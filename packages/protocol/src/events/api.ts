@@ -52,7 +52,7 @@ export const ListEventsQuerySchema = z.object({
   limit: PageLimitSchema.optional(),
   /** `asc` (default, oldest first) or `desc`. */
   order: ListOrderSchema.optional(),
-  /** Cursor from a previous response's `next_page`. */
+  /** Cursor from a previous response's `next_page`: a `seq` position, the last event returned. */
   page: PageCursorStringSchema.optional(),
   /** The wire key is `types[]`. Only these event types are returned; omit for all of them. */
   types: z.array(StoredEventTypeSchema).optional(),

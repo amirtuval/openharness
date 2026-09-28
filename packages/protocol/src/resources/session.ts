@@ -92,11 +92,17 @@ export const CreateSessionRequestSchema = z.object({
 
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequestSchema>
 
-/** Query parameters of `GET /v1/sessions`. */
+/**
+ * Query parameters of `GET /v1/sessions`.
+ *
+ * The list is ordered by `(created_at, id)`, newest first, and `page` resumes at a keyset
+ * position in it — not at an item offset, which would shift while a client pages through a
+ * list that sessions are still being added to.
+ */
 export const ListSessionsQuerySchema = z.object({
   /** Maximum results per page. Defaults to `DEFAULT_PAGE_LIMIT`, capped at `MAX_PAGE_LIMIT`. */
   limit: PageLimitSchema.optional(),
-  /** Cursor from a previous response's `next_page`. */
+  /** Cursor from a previous response's `next_page`: the `(created_at, id)` of its last session. */
   page: PageCursorStringSchema.optional(),
   /** Return only sessions created with this agent. Anthropic's `agent_id` filter. */
   agent_id: AgentIdSchema.optional(),

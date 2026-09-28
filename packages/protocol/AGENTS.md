@@ -54,7 +54,7 @@ src/
   common.ts             timestamps, metadata, page limits
   constants.ts          route prefix, header names, partition count, partitionOf()
   ids.ts                id prefixes, ULID, generators, parsers, branded id schemas
-  pagination.ts         page cursors (encode / decode)
+  pagination.ts         page cursors: `seq` (events) and keyset `key` (agents, sessions)
   errors.ts             the Anthropic error envelope, error types and status codes
   content.ts            message content blocks (text only in v1)
   resources/
@@ -125,7 +125,8 @@ Two entry points, named in `package.json`'s `exports`. Both resolve to built out
 | `generateId()`, `newAgentId()`, `newSessionId()`, `newEventId()`                                                                                                                                      | generators                                                   |
 | `parseId()` / `ParsedId`, `tryParseId()`, `isId()`, `isAgentId()`, `isSessionId()`, `isEventId()`                                                                                                     | parsing and validation                                       |
 | `AgentIdSchema` / `AgentId`, `SessionIdSchema` / `SessionId`, `EventIdSchema` / `EventId`                                                                                                             | branded id schemas                                           |
-| `PAGE_CURSOR_PREFIX`, `PageCursorSchema`, `PageCursorStringSchema`, `NextPageSchema`, `encodePageCursor()`, `decodePageCursor()`, `tryDecodePageCursor()`, `isPageCursor()`                           | opaque pagination cursors                                    |
+| `PAGE_CURSOR_PREFIX`, `PageCursorSchema` / `PageCursor`, `SeqCursorSchema` / `SeqCursor`, `KeyCursorSchema` / `KeyCursor`, `PageCursorStringSchema`, `NextPageSchema`                                 | opaque pagination cursors: `seq` and keyset `key` positions  |
+| `encodeSeqCursor()`, `encodeKeyCursor()`, `KeyCursorPosition`, `decodePageCursor()`, `tryDecodePageCursor()`, `isPageCursor()`                                                                        | writing a cursor, and reading one back                       |
 | `API_VERSION_PREFIX`, `API_KEY_HEADER`, `ANTHROPIC_VERSION_HEADER`, `ANTHROPIC_BETA_HEADER`, `API_VERSION_DATE`, `LAST_EVENT_ID_HEADER`, `REQUEST_ID_HEADER`, `JSON_CONTENT_TYPE`, `SSE_CONTENT_TYPE` | the wire constants                                           |
 | `DEFAULT_PARTITION_COUNT`, `partitionOf()`                                                                                                                                                            | session → partition ownership hash                           |
 | `TimestampSchema`, `MetadataSchema`, `PageLimitSchema`, `ListOrderSchema`, `DEFAULT_PAGE_LIMIT`, `MAX_PAGE_LIMIT`, `METADATA_MAX_PAIRS`, `METADATA_MAX_KEY_LENGTH`, `METADATA_MAX_VALUE_LENGTH`       | shared scalars and limits                                    |
@@ -150,6 +151,34 @@ Builders for every resource and event, and one realistic sample session.
 The event builders allocate a running `seq` and a fresh `sevt_` id; pass `seq` or `id` in the
 overrides for a specific one. They construct plain typed values rather than calling `.parse()`,
 so a test can assert that what a builder produces really does parse against the schemas.
+
+## Page cursors
+
+`next_page` in a list response, and the `page` query parameter that carries it back, are one
+opaque string per resume position: `page_` plus the URL-safe base64 of a small JSON payload,
+tagged with the kind of position it holds.
+
+| kind  | endpoints                            | payload                           | the next page starts             |
+| ----- | ------------------------------------ | --------------------------------- | -------------------------------- |
+| `seq` | the events list                      | `{ kind: 'seq', seq }`            | after that event `seq`           |
+| `key` | `GET /v1/agents`, `GET /v1/sessions` | `{ kind: 'key', created_at, id }` | strictly before that keyset item |
+
+Both resource lists are ordered by `(created_at, id)` and use the keyset cursor for a reason:
+sessions are listed newest first, so an item offset would shift under a client that fetches
+two pages while a session is being created, duplicating or skipping items. `created_at` alone
+is not a position either — two items can share a millisecond — and `id` breaks the tie, being
+a ULID that sorts by creation time too. The store seeks into that total order with one
+comparison; the events list keeps using `seq`, which is already the log's ordering key.
+
+`encodeSeqCursor(seq)` / `encodeKeyCursor({ created_at, id })` write a position (the second
+takes anything carrying those two fields, so a whole `Agent` or `Session` can be passed).
+`tryDecodePageCursor()` returns a `PageCursor` — the `{ kind: 'seq', … } | { kind: 'key', … }`
+union — or `null`; `decodePageCursor()` throws `RangeError` instead. Only the canonical
+spelling round-trips: the string must be exactly what the encoder emits for the position it
+carries, so two spellings can never mean the same page.
+
+Clients never parse a cursor, and `PageCursorStringSchema` — what `page` is validated with —
+accepts either kind. Which kind an endpoint expects is the server's business.
 
 ## Deviations and extensions
 

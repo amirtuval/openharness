@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { newAgentId, newSessionId } from '../ids'
-import { encodePageCursor } from '../pagination'
+import { encodeKeyCursor } from '../pagination'
 import {
   CreateSessionRequestSchema,
   ListSessionsQuerySchema,
@@ -126,10 +126,10 @@ describe('session list schemas', () => {
     expect(
       ListSessionsQuerySchema.parse({
         limit: '10',
-        page: encodePageCursor({ seq: 10 }),
+        page: encodeKeyCursor(session),
         agent_id: session.agent.id,
       }),
-    ).toEqual({ limit: 10, page: encodePageCursor({ seq: 10 }), agent_id: session.agent.id })
+    ).toEqual({ limit: 10, page: encodeKeyCursor(session), agent_id: session.agent.id })
     expect(ListSessionsQuerySchema.safeParse({ agent_id: 'agent_nope' }).success).toBe(false)
   })
 

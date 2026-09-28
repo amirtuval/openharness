@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { newAgentId } from '../ids'
-import { encodePageCursor } from '../pagination'
+import { encodeKeyCursor } from '../pagination'
 import {
   AgentSchema,
   CreateAgentRequestSchema,
@@ -80,11 +80,9 @@ describe('agent request schemas', () => {
   })
 
   it('parses the list query and envelope', () => {
-    expect(
-      ListAgentsQuerySchema.parse({ limit: '20', page: encodePageCursor({ seq: 20 }) }),
-    ).toEqual({
+    expect(ListAgentsQuerySchema.parse({ limit: '20', page: encodeKeyCursor(agent) })).toEqual({
       limit: 20,
-      page: encodePageCursor({ seq: 20 }),
+      page: encodeKeyCursor(agent),
     })
     expect(ListAgentsResponseSchema.parse({ data: [agent], next_page: null })).toEqual({
       data: [agent],

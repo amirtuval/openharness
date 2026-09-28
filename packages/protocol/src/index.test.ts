@@ -21,6 +21,9 @@ describe('@openharness/protocol', () => {
       'ApiErrorBodySchema',
       'AgentIdSchema',
       'PageCursorSchema',
+      'KeyCursorSchema',
+      'encodeSeqCursor',
+      'encodeKeyCursor',
     ] as const) {
       expect(protocol[name], name).toBeDefined()
     }

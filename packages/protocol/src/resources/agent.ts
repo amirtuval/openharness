@@ -74,11 +74,15 @@ export const UpdateAgentRequestSchema = z.object({
 
 export type UpdateAgentRequest = z.infer<typeof UpdateAgentRequestSchema>
 
-/** Query parameters of `GET /v1/agents`. */
+/**
+ * Query parameters of `GET /v1/agents`.
+ *
+ * The list is ordered by `(created_at, id)`; `page` resumes at a keyset position in it.
+ */
 export const ListAgentsQuerySchema = z.object({
   /** Maximum results per page. Defaults to `DEFAULT_PAGE_LIMIT`, capped at `MAX_PAGE_LIMIT`. */
   limit: PageLimitSchema.optional(),
-  /** Cursor from a previous response's `next_page`. */
+  /** Cursor from a previous response's `next_page`: the `(created_at, id)` of its last agent. */
   page: PageCursorStringSchema.optional(),
 })
 

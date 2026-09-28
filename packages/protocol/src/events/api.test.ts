@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { newEventId } from '../ids'
-import { encodePageCursor } from '../pagination'
+import { encodeSeqCursor } from '../pagination'
 import {
   DEFAULT_EVENT_ORDER,
   ListEventsQuerySchema,
@@ -67,14 +67,14 @@ describe('ListEventsQuerySchema', () => {
     const query = ListEventsQuerySchema.parse({
       limit: 50,
       order: 'desc',
-      page: encodePageCursor({ seq: 12 }),
+      page: encodeSeqCursor(12),
       types: ['user.message', 'agent.message'],
       after_seq: 12,
     })
     expect(query).toEqual({
       limit: 50,
       order: 'desc',
-      page: encodePageCursor({ seq: 12 }),
+      page: encodeSeqCursor(12),
       types: ['user.message', 'agent.message'],
       after_seq: 12,
     })
@@ -119,7 +119,7 @@ describe('ListEventsResponseSchema', () => {
     expect(
       ListEventsResponseSchema.safeParse({
         data: [storedMessage],
-        next_page: encodePageCursor({ seq: 1 }),
+        next_page: encodeSeqCursor(1),
       }).success,
     ).toBe(true)
     expect(ListEventsResponseSchema.safeParse({ data: [] }).success).toBe(false)
