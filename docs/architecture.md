@@ -31,7 +31,7 @@ package's `AGENTS.md` describes what that package currently implements.
 | `@openharness/hands`    | `packages/hands`    | sandboxes and tools behind `execute(name, input)`          |
 | `@openharness/brain`    | `packages/brain`    | the stateless harness loop                                 |
 | `@openharness/client`   | `packages/client`   | client for the server, used by the web app and the TUI     |
-| `@openharness/server`   | `apps/server`       | Hono HTTP server (`GET /health` today)                     |
+| `@openharness/server`   | `apps/server`       | Hono HTTP server: the chat API, SSE and the scheduler      |
 | `@openharness/web`      | `apps/web`          | Vite + React chat UI (Tailwind + shadcn/ui)                |
 | `@openharness/cli`      | `apps/tui`          | Ink + React terminal UI, installed as `oh`                 |
 | `@openharness/e2e`      | `e2e`               | cross-package tests                                        |

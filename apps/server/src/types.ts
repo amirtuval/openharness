@@ -1,0 +1,68 @@
+/**
+ * The small shared types the server is written against: the Hono environment, and the
+ * logging seam.
+ */
+
+/**
+ * The Hono environment of every route in this app.
+ *
+ * `requestId` is set once per request by the middleware in `app.ts` and read back by the
+ * error handlers, so an error body and the `request-id` response header always agree.
+ */
+export interface AppEnv {
+  Variables: {
+    requestId: string
+  }
+}
+
+/**
+ * Where the server writes what it is doing.
+ *
+ * A seam rather than `console` directly, so a test can assert on a startup warning and a
+ * host can route the server's output wherever it wants. The default is {@link consoleLogger}.
+ */
+export interface Logger {
+  info(message: string, detail?: unknown): void
+  warn(message: string, detail?: unknown): void
+  error(message: string, detail?: unknown): void
+}
+
+/** The default {@link Logger}: `console`, one line per call. */
+export const consoleLogger: Logger = {
+  info: (message, detail) => {
+    write(console.log, message, detail)
+  },
+  warn: (message, detail) => {
+    write(console.warn, message, detail)
+  },
+  error: (message, detail) => {
+    write(console.error, message, detail)
+  },
+}
+
+function write(sink: (message: string) => void, message: string, detail?: unknown): void {
+  if (detail === undefined) {
+    sink(message)
+  } else {
+    sink(`${message} ${format(detail)}`)
+  }
+}
+
+/** A detail value as one log line: an `Error` as its stack, anything else as JSON. */
+function format(detail: unknown): string {
+  if (detail instanceof Error) {
+    return detail.stack ?? `${detail.name}: ${detail.message}`
+  }
+  try {
+    return JSON.stringify(detail)
+  } catch {
+    return String(detail)
+  }
+}
+
+/** A {@link Logger} that throws every call away; the default in tests. */
+export const silentLogger: Logger = {
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+}

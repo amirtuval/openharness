@@ -36,7 +36,7 @@ node apps/tui/dist/index.js --version             # after `yarn build`
 
 ```
 apps/
-  server/    @openharness/server   Hono HTTP server (GET /health)
+  server/    @openharness/server   Hono HTTP API + SSE server that runs the brain
   web/       @openharness/web      Vite + React web app
   tui/       @openharness/cli      Ink terminal UI, installed as `oh`
 packages/
