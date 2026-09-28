@@ -1,0 +1,51 @@
+{
+  "name": "@openharness/server",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The openharness HTTP server: Hono app served by `@hono/node-server`. For now it only answers `GET /health`; the chat API lands in the v1 epic.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsdown",
+    "build:deps": "turbo run build --filter=@openharness/server^...",
+    "dev": "tsdown --watch --on-success \"node dist/index.js\"",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.1.1",
+    "@openharness/brain": "workspace:*",
+    "@openharness/hands": "workspace:*",
+    "@openharness/protocol": "workspace:*",
+    "@openharness/session": "workspace:*",
+    "hono": "4.13.9"
+  },
+  "devDependencies": {
+    "@openharness/config": "workspace:*",
+    "@types/node": "26.6.3",
+    "eslint": "10.11.0",
+    "prettier": "3.9.9",
+    "tsdown": "0.23.0",
+    "turbo": "2.11.4",
+    "typescript": "6.0.3",
+    "vite": "8.3.1",
+    "vitest": "5.0.2"
+  }
+}
