@@ -8,9 +8,9 @@ three parts:
 - a durable, append-only **session** event log — the source of truth;
 - pluggable **hands** — sandboxes and tools behind `execute(name, input)`.
 
-**Status: skeleton.** The repo has its tooling, CI and documentation in place; every package
-ships a placeholder export and one trivial test. There is no product functionality yet. The
-goal of the v1 epic is a simple chat server with a web UI and a terminal UI.
+**Status: early development.** The v1 epic ([#2](https://github.com/amirtuval/openharness/issues/2))
+is building a simple chat server with a web UI and a terminal UI. It isn't usable end to end yet.
+Each package's `AGENTS.md` says what it currently implements.
 
 ## Quick start
 
