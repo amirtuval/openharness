@@ -2,7 +2,7 @@
   "name": "@openharness/brain",
   "version": "0.0.0",
   "private": true,
-  "description": "The stateless brain: the harness loop that drives a session using hands. Placeholder, implemented in the v1 epic.",
+  "description": "The stateless brain: the harness loop that drives a session.",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -30,11 +30,15 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@mastra/core": "1.71.0",
     "@openharness/hands": "workspace:*",
     "@openharness/protocol": "workspace:*",
-    "@openharness/session": "workspace:*"
+    "@openharness/session": "workspace:*",
+    "ai": "7.0.118",
+    "zod": "4.6.5"
   },
   "devDependencies": {
+    "@ai-sdk/provider": "4.0.18",
     "@openharness/config": "workspace:*",
     "@types/node": "26.6.3",
     "eslint": "10.11.0",
