@@ -43,6 +43,25 @@ Run from the repo root; they all delegate to turbo:
 `typecheck`, `lint` and `test` depend on `^build`: turbo builds a package's dependencies
 before type-checking, linting or testing it, so imports of `@openharness/*` always resolve.
 
+### Tests that want a real database
+
+Two suites test against Postgres rather than a fake: `packages/session`'s store tests, and all
+of [`e2e/`](../e2e/AGENTS.md), which runs the built server in its own process. Point them at a
+database with `DATABASE_URL`:
+
+```bash
+docker run --rm -d --name oh-postgres -p 5432:5432 \
+  -e POSTGRES_USER=openharness -e POSTGRES_PASSWORD=openharness -e POSTGRES_DB=openharness \
+  postgres:18-alpine
+
+DATABASE_URL=postgres://openharness:openharness@localhost:5432/openharness yarn test
+```
+
+Without it the session tests start their own container with testcontainers — and skip, with a
+note, when there is no Docker either. The e2e suite fails and says what it needs: it is the
+proof that the pieces work together, and passing without having run is the worst thing it
+could do.
+
 ## Working inside one package
 
 Every package folder is self-contained — an agent confined to one folder can do all of this
