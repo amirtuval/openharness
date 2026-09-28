@@ -109,7 +109,12 @@ export function createSessionEventStream(
     resume?.()
   }
 
-  options.signal?.addEventListener('abort', close, { once: true })
+  if (options.signal?.aborted === true) {
+    // The client was already gone when the response was built; `abort` will not fire again.
+    close()
+  } else {
+    options.signal?.addEventListener('abort', close, { once: true })
+  }
 
   /** Wait for an event, a close, or the keepalive interval — whichever comes first. */
   const nextWake = (): Promise<'signal' | 'timeout'> =>
