@@ -3,6 +3,7 @@ import { API_VERSION_PREFIX, EVENT_TYPES } from '@openharness/protocol'
 import { InMemorySessionStore } from '@openharness/session'
 
 import { main, startServer } from './main'
+import { PostgresPartitionScheduler } from './partition-scheduler'
 import type { Logger } from './types'
 import { createScriptedModel, readHistory, testConfig, waitFor, waitForIdle } from './test-support'
 
@@ -150,6 +151,51 @@ describe('startServer', () => {
 
     expect((await store.getTurnState(session.id)).state).toBe('idle')
     expect((await readHistory(store, session.id)).at(-1)?.type).toBe(EVENT_TYPES.sessionStatusIdle)
+  })
+
+  it('runs the partitioned scheduler when SCHEDULER=postgres, and hands its leases back', async () => {
+    const store = new InMemorySessionStore({ partitionCount: 4 })
+    const server = await startServer({
+      config: testConfig({
+        scheduler: 'postgres',
+        partitions: 4,
+        instanceId: 'server-a',
+        leaseTtlMs: 5_000,
+        heartbeatMs: 500,
+        sweepMs: 5_000,
+      }),
+      store,
+      model: createScriptedModel({ text: ['answered under a lease'] }).factory,
+      logger: recordingLogger(),
+    })
+    started.push(server)
+    expect(server.scheduler).toBeInstanceOf(PostgresPartitionScheduler)
+    const scheduler = server.scheduler as PostgresPartitionScheduler
+
+    const agent = await store.createAgent({ name: 'Agent', model: { id: 'test/model' } })
+    const session = await store.createSession(agent.id)
+    await fetch(
+      `http://127.0.0.1:${server.port}${API_VERSION_PREFIX}/sessions/${session.id}/events`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          events: [{ type: 'user.message', content: [{ type: 'text', text: 'hi' }] }],
+        }),
+      },
+    )
+
+    // The route only signalled: the turn ran because this instance holds the session's
+    // partition — the whole path the multi-instance server takes.
+    await waitForIdle(store, session.id)
+    expect(await readHistory(store, session.id)).toHaveLength(6)
+    expect(scheduler.heldPartitions().length).toBeGreaterThan(0)
+
+    await server.shutdown()
+
+    // The shutdown released the leases, so another instance can take over at once.
+    const lease = await store.acquirePartition(scheduler.heldPartitions()[0] ?? 0, 'other', 1_000)
+    expect(lease).not.toBeNull()
   })
 
   it('stops listening after shutdown', async () => {

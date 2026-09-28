@@ -345,8 +345,14 @@ function abortSignalFor(handle: TurnHandle): AbortSignal {
   return AbortSignal.any([handle.controller.signal, handle.signal])
 }
 
-/** Resolve when `work` does, or after `timeoutMs` — whichever comes first. */
-async function withTimeout(work: Promise<void>, timeoutMs: number): Promise<void> {
+/**
+ * Resolve when `work` does, or after `timeoutMs` — whichever comes first.
+ *
+ * The ceiling every drain in this package is written with: a pass that does not finish in
+ * time is left behind rather than allowed to hold up a shutdown (or a lease this instance is
+ * giving up).
+ */
+export async function withTimeout(work: Promise<void>, timeoutMs: number): Promise<void> {
   if (timeoutMs <= 0) {
     return
   }

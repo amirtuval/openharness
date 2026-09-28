@@ -2,17 +2,23 @@ import type { Hono } from 'hono'
 import {
   API_KEY_HEADER,
   API_VERSION_PREFIX,
+  DEFAULT_PARTITION_COUNT,
   type Agent,
   type AgentId,
   type Session,
   type SessionId,
   type StoredEvent,
 } from '@openharness/protocol'
-import { InMemorySessionStore } from '@openharness/session'
+import { InMemorySessionStore, type SessionStore } from '@openharness/session'
 
 import { createApp } from '../app'
-import type { ServerConfig } from '../config'
+import type { SchedulerKind, ServerConfig } from '../config'
 import { startServer } from '../main'
+import {
+  DEFAULT_HEARTBEAT_MS,
+  DEFAULT_LEASE_TTL_MS,
+  DEFAULT_SWEEP_MS,
+} from '../partition-scheduler'
 import { LocalScheduler, type SessionScheduler } from '../scheduler'
 import { type AppEnv, silentLogger } from '../types'
 import { type ScriptedModel, type ScriptedReply, createScriptedModel } from './model'
@@ -64,6 +70,18 @@ export interface TestOptions {
   readonly drainTimeoutMs?: number
   /** The SSE keepalive interval. */
   readonly sseKeepaliveMs?: number
+  /** Which scheduler runs the brains; `local` unless the test asks for partitions. */
+  readonly scheduler?: SchedulerKind
+  /** This instance's id; the lease table's owner when the scheduler is the partitioned one. */
+  readonly instanceId?: string
+  /** How many partitions the session space has. */
+  readonly partitions?: number
+  /** How long a partition lease lasts. */
+  readonly leaseTtlMs?: number
+  /** How often leases are renewed. */
+  readonly heartbeatMs?: number
+  /** How often owned partitions are re-scanned. */
+  readonly sweepMs?: number
 }
 
 /** Build an app, a store and a scheduler in-process; nothing listens. */
@@ -150,12 +168,18 @@ export function testConfig(options: TestOptions = {}): ServerConfig {
   return {
     port: 0,
     databaseUrl: undefined,
+    scheduler: options.scheduler ?? 'local',
     apiKey: options.apiKey,
     testModel: undefined,
     webDir: options.webDir,
     corsOrigins: [],
     maxConcurrentSessions: options.maxConcurrentSessions ?? 4,
     drainTimeoutMs: options.drainTimeoutMs ?? 5000,
+    instanceId: options.instanceId ?? 'test-instance',
+    partitions: options.partitions ?? DEFAULT_PARTITION_COUNT,
+    leaseTtlMs: options.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS,
+    heartbeatMs: options.heartbeatMs ?? DEFAULT_HEARTBEAT_MS,
+    sweepMs: options.sweepMs ?? DEFAULT_SWEEP_MS,
   }
 }
 
@@ -261,7 +285,7 @@ export async function httpInterrupt(
 
 /** Every event in a session's log, in order, page by page. */
 export async function readHistory(
-  store: InMemorySessionStore,
+  store: SessionStore,
   sessionId: SessionId,
 ): Promise<StoredEvent[]> {
   const events: StoredEvent[] = []
@@ -277,10 +301,7 @@ export async function readHistory(
 }
 
 /** The `type` of every event in a session's log, which is what most assertions want. */
-export async function historyTypes(
-  store: InMemorySessionStore,
-  sessionId: SessionId,
-): Promise<string[]> {
+export async function historyTypes(store: SessionStore, sessionId: SessionId): Promise<string[]> {
   return (await readHistory(store, sessionId)).map((event) => event.type)
 }
 
@@ -306,7 +327,7 @@ export async function waitFor(
 
 /** Wait until the session is idle with nothing queued. */
 export async function waitForIdle(
-  store: InMemorySessionStore,
+  store: SessionStore,
   sessionId: SessionId,
   timeoutMs = 5000,
 ): Promise<void> {

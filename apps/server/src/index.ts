@@ -31,9 +31,12 @@ export { createApp, isApiPath, type AppOptions } from './app'
 export {
   ENV_VARS,
   DEFAULT_PORT,
+  DEFAULT_SCHEDULER,
+  defaultInstanceId,
   describeConfig,
   readServerConfig,
   usesTestModel,
+  type SchedulerKind,
   type ServerConfig,
 } from './config'
 export { HttpError, invalidRequest, notFoundError } from './http/errors'
@@ -51,6 +54,14 @@ export {
   planFor,
 } from './mock-model'
 export { resolveModelFactory, type ResolvedModel } from './model'
+export {
+  DEFAULT_HEARTBEAT_MS,
+  DEFAULT_LEASE_TTL_MS,
+  DEFAULT_SWEEP_MS,
+  PostgresPartitionScheduler,
+  type PostgresPartitionSchedulerOptions,
+} from './partition-scheduler'
+export { DEFAULT_MAX_CONCURRENT_PASSES, PassQueue, type PassContext } from './pass-queue'
 export { DEFAULT_DRAIN_TIMEOUT_MS, SessionRunner } from './runner'
 export type { RunSessionOptions, SessionRunnerOptions } from './runner'
 export {

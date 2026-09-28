@@ -1,8 +1,18 @@
 import { describe, expect, it } from 'vitest'
 
+import { DEFAULT_PARTITION_COUNT } from '@openharness/protocol'
+
+import { DEFAULT_HEARTBEAT_MS, DEFAULT_LEASE_TTL_MS, DEFAULT_SWEEP_MS } from './partition-scheduler'
 import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
 import { DEFAULT_DRAIN_TIMEOUT_MS } from './runner'
-import { DEFAULT_PORT, describeConfig, readServerConfig, usesTestModel } from './config'
+import {
+  DEFAULT_PORT,
+  DEFAULT_SCHEDULER,
+  defaultInstanceId,
+  describeConfig,
+  readServerConfig,
+  usesTestModel,
+} from './config'
 
 /**
  * Reading the environment: what is unset, what is empty, and what is wrong — because a
@@ -16,13 +26,26 @@ describe('readServerConfig', () => {
     expect(config).toEqual({
       port: DEFAULT_PORT,
       databaseUrl: undefined,
+      scheduler: DEFAULT_SCHEDULER,
       apiKey: undefined,
       testModel: undefined,
       webDir: undefined,
       corsOrigins: [],
       maxConcurrentSessions: DEFAULT_MAX_CONCURRENT_SESSIONS,
       drainTimeoutMs: DEFAULT_DRAIN_TIMEOUT_MS,
+      instanceId: config.instanceId,
+      partitions: DEFAULT_PARTITION_COUNT,
+      leaseTtlMs: DEFAULT_LEASE_TTL_MS,
+      heartbeatMs: DEFAULT_HEARTBEAT_MS,
+      sweepMs: DEFAULT_SWEEP_MS,
     })
+    // The instance id is generated, so it is only asserted to look like one: this host, this
+    // process, and a suffix that makes two instances on the host unique.
+    expect(config.instanceId).toMatch(new RegExp(`-${String(process.pid)}-[0-9a-f]{8}$`))
+  })
+
+  it('generates a different instance id for every read', () => {
+    expect(readServerConfig({}).instanceId).not.toBe(defaultInstanceId())
   })
 
   it('reads every variable', () => {
@@ -35,19 +58,65 @@ describe('readServerConfig', () => {
       OPENHARNESS_CORS_ORIGINS: 'http://a.test, http://b.test',
       OPENHARNESS_MAX_CONCURRENT_SESSIONS: '12',
       OPENHARNESS_DRAIN_TIMEOUT_MS: '250',
+      SCHEDULER: 'postgres',
+      OPENHARNESS_INSTANCE_ID: 'instance-a',
+      OPENHARNESS_PARTITIONS: '8',
+      OPENHARNESS_LEASE_TTL_MS: '900',
+      OPENHARNESS_HEARTBEAT_MS: '300',
+      OPENHARNESS_SWEEP_MS: '450',
     })
 
     expect(config).toEqual({
       port: 8080,
       databaseUrl: 'postgres://localhost/openharness',
+      scheduler: 'postgres',
       apiKey: 'oh_key',
       testModel: 'mock',
       webDir: '/srv/web',
       corsOrigins: ['http://a.test', 'http://b.test'],
       maxConcurrentSessions: 12,
       drainTimeoutMs: 250,
+      instanceId: 'instance-a',
+      partitions: 8,
+      leaseTtlMs: 900,
+      heartbeatMs: 300,
+      sweepMs: 450,
     })
     expect(usesTestModel(config)).toBe(true)
+  })
+
+  it('refuses a scheduler it does not have', () => {
+    expect(() => readServerConfig({ SCHEDULER: 'postgresql' })).toThrow(/SCHEDULER/)
+  })
+
+  it('refuses the postgres scheduler without a database to lease partitions in', () => {
+    // Partition leases live in the database, so this is a configuration nobody can mean:
+    // the process does not come up rather than running turns nobody owns.
+    expect(() => readServerConfig({ SCHEDULER: 'postgres' })).toThrow(/DATABASE_URL/)
+    expect(
+      readServerConfig({
+        SCHEDULER: 'postgres',
+        DATABASE_URL: 'postgres://localhost/openharness',
+      }).scheduler,
+    ).toBe('postgres')
+  })
+
+  it('refuses a heartbeat that would outlive the lease it renews', () => {
+    const env = { OPENHARNESS_LEASE_TTL_MS: '1000', OPENHARNESS_HEARTBEAT_MS: '1000' }
+    expect(() => readServerConfig(env)).toThrow(/OPENHARNESS_HEARTBEAT_MS/)
+    expect(() =>
+      readServerConfig({ OPENHARNESS_LEASE_TTL_MS: '1000', OPENHARNESS_HEARTBEAT_MS: '2500' }),
+    ).toThrow(/OPENHARNESS_HEARTBEAT_MS/)
+    expect(
+      readServerConfig({ OPENHARNESS_LEASE_TTL_MS: '1000', OPENHARNESS_HEARTBEAT_MS: '999' })
+        .heartbeatMs,
+    ).toBe(999)
+  })
+
+  it('refuses a partition count below one', () => {
+    expect(() => readServerConfig({ OPENHARNESS_PARTITIONS: '0' })).toThrow(
+      /OPENHARNESS_PARTITIONS/,
+    )
   })
 
   it('treats an empty variable as unset', () => {
@@ -97,5 +166,29 @@ describe('describeConfig', () => {
 
     expect(lines.join('\n')).toContain('store: postgres')
     expect(lines.join('\n')).toContain('auth: x-api-key')
+  })
+
+  it('says which scheduler and which partition space the server runs', () => {
+    const local = describeConfig(readServerConfig({}))
+    expect(local.join('\n')).toContain('scheduler: local')
+
+    const partitioned = describeConfig(
+      readServerConfig({
+        SCHEDULER: 'postgres',
+        DATABASE_URL: 'postgres://localhost/x',
+        OPENHARNESS_INSTANCE_ID: 'instance-a',
+        OPENHARNESS_PARTITIONS: '8',
+        OPENHARNESS_LEASE_TTL_MS: '900',
+        OPENHARNESS_HEARTBEAT_MS: '300',
+        OPENHARNESS_SWEEP_MS: '450',
+      }),
+    )
+    const line = partitioned.join('\n')
+    expect(line).toContain('scheduler: postgres')
+    expect(line).toContain('instance-a')
+    expect(line).toContain('8 partitions')
+    expect(line).toContain('lease 900ms')
+    expect(line).toContain('heartbeat 300ms')
+    expect(line).toContain('sweep 450ms')
   })
 })
