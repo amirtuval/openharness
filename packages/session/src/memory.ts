@@ -1,12 +1,9 @@
 import {
   DEFAULT_EVENT_ORDER,
-  DEFAULT_PAGE_LIMIT,
   DEFAULT_PARTITION_COUNT,
   EVENT_TYPES,
-  MAX_PAGE_LIMIT,
   StoredEventSchema,
   UserEventSchema,
-  decodePageCursor,
   encodeKeyCursor,
   encodeSeqCursor,
   newAgentId,
@@ -26,7 +23,6 @@ import {
   type NextPage,
   type Session,
   type SessionId,
-  type SeqCursor,
   type StoredEvent,
   type StreamEvent,
   type StreamOnlyEvent,
@@ -37,6 +33,7 @@ import {
 
 import { type Clock, systemClock, timestampAt } from './clock'
 import { AgentNotFoundError, FencedError, SessionNotFoundError } from './errors'
+import { assertTtl, decodeKeyPage, decodeSeqPage, pageSize } from './inputs'
 import type {
   AppendableEvent,
   AppendEventsOptions,
@@ -629,14 +626,6 @@ function needsWork(record: SessionRecord): boolean {
   )
 }
 
-/** The page size to use: `limit` clamped into `[1, MAX_PAGE_LIMIT]`, or the protocol default. */
-function pageSize(limit: number | undefined): number {
-  if (limit === undefined || !Number.isFinite(limit)) {
-    return DEFAULT_PAGE_LIMIT
-  }
-  return Math.min(Math.max(Math.trunc(limit), 1), MAX_PAGE_LIMIT)
-}
-
 /**
  * The list order of both agents and sessions: `(created_at, id)`, ascending.
  *
@@ -677,24 +666,6 @@ function paginate<T extends KeyCursorPosition>(
   return { data, next_page }
 }
 
-/** Decode the `page` of an events list, which is a `seq` position. */
-function decodeSeqPage(page: string): SeqCursor {
-  const cursor = decodePageCursor(page)
-  if (cursor.kind !== 'seq') {
-    throw new RangeError(`listEvents takes a seq cursor, but got a ${cursor.kind} cursor`)
-  }
-  return cursor
-}
-
-/** Decode the `page` of an agent or session list, which is a keyset position. */
-function decodeKeyPage(page: string): KeyCursor {
-  const cursor = decodePageCursor(page)
-  if (cursor.kind !== 'key') {
-    throw new RangeError(`this list takes a key cursor, but got a ${cursor.kind} cursor`)
-  }
-  return cursor
-}
-
 /** The last item of an array the pagination code has already proved non-empty. */
 function lastOf<T>(items: readonly T[]): T {
   const last = items[items.length - 1]
@@ -702,11 +673,4 @@ function lastOf<T>(items: readonly T[]): T {
     throw new RangeError('lastOf() needs a non-empty array')
   }
   return last
-}
-
-/** A lease only lasts a positive amount of time; anything else is a caller bug, not a lease. */
-function assertTtl(ttlMs: number): void {
-  if (!Number.isFinite(ttlMs) || ttlMs <= 0) {
-    throw new RangeError(`ttlMs must be a positive, finite number of milliseconds, got ${ttlMs}`)
-  }
 }
