@@ -32,8 +32,13 @@ import {
 } from '@openharness/protocol'
 
 import { type Clock, systemClock, timestampAt } from './clock'
-import { AgentNotFoundError, FencedError, SessionNotFoundError } from './errors'
-import { assertTtl, decodeKeyPage, decodeSeqPage, pageSize } from './inputs'
+import {
+  AgentNotFoundError,
+  DuplicateEventIdError,
+  FencedError,
+  SessionNotFoundError,
+} from './errors'
+import { assertEventIds, assertTtl, decodeKeyPage, decodeSeqPage, pageSize } from './inputs'
 import type {
   AppendableEvent,
   AppendEventsOptions,
@@ -85,6 +90,13 @@ export class InMemorySessionStore implements SessionStore {
   readonly #agents = new Map<string, Agent>()
 
   readonly #sessions = new Map<string, SessionRecord>()
+
+  /**
+   * Every id in the log, across sessions: an event id is one event's identity for the whole
+   * store, so a caller-supplied id has to be free here and not only in its own session. The
+   * Postgres store gets the same guarantee from the primary key on `events.id`.
+   */
+  readonly #eventIds = new Set<EventId>()
 
   readonly #leases = new Map<number, LeaseRecord>()
 
@@ -405,19 +417,29 @@ export class InMemorySessionStore implements SessionStore {
    * status and `updated_at`, and hand back the stored events. Delivery is the caller's job, so
    * that a subscription is only notified once the whole append — or the whole creation — landed.
    *
-   * Build first, commit second: an event this store refuses (one the protocol schema rejects)
-   * leaves the log exactly as it was, because an append is one transaction.
+   * Build first, commit second: an event this store refuses — one the protocol schema rejects,
+   * an id that is not an event id, or one the log already holds — leaves the log exactly as it
+   * was, because an append is one transaction.
    */
   #append(record: SessionRecord, events: readonly AppendableEvent[], now: number): StoredEvent[] {
+    assertEventIds(record.session.id, events)
     const processedAt = timestampAt(now)
     const stored: StoredEvent[] = []
     let seq = record.nextSeq
     for (const input of events) {
-      stored.push(storedEventFrom(input, { id: newEventId(now), seq, processedAt }))
+      // The event's own id when it brought one — the one its previews carried — and a fresh
+      // one otherwise. Either way the id is checked against the whole log before anything is
+      // written, so a batch with a taken id is refused whole.
+      const id = input.id ?? newEventId(now)
+      if (this.#eventIds.has(id)) {
+        throw new DuplicateEventIdError(record.session.id, id)
+      }
+      stored.push(storedEventFrom(input, { id, seq, processedAt }))
       seq += 1
     }
     for (const event of stored) {
       record.events.push({ event, createdAtMs: now })
+      this.#eventIds.add(event.id)
     }
     record.nextSeq = seq
     for (const event of stored) {

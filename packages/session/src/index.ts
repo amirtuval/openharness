@@ -14,8 +14,8 @@
  *   for every other package, and the reference behaviour for the contract.
  * - **{@link Clock}** and {@link timestampAt} (`./clock`) — the injectable time source every
  *   store takes, so tests can move time instead of waiting for it.
- * - **{@link FencedError}**, {@link SessionNotFoundError}, {@link AgentNotFoundError}
- *   (`./errors`) — the typed failures a store raises.
+ * - **{@link FencedError}**, {@link SessionNotFoundError}, {@link AgentNotFoundError},
+ *   {@link DuplicateEventIdError} (`./errors`) — the typed failures a store raises.
  *
  * `@openharness/session/testing` holds what tests need: the conformance suite every
  * implementation must pass (`runSessionStoreConformance`), a controllable `TestClock`, and the

@@ -6,6 +6,7 @@ import {
   EVENT_TYPES,
   MAX_PAGE_LIMIT,
   isStoredEvent,
+  newEventId,
   partitionOf,
   type CreateAgentRequest,
   type Session,
@@ -17,7 +18,7 @@ import { Kysely, PostgresDialect, sql } from 'kysely'
 import { Pool } from 'pg'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 
-import { FencedError, isFencedError } from '../errors'
+import { DuplicateEventIdError, FencedError, isFencedError } from '../errors'
 import { createTestClock, type TestClock } from '../testing/clock'
 import { runSessionStoreConformance, type MakeSessionStore } from '../testing/conformance'
 import { createPostgresSessionStore, migrate, type PostgresSchema } from './index'
@@ -33,6 +34,12 @@ import { createPostgresSessionStore, migrate, type PostgresSchema } from './inde
  * around. If neither is available the suite is **skipped with a note** rather than silently
  * passing: the store is the durable one, and "the tests did not run" must not look like "the
  * tests passed".
+ *
+ * The extras are the ones a shared store can be asked and a single-process fake cannot: two
+ * stores appending at once, a supplied event id two of them try to take, fencing across
+ * stores, a burst that must be delivered exactly once, catching up after the listening
+ * connection is killed, a dropped oversized ephemeral event, idempotent migrations, and
+ * `close()` leaving a borrowed pool alone.
  *
  * ## How each test is isolated
  *
@@ -145,6 +152,33 @@ if (target === null) {
           .map((event) => event.seq)
           .sort(ascending),
       ).toEqual(expected)
+    })
+
+    it('refuses the same supplied id from two stores, for two sessions at once', async () => {
+      const { store: first, session } = await seeded()
+      const second = track(createPostgresSessionStore({ pool }, { now: () => START_MS }))
+      const other = await second.createSession((await second.createAgent(agentInput('Other'))).id)
+      const id = newEventId()
+
+      // Two appends to different sessions do not share the append lock, so nothing serializes
+      // them: the unique constraint on `events.id` is what decides. One append stores its
+      // event, the other is refused whole.
+      const results = await Promise.allSettled([
+        first.appendEvents(session.id, [{ ...userMessage('first'), id }]),
+        second.appendEvents(other.id, [{ ...userMessage('second'), id }]),
+      ])
+      expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
+      const refused = results.filter((result) => result.status === 'rejected')
+      expect(refused).toHaveLength(1)
+      expect(refused[0]?.reason).toBeInstanceOf(DuplicateEventIdError)
+      expect((refused[0]?.reason as DuplicateEventIdError).eventId).toBe(id)
+
+      // The id landed once, in one of the two logs, and the loser stored nothing.
+      const stored = [
+        ...(await first.listEvents(session.id)).data,
+        ...(await second.listEvents(other.id)).data,
+      ]
+      expect(stored.map((event) => event.id)).toEqual([id])
     })
 
     it('fences a stale epoch across stores, and accepts the current one', async () => {

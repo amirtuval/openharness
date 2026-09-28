@@ -63,14 +63,19 @@ Details that matter:
   instant too (in SQL for `acquirePartition`, in JavaScript for a fence check). That is what
   makes the conformance suite's "move the clock forward" tests work against Postgres.
 - **`events.payload` is the event body** — what the caller sent, without `id`, `seq` and
-  `processed_at`, which are columns. `events.type` duplicates `payload->>'type'` so that
-  filtering, the partial index and integrity checks do not have to read JSON.
+  `processed_at`, which are columns; a caller-supplied id is written to `events.id` and is not
+  repeated in the JSON. `events.type` duplicates `payload->>'type'` so that filtering, the
+  partial index and integrity checks do not have to read JSON.
 - **`events` has `unique (session_id, seq)`** — the ordering key is unique per session — an
   explicit index on `(session_id, seq)`, and a partial index
   `(session_id, seq) where processed_at is null and type in ('user.message', 'user.interrupt')`
   for the queued events the brain reads on every iteration. The unique constraint already
   provides the `(session_id, seq)` access path; the explicit index is kept because the schema
   documents it as part of the contract.
+- **`events.id` is unique across the whole table** — an event id identifies one event for the
+  whole store, because it is what a stored event shares with its stream-only previews (see
+  [caller-supplied ids](#caller-supplied-ids)). The primary key already enforces it, and
+  `0005_events_id_unique.sql` declares a `unique` index named `events_id_key` beside it.
 - **`sessions.partition`** is `partitionOf(sessionId)` — stored, not recomputed, so
   `findSessionsNeedingWork` is an index range scan per partition.
 - **`partition_leases.owner is null` means free**, and a `check` keeps owner and `expires_at`
@@ -94,12 +99,13 @@ consequence is that **a migration file must never be edited once it has been app
 anywhere** — the runner will not re-run it, so an edit is silently ignored on existing
 databases while applying to new ones. Add a new file instead.
 
-| file                        | what it creates                                                         |
-| --------------------------- | ----------------------------------------------------------------------- |
-| `0001_agents.sql`           | `agents`, and the `(created_at, id)` index the agent list pages through |
-| `0002_sessions.sql`         | `sessions`, plus the indexes for the three ways sessions are queried    |
-| `0003_events.sql`           | `events`, its uniqueness constraint and its two secondary indexes       |
-| `0004_partition_leases.sql` | `partition_leases`                                                      |
+| file                        | what it creates                                                           |
+| --------------------------- | ------------------------------------------------------------------------- |
+| `0001_agents.sql`           | `agents`, and the `(created_at, id)` index the agent list pages through   |
+| `0002_sessions.sql`         | `sessions`, plus the indexes for the three ways sessions are queried      |
+| `0003_events.sql`           | `events`, its uniqueness constraint and its two secondary indexes         |
+| `0004_partition_leases.sql` | `partition_leases`                                                        |
+| `0005_events_id_unique.sql` | the `unique` index that states the id guarantee (`events_id_key`) by name |
 
 To run them outside an application:
 
@@ -140,6 +146,38 @@ transaction: they are in the log before the session is visible.
 `markProcessed` claims rather than asserts: one `update … where processed_at is null
 returning *` sets `processed_at` for exactly the rows that were still queued, so two callers
 racing for the same event cannot both win, and marking twice is a no-op.
+
+## Caller-supplied ids
+
+An append may carry its own `sevt_` id (`AppendableEvent.id`) — the one the brain published the
+event's `event_start`/`event_delta` previews under, so that a client replaces the preview with
+the stored event. The store writes the event under exactly that id; `events.id` is where it
+lands, and the payload holds the event body without it, as it does for the ids the store mints.
+
+The id is checked by the database rather than by a read first, because it is unique across the
+whole table and not just within a session:
+
+```
+begin
+  select … from sessions where id = $1 for update      -- the append lock
+  insert into events …                                  -- a taken id fails here
+commit
+```
+
+A duplicate raises SQLSTATE `23505` — on `events_pkey`, or on `events_id_key`, the unique index
+`0005_events_id_unique.sql` declares beside it; Postgres does not promise which one it names,
+so the store watches both — the transaction rolls back, and the append is refused with a
+`DuplicateEventIdError` that names the id the log already holds. Nothing of that batch is
+stored: the events that preceded the offending one in the same append are rolled back with it,
+because an append is one transaction.
+
+Naming the id is safe after the rollback: an insert that meets an uncommitted conflicting row
+waits for it and only ends in a violation if that row commits, so the conflicting event is in
+the table and one read finds it. An id that is not a valid event id (`RangeError`), and the
+same id twice in one batch (`DuplicateEventIdError`), are refused by both stores before any of
+this — they are argument checks, and `0005_events_id_unique.sql` is what covers the case a
+single process cannot see: two appends, to the same session or to different ones, racing for
+the same id.
 
 ## Fencing and leases
 

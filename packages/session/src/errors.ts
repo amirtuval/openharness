@@ -1,4 +1,4 @@
-import type { AgentId, SessionId } from '@openharness/protocol'
+import type { AgentId, EventId, SessionId } from '@openharness/protocol'
 
 /**
  * The errors a {@link SessionStore} throws.
@@ -21,6 +21,9 @@ export const SESSION_NOT_FOUND_ERROR_CODE = 'session_not_found'
 
 /** The `code` of a {@link AgentNotFoundError}. Stable across builds. */
 export const AGENT_NOT_FOUND_ERROR_CODE = 'agent_not_found'
+
+/** The `code` of a {@link DuplicateEventIdError}. Stable across builds. */
+export const DUPLICATE_EVENT_ID_ERROR_CODE = 'duplicate_event_id'
 
 /** What a {@link FencedError} reports: which write, which partition, and why it was refused. */
 export interface FencedErrorDetails {
@@ -120,5 +123,32 @@ export class AgentNotFoundError extends Error {
     super(`agent not found: ${agentId}`)
     this.name = 'AgentNotFoundError'
     this.agentId = agentId
+  }
+}
+
+/**
+ * An append was refused because one of its events carries an id the log already holds.
+ *
+ * An event id is the identity of one event in the whole store, not just in one session: it is
+ * what a client replaces a stream-only `event_start`/`event_delta` preview with. So an append
+ * that supplies an id may only do so if nothing is stored under it, and if it does not appear
+ * twice in the same batch. Either way the whole append is refused — nothing from that batch is
+ * stored — and the caller has to pick another id. See {@link SessionStore.appendEvents}.
+ */
+export class DuplicateEventIdError extends Error {
+  /** Stable, machine-readable code; see {@link DUPLICATE_EVENT_ID_ERROR_CODE}. */
+  readonly code = DUPLICATE_EVENT_ID_ERROR_CODE
+
+  /** The session the refused append named. */
+  readonly sessionId: SessionId
+
+  /** The `sevt_` id the append tried to write a second event under. */
+  readonly eventId: EventId
+
+  constructor(sessionId: SessionId, eventId: EventId) {
+    super(`event id already exists: ${eventId}`)
+    this.name = 'DuplicateEventIdError'
+    this.sessionId = sessionId
+    this.eventId = eventId
   }
 }

@@ -36,8 +36,13 @@ import {
 import { Pool, type ClientConfig } from 'pg'
 
 import { type Clock, systemClock } from '../clock'
-import { AgentNotFoundError, FencedError, SessionNotFoundError } from '../errors'
-import { assertTtl, decodeKeyPage, decodeSeqPage, pageSize } from '../inputs'
+import {
+  AgentNotFoundError,
+  DuplicateEventIdError,
+  FencedError,
+  SessionNotFoundError,
+} from '../errors'
+import { assertEventIds, assertTtl, decodeKeyPage, decodeSeqPage, pageSize } from '../inputs'
 import type {
   AppendableEvent,
   AppendEventsOptions,
@@ -309,17 +314,31 @@ export class PostgresSessionStore implements SessionStore {
     options: AppendEventsOptions = {},
   ): Promise<StoredEvent[]> {
     const now = this.#clock()
-    return this.#db.transaction().execute(async (trx) => {
-      // The session row is the append lock: every append to a session takes it, so `seq` is
-      // assigned gap-free and in the order the appends committed. It is also the existence
-      // check, and the row the status update lands on.
-      const session = await lockSession(trx, sessionId)
-      if (session === undefined) {
-        throw new SessionNotFoundError(sessionId)
+    const supplied = suppliedIdsOf(events)
+    try {
+      return await this.#db.transaction().execute(async (trx) => {
+        // The session row is the append lock: every append to a session takes it, so `seq` is
+        // assigned gap-free and in the order the appends committed. It is also the existence
+        // check, and the row the status update lands on.
+        const session = await lockSession(trx, sessionId)
+        if (session === undefined) {
+          throw new SessionNotFoundError(sessionId)
+        }
+        assertFence(await this.#leaseOf(trx, options.fence), options.fence, 'appendEvents', now)
+        return this.#append(trx, sessionId, events, now)
+      })
+    } catch (error) {
+      // A caller-supplied id that the log already holds is refused by the unique constraint on
+      // `events.id`: the insert fails, and the transaction that carried it rolls back whole, so
+      // nothing of the batch is stored. The row it collided with is committed — an insert that
+      // meets an uncommitted one waits for it, and only ends in a violation if it commits — so
+      // a read here names the id the refusal is about.
+      if (supplied.length === 0 || !isEventIdUniqueViolation(error)) {
+        throw error
       }
-      assertFence(await this.#leaseOf(trx, options.fence), options.fence, 'appendEvents', now)
-      return this.#append(trx, sessionId, events, now)
-    })
+      const taken = await this.#storedEventId(supplied)
+      throw taken === null ? error : new DuplicateEventIdError(sessionId, taken)
+    }
   }
 
   async markProcessed(
@@ -686,6 +705,11 @@ export class PostgresSessionStore implements SessionStore {
    * where the append actually happens: one multi-row insert, one session update, and one
    * notification per event — all in the caller's transaction, which is what makes a
    * subscription hear about an event exactly when it commits.
+   *
+   * An event that brought its own id is written under it, and the unique constraint on
+   * `events.id` is what refuses one the log already holds: the insert fails and the
+   * transaction rolls back whole. {@link PostgresSessionStore.appendEvents} turns that into a
+   * `DuplicateEventIdError`.
    */
   async #append(
     trx: Transaction<PostgresSchema>,
@@ -697,18 +721,24 @@ export class PostgresSessionStore implements SessionStore {
       // Nothing to write: no rows, no status change, and `updated_at` stays where it was.
       return []
     }
+    assertEventIds(sessionId, events)
     const base = await this.#maxSeq(sessionId, trx)
     const at = instant(now)
-    const rows: EventRow[] = events.map((input, index) => ({
-      id: newEventId(now),
-      session_id: sessionId,
-      seq: base + index + 1,
-      type: input.type,
-      payload: input,
-      created_at: at,
-      // A user event is queued until a turn claims it; everything else happened now.
-      processed_at: isUserEventType(input.type) ? null : at,
-    }))
+    const rows: EventRow[] = events.map((input, index) => {
+      // The id is a column, so a supplied one is written there and not repeated in the body:
+      // `payload` is the event as the caller sent it, without the fields the store assigns.
+      const { id, ...payload } = input
+      return {
+        id: id ?? newEventId(now),
+        session_id: sessionId,
+        seq: base + index + 1,
+        type: input.type,
+        payload,
+        created_at: at,
+        // A user event is queued until a turn claims it; everything else happened now.
+        processed_at: isUserEventType(input.type) ? null : at,
+      }
+    })
     await trx.insertInto('events').values(rows).execute()
     const status = statusAfter(events)
     await trx
@@ -734,6 +764,29 @@ export class PostgresSessionStore implements SessionStore {
       .where('session_id', '=', sessionId)
       .executeTakeFirstOrThrow()
     return row.seq
+  }
+
+  /**
+   * Which of these ids the log already holds, earliest in the batch first, or `null` when it
+   * holds none of them.
+   *
+   * Read outside the transaction of the append that was refused, which has rolled back by
+   * then. An id is unique across the whole table, not just within a session, so this looks at
+   * every session's events.
+   */
+  async #storedEventId(eventIds: readonly EventId[]): Promise<EventId | null> {
+    const rows = await this.#db
+      .selectFrom('events')
+      .select('id')
+      .where('id', 'in', [...eventIds])
+      .execute()
+    const stored = new Set<string>(rows.map((row) => row.id))
+    for (const id of eventIds) {
+      if (stored.has(id)) {
+        return id
+      }
+    }
+    return null
   }
 
   /** The partition's lease row, or `undefined` when the partition has never been leased. */
@@ -1098,6 +1151,46 @@ function lastOf<T>(items: readonly T[]): T {
     throw new RangeError('lastOf() needs a non-empty array')
   }
   return last
+}
+
+/** The ids a batch supplied, in the order it supplied them. */
+function suppliedIdsOf(events: readonly AppendableEvent[]): EventId[] {
+  const supplied: EventId[] = []
+  for (const event of events) {
+    if (event.id !== undefined) {
+      supplied.push(event.id)
+    }
+  }
+  return supplied
+}
+
+/** Postgres's SQLSTATE for a unique-constraint violation. */
+const UNIQUE_VIOLATION = '23505'
+
+/**
+ * The constraints a duplicate event id can be reported under: the primary key on `events.id`
+ * (`0003_events.sql`) and the unique index `0005_events_id_unique.sql` declares beside it.
+ * Both enforce the same thing, and Postgres does not promise which one it names.
+ */
+const EVENT_ID_CONSTRAINTS = new Set(['events_pkey', 'events_id_key'])
+
+/**
+ * Whether `error` is Postgres refusing a write because an event id is already taken.
+ *
+ * Only the id's own constraints count: a violation of `events (session_id, seq)` is a
+ * different bug — the append lock means it cannot happen — and it surfaces as itself.
+ * `constraint` is an identifier, so this does not depend on the database's locale.
+ */
+function isEventIdUniqueViolation(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) {
+    return false
+  }
+  const { code, constraint } = error as { readonly code?: unknown; readonly constraint?: unknown }
+  return (
+    code === UNIQUE_VIOLATION &&
+    typeof constraint === 'string' &&
+    EVENT_ID_CONSTRAINTS.has(constraint)
+  )
 }
 
 /** A function that runs at most once, whatever it is called: an `Unsubscribe`. */

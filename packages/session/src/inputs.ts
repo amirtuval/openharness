@@ -2,9 +2,14 @@ import {
   DEFAULT_PAGE_LIMIT,
   MAX_PAGE_LIMIT,
   decodePageCursor,
+  isEventId,
+  type EventId,
   type KeyCursor,
   type SeqCursor,
+  type SessionId,
 } from '@openharness/protocol'
+
+import { DuplicateEventIdError } from './errors'
 
 /**
  * The checks every store applies to a caller's arguments before it touches its own state.
@@ -46,5 +51,39 @@ export function decodeKeyPage(page: string): KeyCursor {
 export function assertTtl(ttlMs: number): void {
   if (!Number.isFinite(ttlMs) || ttlMs <= 0) {
     throw new RangeError(`ttlMs must be a positive, finite number of milliseconds, got ${ttlMs}`)
+  }
+}
+
+/**
+ * Check the ids an append is carrying before the store writes anything.
+ *
+ * An event may bring its own id (see `AppendableEvent`), and the id has to be one the store
+ * can use: a valid `sevt_` id, and not the same id twice in one batch. Both stores check that
+ * here, and both check it before the first write, because an append is all-or-nothing — a
+ * batch the store cannot write is a batch that stores nothing.
+ *
+ * Whether an id is *free* is each store's own question: it is state, and the two stores keep
+ * it in different places (a set of ids in memory, a unique constraint on the table).
+ *
+ * @throws RangeError when a supplied id is not a valid event id
+ * @throws DuplicateEventIdError when the same id is supplied twice in one batch
+ */
+export function assertEventIds(
+  sessionId: SessionId,
+  events: readonly { readonly id?: EventId }[],
+): void {
+  const seen = new Set<EventId>()
+  for (const event of events) {
+    const id = event.id
+    if (id === undefined) {
+      continue
+    }
+    if (!isEventId(id)) {
+      throw new RangeError(`not a valid event id: ${JSON.stringify(id)}`)
+    }
+    if (seen.has(id)) {
+      throw new DuplicateEventIdError(sessionId, id)
+    }
+    seen.add(id)
   }
 }
