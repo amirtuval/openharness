@@ -118,9 +118,8 @@ describe('runTurn', () => {
     expect(deltas.every((delta) => delta.delta.index === 0)).toBe(true)
     // The preview is a prefix of the stored reply, which is what a client accumulates on.
     expect(deltas.map((delta) => delta.delta.content.text).join('')).toBe(textOf(stored))
-    // `InMemorySessionStore` assigns the stored id itself, so the preview and the reply line up
-    // on everything but that field — see the contract gap in `AGENTS.md`.
-    expect(stored?.id).toEqual(expect.any(String))
+    // The stored reply keeps the id its preview announced, so a client can swap one for the other.
+    expect(stored?.id).toBe(previewId)
   })
 
   it('picks up a message that arrives mid-stream in a second request', async () => {

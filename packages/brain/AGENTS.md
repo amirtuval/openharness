@@ -187,17 +187,13 @@ after trying Mastra's `Agent` first. `Agent.stream()` swallows what this loop ne
 (including its status), an `abort` part, and a `usage` report. `streamRetries: 0` keeps the SDK
 from retrying underneath the loop.
 
-## Contract gaps
+## Preview and stored ids
 
-**The `sevt_` id of a stored `agent.message`.** `@openharness/protocol` says the stored reply
-carries the id its `event_start` announced, so a client can replace what it accumulated with
-what was stored. `@openharness/session` says `appendEvents` assigns `id` — `AppendableEvent` has
-no `id` field at all — so `InMemorySessionStore` overwrites the id the brain passes. Both
-packages are read-only contracts for this issue, so the brain does what it can: it publishes the
-preview under one pre-generated id, passes that id to `appendEvents` (see `events.ts`), and
-everything a client can observe about the _preview_ is correct. On a store that honors a
-caller-supplied id for an agent event the two line up; on `InMemorySessionStore` they do not,
-and the loop cannot fix that from inside `brain`.
+`@openharness/protocol` says a stored `agent.message` has the id its `event_start` announced, so a
+client can replace the preview it accumulated with the stored reply. The brain generates that
+`sevt_` id before streaming, publishes every `event_start`/`event_delta` under it, and passes it
+to `appendEvents`, which stores a caller-supplied id exactly as given (see
+`@openharness/session`). The tests assert the two ids are equal.
 
 ## Testing
 

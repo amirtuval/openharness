@@ -61,18 +61,12 @@ export function spanEnd(
  *
  * `id` is the `sevt_` id the `event_start` and every `event_delta` carried, which is how a
  * client matches what it accumulated against what was stored.
- *
- * **Contract gap.** `AppendableEvent` has no `id` — `@openharness/session` says the store
- * assigns it — while `@openharness/protocol` says a stored `agent.message` carries the id its
- * preview announced. The two cannot both hold, and the brain cannot publish a preview under an
- * id it does not choose, so it chooses one and asserts it here: a store that honours a
- * caller-supplied id for an agent event lines up, and `InMemorySessionStore` overwrites it with
- * one of its own. See `AGENTS.md`, "Contract gaps".
+ * `appendEvents` stores a caller-supplied id exactly as given, which is what makes the two match.
  */
 export function agentMessage(id: EventId, text: string): AppendableEvent {
   return {
     type: EVENT_TYPES.agentMessage,
     id,
     content: [{ type: 'text', text }],
-  } as AppendableEvent
+  }
 }
