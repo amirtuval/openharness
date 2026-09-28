@@ -1,8 +1,8 @@
 # @openharness/session
 
 The durable, append-only session event log: the `SessionStore` contract the brain and the
-server code against, the in-memory implementation every other package tests against, and the
-conformance suite both pass.
+server code against, the in-memory implementation every other package tests against, the
+Postgres implementation production runs on, and the conformance suite all of them pass.
 
 A session is a log of events — the user's messages, the agent's replies, the status
 transitions that bracket a turn, and the spans around every model request. It is the source of
@@ -23,10 +23,15 @@ Run from this folder (`packages/session`):
 | `yarn format`       | Prettier `--write`                                                      |
 | `yarn format:check` | Prettier `--check`                                                      |
 | `yarn test`         | Vitest, single run                                                      |
+| `yarn migrate`      | applies `migrations/` to `DATABASE_URL` using the built `bin`           |
 
 `yarn build:deps` matters when you work in isolation: it builds this package's workspace
 dependencies (from the repo root's installed `node_modules`) without touching the rest of the
 repo.
+
+`yarn test` runs the Postgres tests against a real database — `DATABASE_URL` if it is set,
+otherwise one brought up by testcontainers, and skipped with a note when neither is available.
+See [Running Postgres](#running-postgres) below.
 
 ## Layout
 
@@ -37,10 +42,21 @@ src/
   memory.ts             InMemorySessionStore: the fake, and the reference behaviour
   clock.ts              Clock, systemClock, timestampAt()
   errors.ts             FencedError, SessionNotFoundError, AgentNotFoundError
+  inputs.ts             the argument checks both stores share (limits, cursors, lease ttls)
+  postgres/
+    index.ts            the `@openharness/session/postgres` entry point
+    store.ts            PostgresSessionStore and createPostgresSessionStore
+    schema.ts           the Kysely table types, row → protocol mapping, channel names
+    listen.ts           the dedicated LISTEN connection, and its reconnection
+    migrate.ts          migrate(): the SQL-file runner
+    cli.ts              the `openharness-session-migrate` bin
+    postgres.test.ts    the conformance suite against Postgres, plus extra tests
   testing/
     index.ts            the subpath entry: re-exports, plus the suite and the test clock
     conformance.ts      runSessionStoreConformance()
     clock.ts            createTestClock()
+migrations/             the SQL the Postgres store needs, applied by `migrate()`
+docs/postgres.md        the Postgres store: schema, migrations, delivery, local setup
 ```
 
 ## Public API
@@ -62,6 +78,21 @@ src/
 | `FENCED_ERROR_CODE`, `SESSION_NOT_FOUND_ERROR_CODE`, `AGENT_NOT_FOUND_ERROR_CODE`       | the stable `code` of each error, for detection across bundles                   |
 | `PACKAGE_NAME`                                                                          | this package's name; lets a dependent prove the import resolved                 |
 
+### `@openharness/session/postgres`
+
+| export                                                                                  | what it is                                                                        |
+| --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `PostgresSessionStore`, `createPostgresSessionStore(config, options?)`                  | the durable implementation; `{ connectionString }` or `{ pool }`, plus options    |
+| `PostgresSessionStoreOptions`, `PostgresSessionStoreConfig`                             | its options (`now`, `partitionCount`, `onError`) and the two ways to reach a DB   |
+| `migrate(db, options?)`                                                                 | applies `migrations/`, idempotently, in one locked transaction; returns the files |
+| `MigrateOptions`                                                                        | `{ migrationsDir? }`, for a migrations directory that is not this package's       |
+| `PostgresSchema`, `AgentsTable`, `SessionsTable`, `EventsTable`, `PartitionLeasesTable` | the Kysely table types, for a caller that wants to query alongside the store      |
+
+This entry point is a separate subpath on purpose: it is the only module that depends on `pg`
+and `kysely`, and a consumer that only needs the contract, the fake or the suite must not load
+them. `store.close()` releases the listening connection and ends the pool **only if the store
+opened it**. See [`docs/postgres.md`](./docs/postgres.md).
+
 ### `@openharness/session/testing`
 
 | export                                               | what it is                                                      |
@@ -78,7 +109,7 @@ this one.
 ## The contract
 
 `SessionStore` in `src/store.ts` is the complete, documented contract; this section is the
-summary a wave-2 agent needs before writing a line against it.
+summary a caller — or a new implementation — needs before writing a line against it.
 
 **Everything is asynchronous**, and nothing may assume synchronous delivery. A store built on
 `LISTEN`/`NOTIFY` notifies after it commits, and a subscription or a signal arrives a tick
@@ -172,10 +203,64 @@ validate the wire, and callers (the API, the brain) run them. `InMemorySessionSt
 one exception, and only to be _stricter_: it rebuilds each appended event through
 `StoredEventSchema`, so the fake cannot hand back anything but the exact wire shape.
 
+## The Postgres store
+
+`@openharness/session/postgres` implements the same contract against Postgres, with Kysely and
+`pg`, and passes `runSessionStoreConformance` unchanged — `src/postgres/postgres.test.ts` runs
+the whole suite against a real database. [docs/postgres.md](./docs/postgres.md) is the long
+version; this is the shape of it.
+
+**Schema.** Four tables, all created by `migrations/`: `agents`, `sessions` (with the
+`partitionOf` partition and the `status` the log's last status event implies), `events` (`id`,
+`session_id`, `seq`, `type`, `payload jsonb`, `created_at`, `processed_at`, `unique
+(session_id, seq)`, an index on `(session_id, seq)` and a partial index for queued user
+events) and `partition_leases` (`partition`, `owner`, `epoch`, `expires_at`). Ids are `text
+collate "C"`, so SQL ordering is the byte order the protocol's keyset cursors use; every
+timestamp is `timestamptz` written from the injected clock, never from `now()`.
+
+**Migrations.** Plain SQL files in `migrations/`, applied in name order by `migrate(db)` — one
+transaction under an advisory lock, every statement `if not exists`, so it is idempotent and
+safe to run from two instances at once. There is no ledger: a file that has been applied
+anywhere must never be edited. `yarn migrate` runs the built bin.
+
+**Appending.** `seq` is assigned inside the append transaction, under `select … for update` on
+the session row, so concurrent appends — from any number of connections, stores or processes —
+serialize and the numbers are gap-free and ordered. `initial_events` go through the same path
+in the creation transaction.
+
+**Fencing and leases.** A fenced write checks `partition_leases` in its own transaction and
+throws `FencedError` on a mismatch. `acquirePartition` is a single conditional upsert that
+matches an unleased, self-owned or expired row, so testing and taking are atomic, and every
+successful take advances the epoch — the same owner included.
+
+**Live delivery.** One dedicated `LISTEN` connection per store, `LISTEN`/`UNLISTEN` per session
+as its first and last listener come and go, and per partition for signals. A stored
+notification carries the `seq` (never the event — payloads are capped at 8 KB) and the
+subscriber fetches the range after the last `seq` it delivered, so coalesced or repeated
+notifications cannot duplicate or drop anything; ephemeral events travel in the payload, and
+one that would not fit is dropped. The connection reconnects with backoff and then catches up
+from the last delivered `seq`. Signal channels are per partition, so every instance listening
+for that partition hears a signal, not just the sender.
+
+**Time.** The store takes the same `Clock` and derives every `created_at`, `updated_at`,
+`processed_at`, lease `expires_at` and lease-expiry comparison from it. Nothing reads the
+database's `now()`.
+
+## Running Postgres
+
+- **In CI** there is a `postgres` service in the workflow, and `DATABASE_URL` is set for the
+  test steps, so the Postgres tests always run there.
+- **Locally** set `DATABASE_URL`, or have a Docker daemon running and let the tests start
+  `postgres:18-alpine` with testcontainers. With neither, the suite is skipped with a note —
+  a skip is not a pass.
+- The tests truncate `agents`, `sessions`, `events` and `partition_leases` before every test,
+  so point `DATABASE_URL` at a scratch database.
+
 ## Running the conformance suite against a new implementation
 
-The Postgres store (wave 2) must pass the same suite. Write a test file with a factory that
-builds a fresh store on the clock it is handed, and let the suite do the rest:
+Every implementation must pass the same suite. Write a test file with a factory that builds a
+fresh store on the clock it is handed, and let the suite do the rest — `src/postgres/postgres.test.ts`
+is a worked example:
 
 ```ts
 import { runSessionStoreConformance } from '@openharness/session/testing'
@@ -217,6 +302,11 @@ relative paths. `yarn check:deps` at the repo root enforces this.
 
 - `testing/conformance.test.ts` runs the whole suite against `InMemorySessionStore` — the
   acceptance test of this package.
+- `postgres/postgres.test.ts` runs the same suite against Postgres — the acceptance test of
+  the durable store — and adds what only a shared store can be asked: concurrent appends from
+  two stores, fencing across stores, a burst that must be delivered exactly once, catching up
+  after the listening connection is killed, a dropped oversized ephemeral event, idempotent
+  migrations, and `close()` leaving a borrowed pool alone.
 - `memory.test.ts` covers what the fake promises _on top of_ the contract: the injected
   clock, the copies it hands out, microtask delivery, and error identity.
 - `index.test.ts` and `testing/clock.test.ts` cover the entry points and the test clock.
