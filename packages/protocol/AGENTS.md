@@ -19,7 +19,7 @@ Run from this folder (`packages/protocol`):
 | `yarn build`        | builds `src/` to `dist/` with tsdown (`.js` + `.d.ts`)                  |
 | `yarn build:deps`   | builds only this package's workspace dependencies (turbo filter `^...`) |
 | `yarn dev`          | watch mode                                                              |
-| `yarn typecheck`    | `tsc --noEmit`                                                          |
+| `yarn typecheck`    | `tsc --noEmit` for `tsconfig.json` and for `tsconfig.tooling.json`      |
 | `yarn lint`         | ESLint over this folder                                                 |
 | `yarn format`       | Prettier `--write`                                                      |
 | `yarn format:check` | Prettier `--check`                                                      |
@@ -28,6 +28,23 @@ Run from this folder (`packages/protocol`):
 `yarn build:deps` matters when you work in isolation: it builds this package's workspace
 dependencies (from the repo root's installed `node_modules`) without touching the rest of the
 repo.
+
+## Environments
+
+`@openharness/protocol` is loaded by browsers (the web app's client imports it) as well as by
+Node, so everything in `src/` is written against the APIs both have:
+
+- No `node:*` imports, no `Buffer`, no `process`. `crypto.getRandomValues` is the Web Crypto
+  global, and is what `ids.ts` draws ULID randomness from.
+- `tsconfig.json` extends `@openharness/config/tsconfig/base.json` (`types: []`) with
+  `"lib": ["ES2023", "DOM"]`, which keeps `@types/node` out of `src/`: `Buffer.from('x')` in a
+  source file is a type error (`yarn typecheck`). `TextEncoder`, `btoa`, `atob` and `crypto`
+  typecheck because `DOM` declares them, and all of them exist in Node 24.
+- The two `*.config.ts` files are Node programs — they configure tsdown and Vitest — and are
+  checked by `tsconfig.tooling.json`, which extends `node.json`. That is the only program that
+  sees `@types/node`, which is why it stays a devDependency; pulling it into `src/` through the
+  tooling configs (Vitest's own types reach Node's through `vite`) is exactly what the split
+  prevents.
 
 ## Layout
 
@@ -211,6 +228,10 @@ relative paths. `yarn check:deps` at the repo root enforces this.
 `events/events.test.ts` for the unions — it drives a table of one valid wire sample per stored
 event type, so a schema change that breaks the wire format fails a named test rather than a
 type.
+
+Tests are in `src/`, so they are typechecked against the browser-safe program too, and they
+must not need `@types/node`. `pagination.test.ts` also runs a cursor round trip with
+`globalThis.Buffer` stubbed out — the runtime half of the environment rule above.
 
 ## Rules
 
