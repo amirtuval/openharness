@@ -1,0 +1,1136 @@
+import {
+  DEFAULT_EVENT_ORDER,
+  DEFAULT_PARTITION_COUNT,
+  EVENT_TYPES,
+  encodeKeyCursor,
+  encodeSeqCursor,
+  newAgentId,
+  newEventId,
+  newSessionId,
+  partitionOf,
+  type Agent,
+  type AgentId,
+  type CreateAgentRequest,
+  type EventId,
+  type KeyCursor,
+  type ListAgentsResponse,
+  type ListEventsResponse,
+  type ListSessionsResponse,
+  type ModelRequestStartEvent,
+  type Session,
+  type SessionId,
+  type SessionStatus,
+  type StoredEvent,
+  type StreamOnlyEvent,
+  type UpdateAgentRequest,
+  type UserEvent,
+} from '@openharness/protocol'
+import {
+  Kysely,
+  PostgresDialect,
+  sql,
+  type RawBuilder,
+  type SqlBool,
+  type Transaction,
+} from 'kysely'
+import { Pool, type ClientConfig } from 'pg'
+
+import { type Clock, systemClock } from '../clock'
+import { AgentNotFoundError, FencedError, SessionNotFoundError } from '../errors'
+import { assertTtl, decodeKeyPage, decodeSeqPage, pageSize } from '../inputs'
+import type {
+  AppendableEvent,
+  AppendEventsOptions,
+  CreateSessionOptions,
+  ListAgentsOptions,
+  ListEventsOptions,
+  ListSessionsOptions,
+  MarkProcessedOptions,
+  PartitionFence,
+  PartitionLease,
+  PartitionSignal,
+  PartitionSignalInput,
+  PartitionSignalListener,
+  SessionEventListener,
+  SessionStore,
+  TurnState,
+  Unsubscribe,
+} from '../store'
+import { ListenConnection } from './listen'
+import {
+  instant,
+  agentFromRow,
+  encodeEphemeralNotification,
+  encodePartitionNotification,
+  encodeStoredNotification,
+  eventFromRow,
+  isPartitionChannel,
+  partitionChannel,
+  decodePartitionNotification,
+  decodeSessionNotification,
+  sessionChannel,
+  sessionFromRow,
+  timestampOf,
+  type AgentRow,
+  type EventRow,
+  type PartitionLeaseRow,
+  type PostgresSchema,
+  type SessionRow,
+} from './schema'
+
+/**
+ * The Postgres `SessionStore`: the durable implementation of the contract in `store.ts`.
+ *
+ * It passes the same conformance suite as `InMemorySessionStore`, and the two behave
+ * identically wherever the contract speaks — the differences are the ones the contract leaves
+ * open, and they are all about being shared rather than about being different:
+ *
+ * - **Live delivery is `LISTEN`/`NOTIFY`.** A store keeps one dedicated listening connection
+ *   (see `listen.ts`); appends notify on the session's channel inside the append
+ *   transaction, so a subscriber hears about an event when it commits. Notifications carry
+ *   the event's `seq`, not the event, and the subscriber fetches the range — which is what
+ *   makes coalesced, repeated or missed notifications harmless. Ephemeral events have no row
+ *   to fetch, so they travel in the payload itself (see `schema.ts`).
+ * - **Signals are process-wide.** A partition's signal is a notification on that partition's
+ *   channel, so every server instance listening for that partition hears it, not just the one
+ *   that sent it.
+ * - **Time is still the store's.** Every timestamp and every lease comparison uses the
+ *   injected clock, passed to Postgres as a parameter. Nothing here calls the database's
+ *   `now()`.
+ *
+ * ## What a caller has to provide
+ *
+ * The tables have to exist: run {@link migrate} against the same database before the first
+ * call. The store does not create its schema, and it does not validate what it is given —
+ * the protocol schemas do that at the edges, exactly as they do for the in-memory store.
+ *
+ * ## What is not covered by the contract
+ *
+ * A listener that misses events because its connection died catches up through the
+ * reconnected listening connection, but **signals missed while disconnected are gone**: they
+ * are hints, not a queue, and a partition's new owner recovers by calling
+ * `findSessionsNeedingWork`, exactly as the contract says.
+ */
+export class PostgresSessionStore implements SessionStore {
+  readonly #db: Kysely<PostgresSchema>
+
+  readonly #pool: Pool
+
+  /** Whether this store opened the pool: only then does {@link PostgresSessionStore.close} end it. */
+  readonly #ownsPool: boolean
+
+  readonly #clock: Clock
+
+  readonly #partitionCount: number
+
+  /** One entry per session someone is subscribed to, keyed by the session's id. */
+  readonly #sessions = new Map<SessionId, SessionSubscription>()
+
+  /** The channel each subscribed session is announced on, for routing what comes back. */
+  readonly #channels = new Map<string, SessionId>()
+
+  /** One entry per partition someone is listening for signals on. */
+  readonly #signals = new Map<number, Set<PartitionSignalListener>>()
+
+  #listen: ListenConnection | null = null
+
+  /** The delivery queue: notifications are handled in the order they arrived. */
+  #queue: Promise<unknown> = Promise.resolve()
+
+  #closed = false
+
+  /** How the dedicated listening connection reaches the same database. */
+  readonly #clientConfig: ClientConfig
+
+  /** Where a lost listening connection is reported; silent by default. */
+  readonly #onError: (error: Error) => void
+
+  constructor(options: PostgresSessionStoreOptions = {}) {
+    const { pool, connectionString } = options
+    if (pool !== undefined && connectionString !== undefined) {
+      throw new TypeError('pass either `pool` or `connectionString`, not both')
+    }
+    if (pool === undefined && connectionString === undefined) {
+      throw new TypeError('pass either `pool` or `connectionString`')
+    }
+    if (pool !== undefined) {
+      this.#pool = pool
+      this.#ownsPool = false
+    } else {
+      this.#pool = new Pool({ connectionString })
+      this.#ownsPool = true
+    }
+    this.#db = new Kysely<PostgresSchema>({ dialect: new PostgresDialect({ pool: this.#pool }) })
+    this.#clock = options.now ?? systemClock
+    this.#partitionCount = options.partitionCount ?? DEFAULT_PARTITION_COUNT
+    this.#onError = options.onError ?? (() => undefined)
+    this.#clientConfig = pool === undefined ? { connectionString } : pool.options
+  }
+
+  // ------------------------------------------------------------------ agents
+
+  async createAgent(input: CreateAgentRequest): Promise<Agent> {
+    const now = this.#clock()
+    const row: AgentRow = {
+      id: newAgentId(now),
+      name: input.name,
+      description: input.description ?? null,
+      model_id: input.model.id,
+      system: input.system ?? null,
+      created_at: instant(now),
+      updated_at: instant(now),
+    }
+    await this.#db.insertInto('agents').values(row).execute()
+    return agentFromRow(row)
+  }
+
+  async getAgent(agentId: AgentId): Promise<Agent | null> {
+    const row = await this.#db
+      .selectFrom('agents')
+      .selectAll()
+      .where('id', '=', agentId)
+      .executeTakeFirst()
+    return row === undefined ? null : agentFromRow(row)
+  }
+
+  async listAgents(options: ListAgentsOptions = {}): Promise<ListAgentsResponse> {
+    const cursor = options.page === undefined ? null : decodeKeyPage(options.page)
+    const limit = pageSize(options.limit)
+    const query = this.#db.selectFrom('agents').selectAll()
+    const rows = await (cursor === null ? query : query.where(keyset(cursor, 'asc')))
+      .orderBy('created_at', 'asc')
+      .orderBy('id', 'asc')
+      .limit(limit + 1)
+      .execute()
+    const data = rows.slice(0, limit).map(agentFromRow)
+    return {
+      data,
+      next_page: rows.length > limit ? encodeKeyCursor(lastOf(data)) : null,
+    }
+  }
+
+  async updateAgent(agentId: AgentId, update: UpdateAgentRequest): Promise<Agent | null> {
+    const now = this.#clock()
+    return this.#db.transaction().execute(async (trx) => {
+      // Read, patch and write in one transaction: an update is a partial one, so what it
+      // leaves alone has to be what was stored when it started.
+      const row = await trx
+        .selectFrom('agents')
+        .selectAll()
+        .where('id', '=', agentId)
+        .forUpdate()
+        .executeTakeFirst()
+      if (row === undefined) {
+        return null
+      }
+      const updated: AgentRow = {
+        ...row,
+        name: update.name ?? row.name,
+        description: update.description === undefined ? row.description : update.description,
+        model_id: update.model?.id ?? row.model_id,
+        system: update.system === undefined ? row.system : update.system,
+        updated_at: instant(now),
+      }
+      await trx.updateTable('agents').set(updated).where('id', '=', agentId).execute()
+      return agentFromRow(updated)
+    })
+  }
+
+  // ---------------------------------------------------------------- sessions
+
+  async createSession(agentId: AgentId, options: CreateSessionOptions = {}): Promise<Session> {
+    const now = this.#clock()
+    const id = newSessionId(now)
+    return this.#db.transaction().execute(async (trx) => {
+      const agent = await trx
+        .selectFrom('agents')
+        .selectAll()
+        .where('id', '=', agentId)
+        .executeTakeFirst()
+      if (agent === undefined) {
+        throw new AgentNotFoundError(agentId)
+      }
+      const row: SessionRow = {
+        id,
+        status: 'idle',
+        partition: partitionOf(id, this.#partitionCount),
+        title: options.title ?? null,
+        metadata: { ...options.metadata },
+        agent_id: agent.id,
+        agent_name: agent.name,
+        agent_model_id: agent.model_id,
+        agent_system: agent.system,
+        created_at: instant(now),
+        updated_at: instant(now),
+      }
+      await trx.insertInto('sessions').values(row).execute()
+      // `initial_events` belong to the creation transaction: they are in the log before this
+      // returns, so nothing can observe the session without them.
+      await this.#append(trx, id, options.initial_events ?? [], now)
+      return sessionFromRow(row)
+    })
+  }
+
+  async getSession(sessionId: SessionId): Promise<Session | null> {
+    const row = await readSession(this.#db, sessionId)
+    return row === undefined ? null : sessionFromRow(row)
+  }
+
+  async listSessions(options: ListSessionsOptions = {}): Promise<ListSessionsResponse> {
+    const cursor = options.page === undefined ? null : decodeKeyPage(options.page)
+    const limit = pageSize(options.limit)
+    let query = this.#db.selectFrom('sessions').selectAll()
+    if (options.agentId !== undefined) {
+      query = query.where('agent_id', '=', options.agentId)
+    }
+    if (cursor !== null) {
+      query = query.where(keyset(cursor, 'desc'))
+    }
+    // Newest first: the list order is `(created_at, id)` descending, which is the order the
+    // cursors seek into. The `C` collation on `id` makes the SQL order the one the cursor
+    // encodes — byte order, exactly what the in-memory store compares.
+    const rows = await query
+      .orderBy('created_at', 'desc')
+      .orderBy('id', 'desc')
+      .limit(limit + 1)
+      .execute()
+    const data = rows.slice(0, limit).map(sessionFromRow)
+    return {
+      data,
+      next_page: rows.length > limit ? encodeKeyCursor(lastOf(data)) : null,
+    }
+  }
+
+  // ----------------------------------------------------------------- events
+
+  async appendEvents(
+    sessionId: SessionId,
+    events: AppendableEvent[],
+    options: AppendEventsOptions = {},
+  ): Promise<StoredEvent[]> {
+    const now = this.#clock()
+    return this.#db.transaction().execute(async (trx) => {
+      // The session row is the append lock: every append to a session takes it, so `seq` is
+      // assigned gap-free and in the order the appends committed. It is also the existence
+      // check, and the row the status update lands on.
+      const session = await lockSession(trx, sessionId)
+      if (session === undefined) {
+        throw new SessionNotFoundError(sessionId)
+      }
+      assertFence(await this.#leaseOf(trx, options.fence), options.fence, 'appendEvents', now)
+      return this.#append(trx, sessionId, events, now)
+    })
+  }
+
+  async markProcessed(
+    sessionId: SessionId,
+    eventIds: EventId[],
+    options: MarkProcessedOptions = {},
+  ): Promise<UserEvent[]> {
+    const now = this.#clock()
+    return this.#db.transaction().execute(async (trx) => {
+      if ((await readSession(trx, sessionId)) === undefined) {
+        throw new SessionNotFoundError(sessionId)
+      }
+      assertFence(await this.#leaseOf(trx, options.fence), options.fence, 'markProcessed', now)
+      if (eventIds.length === 0) {
+        return []
+      }
+      // The claim is the `update`: rows that are already processed, that belong to another
+      // session, or that are not user events do not match, so two callers racing for the same
+      // event cannot both win — the loser's `where` re-checks under the row lock and matches
+      // nothing.
+      const claimed = await sql<EventRow>`
+        with claimed as (
+          update events
+             set processed_at = ${instant(now)}
+           where session_id = ${sessionId}
+             and id = any(${eventIds}::text[])
+             and processed_at is null
+             and type in (${EVENT_TYPES.userMessage}, ${EVENT_TYPES.userInterrupt})
+          returning *
+        )
+        select * from claimed order by seq asc
+      `.execute(trx)
+      return claimed.rows.map(eventFromRow).filter(isUserEvent)
+    })
+  }
+
+  async listEvents(
+    sessionId: SessionId,
+    options: ListEventsOptions = {},
+  ): Promise<ListEventsResponse> {
+    if ((await readSession(this.#db, sessionId)) === undefined) {
+      throw new SessionNotFoundError(sessionId)
+    }
+    const order = options.order ?? DEFAULT_EVENT_ORDER
+    const cursor = options.page === undefined ? null : decodeSeqPage(options.page)
+    const limit = pageSize(options.limit)
+    if (options.types !== undefined && options.types.length === 0) {
+      return { data: [], next_page: null }
+    }
+    let query = this.#db.selectFrom('events').selectAll().where('session_id', '=', sessionId)
+    if (cursor !== null) {
+      query = query.where('seq', order === 'asc' ? '>' : '<', cursor.seq)
+    }
+    if (options.afterSeq !== undefined) {
+      query = query.where('seq', '>', options.afterSeq)
+    }
+    if (options.types !== undefined) {
+      query = query.where('type', 'in', options.types)
+    }
+    const rows = await query
+      .orderBy('seq', order)
+      .limit(limit + 1)
+      .execute()
+    const data = rows.slice(0, limit)
+    return {
+      data: data.map(eventFromRow),
+      next_page: rows.length > limit ? encodeSeqCursor(lastOf(data).seq) : null,
+    }
+  }
+
+  async getPendingUserEvents(sessionId: SessionId): Promise<UserEvent[]> {
+    if ((await readSession(this.#db, sessionId)) === undefined) {
+      throw new SessionNotFoundError(sessionId)
+    }
+    const rows = await this.#db
+      .selectFrom('events')
+      .selectAll()
+      .where('session_id', '=', sessionId)
+      .where('processed_at', 'is', null)
+      .where('type', 'in', [EVENT_TYPES.userMessage, EVENT_TYPES.userInterrupt])
+      .orderBy('seq', 'asc')
+      .execute()
+    return rows.map(eventFromRow).filter(isUserEvent)
+  }
+
+  async getTurnState(sessionId: SessionId): Promise<TurnState> {
+    if ((await readSession(this.#db, sessionId)) === undefined) {
+      throw new SessionNotFoundError(sessionId)
+    }
+    const lastStatus = await this.#db
+      .selectFrom('events')
+      .select('type')
+      .where('session_id', '=', sessionId)
+      .where('type', 'in', [
+        EVENT_TYPES.sessionStatusRunning,
+        EVENT_TYPES.sessionStatusIdle,
+        EVENT_TYPES.sessionStatusRescheduled,
+      ])
+      .orderBy('seq', 'desc')
+      .limit(1)
+      .executeTakeFirst()
+    if (lastStatus === undefined || lastStatus.type === EVENT_TYPES.sessionStatusIdle) {
+      return { state: 'idle', openSpan: null }
+    }
+    const openSpan = await this.#openSpan(sessionId)
+    return openSpan === null
+      ? { state: 'unfinished', openSpan: null }
+      : { state: 'running', openSpan }
+  }
+
+  // ------------------------------------------------------- live subscription
+
+  async subscribe(sessionId: SessionId, listener: SessionEventListener): Promise<Unsubscribe> {
+    const channel = sessionChannel(sessionId)
+    // Where the new listener starts. A subscription never replays the log: whatever is
+    // already stored when it is established is read through `listEvents`, so the snapshot is
+    // taken first and everything after it is delivered — including anything that lands
+    // between the snapshot and the `LISTEN`, which the catch-up fetch below picks up.
+    const from = await this.#maxSeqOrThrow(sessionId)
+    let subscription = this.#sessions.get(sessionId)
+    if (subscription === undefined) {
+      subscription = { channel, fetched: from, listeners: new Map() }
+      this.#sessions.set(sessionId, subscription)
+      this.#channels.set(channel, sessionId)
+      try {
+        await this.#connection().listen(channel)
+      } catch (error) {
+        this.#sessions.delete(sessionId)
+        this.#channels.delete(channel)
+        throw error
+      }
+    }
+    subscription.listeners.set(listener, from)
+    if (subscription.listeners.size === 1) {
+      // The catch-up fetch: anything that landed between the snapshot and the `LISTEN` was
+      // never announced to this store, and the notification for it is what we just missed.
+      await this.#enqueue(() => this.#flush(sessionId))
+    }
+    return once(() => {
+      const current = this.#sessions.get(sessionId)
+      if (current === undefined) {
+        return
+      }
+      current.listeners.delete(listener)
+      if (current.listeners.size === 0) {
+        this.#sessions.delete(sessionId)
+        this.#channels.delete(current.channel)
+        // `Unsubscribe` is synchronous, so the `UNLISTEN` is best effort: the channel stays
+        // listened to until it lands, which only costs a notification nobody routes.
+        void this.#listen?.unlisten(current.channel).catch(() => undefined)
+      }
+    })
+  }
+
+  async publishEphemeral(sessionId: SessionId, event: StreamOnlyEvent): Promise<void> {
+    const payload = encodeEphemeralNotification(event)
+    await this.#db.transaction().execute(async (trx) => {
+      if ((await readSession(trx, sessionId)) === undefined) {
+        throw new SessionNotFoundError(sessionId)
+      }
+      if (payload === null) {
+        // Ephemeral events are best effort: one that cannot fit in a notification is dropped
+        // rather than allowed to fail the publish (or the append transaction that carried it).
+        return
+      }
+      await sql`select pg_notify(${sessionChannel(sessionId)}, ${payload})`.execute(trx)
+    })
+  }
+
+  // -------------------------------------------------------- scheduler support
+
+  async signalPartition(partition: number, signal: PartitionSignalInput): Promise<void> {
+    const payload: PartitionSignal = {
+      partition,
+      sessionId: signal.sessionId,
+      kind: signal.kind,
+    }
+    // Announced on the partition's channel so every instance listening for that partition
+    // hears it, not just this one. Nobody listening means the signal is dropped, which the
+    // contract allows: recovery reads `findSessionsNeedingWork`, not the signals.
+    await sql`select pg_notify(${partitionChannel(partition)}, ${encodePartitionNotification(payload)})`.execute(
+      this.#db,
+    )
+  }
+
+  async onPartitionSignal(
+    partition: number,
+    listener: PartitionSignalListener,
+  ): Promise<Unsubscribe> {
+    const channel = partitionChannel(partition)
+    let listeners = this.#signals.get(partition)
+    if (listeners === undefined) {
+      listeners = new Set()
+      this.#signals.set(partition, listeners)
+      try {
+        await this.#connection().listen(channel)
+      } catch (error) {
+        this.#signals.delete(partition)
+        throw error
+      }
+    }
+    listeners.add(listener)
+    return once(() => {
+      const current = this.#signals.get(partition)
+      if (current === undefined) {
+        return
+      }
+      current.delete(listener)
+      if (current.size === 0) {
+        this.#signals.delete(partition)
+        void this.#listen?.unlisten(channel).catch(() => undefined)
+      }
+    })
+  }
+
+  async findSessionsNeedingWork(partitions: readonly number[]): Promise<SessionId[]> {
+    if (partitions.length === 0) {
+      return []
+    }
+    // Derived from the log alone — no lease, no signal, no transient state — so a partition
+    // that has just been taken over gets the same answer as one that is running normally.
+    // A session with pending user events *and* an open turn matches once, because it is one
+    // row with two conditions.
+    const found = await sql<{ id: string }>`
+      select s.id
+        from sessions s
+       where s.partition = any(${[...partitions]}::int[])
+         and (
+           exists (
+             select 1
+               from events e
+              where e.session_id = s.id
+                and e.processed_at is null
+                and e.type in (${EVENT_TYPES.userMessage}, ${EVENT_TYPES.userInterrupt})
+           )
+           -- An open turn: the last status event is not session.status_idle. A log with no
+           -- status event at all is idle, which is what the coalesce supplies.
+           or coalesce((
+             select e2.type
+               from events e2
+              where e2.session_id = s.id
+                and e2.type in (
+                  ${EVENT_TYPES.sessionStatusRunning},
+                  ${EVENT_TYPES.sessionStatusIdle},
+                  ${EVENT_TYPES.sessionStatusRescheduled}
+                )
+              order by e2.seq desc
+              limit 1
+           ), ${EVENT_TYPES.sessionStatusIdle}) <> ${EVENT_TYPES.sessionStatusIdle}
+         )
+       order by s.created_at asc, s.id asc
+    `.execute(this.#db)
+    return found.rows.map((row) => row.id as SessionId)
+  }
+
+  // ------------------------------------------------------------ partition leases
+
+  async acquirePartition(
+    partition: number,
+    owner: string,
+    ttlMs: number,
+  ): Promise<PartitionLease | null> {
+    assertTtl(ttlMs)
+    const now = this.#clock()
+    // One statement, so the "is it free?" test and the take are atomic: the conditional
+    // `do update` matches an unleased row, the same owner, or an expired lease, and every
+    // take — even by the owner that already held it — opens a new tenure and advances the
+    // epoch. No row comes back when a live lease is held by somebody else.
+    const taken = await sql<PartitionLeaseRow>`
+      insert into partition_leases (partition, owner, epoch, expires_at)
+      values (${partition}, ${owner}, 1, ${instant(now + ttlMs)})
+      on conflict (partition) do update
+         set owner = excluded.owner,
+             epoch = partition_leases.epoch + 1,
+             expires_at = excluded.expires_at
+       where partition_leases.owner is null
+          or partition_leases.owner = excluded.owner
+          or partition_leases.expires_at <= ${instant(now)}
+      returning partition, owner, epoch, expires_at
+    `.execute(this.#db)
+    const row = taken.rows[0]
+    return row === undefined ? null : leaseFromRow(row)
+  }
+
+  async renewPartition(
+    partition: number,
+    owner: string,
+    epoch: number,
+    ttlMs: number,
+  ): Promise<boolean> {
+    assertTtl(ttlMs)
+    const now = this.#clock()
+    const renewed = await sql`
+      update partition_leases
+         set expires_at = ${instant(now + ttlMs)}
+       where partition = ${partition}
+         and owner = ${owner}
+         and epoch = ${epoch}
+         and expires_at > ${instant(now)}
+      returning partition
+    `.execute(this.#db)
+    return renewed.rows.length > 0
+  }
+
+  async releasePartition(partition: number, owner: string, epoch: number): Promise<void> {
+    // Releasing what this owner does not hold is a no-op, so the statement matches on both
+    // owner and epoch and simply does nothing otherwise. The epoch still advances, so a write
+    // still in flight from the released tenure is fenced rather than landing in the next one.
+    await sql`
+      update partition_leases
+         set owner = null,
+             expires_at = null,
+             epoch = epoch + 1
+       where partition = ${partition}
+         and owner = ${owner}
+         and epoch = ${epoch}
+    `.execute(this.#db)
+  }
+
+  async currentEpoch(partition: number): Promise<number> {
+    const row = await this.#db
+      .selectFrom('partition_leases')
+      .select('epoch')
+      .where('partition', '=', partition)
+      .executeTakeFirst()
+    return row?.epoch ?? 0
+  }
+
+  // ------------------------------------------------------------------ lifecycle
+
+  /**
+   * Give up the store's own resources: drop the listening connection, and end the pool when
+   * this store opened it.
+   *
+   * A store built on a pool the caller owns leaves that pool alone — the caller may be
+   * sharing it with the rest of the application. Idempotent, and nothing else may be called
+   * afterwards.
+   */
+  async close(): Promise<void> {
+    if (this.#closed) {
+      return
+    }
+    this.#closed = true
+    this.#sessions.clear()
+    this.#channels.clear()
+    this.#signals.clear()
+    const listen = this.#listen
+    this.#listen = null
+    if (listen !== null) {
+      await listen.close()
+    }
+    if (this.#ownsPool) {
+      await this.#db.destroy()
+    }
+  }
+
+  // ------------------------------------------------------------------ internals
+
+  /**
+   * Append events to a session's log inside an open transaction, assign `seq` from the log's
+   * own end, follow the status events onto the session row, and announce what was written.
+   *
+   * The caller has already taken the session's row lock and checked the fence, so this is
+   * where the append actually happens: one multi-row insert, one session update, and one
+   * notification per event — all in the caller's transaction, which is what makes a
+   * subscription hear about an event exactly when it commits.
+   */
+  async #append(
+    trx: Transaction<PostgresSchema>,
+    sessionId: SessionId,
+    events: readonly AppendableEvent[],
+    now: number,
+  ): Promise<StoredEvent[]> {
+    if (events.length === 0) {
+      // Nothing to write: no rows, no status change, and `updated_at` stays where it was.
+      return []
+    }
+    const base = await this.#maxSeq(sessionId, trx)
+    const at = instant(now)
+    const rows: EventRow[] = events.map((input, index) => ({
+      id: newEventId(now),
+      session_id: sessionId,
+      seq: base + index + 1,
+      type: input.type,
+      payload: input,
+      created_at: at,
+      // A user event is queued until a turn claims it; everything else happened now.
+      processed_at: isUserEventType(input.type) ? null : at,
+    }))
+    await trx.insertInto('events').values(rows).execute()
+    const status = statusAfter(events)
+    await trx
+      .updateTable('sessions')
+      .set(status === null ? { updated_at: at } : { status, updated_at: at })
+      .where('id', '=', sessionId)
+      .execute()
+    // Inside the transaction on purpose: Postgres delivers the notification when it commits,
+    // so a subscriber never reads a log an append has not finished writing.
+    const channel = sessionChannel(sessionId)
+    const payloads = rows.map((row) => encodeStoredNotification(row.seq))
+    await sql`select pg_notify(${channel}, payload) from unnest(${payloads}::text[]) as payload`.execute(
+      trx,
+    )
+    return rows.map(eventFromRow)
+  }
+
+  /** The `seq` of the session's last event, or `0` when the log is empty. */
+  async #maxSeq(sessionId: SessionId, db: Queryable = this.#db): Promise<number> {
+    const row = await db
+      .selectFrom('events')
+      .select(sql<number>`coalesce(max(seq), 0)`.as('seq'))
+      .where('session_id', '=', sessionId)
+      .executeTakeFirstOrThrow()
+    return row.seq
+  }
+
+  /** The partition's lease row, or `undefined` when the partition has never been leased. */
+  async #leaseOf(
+    trx: Transaction<PostgresSchema>,
+    fence: PartitionFence | undefined,
+  ): Promise<PartitionLeaseRow | undefined> {
+    if (fence === undefined) {
+      return undefined
+    }
+    return trx
+      .selectFrom('partition_leases')
+      .selectAll()
+      .where('partition', '=', fence.partition)
+      .executeTakeFirst()
+  }
+
+  /** The oldest `span.model_request_start` in the log that no end event closed, or `null`. */
+  async #openSpan(sessionId: SessionId): Promise<ModelRequestStartEvent | null> {
+    const rows = await sql<EventRow>`
+      select e.*
+        from events e
+       where e.session_id = ${sessionId}
+         and e.type = ${EVENT_TYPES.modelRequestStart}
+         and not exists (
+           select 1
+             from events x
+            where x.session_id = e.session_id
+              and x.type = ${EVENT_TYPES.modelRequestEnd}
+              and x.payload ->> 'model_request_start_id' = e.id
+         )
+       order by e.seq asc
+       limit 1
+    `.execute(this.#db)
+    const row = rows.rows[0]
+    return row === undefined ? null : (eventFromRow(row) as ModelRequestStartEvent)
+  }
+
+  /**
+   * The session's current last `seq`, in one round trip with the existence check.
+   *
+   * A subscription starts after this position, which is the contract's "never called for an
+   * event that was already in the log when the subscription was established".
+   *
+   * @throws SessionNotFoundError when the session does not exist
+   */
+  async #maxSeqOrThrow(sessionId: SessionId): Promise<number> {
+    const found = await sql<{ max_seq: number }>`
+      select coalesce((select max(seq) from events e where e.session_id = s.id), 0) as max_seq
+        from sessions s
+       where s.id = ${sessionId}
+    `.execute(this.#db)
+    const row = found.rows[0]
+    if (row === undefined) {
+      throw new SessionNotFoundError(sessionId)
+    }
+    return row.max_seq
+  }
+
+  /** The listening connection, opened on the first subscription. */
+  #connection(): ListenConnection {
+    if (this.#closed) {
+      throw new Error('this session store is closed')
+    }
+    this.#listen ??= new ListenConnection({
+      clientConfig: this.#clientConfig,
+      onNotification: (channel, payload) => {
+        // Queued, not handled here: the handler is synchronous and may need to query, and
+        // notifications have to be processed one at a time and in the order they arrived.
+        void this.#enqueue(() => this.#dispatch(channel, payload))
+      },
+      onReconnect: () => this.#enqueue(() => this.#catchUp()),
+      onError: (error) => {
+        this.#onError(error)
+      },
+    })
+    return this.#listen
+  }
+
+  /**
+   * Run `task` after the tasks already queued, one at a time.
+   *
+   * Delivery is serialized because it is stateful — a fetch advances a session's position and
+   * hands the rows to listeners — and two flushes of the same session interleaving would
+   * hand the same event out twice. A task's failure is its own: the queue carries on.
+   */
+  #enqueue<T>(task: () => Promise<T>): Promise<T> {
+    const result = this.#queue.then(task, task)
+    this.#queue = result.catch(() => undefined)
+    return result
+  }
+
+  /** Hand one notification to whoever it belongs to. */
+  async #dispatch(channel: string, payload: string): Promise<void> {
+    if (isPartitionChannel(channel)) {
+      const signal = decodePartitionNotification(payload)
+      if (signal !== null) {
+        deliverTo(this.#signals.get(signal.partition), signal)
+      }
+      return
+    }
+    const sessionId = this.#channels.get(channel)
+    if (sessionId === undefined) {
+      return
+    }
+    const notification = decodeSessionNotification(payload)
+    if (notification === null) {
+      return
+    }
+    if (notification.kind === 'stored') {
+      // The payload named a `seq`, not an event: fetch everything this session's listeners
+      // have not seen. Repeated or coalesced notifications cost one empty query each.
+      await this.#flush(sessionId)
+      return
+    }
+    const subscription = this.#sessions.get(sessionId)
+    if (subscription !== undefined) {
+      deliverTo(subscription.listeners.keys(), notification.event)
+    }
+  }
+
+  /**
+   * Deliver everything stored after what this session's listeners have already seen.
+   *
+   * One query per batch, and the batch position — `fetched` — advances with the query rather
+   * than with what a particular listener needed, so a listener that joined late cannot make
+   * the loop fetch the same rows again. A notification that arrives while a batch is in
+   * flight is queued behind this call, and finds nothing left to do.
+   */
+  async #flush(sessionId: SessionId): Promise<void> {
+    for (;;) {
+      const subscription = this.#sessions.get(sessionId)
+      if (subscription === undefined || subscription.listeners.size === 0) {
+        return
+      }
+      const rows = await this.#eventsAfter(sessionId, subscription.fetched)
+      const current = this.#sessions.get(sessionId)
+      if (current !== subscription) {
+        return
+      }
+      const last = rows[rows.length - 1]
+      if (last === undefined) {
+        return
+      }
+      subscription.fetched = last.seq
+      for (const row of rows) {
+        const event = eventFromRow(row)
+        for (const [listener, delivered] of [...subscription.listeners]) {
+          if (row.seq <= delivered) {
+            continue
+          }
+          subscription.listeners.set(listener, row.seq)
+          deliverTo([listener], event)
+        }
+      }
+    }
+  }
+
+  /** A batch of stored events, in `seq` order, from just after `afterSeq`. */
+  async #eventsAfter(sessionId: SessionId, afterSeq: number): Promise<EventRow[]> {
+    return this.#db
+      .selectFrom('events')
+      .selectAll()
+      .where('session_id', '=', sessionId)
+      .where('seq', '>', afterSeq)
+      .orderBy('seq', 'asc')
+      .limit(FETCH_BATCH_SIZE)
+      .execute()
+  }
+
+  /** Catch up every subscription after a reconnect: notifications were missed while gone. */
+  async #catchUp(): Promise<void> {
+    if (this.#closed) {
+      return
+    }
+    for (const sessionId of [...this.#sessions.keys()]) {
+      await this.#flush(sessionId)
+    }
+  }
+}
+
+/** Everything {@link PostgresSessionStore} takes. */
+export interface PostgresSessionStoreOptions {
+  /** A connection string this store opens (and, on {@link PostgresSessionStore.close}, ends) itself. */
+  readonly connectionString?: string
+  /** A pool to borrow. The store never ends it; the caller owns its lifecycle. */
+  readonly pool?: Pool
+  /**
+   * The store's time source. Defaults to {@link systemClock}; pass a controllable clock in
+   * tests, which is what the conformance suite does. Nothing in this store reads the
+   * database's `now()`.
+   */
+  readonly now?: Clock
+  /**
+   * Number of partitions sessions hash into, used by
+   * {@link PostgresSessionStore.findSessionsNeedingWork}. Defaults to the protocol's
+   * `DEFAULT_PARTITION_COUNT`; a store only agrees with a server whose partitions match.
+   */
+  readonly partitionCount?: number
+  /**
+   * Called when the listening connection is lost or cannot be re-established.
+   *
+   * The store reconnects and catches up on its own, so this is for logging rather than for
+   * recovery: a store with no reporter stays silent instead of writing to a console it does
+   * not own.
+   */
+  readonly onError?: (error: Error) => void
+}
+
+/** How the two ways of reaching Postgres are written: a connection string, or a pool. */
+export type PostgresSessionStoreConfig =
+  { readonly connectionString: string } | { readonly pool: Pool }
+
+/**
+ * Build a Postgres-backed session store.
+ *
+ * ```ts
+ * const store = createPostgresSessionStore(
+ *   { connectionString: process.env.DATABASE_URL },
+ *   { clock: systemClock },
+ * )
+ * ```
+ *
+ * The tables have to exist: run {@link migrate} against the same database first.
+ */
+export function createPostgresSessionStore(
+  config: PostgresSessionStoreConfig,
+  options: Omit<PostgresSessionStoreOptions, 'connectionString' | 'pool'> = {},
+): PostgresSessionStore {
+  return new PostgresSessionStore({ ...config, ...options })
+}
+
+/** Something Kysely can run a query against: the database itself, or one of its transactions. */
+type Queryable = Kysely<PostgresSchema> | Transaction<PostgresSchema>
+
+/**
+ * Everything the store knows about one subscribed session.
+ *
+ * Each listener carries its own position, because a subscription never replays the log: a
+ * listener that arrives later starts later, and one that is still catching up does not make
+ * another one re-see an event. `fetched` is how far the *queries* have read, which is what
+ * keeps a catch-up loop from asking for the same batch twice when the listeners are at
+ * different positions.
+ */
+interface SessionSubscription {
+  /** The channel the session's events are announced on. */
+  readonly channel: string
+  /** The highest `seq` a fetch has read; only ever moves forward. */
+  fetched: number
+  /** Each listener, and the `seq` of the last event it was given. */
+  readonly listeners: Map<SessionEventListener, number>
+}
+
+/** How many events a catch-up fetch reads at a time. */
+const FETCH_BATCH_SIZE = 500
+
+/** The session's row, locked for the rest of the transaction. */
+async function lockSession(
+  trx: Transaction<PostgresSchema>,
+  sessionId: SessionId,
+): Promise<SessionRow | undefined> {
+  return trx
+    .selectFrom('sessions')
+    .selectAll()
+    .where('id', '=', sessionId)
+    .forUpdate()
+    .executeTakeFirst()
+}
+
+/** The session's row, or `undefined` when no session has that id. */
+async function readSession(db: Queryable, sessionId: SessionId): Promise<SessionRow | undefined> {
+  return db.selectFrom('sessions').selectAll().where('id', '=', sessionId).executeTakeFirst()
+}
+
+/**
+ * The keyset predicate of a list cursor: the items that come strictly after the cursor's
+ * position in the list's own order.
+ *
+ * Both sides are cast explicitly: the cursor arrives as a string from the wire, and the id
+ * is compared under the `C` collation the column is declared with, so the SQL order is the
+ * byte order the cursor was encoded from.
+ */
+function keyset(cursor: KeyCursor, direction: 'asc' | 'desc'): RawBuilder<SqlBool> {
+  const comparison = direction === 'asc' ? sql`>` : sql`<`
+  return sql<SqlBool>`(created_at, id) ${comparison} (${cursor.created_at}::timestamptz, ${cursor.id}::text collate "C")`
+}
+
+/**
+ * Refuse a fenced write whose epoch is not the partition's live one; unfenced writes always
+ * pass.
+ *
+ * The liveness test is the same comparison the contract makes everywhere else — a lease is
+ * expired from the instant `expires_at` names, inclusive — and it reads the injected clock,
+ * never the database's.
+ */
+function assertFence(
+  lease: PartitionLeaseRow | undefined,
+  fence: PartitionFence | undefined,
+  operation: string,
+  now: number,
+): void {
+  if (fence === undefined) {
+    return
+  }
+  if (lease !== undefined && lease.owner !== null && lease.expires_at !== null) {
+    if (lease.epoch === fence.epoch && lease.expires_at.getTime() > now) {
+      return
+    }
+  }
+  throw new FencedError({
+    partition: fence.partition,
+    epoch: fence.epoch,
+    currentEpoch: lease?.epoch ?? 0,
+    operation,
+  })
+}
+
+/** The lease a held row describes. Every row the acquire statement returns is held. */
+function leaseFromRow(row: PartitionLeaseRow): PartitionLease {
+  if (row.owner === null || row.expires_at === null) {
+    throw new Error(`partition ${row.partition} has a lease row with no owner or expiry`)
+  }
+  return {
+    partition: row.partition,
+    owner: row.owner,
+    epoch: row.epoch,
+    expires_at: timestampOf(row.expires_at),
+  }
+}
+
+/**
+ * The session status an append leaves behind: the one the last status event in the batch
+ * names, or `null` when the batch does not speak about status at all — a
+ * `session.status_rescheduled` neither opens nor closes a turn, so it changes nothing.
+ */
+function statusAfter(events: readonly AppendableEvent[]): SessionStatus | null {
+  let status: SessionStatus | null = null
+  for (const event of events) {
+    if (event.type === EVENT_TYPES.sessionStatusRunning) {
+      status = 'running'
+    } else if (event.type === EVENT_TYPES.sessionStatusIdle) {
+      status = 'idle'
+    }
+  }
+  return status
+}
+
+/** Whether an event type is one the user writes; those are queued until a turn claims them. */
+function isUserEventType(type: string): boolean {
+  return type === EVENT_TYPES.userMessage || type === EVENT_TYPES.userInterrupt
+}
+
+/** Whether a stored event is a user event. */
+function isUserEvent(event: StoredEvent): event is UserEvent {
+  return isUserEventType(event.type)
+}
+
+/** The last item of an array the caller has already proved non-empty. */
+function lastOf<T>(items: readonly T[]): T {
+  const last = items[items.length - 1]
+  if (last === undefined) {
+    throw new RangeError('lastOf() needs a non-empty array')
+  }
+  return last
+}
+
+/** A function that runs at most once, whatever it is called: an `Unsubscribe`. */
+function once(action: () => void): Unsubscribe {
+  let done = false
+  return () => {
+    if (done) {
+      return
+    }
+    done = true
+    action()
+  }
+}
+
+/**
+ * Call each listener with `event`, and let none of them affect the store or the others.
+ *
+ * A listener is called for its side effects, not for its answer: an implementation that
+ * needs to wait for a listener does so on its own, and one that throws — or rejects — is
+ * simply not called again for this event.
+ */
+function deliverTo<T>(
+  listeners: Iterable<(value: T) => void | Promise<void>> | undefined,
+  event: T,
+): void {
+  if (listeners === undefined) {
+    return
+  }
+  for (const listener of [...listeners]) {
+    try {
+      void Promise.resolve(listener(event)).catch(() => undefined)
+    } catch {
+      // A listener that throws is the listener's problem: the store keeps delivering.
+    }
+  }
+}

@@ -25,9 +25,9 @@ import type {
  * The storage and signaling contract the brain and the server code against.
  *
  * A session is a durable, append-only event log, and this interface is the only way to read or
- * write one. Two implementations exist or are planned: `InMemorySessionStore` — the test fake
- * every other package uses, and the reference behaviour — and a Postgres store, which the same
- * conformance suite must pass.
+ * write one. Two implementations exist: `InMemorySessionStore` — the test fake every other
+ * package uses, and the reference behaviour — and `PostgresSessionStore`, which passes the
+ * same conformance suite.
  *
  * ## What every implementation must guarantee
  *
