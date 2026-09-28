@@ -1,6 +1,10 @@
-import { PROTOCOL_DEPENDENCY } from '../index'
+/**
+ * `@openharness/session/testing` — what a test needs from the session package: the in-memory
+ * store again, so a test can import the store and everything it is tested with from one place,
+ * and {@link createTestClock}, the controllable clock every store takes
+ * (`new InMemorySessionStore({ now: clock.now })`).
+ */
 
-/** Subpath export `@openharness/session/testing`: in-memory session helpers (placeholder). */
-export const TESTING_PACKAGE_NAME = '@openharness/session/testing'
-
-export const emptySession = { protocol: PROTOCOL_DEPENDENCY, events: [] as const } as const
+export * from '../index'
+export { createTestClock } from './clock'
+export type { TestClock } from './clock'

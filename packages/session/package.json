@@ -2,7 +2,7 @@
   "name": "@openharness/session",
   "version": "0.0.0",
   "private": true,
-  "description": "The durable, append-only session event log. Placeholder, implemented in the v1 epic.",
+  "description": "The durable, append-only session event log: the SessionStore contract, an in-memory implementation and its conformance suite.",
   "license": "MIT",
   "type": "module",
   "engines": {
