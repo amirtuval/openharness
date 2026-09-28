@@ -50,6 +50,9 @@ jobs:
       # PRs: only packages changed vs the base branch, plus their dependents.
       - name: Build, typecheck, lint, test (affected)
         if: github.event_name == 'pull_request'
+        env:
+          # actions/checkout only creates remote-tracking refs, so point turbo at origin/<base>.
+          TURBO_SCM_BASE: origin/${{ github.base_ref }}
         run: yarn turbo run build typecheck lint format:check test --affected --cache-dir=.turbo/cache
 
       # main: everything (unchanged packages are turbo cache hits).
