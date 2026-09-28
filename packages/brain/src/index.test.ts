@@ -1,5 +1,27 @@
 import { describe, expect, it } from 'vitest'
-import { DEPENDENCIES, PACKAGE_NAME } from './index'
+
+import {
+  CHARS_PER_TOKEN,
+  DEFAULT_CONTEXT_STRATEGY,
+  DEFAULT_CONTEXT_TOKEN_BUDGET,
+  DEFAULT_MAX_RETRIES,
+  DEFAULT_BASE_DELAY_MS,
+  DEFAULT_MAX_DELAY_MS,
+  DEPENDENCIES,
+  PACKAGE_NAME,
+  ZERO_MODEL_USAGE,
+  abortableSleep,
+  backoffDelay,
+  classifyModelError,
+  createContextStrategy,
+  estimateTokens,
+  isRetryableModelError,
+  resolveRetryPolicy,
+  routerModelFactory,
+  runTurn,
+  streamModelRequest,
+  toModelUsage,
+} from './index'
 
 describe('@openharness/brain', () => {
   it('exposes its package name', () => {
@@ -12,5 +34,43 @@ describe('@openharness/brain', () => {
       '@openharness/session',
       '@openharness/hands',
     ])
+  })
+
+  it('exports the turn loop and its knobs', () => {
+    expect(typeof runTurn).toBe('function')
+    expect(typeof streamModelRequest).toBe('function')
+    expect(typeof routerModelFactory).toBe('function')
+    expect(typeof createContextStrategy).toBe('function')
+    expect(typeof classifyModelError).toBe('function')
+    expect(typeof isRetryableModelError).toBe('function')
+    expect(typeof resolveRetryPolicy).toBe('function')
+    expect(typeof backoffDelay).toBe('function')
+    expect(typeof abortableSleep).toBe('function')
+    expect(typeof estimateTokens).toBe('function')
+    expect(typeof toModelUsage).toBe('function')
+    expect(typeof DEFAULT_CONTEXT_STRATEGY).toBe('function')
+  })
+
+  it('exports the defaults a host reads to know what it is getting', () => {
+    expect(DEFAULT_CONTEXT_TOKEN_BUDGET).toBeGreaterThan(0)
+    expect(CHARS_PER_TOKEN).toBe(4)
+    expect(DEFAULT_MAX_RETRIES).toBe(3)
+    expect(DEFAULT_BASE_DELAY_MS).toBeGreaterThan(0)
+    expect(DEFAULT_MAX_DELAY_MS).toBeGreaterThan(DEFAULT_BASE_DELAY_MS)
+    expect(ZERO_MODEL_USAGE).toEqual({
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+    })
+  })
+
+  it('builds a model from a router string without a key', () => {
+    // Constructing the router model touches no provider and no network: resolving the provider
+    // happens on the first request, which is the host's business, not this constructor's.
+    expect(routerModelFactory('anthropic/claude-sonnet-5')).toMatchObject({
+      provider: 'anthropic',
+      modelId: 'claude-sonnet-5',
+    })
   })
 })
