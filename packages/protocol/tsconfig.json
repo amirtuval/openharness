@@ -1,4 +1,14 @@
 {
-  "extends": "@openharness/config/tsconfig/node.json",
-  "include": ["src", "*.config.ts"]
+  // `base.json`, not `node.json`: this package is loaded by browsers too (the web app's client
+  // imports it), so `src/` must compile without `@types/node` — a `Buffer` that only exists in
+  // Node has to be a type error here. `DOM` is the other half of the environment: every Web API
+  // used here (`TextEncoder`, `btoa`, `crypto.getRandomValues`) is a global in Node 24 as well.
+  //
+  // The two `*.config.ts` files do run in Node, and `vite`'s declaration file pulls Node's types
+  // in with them, so they are checked by `tsconfig.tooling.json` instead of this program.
+  "extends": "@openharness/config/tsconfig/base.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM"]
+  },
+  "include": ["src"]
 }

@@ -2,7 +2,7 @@
   "name": "@openharness/protocol",
   "version": "0.0.0",
   "private": true,
-  "description": "The shared protocol between brain, session, hands and the frontends: the wire types and schemas every package agrees on. Placeholder, implemented in the v1 epic.",
+  "description": "The shared protocol between brain, session, hands and the frontends: zod schemas and types for the HTTP API, the session event log, errors, ids and pagination.",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -27,7 +27,7 @@
     "build": "tsdown",
     "build:deps": "turbo run build --filter=@openharness/protocol^...",
     "dev": "tsdown --watch",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.tooling.json",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
