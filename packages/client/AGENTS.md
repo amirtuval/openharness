@@ -41,8 +41,7 @@ The client is loaded by browsers (the web app) and by Node 24 (the TUI, tests, s
   `tsconfig.tooling.json` (the only program that sees `@types/node`).
 - `src/browser.test.ts` is the runtime half of the same rule: it runs under `@vitest-environment
 jsdom` with `Buffer` stubbed out, and streams a turn through the client and the transcript.
-  (jsdom itself comes from `apps/web`'s devDependencies, hoisted to the root `node_modules`;
-  the client does not declare it.)
+  (jsdom is a devDependency of this package.)
 - The global `fetch` is called as `globalThis.fetch(...)`: a bare reference throws
   "Illegal invocation" in browsers.
 
