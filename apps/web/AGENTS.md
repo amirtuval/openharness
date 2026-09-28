@@ -1,6 +1,11 @@
 # @openharness/web
 
-The openharness web app: Vite + React + TypeScript. It renders a placeholder page; the chat UI lands in the v1 epic.
+The openharness web app: a chat UI for the v1 API, built with Vite + React + TypeScript,
+Tailwind and shadcn/ui. It talks to the server only through `@openharness/client`, and every
+piece of chat state comes from the client's transcript reducer — there is no second store.
+
+The long version of the decisions below, and what to watch out for, is in
+[`docs/chat-ui.md`](./docs/chat-ui.md).
 
 ## Commands
 
@@ -10,7 +15,7 @@ Run from this folder (`apps/web`):
 | ------------------- | ----------------------------------------------------------------------- |
 | `yarn build`        | builds the static site into `dist/` with Vite                           |
 | `yarn build:deps`   | builds only this package's workspace dependencies (turbo filter `^...`) |
-| `yarn dev`          | Vite dev server on http://localhost:5173                                |
+| `yarn dev`          | Vite dev server on http://localhost:5173, with `/v1` proxied            |
 | `yarn typecheck`    | `tsc --noEmit`                                                          |
 | `yarn lint`         | ESLint over this folder                                                 |
 | `yarn format`       | Prettier `--write`                                                      |
@@ -21,25 +26,163 @@ Run from this folder (`apps/web`):
 dependencies (from the repo root's installed `node_modules`) without touching the rest of the
 repo.
 
-## Public API
+## Running it
 
-| `@openharness/web` | not imported by other packages; `yarn build` emits a static site in `dist/` (Vite), `yarn dev` serves it on http://localhost:5173. |
+The server is not built yet, so development and tests run against the client's fake server.
+
+```bash
+# UI only, in-memory server, seeded scenario, scripted replies
+VITE_OPENHARNESS_FAKE=1 yarn dev
+
+# against a real server (defaults to http://localhost:3000 for /v1)
+yarn dev
+OPENHARNESS_PROXY_TARGET=http://localhost:8787 yarn dev
+```
+
+`yarn dev` proxies `/v1` to `http://localhost:3000` (the target comes from
+`OPENHARNESS_PROXY_TARGET`, read in `vite.config.ts`). With an empty server URL in the
+settings — the default — the app calls `/v1` on its own origin, which is exactly what the
+proxy answers in dev and what a static `dist/` served next to the API wants in production.
+
+Fake mode is development-only by construction: the gate is
+`import.meta.env.DEV && import.meta.env.VITE_OPENHARNESS_FAKE === '1'`, which a production
+build replaces with `false`, and the fake itself is a dynamic import — so neither the branch
+nor the `@openharness/client/testing` chunk ends up in `dist/`. The fake is also handy in a
+browser console: fake mode puts it on `window` as `__openharnessFake`.
+
+## Structure
+
+```
+src/
+  main.tsx                     bootstrap: resolve the client (fake in dev mode), render <App>
+  App.tsx                      builds the client from the settings, routes, sidebar + screen
+  index.css                    Tailwind + the shadcn design tokens (dark follows the system)
+  components/
+    client-provider.tsx        the client in context, so screens can use it
+    sidebar.tsx                session list (newest first), New chat, Agents, Settings
+    chat/
+      chat-view.tsx            the chat screen: header, messages, errors, composer
+      message-list.tsx         the scrolling conversation + stick-to-bottom
+      message-item.tsx         one message (user right / agent left, markdown)
+      markdown.tsx             react-markdown + remark-gfm, styled element by element
+      composer.tsx             the input; Enter sends, Stop appears while running
+      status-indicator.tsx     running / idle / retrying
+      error-banner.tsx         inline errors (from the log, or from a failed request)
+    agents/agent-form.tsx      name, model (free text + suggestions), system prompt
+    ui/                        shadcn/ui primitives, copied from the registry
+  screens/
+    home-screen.tsx            no chat open
+    new-chat-screen.tsx        pick an agent, create the session, go to the chat
+    agents-screen.tsx          list, create, edit
+    settings-screen.tsx        server URL + API key, stored in localStorage
+  hooks/
+    use-session.ts             THE session hook: history, live stream, send, interrupt
+    use-sessions.ts            the sidebar's list, plus create
+    use-agents.ts              the agents list, plus create and update
+    use-stick-to-bottom.ts     auto-scroll that stays put when the reader scrolls up
+    use-route.ts, use-settings.ts   thin React bindings over the two small stores
+  lib/
+    router.ts                  the hash routes (#/s/<id>, #/new, #/agents, #/settings)
+    settings.ts                localStorage settings, a stable snapshot for React
+    dev-fake-client.ts         dev-only fake client + the seeded scenario
+    models.ts                  the model suggestions the agent form offers
+    errors.ts, format.ts, utils.ts
+  test-support/render-app.tsx  render the app against a fake client; DOM readers
+```
+
+### Routes
+
+| route             | screen                         |
+| ----------------- | ------------------------------ |
+| `#/`              | home (no chat open)            |
+| `#/s/<sessionId>` | the chat                       |
+| `#/new`           | new chat: pick an agent        |
+| `#/agents`        | agents: list, create, edit     |
+| `#/settings`      | settings: server URL + API key |
+
+Hash routes, so the build stays a static bundle that any static host can serve without a
+rewrite rule. Chat links are real `<a href="#/s/…">`, so Back, middle-click and a reload land
+where a reader expects.
+
+## State flow
+
+`useSession(client, sessionId)` (`src/hooks/use-session.ts`) is the one place the chat state
+lives. It owns a `createTranscript()` store and, in one effect:
+
+1. loads the history with `client.sessions.events.iterate(sessionId)` and folds it into the
+   transcript;
+2. then follows live with
+   `client.sessions.events.stream(sessionId, { deltas: true, afterSeq: transcript.getState().lastSeq })`
+   — exactly where the history stopped, so nothing is replayed and nothing is missed;
+3. aborts the stream on unmount (`signal.abort()` ends the iteration quietly, no throw).
+
+Rendering reads the store with `useSyncExternalStore(transcript.subscribe, transcript.getState)`,
+so the transcript stays plain data, and a reload is just the same code path as opening the
+session for the first time — which is why it restores the history _and_ resumes the stream.
+
+`send(text)` calls `client.sendMessage` and folds the returned stored event in immediately:
+the message shows at once, and the stream's copy of the same event is dropped by the
+transcript's `seq` rule, so nothing is duplicated. While a turn is running, `send` is a
+steering message — the server queues it, and the transcript shows it as `pending` until the
+next model request picks it up. `interrupt()` is the Stop button (`user.interrupt`); the
+partial reply stays on screen, which is the transcript's rule, not the UI's.
+
+Failures never throw at the user: a failed load, send or interrupt lands in `requestError`,
+and a `session.error` from the log is `lastError` — both rendered inline above the composer.
+
+## Chat components
+
+**Vercel AI Elements and assistant-ui were both evaluated and not used**; the chat is built
+from shadcn/ui primitives plus five presentational components in `src/components/chat/`:
+
+- AI Elements does render from props (`Message` takes `from` and children), but it hard-depends
+  on `ai` and `streamdown` for `Message`, and `PromptInput` brings `ai`, `nanoid` and six
+  shadcn primitives for a composer whose state (attachments, model pickers) this app does not
+  have. Pulling the AI SDK in for types and a markdown renderer — when the issue says not to
+  use `useChat` — is the wrong trade.
+- assistant-ui's external-store runtime expects its own message model (`ThreadMessageLike`
+  parts) and its own streaming flags. That is a second state model next to the transcript
+  reducer, which already models exactly this (previews, reconciliation, pending, errors).
+
+So: `MessageList`/`MessageItem`/`Composer`/`StatusIndicator`/`ErrorBanner`, driven by
+`useSession`, styled with Tailwind and shadcn/ui's Button, Textarea, Input, Label, Card and
+Badge (copied from the registry, with the import paths rewritten — this app has no `@/`
+alias, because its single `tsconfig.json` is the browser program and a Vite alias needs an
+absolute path from a Node API it cannot see).
+
+Markdown is `react-markdown` + `remark-gfm` with the elements styled by hand; no
+`rehype-raw`, so HTML in a message stays text.
+
+## Testing
+
+`src/**/*.test.tsx` with Vitest (jsdom) and Testing Library, driving
+`createFakeClient()` — no server, no mocked client. `src/test-support/render-app.tsx` renders
+the app with the fake and provides a few DOM readers.
+
+| file                                     | covers                                                                                                                                          |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/App.test.tsx`                       | open a session, send → streamed reply, Stop → interrupted, reload → history, steering, retry → success, terminal error, new chat, request error |
+| `src/screens/agents-screen.test.tsx`     | list, create and edit an agent, the model suggestions                                                                                           |
+| `src/screens/settings-screen.test.tsx`   | settings round-trip, an empty URL as same-origin                                                                                                |
+| `src/hooks/use-session.test.tsx`         | the hook's own contract: a failed load, and no duplicated message                                                                               |
+| `src/hooks/use-stick-to-bottom.test.tsx` | the auto-scroll rule, with a scroll geometry jsdom does not have                                                                                |
+| `src/lib/*.test.ts`                      | routes, the settings store, the fake-mode scenario                                                                                              |
+
+Timing matters: the fake streams with `delayMs: 0` by default, so a test that wants to observe
+a reply _while it streams_ passes a larger `delayMs` (and enough `chunks`) — otherwise the
+reply can be finished before the first assertion runs.
 
 ## Allowed `@openharness/*` dependencies
 
 Only these (see the table in `docs/architecture.md`):
 
 - `@openharness/protocol`
-- `@openharness/client`
+- `@openharness/client` (and its `./testing` subpath in dev and in tests)
 
 `@openharness/config` is additionally allowed as a **devDependency**.
 
 Packages consume each other through built output only (`exports` → `dist/`), never through
 relative paths. `yarn check:deps` at the repo root enforces this.
-
-## Testing
-
-`src/**/*.test.tsx` with Vitest (jsdom environment) + Testing Library: components are queried by role, and `vitest.setup.ts` registers `@testing-library/jest-dom` matchers.
 
 ## Rules
 
