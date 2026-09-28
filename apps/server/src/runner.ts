@@ -280,7 +280,11 @@ export class SessionRunner {
             ? {}
             : { contextStrategy: this.#contextStrategy }),
         })
-        if (outcome.outcome === 'noop') {
+        // A `noop` means this turn found nothing to do, which is a reason to stop — unless a
+        // wake arrived while it was looking. A signal for an event appended in that window
+        // (the brain reads the log before it decides) is exactly the case the flag exists for,
+        // and dropping it would leave the work unclaimed until the process restarted.
+        if (outcome.outcome === 'noop' && !handle.woken) {
           break
         }
         // Read the log first, then the flag: a `wake` that lands during the read is seen by

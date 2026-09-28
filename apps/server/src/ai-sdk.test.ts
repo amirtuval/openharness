@@ -8,11 +8,13 @@ import {
 } from '@openharness/protocol'
 
 import {
+  ObservableStore,
   httpCreateAgent,
   httpCreateSession,
   postJson,
   readHistory,
   startTestServer,
+  waitFor,
   waitForIdle,
   type TestContext,
 } from './test-support'
@@ -73,6 +75,23 @@ async function chat(
     .join('')
   return { text, chunks }
 }
+
+describe('the subscription', () => {
+  it('is released when the turn ends', async () => {
+    const store = new ObservableStore()
+    const test = await startTestServer({ store, replies: [{ text: ['bye'] }] })
+    context = test
+    const agent = await httpCreateAgent(test)
+    const session = await httpCreateSession(test, agent.id)
+
+    await chat(test, session.id, [userMessage('Hi')])
+
+    await waitFor(() => store.subscriptions > 0)
+    await waitFor(() => store.unsubscribed > 0, {
+      message: 'the store subscription outlived the chat request',
+    })
+  })
+})
 
 describe('the AI SDK chat endpoint', () => {
   it('streams a full reply, and stores it as a turn', async () => {

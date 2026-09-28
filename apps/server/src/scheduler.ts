@@ -216,7 +216,13 @@ export class LocalScheduler implements SessionScheduler {
       )
       this.#active.set(sessionId, pass)
       void pass.then(() => {
-        this.#active.delete(sessionId)
+        // Only if this pass is still the one on record. The runner lets go of a session a
+        // microtask before this runs, so a signal in that window can start the next pass for
+        // it — and deleting *that* pass's slot would let the next `#pump` start one session
+        // more than the limit allows.
+        if (this.#active.get(sessionId) === pass) {
+          this.#active.delete(sessionId)
+        }
         this.#pump()
       })
     }

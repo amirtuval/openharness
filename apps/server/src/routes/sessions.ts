@@ -2,9 +2,7 @@ import type { Hono } from 'hono'
 import {
   API_VERSION_PREFIX,
   CreateSessionRequestSchema,
-  EVENT_TYPES,
   ListSessionsQuerySchema,
-  type UserEventInput,
 } from '@openharness/protocol'
 import type { CreateSessionOptions, ListSessionsOptions } from '@openharness/session'
 
@@ -12,6 +10,7 @@ import type { AppEnv } from '../types'
 import { notFoundError } from '../http/errors'
 import { parseBody, parseQuery, sessionIdParam } from '../http/request'
 import type { RouteDeps } from './deps'
+import { signalKinds } from './signals'
 
 /**
  * The session endpoints.
@@ -32,10 +31,11 @@ export function registerSessionRoutes(app: Hono<AppEnv>, deps: RouteDeps): void 
     // `createSession` answers `AgentNotFoundError` for an unknown agent, which the app maps
     // to a 404 in the protocol's envelope.
     const session = await deps.store.createSession(body.agent, options)
-    if (needsTurn(body.initial_events ?? [])) {
-      // `initial_events` are the session's first queued events — the protocol says they are
-      // stored "before it starts running" — so a session created with a message runs it.
-      deps.scheduler.signal(session.id, 'work')
+    // `initial_events` are the session's first queued events — the protocol says they are
+    // stored "before it starts running" — so a session created with a message runs it, and one
+    // created with an interrupt has it claimed, exactly as `POST …/events` would.
+    for (const kind of signalKinds(body.initial_events ?? [])) {
+      deps.scheduler.signal(session.id, kind)
     }
     return c.json(session, 201)
   })
@@ -59,9 +59,4 @@ export function registerSessionRoutes(app: Hono<AppEnv>, deps: RouteDeps): void 
     }
     return c.json(session)
   })
-}
-
-/** Whether the events a session is created with ask for a turn: an unprocessed user message. */
-function needsTurn(initialEvents: readonly UserEventInput[]): boolean {
-  return initialEvents.some((event) => event.type === EVENT_TYPES.userMessage)
 }

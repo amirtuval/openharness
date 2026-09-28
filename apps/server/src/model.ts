@@ -24,10 +24,12 @@ export interface ResolvedModel {
 /**
  * Resolve the model factory from a configuration.
  *
+ * Nothing here checks for provider credentials: the router resolves them when it makes a
+ * request, so a missing key is a turn that fails with a `session.error`, not a boot that
+ * fails. What this does guard is the variable itself.
+ *
  * @throws Error when `OPENHARNESS_TEST_MODEL` is set to anything but `mock`: a typo must not
- *   quietly fall back to a model that needs provider credentials, nor quietly to the mock
- * @throws Error when the router is wanted but no credential is in the environment — the
- *   failure belongs at boot, not on the first user message
+ *   quietly fall back to the router, nor quietly to the mock
  */
 export function resolveModelFactory(config: ServerConfig): ResolvedModel {
   if (config.testModel === undefined) {

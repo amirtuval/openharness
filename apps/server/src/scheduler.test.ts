@@ -100,6 +100,47 @@ describe('running a session', () => {
   })
 })
 
+/** An `InMemorySessionStore` whose turn-state read runs a hook, once. */
+class WakingStore extends InMemorySessionStore {
+  onTurnStateRead: (() => Promise<void> | void) | undefined
+
+  override async getTurnState(
+    sessionId: SessionId,
+  ): ReturnType<InMemorySessionStore['getTurnState']> {
+    const state = await super.getTurnState(sessionId)
+    const hook = this.onTurnStateRead
+    this.onTurnStateRead = undefined
+    await hook?.()
+    return state
+  }
+}
+
+describe('a wake that arrives while a turn is finishing', () => {
+  it('is not lost when the turn that was running had nothing to do', async () => {
+    // The narrow race this guards: a `noop` turn is one that found nothing to do, but the
+    // brain reads the log before it decides, so a message appended in that window is invisible
+    // to it. The signal for that message wakes the pass — and a pass that stopped on `noop`
+    // without looking at the flag again would leave the message queued until a restart.
+    const store = new WakingStore()
+    const model = createScriptedModel({ text: ['answered after the wake'] })
+    const runner = new SessionRunner({ store, model: model.factory })
+    const agent = await store.createAgent({ name: 'Agent', model: { id: 'test/model' } })
+    const session = await store.createSession(agent.id)
+    store.onTurnStateRead = async () => {
+      await store.appendEvents(session.id, [
+        { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: 'appended mid-read' }] },
+      ])
+      runner.wake(session.id)
+    }
+
+    const outcome = await runner.run(session.id)
+
+    expect(outcome).toEqual({ outcome: 'idle' })
+    expect(repliesOf(await readHistory(store, session.id))).toEqual(['answered after the wake'])
+    expect(await store.getPendingUserEvents(session.id)).toEqual([])
+  })
+})
+
 describe('one turn at a time', () => {
   it('answers a second run() call for the same session with the pass in flight', async () => {
     const { context: test, sessionId } = await fixture({

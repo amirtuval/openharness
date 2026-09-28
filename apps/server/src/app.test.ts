@@ -8,6 +8,7 @@ import {
   API_VERSION_PREFIX,
   AgentSchema,
   ApiErrorBodySchema,
+  EVENT_TYPES,
   ListAgentsResponseSchema,
   ListEventsResponseSchema,
   ListSessionsResponseSchema,
@@ -21,6 +22,7 @@ import {
   createTestApp,
   httpCreateAgent,
   httpCreateSession,
+  readHistory,
   waitForIdle,
   type TestContext,
 } from './test-support'
@@ -253,6 +255,21 @@ describe('the sessions API', () => {
 
     await test.model.waitForRequests(1)
     await waitForIdle(test.store, session.id)
+  })
+
+  it('claims an interrupt a session was created with', async () => {
+    const test = setup()
+    const agent = await httpCreateAgent(test)
+
+    const session = await httpCreateSession(test, agent.id, {
+      initial_events: [{ type: 'user.interrupt' }],
+    })
+
+    await waitForIdle(test.store, session.id)
+    const history = await readHistory(test.store, session.id)
+    const interrupt = history.find((event) => event.type === EVENT_TYPES.userInterrupt)
+    expect(interrupt?.processed_at).not.toBeNull()
+    expect(test.model.requests).toBe(0)
   })
 
   it('answers 400 for a malformed session id', async () => {

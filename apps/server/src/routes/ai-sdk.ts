@@ -65,8 +65,15 @@ export function registerAiSdkRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
       }
       const stream = createUIMessageStream({
         execute: async ({ writer }) => {
-          writer.write({ type: 'start' })
-          await pumpTurn({ writer, live, signal: c.req.raw.signal })
+          try {
+            writer.write({ type: 'start' })
+            await pumpTurn({ writer, live, signal: c.req.raw.signal })
+          } finally {
+            // However the turn ended — idle, the client gone, an error — this request is
+            // done with the session. A subscription that outlives its reader would keep
+            // buffering every later event of the session for nobody.
+            live.close()
+          }
         },
         onError: (error) => errorMessageOf(error),
       })
@@ -224,7 +231,12 @@ async function openSessionLive(
     waiter = null
     waiting?.(null)
   }
-  signal?.addEventListener('abort', close, { once: true })
+  if (signal?.aborted === true) {
+    // The client was already gone when this request arrived; `abort` will not fire again.
+    close()
+  } else {
+    signal?.addEventListener('abort', close, { once: true })
+  }
 
   return {
     next: () => {

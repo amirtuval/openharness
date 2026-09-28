@@ -7,9 +7,8 @@ import {
   type Session,
   type SessionId,
 } from '@openharness/protocol'
-import { InMemorySessionStore } from '@openharness/session'
-
 import {
+  ObservableStore,
   httpCreateAgent,
   httpCreateSession,
   httpSendMessage,
@@ -310,22 +309,3 @@ describe('disconnecting', () => {
     })
   })
 })
-
-/** An `InMemorySessionStore` that counts subscriptions, so a test can watch them come and go. */
-class ObservableStore extends InMemorySessionStore {
-  subscriptions = 0
-
-  unsubscribed = 0
-
-  override async subscribe(
-    sessionId: SessionId,
-    listener: Parameters<InMemorySessionStore['subscribe']>[1],
-  ): ReturnType<InMemorySessionStore['subscribe']> {
-    const unsubscribe = await super.subscribe(sessionId, listener)
-    this.subscriptions += 1
-    return () => {
-      this.unsubscribed += 1
-      unsubscribe()
-    }
-  }
-}

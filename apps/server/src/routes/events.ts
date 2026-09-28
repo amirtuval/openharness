@@ -11,13 +11,14 @@ import {
   type StreamEventsQuery,
   type UserEvent,
 } from '@openharness/protocol'
-import type { ListEventsOptions, PartitionSignalKind } from '@openharness/session'
+import type { ListEventsOptions } from '@openharness/session'
 
 import type { AppEnv } from '../types'
 import { notFoundError } from '../http/errors'
 import { parseBody, parseQuery, sessionIdParam } from '../http/request'
 import { SSE_HEADERS, createSessionEventStream } from '../sse'
 import type { RouteDeps } from './deps'
+import { signalKinds } from './signals'
 
 /** The `event_deltas[]` value that opts a connection into `agent.message` previews. */
 const DELTA_EVENT_TYPE = EVENT_TYPES.agentMessage
@@ -110,24 +111,6 @@ function resumeFrom(c: Context<AppEnv>, query: StreamEventsQuery): number | unde
   }
   const trimmed = header.trim()
   return /^\d+$/.test(trimmed) ? Number(trimmed) : undefined
-}
-
-/**
- * What the scheduler is told after an append: `interrupt` for a `user.interrupt`, `work` for
- * a `user.message`.
- *
- * The interrupt is signalled first on purpose. A batch that carries both means "stop, then
- * answer this", and signalling `work` first would start a turn only to abort it.
- */
-function signalKinds(events: readonly { readonly type: string }[]): PartitionSignalKind[] {
-  const kinds: PartitionSignalKind[] = []
-  if (events.some((event) => event.type === EVENT_TYPES.userInterrupt)) {
-    kinds.push('interrupt')
-  }
-  if (events.some((event) => event.type === EVENT_TYPES.userMessage)) {
-    kinds.push('work')
-  }
-  return kinds
 }
 
 /** Whether a stored event is one of the user's; `POST …/events` only ever writes those. */

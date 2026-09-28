@@ -58,8 +58,10 @@ and only then tells the scheduler. The store call is what makes the request dura
 signal is a latency optimization the scheduler can afford to lose (see "Signals are hints" in
 `packages/session`).
 
-Creating a session with `initial_events` that include a `user.message` signals `work` too: the
-protocol says those events are stored "before it starts running".
+Creating a session with `initial_events` goes through the same rules: the protocol says those
+events are stored "before it starts running", so a `user.message` among them signals `work` and
+a `user.interrupt` signals `interrupt` — exactly what the same events would do posted to
+`POST …/events` afterwards.
 
 ## Environment variables
 
@@ -176,9 +178,12 @@ class SessionRunner {
 
 `SessionRunner` is the reusable half: **one turn per session at a time**, and after a `runTurn`
 resolves it looks at the log again — `getPendingUserEvents` and `getTurnState` — to run another
-one if there is work (a message queued behind an interrupt, an open turn), stopping on `noop`
-so a session that cannot make progress cannot spin. Calling `run()` while a pass is in flight
-does not start a second one: it wakes the pass and answers with its outcome.
+one if there is work (a message queued behind an interrupt, an open turn). It stops on `noop`,
+which is what keeps a session that cannot make progress from spinning — but a `wake` that
+arrived during that `noop` turn is honored first, because the brain reads the log before it
+decides and a signal for an event appended in that window would otherwise be lost. Calling
+`run()` while a pass is in flight does not start a second one: it wakes the pass and answers
+with its outcome.
 
 **This is where #11 plugs in.** A `PostgresPartitionScheduler` acquires partition leases, listens
 with `onPartitionSignal`, and calls the same `runner.run(sessionId, { fence })` with the lease it
@@ -228,7 +233,14 @@ stream built from the session's live events: previews become `text-start` / `tex
 `text-end` under the `sevt_` id the brain announced, the stored `agent.message` closes the
 block (streaming any tail the previews shed), a `session.error` becomes an `error` chunk, and
 `session.status_idle` ends the response. The subscription is opened _before_ the message is
-appended, so a turn that starts and finishes while the handler is still running is still seen.
+appended, so a turn that starts and finishes while the handler is still running is still seen —
+and it is released in a `finally` however the response ended, because a subscription that
+outlives its reader would keep buffering every later event of the session for nobody.
+
+`session.status_idle` is also the only thing that ends the response. A turn that dies without
+writing one (a store failure mid-turn, which the scheduler logs and drops) leaves the request
+open until the client disconnects: the client's own abort signal is what closes it. The
+protocol's SSE stream has the same stay-open-until-disconnected property.
 
 `trigger: 'regenerate-message'` is treated as "send the last user message again": v1 has no
 regenerate semantics, and answering the same prompt again is the closest honest reading.

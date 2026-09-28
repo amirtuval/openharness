@@ -123,6 +123,28 @@ export async function startTestServer(options: TestOptions = {}): Promise<TestCo
   }
 }
 
+/**
+ * An `InMemorySessionStore` that counts its subscriptions, so a test can watch them come and
+ * go — the only way to see that a stream released the session it was following.
+ */
+export class ObservableStore extends InMemorySessionStore {
+  subscriptions = 0
+
+  unsubscribed = 0
+
+  override async subscribe(
+    sessionId: SessionId,
+    listener: Parameters<InMemorySessionStore['subscribe']>[1],
+  ): ReturnType<InMemorySessionStore['subscribe']> {
+    const unsubscribe = await super.subscribe(sessionId, listener)
+    this.subscriptions += 1
+    return () => {
+      this.unsubscribed += 1
+      unsubscribe()
+    }
+  }
+}
+
 /** A full {@link ServerConfig} for a test, listening on an ephemeral port. */
 export function testConfig(options: TestOptions = {}): ServerConfig {
   return {
