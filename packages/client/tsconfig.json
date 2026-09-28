@@ -1,4 +1,15 @@
 {
-  "extends": "@openharness/config/tsconfig/node.json",
-  "include": ["src", "*.config.ts"]
+  // `base.json`, not `node.json`: this package is loaded by browsers (the web app) as well as
+  // by Node, so `src/` must compile without `@types/node` — a `Buffer` or a `process.env` has
+  // to be a type error here. `DOM` is the other half of the environment: every Web API used
+  // here (`fetch`, `ReadableStream`, `TextDecoder`, `AbortController`, `setTimeout`) is a
+  // global in Node 24 as well.
+  //
+  // The two `*.config.ts` files do run in Node, and Vitest's own types reach Node's through
+  // `vite`, so they are checked by `tsconfig.tooling.json` instead of this program.
+  "extends": "@openharness/config/tsconfig/base.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"]
+  },
+  "include": ["src"]
 }
