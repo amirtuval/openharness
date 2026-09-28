@@ -13,20 +13,29 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./postgres": {
+      "types": "./dist/postgres/index.d.ts",
+      "import": "./dist/postgres/index.js"
+    },
     "./testing": {
       "types": "./dist/testing/index.d.ts",
       "import": "./dist/testing/index.js"
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "migrations"
   ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "openharness-session-migrate": "./dist/postgres/cli.js"
+  },
   "scripts": {
     "build": "tsdown",
     "build:deps": "turbo run build --filter=@openharness/session^...",
     "dev": "tsdown --watch",
+    "migrate": "node ./dist/postgres/cli.js",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "format": "prettier --write .",
@@ -34,13 +43,18 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@openharness/protocol": "workspace:*"
+    "@openharness/protocol": "workspace:*",
+    "kysely": "0.29.6",
+    "pg": "8.23.0"
   },
   "devDependencies": {
     "@openharness/config": "workspace:*",
+    "@testcontainers/postgresql": "12.1.0",
     "@types/node": "26.6.3",
+    "@types/pg": "8.23.1",
     "eslint": "10.11.0",
     "prettier": "3.9.9",
+    "testcontainers": "12.1.0",
     "tsdown": "0.23.0",
     "turbo": "2.11.4",
     "typescript": "6.0.3",

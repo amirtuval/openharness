@@ -2,7 +2,7 @@
   "name": "@openharness/cli",
   "version": "0.0.0",
   "private": true,
-  "description": "The openharness terminal UI, an Ink (React) app installed as the `oh` command. It renders a placeholder screen; the chat TUI lands in the v1 epic.",
+  "description": "The openharness terminal UI: an Ink (React) chat client installed as the `oh` command.",
   "license": "MIT",
   "type": "module",
   "engines": {

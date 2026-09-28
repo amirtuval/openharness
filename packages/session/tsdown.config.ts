@@ -1,7 +1,16 @@
 import { defineConfig } from 'tsdown'
 
 export default defineConfig({
-  entry: ['src/index.ts', 'src/testing/index.ts'],
+  // `src/postgres/` is its own entry point: it is the only module that depends on `pg` and
+  // `kysely`, and a consumer that only needs the contract or the in-memory store must not
+  // load them.
+  entry: [
+    'src/index.ts',
+    'src/postgres/index.ts',
+    // The `openharness-session-migrate` bin; see `bin` in package.json.
+    'src/postgres/cli.ts',
+    'src/testing/index.ts',
+  ],
   platform: 'node',
   format: 'esm',
   dts: true,

@@ -5,8 +5,8 @@ openharness is an open-source implementation of Anthropic's
 stateless **brain** (harness loop), a durable append-only **session** event log, and pluggable
 **hands** (sandboxes/tools behind `execute(name, input)`).
 
-The repo is a skeleton: no product functionality yet, every package ships a placeholder export.
-The v1 epic ("v1 chat") implements a chat server with a web UI and a TUI.
+The v1 epic ("v1 chat", issue #2) is in progress: a chat server with a web UI and a TUI. Each
+package's `AGENTS.md` describes what that package implements today.
 
 ## How to work here
 

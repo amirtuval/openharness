@@ -25,9 +25,9 @@ import type {
  * The storage and signaling contract the brain and the server code against.
  *
  * A session is a durable, append-only event log, and this interface is the only way to read or
- * write one. Two implementations exist or are planned: `InMemorySessionStore` — the test fake
- * every other package uses, and the reference behaviour — and a Postgres store, which the same
- * conformance suite must pass.
+ * write one. Two implementations exist: `InMemorySessionStore` — the test fake every other
+ * package uses, and the reference behaviour — and `PostgresSessionStore`, which passes the
+ * same conformance suite.
  *
  * ## What every implementation must guarantee
  *
@@ -35,10 +35,11 @@ import type {
  *   by one, in the order the events were given. `seq` is the only ordering key: timestamps are
  *   metadata, not order. Reads return events in `seq` order (ascending by default), and a
  *   subscription delivers stored events in `seq` order with no gaps and no duplicates.
- * - **Atomically assigned fields.** `id`, `seq` and the event's internal creation time are
- *   assigned inside one transaction, so a turn can never observe half an append. The events
- *   returned to the caller are the stored events: `StoredEvent` exactly, with no extra field
- *   (notably no `created_at` — the protocol has none).
+ * - **Atomically assigned fields.** `seq` and the event's internal creation time are assigned
+ *   inside one transaction — and so is `id`, unless the caller supplied one, which is stored
+ *   as given (see {@link SessionStore.appendEvents}) — so a turn can never observe half an
+ *   append. The events returned to the caller are the stored events: `StoredEvent` exactly,
+ *   with no extra field (notably no `created_at` — the protocol has none).
  * - **Durability per append.** An append is one transaction. `initial_events` on
  *   {@link SessionStore.createSession} are part of the session's creation transaction, not
  *   appends that follow it.
@@ -117,18 +118,42 @@ export interface SessionStore {
   /**
    * Append events to a session's log, in order, and return them as stored.
    *
-   * The store assigns `id`, `seq` and the internal creation time in one transaction. A user
-   * event is stored with `processed_at: null`; every other event is stored with `processed_at`
-   * set to the clock's current instant. The session's `status` follows `session.status_running`
-   * and `session.status_idle` in the same transaction, its `updated_at` advances, and
-   * subscribers are notified after the append is committed.
+   * The store assigns `seq` and the internal creation time in one transaction, and `id` too
+   * unless the event carries one of its own. A user event is stored with `processed_at: null`;
+   * every other event is stored with `processed_at` set to the clock's current instant. The
+   * session's `status` follows `session.status_running` and `session.status_idle` in the same
+   * transaction, its `updated_at` advances, and subscribers are notified after the append is
+   * committed.
    *
    * The input carries only the fields the caller owns — an `AppendableEvent` is a `StoredEvent`
    * without the assigned ones. Inputs are stored as given and not validated: callers validate
    * with the protocol schemas.
    *
+   * ## Supplying an id
+   *
+   * An event may bring its own `id` (see {@link AppendableEvent}), and the store then writes it
+   * under exactly that id. This is what lines a stored `agent.message` up with the previews
+   * that came before it: the brain generates a `sevt_` id, publishes `event_start` and
+   * `event_delta` under it with {@link SessionStore.publishEphemeral}, and appends the final
+   * event with the same id — so a client replaces the preview with the stored message by id,
+   * and the two are one event throughout.
+   *
+   * An id has to be one the store can use, and an append that carries one it cannot is refused
+   * whole — nothing from that batch is stored:
+   *
+   * - it must be a valid `sevt_` id; anything else is a `RangeError`;
+   * - it must not already be in the store, and must not appear twice in this batch; either way
+   *   the append fails with {@link DuplicateEventIdError}. An event id identifies one event for
+   *   the whole store rather than one per session, so the id of an event in another session is
+   *   taken too — `PostgresSessionStore` enforces that with a unique constraint on `events.id`.
+   *
+   * `seq` stays the store's either way: a supplied id changes which event an append writes,
+   * not where in the log it lands.
+   *
    * @throws SessionNotFoundError when the session does not exist
    * @throws FencedError when `options.fence` is not the partition's current live lease
+   * @throws DuplicateEventIdError when an event id is already stored, or repeated in the batch
+   * @throws RangeError when an event's `id` is not a valid event id
    */
   appendEvents(
     sessionId: SessionId,
@@ -217,7 +242,8 @@ export interface SessionStore {
    * subscribers without storing it.
    *
    * Ephemeral events are a display aid, not the record: the log holds the event they preview,
-   * under the same `sevt_` id.
+   * under the same `sevt_` id — the one the append that stores it supplies (see
+   * {@link AppendableEvent}).
    *
    * @throws SessionNotFoundError when the session does not exist
    */
@@ -301,11 +327,25 @@ export interface SessionStore {
  * The events a caller may append: a `StoredEvent` without the fields the store assigns.
  *
  * Derived from the protocol's union rather than restated, so adding an event type to the
- * protocol makes it appendable without touching this package. The three omitted fields are the
- * store's to write — `id` and `seq` identify the event in the log, and `processed_at` is `null`
- * for user events and the clock's instant for everything else.
+ * protocol makes it appendable without touching this package. The omitted fields are the
+ * store's to write — `seq` identifies the event's position in the log, and `processed_at` is
+ * `null` for user events and the clock's instant for everything else — with one exception:
+ * `id`, which a caller may supply and the store then stores as given.
+ *
+ * Supplying an id is how a stored event keeps the identity its stream-only previews already
+ * had: the brain mints a `sevt_` id, publishes `event_start` and `event_delta` under it with
+ * {@link SessionStore.publishEphemeral}, and appends the final `agent.message` carrying the
+ * same id. The id it supplies has to be a valid event id and one the store does not already
+ * hold, or the append is refused whole; see {@link SessionStore.appendEvents}.
  */
-export type AppendableEvent = DistributiveOmit<StoredEvent, 'id' | 'seq' | 'processed_at'>
+export type AppendableEvent = DistributiveOmit<StoredEvent, 'id' | 'seq' | 'processed_at'> & {
+  /**
+   * The event's id, when the caller already has one — the id its previews were published
+   * under. Omitted, the store generates one, as it does for every event that does not
+   * preview itself.
+   */
+  readonly id?: EventId
+}
 
 /** `Omit` that distributes over a union, so the members of a discriminated union stay discriminated. */
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never
