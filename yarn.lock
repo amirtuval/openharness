@@ -870,9 +870,15 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@openharness/e2e@workspace:e2e"
   dependencies:
+    "@openharness/client": "workspace:*"
     "@openharness/config": "workspace:*"
     "@openharness/protocol": "workspace:*"
+    "@openharness/server": "workspace:*"
+    "@openharness/web": "workspace:*"
+    "@types/node": "npm:26.6.3"
+    "@types/pg": "npm:8.23.1"
     eslint: "npm:10.11.0"
+    pg: "npm:8.23.0"
     prettier: "npm:3.9.9"
     turbo: "npm:2.11.4"
     typescript: "npm:6.0.3"
@@ -915,7 +921,7 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@openharness/server@workspace:apps/server":
+"@openharness/server@workspace:*, @openharness/server@workspace:apps/server":
   version: 0.0.0-use.local
   resolution: "@openharness/server@workspace:apps/server"
   dependencies:
@@ -967,7 +973,7 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@openharness/web@workspace:apps/web":
+"@openharness/web@workspace:*, @openharness/web@workspace:apps/web":
   version: 0.0.0-use.local
   resolution: "@openharness/web@workspace:apps/web"
   dependencies:
