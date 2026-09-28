@@ -1,0 +1,247 @@
+import {
+  API_VERSION_PREFIX,
+  ListEventsResponseSchema,
+  ListSessionsResponseSchema,
+  SendEventsResponseSchema,
+  SessionSchema,
+} from '@openharness/protocol'
+import type {
+  CreateSessionRequest,
+  ListEventsQuery,
+  ListEventsResponse,
+  ListSessionsQuery,
+  ListSessionsResponse,
+  SendEventsResponse,
+  Session,
+  StoredEvent,
+  StreamEvent,
+  UserEventInput,
+} from '@openharness/protocol'
+
+import type { RequestOptions } from '../client'
+import { followSessionEvents } from '../events/stream'
+import type { StreamOptions } from '../events/stream'
+import type { Transport } from '../http'
+
+/**
+ * The session endpoints, and the events that belong to a session.
+ *
+ * ```
+ * POST /v1/sessions                          create  -> session
+ * GET  /v1/sessions                          list    -> { data: session[], next_page }
+ * GET  /v1/sessions/{id}                     get     -> session
+ * POST /v1/sessions/{id}/events              send    -> { data: user event[] }
+ * GET  /v1/sessions/{id}/events              list    -> { data: stored event[], next_page }
+ * GET  /v1/sessions/{id}/events/stream       stream  -> a live event stream
+ * ```
+ *
+ * A session is a durable, append-only event log; the resource is its header. The log is the
+ * conversation, so the interesting methods are on {@link SessionEventsResource}.
+ */
+export interface SessionsResource {
+  /**
+   * Create a session.
+   *
+   * @param body the agent to run, and optionally a title, metadata and initial events
+   * @param options request options (cancellation)
+   */
+  create(body: CreateSessionRequest, options?: RequestOptions): Promise<Session>
+
+  /**
+   * Read one session.
+   *
+   * @param sessionId the `sesn_` id
+   * @param options request options (cancellation)
+   * @throws ApiError with `not_found_error` when there is no such session
+   */
+  get(sessionId: string, options?: RequestOptions): Promise<Session>
+
+  /**
+   * Read one page of sessions, newest first.
+   *
+   * @param params `limit`, `page` and the `agent_id` filter
+   * @param options request options (cancellation)
+   */
+  list(params?: ListSessionsQuery, options?: RequestOptions): Promise<ListSessionsResponse>
+
+  /** The session's event log: read it, append to it, follow it. */
+  readonly events: SessionEventsResource
+}
+
+/** A session's event log, on the wire. */
+export interface SessionEventsResource {
+  /**
+   * Append user events to a session's log.
+   *
+   * Only user events can be appended — `user.message` and `user.interrupt` — and the server
+   * assigns their `id`, `seq` and `processed_at`; the response carries them as stored.
+   *
+   * @param sessionId the `sesn_` id
+   * @param events one event, or several to append in order
+   * @param options request options (cancellation)
+   */
+  send(
+    sessionId: string,
+    events: UserEventInput | readonly UserEventInput[],
+    options?: RequestOptions,
+  ): Promise<SendEventsResponse>
+
+  /**
+   * Read one page of the log.
+   *
+   * @param sessionId the `sesn_` id
+   * @param params `limit`, `order`, `page`, the `types[]` filter and `after_seq`
+   * @param options request options (cancellation)
+   */
+  list(
+    sessionId: string,
+    params?: ListEventsQuery,
+    options?: RequestOptions,
+  ): Promise<ListEventsResponse>
+
+  /**
+   * Walk the whole log, a page at a time.
+   *
+   * For "read the session" — a reload, a transcript rebuild — rather than for a first page.
+   * The cursor is carried over untouched, so this sees a consistent view even while events
+   * are being appended (the log's `seq` cursor is a position, not an offset).
+   *
+   * @param sessionId the `sesn_` id
+   * @param params as {@link list}; `page` lets the walk start later in the log
+   * @param options request options (cancellation)
+   */
+  iterate(
+    sessionId: string,
+    params?: ListEventsQuery,
+    options?: RequestOptions,
+  ): AsyncIterable<StoredEvent>
+
+  /**
+   * Follow the log live, reconnecting as needed.
+   *
+   * The iterable never ends on its own: the session can always run again, and a dropped
+   * connection is reconnected after a backoff with `last-event-id` set, so no stored event is
+   * delivered twice or skipped. It ends when `options.signal` aborts.
+   *
+   * @param sessionId the `sesn_` id
+   * @param options whether to ask for previews, where to start, and cancellation
+   */
+  stream(sessionId: string, options?: StreamOptions): AsyncIterable<StreamEvent>
+}
+
+/** Build the sessions resource over a transport. */
+export function createSessionsResource(transport: Transport): SessionsResource {
+  const path = `${API_VERSION_PREFIX}/sessions`
+
+  return {
+    create(body, options) {
+      return transport.json(SessionSchema, {
+        method: 'POST',
+        path,
+        body,
+        signal: options?.signal,
+      })
+    },
+
+    get(sessionId, options) {
+      return transport.json(SessionSchema, {
+        method: 'GET',
+        path: `${path}/${sessionId}`,
+        signal: options?.signal,
+      })
+    },
+
+    list(params, options) {
+      return transport.json(ListSessionsResponseSchema, {
+        method: 'GET',
+        path,
+        query: { limit: params?.limit, page: params?.page, agent_id: params?.agent_id },
+        signal: options?.signal,
+      })
+    },
+
+    events: createSessionEventsResource(transport),
+  }
+}
+
+/**
+ * The path of a session's event log: `POST` here to append, `GET` here to read.
+ *
+ * Exported for the helpers on the client, which send user events directly rather than through
+ * {@link SessionEventsResource.send} so that they can return the stored event itself.
+ *
+ * @param sessionId the `sesn_` id
+ */
+export function sessionEventsPath(sessionId: string): string {
+  return `${API_VERSION_PREFIX}/sessions/${sessionId}/events`
+}
+
+/** Build the events sub-resource over a transport. */
+function createSessionEventsResource(transport: Transport): SessionEventsResource {
+  const eventsPath = sessionEventsPath
+
+  const list = (
+    sessionId: string,
+    params?: ListEventsQuery,
+    options?: RequestOptions,
+  ): Promise<ListEventsResponse> =>
+    transport.json(ListEventsResponseSchema, {
+      method: 'GET',
+      path: eventsPath(sessionId),
+      query: {
+        limit: params?.limit,
+        order: params?.order,
+        page: params?.page,
+        'types[]': params?.types,
+        after_seq: params?.after_seq,
+      },
+      signal: options?.signal,
+    })
+
+  return {
+    send(sessionId, events, options) {
+      return transport.json(SendEventsResponseSchema, {
+        method: 'POST',
+        path: eventsPath(sessionId),
+        body: { events: isEventList(events) ? events : [events] },
+        signal: options?.signal,
+      })
+    },
+
+    list,
+
+    async *iterate(sessionId, params, options) {
+      // A server that answers with a cursor it has already been given would page forever, so
+      // a cursor seen before ends the walk instead of repeating a page.
+      const requested = new Set<string>()
+      let page = params?.page
+      if (page !== undefined) {
+        requested.add(page)
+      }
+      for (;;) {
+        const response = await list(sessionId, { ...params, page }, options)
+        const next = response.next_page
+        if (next !== null && requested.has(next)) {
+          return
+        }
+        yield* response.data
+        if (next === null) {
+          return
+        }
+        requested.add(next)
+        page = next
+      }
+    },
+
+    stream(sessionId, options) {
+      return followSessionEvents(transport, sessionId, options ?? {})
+    },
+  }
+}
+
+/** A single event or a list of them, without guessing from the contents of one. */
+function isEventList(
+  events: UserEventInput | readonly UserEventInput[],
+): events is readonly UserEventInput[] {
+  return Array.isArray(events)
+}
