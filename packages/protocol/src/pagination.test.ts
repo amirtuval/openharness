@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import {
   PAGE_CURSOR_PREFIX,
@@ -9,6 +9,20 @@ import {
   isPageCursor,
   tryDecodePageCursor,
 } from './pagination'
+
+/**
+ * Build a cursor around an arbitrary payload — the hostile input the encoder would never
+ * produce. Deliberately not the package's own encoder: this has to stay able to spell
+ * something the encoder cannot.
+ */
+function cursorFor(payload: string): string {
+  const bytes = new TextEncoder().encode(payload)
+  let binary = ''
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte)
+  }
+  return PAGE_CURSOR_PREFIX + btoa(binary).replaceAll('+', '-').replaceAll('/', '_')
+}
 
 describe('page cursors', () => {
   it('round-trips the sequence number', () => {
@@ -32,9 +46,7 @@ describe('page cursors', () => {
 
   it('rejects a cursor that was not produced here', () => {
     expect(() => decodePageCursor('page_not-base64!')).toThrow(RangeError)
-    expect(() => decodePageCursor('page_' + Buffer.from('{}').toString('base64url'))).toThrow(
-      RangeError,
-    )
+    expect(() => decodePageCursor(cursorFor('{}'))).toThrow(RangeError)
     expect(() => decodePageCursor('nonsense')).toThrow(RangeError)
     expect(() => decodePageCursor('page_')).toThrow(RangeError)
   })
@@ -59,10 +71,28 @@ describe('page cursors', () => {
   })
 
   it('rejects a payload that is not a cursor object', () => {
-    const cursor = PAGE_CURSOR_PREFIX + Buffer.from('"a string"').toString('base64url')
+    const cursor = cursorFor('"a string"')
     expect(() => decodePageCursor(cursor)).toThrow(RangeError)
-    const fractional = PAGE_CURSOR_PREFIX + Buffer.from('{"seq":1.5}').toString('base64url')
+    const fractional = cursorFor('{"seq":1.5}')
     expect(() => decodePageCursor(fractional)).toThrow(RangeError)
+  })
+
+  it('decodes without any Node-only global', () => {
+    // The package is imported by the web app. Take `Buffer` away and every cursor path still
+    // has to work; `crypto.getRandomValues` in ids.ts is a Web API and stays available.
+    vi.stubGlobal('Buffer', undefined)
+    try {
+      // `Buffer` is not a name this package can even refer to: without `@types/node` it does
+      // not exist in the type system, which is the compile-time half of this test.
+      const globals = globalThis as { Buffer?: unknown }
+      expect(globals.Buffer).toBeUndefined()
+      const cursor = encodePageCursor({ seq: 42 })
+      expect(PageCursorStringSchema.safeParse(cursor).success).toBe(true)
+      expect(decodePageCursor(cursor)).toEqual({ seq: 42 })
+      expect(tryDecodePageCursor(cursorFor('"a string"'))).toBeNull()
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('has a non-throwing variant', () => {

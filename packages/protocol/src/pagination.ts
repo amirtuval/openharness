@@ -68,7 +68,7 @@ export function encodePageCursor(cursor: PageCursor): string {
     throw new RangeError(`not a valid page cursor: ${JSON.stringify(cursor)}`)
   }
   const payload = JSON.stringify({ seq: parsed.data.seq })
-  return PAGE_CURSOR_PREFIX + Buffer.from(payload, 'utf8').toString('base64url')
+  return PAGE_CURSOR_PREFIX + base64UrlEncode(payload)
 }
 
 /**
@@ -84,9 +84,11 @@ export function tryDecodePageCursor(cursor: string): PageCursor | null {
     return null
   }
   try {
-    const decoded: unknown = JSON.parse(
-      Buffer.from(cursor.slice(PAGE_CURSOR_PREFIX.length), 'base64url').toString('utf8'),
-    )
+    const payload = base64UrlDecode(cursor.slice(PAGE_CURSOR_PREFIX.length))
+    if (payload === null) {
+      return null
+    }
+    const decoded: unknown = JSON.parse(payload)
     const parsed = PageCursorSchema.safeParse(decoded)
     if (!parsed.success) {
       return null
@@ -108,4 +110,42 @@ export function decodePageCursor(cursor: string): PageCursor {
     throw new RangeError(`not a page cursor: ${JSON.stringify(cursor)}`)
   }
   return decoded
+}
+
+const textEncoder = new TextEncoder()
+
+/** Strict, so bytes that are not UTF-8 fail the decode instead of becoming U+FFFD. */
+const textDecoder = new TextDecoder('utf-8', { fatal: true })
+
+/**
+ * Base64url without padding, over the UTF-8 bytes of `text`.
+ *
+ * Built on `TextEncoder` and `btoa` rather than `Buffer`: this package is imported by the web
+ * app, where `Buffer` does not exist. Both are Web APIs, so they are in Node 24 as well.
+ */
+function base64UrlEncode(text: string): string {
+  let binary = ''
+  for (const byte of textEncoder.encode(text)) {
+    binary += String.fromCharCode(byte)
+  }
+  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '')
+}
+
+/**
+ * {@link base64UrlEncode} in reverse, or `null` if `value` is not unpadded base64url of
+ * well-formed UTF-8. Every failure — a stray character, a bad length, an invalid byte — is
+ * the same answer to the caller.
+ */
+function base64UrlDecode(value: string): string | null {
+  const base64 = value.replaceAll('-', '+').replaceAll('_', '/')
+  try {
+    const binary = atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, '='))
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i += 1) {
+      bytes[i] = binary.charCodeAt(i)
+    }
+    return textDecoder.decode(bytes)
+  } catch {
+    return null
+  }
 }
