@@ -1,0 +1,32 @@
+{
+  "name": "@openharness/e2e",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Home for cross-package (end-to-end) tests. Today it holds a single placeholder test; real server/web/TUI tests land in the v1 epic.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "echo '@openharness/e2e: nothing to build (test-only package)'",
+    "build:deps": "turbo run build --filter=@openharness/e2e^...",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@openharness/protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@openharness/config": "workspace:*",
+    "eslint": "10.11.0",
+    "prettier": "3.9.9",
+    "turbo": "2.11.4",
+    "typescript": "6.0.3",
+    "vite": "8.3.1",
+    "vitest": "5.0.2"
+  }
+}
