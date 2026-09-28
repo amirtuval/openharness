@@ -1,0 +1,54 @@
+{
+  "name": "@openharness/cli",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The openharness terminal UI, an Ink (React) app installed as the `oh` command. It renders a placeholder screen; the chat TUI lands in the v1 epic.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "oh": "./dist/index.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsdown",
+    "build:deps": "turbo run build --filter=@openharness/cli^...",
+    "dev": "tsdown --watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@openharness/client": "workspace:*",
+    "@openharness/protocol": "workspace:*",
+    "ink": "7.1.1",
+    "react": "19.3.0"
+  },
+  "devDependencies": {
+    "@openharness/config": "workspace:*",
+    "@types/node": "26.6.3",
+    "@types/react": "19.3.0",
+    "eslint": "10.11.0",
+    "ink-testing-library": "4.0.0",
+    "prettier": "3.9.9",
+    "tsdown": "0.23.0",
+    "turbo": "2.11.4",
+    "typescript": "6.0.3",
+    "vite": "8.3.1",
+    "vitest": "5.0.2"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "extends": "@openharness/config/tsconfig/react.json",
+  "compilerOptions": {
+    "lib": ["ES2023"],
+    "types": ["node"]
+  },
+  "include": ["src", "*.config.ts"]
+}
