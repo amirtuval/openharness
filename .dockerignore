@@ -1,0 +1,26 @@
+# What the image does not need. Everything else is copied into the build stage, which is why
+# this list is about noise and staleness rather than size: a host `node_modules` or `dist/`
+# copied into the image would shadow the install and the build the Dockerfile does itself.
+
+# Dependencies and build output — installed and built inside the image, never copied in.
+**/node_modules
+**/dist
+**/.turbo
+**/*.tsbuildinfo
+
+# Version control, editors and CI.
+.git
+.github
+.vscode
+.editorconfig
+
+# Tests: the e2e package is test-only, and the Dockerfile only builds server and web.
+# (Its `package.json` stays: the workspace list has to resolve from inside the image.)
+e2e/src
+
+# Local state and secrets: the compose file passes these in from the environment instead.
+.env
+.env.*
+!.env.example
+*.log
+coverage
