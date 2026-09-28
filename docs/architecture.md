@@ -17,10 +17,9 @@ that core. This document stays at that level; package details live in each packa
 
 ## Status
 
-The repo is a **skeleton**. Apart from `@openharness/protocol`, which now carries the real
-wire contract, every package ships a placeholder export and one trivial test; there is no
-product functionality yet. The v1 epic ("v1 chat") implements a chat server with a web UI and
-a TUI.
+The v1 epic ([#2](https://github.com/amirtuval/openharness/issues/2), "v1 chat") is in
+progress: a chat server with a web UI and a TUI. The epic tracks which packages are done. Each
+package's `AGENTS.md` describes what that package currently implements.
 
 ## Package map
 
