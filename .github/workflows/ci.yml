@@ -13,9 +13,19 @@ jobs:
   ci:
     runs-on: ubuntu-latest
     services:
-      # The session package's Postgres tests run against a real database. With DATABASE_URL
-      # set they use this service, instead of pulling postgres:18-alpine themselves with
-      # testcontainers — and they always run here, rather than being skipped.
+      # A Postgres for the suites that test against a real database: `packages/session`'s store
+      # tests and `e2e/`, which runs the built server in its own process.
+      #
+      # The e2e suite reads this service through DATABASE_URL — turbo's default environment
+      # mode hands a task only the variables its configuration names, and `e2e/turbo.json` is
+      # where DATABASE_URL is passed through for that task. It creates a database of its own
+      # per test file (`openharness_e2e_<label>_<random>`, dropped afterwards), so the user
+      # has to be allowed to create databases: the image's POSTGRES_USER is a superuser, which
+      # is what makes that work.
+      #
+      # The session tests, by the same rule, do not see DATABASE_URL and still bring up their
+      # own `postgres:18-alpine` with testcontainers (Docker is available on the runner).
+      # Passing it through for that task too would save them the pull.
       postgres:
         image: postgres:18-alpine
         env:
@@ -64,7 +74,9 @@ jobs:
       - name: Check root formatting
         run: yarn format:check:repo
 
-      # PRs: only packages changed vs the base branch, plus their dependents.
+      # PRs: only packages changed vs the base branch, plus their dependents. `e2e` depends on
+      # the server, the client and the web app, so a change to any of those runs the
+      # end-to-end suite here too — against the postgres service above.
       - name: Build, typecheck, lint, test (affected)
         if: github.event_name == 'pull_request'
         env:
