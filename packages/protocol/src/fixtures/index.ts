@@ -1,6 +1,538 @@
-import { PACKAGE_NAME } from '../index'
+import type { EventId } from '../ids'
+import { newAgentId, newEventId, newSessionId } from '../ids'
+import type {
+  Agent,
+  AgentMessageEvent,
+  ContentDelta,
+  EventDelta,
+  EventStart,
+  ModelRequestEndEvent,
+  ModelRequestStartEvent,
+  ModelUsage,
+  Session,
+  SessionAgent,
+  SessionError,
+  SessionErrorEvent,
+  SessionStatusIdleEvent,
+  SessionStatusRescheduledEvent,
+  SessionStatusRunningEvent,
+  StoredEvent,
+  StreamEvent,
+  UserInterruptEvent,
+  UserMessageEvent,
+} from '../index'
 
-/** Subpath export `@openharness/protocol/fixtures`: shared test fixtures (placeholder). */
-export const FIXTURES_PACKAGE_NAME = PACKAGE_NAME
+/**
+ * Subpath export `@openharness/protocol/fixtures`.
+ *
+ * Builders for every resource and event in the protocol, plus a realistic sample session.
+ * `@openharness/session`, `@openharness/brain`, the server and the client tests all need
+ * well-formed protocol objects, and hand-rolling them invites drift from the schemas — the
+ * builders here are the single place that knows how to make one.
+ *
+ * The event builders hand out ids from {@link newEventId} and a shared running `seq`. Pass
+ * `seq` (or `id`) in the overrides when a test needs a specific one; the sample history below
+ * pins both so it reads as a fixed story.
+ *
+ * These are plain builders: they construct typed values and leave validation to the caller,
+ * so a test can assert that what the fixtures produce actually parses against the schemas.
+ */
 
-export const placeholderFixture: { placeholder: true } = { placeholder: true }
+/** Running `seq` handed to events built without an explicit one. One per session, as on the wire. */
+let nextSeq = 1
+
+/** Allocate the next fixture `seq`. */
+function takeSeq(): number {
+  return nextSeq++
+}
+
+/** A fixed instant, the anchor for every timestamp in the sample session. */
+const SAMPLE_EPOCH = Date.UTC(2026, 2, 15, 10, 0, 0)
+
+/**
+ * A timestamp `offsetSeconds` after {@link SAMPLE_EPOCH}, in RFC 3339 form.
+ *
+ * @param offsetSeconds seconds past the anchor; may be fractional
+ */
+export function fixtureTimestamp(offsetSeconds = 0): string {
+  return new Date(SAMPLE_EPOCH + offsetSeconds * 1000).toISOString()
+}
+
+/**
+ * An `agent` resource.
+ *
+ * @param overrides fields to replace on the default agent
+ */
+export function makeAgent(overrides: Partial<Agent> = {}): Agent {
+  const agent: Agent = {
+    id: newAgentId(),
+    type: 'agent',
+    name: 'Summarizer',
+    description: 'Summarizes a repository for a chat user.',
+    model: { id: 'anthropic/claude-sonnet-5' },
+    system: 'You are a concise technical assistant.',
+    created_at: fixtureTimestamp(),
+    updated_at: fixtureTimestamp(),
+  }
+  return { ...agent, ...overrides }
+}
+
+/**
+ * The agent snapshot a session is created with.
+ *
+ * @param overrides fields to replace on the default snapshot
+ */
+export function makeSessionAgent(overrides: Partial<SessionAgent> = {}): SessionAgent {
+  const agent: SessionAgent = {
+    id: newAgentId(),
+    name: 'Summarizer',
+    model: { id: 'anthropic/claude-sonnet-5' },
+    system: 'You are a concise technical assistant.',
+  }
+  return { ...agent, ...overrides }
+}
+
+/**
+ * A `session` resource, `idle` with no title and no metadata unless overridden.
+ *
+ * @param overrides fields to replace on the default session
+ */
+export function makeSession(overrides: Partial<Session> = {}): Session {
+  const session: Session = {
+    id: newSessionId(),
+    type: 'session',
+    status: 'idle',
+    title: null,
+    metadata: {},
+    agent: makeSessionAgent(),
+    created_at: fixtureTimestamp(),
+    updated_at: fixtureTimestamp(),
+  }
+  return { ...session, ...overrides }
+}
+
+// ---------------------------------------------------------------- user events
+
+/**
+ * A stored `user.message`.
+ *
+ * @param text the message body; becomes the single text block
+ * @param overrides fields to replace on the event
+ */
+export function makeUserMessage(
+  text: string,
+  overrides: Partial<UserMessageEvent> = {},
+): UserMessageEvent {
+  const event: UserMessageEvent = {
+    id: newEventId(),
+    type: 'user.message',
+    seq: takeSeq(),
+    processed_at: null,
+    content: [{ type: 'text', text }],
+  }
+  return { ...event, ...overrides }
+}
+
+/**
+ * A stored `user.interrupt`.
+ *
+ * @param overrides fields to replace on the event
+ */
+export function makeUserInterrupt(overrides: Partial<UserInterruptEvent> = {}): UserInterruptEvent {
+  const event: UserInterruptEvent = {
+    id: newEventId(),
+    type: 'user.interrupt',
+    seq: takeSeq(),
+    processed_at: null,
+  }
+  return { ...event, ...overrides }
+}
+
+// --------------------------------------------------------------- agent events
+
+/**
+ * A stored `agent.message`.
+ *
+ * @param text the reply body; becomes the single text block
+ * @param overrides fields to replace on the event
+ */
+export function makeAgentMessage(
+  text: string,
+  overrides: Partial<AgentMessageEvent> = {},
+): AgentMessageEvent {
+  const event: AgentMessageEvent = {
+    id: newEventId(),
+    type: 'agent.message',
+    seq: takeSeq(),
+    processed_at: fixtureTimestamp(),
+    content: [{ type: 'text', text }],
+  }
+  return { ...event, ...overrides }
+}
+
+// ------------------------------------------------------------- session events
+
+/**
+ * A `session.status_running` event.
+ *
+ * @param overrides fields to replace on the event
+ */
+export function makeStatusRunning(
+  overrides: Partial<SessionStatusRunningEvent> = {},
+): SessionStatusRunningEvent {
+  const event: SessionStatusRunningEvent = {
+    id: newEventId(),
+    type: 'session.status_running',
+    seq: takeSeq(),
+    processed_at: fixtureTimestamp(),
+  }
+  return { ...event, ...overrides }
+}
+
+/**
+ * A `session.status_idle` event, `end_turn` unless overridden.
+ *
+ * @param overrides fields to replace on the event
+ */
+export function makeStatusIdle(
+  overrides: Partial<SessionStatusIdleEvent> = {},
+): SessionStatusIdleEvent {
+  const event: SessionStatusIdleEvent = {
+    id: newEventId(),
+    type: 'session.status_idle',
+    seq: takeSeq(),
+    processed_at: fixtureTimestamp(),
+    stop_reason: { type: 'end_turn' },
+  }
+  return { ...event, ...overrides }
+}
+
+/**
+ * A `session.status_rescheduled` event.
+ *
+ * @param overrides fields to replace on the event
+ */
+export function makeStatusRescheduled(
+  overrides: Partial<SessionStatusRescheduledEvent> = {},
+): SessionStatusRescheduledEvent {
+  const event: SessionStatusRescheduledEvent = {
+    id: newEventId(),
+    type: 'session.status_rescheduled',
+    seq: takeSeq(),
+    processed_at: fixtureTimestamp(),
+  }
+  return { ...event, ...overrides }
+}
+
+/**
+ * A `session.error` event. Defaults to a retryable `model_overloaded_error`.
+ *
+ * @param overrides fields to replace on the event
+ * @param overrides.error the `error` object, when the default one will not do
+ */
+export function makeSessionError(overrides: Partial<SessionErrorEvent> = {}): SessionErrorEvent {
+  const error: SessionError = {
+    type: 'model_overloaded_error',
+    message: 'The model is overloaded. Retrying.',
+    retry_status: { type: 'retrying' },
+  }
+  const event: SessionErrorEvent = {
+    id: newEventId(),
+    type: 'session.error',
+    seq: takeSeq(),
+    processed_at: fixtureTimestamp(),
+    error,
+  }
+  return { ...event, ...overrides }
+}
+
+// ---------------------------------------------------------------- span events
+
+/**
+ * A `span.model_request_start` event.
+ *
+ * @param overrides fields to replace on the event
+ */
+export function makeModelRequestStart(
+  overrides: Partial<ModelRequestStartEvent> = {},
+): ModelRequestStartEvent {
+  const event: ModelRequestStartEvent = {
+    id: newEventId(),
+    type: 'span.model_request_start',
+    seq: takeSeq(),
+    processed_at: fixtureTimestamp(),
+  }
+  return { ...event, ...overrides }
+}
+
+/** Token usage a fixture model request reports. Override it per test. */
+export const FIXTURE_MODEL_USAGE: ModelUsage = {
+  input_tokens: 512,
+  output_tokens: 64,
+  cache_creation_input_tokens: 0,
+  cache_read_input_tokens: 0,
+}
+
+/**
+ * A `span.model_request_end` event that closes `start`, with no error by default.
+ *
+ * @param start the `span.model_request_start` this closes
+ * @param overrides fields to replace on the event
+ */
+export function makeModelRequestEnd(
+  start: ModelRequestStartEvent,
+  overrides: Partial<ModelRequestEndEvent> = {},
+): ModelRequestEndEvent {
+  const event: ModelRequestEndEvent = {
+    id: newEventId(),
+    type: 'span.model_request_end',
+    seq: takeSeq(),
+    processed_at: fixtureTimestamp(),
+    model_request_start_id: start.id,
+    model_usage: { ...FIXTURE_MODEL_USAGE },
+    is_error: null,
+  }
+  return { ...event, ...overrides }
+}
+
+// ------------------------------------------------------- stream-only previews
+
+/**
+ * An `event_start` previewing `id` as an `agent.message`.
+ *
+ * @param id the `sevt_` id of the event being previewed
+ * @param overrides fields to replace on the event
+ */
+export function makeEventStart(id: EventId, overrides: Partial<EventStart> = {}): EventStart {
+  const event: EventStart = {
+    type: 'event_start',
+    event: { type: 'agent.message', id },
+  }
+  return { ...event, ...overrides }
+}
+
+/**
+ * A `content_delta` payload.
+ *
+ * @param text the fragment of text to carry
+ * @param overrides fields to replace on the delta
+ */
+export function makeContentDelta(
+  text: string,
+  overrides: Partial<ContentDelta> = {},
+): ContentDelta {
+  const delta: ContentDelta = {
+    type: 'content_delta',
+    index: 0,
+    content: { type: 'text', text },
+  }
+  return { ...delta, ...overrides }
+}
+
+/**
+ * An `event_delta` extending the preview of `eventId`.
+ *
+ * @param eventId the `sevt_` id of the event being previewed
+ * @param text the fragment of text to carry
+ * @param overrides fields to replace on the event
+ */
+export function makeEventDelta(
+  eventId: EventId,
+  text: string,
+  overrides: Partial<EventDelta> = {},
+): EventDelta {
+  const event: EventDelta = {
+    type: 'event_delta',
+    event_id: eventId,
+    delta: makeContentDelta(text),
+  }
+  return { ...event, ...overrides }
+}
+
+// -------------------------------------------------------------------- samples
+
+/** A sample agent: an `anthropic/claude-sonnet-5` summarizer. */
+export const sampleAgent: Agent = makeAgent({
+  id: newAgentId(1770000000000),
+  created_at: fixtureTimestamp(),
+  updated_at: fixtureTimestamp(),
+})
+
+/** A session running {@link sampleAgent}, idle and titled. */
+export const sampleSession: Session = makeSession({
+  id: newSessionId(1770000000000),
+  title: 'README summary',
+  metadata: { source: 'fixtures' },
+  agent: makeSessionAgent({
+    id: sampleAgent.id,
+    name: sampleAgent.name,
+    model: sampleAgent.model,
+    system: sampleAgent.system,
+  }),
+  created_at: fixtureTimestamp(),
+  updated_at: fixtureTimestamp(12),
+})
+
+/**
+ * A session history that exercises every part of the v1 lifecycle:
+ *
+ * 1. a full turn — `status_running`, `user.message`, a model request, `agent.message`,
+ *    `status_idle { end_turn }`
+ * 2. a steering message — the user speaks again while the turn is running, and the brain
+ *    picks it up in the same turn
+ * 3. an interrupt — `user.interrupt` cuts the model off mid-response, the partial text is
+ *    still stored as an `agent.message`, and the span closes with an `interrupted` error
+ * 4. a retried error — a `session.error` with `retry_status: retrying` and a
+ *    `session.status_rescheduled`, then a fresh `session.status_running` and a clean reply
+ *
+ * It ends mid-turn: a last `user.message` sits at `processed_at: null`, the state a client
+ * sees between sending a message and the brain reaching it. `seq` starts at 1 and increases
+ * by one per event, the way the store assigns it.
+ */
+export const sampleSessionHistory: StoredEvent[] = buildSampleSessionHistory()
+
+function buildSampleSessionHistory(): StoredEvent[] {
+  const events: StoredEvent[] = []
+  const push = (event: StoredEvent): void => {
+    events.push(event)
+  }
+  const at = (seq: number): { seq: number; processed_at: string } => ({
+    seq,
+    processed_at: fixtureTimestamp(seq),
+  })
+
+  // Turn 1: a complete turn, start to finish.
+  const running1 = makeStatusRunning({ ...at(1) })
+  push(running1)
+  push(
+    makeUserMessage('Summarize the repo README in one sentence.', {
+      ...at(2),
+      processed_at: fixtureTimestamp(2),
+    }),
+  )
+  const start1 = makeModelRequestStart({ ...at(3) })
+  push(start1)
+  push(
+    makeAgentMessage('openharness is an open-source implementation of Managed Agents.', {
+      ...at(4),
+    }),
+  )
+  push(
+    makeModelRequestEnd(start1, {
+      ...at(5),
+      model_usage: { ...FIXTURE_MODEL_USAGE, input_tokens: 640, output_tokens: 24 },
+    }),
+  )
+  push(makeStatusIdle({ ...at(6) }))
+
+  // Turn 2: the user steers mid-turn; the queued message is picked up by the running turn.
+  push(makeStatusRunning({ ...at(7) }))
+  push(
+    makeUserMessage('Actually, mention the session log.', {
+      ...at(8),
+      processed_at: fixtureTimestamp(8),
+    }),
+  )
+  const start2 = makeModelRequestStart({ ...at(9) })
+  push(start2)
+  push(
+    makeAgentMessage(
+      'openharness is Managed Agents in the open: a durable session log, a stateless brain.',
+      {
+        ...at(10),
+      },
+    ),
+  )
+  push(
+    makeModelRequestEnd(start2, {
+      ...at(11),
+      model_usage: { ...FIXTURE_MODEL_USAGE, input_tokens: 704, output_tokens: 31 },
+    }),
+  )
+  push(makeStatusIdle({ ...at(12) }))
+
+  // Turn 3: the user interrupts; the partial reply is kept and the span closes with an error.
+  push(makeStatusRunning({ ...at(13) }))
+  push(
+    makeUserMessage('Now write a haiku about it.', {
+      ...at(14),
+      processed_at: fixtureTimestamp(14),
+    }),
+  )
+  const start3 = makeModelRequestStart({ ...at(15) })
+  push(start3)
+  push(makeUserInterrupt({ ...at(16) }))
+  push(makeAgentMessage('Events in a log,', { ...at(17) }))
+  push(
+    makeModelRequestEnd(start3, {
+      ...at(18),
+      model_usage: { ...FIXTURE_MODEL_USAGE, input_tokens: 720, output_tokens: 6 },
+      is_error: true,
+      error: { type: 'interrupted', message: 'Interrupted by the user.' },
+    }),
+  )
+  push(makeStatusIdle({ ...at(19) }))
+
+  // Turn 4: the model request fails, the session retries, and the retry succeeds.
+  push(makeStatusRunning({ ...at(20) }))
+  push(makeUserMessage('And the license?', { ...at(21), processed_at: fixtureTimestamp(21) }))
+  const failedStart = makeModelRequestStart({ ...at(22) })
+  push(failedStart)
+  push(
+    makeModelRequestEnd(failedStart, {
+      ...at(23),
+      model_usage: { ...FIXTURE_MODEL_USAGE, input_tokens: 0, output_tokens: 0 },
+      is_error: true,
+      error: { type: 'model_error', message: 'The model is overloaded.' },
+    }),
+  )
+  push(makeSessionError({ ...at(24) }))
+  push(makeStatusRescheduled({ ...at(25) }))
+  push(makeStatusRunning({ ...at(26) }))
+  const retryStart = makeModelRequestStart({ ...at(27) })
+  push(retryStart)
+  push(makeAgentMessage('MIT.', { ...at(28) }))
+  push(
+    makeModelRequestEnd(retryStart, {
+      ...at(29),
+      model_usage: { ...FIXTURE_MODEL_USAGE, input_tokens: 768, output_tokens: 2 },
+    }),
+  )
+  push(makeStatusIdle({ ...at(30) }))
+
+  // Turn 5: the user has just spoken; the brain has not picked the message up yet.
+  push(makeStatusRunning({ ...at(31) }))
+  push(makeUserMessage('One more thing: who maintains it?', { ...at(32), processed_at: null }))
+
+  return events
+}
+
+/**
+ * The live view of the first `agent.message` in {@link sampleSessionHistory}: the
+ * `event_start` and `event_delta` previews, followed by the stored event itself.
+ *
+ * This is the same event the history carries — same `sevt_` id, same `seq` — so a client can
+ * accumulate the preview, then match the stored message by id and discard what it
+ * accumulated. Concatenating the deltas gives a prefix of the stored message's text (here,
+ * the whole of it), which is exactly the guarantee the accumulator may rely on.
+ */
+export const sampleStreamPreview: StreamEvent[] = buildSampleStreamPreview()
+
+function buildSampleStreamPreview(): StreamEvent[] {
+  const message = sampleSessionHistory.find(
+    (event): event is AgentMessageEvent => event.type === 'agent.message',
+  )
+  if (message === undefined) {
+    throw new Error('sampleSessionHistory must contain an agent.message')
+  }
+  const text = message.content.map((block) => block.text).join('')
+  const third = Math.ceil(text.length / 3)
+  const fragments = [text.slice(0, third), text.slice(third, 2 * third), text.slice(2 * third)]
+  return [
+    makeEventStart(message.id),
+    ...fragments
+      .filter((fragment) => fragment.length > 0)
+      .map((fragment) => makeEventDelta(message.id, fragment)),
+    message,
+  ]
+}
