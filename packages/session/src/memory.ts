@@ -1,12 +1,9 @@
 import {
   DEFAULT_EVENT_ORDER,
-  DEFAULT_PAGE_LIMIT,
   DEFAULT_PARTITION_COUNT,
   EVENT_TYPES,
-  MAX_PAGE_LIMIT,
   StoredEventSchema,
   UserEventSchema,
-  decodePageCursor,
   encodeKeyCursor,
   encodeSeqCursor,
   newAgentId,
@@ -26,7 +23,6 @@ import {
   type NextPage,
   type Session,
   type SessionId,
-  type SeqCursor,
   type StoredEvent,
   type StreamEvent,
   type StreamOnlyEvent,
@@ -36,7 +32,13 @@ import {
 } from '@openharness/protocol'
 
 import { type Clock, systemClock, timestampAt } from './clock'
-import { AgentNotFoundError, FencedError, SessionNotFoundError } from './errors'
+import {
+  AgentNotFoundError,
+  DuplicateEventIdError,
+  FencedError,
+  SessionNotFoundError,
+} from './errors'
+import { assertEventIds, assertTtl, decodeKeyPage, decodeSeqPage, pageSize } from './inputs'
 import type {
   AppendableEvent,
   AppendEventsOptions,
@@ -88,6 +90,13 @@ export class InMemorySessionStore implements SessionStore {
   readonly #agents = new Map<string, Agent>()
 
   readonly #sessions = new Map<string, SessionRecord>()
+
+  /**
+   * Every id in the log, across sessions: an event id is one event's identity for the whole
+   * store, so a caller-supplied id has to be free here and not only in its own session. The
+   * Postgres store gets the same guarantee from the primary key on `events.id`.
+   */
+  readonly #eventIds = new Set<EventId>()
 
   readonly #leases = new Map<number, LeaseRecord>()
 
@@ -408,19 +417,29 @@ export class InMemorySessionStore implements SessionStore {
    * status and `updated_at`, and hand back the stored events. Delivery is the caller's job, so
    * that a subscription is only notified once the whole append — or the whole creation — landed.
    *
-   * Build first, commit second: an event this store refuses (one the protocol schema rejects)
-   * leaves the log exactly as it was, because an append is one transaction.
+   * Build first, commit second: an event this store refuses — one the protocol schema rejects,
+   * an id that is not an event id, or one the log already holds — leaves the log exactly as it
+   * was, because an append is one transaction.
    */
   #append(record: SessionRecord, events: readonly AppendableEvent[], now: number): StoredEvent[] {
+    assertEventIds(record.session.id, events)
     const processedAt = timestampAt(now)
     const stored: StoredEvent[] = []
     let seq = record.nextSeq
     for (const input of events) {
-      stored.push(storedEventFrom(input, { id: newEventId(now), seq, processedAt }))
+      // The event's own id when it brought one — the one its previews carried — and a fresh
+      // one otherwise. Either way the id is checked against the whole log before anything is
+      // written, so a batch with a taken id is refused whole.
+      const id = input.id ?? newEventId(now)
+      if (this.#eventIds.has(id)) {
+        throw new DuplicateEventIdError(record.session.id, id)
+      }
+      stored.push(storedEventFrom(input, { id, seq, processedAt }))
       seq += 1
     }
     for (const event of stored) {
       record.events.push({ event, createdAtMs: now })
+      this.#eventIds.add(event.id)
     }
     record.nextSeq = seq
     for (const event of stored) {
@@ -629,14 +648,6 @@ function needsWork(record: SessionRecord): boolean {
   )
 }
 
-/** The page size to use: `limit` clamped into `[1, MAX_PAGE_LIMIT]`, or the protocol default. */
-function pageSize(limit: number | undefined): number {
-  if (limit === undefined || !Number.isFinite(limit)) {
-    return DEFAULT_PAGE_LIMIT
-  }
-  return Math.min(Math.max(Math.trunc(limit), 1), MAX_PAGE_LIMIT)
-}
-
 /**
  * The list order of both agents and sessions: `(created_at, id)`, ascending.
  *
@@ -677,24 +688,6 @@ function paginate<T extends KeyCursorPosition>(
   return { data, next_page }
 }
 
-/** Decode the `page` of an events list, which is a `seq` position. */
-function decodeSeqPage(page: string): SeqCursor {
-  const cursor = decodePageCursor(page)
-  if (cursor.kind !== 'seq') {
-    throw new RangeError(`listEvents takes a seq cursor, but got a ${cursor.kind} cursor`)
-  }
-  return cursor
-}
-
-/** Decode the `page` of an agent or session list, which is a keyset position. */
-function decodeKeyPage(page: string): KeyCursor {
-  const cursor = decodePageCursor(page)
-  if (cursor.kind !== 'key') {
-    throw new RangeError(`this list takes a key cursor, but got a ${cursor.kind} cursor`)
-  }
-  return cursor
-}
-
 /** The last item of an array the pagination code has already proved non-empty. */
 function lastOf<T>(items: readonly T[]): T {
   const last = items[items.length - 1]
@@ -702,11 +695,4 @@ function lastOf<T>(items: readonly T[]): T {
     throw new RangeError('lastOf() needs a non-empty array')
   }
   return last
-}
-
-/** A lease only lasts a positive amount of time; anything else is a caller bug, not a lease. */
-function assertTtl(ttlMs: number): void {
-  if (!Number.isFinite(ttlMs) || ttlMs <= 0) {
-    throw new RangeError(`ttlMs must be a positive, finite number of milliseconds, got ${ttlMs}`)
-  }
 }

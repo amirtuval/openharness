@@ -12,6 +12,23 @@ concurrency:
 jobs:
   ci:
     runs-on: ubuntu-latest
+    services:
+      # The session package's Postgres tests run against a real database. With DATABASE_URL
+      # set they use this service, instead of pulling postgres:18-alpine themselves with
+      # testcontainers — and they always run here, rather than being skipped.
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: openharness
+          POSTGRES_PASSWORD: openharness
+          POSTGRES_DB: openharness
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U openharness -d openharness"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -53,9 +70,14 @@ jobs:
         env:
           # actions/checkout only creates remote-tracking refs, so point turbo at origin/<base>.
           TURBO_SCM_BASE: origin/${{ github.base_ref }}
+          # The postgres service above. The session tests truncate their tables, so a scratch
+          # database is all this has to be.
+          DATABASE_URL: postgres://openharness:openharness@localhost:5432/openharness
         run: yarn turbo run build typecheck lint format:check test --affected --cache-dir=.turbo/cache
 
       # main: everything (unchanged packages are turbo cache hits).
       - name: Build, typecheck, lint, test (all)
         if: github.event_name != 'pull_request'
+        env:
+          DATABASE_URL: postgres://openharness:openharness@localhost:5432/openharness
         run: yarn turbo run build typecheck lint format:check test --cache-dir=.turbo/cache

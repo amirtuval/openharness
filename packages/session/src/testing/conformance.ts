@@ -8,6 +8,7 @@ import {
   encodeKeyCursor,
   encodeSeqCursor,
   isStoredEvent,
+  newEventId,
   partitionOf,
   type Agent,
   type AgentId,
@@ -27,6 +28,8 @@ import { describe, expect, it } from 'vitest'
 import { timestampAt } from '../clock'
 import {
   AGENT_NOT_FOUND_ERROR_CODE,
+  DUPLICATE_EVENT_ID_ERROR_CODE,
+  DuplicateEventIdError,
   FENCED_ERROR_CODE,
   SESSION_NOT_FOUND_ERROR_CODE,
   isFencedError,
@@ -72,6 +75,9 @@ import { type TestClock, createTestClock } from './clock'
  *   pagination, the agent filter, and not-found behaviour.
  * - **appending events** — `id`/`seq` assignment, `processed_at` per event kind, and the shape
  *   of what comes back.
+ * - **caller-supplied event ids** — an id the caller brings is the stored event's id and stays
+ *   the identity its previews carried, `seq` is still the store's, and a batch is refused whole
+ *   when an id is taken, repeated in it, or not a valid event id.
  * - **the `processed_at` lifecycle** — pending events, marking, marking twice, and ids that are
  *   not pending user events.
  * - **status updates** — the session `status` mirroring the log, and a reschedule not ending a
@@ -426,6 +432,171 @@ export function runSessionStoreConformance(
         for (const event of (await store.listEvents(session.id)).data) {
           expectExact(StoredEventSchema, event, 'a stored event')
         }
+      })
+    })
+
+    // ------------------------------------------------- caller-supplied event ids
+
+    describe('caller-supplied event ids', () => {
+      it('stores an event under the id it was given, and returns it', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const id = suppliedEventId()
+        // Written out rather than spread over a builder: this is the shape a caller — the
+        // brain appending the `agent.message` its previews announced — writes by hand.
+        const [stored] = await append(store, session.id, [
+          { type: EVENT_TYPES.agentMessage, content: [{ type: 'text', text: 'hello' }], id },
+        ])
+        expect(stored?.id).toBe(id)
+      })
+
+      it('reads the event back under that id, at the seq the log has it at', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const id = suppliedEventId()
+        const [stored] = await append(store, session.id, [{ ...userMessage('one'), id }])
+        const page = await store.listEvents(session.id)
+        expect(page.data.find((event) => event.id === id)).toEqual(stored)
+        expect(page.data.filter((event) => event.id === id)).toHaveLength(1)
+
+        // `seq` is the store's either way: a supplied id changes which event an append
+        // writes, not where in the log it lands.
+        expect(stored?.seq).toBe(1)
+        const [next] = await append(store, session.id, [userMessage('two')])
+        expect(next?.seq).toBe(2)
+        expect(next?.id).not.toBe(id)
+      })
+
+      it('mixes supplied and generated ids in one batch', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const first = suppliedEventId()
+        const third = suppliedEventId()
+        const stored = await append(store, session.id, [
+          { ...userMessage('one'), id: first },
+          userMessage('two'),
+          { ...statusRunning(), id: third },
+        ])
+        expect(stored.map((event) => event.seq)).toEqual([1, 2, 3])
+        expect(stored[0]?.id).toBe(first)
+        expect(stored[2]?.id).toBe(third)
+        // The event that brought no id got one from the store, as every event used to.
+        expect(stored[1]?.id).toMatch(/^sevt_/)
+        expect(new Set(stored.map((event) => event.id)).size).toBe(3)
+      })
+
+      it('keeps a stored event on the id its previews were published under', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const received: StreamEvent[] = []
+        await store.subscribe(session.id, (event) => {
+          received.push(event)
+        })
+        // What the brain does for a streaming reply: mint an id, publish the previews under
+        // it, and append the final message with the same id, so a client can replace the
+        // preview with the stored event.
+        const id = suppliedEventId()
+        await store.publishEphemeral(session.id, eventStart(id))
+        await store.publishEphemeral(session.id, eventDelta(id))
+        const [stored] = await append(store, session.id, [{ ...agentMessage('hello'), id }])
+        await waitFor(() => received.length === 3, 'the two previews and the stored event')
+
+        const previewed: EventId[] = []
+        const storedIds: EventId[] = []
+        for (const event of received) {
+          if (isStoredEvent(event)) {
+            storedIds.push(event.id)
+          } else {
+            previewed.push(previewedId(event))
+          }
+        }
+        expect(stored?.id).toBe(id)
+        expect(storedIds).toEqual([id])
+        expect(previewed).toEqual([id, id])
+      })
+
+      it('refuses an id the log already holds, and stores nothing of the batch', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const id = suppliedEventId()
+        const [first] = await append(store, session.id, [{ ...userMessage('first'), id }])
+
+        const error = await thrownBy(() =>
+          store.appendEvents(session.id, [userMessage('second'), { ...agentMessage('hi'), id }]),
+        )
+        expect(error).toBeInstanceOf(DuplicateEventIdError)
+        expectErrorIdentity(error, 'DuplicateEventIdError', DUPLICATE_EVENT_ID_ERROR_CODE)
+        expect(errorFields(error)).toMatchObject({ sessionId: session.id, eventId: id })
+
+        // Nothing of the refused batch: not the event with the taken id, and not the valid
+        // event in front of it, because an append is one transaction.
+        expect((await store.listEvents(session.id)).data).toEqual([first])
+        expect(await store.getPendingUserEvents(session.id)).toEqual([first])
+      })
+
+      it('refuses an id another session already holds', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const id = suppliedEventId()
+        await append(store, session.id, [{ ...userMessage('here'), id }])
+
+        // An event id is the identity of one event for the whole store, not one per session.
+        const other = await store.createSession((await store.createAgent(agentInput('Other'))).id)
+        const error = await thrownBy(() =>
+          store.appendEvents(other.id, [{ ...userMessage('there'), id }]),
+        )
+        expectErrorIdentity(error, 'DuplicateEventIdError', DUPLICATE_EVENT_ID_ERROR_CODE)
+        expect((await store.listEvents(other.id)).data).toEqual([])
+      })
+
+      it('refuses the same id twice in one batch, and stores nothing', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const id = suppliedEventId()
+        const error = await thrownBy(() =>
+          store.appendEvents(session.id, [
+            { ...userMessage('one'), id },
+            { ...statusRunning(), id },
+          ]),
+        )
+        expectErrorIdentity(error, 'DuplicateEventIdError', DUPLICATE_EVENT_ID_ERROR_CODE)
+        expect(errorFields(error)).toMatchObject({ eventId: id })
+        expect((await store.listEvents(session.id)).data).toEqual([])
+        expect((await store.getSession(session.id))?.status).toBe('idle')
+      })
+
+      it('refuses an id that is not a valid event id, and stores nothing', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        // A session id is a valid id of the wrong kind; the other is not an id at all.
+        const wrongKind = session.id as unknown as EventId
+        const notAnId = 'nope' as EventId
+        for (const id of [wrongKind, notAnId]) {
+          const error = await thrownBy(() =>
+            store.appendEvents(session.id, [{ ...userMessage('hi'), id }]),
+          )
+          expect(error).toBeInstanceOf(RangeError)
+        }
+        expect((await store.listEvents(session.id)).data).toEqual([])
+      })
+
+      it('fences an append that supplies an id like any other', async () => {
+        const { store, clock } = await setup()
+        const { session } = await seed(store)
+        const lease = await leaseFor(store, session.id, 30 * SECOND)
+        const fence = { partition: lease.partition, epoch: lease.epoch }
+        const id = suppliedEventId()
+        const [stored] = await append(store, session.id, [{ ...userMessage('hi'), id }], { fence })
+        expect(stored?.id).toBe(id)
+
+        clock.advance(30 * SECOND)
+        const error = await thrownBy(() =>
+          store.appendEvents(session.id, [{ ...userMessage('late'), id: suppliedEventId() }], {
+            fence,
+          }),
+        )
+        expect(isFencedError(error)).toBe(true)
+        expect((await store.listEvents(session.id)).data).toEqual([stored])
       })
     })
 
@@ -1205,6 +1376,11 @@ function unknownEventId(): EventId {
   return 'sevt_00000000000000000000000000' as EventId
 }
 
+/** A `sevt_` id a test hands the store, so the store is not the one that minted it. */
+function suppliedEventId(): EventId {
+  return newEventId()
+}
+
 /** A `user.message` to append. */
 function userMessage(text: string): AppendableEvent {
   return { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text }] }
@@ -1265,6 +1441,11 @@ function spanEnd(start: ModelRequestStartEvent): AppendableEvent {
 /** An `event_start` previewing `id`. */
 function eventStart(id: EventId): StreamOnlyEvent {
   return { type: EVENT_TYPES.eventStart, event: { type: EVENT_TYPES.agentMessage, id } }
+}
+
+/** The id a stream-only event previews: an `event_start` names it, an `event_delta` points at it. */
+function previewedId(event: StreamOnlyEvent): EventId {
+  return event.type === EVENT_TYPES.eventStart ? event.event.id : event.event_id
 }
 
 /** An `event_delta` extending the preview of `id`. */

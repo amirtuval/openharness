@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   AgentNotFoundError,
+  DuplicateEventIdError,
   FencedError,
   InMemorySessionStore,
   PACKAGE_NAME,
@@ -22,6 +23,7 @@ describe('@openharness/session', () => {
     expect(typeof FencedError).toBe('function')
     expect(typeof SessionNotFoundError).toBe('function')
     expect(typeof AgentNotFoundError).toBe('function')
+    expect(typeof DuplicateEventIdError).toBe('function')
     expect(typeof isFencedError).toBe('function')
   })
 
