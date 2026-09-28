@@ -919,6 +919,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@openharness/server@workspace:apps/server"
   dependencies:
+    "@ai-sdk/provider": "npm:4.0.18"
     "@hono/node-server": "npm:2.1.1"
     "@openharness/brain": "workspace:*"
     "@openharness/config": "workspace:*"
@@ -926,14 +927,19 @@ __metadata:
     "@openharness/protocol": "workspace:*"
     "@openharness/session": "workspace:*"
     "@types/node": "npm:26.6.3"
+    "@types/pg": "npm:8.23.1"
+    ai: "npm:7.0.118"
     eslint: "npm:10.11.0"
     hono: "npm:4.13.9"
+    kysely: "npm:0.29.6"
+    pg: "npm:8.23.0"
     prettier: "npm:3.9.9"
     tsdown: "npm:0.23.0"
     turbo: "npm:2.11.4"
     typescript: "npm:6.0.3"
     vite: "npm:8.3.1"
     vitest: "npm:5.0.2"
+    zod: "npm:4.6.5"
   languageName: unknown
   linkType: soft
 

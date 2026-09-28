@@ -1,39 +1,76 @@
 import { pathToFileURL } from 'node:url'
-import { serve } from '@hono/node-server'
-import { PACKAGE_NAME as BRAIN_PACKAGE_NAME } from '@openharness/brain'
-import { PACKAGE_NAME as HANDS_PACKAGE_NAME } from '@openharness/hands'
-import { PACKAGE_NAME as PROTOCOL_PACKAGE_NAME } from '@openharness/protocol'
-import { PACKAGE_NAME as SESSION_PACKAGE_NAME } from '@openharness/session'
-import { app } from './app'
 
-export const PACKAGE_NAME = '@openharness/server'
-export { app }
+import { main } from './main'
 
 /**
- * Placeholder wiring: it proves that every allowed `@openharness/*` edge of this package
- * resolves through built output. It goes away in the v1 chat epic, together with the
- * placeholder exports of the packages listed here.
+ * `@openharness/server` — the runnable openharness server.
+ *
+ * The HTTP API the protocol describes, the SSE stream over a session's event log, and the
+ * scheduler that runs brains against it. `node dist/index.js` reads the environment and starts
+ * everything (see `AGENTS.md` for the variables and `docs/api.md` for the routes).
+ *
+ * ```ts
+ * import { createApp } from '@openharness/server'
+ *
+ * const app = createApp({ store, scheduler, apiKey: 'oh_…' })
+ * ```
+ *
+ * The three pieces a host wires together:
+ *
+ * - **{@link createApp}** — the routes, against any `SessionStore` and `SessionScheduler`.
+ * - **{@link LocalScheduler}** — the single-process scheduler, on top of {@link SessionRunner},
+ *   which owns the per-session turn loop.
+ * - **{@link startServer}** (and {@link main}) — the whole thing: store, migrations, model,
+ *   scheduler, listener and a graceful shutdown.
  */
-export const WIRED_PACKAGES = [
-  PROTOCOL_PACKAGE_NAME,
-  SESSION_PACKAGE_NAME,
-  BRAIN_PACKAGE_NAME,
-  HANDS_PACKAGE_NAME,
-] as const
 
-const DEFAULT_PORT = 3000
+/** This package's name; a cheap way for a dependent to prove the import resolved. */
+export const PACKAGE_NAME = '@openharness/server'
 
-/** Starts the HTTP server. Used by `node dist/index.js` and by e2e tests (later). */
-export function startServer(port: number = Number(process.env['PORT'] ?? DEFAULT_PORT)) {
-  return serve({ fetch: app.fetch, port }, (info) => {
-    console.log(`${PACKAGE_NAME} listening on http://localhost:${info.port}`)
-    console.log(`wired placeholders: ${WIRED_PACKAGES.join(', ')}`)
-  })
-}
+export { createApp, isApiPath, type AppOptions } from './app'
+export {
+  ENV_VARS,
+  DEFAULT_PORT,
+  describeConfig,
+  readServerConfig,
+  usesTestModel,
+  type ServerConfig,
+} from './config'
+export { HttpError, invalidRequest, notFoundError } from './http/errors'
+export { main, startServer, type StartServerOptions, type StartedServer } from './main'
+export {
+  createMockModelFactory,
+  MOCK_ECHO_CHUNKS,
+  MOCK_MODEL_ENV_VALUE,
+  MOCK_MODEL_USAGE,
+  MOCK_RETRYABLE_MARKER,
+  MOCK_SLOW_CHUNKS,
+  MOCK_SLOW_MARKER,
+  MOCK_SLOW_TOTAL_MS,
+  MOCK_TERMINAL_MARKER,
+  planFor,
+} from './mock-model'
+export { resolveModelFactory, type ResolvedModel } from './model'
+export { DEFAULT_DRAIN_TIMEOUT_MS, SessionRunner } from './runner'
+export type { RunSessionOptions, SessionRunnerOptions } from './runner'
+export {
+  DEFAULT_MAX_CONCURRENT_SESSIONS,
+  LocalScheduler,
+  partitions,
+  type LocalSchedulerOptions,
+  type SessionScheduler,
+  type StopSchedulerOptions,
+} from './scheduler'
+export { SSE_KEEPALIVE, SSE_KEEPALIVE_MS, createSessionEventStream } from './sse'
+export { consoleLogger, silentLogger, type AppEnv, type Logger } from './types'
 
+// `node dist/index.js` starts the server; importing this module never does.
 const isDirectRun =
   process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href
 
 if (isDirectRun) {
-  startServer()
+  main().catch((error: unknown) => {
+    console.error('the server could not start', error)
+    process.exitCode = 1
+  })
 }
