@@ -579,7 +579,6 @@ __metadata:
     prettier: "npm:3.9.9"
     react: "npm:19.3.0"
     react-dom: "npm:19.3.0"
-    tsdown: "npm:0.23.0"
     turbo: "npm:2.11.4"
     typescript: "npm:6.0.3"
     vite: "npm:8.3.1"
