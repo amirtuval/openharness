@@ -22,9 +22,9 @@ progress: a chat server with a web UI and a TUI. What works end to end today: ag
 sessions, a chat turn with streamed previews, steering a turn in flight, interrupting it,
 automatic retries of a failed model request, and sessions that survive the process that was
 running them — a turn a dead server left open is closed as `brain_lost` and run again by the
-next one. Multi-instance scheduling — several servers sharing one database and owning
-partitions of the session space between them — is **in progress** (issue #11); today a server
-owns every session it can see.
+next one. Several servers can share one database (`SCHEDULER=postgres`): they split the session
+space into leased partitions, and when one dies another takes its partitions over and finishes
+its turns (see `apps/server/docs/scheduling.md`).
 
 ## How it runs
 

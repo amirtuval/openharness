@@ -21,8 +21,8 @@ DATABASE_URL=postgres://openharness:openharness@localhost:5432/openharness yarn 
 
 Without `DATABASE_URL` the suite fails with that instruction rather than skipping: an e2e suite
 that quietly passes because nothing ran is worse than one that says what it needs. Two files
-_are_ skipped on purpose, and both say why in their output — the failover test (needs #11) and
-the provider smoke test (needs a provider key).
+can skip, and both say why in their output: the provider smoke test (needs a provider key), and
+the failover test, which guards against a server without the multi-instance scheduler.
 
 ## Commands
 
@@ -109,8 +109,8 @@ Four decisions worth knowing before reading the tests:
 
 ### The failover test, and how it decides to skip
 
-The multi-instance scheduler is issue #11, which is not on this branch. On a tree without it,
-`SCHEDULER=postgres` is simply an unknown variable: the server ignores it, comes up on
+The test needs the multi-instance scheduler (`SCHEDULER=postgres`, issue #11). On a tree
+without it, `SCHEDULER=postgres` would simply be an unknown variable: the server ignores it, comes up on
 `LocalScheduler`, and two instances believe they each own every session — which is not
 something the server can report, and not something this test can assert against. So the test
 **detects** the capability and skips with an explanation instead of guessing. Two checks, in
@@ -123,9 +123,10 @@ order:
    partition scheduler is one with `partition_leases.owner` set, and if nothing claims
    partitions, ownership is recorded some other way than this test assumes.
 
-Either way the skip message says which check failed and what would make the test run. When #11
-lands, the same file runs unchanged: both instances with `SCHEDULER=postgres`, one `SIGKILL`
-mid-`__slow__`, and the survivor has to finish the turn.
+Either way the skip message says which check failed and what would make the test run. With
+#11 in the tree the test runs: both instances start with `SCHEDULER=postgres`, the test looks
+up which one owns the session's partition in `partition_leases`, `SIGKILL`s that owner
+mid-`__slow__`, and the survivor has to take the partition over and finish the turn.
 
 ## Testing
 
