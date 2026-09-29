@@ -173,7 +173,14 @@ function reduceStoredEvent(state: TranscriptState, event: StoredEvent): Transcri
       return { ...state, status: 'running' }
 
     case EVENT_TYPES.sessionStatusIdle:
-      return { ...state, status: 'idle' }
+      // A turn that has ended cannot have a reply still streaming: the stored `agent.message`
+      // precedes this, so a preview still open is one nothing will ever replace. That is the
+      // same statement as the span end below, and it is the backstop for the case where the
+      // span end never arrived at all — a stored event this client cannot parse is skipped
+      // (`events/stream.ts`), and a preview no longer watched by anything would otherwise stay
+      // streaming for the life of the session, drawing an empty bubble in a frontend that
+      // renders it (#40).
+      return { ...state, status: 'idle', messages: withoutPreviews(state.messages) }
 
     case EVENT_TYPES.sessionError:
       return {
@@ -201,14 +208,21 @@ function reduceStoredEvent(state: TranscriptState, event: StoredEvent): Transcri
       // A preview that was never replaced by its stored event belongs to a request that
       // failed or was interrupted before the reply could be written; there is nothing to
       // keep. (A reconciled preview is no longer `streaming`, so it survives.)
-      return {
-        ...state,
-        messages: state.messages.filter((message) => !message.streaming),
-      }
+      return { ...state, messages: withoutPreviews(state.messages) }
 
     default:
       return state
   }
+}
+
+/**
+ * The messages that outlive a reply that is not coming: everything that is not still a preview.
+ *
+ * A preview the log never reconciled has no text anyone stored, so there is nothing to keep —
+ * what it stood in for did not happen.
+ */
+function withoutPreviews(messages: readonly TranscriptMessage[]): readonly TranscriptMessage[] {
+  return messages.filter((message) => !message.streaming)
 }
 
 /** The transcript message for a stored `user.message`. */
