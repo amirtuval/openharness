@@ -9,6 +9,7 @@ import type { CreateSessionOptions, ListSessionsOptions } from '@openharness/ses
 import type { AppEnv } from '../types'
 import { notFoundError } from '../http/errors'
 import { parseBody, parseQuery, sessionIdParam } from '../http/request'
+import { nameSessionFromFirstMessage } from '../titles'
 import type { RouteDeps } from './deps'
 import { signalKinds } from './signals'
 
@@ -31,13 +32,20 @@ export function registerSessionRoutes(app: Hono<AppEnv>, deps: RouteDeps): void 
     // `createSession` answers `AgentNotFoundError` for an unknown agent, which the app maps
     // to a 404 in the protocol's envelope.
     const session = await deps.store.createSession(body.agent, options)
+    // A session created with a message is named after it, exactly as one that has its first
+    // message posted afterwards — unless the request carried a title of its own, which wins.
+    const named = await nameSessionFromFirstMessage(
+      deps.store,
+      session.id,
+      body.initial_events ?? [],
+    )
     // `initial_events` are the session's first queued events — the protocol says they are
     // stored "before it starts running" — so a session created with a message runs it, and one
     // created with an interrupt has it claimed, exactly as `POST …/events` would.
     for (const kind of signalKinds(body.initial_events ?? [])) {
       deps.scheduler.signal(session.id, kind)
     }
-    return c.json(session, 201)
+    return c.json(named ?? session, 201)
   })
 
   app.get(sessions, async (c) => {

@@ -2,6 +2,7 @@ import {
   AgentSchema,
   EVENT_TYPES,
   MAX_PAGE_LIMIT,
+  SESSION_TITLE_MAX_LENGTH,
   SessionSchema,
   StoredEventSchema,
   decodePageCursor,
@@ -72,7 +73,8 @@ import { type TestClock, createTestClock } from './clock'
  *
  * - **agents** — create, get, update, and keyset pagination, including `created_at` ties.
  * - **sessions** — the agent snapshot, creation options, `initial_events`, newest-first
- *   pagination, the agent filter, and not-found behaviour.
+ *   pagination, the agent filter, not-found behaviour, and the title an `updateSession` sets,
+ *   keeps or clears.
  * - **appending events** — `id`/`seq` assignment, `processed_at` per event kind, and the shape
  *   of what comes back.
  * - **caller-supplied event ids** — an id the caller brings is the stored event's id and stays
@@ -86,6 +88,8 @@ import { type TestClock, createTestClock } from './clock'
  * - **reading the log** — order, `after_seq`, `types`, `seq` pagination and bad cursors.
  * - **subscriptions** — stored events in `seq` order, ephemeral events interleaved, isolation,
  *   unsubscribe.
+ * - **the in-flight preview** — the `getPreview` read: start, accumulating deltas, what clears
+ *   it (the stored event, a `span.model_request_end`), replacement, and per-session isolation.
  * - **partition signals** — delivery, fan-out to a partition's listeners, and dropping.
  * - **findSessionsNeedingWork** — pending events and open turns, scoped to partitions.
  * - **partition leases** — acquire, renew, expiry at `expires_at`, steal after expiry, release.
@@ -244,6 +248,49 @@ export function runSessionStoreConformance(
         expect(session.title).toBe('A chat')
         expect(session.metadata).toEqual({ ticket: 'OH-4' })
         expect(await store.getSession(session.id)).toEqual(session)
+      })
+
+      it('sets a title after creation, and advances updated_at', async () => {
+        const { store, clock } = await setup()
+        const { session } = await seed(store)
+        clock.advance(5 * SECOND)
+        const updated = await store.updateSession(session.id, { title: 'A chat about widgets' })
+        expect(updated).toMatchObject({
+          id: session.id,
+          title: 'A chat about widgets',
+          status: session.status,
+          metadata: session.metadata,
+          agent: session.agent,
+          created_at: session.created_at,
+          updated_at: timestampAt(clock.currentMs),
+        })
+        expect(await store.getSession(session.id)).toEqual(updated)
+        expectExact(SessionSchema, updated, 'a session')
+        // A title is metadata, not an event: the log is untouched.
+        expect(await store.listEvents(session.id)).toEqual({ data: [], next_page: null })
+      })
+
+      it('keeps the title it omits, clears the one it nulls, and answers null for an unknown session', async () => {
+        const { store, clock } = await setup()
+        const { session } = await seed(store)
+        await store.updateSession(session.id, { title: 'First' })
+        clock.advance(SECOND)
+        expect((await store.updateSession(session.id, {}))?.title).toBe('First')
+        clock.advance(SECOND)
+        expect((await store.updateSession(session.id, { title: null }))?.title).toBeNull()
+        expect((await store.getSession(session.id))?.title).toBeNull()
+        expect(await store.updateSession(unknownSessionId(), { title: 'Nobody' })).toBeNull()
+      })
+
+      it('stores a title of exactly the protocol maximum, as it was given', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const title = 'x'.repeat(SESSION_TITLE_MAX_LENGTH)
+        const updated = await store.updateSession(session.id, { title })
+        expect(updated?.title).toBe(title)
+        const reread = await store.getSession(session.id)
+        expect(reread?.title).toBe(title)
+        expect(reread?.updated_at).toBe(updated?.updated_at)
       })
 
       it('appends initial_events in the creation transaction, unprocessed and numbered from 1', async () => {
@@ -995,6 +1042,110 @@ export function runSessionStoreConformance(
       })
     })
 
+    // -------------------------------------------------------- in-flight preview
+
+    describe('the in-flight preview', () => {
+      it('is null until an event_start, and accumulates the deltas that follow it', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        expect(await store.getPreview(session.id)).toBeNull()
+
+        const id = suppliedEventId()
+        await store.publishEphemeral(session.id, eventStart(id))
+        expect(await store.getPreview(session.id)).toEqual({ eventId: id, text: '' })
+
+        await store.publishEphemeral(session.id, deltaOf(id, 'Hel'))
+        await store.publishEphemeral(session.id, deltaOf(id, 'lo'))
+        expect(await store.getPreview(session.id)).toEqual({ eventId: id, text: 'Hello' })
+        // A delta extends the preview, not the log: the text is nowhere else yet.
+        expect(await store.listEvents(session.id)).toEqual({ data: [], next_page: null })
+      })
+
+      it('is cleared when the event it previews is stored', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const id = suppliedEventId()
+        await store.publishEphemeral(session.id, eventStart(id))
+        await store.publishEphemeral(session.id, deltaOf(id, 'Hello'))
+        const [stored] = await store.appendEvents(session.id, [agentMessageUnder(id, 'Hello')])
+        expect(stored?.id).toBe(id)
+        expect(await store.getPreview(session.id)).toBeNull()
+
+        // A delta that arrives afterwards does not resurrect it: the preview is over, and the
+        // log is what a reader sees now.
+        await store.publishEphemeral(session.id, deltaOf(id, ' and more'))
+        expect(await store.getPreview(session.id)).toBeNull()
+      })
+
+      it('is cleared by a span.model_request_end, and by nothing else', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const start = await openSpan(store, session.id)
+        const id = suppliedEventId()
+        await store.publishEphemeral(session.id, eventStart(id))
+        await store.publishEphemeral(session.id, deltaOf(id, 'Hello'))
+
+        // An unrelated append leaves the preview alone...
+        await append(store, session.id, [userMessage('another message')])
+        expect(await store.getPreview(session.id)).toEqual({ eventId: id, text: 'Hello' })
+
+        // ...and the end of the model request the preview belonged to ends it, whether or not
+        // that request produced a message.
+        await append(store, session.id, [spanEnd(start)])
+        expect(await store.getPreview(session.id)).toBeNull()
+      })
+
+      it('is replaced by a new event_start, which the old preview stops extending', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const first = suppliedEventId()
+        const second = suppliedEventId()
+        await store.publishEphemeral(session.id, eventStart(first))
+        await store.publishEphemeral(session.id, deltaOf(first, 'one'))
+        await store.publishEphemeral(session.id, eventStart(second))
+        expect(await store.getPreview(session.id)).toEqual({ eventId: second, text: '' })
+
+        // A delta for the preview that was replaced is delivered as always, and changes nothing:
+        // there is at most one preview per session.
+        await store.publishEphemeral(session.id, deltaOf(first, 'two'))
+        expect(await store.getPreview(session.id)).toEqual({ eventId: second, text: '' })
+        await store.publishEphemeral(session.id, deltaOf(second, 'three'))
+        expect(await store.getPreview(session.id)).toEqual({ eventId: second, text: 'three' })
+      })
+
+      it('is kept per session', async () => {
+        const { store } = await setup()
+        const agent = await store.createAgent(agentInput())
+        const one = await store.createSession(agent.id)
+        const other = await store.createSession(agent.id)
+        const oneId = suppliedEventId()
+        const otherId = suppliedEventId()
+        await store.publishEphemeral(one.id, eventStart(oneId))
+        await store.publishEphemeral(other.id, eventStart(otherId))
+        await store.publishEphemeral(one.id, deltaOf(oneId, 'mine'))
+        await store.publishEphemeral(other.id, deltaOf(otherId, 'theirs'))
+
+        expect(await store.getPreview(one.id)).toEqual({ eventId: oneId, text: 'mine' })
+        expect(await store.getPreview(other.id)).toEqual({ eventId: otherId, text: 'theirs' })
+        // Storing one session's message clears that session's preview, and no other's.
+        await store.appendEvents(one.id, [agentMessageUnder(oneId, 'mine')])
+        expect(await store.getPreview(one.id)).toBeNull()
+        expect(await store.getPreview(other.id)).toEqual({ eventId: otherId, text: 'theirs' })
+      })
+
+      it('ignores a delta nothing started, and answers for a session that does not exist', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        // A delta whose `event_start` this store never saw cannot start a preview: a preview
+        // begins with an `event_start` and with nothing else.
+        await store.publishEphemeral(session.id, deltaOf(suppliedEventId(), 'nowhere'))
+        expect(await store.getPreview(session.id)).toBeNull()
+
+        const error = await thrownBy(() => store.getPreview(unknownSessionId()))
+        expectErrorIdentity(error, 'SessionNotFoundError', SESSION_NOT_FOUND_ERROR_CODE)
+      })
+    })
+
     // -------------------------------------------------------- partition signals
 
     describe('partition signals', () => {
@@ -1391,6 +1542,11 @@ function agentMessage(text: string): AppendableEvent {
   return { type: EVENT_TYPES.agentMessage, content: [{ type: 'text', text }] }
 }
 
+/** An `agent.message` to append under the id `id`, as the brain appends one its previews announced. */
+function agentMessageUnder(id: EventId, text: string): AppendableEvent {
+  return { ...agentMessage(text), id }
+}
+
 /** A `session.status_running` to append. */
 function statusRunning(): AppendableEvent {
   return { type: EVENT_TYPES.sessionStatusRunning }
@@ -1450,10 +1606,15 @@ function previewedId(event: StreamOnlyEvent): EventId {
 
 /** An `event_delta` extending the preview of `id`. */
 function eventDelta(id: EventId): StreamOnlyEvent {
+  return deltaOf(id, 'hel')
+}
+
+/** An `event_delta` carrying `text` for the preview of `id`. */
+function deltaOf(id: EventId, text: string): StreamOnlyEvent {
   return {
     type: EVENT_TYPES.eventDelta,
     event_id: id,
-    delta: { type: 'content_delta', index: 0, content: { type: 'text', text: 'hel' } },
+    delta: { type: 'content_delta', index: 0, content: { type: 'text', text } },
   }
 }
 

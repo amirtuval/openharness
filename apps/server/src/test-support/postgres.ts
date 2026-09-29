@@ -129,9 +129,9 @@ export async function startPostgres(
   return fixture
 }
 
-/** Empty the four tables the store uses. */
+/** Empty the five tables the store uses. */
 export async function truncateAll(db: Kysely<PostgresSchema>): Promise<void> {
-  await sql`truncate table events, sessions, agents, partition_leases`.execute(db)
+  await sql`truncate table events, session_previews, sessions, agents, partition_leases`.execute(db)
 }
 
 /** What a recorded write carried: the fence, when the writer attached one. */
@@ -169,5 +169,33 @@ export class RecordingStore extends PostgresSessionStore {
   ): Promise<UserEvent[]> {
     this.writes.push(options ?? {})
     return super.markProcessed(sessionId, eventIds, options)
+  }
+}
+
+/**
+ * A store that counts its subscriptions, like `ObservableStore` does in memory.
+ *
+ * A test that has to catch what a connection is sent *live* — a preview delta, say, which
+ * only goes to the connections attached when it is published — needs that connection's
+ * subscription to be in place before the events are, and counting them is the only way to
+ * know it is: `subscribe` answers once the `LISTEN` has been issued.
+ */
+export class ObservablePostgresStore extends PostgresSessionStore {
+  /** How many subscriptions this store has established. */
+  subscriptions = 0
+
+  /** How many of them have been released again. */
+  unsubscribed = 0
+
+  override async subscribe(
+    sessionId: SessionId,
+    listener: Parameters<PostgresSessionStore['subscribe']>[1],
+  ): ReturnType<PostgresSessionStore['subscribe']> {
+    const unsubscribe = await super.subscribe(sessionId, listener)
+    this.subscriptions += 1
+    return () => {
+      this.unsubscribed += 1
+      unsubscribe()
+    }
   }
 }

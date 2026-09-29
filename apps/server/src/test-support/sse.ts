@@ -19,7 +19,13 @@ export interface SseMessage {
 
 /** A stream being followed: pull messages, or close it. */
 export interface SseReader extends AsyncIterable<SseMessage> {
-  /** The next message, or `null` when the stream ended. */
+  /**
+   * The next message, or `null` when the stream ended.
+   *
+   * Rejects when the server wrote something that is not a `StreamEvent` (a frame the
+   * protocol does not allow), or when none arrived in time. A malformed frame ends the read
+   * as well: everything after it is unread.
+   */
   next(timeoutMs?: number): Promise<SseMessage | null>
   /** Stop reading; the connection is dropped. */
   close(): void
@@ -43,6 +49,14 @@ export function openSse(response: Response): SseReader {
   const waiters: ((message: SseMessage | null) => void)[] = []
   let buffer = ''
   let ended = false
+  /**
+   * A message the server wrote that is not a `StreamEvent`.
+   *
+   * Kept rather than thrown from the reading loop: a parse failure is the *server's* bug, and
+   * a test has to see it as that. Swallowing it — which is what a reader that only ends its
+   * stream would do — reports "the stream ended" for what is really an invalid frame.
+   */
+  let malformed: Error | null = null
 
   const push = (message: SseMessage | null): void => {
     const waiter = waiters.shift()
@@ -80,10 +94,25 @@ export function openSse(response: Response): SseReader {
           }
           const raw = buffer.slice(0, end)
           buffer = buffer.slice(end + 2)
-          const message = parseMessage(raw)
+          let message: SseMessage | null
+          try {
+            message = parseMessage(raw)
+          } catch (error) {
+            // The frame is the story here, not the error: `data:` is what the server wrote.
+            malformed =
+              error instanceof Error
+                ? new Error(`the server wrote a message that is not a stream event: ${raw}`, {
+                    cause: error,
+                  })
+                : new Error(String(error))
+            break
+          }
           if (message !== null) {
             push(message)
           }
+        }
+        if (malformed !== null) {
+          break
         }
       }
     } catch {
@@ -98,16 +127,23 @@ export function openSse(response: Response): SseReader {
     if (buffered !== undefined) {
       return Promise.resolve(buffered)
     }
+    if (malformed !== null) {
+      return Promise.reject(malformed)
+    }
     if (ended) {
       return Promise.resolve(null)
     }
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        reject(new Error(`no SSE message within ${timeoutMs}ms`))
+        reject(malformed ?? new Error(`no SSE message within ${timeoutMs}ms`))
       }, timeoutMs)
       timer.unref()
       waiters.push((message) => {
         clearTimeout(timer)
+        if (message === null && malformed !== null) {
+          reject(malformed)
+          return
+        }
         resolve(message)
       })
     })

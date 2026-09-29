@@ -34,20 +34,20 @@ Everything under `API_VERSION_PREFIX` (`/v1`). Bodies and queries are validated 
 protocol's schemas, so the shapes are not repeated here — see
 [`packages/protocol/AGENTS.md`](../../packages/protocol/AGENTS.md).
 
-| method | path                                      | body / query                             | answers                                        |
-| ------ | ----------------------------------------- | ---------------------------------------- | ---------------------------------------------- |
-| `GET`  | `/health`                                 | —                                        | `{ status: 'ok' }`; never needs a key          |
-| `POST` | `/v1/agents`                              | `CreateAgentRequestSchema`               | 201, the `Agent`                               |
-| `GET`  | `/v1/agents`                              | `ListAgentsQuerySchema`                  | `{ data, next_page }`                          |
-| `GET`  | `/v1/agents/{agent_id}`                   | —                                        | the `Agent`, or 404                            |
-| `POST` | `/v1/agents/{agent_id}`                   | `UpdateAgentRequestSchema`               | the updated `Agent`, or 404                    |
-| `POST` | `/v1/sessions`                            | `CreateSessionRequestSchema`             | 201, the `Session`; 404 for an unknown agent   |
-| `GET`  | `/v1/sessions`                            | `ListSessionsQuerySchema`                | `{ data, next_page }`                          |
-| `GET`  | `/v1/sessions/{session_id}`               | —                                        | the `Session`, or 404                          |
-| `POST` | `/v1/sessions/{session_id}/events`        | `SendEventsRequestSchema`                | `{ data: user event[] }`; then signals         |
-| `GET`  | `/v1/sessions/{session_id}/events`        | `ListEventsQuerySchema`                  | `{ data, next_page }`                          |
-| `GET`  | `/v1/sessions/{session_id}/events/stream` | `StreamEventsQuerySchema`                | the SSE stream; 404 for an unknown session     |
-| `POST` | `/v1/sessions/{session_id}/ai-sdk/chat`   | the AI SDK `useChat` request (see below) | an AI SDK UI message stream — an **extension** |
+| method | path                                      | body / query                             | answers                                             |
+| ------ | ----------------------------------------- | ---------------------------------------- | --------------------------------------------------- |
+| `GET`  | `/health`                                 | —                                        | `{ status: 'ok' }`; never needs a key               |
+| `POST` | `/v1/agents`                              | `CreateAgentRequestSchema`               | 201, the `Agent`                                    |
+| `GET`  | `/v1/agents`                              | `ListAgentsQuerySchema`                  | `{ data, next_page }`                               |
+| `GET`  | `/v1/agents/{agent_id}`                   | —                                        | the `Agent`, or 404                                 |
+| `POST` | `/v1/agents/{agent_id}`                   | `UpdateAgentRequestSchema`               | the updated `Agent`, or 404                         |
+| `POST` | `/v1/sessions`                            | `CreateSessionRequestSchema`             | 201, the `Session`; 404 for an unknown agent        |
+| `GET`  | `/v1/sessions`                            | `ListSessionsQuerySchema`                | `{ data, next_page }`                               |
+| `GET`  | `/v1/sessions/{session_id}`               | —                                        | the `Session`, or 404                               |
+| `POST` | `/v1/sessions/{session_id}/events`        | `SendEventsRequestSchema`                | `{ data: user event[] }`; then signals, and a title |
+| `GET`  | `/v1/sessions/{session_id}/events`        | `ListEventsQuerySchema`                  | `{ data, next_page }`                               |
+| `GET`  | `/v1/sessions/{session_id}/events/stream` | `StreamEventsQuerySchema`                | the SSE stream; 404 for an unknown session          |
+| `POST` | `/v1/sessions/{session_id}/ai-sdk/chat`   | the AI SDK `useChat` request (see below) | an AI SDK UI message stream — an **extension**      |
 
 There is no `GET /v1/models`: it is out of scope for v1 (the epic tracks it separately).
 Anything else answers 404 in the protocol's error envelope.
@@ -132,13 +132,59 @@ Replay and live delivery are stitched together so a client cannot tell where one
 
 1. **subscribe first** — the store starts buffering everything that happens from here;
 2. **replay** the log after the resume position, page by page;
-3. **flush the buffer**, dropping any stored event at or below the last `seq` the replay
+3. **snapshot the preview in flight** — see below — on a connection that asked for previews;
+4. **flush the buffer**, dropping any stored event at or below the last `seq` the replay
    delivered, which is exactly the overlap.
 
 `event_start` / `event_delta` are delivered only to a connection that asked for them with
 `event_deltas[]=agent.message`. Disconnecting cancels the body stream, and that is what ends
 the store subscription and the keepalive timer — there is nothing left running for a client
 that has gone away.
+
+### The preview snapshot (#27)
+
+Previews are delivered to the connections attached when they are published, and to nobody
+else. A client that connects while a reply is streaming — a reloaded page, a second tab —
+would therefore start rendering it at whichever delta it happened to catch, and show a reply
+that begins mid-word until the stored `agent.message` replaces the preview at the end of the
+turn. The log cannot answer that, because the message is not in it yet; the store keeps the
+text that was sent (`SessionStore.getPreview`), and this is where it is handed over.
+
+After the replay, a connection that asked for `agent.message` previews gets the reply in
+flight as exactly the frames it already knows how to read: `event_start` for the `sevt_` id the
+brain announced, then **one** `event_delta` carrying the whole accumulated text at index `0`.
+It is skipped when there is nothing in flight or when the stored message it previews was in the
+replay. The live deltas that follow continue from there, and the stored `agent.message` ends
+the preview as usual — under the same id.
+
+The `event_delta` is only sent when the preview has text, the `event_start` always is. A
+connection can land in the window between the brain's `event_start` and its first delta — one
+store round trip long, and easy to hit on a loaded machine — and a preview in that window has
+accumulated nothing: `text: ''` is not a block the protocol accepts (`TextBlockSchema` wants at
+least one character), so the accumulated delta for it would be a frame a validating client
+stops at, while there is nothing for the client to be missing. The announcement still goes out,
+and is what the live deltas that follow are read under.
+
+**The race.** Deltas can be published while the snapshot is being read, so they are already in
+the snapshot's text _and_ waiting in the buffer to be written out live; applied twice, the
+reply would double in the middle. Ephemeral events carry no position to compare with, so the
+buffer is filtered by text: the deltas the snapshot covers are the ones published before it was
+read, so their text is what its text **ends** with — and, in the buffer, they are the first
+deltas for the id, because everything published before the connection subscribed is in neither
+place. `dropCovered` in `sse.ts` therefore drops the longest run of buffered deltas, from the
+first, that still ends the snapshot's text; everything after it is new content and goes out
+live. Buffered `event_start`s for the snapshot's id go too — a second one would make a client
+start its accumulator over, throwing the snapshot away.
+
+### Session titles (#29)
+
+A session is named after the first `user.message` it is sent: `POST …/events`, and the
+`initial_events` of `POST /v1/sessions`, derive a title from it and set it, in the same request
+that stores the message — the creation response carries the title it just set. The rule is
+`deriveSessionTitle` in `titles.ts`: the first non-empty line, whitespace collapsed, trimmed
+and cut to the protocol's `SESSION_TITLE_MAX_LENGTH` with an ellipsis. It is written **once**:
+a title supplied at creation, and one an earlier message produced, is never replaced, and a
+message with no text leaves the title `null`.
 
 ## Scheduler
 
@@ -350,7 +396,8 @@ src/
   scheduler.ts          SessionScheduler, LocalScheduler, partition helpers
   pass-queue.ts         PassQueue: the queue and the concurrency limit, shared by both
   partition-scheduler.ts PostgresPartitionScheduler: leases, epochs, signals, recovery (#11)
-  sse.ts                the SSE body of a stream request
+  sse.ts                the SSE body of a stream request, and the preview snapshot (#27)
+  titles.ts             naming a session after its first message (#29)
   static.ts             serving a built web app from OPENHARNESS_WEB_DIR
   types.ts              AppEnv (the Hono environment) and the Logger seam
   http/
@@ -382,9 +429,23 @@ scripted model. Route tests call the Hono app in-process (`app.request()`); the 
 tests start a real listener on an ephemeral port, because what they assert — frames on a
 socket, the client transport's own request shape — only exists over one.
 
-- `app.test.ts` — every route, the error envelopes, auth, CORS, static assets.
+Test **files** run one at a time (`fileParallelism: false` in `vitest.config.ts`): the two
+suites that run against the same Postgres — `partition-scheduler.test.ts` and
+`sse-postgres.test.ts` — each empty the tables they use, so two of them in flight at once would
+delete each other's sessions. Packages still run in parallel with each other.
+
+- `app.test.ts` — every route, the error envelopes, auth, CORS, static assets, and the title a
+  session gets from its first message.
 - `sse.test.ts` — replay and live with no gaps or duplicates, `last-event-id` resume, previews
-  opt-in, keepalive, disconnect cleanup.
+  opt-in, keepalive, disconnect cleanup, and the preview snapshot a connection that opens
+  mid-reply is given (#27) — including the delta that lands while the snapshot is read, and a
+  preview whose `event_start` has been published but whose text has not started. The replies
+  those tests reload into are held by the test (`defer`), not paced by a clock.
+- `sse-postgres.test.ts` — the same reload mid-reply over a real Postgres store, where the
+  preview is a row another instance can read. Same database rule as
+  `partition-scheduler.test.ts`: `DATABASE_URL`, otherwise a container, otherwise skipped.
+- `titles.test.ts` — the derivation: first non-empty line, whitespace, truncation with an
+  ellipsis, and the write path that never replaces a title that exists.
 - `scheduler.test.ts` — one turn per session, steering, interrupts (running and idle), a
   message queued behind an interrupt, recovery on start, concurrency, stopping, and the fence
   reaching the store.

@@ -15,6 +15,8 @@ import {
   REQUEST_ID_HEADER,
   SendEventsResponseSchema,
   SessionSchema,
+  type Session,
+  type SessionId,
 } from '@openharness/protocol'
 
 import { createApp } from './app'
@@ -22,6 +24,7 @@ import {
   createTestApp,
   httpCreateAgent,
   httpCreateSession,
+  httpSendMessage,
   readHistory,
   waitForIdle,
   type TestContext,
@@ -42,6 +45,25 @@ afterEach(async () => {
 function setup(options: Parameters<typeof createTestApp>[0] = {}): TestContext {
   context = createTestApp(options)
   return context
+}
+
+/** Read one session over HTTP, checked against the protocol's schema. */
+async function readSession(test: TestContext, sessionId: SessionId): Promise<Session> {
+  const response = await test.app.request(`${API_VERSION_PREFIX}/sessions/${sessionId}`)
+  return SessionSchema.parse(await response.json())
+}
+
+/** Post events to a session over HTTP and return the response. */
+async function postEvents(
+  test: TestContext,
+  sessionId: SessionId,
+  events: readonly unknown[],
+): Promise<Response> {
+  return test.app.request(`${API_VERSION_PREFIX}/sessions/${sessionId}/events`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ events }),
+  })
 }
 
 describe('GET /health', () => {
@@ -395,6 +417,75 @@ describe('the events API', () => {
 
     expect(response.status).toBe(400)
     expect(ApiErrorBodySchema.parse(await response.json()).error.type).toBe('invalid_request_error')
+  })
+})
+
+describe('session titles', () => {
+  it('names a session after the first message it was sent', async () => {
+    const test = setup({ replies: [{ text: ['ok'] }] })
+    const agent = await httpCreateAgent(test)
+    const session = await httpCreateSession(test, agent.id)
+    expect(session.title).toBeNull()
+
+    await httpSendMessage(test, session.id, 'Fix the SSE reload bug\n\nit never replays previews')
+
+    expect((await readSession(test, session.id)).title).toBe('Fix the SSE reload bug')
+  })
+
+  it('does not rename a session when later messages arrive', async () => {
+    const test = setup({ replies: [{ text: ['ok'] }] })
+    const agent = await httpCreateAgent(test)
+    const session = await httpCreateSession(test, agent.id)
+    await httpSendMessage(test, session.id, 'the first thing')
+    await waitForIdle(test.store, session.id)
+
+    await httpSendMessage(test, session.id, 'and now something else, at some length')
+
+    expect((await readSession(test, session.id)).title).toBe('the first thing')
+  })
+
+  it('keeps the title a session was created with', async () => {
+    const test = setup({ replies: [{ text: ['ok'] }] })
+    const agent = await httpCreateAgent(test)
+    const session = await httpCreateSession(test, agent.id, { title: 'Named up front' })
+
+    await httpSendMessage(test, session.id, 'a message that would have named it otherwise')
+
+    expect((await readSession(test, session.id)).title).toBe('Named up front')
+  })
+
+  it('names a session created with initial_events, and answers with the title', async () => {
+    const test = setup({ replies: [{ text: ['ok'] }] })
+    const agent = await httpCreateAgent(test)
+
+    const session = await httpCreateSession(test, agent.id, {
+      initial_events: [{ type: 'user.message', content: [{ type: 'text', text: 'Hi there' }] }],
+    })
+
+    expect(session.title).toBe('Hi there')
+    expect((await readSession(test, session.id)).title).toBe('Hi there')
+  })
+
+  it('leaves the title null when the first message carries no text', async () => {
+    const test = setup({ replies: [{ text: ['ok'] }] })
+    const agent = await httpCreateAgent(test)
+    const session = await httpCreateSession(test, agent.id)
+
+    // A `user.message` may carry no blocks at all; there is nothing to name the session after.
+    await postEvents(test, session.id, [{ type: 'user.message', content: [] }])
+
+    expect((await readSession(test, session.id)).title).toBeNull()
+  })
+
+  it('leaves the title null for an interrupt', async () => {
+    const test = setup()
+    const agent = await httpCreateAgent(test)
+    const session = await httpCreateSession(test, agent.id)
+
+    await postEvents(test, session.id, [{ type: 'user.interrupt' }])
+    await waitForIdle(test.store, session.id)
+
+    expect((await readSession(test, session.id)).title).toBeNull()
   })
 })
 

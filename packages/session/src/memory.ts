@@ -53,9 +53,11 @@ import type {
   PartitionSignalInput,
   PartitionSignalListener,
   SessionEventListener,
+  SessionPreview,
   SessionStore,
   TurnState,
   Unsubscribe,
+  UpdateSessionRequest,
 } from './store'
 
 /**
@@ -97,6 +99,14 @@ export class InMemorySessionStore implements SessionStore {
    * Postgres store gets the same guarantee from the primary key on `events.id`.
    */
   readonly #eventIds = new Set<EventId>()
+
+  /**
+   * The preview in flight for each session whose current `agent.message` is being streamed:
+   * the id its `event_start` named and the text its deltas have accumulated. An entry appears
+   * on `event_start` and goes when the previewed event is stored or a `span.model_request_end`
+   * is appended — see {@link SessionStore.getPreview}.
+   */
+  readonly #previews = new Map<string, PreviewRecord>()
 
   readonly #leases = new Map<number, LeaseRecord>()
 
@@ -207,6 +217,18 @@ export class InMemorySessionStore implements SessionStore {
     return resolved({ data: data.map(clone), next_page })
   }
 
+  updateSession(sessionId: SessionId, update: UpdateSessionRequest): Promise<Session | null> {
+    const record = this.#sessions.get(sessionId)
+    if (record === undefined) {
+      return resolved(null)
+    }
+    if (update.title !== undefined) {
+      record.session.title = update.title
+    }
+    record.session.updated_at = timestampAt(this.#clock())
+    return resolved(clone(record.session))
+  }
+
   // ----------------------------------------------------------------- events
 
   appendEvents(
@@ -302,8 +324,15 @@ export class InMemorySessionStore implements SessionStore {
 
   publishEphemeral(sessionId: SessionId, event: StreamOnlyEvent): Promise<void> {
     this.#requireSession(sessionId)
+    this.#trackPreview(sessionId, event)
     this.#deliver(sessionId, clone(event))
     return resolved(undefined)
+  }
+
+  getPreview(sessionId: SessionId): Promise<SessionPreview | null> {
+    this.#requireSession(sessionId)
+    const preview = this.#previews.get(sessionId)
+    return resolved(preview === undefined ? null : { eventId: preview.eventId, text: preview.text })
   }
 
   // -------------------------------------------------------- scheduler support
@@ -452,7 +481,30 @@ export class InMemorySessionStore implements SessionStore {
     if (stored.length > 0) {
       record.session.updated_at = timestampAt(now)
     }
+    if (endsPreview(this.#previews.get(record.session.id), stored)) {
+      this.#previews.delete(record.session.id)
+    }
     return stored
+  }
+
+  /**
+   * Fold an ephemeral event into the session's in-flight preview.
+   *
+   * An `event_start` begins a preview — replacing whatever the session was previewing before,
+   * because there is only ever one — and an `event_delta` extends the preview of the id it
+   * names, and nothing else: a delta for another event (one whose `event_start` this store
+   * never saw, or one that has been cleared) is delivered as it always was and leaves the
+   * preview alone.
+   */
+  #trackPreview(sessionId: SessionId, event: StreamOnlyEvent): void {
+    if (event.type === EVENT_TYPES.eventStart) {
+      this.#previews.set(sessionId, { eventId: event.event.id, text: '' })
+      return
+    }
+    const preview = this.#previews.get(sessionId)
+    if (preview !== undefined && preview.eventId === event.event_id) {
+      preview.text += event.delta.content.text
+    }
   }
 
   /** Refuse a fenced write whose epoch is not the partition's live one; unfenced writes always pass. */
@@ -515,6 +567,12 @@ interface EventRecord {
    * read returns is exactly a `StoredEvent`.
    */
   readonly createdAtMs: number
+}
+
+/** The preview in flight for one session: the id its `event_start` named, and the text so far. */
+interface PreviewRecord {
+  readonly eventId: EventId
+  text: string
 }
 
 /** A session's header and its log. */
@@ -638,6 +696,20 @@ function findOpenSpan(events: readonly StoredEvent[]): ModelRequestStartEvent | 
     return start
   }
   return null
+}
+
+/**
+ * Whether an append ends the session's preview: the event the preview was for is now stored —
+ * the log is the authority, and the preview was its display stand-in — or the model request the
+ * preview belonged to ended, whether or not it produced a message.
+ */
+function endsPreview(preview: PreviewRecord | undefined, stored: readonly StoredEvent[]): boolean {
+  if (preview === undefined) {
+    return false
+  }
+  return stored.some(
+    (event) => event.id === preview.eventId || event.type === EVENT_TYPES.modelRequestEnd,
+  )
 }
 
 /** Whether a session has work waiting: a pending user event, or an open turn. */

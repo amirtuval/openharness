@@ -197,3 +197,40 @@ function delay(ms: number): Promise<void> {
 export function modelError(statusCode: number, message: string): Error {
   return Object.assign(new Error(message), { statusCode })
 }
+
+/** A promise only the test can settle; what {@link defer} hands back. */
+export interface Deferred {
+  /** What a {@link ScriptedReply}'s `onChunk` awaits to hold the reply. */
+  readonly promise: Promise<void>
+  /** Let the reply continue. Settling twice is a no-op. */
+  release(): void
+}
+
+/**
+ * How long a test that holds a reply open may take, in milliseconds.
+ *
+ * Vitest's own default is 10 seconds, which is *less* than the waits such a test makes: a
+ * reload mid-reply reads with a 10-second bound, the frames it expects next with 5 more, and
+ * the end of the turn with 15 — each of them a condition with room for a slow machine, and
+ * together more than the default allows. A budget under the sum of the waits fails tests
+ * that were about to pass; this one is above it, and the waits inside are what the
+ * assertions are still made of.
+ */
+export const HELD_REPLY_TEST_TIMEOUT_MS = 30_000
+
+/**
+ * A gate for a scripted reply.
+ *
+ * A test that has to act *during* a turn — reload mid-reply, read the preview the store
+ * holds — must be able to stop the turn where it wants it rather than hope the reply is
+ * still streaming when it looks. `onChunk` awaiting one of these is how: the model produces
+ * everything before it and nothing after it until {@link Deferred.release} is called, so
+ * what the turn has published is a fact the test controls instead of a race.
+ */
+export function defer(): Deferred {
+  let release: () => void = () => {}
+  const promise = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  return { promise, release }
+}

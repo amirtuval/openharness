@@ -9,8 +9,10 @@ import {
   newEventId,
   partitionOf,
   type CreateAgentRequest,
+  type EventId,
   type Session,
   type StoredEvent,
+  type StreamOnlyEvent,
   type UserEventInput,
 } from '@openharness/protocol'
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql'
@@ -19,6 +21,7 @@ import { Pool } from 'pg'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 
 import { DuplicateEventIdError, FencedError, isFencedError } from '../errors'
+import type { AppendableEvent } from '../store'
 import { createTestClock, type TestClock } from '../testing/clock'
 import { runSessionStoreConformance, type MakeSessionStore } from '../testing/conformance'
 import { createPostgresSessionStore, migrate, type PostgresSchema } from './index'
@@ -305,6 +308,32 @@ if (target === null) {
       expect(received).toEqual([EVENT_TYPES.userMessage, EVENT_TYPES.eventStart])
     })
 
+    it('keeps the in-flight preview in the table, for any store to read', async () => {
+      const { store, clock, session } = await seeded()
+      // A second store on the same pool is a second process as far as the database is
+      // concerned: a preview written by one is what the other reads, which is what makes the
+      // snapshot work when the brain and the stream are served by different instances.
+      const second = track(createPostgresSessionStore({ pool }, { now: clock.now }))
+      const previewId = newEventId()
+
+      await store.publishEphemeral(session.id, eventStart(previewId))
+      await store.publishEphemeral(session.id, deltaOf(previewId, 'half a '))
+      // The row is written in the publish's own transaction, so a reader sees it as soon as
+      // the publish resolved — never a delta that is announced but not yet readable.
+      expect(await second.getPreview(session.id)).toEqual({ eventId: previewId, text: 'half a ' })
+
+      await second.publishEphemeral(session.id, deltaOf(previewId, 'reply'))
+      expect(await store.getPreview(session.id)).toEqual({
+        eventId: previewId,
+        text: 'half a reply',
+      })
+
+      // And the append that stores the message clears it for every store, not only the writer's.
+      await second.appendEvents(session.id, [agentMessageUnder(previewId, 'half a reply')])
+      expect(await store.getPreview(session.id)).toBeNull()
+      expect(await second.getPreview(session.id)).toBeNull()
+    })
+
     it('applies its migrations idempotently', async () => {
       // The suite's `beforeAll` has already migrated this database; running again must be a
       // no-op that leaves the schema usable, which is what makes it safe on every deploy.
@@ -356,7 +385,9 @@ if (target === null) {
 
   /** Empty every table, so a test starts where the previous one started. */
   async function truncateAll(): Promise<void> {
-    await sql`truncate table events, sessions, agents, partition_leases`.execute(db)
+    await sql`truncate table events, session_previews, sessions, agents, partition_leases`.execute(
+      db,
+    )
   }
 }
 
@@ -368,6 +399,25 @@ function agentInput(name = 'Summarizer'): CreateAgentRequest {
 /** A `user.message` to append. */
 function userMessage(text: string): UserEventInput {
   return { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text }] }
+}
+
+/** An `event_start` previewing `id`. */
+function eventStart(id: EventId): StreamOnlyEvent {
+  return { type: EVENT_TYPES.eventStart, event: { type: EVENT_TYPES.agentMessage, id } }
+}
+
+/** An `event_delta` carrying `text` for the preview of `id`. */
+function deltaOf(id: EventId, text: string): StreamOnlyEvent {
+  return {
+    type: EVENT_TYPES.eventDelta,
+    event_id: id,
+    delta: { type: 'content_delta', index: 0, content: { type: 'text', text } },
+  }
+}
+
+/** An `agent.message` to append under the id `id`, as the brain appends one its previews announced. */
+function agentMessageUnder(id: EventId, text: string): AppendableEvent {
+  return { id, type: EVENT_TYPES.agentMessage, content: [{ type: 'text', text }] }
 }
 
 /** Whether a Docker daemon looks reachable, so testcontainers has something to talk to. */
