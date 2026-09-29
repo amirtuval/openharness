@@ -17,6 +17,10 @@ coverage/
 !.yarn/sdks
 !.yarn/versions
 
+# playwright
+/test-results/
+e2e/test-results/
+
 # misc
 .DS_Store
 *.log
