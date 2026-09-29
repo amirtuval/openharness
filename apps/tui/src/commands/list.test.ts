@@ -3,6 +3,8 @@ import { createFakeClient } from '@openharness/client/testing'
 import { makeAgent, makeSession } from '@openharness/protocol/fixtures'
 import { describe, expect, it } from 'vitest'
 
+import { MAX_LIST_PAGES } from '../paging'
+import { pagedAgents, pagedSessions, seedAgents, seedSessions } from '../test-support/fake'
 import { formatAgents, formatSessions, runAgents, runSessions, type CommandIo } from './list'
 
 /** Collect what a command wrote, and how it left. */
@@ -80,6 +82,19 @@ describe('runSessions', () => {
     expect(out.join('\n')).toContain(fake.session.id)
   })
 
+  it('lists every session, not just the first page', async () => {
+    const fake = createFakeClient()
+    const sessions = await seedSessions(fake, 120)
+    const { io, out } = recorder()
+
+    const code = await runSessions(pagedSessions(fake, sessions), io)
+
+    expect(code).toBe(0)
+    expect(out).toHaveLength(120)
+    expect(out.join('\n')).toContain('Session 01')
+    expect(out.join('\n')).toContain('Session 120')
+  })
+
   it('reports a failure on stderr and exits 1', async () => {
     const fake = createFakeClient()
     const client = {
@@ -109,6 +124,42 @@ describe('runAgents', () => {
 
     expect(code).toBe(0)
     expect(out.join('\n')).toContain(fake.agent.name)
+  })
+
+  it('lists every agent, not just the first page', async () => {
+    const fake = createFakeClient()
+    const agents = await seedAgents(fake, 45)
+    const { io, out } = recorder()
+
+    const code = await runAgents(pagedAgents(fake, agents), io)
+
+    expect(code).toBe(0)
+    expect(out).toHaveLength(45)
+    expect(out.join('\n')).toContain('Agent 01')
+    expect(out.join('\n')).toContain('Agent 45')
+  })
+
+  it('gives up on a server that never runs out of pages', async () => {
+    const fake = createFakeClient()
+    let answer = 0
+    const client = {
+      ...fake,
+      agents: {
+        ...fake.agents,
+        list: () => {
+          answer += 1
+          return Promise.resolve({ data: [], next_page: `cursor-${String(answer)}` })
+        },
+      },
+    }
+    const { io, out, err } = recorder()
+
+    const code = await runAgents(client, io)
+
+    expect(code).toBe(1)
+    expect(out).toEqual([])
+    expect(answer).toBe(MAX_LIST_PAGES)
+    expect(err.join('\n')).toContain(`more than ${String(MAX_LIST_PAGES)} pages`)
   })
 
   it('reports a server that is not there', async () => {

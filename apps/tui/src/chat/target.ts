@@ -1,5 +1,7 @@
-import type { Client } from '@openharness/client'
-import type { Agent, Session } from '@openharness/protocol'
+import { ApiError, type Client } from '@openharness/client'
+import { isAgentId, type Agent, type Session } from '@openharness/protocol'
+
+import { listAllAgents } from '../paging'
 
 /** What the CLI worked out to do before the chat screen can exist. */
 export type TargetResolution =
@@ -32,6 +34,10 @@ export interface TargetOptions {
  *    the server has exactly one, by asking if it has several, and by failing with something
  *    to read if it has none.
  *
+ * Every agent the server has is considered, not just the first page of them: `--agent` reads
+ * an id straight from the server, and matches a name against the whole list (`listAllAgents`
+ * walks `next_page`).
+ *
  * An agent that cannot be resolved is an error rather than a fallback: silently chatting
  * with a different agent than the one that was asked for is worse than not starting.
  */
@@ -55,14 +61,25 @@ export async function resolveTarget(
 }
 
 async function startNew(client: Client, query: string | undefined): Promise<TargetResolution> {
-  const agents = (await client.agents.list()).data
-
   if (query !== undefined) {
-    const selection = selectAgent(agents, query)
+    const wanted = query.trim()
+
+    // An id is worth reading directly: one request instead of a walk, and it finds the agent
+    // whatever else the list holds. A value that looks like an id but names nothing falls
+    // through to the name match below, so `--agent <name>` is never narrowed by its shape.
+    if (isAgentId(wanted)) {
+      const direct = await getAgentOrUndefined(client, wanted)
+      if (direct !== undefined) {
+        return { kind: 'session', session: await client.sessions.create({ agent: direct.id }) }
+      }
+    }
+
+    const selection = selectAgent(await listAllAgents(client), query)
     if (!selection.ok) throw new Error(selection.error)
     return { kind: 'session', session: await client.sessions.create({ agent: selection.agent.id }) }
   }
 
+  const agents = await listAllAgents(client)
   const only = agents[0]
   if (agents.length === 1 && only !== undefined) {
     return { kind: 'session', session: await client.sessions.create({ agent: only.id }) }
@@ -73,6 +90,22 @@ async function startNew(client: Client, query: string | undefined): Promise<Targ
   }
 
   return { kind: 'choose', agents }
+}
+
+/**
+ * `agents.get`, with "there is no such agent" answering `undefined` instead of throwing.
+ *
+ * Only a 404 is read that way. Anything else — a refused connection, a bad key, a server
+ * that answered with something unreadable — is a failure worth reporting, not a reason to
+ * fall back to matching a name.
+ */
+async function getAgentOrUndefined(client: Client, id: string): Promise<Agent | undefined> {
+  try {
+    return await client.agents.get(id)
+  } catch (error) {
+    if (error instanceof ApiError && error.type === 'not_found_error') return undefined
+    throw error
+  }
 }
 
 /** The outcome of matching `--agent` against the agents the server listed. */
