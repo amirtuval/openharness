@@ -39,6 +39,13 @@ The POST stores the message and answers immediately; the brain runs in the backg
 stream carries what it does. `user.interrupt` is the same call with
 `{"type":"user.interrupt"}`, and it aborts the turn in flight.
 
+The first `user.message` a session is sent also names it: the session's `title` — `null` until
+then — becomes the message's first non-empty line, whitespace collapsed and cut to
+`SESSION_TITLE_MAX_LENGTH`, so a list of chats shows what each one is about rather than the
+agent's name. That happens once. A title passed to `POST /v1/sessions`, and one an earlier
+message produced, is never overwritten; a session created with `initial_events` is named the
+same way, in the same request.
+
 ## Routes
 
 | method | path                                      | what it does                                                    |
@@ -95,6 +102,20 @@ data: {"type":"agent.message","id":"sevt_01H…","seq":12,"processed_at":"…","
 - Without either, the stream is **live only**: it delivers what happens next. Read the log
   first with `GET …/events` (or `after_seq=0`) and pass the last `seq` to continue.
 - Comments (`: ping`, every 15 seconds) are keepalives and can be ignored.
+
+### Reloading mid-reply
+
+`event_start` and `event_delta` go only to the connections attached when they are published, so
+a client that connects while a reply is streaming would otherwise render it from the first
+delta it caught — a message that begins mid-word until the stored `agent.message` arrives at
+the end of the turn.
+
+A connection that asked for `agent.message` previews is given what it missed instead: after the
+replay, and before the live events, the server sends the `event_start` of the reply in flight
+and **one** `event_delta` carrying the whole text accumulated so far (`index: 0`). Deltas that
+follow continue from there, and the stored `agent.message` — the same `sevt_` id — replaces the
+preview as it always does. A delta that arrives while that snapshot is being read is not
+delivered twice.
 
 ## Authentication
 

@@ -129,9 +129,9 @@ export async function startPostgres(
   return fixture
 }
 
-/** Empty the four tables the store uses. */
+/** Empty the five tables the store uses. */
 export async function truncateAll(db: Kysely<PostgresSchema>): Promise<void> {
-  await sql`truncate table events, sessions, agents, partition_leases`.execute(db)
+  await sql`truncate table events, session_previews, sessions, agents, partition_leases`.execute(db)
 }
 
 /** What a recorded write carried: the fence, when the writer attached one. */

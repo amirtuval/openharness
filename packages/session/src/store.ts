@@ -113,6 +113,25 @@ export interface SessionStore {
    */
   listSessions(options?: ListSessionsOptions): Promise<ListSessionsResponse>
 
+  /**
+   * Change a session's title, and return the session as it is afterwards — or `null` when no
+   * session has that id.
+   *
+   * The title is the session's label: what a session list shows to tell one chat from another.
+   * A frontend that knows it at creation passes it to {@link SessionStore.createSession}; one
+   * that does not — anything that names a chat after the first message — sets it here once the
+   * message is stored. An omitted `title` keeps the stored one, and `null` clears it, exactly
+   * as {@link SessionStore.updateAgent} treats its nullable fields.
+   *
+   * `updated_at` is set from the clock. Nothing else moves: not the status, not the agent
+   * snapshot, and not the log — a title is metadata about a session, never a reason to run one.
+   *
+   * The title is stored as given, like every other input (see the notes on validation below):
+   * a caller sets it from the protocol's `Session.title`, and one that derives a title from a
+   * message is the one that has to fit it into `SESSION_TITLE_MAX_LENGTH`.
+   */
+  updateSession(sessionId: SessionId, update: UpdateSessionRequest): Promise<Session | null>
+
   // ----------------------------------------------------------------- events
 
   /**
@@ -245,9 +264,49 @@ export interface SessionStore {
    * under the same `sevt_` id — the one the append that stores it supplies (see
    * {@link AppendableEvent}).
    *
+   * Publishing also maintains the session's in-flight preview, which is what lets a connection
+   * that opens mid-stream see the text already sent: an `event_start` begins one, and each
+   * `event_delta` for that id extends it. {@link SessionStore.getPreview} is the read.
+   *
    * @throws SessionNotFoundError when the session does not exist
    */
   publishEphemeral(sessionId: SessionId, event: StreamOnlyEvent): Promise<void>
+
+  /**
+   * The preview in flight for the session's current `agent.message`: the `sevt_` id its
+   * `event_start` announced, and the text its `event_delta`s have accumulated so far — or
+   * `null` when nothing is in flight.
+   *
+   * This is the read a connection that arrives late needs. Previews are delivered only to the
+   * listeners attached when they are published, so a client that was reloaded, or that opened
+   * a second tab, cannot see what the deltas before it contained; the store keeps the
+   * accumulation instead, and the server sends it as `event_start` plus one `event_delta`
+   * before it follows live.
+   *
+   * ## The lifecycle
+   *
+   * {@link SessionStore.publishEphemeral} with an `event_start` begins a preview: `eventId` is
+   * the id it announced and `text` is empty. Each `event_delta` published for that id appends
+   * its text, in publish order, so `text` is what a listener attached at that moment would have
+   * accumulated. There is **at most one preview per session**, and a new `event_start`
+   * replaces the previous one.
+   *
+   * The preview ends — this answers `null` from then on — when either
+   *
+   * - **the event it previews is stored**: an append carrying that id, which is how the
+   *   `agent.message` the deltas were for takes the preview's place (see
+   *   {@link AppendableEvent}); or
+   * - **a `span.model_request_end` is appended** for the session, which ends the model request
+   *   the preview belonged to whether or not it produced a message.
+   *
+   * Deltas stay best-effort, and so does the preview: a delta for an id that is not the current
+   * preview's is ignored rather than starting one, and one an implementation had to drop (a
+   * Postgres store cannot publish an ephemeral event bigger than a `NOTIFY` payload) is not
+   * accumulated either — what this returns is what was actually published.
+   *
+   * @throws SessionNotFoundError when the session does not exist
+   */
+  getPreview(sessionId: SessionId): Promise<SessionPreview | null>
 
   // -------------------------------------------------------- scheduler support
 
@@ -349,6 +408,29 @@ export type AppendableEvent = DistributiveOmit<StoredEvent, 'id' | 'seq' | 'proc
 
 /** `Omit` that distributes over a union, so the members of a discriminated union stay discriminated. */
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never
+
+/** The in-flight preview of a session's current `agent.message`; what {@link SessionStore.getPreview} returns. */
+export interface SessionPreview {
+  /** The `sevt_` id the previewing `event_start` announced — the id its deltas carry. */
+  readonly eventId: EventId
+  /**
+   * Every `event_delta` text published for that id so far, concatenated in publish order.
+   *
+   * It is a *prefix* of the `content[index].text` of the `agent.message` the id will be stored
+   * under: deltas are best-effort, so one that was dropped never makes it here, and the text of
+   * blocks other than index `0` is not distinguished — a preview is one string.
+   */
+  readonly text: string
+}
+
+/** What {@link SessionStore.updateSession} changes. */
+export interface UpdateSessionRequest {
+  /**
+   * The session's title: a string to set, `null` to clear, or omitted to keep what is stored.
+   * It is written as given; the protocol's `SESSION_TITLE_MAX_LENGTH` is the caller's business.
+   */
+  readonly title?: string | null
+}
 
 /** Fields to give {@link SessionStore.createSession} beyond the agent. */
 export interface CreateSessionOptions {

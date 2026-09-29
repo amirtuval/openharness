@@ -36,8 +36,8 @@ import { type ScriptedModel, type ScriptedReply, createScriptedModel } from './m
 
 /** How a test talks to the server it built. */
 export interface TestContext {
-  /** The store the app is running against. */
-  readonly store: InMemorySessionStore
+  /** The store the app is running against: in-memory unless the test supplied another. */
+  readonly store: SessionStore
   /** The scripted model, for tests that script replies or assert on prompts. */
   readonly model: ScriptedModel
   /** The scheduler running the brains. */
@@ -56,8 +56,11 @@ export interface TestContext {
 
 /** Options shared by {@link createTestApp} and {@link startTestServer}. */
 export interface TestOptions {
-  /** Run against this store instead of a fresh in-memory one. */
-  readonly store?: InMemorySessionStore
+  /**
+   * Run against this store instead of a fresh in-memory one — a Postgres store, say, for a
+   * test that needs the durable half of the same behaviour.
+   */
+  readonly store?: SessionStore
   /** Require this key on `/v1/*`. */
   readonly apiKey?: string
   /** Serve a built web app from this directory. */

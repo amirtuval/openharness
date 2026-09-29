@@ -17,6 +17,7 @@ import type { AppEnv } from '../types'
 import { notFoundError } from '../http/errors'
 import { parseBody, parseQuery, sessionIdParam } from '../http/request'
 import { SSE_HEADERS, createSessionEventStream } from '../sse'
+import { nameSessionFromFirstMessage } from '../titles'
 import type { RouteDeps } from './deps'
 import { signalKinds } from './signals'
 
@@ -43,6 +44,9 @@ export function registerEventRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
     // The store writes `processed_at: null` on every user event, which is what makes it
     // queued work rather than history: the brain claims it at the start of a turn.
     const stored = await deps.store.appendEvents(sessionId, body.events)
+    // A session is named after the first thing said in it — once, and never over a title the
+    // caller supplied at creation. This is the only writer of `title` in the system.
+    await nameSessionFromFirstMessage(deps.store, sessionId, body.events)
     const response: SendEventsResponse = { data: stored.filter(isUserEvent) }
     // Only now — after the append is committed — does anything get asked to run. An interrupt
     // goes first: cutting the turn in flight short is what lets the message queued behind it

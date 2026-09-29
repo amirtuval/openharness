@@ -57,9 +57,11 @@ import type {
   PartitionSignalInput,
   PartitionSignalListener,
   SessionEventListener,
+  SessionPreview,
   SessionStore,
   TurnState,
   Unsubscribe,
+  UpdateSessionRequest,
 } from '../store'
 import { ListenConnection } from './listen'
 import {
@@ -281,6 +283,30 @@ export class PostgresSessionStore implements SessionStore {
     return row === undefined ? null : sessionFromRow(row)
   }
 
+  async updateSession(sessionId: SessionId, update: UpdateSessionRequest): Promise<Session | null> {
+    const now = this.#clock()
+    return this.#db.transaction().execute(async (trx) => {
+      // Read, patch and write in one transaction, like `updateAgent`: an update is a partial
+      // one, so what it leaves alone has to be what was stored when it started.
+      const row = await trx
+        .selectFrom('sessions')
+        .selectAll()
+        .where('id', '=', sessionId)
+        .forUpdate()
+        .executeTakeFirst()
+      if (row === undefined) {
+        return null
+      }
+      const updated: SessionRow = {
+        ...row,
+        title: update.title === undefined ? row.title : update.title,
+        updated_at: instant(now),
+      }
+      await trx.updateTable('sessions').set(updated).where('id', '=', sessionId).execute()
+      return sessionFromRow(updated)
+    })
+  }
+
   async listSessions(options: ListSessionsOptions = {}): Promise<ListSessionsResponse> {
     const cursor = options.page === undefined ? null : decodeKeyPage(options.page)
     const limit = pageSize(options.limit)
@@ -495,6 +521,7 @@ export class PostgresSessionStore implements SessionStore {
 
   async publishEphemeral(sessionId: SessionId, event: StreamOnlyEvent): Promise<void> {
     const payload = encodeEphemeralNotification(event)
+    const now = this.#clock()
     await this.#db.transaction().execute(async (trx) => {
       if ((await readSession(trx, sessionId)) === undefined) {
         throw new SessionNotFoundError(sessionId)
@@ -502,10 +529,34 @@ export class PostgresSessionStore implements SessionStore {
       if (payload === null) {
         // Ephemeral events are best effort: one that cannot fit in a notification is dropped
         // rather than allowed to fail the publish (or the append transaction that carried it).
+        // Nothing is accumulated for it either: the preview is what the subscribers of this
+        // store would have seen, and they were not shown it.
         return
       }
+      // The preview row and the notification are written in one transaction, so a store that
+      // hears a delta and reads the preview sees at least that delta's text — the row is never
+      // behind the stream. Nothing is announced before it is written, and neither is visible
+      // before the commit.
+      await this.#recordPreview(trx, sessionId, event, now)
       await sql`select pg_notify(${sessionChannel(sessionId)}, ${payload})`.execute(trx)
     })
+  }
+
+  async getPreview(sessionId: SessionId): Promise<SessionPreview | null> {
+    const row = await this.#db
+      .selectFrom('session_previews')
+      .select(['event_id', 'text'])
+      .where('session_id', '=', sessionId)
+      .executeTakeFirst()
+    if (row !== undefined) {
+      return { eventId: row.event_id as EventId, text: row.text }
+    }
+    // No preview — which an unknown session has too, so the existence check is what tells
+    // "nothing is in flight" apart from "there is no such session".
+    if ((await readSession(this.#db, sessionId)) === undefined) {
+      throw new SessionNotFoundError(sessionId)
+    }
+    return null
   }
 
   // -------------------------------------------------------- scheduler support
@@ -746,6 +797,17 @@ export class PostgresSessionStore implements SessionStore {
       .set(status === null ? { updated_at: at } : { status, updated_at: at })
       .where('id', '=', sessionId)
       .execute()
+    // The preview of a message ends where the message is stored — the log is the authority
+    // now — and so does a preview whose model request ended without producing one. It goes in
+    // this transaction, so a reader can never find the log holding the event while the preview
+    // still claims it is in flight.
+    const written = rows.map((row) => row.id)
+    const endsRequest = events.some((event) => event.type === EVENT_TYPES.modelRequestEnd)
+    await sql`
+      delete from session_previews
+       where session_id = ${sessionId}
+         and (event_id = any(${written}::text[]) or ${endsRequest}::boolean)
+    `.execute(trx)
     // Inside the transaction on purpose: Postgres delivers the notification when it commits,
     // so a subscriber never reads a log an append has not finished writing.
     const channel = sessionChannel(sessionId)
@@ -754,6 +816,42 @@ export class PostgresSessionStore implements SessionStore {
       trx,
     )
     return rows.map(eventFromRow)
+  }
+
+  /**
+   * Fold an ephemeral event into the session's in-flight preview, in the publish's
+   * transaction.
+   *
+   * An `event_start` resets the row — there is at most one preview per session, so a new one
+   * replaces whatever was being previewed before — and an `event_delta` appends its text to the
+   * row it names, and to no other: the `where` matches the current `event_id`, so a delta for
+   * another event changes nothing, and there being no row to update cannot start a preview of
+   * its own. `updated_at` is the injected clock's, like every other timestamp here.
+   */
+  async #recordPreview(
+    trx: Transaction<PostgresSchema>,
+    sessionId: SessionId,
+    event: StreamOnlyEvent,
+    now: number,
+  ): Promise<void> {
+    if (event.type === EVENT_TYPES.eventStart) {
+      await sql`
+        insert into session_previews (session_id, event_id, text, updated_at)
+        values (${sessionId}, ${event.event.id}, '', ${instant(now)})
+        on conflict (session_id) do update
+           set event_id = excluded.event_id,
+               text = excluded.text,
+               updated_at = excluded.updated_at
+      `.execute(trx)
+      return
+    }
+    await sql`
+      update session_previews
+         set text = text || ${event.delta.content.text},
+             updated_at = ${instant(now)}
+       where session_id = ${sessionId}
+         and event_id = ${event.event_id}
+    `.execute(trx)
   }
 
   /** The `seq` of the session's last event, or `0` when the log is empty. */

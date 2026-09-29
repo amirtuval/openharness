@@ -68,9 +68,11 @@ docs/postgres.md        the Postgres store: schema, migrations, delivery, local 
 | `SessionStore`                                                                                                     | the storage and signaling contract; every method is async, and documented below                                      |
 | `AppendableEvent`                                                                                                  | an event a caller appends: a `StoredEvent` minus `seq` and `processed_at`, plus an optional `id` the caller supplies |
 | `CreateSessionOptions`, `ListAgentsOptions`, `ListSessionsOptions`, `ListEventsOptions`                            | the options objects of the list and create methods                                                                   |
+| `UpdateSessionRequest`                                                                                             | what `updateSession()` changes: the title, or nothing                                                                |
 | `AppendEventsOptions`, `MarkProcessedOptions`, `PartitionFence`                                                    | the optional fence a brain attaches to a write                                                                       |
 | `PartitionLease`, `PartitionSignal`, `PartitionSignalInput`, `PartitionSignalKind`                                 | leases over a partition, and the signals sent to its owner                                                           |
 | `TurnState`, `TurnStateKind`                                                                                       | what `getTurnState()` answers                                                                                        |
+| `SessionPreview`                                                                                                   | what `getPreview()` answers: the id in flight, and the text so far                                                   |
 | `SessionEventListener`, `PartitionSignalListener`, `Unsubscribe`                                                   | subscription plumbing                                                                                                |
 | `InMemorySessionStore`, `InMemorySessionStoreOptions`                                                              | the in-memory implementation and its `{ now, partitionCount }` options                                               |
 | `Clock`, `systemClock`, `timestampAt()`                                                                            | the injectable time source, and how an instant is written as a timestamp                                             |
@@ -80,13 +82,13 @@ docs/postgres.md        the Postgres store: schema, migrations, delivery, local 
 
 ### `@openharness/session/postgres`
 
-| export                                                                                  | what it is                                                                        |
-| --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| `PostgresSessionStore`, `createPostgresSessionStore(config, options?)`                  | the durable implementation; `{ connectionString }` or `{ pool }`, plus options    |
-| `PostgresSessionStoreOptions`, `PostgresSessionStoreConfig`                             | its options (`now`, `partitionCount`, `onError`) and the two ways to reach a DB   |
-| `migrate(db, options?)`                                                                 | applies `migrations/`, idempotently, in one locked transaction; returns the files |
-| `MigrateOptions`                                                                        | `{ migrationsDir? }`, for a migrations directory that is not this package's       |
-| `PostgresSchema`, `AgentsTable`, `SessionsTable`, `EventsTable`, `PartitionLeasesTable` | the Kysely table types, for a caller that wants to query alongside the store      |
+| export                                                                                                          | what it is                                                                        |
+| --------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `PostgresSessionStore`, `createPostgresSessionStore(config, options?)`                                          | the durable implementation; `{ connectionString }` or `{ pool }`, plus options    |
+| `PostgresSessionStoreOptions`, `PostgresSessionStoreConfig`                                                     | its options (`now`, `partitionCount`, `onError`) and the two ways to reach a DB   |
+| `migrate(db, options?)`                                                                                         | applies `migrations/`, idempotently, in one locked transaction; returns the files |
+| `MigrateOptions`                                                                                                | `{ migrationsDir? }`, for a migrations directory that is not this package's       |
+| `PostgresSchema`, `AgentsTable`, `SessionsTable`, `EventsTable`, `SessionPreviewsTable`, `PartitionLeasesTable` | the Kysely table types, for a caller that wants to query alongside the store      |
 
 This entry point is a separate subpath on purpose: it is the only module that depends on `pg`
 and `kysely`, and a consumer that only needs the contract, the fake or the suite must not load
@@ -150,6 +152,33 @@ appends is stored with `processed_at` already set.
 `session.status_rescheduled` does not end a turn and leaves the status alone; v1 has no
 resting `rescheduling` status. Every append also advances the session's `updated_at`.
 
+**The title.** A session's `title` is the one field that changes after creation:
+`updateSession(sessionId, { title })` sets it, `{ title: null }` clears it, and an omitted
+title keeps what is stored. `updated_at` moves; nothing else does — not the status, not the
+agent snapshot, not the log — and `getSession`, `updateSession` answer `null` for an id nobody
+has. It is the piece a frontend that only learns what a chat is about after the first message
+needs (the server derives a title from that message and calls this — see `apps/server`). The
+title is stored as given — the protocol's `SESSION_TITLE_MAX_LENGTH` is the caller's business,
+like every other bound this package does not enforce.
+
+**The in-flight preview** (`publishEphemeral` and `getPreview`) is the other piece of state
+that is not the log. Previews go only to the connections attached when they are published, so a
+client that connects mid-reply cannot see what was already sent; the store keeps the answer:
+
+- an **`event_start`** begins a preview — `{ eventId, text: '' }` — replacing whatever the
+  session was previewing before, because there is **at most one preview per session**;
+- an **`event_delta`** appends its text to the preview of the id it names, and to no other: a
+  delta nothing started is delivered as it always was and changes nothing;
+- the preview **ends** — `getPreview` answers `null` — when the event it previews is _stored_
+  (an append carrying that id, which is how the `agent.message` takes its preview's place) or
+  when a `span.model_request_end` is appended for the session, whichever comes first.
+
+Deltas stay best-effort, and so does the preview: one an implementation had to drop (a Postgres
+store cannot `NOTIFY` a payload over 8 KB, so it drops the event) is not accumulated either —
+what `getPreview` returns is what a listener attached at publish time would have seen. The read
+is what the server's SSE handler uses to hand a late connection the text it missed as one
+`event_start` plus one accumulated `event_delta`; see `apps/server/AGENTS.md`.
+
 **Turn state** (`getTurnState`) is derived from the log alone — no lease, no clock, no
 in-memory bookkeeping — so it means the same thing in every store, and a server that has just
 taken a partition over can ask before it has done anything:
@@ -200,10 +229,12 @@ signals are a latency optimization and not a durable queue. No flow may depend o
 arriving: a partition's new owner recovers by asking `findSessionsNeedingWork`, which reports
 the sessions with pending user events or an open turn, oldest first.
 
-**Errors.** `SessionNotFoundError` (every session-scoped method except `getSession`),
+**Errors.** `SessionNotFoundError` (every session-scoped method except `getSession` and
+`updateSession`, which answer `null`),
 `AgentNotFoundError` (`createSession` with an unknown agent), `FencedError` (`appendEvents`,
 `markProcessed`) and `DuplicateEventIdError` (`appendEvents` carrying an id the log already
-holds, or the same id twice). `getSession`, `getAgent` and `updateAgent` answer `null` instead.
+holds, or the same id twice). `getSession`, `updateSession`, `getAgent` and `updateAgent` answer
+`null` instead.
 Each error is a real class with a stable `name` and `code`, so `instanceof` works from the
 built output and `isFencedError()` recognises one that crossed a bundle boundary.
 
@@ -225,13 +256,23 @@ one exception, and only to be _stricter_: it rebuilds each appended event throug
 the whole suite against a real database. [docs/postgres.md](./docs/postgres.md) is the long
 version; this is the shape of it.
 
-**Schema.** Four tables, all created by `migrations/`: `agents`, `sessions` (with the
+**Schema.** Five tables, all created by `migrations/`: `agents`, `sessions` (with the
 `partitionOf` partition and the `status` the log's last status event implies), `events` (`id`,
 `session_id`, `seq`, `type`, `payload jsonb`, `created_at`, `processed_at`, `unique
 (session_id, seq)`, an index on `(session_id, seq)` and a partial index for queued user
-events) and `partition_leases` (`partition`, `owner`, `epoch`, `expires_at`). Ids are `text
-collate "C"`, so SQL ordering is the byte order the protocol's keyset cursors use; every
-timestamp is `timestamptz` written from the injected clock, never from `now()`.
+events), `session_previews` (an **`unlogged`** table: one row per session whose `agent.message`
+is being previewed — `session_id` primary key, `event_id`, `text`, `updated_at`) and
+`partition_leases` (`partition`, `owner`, `epoch`, `expires_at`). Ids are `text collate "C"`,
+so SQL ordering is the byte order the protocol's keyset cursors use; every timestamp is
+`timestamptz` written from the injected clock, never from `now()`.
+
+The preview row is what lets `getPreview` answer for a connection the streaming brain never
+talked to: `publishEphemeral` writes it — an `event_start` resetting the row, an `event_delta`
+appending to `text` with `||` while the id still matches — and the append transaction deletes
+it when it stores the previewed event or closes the model request, so a reader can never see a
+log that holds the event while its preview is still in flight. `unlogged` is deliberate: a
+preview is a display aid, and losing it to a crash costs a reconnecting client the beginning of
+a reply it will see in full when the stored message lands.
 
 **Migrations.** Plain SQL files in `migrations/`, applied in name order by `migrate(db)` — one
 transaction under an advisory lock, every statement `if not exists`, so it is idempotent and
@@ -249,6 +290,10 @@ store answers `DuplicateEventIdError`, and the id is the one the log already hol
 throws `FencedError` on a mismatch. `acquirePartition` is a single conditional upsert that
 matches an unleased, self-owned or expired row, so testing and taking are atomic, and every
 successful take advances the epoch — the same owner included.
+
+**Titles and previews.** `updateSession` reads, patches and writes the session row in one
+transaction, like `updateAgent`. `publishEphemeral` writes the preview and `pg_notify`s in the
+same transaction, so a store that hears a delta reads a preview that already includes it.
 
 **Live delivery.** One dedicated `LISTEN` connection per store, `LISTEN`/`UNLISTEN` per session
 as its first and last listener come and go, and per partition for signals. A stored
@@ -327,8 +372,9 @@ relative paths. `yarn check:deps` at the repo root enforces this.
   the durable store — and adds what only a shared store can be asked: concurrent appends from
   two stores, a supplied event id two of them try to take, fencing across stores, a burst that
   must be delivered exactly once, catching up after the listening connection is killed, a
-  dropped oversized ephemeral event, idempotent migrations, and `close()` leaving a borrowed
-  pool alone.
+  dropped oversized ephemeral event (which is not accumulated into the preview either), the
+  in-flight preview a second store reads out of the table, idempotent migrations, and
+  `close()` leaving a borrowed pool alone.
 - `memory.test.ts` covers what the fake promises _on top of_ the contract: the injected
   clock, the copies it hands out, microtask delivery, and error identity.
 - `index.test.ts` and `testing/clock.test.ts` cover the entry points and the test clock.

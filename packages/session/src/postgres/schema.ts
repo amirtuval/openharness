@@ -63,6 +63,23 @@ export interface EventsTable {
   processed_at: Date | null
 }
 
+/**
+ * `session_previews`: the preview in flight for a session's current `agent.message`.
+ *
+ * One row per session at most. An `event_start` resets it — `event_id` and an empty `text` —
+ * and an `event_delta` appends to `text` while it carries that same `event_id`; the row goes
+ * inside the append transaction that stores the previewed event, or one carrying a
+ * `span.model_request_end`. See `SessionStore.getPreview`.
+ */
+export interface SessionPreviewsTable {
+  session_id: string
+  /** The `sevt_` id the previewing `event_start` announced. */
+  event_id: string
+  /** Every delta text published for that id so far, concatenated in publish order. */
+  text: string
+  updated_at: Date
+}
+
 /** `partition_leases`: who holds a partition, at which epoch, until when. */
 export interface PartitionLeasesTable {
   partition: number
@@ -77,6 +94,7 @@ export interface PostgresSchema {
   agents: AgentsTable
   sessions: SessionsTable
   events: EventsTable
+  session_previews: SessionPreviewsTable
   partition_leases: PartitionLeasesTable
 }
 

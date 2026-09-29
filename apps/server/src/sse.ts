@@ -1,11 +1,14 @@
 import {
+  EVENT_TYPES,
   MAX_PAGE_LIMIT,
   SSE_CONTENT_TYPE,
   isStoredEvent,
+  type EventId,
   type SessionId,
   type StreamEvent,
+  type StreamOnlyEvent,
 } from '@openharness/protocol'
-import type { SessionStore, Unsubscribe } from '@openharness/session'
+import type { SessionPreview, SessionStore, Unsubscribe } from '@openharness/session'
 
 /**
  * The server side of `GET /v1/sessions/{id}/events/stream`.
@@ -25,11 +28,34 @@ import type { SessionStore, Unsubscribe } from '@openharness/session'
  * 1. **subscribe first.** The store buffers everything that happens from here on.
  * 2. **replay** the log from the resume position (`after_seq`, or the `last-event-id` header,
  *    or nothing at all for live-only).
- * 3. **flush the buffer**, dropping anything at or below the last `seq` the replay delivered —
+ * 3. **snapshot the preview in flight**, on a connection that asked for previews: the reply
+ *    already streamed is not in the log yet, and only the store still has it. See below.
+ * 4. **flush the buffer**, dropping anything at or below the last `seq` the replay delivered —
  *    which is exactly the overlap between the two halves.
  *
  * The resume position is the last `seq` the client saw, so a client that reconnects having
  * seen `seq: 7` gets 8, 9, 10 … and never 7 again.
+ *
+ * ## The preview snapshot
+ *
+ * An `event_start` and its `event_delta`s are delivered to the connections attached when they
+ * are published, and to nobody else: a page that reloads mid-reply, or a second tab that opens
+ * on a turn already running, would otherwise start rendering at the first delta it happened to
+ * catch — a reply that begins mid-word until the stored `agent.message` replaces it at the end
+ * of the turn. The log cannot fix that (the message is not in it yet), so the store keeps the
+ * text that was sent and {@link SessionStore.getPreview} hands it over.
+ *
+ * A connection that asked for `agent.message` previews gets it as exactly the frames a client
+ * already reads for a live one: `event_start` announcing the id, then **one** `event_delta`
+ * carrying the whole accumulated text at block index `0`. The live deltas that follow continue
+ * from there, and the stored message ends the preview as it always does — under the same id,
+ * so a client replaces the accumulated preview with the authoritative text.
+ *
+ * The delta that arrives *while* the snapshot is being read is the one hazard: it is already
+ * part of the snapshot's text in some cases and new content in others, and ephemeral events
+ * carry no sequence number to tell the two apart. The buffer is filtered by text instead: the
+ * deltas the snapshot covers are the last ones published, so they are the ones its text ends
+ * with — see `dropCovered` below.
  */
 
 /** How long the stream may be quiet before a `: ping` comment goes out. */
@@ -45,6 +71,17 @@ export const SSE_HEADERS: Record<string, string> = {
   'cache-control': 'no-cache, no-transform',
   connection: 'keep-alive',
   'x-accel-buffering': 'no',
+}
+
+/**
+ * Whether a live event belongs to the preview of `eventId`: its `event_start`, or one of its
+ * `event_delta`s. Stream-only events only — a stored event is its own thing.
+ */
+function isPreviewOf(event: StreamEvent, eventId: EventId): event is StreamOnlyEvent {
+  return (
+    (event.type === EVENT_TYPES.eventStart && event.event.id === eventId) ||
+    (event.type === EVENT_TYPES.eventDelta && event.event_id === eventId)
+  )
 }
 
 /** One event as the bytes of an SSE message; streams are written in UTF-8. */
@@ -151,10 +188,20 @@ export function createSessionEventStream(
       let lastSeq = options.afterSeq ?? 0
       let replaying = options.afterSeq !== undefined
 
+      /**
+       * The `id` of every `agent.message` this connection was sent. That is the only event a
+       * preview can be for (`event_start.event.type` has one member), so it is what the
+       * snapshot below checks before handing out a preview the client may already have.
+       */
+      const deliveredMessages = new Set<EventId>()
+
       /** Write one event out, unless this connection did not ask for its kind. */
       const write = (event: StreamEvent): boolean => {
         if (!deltas && !isStoredEvent(event)) {
           return false
+        }
+        if (event.type === EVENT_TYPES.agentMessage) {
+          deliveredMessages.add(event.id)
         }
         controller.enqueue(encoder.encode(encodeSseMessage(event)))
         return true
@@ -176,7 +223,74 @@ export function createSessionEventStream(
         }
       }
 
-      /** 3. Everything buffered so far, minus what the replay already delivered. */
+      /**
+       * 3. What the log cannot carry: the `agent.message` being streamed right now, whose
+       *    text exists only in the deltas already published and in the store's snapshot of
+       *    them. Delivered as the `event_start` and the single accumulated `event_delta` a
+       *    client that missed the beginning needs.
+       */
+      const snapshot = async (): Promise<void> => {
+        if (!deltas) {
+          return
+        }
+        const preview = await store.getPreview(sessionId)
+        if (preview === null || deliveredMessages.has(preview.eventId)) {
+          // Nothing in flight, or the stored message it previews was in the replay: either
+          // way the client is not missing anything the snapshot could give it.
+          return
+        }
+        write({
+          type: EVENT_TYPES.eventStart,
+          event: { type: EVENT_TYPES.agentMessage, id: preview.eventId },
+        })
+        write({
+          type: EVENT_TYPES.eventDelta,
+          event_id: preview.eventId,
+          delta: { type: 'content_delta', index: 0, content: { type: 'text', text: preview.text } },
+        })
+        dropCovered(preview)
+      }
+
+      /**
+       * Take out of the buffer what the snapshot just delivered.
+       *
+       * Deltas that arrived while the replay and the snapshot were running are still buffered,
+       * and the ones already counted in the snapshot's text would be applied a second time by a
+       * client — the reply would double in the middle. No ephemeral event carries a sequence
+       * number to compare with, so the text is what is compared: the deltas published before
+       * the snapshot was read are the preview's *last* ones (everything earlier was published
+       * before this connection subscribed, so the buffer never saw it), which is what makes
+       * them the ones the snapshot's text **ends** with. A buffered delta that keeps that tail
+       * going is already in the snapshot and goes; the first one that does not is new content,
+       * and so is everything after it. A buffered `event_start` for the same id goes too — the
+       * snapshot just sent one, and a second would make a client start its accumulator over,
+       * throwing the snapshot away.
+       */
+      const dropCovered = (preview: SessionPreview): void => {
+        const kept: StreamEvent[] = []
+        let covered = ''
+        let reachedNewContent = false
+        for (const event of buffered) {
+          if (!isPreviewOf(event, preview.eventId) || reachedNewContent) {
+            kept.push(event)
+            continue
+          }
+          if (event.type === EVENT_TYPES.eventStart) {
+            continue
+          }
+          const next = covered + event.delta.content.text
+          if (next.length <= preview.text.length && preview.text.endsWith(next)) {
+            covered = next
+            continue
+          }
+          reachedNewContent = true
+          kept.push(event)
+        }
+        buffered.length = 0
+        buffered.push(...kept)
+      }
+
+      /** 4. Everything buffered so far, minus what the replay already delivered. */
       const flush = (): boolean => {
         let delivered = false
         while (buffered.length > 0) {
@@ -197,6 +311,7 @@ export function createSessionEventStream(
 
       try {
         await replay()
+        await snapshot()
         flush()
         // 4. Follow the session until the client goes away.
         while (!closed) {

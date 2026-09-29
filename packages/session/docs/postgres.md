@@ -7,7 +7,8 @@ runs it against a real database — so anything the contract promises works the 
 does in memory.
 
 This document covers what is specific to this store: the schema, how the database is migrated,
-how `seq`, fencing, leases and delivery are implemented, and how to run Postgres locally.
+how `seq`, fencing, leases and delivery are implemented, where the in-flight preview of a
+streaming reply is kept, and how to run Postgres locally.
 
 ---
 
@@ -41,13 +42,14 @@ schema.
 
 ## The schema
 
-Four tables, in `migrations/`:
+Five tables, in `migrations/`:
 
 | table              | what a row is                                                                                      |
 | ------------------ | -------------------------------------------------------------------------------------------------- |
 | `agents`           | an agent configuration: name, description, model, system prompt, timestamps                        |
 | `sessions`         | a log's header: `status`, `partition`, title, metadata, and the agent snapshot                     |
 | `events`           | one stored event: `id`, `session_id`, `seq`, `type`, `payload jsonb`, `created_at`, `processed_at` |
+| `session_previews` | the `agent.message` being streamed right now: its `event_id` and the text its deltas carried       |
 | `partition_leases` | who holds a partition, at which epoch, until when                                                  |
 
 Details that matter:
@@ -78,6 +80,10 @@ Details that matter:
   `0005_events_id_unique.sql` declares a `unique` index named `events_id_key` beside it.
 - **`sessions.partition`** is `partitionOf(sessionId)` — stored, not recomputed, so
   `findSessionsNeedingWork` is an index range scan per partition.
+- **`session_previews` is `unlogged`**, and holds at most one row per session: `session_id`
+  (primary key, `on delete cascade`), the `event_id` the previewing `event_start` announced,
+  the accumulated `text`, and `updated_at` from the injected clock. See
+  [the in-flight preview](#the-in-flight-preview).
 - **`partition_leases.owner is null` means free**, and a `check` keeps owner and `expires_at`
   in step: an owned lease always has an expiry, a free one has neither.
 
@@ -106,6 +112,7 @@ databases while applying to new ones. Add a new file instead.
 | `0003_events.sql`           | `events`, its uniqueness constraint and its two secondary indexes         |
 | `0004_partition_leases.sql` | `partition_leases`                                                        |
 | `0005_events_id_unique.sql` | the `unique` index that states the id guarantee (`events_id_key`) by name |
+| `0006_session_previews.sql` | `session_previews`, the `unlogged` table of previews in flight            |
 
 To run them outside an application:
 
@@ -179,6 +186,56 @@ this — they are argument checks, and `0005_events_id_unique.sql` is what cover
 single process cannot see: two appends, to the same session or to different ones, racing for
 the same id.
 
+## The in-flight preview
+
+A preview — the `event_start` and `event_delta`s announcing an `agent.message` that is still
+being streamed — is delivered to the subscribers attached when it is published, and to nobody
+else. `InMemorySessionStore` can keep the text in a `Map`, because there is one process; this
+store cannot, because the brain that published the deltas and the server that answers a
+reconnecting SSE connection may be different processes, and with `SCHEDULER=postgres` any
+instance can answer. So the accumulation is a row, and `getPreview` reads it:
+
+```sql
+-- publishEphemeral, `event_start`: a new preview replaces the session's previous one
+insert into session_previews (session_id, event_id, text, updated_at)
+values ($1, $2, '', $3)
+on conflict (session_id) do update
+   set event_id = excluded.event_id, text = excluded.text, updated_at = excluded.updated_at;
+
+-- publishEphemeral, `event_delta`: append, and only to the preview this delta names
+update session_previews
+   set text = text || $2, updated_at = $3
+ where session_id = $1 and event_id = $2;
+```
+
+The `where` is what makes a delta for another event — one whose `event_start` this store never
+saw, or one that has already been cleared — a no-op rather than a preview of its own. Both
+statements run in the same transaction as the `pg_notify` that announces the event, so a store
+that hears a delta and immediately reads the preview sees at least that delta's text: the row
+is never behind the stream.
+
+**Clearing happens in the append transaction**, with the events themselves (see
+[`seq`](#seq-gap-free-in-order-under-concurrent-appends)):
+
+```sql
+delete from session_previews
+ where session_id = $1
+   and (event_id = any($2::text[])                       -- the event it previewed is now stored
+        or $3::boolean)                                  -- or a span.model_request_end came in
+```
+
+One statement covers both endings, and running it inside that transaction is what makes the
+promise total: a reader can never find the log holding the event while the preview still claims
+it is in flight.
+
+`unlogged` is deliberate. A preview lives for one model request and is a display aid, not the
+record: losing it in a crash costs a client that reconnects afterwards the beginning of a reply
+it will see in full when the stored `agent.message` lands — which is what it costs today. The
+table is not replicated and a crash truncates it, which is exactly what this data is worth.
+
+`updated_at` comes from the injected clock, like every other timestamp here — the suite moves
+its clock, and a preview must not be the one row that reads `now()`.
+
 ## Fencing and leases
 
 A write carrying `fence: { partition, epoch }` is checked **in the same transaction** as the
@@ -244,7 +301,10 @@ record, the notification is a nudge. Ephemeral events have no row to fetch, so a
 or `event_delta` travels in the payload directly; a payload with a `seq` is a stored
 notification and anything else is an ephemeral event (neither stream-only event type has a
 `seq` field). A payload that would exceed Postgres's 8000-byte limit is **dropped**: deltas are
-a preview and best effort, and a dropped one only costs a step of progressive rendering.
+a preview and best effort, and a dropped one only costs a step of progressive rendering. A
+dropped delta is not accumulated into the preview either (`getPreview` is what a subscriber
+attached at that moment would have seen), and neither is a delta for an event the store never
+saw start.
 
 **Order.** All notification handling goes through one queue, one notification at a time, and
 each subscription remembers the last `seq` each of its listeners was given. So stored events
@@ -281,8 +341,9 @@ DATABASE_URL=postgres://postgres:postgres@localhost:5432/openharness yarn test
 ```
 
 The suite truncates every table before each test, so it is happy to share a database with
-anything else — but it will empty `agents`, `sessions`, `events` and `partition_leases` in
-whatever database `DATABASE_URL` points at. Point it at a scratch database.
+anything else — but it will empty `agents`, `sessions`, `events`, `session_previews` and
+`partition_leases` in whatever database `DATABASE_URL` points at. Point it at a scratch
+database.
 
 ## Operational notes
 
