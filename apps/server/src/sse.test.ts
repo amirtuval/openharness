@@ -13,7 +13,9 @@ import {
 import { InMemorySessionStore, type SessionPreview } from '@openharness/session'
 import { SSE_HEADERS, createSessionEventStream } from './sse'
 import {
+  HELD_REPLY_TEST_TIMEOUT_MS,
   ObservableStore,
+  defer,
   httpCreateAgent,
   httpCreateSession,
   httpSendMessage,
@@ -83,6 +85,14 @@ function seqsOf(messages: readonly SseMessage[]): number[] {
 /** What opts a connection into `agent.message` previews; the tests append `after_seq` to it. */
 const DELTAS = '?event_deltas[]=agent.message'
 
+/**
+ * Which chunk of a held reply the turn stops at.
+ *
+ * Three: enough for the connection before the reload to have read a couple of deltas, and
+ * early enough that the reply has most of itself left to stream once the test lets it go.
+ */
+const HELD_AT = 3
+
 /** The `event_delta` messages of a read, in order. */
 function deltasOf(messages: readonly SseMessage[]): SseMessage[] {
   return messages.filter((message) => message.event.type === EVENT_TYPES.eventDelta)
@@ -113,10 +123,23 @@ function eventDelta(id: EventId, text: string): StreamOnlyEvent {
   }
 }
 
-/** A store that runs a hook inside `getPreview`, so a delta lands while the snapshot is read. */
+/** A store that runs a hook inside `getPreview`, so deltas land while the snapshot is read. */
 class GatedPreviewStore extends InMemorySessionStore {
   /** Run once, before the next `getPreview` answers. */
   gate: (() => Promise<void>) | undefined
+
+  /** How many events this store has handed to a listener; a gate can wait on one landing. */
+  delivered = 0
+
+  override async subscribe(
+    sessionId: SessionId,
+    listener: Parameters<InMemorySessionStore['subscribe']>[1],
+  ): ReturnType<InMemorySessionStore['subscribe']> {
+    return super.subscribe(sessionId, (event) => {
+      this.delivered += 1
+      return listener(event)
+    })
+  }
 
   override async getPreview(sessionId: SessionId): Promise<SessionPreview | null> {
     const gate = this.gate
@@ -335,68 +358,108 @@ describe('a preview snapshot', () => {
   /**
    * The reproduction of #27: a reply is streaming, the page reloads, and the connection that
    * comes back has to show the beginning of it — not the first delta it happens to catch.
+   *
+   * The reply is held where the test wants it — three chunks in, by {@link defer} — rather
+   * than paced by a clock: the turn cannot finish before the reload opens, and cannot stream
+   * another character while the snapshot is being read, so the frames are the test's to
+   * predict instead of a race to win.
    */
-  it('gives a connection opened mid-reply the text that was already streamed', async () => {
-    const chunks = Array.from({ length: 8 }, (_unused, index) => `part ${index + 1}/8 `)
-    const test = await startTestServer({ replies: [{ text: chunks, delayMs: 120 }] })
-    context = test
-    const agent = await httpCreateAgent(test)
-    const session = await httpCreateSession(test, agent.id)
+  it(
+    'gives a connection opened mid-reply the text that was already streamed',
+    async () => {
+      const chunks = Array.from({ length: 8 }, (_unused, index) => `part ${index + 1}/8 `)
+      const store = new ObservableStore()
+      const held = defer()
+      const test = await startTestServer({
+        store,
+        replies: [
+          {
+            text: chunks,
+            onChunk: (_chunk, index) => (index === HELD_AT ? held.promise : undefined),
+          },
+        ],
+      })
+      context = test
+      const agent = await httpCreateAgent(test)
+      const session = await httpCreateSession(test, agent.id)
 
-    // The turn as it looked before the reload: the first deltas of the reply, on the wire.
-    const before = openSse(await fetch(streamUrl(test, session.id, DELTAS)))
-    let streamedBeforeReload: { previewId: string; text: string }
-    try {
-      await httpSendMessage(test, session.id, 'tell me something long')
-      streamedBeforeReload = await readPreview(before)
-    } finally {
-      before.close()
-    }
-    const { previewId } = streamedBeforeReload
-    expect(previewId).toMatch(/^sevt_/)
-    expect(streamedBeforeReload.text.length).toBeGreaterThan(0)
+      // The turn as it looked before the reload: the first deltas of the reply, on the wire.
+      // The connection follows the session *before* the reply starts — a preview is delivered
+      // only to the connections attached when it is published — so what it reads is the whole
+      // beginning of the reply and not whichever delta it happened to catch.
+      const before = openSse(await fetch(streamUrl(test, session.id, DELTAS)))
+      await waitFor(() => store.subscriptions >= 1, {
+        message: 'the connection never subscribed to the session',
+      })
+      let streamedBeforeReload: { previewId: string; text: string }
+      try {
+        await httpSendMessage(test, session.id, 'tell me something long')
+        streamedBeforeReload = await readPreview(before)
+      } finally {
+        before.close()
+      }
+      const { previewId } = streamedBeforeReload
+      expect(previewId).toMatch(/^sevt_/)
+      expect(streamedBeforeReload.text.length).toBeGreaterThan(0)
 
-    // The reload: a fresh connection, replaying the log from the start, still mid-reply.
-    const after = openSse(await fetch(streamUrl(test, session.id, `${DELTAS}&after_seq=0`)))
-    try {
-      const messages = await readUntil(
-        after,
-        (read) => read.some((message) => message.event.type === EVENT_TYPES.sessionStatusIdle),
-        15_000,
-      )
+      // The reload: a fresh connection, replaying the log from the start, still mid-reply.
+      const after = openSse(await fetch(streamUrl(test, session.id, `${DELTAS}&after_seq=0`)))
+      try {
+        // Up to the snapshot, and no further: the turn is held, so the replay and the preview
+        // are all this read can be. A delta arriving at all is the condition.
+        const replayed = await readUntil(after, (read) =>
+          read.some((message) => message.event.type === EVENT_TYPES.eventDelta),
+        )
 
-      // The replay comes first, then the snapshot: `event_start` for the id the preview is
-      // under, and one delta carrying everything published for it so far.
-      const firstPreview = messages.findIndex(
-        (message) => message.event.type === EVENT_TYPES.eventStart,
-      )
-      expect(firstPreview).toBeGreaterThan(-1)
-      expect(messages[firstPreview + 1]?.event.type).toBe(EVENT_TYPES.eventDelta)
-      expect(messages.slice(0, firstPreview).every((message) => 'seq' in message.event)).toBe(true)
+        // The replay comes first, then the snapshot: `event_start` for the id the preview is
+        // under, and one delta carrying everything published for it so far.
+        const firstPreview = replayed.findIndex(
+          (message) => message.event.type === EVENT_TYPES.eventStart,
+        )
+        expect(firstPreview).toBeGreaterThan(-1)
+        expect(replayed[firstPreview + 1]?.event.type).toBe(EVENT_TYPES.eventDelta)
+        expect(replayed.slice(0, firstPreview).every((message) => 'seq' in message.event)).toBe(
+          true,
+        )
 
-      const snapshot = messages[firstPreview + 1]
-      expect(previewIdOf(messages)).toBe(previewId)
-      // The snapshot is the whole reply so far: what the connection before the reload saw, and
-      // whatever the model streamed between the disconnect and this read.
-      expect(deltaText(snapshot!).startsWith(streamedBeforeReload.text)).toBe(true)
+        // The snapshot is the whole reply so far: what the connection before the reload saw —
+        // and, because the turn is held, nothing it could not have seen.
+        const snapshot = replayed[firstPreview + 1]
+        expect(previewIdOf(replayed)).toBe(previewId)
+        expect(deltaText(snapshot!).startsWith(streamedBeforeReload.text)).toBe(true)
+        expect(chunks.join('').startsWith(deltaText(snapshot!))).toBe(true)
 
-      // Then the stream carries on live, and the accumulated preview is exactly the stored
-      // `agent.message` it is a preview of: no gap, and nothing applied twice.
-      const stored = messages.find((message) => message.event.type === EVENT_TYPES.agentMessage)
-      expect(previewIdOf(messages)).toBe(
-        stored?.event.type === EVENT_TYPES.agentMessage ? stored.event.id : '',
-      )
-      const accumulated = deltasOf(messages)
-        .map((message) => deltaText(message))
-        .join('')
-      expect(accumulated).toBe(chunks.join(''))
-      expect(
-        stored?.event.type === EVENT_TYPES.agentMessage ? stored.event.content[0]?.text : '',
-      ).toBe(chunks.join(''))
-    } finally {
-      after.close()
-    }
-  })
+        // Let the rest of the reply through, and follow it to the end of the turn on the same
+        // connection.
+        held.release()
+        const messages = [
+          ...replayed,
+          ...(await readUntil(
+            after,
+            (read) => read.some((message) => message.event.type === EVENT_TYPES.sessionStatusIdle),
+            15_000,
+          )),
+        ]
+
+        // Then the accumulated preview is exactly the stored `agent.message` it is a preview
+        // of: no gap, and nothing applied twice.
+        const stored = messages.find((message) => message.event.type === EVENT_TYPES.agentMessage)
+        expect(previewIdOf(messages)).toBe(
+          stored?.event.type === EVENT_TYPES.agentMessage ? stored.event.id : '',
+        )
+        const accumulated = deltasOf(messages)
+          .map((message) => deltaText(message))
+          .join('')
+        expect(accumulated).toBe(chunks.join(''))
+        expect(
+          stored?.event.type === EVENT_TYPES.agentMessage ? stored.event.content[0]?.text : '',
+        ).toBe(chunks.join(''))
+      } finally {
+        after.close()
+      }
+    },
+    HELD_REPLY_TEST_TIMEOUT_MS,
+  )
 
   /**
    * The race the snapshot has to lose gracefully: the model streams a delta *while* the store
@@ -415,8 +478,9 @@ describe('a preview snapshot', () => {
     await store.publishEphemeral(session.id, eventDelta(previewId, 'Hel'))
     store.gate = async () => {
       await store.publishEphemeral(session.id, eventDelta(previewId, 'lo'))
-      // Long enough for the store to deliver it: it is in the buffer, not applied yet.
-      await new Promise((resolve) => setTimeout(resolve, 20))
+      // Until the store has handed it to the connection: the buffer, at the moment the
+      // snapshot's text is read, is what this test is about.
+      await waitFor(() => store.delivered >= 1, { message: 'the delta never reached the stream' })
     }
 
     const reader = openSse(
@@ -449,6 +513,105 @@ describe('a preview snapshot', () => {
         EVENT_TYPES.eventStart,
         EVENT_TYPES.eventDelta,
       ])
+    } finally {
+      reader.close()
+    }
+  })
+
+  /**
+   * The same race with more than one delta in it, which is the common shape of it: a
+   * connection that opened before the reply did — a page whose turn was already running —
+   * buffers every delta published, and a snapshot read a round trip later covers all of them.
+   * Comparing the buffer from its start finds only the *last* one covered, so the earlier ones
+   * are written out a second time and the reply doubles in the middle of the stream. The whole
+   * covered run goes, and the delta published after the snapshot goes out live.
+   */
+  it('drops every buffered delta the snapshot covered, not just the last one', async () => {
+    const store = new GatedPreviewStore()
+    const agent = await store.createAgent({
+      name: 'Agent',
+      model: { id: 'openharness-test/test-model' },
+    })
+    const session = await store.createSession(agent.id)
+    const previewId = newEventId()
+    // Published before the connection subscribes: in the snapshot's text, in no buffer.
+    await store.publishEphemeral(session.id, eventStart(previewId))
+    await store.publishEphemeral(session.id, eventDelta(previewId, 'one '))
+    store.gate = async () => {
+      // Published while the snapshot is read: in the snapshot's text *and* in the buffer.
+      await store.publishEphemeral(session.id, eventDelta(previewId, 'two '))
+      await store.publishEphemeral(session.id, eventDelta(previewId, 'three'))
+      // Two: the `event_start` and the first delta went out before the connection existed.
+      await waitFor(() => store.delivered >= 2, { message: 'the deltas never reached the stream' })
+    }
+
+    const reader = openSse(
+      new Response(
+        createSessionEventStream({ store, sessionId: session.id, afterSeq: 0, deltas: true }),
+        { headers: SSE_HEADERS },
+      ),
+    )
+    try {
+      const snapshot = [await reader.next(), await reader.next()]
+      expect(snapshot.map((message) => message?.event.type)).toEqual([
+        EVENT_TYPES.eventStart,
+        EVENT_TYPES.eventDelta,
+      ])
+      expect(deltaText(snapshot[1]!)).toBe('one two three')
+
+      // What comes next is the reply moving on — not the deltas the snapshot already carried.
+      await store.publishEphemeral(session.id, eventDelta(previewId, ' four'))
+      await store.publishEphemeral(session.id, eventDelta(previewId, ' five'))
+      const live = [await reader.next(), await reader.next()]
+      expect(live.map((message) => deltaText(message!))).toEqual([' four', ' five'])
+    } finally {
+      reader.close()
+    }
+  })
+
+  /**
+   * The window between the brain's `event_start` and its first delta, which lasts one store
+   * round trip. A connection that snapshots inside it holds a preview with no text, and the
+   * accumulated delta for that preview has nothing to carry. Sending it anyway puts
+   * `text: ''` on the wire, which is not a block the protocol accepts — an `event_delta`
+   * whose `text` is empty is a frame a validating client stops at, taking the rest of the
+   * stream down with it. The id is still announced: it is what the live deltas hang off.
+   */
+  it('announces a preview with no text yet, and no delta for it', async () => {
+    const store = new InMemorySessionStore()
+    const agent = await store.createAgent({
+      name: 'Agent',
+      model: { id: 'openharness-test/test-model' },
+    })
+    const session = await store.createSession(agent.id)
+    const previewId = newEventId()
+    // As the brain leaves it: the preview is in flight, and not a character is published.
+    await store.publishEphemeral(session.id, eventStart(previewId))
+
+    const reader = openSse(
+      new Response(
+        createSessionEventStream({ store, sessionId: session.id, afterSeq: 0, deltas: true }),
+        { headers: SSE_HEADERS },
+      ),
+    )
+    try {
+      // The announcement, under the id the brain gave the preview, and nothing claiming
+      // text behind it.
+      const announced = [await reader.next()].filter(
+        (message): message is SseMessage => message !== null,
+      )
+      expect(announced[0]?.event.type).toBe(EVENT_TYPES.eventStart)
+      expect(previewIdOf(announced)).toBe(previewId)
+
+      // The text arrives with the deltas that follow, under the same id, counted once.
+      await store.publishEphemeral(session.id, eventDelta(previewId, 'Hel'))
+      await store.publishEphemeral(session.id, eventDelta(previewId, 'lo'))
+      const deltas = [await reader.next(), await reader.next()]
+      expect(deltas.map((message) => message?.event.type)).toEqual([
+        EVENT_TYPES.eventDelta,
+        EVENT_TYPES.eventDelta,
+      ])
+      expect(deltas.map((message) => deltaText(message!)).join('')).toBe('Hello')
     } finally {
       reader.close()
     }

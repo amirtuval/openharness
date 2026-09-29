@@ -157,14 +157,24 @@ It is skipped when there is nothing in flight or when the stored message it prev
 replay. The live deltas that follow continue from there, and the stored `agent.message` ends
 the preview as usual — under the same id.
 
-**The race.** A delta can be published while the snapshot is being read, so it is already in
+The `event_delta` is only sent when the preview has text, the `event_start` always is. A
+connection can land in the window between the brain's `event_start` and its first delta — one
+store round trip long, and easy to hit on a loaded machine — and a preview in that window has
+accumulated nothing: `text: ''` is not a block the protocol accepts (`TextBlockSchema` wants at
+least one character), so the accumulated delta for it would be a frame a validating client
+stops at, while there is nothing for the client to be missing. The announcement still goes out,
+and is what the live deltas that follow are read under.
+
+**The race.** Deltas can be published while the snapshot is being read, so they are already in
 the snapshot's text _and_ waiting in the buffer to be written out live; applied twice, the
-reply would double in the middle. Ephemeral events carry no sequence number to compare with, so
-the buffer is filtered by text: the deltas the snapshot covers are the last ones published, so
-they are the ones its text **ends** with (`dropCovered` in `sse.ts`). A buffered delta that
-keeps that tail going is dropped; the first one that does not is new content, and so is
-everything after it. Buffered `event_start`s for the snapshot's id go too — a second one would
-make a client start its accumulator over, throwing the snapshot away.
+reply would double in the middle. Ephemeral events carry no position to compare with, so the
+buffer is filtered by text: the deltas the snapshot covers are the ones published before it was
+read, so their text is what its text **ends** with — and, in the buffer, they are the first
+deltas for the id, because everything published before the connection subscribed is in neither
+place. `dropCovered` in `sse.ts` therefore drops the longest run of buffered deltas, from the
+first, that still ends the snapshot's text; everything after it is new content and goes out
+live. Buffered `event_start`s for the snapshot's id go too — a second one would make a client
+start its accumulator over, throwing the snapshot away.
 
 ### Session titles (#29)
 
@@ -428,7 +438,9 @@ delete each other's sessions. Packages still run in parallel with each other.
   session gets from its first message.
 - `sse.test.ts` — replay and live with no gaps or duplicates, `last-event-id` resume, previews
   opt-in, keepalive, disconnect cleanup, and the preview snapshot a connection that opens
-  mid-reply is given (#27) — including the delta that lands while the snapshot is read.
+  mid-reply is given (#27) — including the delta that lands while the snapshot is read, and a
+  preview whose `event_start` has been published but whose text has not started. The replies
+  those tests reload into are held by the test (`defer`), not paced by a clock.
 - `sse-postgres.test.ts` — the same reload mid-reply over a real Postgres store, where the
   preview is a row another instance can read. Same database rule as
   `partition-scheduler.test.ts`: `DATABASE_URL`, otherwise a container, otherwise skipped.
