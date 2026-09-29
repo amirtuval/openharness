@@ -2,6 +2,7 @@ import type { Client } from '@openharness/client'
 import type { Agent, Session } from '@openharness/protocol'
 
 import { describeError, type ErrorContext } from '../errors'
+import { listAllAgents, listAllSessions } from '../paging'
 
 /** How wide a column gets before it is cut short; ids and timestamps are never cut. */
 const TITLE_WIDTH = 32
@@ -20,13 +21,13 @@ export interface CommandIo {
 /**
  * `oh sessions` — the sessions the server has, newest first.
  *
- * The list is a page, not everything: the protocol caps a page at its own limit, and a
- * terminal is not the place to scroll through thousands of sessions.
+ * Every session the server has, not just the first page of them: a listing that silently
+ * stopped at twenty is how a session the user is looking for appears not to exist. A
+ * terminal can display far more rows than it shows at once.
  */
 export async function runSessions(client: Client, io: CommandIo): Promise<number> {
   try {
-    const page = await client.sessions.list()
-    writeLines(io.stdout, formatSessions(page.data))
+    writeLines(io.stdout, formatSessions(await listAllSessions(client)))
     return 0
   } catch (error) {
     return reportFailure(io, error)
@@ -36,8 +37,7 @@ export async function runSessions(client: Client, io: CommandIo): Promise<number
 /** `oh agents` — the agents a new session can run, oldest first. */
 export async function runAgents(client: Client, io: CommandIo): Promise<number> {
   try {
-    const page = await client.agents.list()
-    writeLines(io.stdout, formatAgents(page.data))
+    writeLines(io.stdout, formatAgents(await listAllAgents(client)))
     return 0
   } catch (error) {
     return reportFailure(io, error)
