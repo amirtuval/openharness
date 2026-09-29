@@ -59,7 +59,9 @@ test.describe('C10 cross-client', () => {
       await test.step('oh starts a new chat', async () => {
         terminal.run(`${CLI_COMMAND} --server ${CLI_SERVER}`)
         await terminal.waitFor(/Which agent\?/)
-        terminal.send('1', 'Enter')
+        // Enter takes the row the cursor starts on: the picker does not offer number keys
+        // once the server has more than nine agents.
+        terminal.send('Enter')
         await terminal.waitForIdle()
         startedInChat = (await terminal.waitFor(/sesn_[A-Z0-9]+/))[0]
       })

@@ -133,6 +133,16 @@ test.describe('W11 errors', () => {
       'set QA_ALLOW_SERVER_RESTART=1 to stop and start the server container',
     )
 
+    // The message the chat shows can only name the server if the app was told which server it
+    // is: with no URL saved it says "this site", which is true and is not what this scenario is
+    // about. An absolute URL here is the same origin the page is already on.
+    await test.step('point the app at the server by URL', async () => {
+      await page.goto('/#/settings')
+      await page.getByLabel('Server URL').fill(BASE_URL)
+      await page.getByRole('button', { name: 'Save' }).click()
+      await expect(page.getByRole('status').filter({ hasText: 'Saved' })).toBeVisible()
+    })
+
     const agent = await createAgent(request, {
       name: uniqueName('QA W11c'),
       model: 'anthropic/claude-sonnet-5',
@@ -153,7 +163,16 @@ test.describe('W11 errors', () => {
       const banner = page.getByRole('alert')
       await expect(banner).toBeVisible({ timeout: 30_000 })
       await shot(page, 'w11-03-server-down')
-      console.log('banner while the server was down:', await banner.innerText())
+
+      // Regression coverage for issue #28: the banner used to be the browser's own
+      // "Request failed / Failed to fetch". Fixed by PR #33, which classifies the transport
+      // failure and names the server the app was pointed at (`apps/web/src/lib/errors.ts`).
+      const text = await banner.innerText()
+      console.log('banner while the server was down:', text)
+      expect(text, 'the browser’s own words for it are not reported to the user').not.toContain(
+        'Failed to fetch',
+      )
+      expect(text, 'the banner names the server that could not be reached').toContain(BASE_URL)
     } finally {
       execFileSync('docker', ['start', SERVER_CONTAINER], { stdio: 'pipe' })
     }

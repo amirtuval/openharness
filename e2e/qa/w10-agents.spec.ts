@@ -103,9 +103,10 @@ test.describe('W10 agents', () => {
     expect(consoleErrors, consoleErrors.join('\n')).toEqual([])
   })
 
-  // Known bug: the screen shows one page of agents and drops the cursor for the rest.
-  // Reported on issue #14.
-  test.fail('W10c the agents screen lists every agent', async ({ page, request }) => {
+  // Was `test.fail` as the reproduction of issue #25 (the screen rendered one page of agents
+  // and dropped `next_page`, so everything past the 20 oldest was unreachable). Fixed by
+  // PR #33: `useAgents` walks every page through `listAllPages`.
+  test('W10c the agents screen lists every agent', async ({ page, request }) => {
     for (let index = 0; index < 21; index += 1) {
       await createAgent(request, {
         name: uniqueName(`QA W10c ${index}`),
