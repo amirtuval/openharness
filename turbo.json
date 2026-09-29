@@ -13,8 +13,7 @@
       "dependsOn": ["^build"]
     },
     "test": {
-      "dependsOn": ["^build"],
-      "passThroughEnv": ["DATABASE_URL"]
+      "dependsOn": ["^build"]
     },
     "format:check": {},
     "dev": {

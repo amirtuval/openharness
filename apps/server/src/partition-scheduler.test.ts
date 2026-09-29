@@ -232,19 +232,19 @@ if (SOURCE === null) {
       const second = instance('second')
 
       await Promise.all([first.scheduler.start(), second.scheduler.start()])
+      // Each instance stops at half the space on its first scan, so two that boot together
+      // each end up with a set rather than whichever one won the race having all of them. The
+      // first scans can race for the same partition and land 5/3 for a moment; the instance
+      // above its share then gives the surplus back, so wait for the balance, not the first claim.
       await waitFor(
         () =>
-          first.scheduler.heldPartitions().length + second.scheduler.heldPartitions().length ===
-          PARTITIONS,
-        { timeoutMs: WAIT_MS, message: 'the partition space was never fully claimed' },
+          first.scheduler.heldPartitions().length === PARTITIONS / 2 &&
+          second.scheduler.heldPartitions().length === PARTITIONS / 2,
+        { timeoutMs: WAIT_MS, message: 'the partition space never settled at half each' },
       )
 
       const heldByFirst = first.scheduler.heldPartitions()
       const heldBySecond = second.scheduler.heldPartitions()
-      // Each instance stops at half the space on its first scan, so two that boot together
-      // each end up with a set rather than whichever one won the race having all of them.
-      expect(heldByFirst).toHaveLength(PARTITIONS / 2)
-      expect(heldBySecond).toHaveLength(PARTITIONS / 2)
       expect(heldByFirst.filter((partition) => heldBySecond.includes(partition))).toEqual([])
 
       // A few heartbeats later nothing has changed hands: a live lease is never taken over.
