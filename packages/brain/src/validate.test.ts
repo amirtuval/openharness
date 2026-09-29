@@ -43,6 +43,16 @@ describe('assertValidEvents', () => {
     }).not.toThrow()
   })
 
+  it('accepts a queued user event, which is stored before it is processed', () => {
+    // The brain writes no user events, so this is the check on the check: a type whose stored
+    // `processed_at` is `null` must not be refused for a timestamp it never has.
+    expect(() => {
+      assertValidEvents([
+        { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: 'Hello' }] },
+      ])
+    }).not.toThrow()
+  })
+
   it('rejects a usage that is not the protocol counters', () => {
     // The shape a real provider's turn used to store: the counters as the string `ai` left
     // behind. The protocol asks for integers, and the log must not get anything else.
