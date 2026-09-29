@@ -926,6 +926,7 @@ __metadata:
     "@openharness/hands": "workspace:*"
     "@openharness/protocol": "workspace:*"
     "@openharness/session": "workspace:*"
+    "@testcontainers/postgresql": "npm:12.1.0"
     "@types/node": "npm:26.6.3"
     "@types/pg": "npm:8.23.1"
     ai: "npm:7.0.118"

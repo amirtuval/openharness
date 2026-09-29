@@ -12,7 +12,8 @@ describe('AgentsScreen', () => {
 
     // Scoped to the list: the sidebar shows the agent's name too, on its session.
     const list = within(await screen.findByRole('region', { name: 'Agent list' }))
-    expect(list.getByText('Summarizer')).toBeInTheDocument()
+    // The region renders before the agents load, so wait for the row rather than asserting at once.
+    expect(await list.findByText('Summarizer')).toBeInTheDocument()
     expect(list.getByText('anthropic/claude-sonnet-5')).toBeInTheDocument()
 
     const model = screen.getByLabelText('Model')

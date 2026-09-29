@@ -2,6 +2,7 @@ import type { ContextStrategy, ModelFactory, RetryPolicy } from '@openharness/br
 import { DEFAULT_PARTITION_COUNT, type SessionId } from '@openharness/protocol'
 import type { PartitionSignalKind, SessionStore } from '@openharness/session'
 
+import { DEFAULT_MAX_CONCURRENT_PASSES, PassQueue } from './pass-queue'
 import { DEFAULT_DRAIN_TIMEOUT_MS, SessionRunner } from './runner'
 
 /**
@@ -72,12 +73,20 @@ export interface LocalSchedulerOptions {
   readonly retry?: RetryPolicy
   /** How the log becomes model messages, passed to every turn. */
   readonly contextStrategy?: ContextStrategy
+  /**
+   * How many partitions the server's sessions are spread over; the protocol's 64 by default.
+   *
+   * A `LocalScheduler` does not lease anything, so this only has to match the store's own
+   * partition count for recovery's `findSessionsNeedingWork` to look at the partitions the
+   * sessions were written into.
+   */
+  readonly partitionCount?: number
   /** Called when a pass rejects — a fenced write, an unexpected failure. Never throws. */
   readonly onError?: (error: unknown, sessionId: SessionId) => void
 }
 
 /** How many sessions run at once when the caller does not say. */
-export const DEFAULT_MAX_CONCURRENT_SESSIONS = 4
+export const DEFAULT_MAX_CONCURRENT_SESSIONS = DEFAULT_MAX_CONCURRENT_PASSES
 
 /**
  * The scheduler for a server that owns every partition: a session needs work, so this process
@@ -96,28 +105,20 @@ export const DEFAULT_MAX_CONCURRENT_SESSIONS = 4
 export class LocalScheduler implements SessionScheduler {
   readonly #store: SessionStore
 
-  readonly #runner: SessionRunner
+  readonly #queue: PassQueue
 
-  readonly #maxConcurrentSessions: number
+  readonly #partitionCount: number
 
   readonly #drainTimeoutMs: number
 
-  readonly #onError: ((error: unknown, sessionId: SessionId) => void) | undefined
-
-  /** Sessions waiting for a slot, oldest enqueue first. */
-  readonly #waiting: SessionId[] = []
-
-  /** The same set as {@link waiting}, for O(1) "is it already queued?". */
-  readonly #queued = new Set<SessionId>()
-
-  /** The passes in flight, by session; the size is what the concurrency limit counts. */
-  readonly #active = new Map<SessionId, Promise<void>>()
-
-  #stopped = false
+  /** The `stop()` in progress, so a second call waits for it instead of starting another. */
+  #stopping: Promise<void> | null = null
 
   constructor(options: LocalSchedulerOptions) {
     this.#store = options.store
-    this.#runner =
+    this.#partitionCount = options.partitionCount ?? DEFAULT_PARTITION_COUNT
+    this.#drainTimeoutMs = options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS
+    const runner =
       options.runner ??
       new SessionRunner({
         store: options.store,
@@ -127,114 +128,51 @@ export class LocalScheduler implements SessionScheduler {
           ? {}
           : { contextStrategy: options.contextStrategy }),
       })
-    this.#maxConcurrentSessions = options.maxConcurrentSessions ?? DEFAULT_MAX_CONCURRENT_SESSIONS
-    this.#drainTimeoutMs = options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS
-    this.#onError = options.onError
+    this.#queue = new PassQueue({
+      runner,
+      ...(options.maxConcurrentSessions === undefined
+        ? {}
+        : { maxConcurrentSessions: options.maxConcurrentSessions }),
+      ...(options.drainTimeoutMs === undefined ? {} : { drainTimeoutMs: options.drainTimeoutMs }),
+      ...(options.onError === undefined ? {} : { onError: options.onError }),
+    })
   }
 
   /** The runner that owns the per-session turn loop; #11 shares one with its partitions. */
   get runner(): SessionRunner {
-    return this.#runner
+    return this.#queue.runner
   }
 
   async start(): Promise<void> {
-    const sessions = await this.#store.findSessionsNeedingWork(partitions())
+    const sessions = await this.#store.findSessionsNeedingWork(partitions(this.#partitionCount))
     for (const sessionId of sessions) {
-      this.#enqueue(sessionId)
+      this.#queue.request(sessionId)
     }
   }
 
   async stop(options: StopSchedulerOptions = {}): Promise<void> {
-    if (this.#stopped) {
-      return
-    }
-    this.#stopped = true
-    this.#waiting.length = 0
-    this.#queued.clear()
-    await this.#runner.stop({
+    this.#stopping ??= this.#queue.stop({
       drainTimeoutMs: options.drainTimeoutMs ?? this.#drainTimeoutMs,
     })
+    return this.#stopping
   }
 
   signal(sessionId: SessionId, kind: PartitionSignalKind): void {
     if (kind === 'interrupt') {
       // A turn in flight is aborted; its pass looks at the log again afterwards, which is
       // where a message queued behind the interrupt gets its turn.
-      if (this.#runner.abort(sessionId)) {
+      if (this.#queue.runner.abort(sessionId)) {
         return
       }
       // Nothing to abort: there is still a queued `user.interrupt` in the log for the brain
       // to claim, so a turn is started for it.
     }
-    this.#enqueue(sessionId)
+    this.#queue.request(sessionId)
   }
 
   /** The sessions with a pass in flight; what the concurrency limit counts. */
   activeSessions(): SessionId[] {
-    return [...this.#active.keys()]
-  }
-
-  /**
-   * Ask for a pass on `sessionId`, respecting the limit.
-   *
-   * A session that is already running is woken instead of queued: two passes for one session
-   * is exactly what {@link SessionRunner} exists to prevent.
-   */
-  #enqueue(sessionId: SessionId): void {
-    if (this.#stopped) {
-      return
-    }
-    if (this.#runner.isRunning(sessionId)) {
-      this.#runner.wake(sessionId)
-      return
-    }
-    if (this.#queued.has(sessionId)) {
-      return
-    }
-    this.#queued.add(sessionId)
-    this.#waiting.push(sessionId)
-    this.#pump()
-  }
-
-  /** Start passes until the limit is reached or the queue is empty. */
-  #pump(): void {
-    while (!this.#stopped && this.#active.size < this.#maxConcurrentSessions) {
-      const sessionId = this.#waiting.shift()
-      if (sessionId === undefined) {
-        return
-      }
-      this.#queued.delete(sessionId)
-      if (this.#runner.isRunning(sessionId)) {
-        this.#runner.wake(sessionId)
-        continue
-      }
-      const pass = this.#runner.run(sessionId).then(
-        () => undefined,
-        (error: unknown) => {
-          this.#report(error, sessionId)
-        },
-      )
-      this.#active.set(sessionId, pass)
-      void pass.then(() => {
-        // Only if this pass is still the one on record. The runner lets go of a session a
-        // microtask before this runs, so a signal in that window can start the next pass for
-        // it — and deleting *that* pass's slot would let the next `#pump` start one session
-        // more than the limit allows.
-        if (this.#active.get(sessionId) === pass) {
-          this.#active.delete(sessionId)
-        }
-        this.#pump()
-      })
-    }
-  }
-
-  /** Report a failed pass without ever letting it escape: the reporter is the only listener. */
-  #report(error: unknown, sessionId: SessionId): void {
-    try {
-      this.#onError?.(error, sessionId)
-    } catch {
-      // A reporter that throws is not worth losing the scheduler over.
-    }
+    return this.#queue.activeSessions()
   }
 }
 

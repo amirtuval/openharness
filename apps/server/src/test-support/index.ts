@@ -6,4 +6,5 @@
  */
 export * from './harness'
 export * from './model'
+export * from './postgres'
 export * from './sse'

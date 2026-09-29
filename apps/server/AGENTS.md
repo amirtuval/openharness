@@ -65,16 +65,22 @@ a `user.interrupt` signals `interrupt` — exactly what the same events would do
 
 ## Environment variables
 
-| variable                              | default | what it does                                                  |
-| ------------------------------------- | ------- | ------------------------------------------------------------- |
-| `DATABASE_URL`                        | —       | run on Postgres, migrating on boot; unset means in-memory     |
-| `OPENHARNESS_API_KEY`                 | —       | require `x-api-key` on `/v1/*`; unset leaves the API open     |
-| `PORT`                                | `3000`  | the port to listen on                                         |
-| `OPENHARNESS_TEST_MODEL`              | —       | `mock` swaps in the deterministic test model                  |
-| `OPENHARNESS_WEB_DIR`                 | —       | a built web app to serve at `/`                               |
-| `OPENHARNESS_CORS_ORIGINS`            | —       | comma-separated origins to allow; unset means no CORS headers |
-| `OPENHARNESS_MAX_CONCURRENT_SESSIONS` | `4`     | how many sessions may be running at once                      |
-| `OPENHARNESS_DRAIN_TIMEOUT_MS`        | `5000`  | how long shutdown waits for a turn in flight                  |
+| variable                              | default                        | what it does                                                  |
+| ------------------------------------- | ------------------------------ | ------------------------------------------------------------- |
+| `DATABASE_URL`                        | —                              | run on Postgres, migrating on boot; unset means in-memory     |
+| `SCHEDULER`                           | `local`                        | `local`, or `postgres` for the multi-instance scheduler       |
+| `OPENHARNESS_API_KEY`                 | —                              | require `x-api-key` on `/v1/*`; unset leaves the API open     |
+| `PORT`                                | `3000`                         | the port to listen on                                         |
+| `OPENHARNESS_TEST_MODEL`              | —                              | `mock` swaps in the deterministic test model                  |
+| `OPENHARNESS_WEB_DIR`                 | —                              | a built web app to serve at `/`                               |
+| `OPENHARNESS_CORS_ORIGINS`            | —                              | comma-separated origins to allow; unset means no CORS headers |
+| `OPENHARNESS_MAX_CONCURRENT_SESSIONS` | `4`                            | how many sessions may be running at once                      |
+| `OPENHARNESS_DRAIN_TIMEOUT_MS`        | `5000`                         | how long shutdown waits for a turn in flight                  |
+| `OPENHARNESS_INSTANCE_ID`             | hostname + pid + random suffix | this instance's id in the lease table                         |
+| `OPENHARNESS_PARTITIONS`              | `64` (the protocol's)          | how many partitions the session space has                     |
+| `OPENHARNESS_LEASE_TTL_MS`            | `30000`                        | how long a partition lease lasts before it must be renewed    |
+| `OPENHARNESS_HEARTBEAT_MS`            | `10000`                        | how often leases are renewed and free partitions taken        |
+| `OPENHARNESS_SWEEP_MS`                | `60000`                        | how often owned partitions are re-scanned for missed work     |
 
 Provider credentials (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) are not read by this package:
 the default model factory is the brain's `routerModelFactory`, and Mastra's router reads
@@ -162,6 +168,52 @@ most `OPENHARNESS_MAX_CONCURRENT_SESSIONS` sessions run at once; the rest wait t
 `stop()` accepts nothing more, aborts the turns in flight and gives them the drain timeout to
 write their last events.
 
+### `PostgresPartitionScheduler`
+
+```ts
+new PostgresPartitionScheduler({
+  store,
+  model,
+  instanceId, // unique among the servers sharing the database
+  partitions = 64, // must match the store's partition count
+  ttlMs = 30000, // how long a lease lasts before it must be renewed
+  heartbeatMs = 10000, // renew held leases, take free ones, give up surplus
+  sweepMs = 60000, // re-scan owned partitions for work no signal mentioned
+  maxConcurrentSessions = 4,
+  drainTimeoutMs = 5000,
+  retry,
+  contextStrategy,
+  runner,
+  onError,
+  onNotice, // a failure, a line about what it is doing
+})
+```
+
+`SCHEDULER=postgres` builds it; `local` (the default) is the `LocalScheduler`. The one line
+that changes for a route is the other way round: it does not change at all. Ownership is by
+partition lease — `sessionId` hashes to one of `partitions`, and an instance runs a session
+only while it holds that partition's lease, writing every turn under `fence: {partition, epoch}`.
+
+- **Acquiring a partition** subscribes to its signals first and then recovers it
+  (`findSessionsNeedingWork`), so a partition whose previous owner died is picked up, and
+  whatever arrived before the subscription is found rather than lost.
+- **Balancing** is inferred from lease outcomes, because the store cannot list instances: a
+  scan takes free or expired partitions and never a live one, a fresh instance stops its first
+  scan at half the space so instances booting together share it, and an instance holding more
+  than `ceil(partitions / (1 + peers))` gives the surplus up — finishing the turns in it first,
+  then releasing.
+- **Losing a lease** — a refused renewal, or a `FencedError` out of a turn — aborts that
+  partition's turns, ends its subscription and stops it running work for it. It never crashes
+  the process.
+- **`stop()`** drains the turns in flight and then releases every lease, so the next instance
+  takes over at its next heartbeat instead of waiting out the TTL.
+- **`pause()`/`resume()`** stop and restart the timers without giving anything up: what a
+  wedged process looks like from the outside, and what the zombie tests use.
+- **`heldPartitions()`** is what an instance owns right now.
+
+[`docs/scheduling.md`](./docs/scheduling.md) is the long version: partitions, leases, epochs,
+signals, balancing, crashes and shutdown.
+
 ```ts
 class SessionRunner {
   run(
@@ -185,11 +237,11 @@ decides and a signal for an event appended in that window would otherwise be los
 `run()` while a pass is in flight does not start a second one: it wakes the pass and answers
 with its outcome.
 
-**This is where #11 plugs in.** A `PostgresPartitionScheduler` acquires partition leases, listens
-with `onPartitionSignal`, and calls the same `runner.run(sessionId, { fence })` with the lease it
-holds — the `fence` goes straight to `runTurn`, so a brain whose lease has been taken over stops
-at its first refused write. The scheduler above decides _which_ sessions are owned; the runner
-decides _how_ they are run.
+**This is the seam the partitioned scheduler reuses.** A `PostgresPartitionScheduler` acquires
+partition leases, listens with `onPartitionSignal`, and calls the same
+`runner.run(sessionId, { fence })` with the lease it holds — the `fence` goes straight to
+`runTurn`, so a brain whose lease has been taken over stops at its first refused write. The
+scheduler above decides _which_ sessions are owned; the runner decides _how_ they are run.
 
 `run`'s optional `signal` is the other half of that: "this process should not be running this
 session any more" — a shutdown, or a lease given up. A pass whose signal is already aborted
@@ -274,8 +326,11 @@ drain.
 | `startServer(options)`                              | store, migrations, model, scheduler, listener and a `shutdown()`                |
 | `main(env, options)`                                | `startServer` from the environment, plus the signal handlers                    |
 | `LocalScheduler`                                    | the single-process `SessionScheduler`                                           |
-| `SessionRunner`                                     | the per-session turn loop, reusable (#11)                                       |
+| `PostgresPartitionScheduler`                        | the multi-instance `SessionScheduler`: partition leases, epochs, recovery (#11) |
+| `PassQueue`                                         | the pass queue and concurrency limit both schedulers share                      |
+| `SessionRunner`                                     | the per-session turn loop, reusable: what both schedulers run passes with       |
 | `createMockModelFactory()`                          | the deterministic test model, for a host that wires its own                     |
+| `defaultInstanceId()`                               | hostname + pid + random suffix: the id a server leases partitions under         |
 | `readServerConfig(env)`, `ServerConfig`, `ENV_VARS` | the environment, parsed                                                         |
 | `HttpError`, `PACKAGE_NAME`, `Logger`               | the error type, the package name and the logging seam                           |
 
@@ -293,6 +348,8 @@ src/
   mock-model.ts         the deterministic test model and its markers
   runner.ts             SessionRunner: one turn per session, re-run while there is work
   scheduler.ts          SessionScheduler, LocalScheduler, partition helpers
+  pass-queue.ts         PassQueue: the queue and the concurrency limit, shared by both
+  partition-scheduler.ts PostgresPartitionScheduler: leases, epochs, signals, recovery (#11)
   sse.ts                the SSE body of a stream request
   static.ts             serving a built web app from OPENHARNESS_WEB_DIR
   types.ts              AppEnv (the Hono environment) and the Logger seam
@@ -300,7 +357,8 @@ src/
     errors.ts           HttpError and the protocol's error envelope
     request.ts          body/query/path reading, through the protocol's schemas
   routes/               agents.ts, sessions.ts, events.ts, ai-sdk.ts
-  test-support/         test-only: scripted model, SSE reader, the server harness
+  test-support/         test-only: scripted model, SSE reader, the server harness, Postgres
+docs/scheduling.md      the multi-instance scheduler: partitions, leases, epochs, recovery
 ```
 
 ## Allowed `@openharness/*` dependencies
@@ -330,10 +388,17 @@ socket, the client transport's own request shape — only exists over one.
 - `scheduler.test.ts` — one turn per session, steering, interrupts (running and idle), a
   message queued behind an interrupt, recovery on start, concurrency, stopping, and the fence
   reaching the store.
+- `partition-scheduler.test.ts` — the multi-instance scheduler against real Postgres, several
+  instances in one process each with its own store connection: spread and takeover, one turn
+  per session, a crash mid-turn and the recovery that finishes it, a zombie that cannot write,
+  a lease that cannot be renewed, interrupts routed across instances, the sweep, the fences a
+  turn writes with, and shutdown handing its partitions back. `DATABASE_URL` when it is set,
+  otherwise a container, otherwise the suite is skipped with a note.
 - `ai-sdk.test.ts` — the adapter through `DefaultChatTransport` and `readUIMessageStream`.
 - `mock-model.test.ts` — the echo, `__slow__`, both failure markers, fixed usage, and that the
   hook cannot activate without the variable.
-- `config.test.ts`, `main.test.ts` — the environment, startup, recovery and shutdown.
+- `config.test.ts`, `main.test.ts` — the environment, startup, recovery and shutdown, and
+  `SCHEDULER=postgres` wiring the partitioned scheduler.
 
 ## Rules
 

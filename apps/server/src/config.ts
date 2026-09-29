@@ -1,4 +1,10 @@
+import { randomUUID } from 'node:crypto'
+import { hostname } from 'node:os'
+
+import { DEFAULT_PARTITION_COUNT } from '@openharness/protocol'
+
 import { MOCK_MODEL_ENV_VALUE } from './mock-model'
+import { DEFAULT_HEARTBEAT_MS, DEFAULT_LEASE_TTL_MS, DEFAULT_SWEEP_MS } from './partition-scheduler'
 import { DEFAULT_DRAIN_TIMEOUT_MS } from './runner'
 import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
 
@@ -13,6 +19,7 @@ import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
  * | variable                            | what it does                                                    |
  * | ----------------------------------- | --------------------------------------------------------------- |
  * | `DATABASE_URL`                      | Postgres to run on, migrated on boot; unset means in-memory      |
+ * | `SCHEDULER`                         | `local` (default) or `postgres`, the multi-instance scheduler    |
  * | `OPENHARNESS_API_KEY`               | require `x-api-key` on `/v1/*`; unset leaves the API open        |
  * | `PORT`                              | the port to listen on; `3000` by default                         |
  * | `OPENHARNESS_TEST_MODEL`            | `mock` swaps in the deterministic test model (see `mock-model.ts`) |
@@ -20,6 +27,11 @@ import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
  * | `OPENHARNESS_CORS_ORIGINS`          | comma-separated origins to allow; unset means no CORS at all     |
  * | `OPENHARNESS_MAX_CONCURRENT_SESSIONS` | how many sessions may run at once; `4` by default               |
  * | `OPENHARNESS_DRAIN_TIMEOUT_MS`      | how long shutdown waits for a turn in flight; `5000` by default  |
+ * | `OPENHARNESS_INSTANCE_ID`           | this server's id in the lease table; `host-pid-random` by default |
+ * | `OPENHARNESS_PARTITIONS`            | how many partitions the session space has; protocol's `64`       |
+ * | `OPENHARNESS_LEASE_TTL_MS`          | how long a partition lease lasts; `30000` by default             |
+ * | `OPENHARNESS_HEARTBEAT_MS`          | how often leases are renewed; `10000` by default                 |
+ * | `OPENHARNESS_SWEEP_MS`              | how often owned partitions are re-scanned; `60000` by default    |
  *
  * Provider credentials (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) are not read here: the
  * default model factory is Mastra's router, which reads whatever the provider it routes to
@@ -29,6 +41,7 @@ import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
 /** The environment variable names this package reads. */
 export const ENV_VARS = {
   databaseUrl: 'DATABASE_URL',
+  scheduler: 'SCHEDULER',
   apiKey: 'OPENHARNESS_API_KEY',
   port: 'PORT',
   testModel: 'OPENHARNESS_TEST_MODEL',
@@ -36,6 +49,11 @@ export const ENV_VARS = {
   corsOrigins: 'OPENHARNESS_CORS_ORIGINS',
   maxConcurrentSessions: 'OPENHARNESS_MAX_CONCURRENT_SESSIONS',
   drainTimeoutMs: 'OPENHARNESS_DRAIN_TIMEOUT_MS',
+  instanceId: 'OPENHARNESS_INSTANCE_ID',
+  partitions: 'OPENHARNESS_PARTITIONS',
+  leaseTtlMs: 'OPENHARNESS_LEASE_TTL_MS',
+  heartbeatMs: 'OPENHARNESS_HEARTBEAT_MS',
+  sweepMs: 'OPENHARNESS_SWEEP_MS',
 } as const
 
 /** Everything the server reads from the environment, parsed and checked. */
@@ -44,6 +62,8 @@ export interface ServerConfig {
   readonly port: number
   /** The Postgres connection string, or `undefined` for the in-memory store. */
   readonly databaseUrl: string | undefined
+  /** Which scheduler runs the brains: this process alone, or partition leases. */
+  readonly scheduler: SchedulerKind
   /** The API key `/v1/*` requires, or `undefined` for an open API. */
   readonly apiKey: string | undefined
   /** The value of `OPENHARNESS_TEST_MODEL`, if any. */
@@ -56,10 +76,37 @@ export interface ServerConfig {
   readonly maxConcurrentSessions: number
   /** How long a shutdown waits for the turns in flight. */
   readonly drainTimeoutMs: number
+  /** This instance's id in the lease table; unique among the servers sharing a database. */
+  readonly instanceId: string
+  /** How many partitions the session space is divided into. */
+  readonly partitions: number
+  /** How long a partition lease lasts before it has to be renewed. */
+  readonly leaseTtlMs: number
+  /** How often held leases are renewed and free partitions taken over. */
+  readonly heartbeatMs: number
+  /** How often owned partitions are re-scanned for work a signal may have missed. */
+  readonly sweepMs: number
 }
+
+/** Which {@link SessionScheduler} the server runs. */
+export type SchedulerKind = 'local' | 'postgres'
 
 /** The port a server listens on when `PORT` does not say. */
 export const DEFAULT_PORT = 3000
+
+/** The scheduler a server runs when `SCHEDULER` does not say. */
+export const DEFAULT_SCHEDULER: SchedulerKind = 'local'
+
+/**
+ * An instance id nobody else is using: this host, this process, and a random suffix.
+ *
+ * The hostname and the pid make a log line readable; the suffix is what makes two instances
+ * on one host unique, which matters because two live instances leasing under one id would
+ * fence each other's writes.
+ */
+export function defaultInstanceId(): string {
+  return `${hostname()}-${process.pid}-${randomUUID().slice(0, 8)}`
+}
 
 /**
  * Read the server's configuration from an environment.
@@ -72,9 +119,30 @@ export const DEFAULT_PORT = 3000
  *   easier to read than a server that came up listening on `NaN`
  */
 export function readServerConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
+  const databaseUrl = readString(env, ENV_VARS.databaseUrl)
+  const scheduler = readChoice(env, ENV_VARS.scheduler, ['local', 'postgres'], DEFAULT_SCHEDULER)
+  if (scheduler === 'postgres' && databaseUrl === undefined) {
+    // Partition leases live in the store, and only the Postgres store has a table to put them
+    // in: a server asked to run the multi-instance scheduler without a database is a
+    // configuration nobody can mean, so it does not come up.
+    throw new Error(
+      `${ENV_VARS.scheduler}=postgres requires ${ENV_VARS.databaseUrl} to be set: ` +
+        'partition leases are stored in the database',
+    )
+  }
+  const leaseTtlMs = readInteger(env, ENV_VARS.leaseTtlMs, DEFAULT_LEASE_TTL_MS, { min: 1 })
+  const heartbeatMs = readInteger(env, ENV_VARS.heartbeatMs, DEFAULT_HEARTBEAT_MS, { min: 1 })
+  if (heartbeatMs >= leaseTtlMs) {
+    // A heartbeat slower than the lease is a lease that lapses between two renewals.
+    throw new Error(
+      `${ENV_VARS.heartbeatMs} (${heartbeatMs}) must be smaller than ` +
+        `${ENV_VARS.leaseTtlMs} (${leaseTtlMs})`,
+    )
+  }
   return {
     port: readInteger(env, ENV_VARS.port, DEFAULT_PORT, { min: 0, max: 65535 }),
-    databaseUrl: readString(env, ENV_VARS.databaseUrl),
+    databaseUrl,
+    scheduler,
     apiKey: readString(env, ENV_VARS.apiKey),
     testModel: readString(env, ENV_VARS.testModel),
     webDir: readString(env, ENV_VARS.webDir),
@@ -88,6 +156,11 @@ export function readServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
     drainTimeoutMs: readInteger(env, ENV_VARS.drainTimeoutMs, DEFAULT_DRAIN_TIMEOUT_MS, {
       min: 0,
     }),
+    instanceId: readString(env, ENV_VARS.instanceId) ?? defaultInstanceId(),
+    partitions: readInteger(env, ENV_VARS.partitions, DEFAULT_PARTITION_COUNT, { min: 1 }),
+    leaseTtlMs,
+    heartbeatMs,
+    sweepMs: readInteger(env, ENV_VARS.sweepMs, DEFAULT_SWEEP_MS, { min: 1 }),
   }
 }
 
@@ -103,6 +176,13 @@ export function describeConfig(config: ServerConfig): string[] {
     config.databaseUrl === undefined
       ? 'store: in-memory'
       : 'store: postgres (migrations applied on boot)',
+  )
+  lines.push(
+    config.scheduler === 'postgres'
+      ? `scheduler: postgres partitions (instance ${config.instanceId}, ` +
+          `${config.partitions} partitions, lease ${config.leaseTtlMs}ms, ` +
+          `heartbeat ${config.heartbeatMs}ms, sweep ${config.sweepMs}ms)`
+      : 'scheduler: local (this process owns every session)',
   )
   lines.push(
     config.apiKey === undefined ? 'auth: open (no OPENHARNESS_API_KEY)' : 'auth: x-api-key',
@@ -147,6 +227,23 @@ function readInteger(
     throw new Error(`${name} must be an integer ${range}, got ${JSON.stringify(value)}`)
   }
   return parsed
+}
+
+/** A variable's value as one of a fixed set, or `fallback` when it is unset or empty. */
+function readChoice<T extends string>(
+  env: NodeJS.ProcessEnv,
+  name: string,
+  options: readonly T[],
+  fallback: T,
+): T {
+  const value = readString(env, name)
+  if (value === undefined) {
+    return fallback
+  }
+  if (!(options as readonly string[]).includes(value)) {
+    throw new Error(`${name} must be one of ${options.join(', ')}, got ${JSON.stringify(value)}`)
+  }
+  return value as T
 }
 
 /**
