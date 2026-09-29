@@ -1,4 +1,5 @@
 import {
+  QA_MODEL,
   composer,
   conversation,
   createAgent,
@@ -6,6 +7,7 @@ import {
   distanceFromBottom,
   expect,
   eventTypes,
+  isRealModel,
   openChat,
   recordRendering,
   renderedLengths,
@@ -15,6 +17,7 @@ import {
   status,
   test,
   uniqueName,
+  waitForAnswer,
 } from './support'
 
 /**
@@ -29,7 +32,7 @@ test.describe('W2 basic chat', () => {
   }) => {
     const agent = await createAgent(request, {
       name: uniqueName('QA W2'),
-      model: 'anthropic/claude-sonnet-5',
+      model: QA_MODEL,
       system: 'Answer briefly.',
     })
     const session = await createSession(request, agent.id)
@@ -39,8 +42,7 @@ test.describe('W2 basic chat', () => {
     await test.step('the reply streams in piece by piece', async () => {
       await sendFromComposer(page, 'hello there')
 
-      const agentMessage = page.locator('article[data-role="agent"]').last()
-      await expect(agentMessage).toContainText('hello there')
+      await waitForAnswer(page, 'hello there')
       await expect(status(page)).toHaveAttribute('aria-label', 'Status: Idle')
 
       const lengths = [...new Set(await renderedLengths(page))].filter((length) => length > 0)
@@ -70,7 +72,15 @@ test.describe('W2 basic chat', () => {
         'const answer = 42',
         '```',
       ].join('\n')
-      await sendFromComposer(page, markdown)
+      // The mock echoes the prompt, so sending the markdown *is* getting it back. A real model
+      // has to be asked for it, and is asked for it and nothing else: this scenario is about
+      // what the app renders, not about what a provider chooses to write.
+      await sendFromComposer(
+        page,
+        isRealModel
+          ? `Reply with exactly this markdown and nothing else — no code fence, no commentary:\n\n${markdown}`
+          : markdown,
+      )
 
       const reply = page.locator('article[data-role="agent"]').last()
       await expect(reply.locator('h1')).toHaveText('A heading')

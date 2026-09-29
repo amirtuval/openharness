@@ -1,4 +1,5 @@
 import {
+  QA_MODEL,
   composer,
   createAgent,
   createSession,
@@ -6,8 +7,10 @@ import {
   openChat,
   sendFromComposer,
   shot,
+  status,
   test,
   uniqueName,
+  waitForAnswer,
 } from './support'
 
 /** W13 — layout at two widths, and the keyboard the composer promises. */
@@ -19,7 +22,7 @@ test.describe('W13 layout and keyboard', () => {
   }) => {
     const agent = await createAgent(request, {
       name: uniqueName('QA W13'),
-      model: 'anthropic/claude-sonnet-5',
+      model: QA_MODEL,
       system: 'Answer briefly.',
     })
     const session = await createSession(request, agent.id)
@@ -66,6 +69,10 @@ test.describe('W13 layout and keyboard', () => {
     })
 
     await test.step('Tab order', async () => {
+      // The turn the step above just sent has to be over: while one is running the control
+      // next to the composer is Stop, which is the right answer to "what is beside the
+      // composer" and the wrong answer to this question.
+      await expect(status(page)).toHaveAttribute('aria-label', 'Status: Idle')
       const focusedNow = async (): Promise<string> =>
         page.evaluate(() => {
           const element = document.activeElement as HTMLElement | null
@@ -106,15 +113,13 @@ test.describe('W13 layout and keyboard', () => {
   }) => {
     const agent = await createAgent(request, {
       name: uniqueName('QA W13b'),
-      model: 'anthropic/claude-sonnet-5',
+      model: QA_MODEL,
       system: 'Answer briefly.',
     })
     const session = await createSession(request, agent.id)
     await openChat(page, session.id)
     await sendFromComposer(page, 'a message so the conversation is not empty')
-    await expect(page.locator('article[data-role="agent"]').last()).toContainText(
-      'a message so the conversation is not empty',
-    )
+    await waitForAnswer(page, 'a message so the conversation is not empty')
 
     await page.setViewportSize({ width: 390, height: 844 })
 

@@ -1,4 +1,5 @@
 import {
+  QA_MODEL,
   createAgent,
   createSession,
   expect,
@@ -7,6 +8,7 @@ import {
   shot,
   test,
   uniqueName,
+  waitForAnswer,
 } from './support'
 
 /** W8 — the same session open twice: what one tab sends, the other sees while it happens. */
@@ -19,7 +21,7 @@ test.describe('W8 two tabs', () => {
   }) => {
     const agent = await createAgent(request, {
       name: uniqueName('QA W8'),
-      model: 'anthropic/claude-sonnet-5',
+      model: QA_MODEL,
       system: 'Answer briefly.',
     })
     const session = await createSession(request, agent.id)
@@ -33,9 +35,7 @@ test.describe('W8 two tabs', () => {
       await expect(other.locator('article[data-role="user"]').last()).toContainText(
         'sent from tab one',
       )
-      await expect(other.locator('article[data-role="agent"]').last()).toContainText(
-        'sent from tab one',
-      )
+      await waitForAnswer(other, 'sent from tab one')
     })
 
     await test.step('from the second tab', async () => {
@@ -43,9 +43,7 @@ test.describe('W8 two tabs', () => {
       await expect(page.locator('article[data-role="user"]').last()).toContainText(
         'sent from tab two',
       )
-      await expect(page.locator('article[data-role="agent"]').last()).toContainText(
-        'sent from tab two',
-      )
+      await waitForAnswer(page, 'sent from tab two')
     })
 
     await expect(page.locator('article[data-role]')).toHaveCount(4)

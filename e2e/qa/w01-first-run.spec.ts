@@ -1,4 +1,13 @@
-import { composer, expect, sendFromComposer, shot, test, uniqueName } from './support'
+import {
+  QA_MODEL,
+  composer,
+  expect,
+  sendFromComposer,
+  shot,
+  test,
+  uniqueName,
+  waitForAnswer,
+} from './support'
 
 /**
  * W1 — first run: an empty app, one agent created through the form, one chat started with it.
@@ -37,7 +46,7 @@ test.describe('W1 first run', () => {
       await expect(page.getByRole('heading', { name: 'Agents' })).toBeVisible()
 
       await page.getByLabel('Name').fill(agentName)
-      await page.getByLabel('Model').fill('anthropic/claude-sonnet-5')
+      await page.getByLabel('Model').fill(QA_MODEL)
       await page.getByLabel('System prompt').fill('You are a concise QA test agent.')
       await page.getByRole('button', { name: 'Create agent' }).click()
 
@@ -60,7 +69,7 @@ test.describe('W1 first run', () => {
       await expect(page.getByText('Say something to start the conversation.')).toBeVisible()
 
       await sendFromComposer(page, 'hello from W1')
-      await expect(page.locator('article[data-role="agent"]').last()).toContainText('hello from W1')
+      await waitForAnswer(page, 'hello from W1')
       await shot(page, 'w1-03-first-chat')
     })
 

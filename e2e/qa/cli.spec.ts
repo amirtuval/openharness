@@ -2,8 +2,27 @@ import { execFileSync } from 'node:child_process'
 
 import type { APIRequestContext } from '@playwright/test'
 
-import { createAgent, expect, test, uniqueName } from './support'
-import { CLI_COMMAND, CLI_SERVER, CLI_CWD, Terminal } from './tmux'
+import {
+  LONG_REPLY_END,
+  LONG_REPLY_PROMPT,
+  QA_MODEL,
+  createAgent,
+  eventTypes,
+  expect,
+  isRealModel,
+  test,
+  uniqueName,
+} from './support'
+import {
+  AGENT_LINE,
+  CLI_COMMAND,
+  CLI_SERVER,
+  CLI_CWD,
+  Terminal,
+  occurrences,
+  replyHasText,
+  sendAndAwaitAnswer,
+} from './tmux'
 
 /**
  * Leave a chat, and answer the resume hint it prints.
@@ -77,6 +96,11 @@ async function allAgents(request: APIRequestContext): Promise<{ id: string; name
 test.describe('cli scenarios', () => {
   test.skip(process.env.QA_WITH_CLI !== '1', 'set QA_WITH_CLI=1 to drive the oh CLI in tmux')
 
+  // These run a whole conversation through a pseudo-terminal, and against a real provider one
+  // of them streams a long reply with another turn behind it. The suite's 120 s ceiling is
+  // sized for the browser scenarios.
+  test.setTimeout(240_000)
+
   test('C1 new chat: pick an agent, send, stream, prompt back', async ({ context }) => {
     const terminal = new Terminal('oh-qa-c1')
     const shot = await context.newPage()
@@ -93,18 +117,18 @@ test.describe('cli scenarios', () => {
       terminal.send('Enter')
       await terminal.waitForIdle()
 
-      terminal.type('hello from the terminal')
-      terminal.send('Enter')
-      await terminal.waitFor(/agent ›/)
-
       // Wait for the reply, not just for "idle": the status line says idle before the turn
       // starts too, so an `idle` that was already on screen is not the end of anything.
-      await terminal.waitFor(/agent › hello from the terminal/)
+      await sendAndAwaitAnswer(terminal, 'hello from the terminal')
       await terminal.screenshot(shot, 'c1-02-streaming')
       await terminal.waitForIdle()
       const screen = terminal.capture()
       expect(screen).toContain('you › hello from the terminal')
-      expect(screen).toContain('agent › hello from the terminal')
+      if (!isRealModel) {
+        // The mock answers by echoing its prompt; where the reply's own words are not known,
+        // the line above is the only half of this that can be asserted.
+        expect(screen).toContain('agent › hello from the terminal')
+      }
       expect(screen, 'the status line is back').toMatch(/idle/)
     } finally {
       terminal.kill()
@@ -123,32 +147,42 @@ test.describe('cli scenarios', () => {
       terminal.send('Enter')
       await terminal.waitForIdle()
 
-      terminal.type('__slow__ a long reply please')
-      terminal.send('Enter')
-      await terminal.waitFor(/part 4\/40/)
+      const longPrompt = isRealModel ? LONG_REPLY_PROMPT : '__slow__ a long reply please'
+      await sendAndAwaitAnswer(terminal, longPrompt, { slow: !isRealModel })
       await terminal.screenshot(shot, 'c2-01-slow-stream-80x24')
 
-      await terminal.waitFor(/part 40\/40/, 60_000)
-      await terminal.waitForIdle()
+      await terminal.waitForIdle(180_000)
       // Wrapped to the terminal width, and the status line and prompt are still there.
       const narrow = terminal.capture()
-      expect(narrow).toContain('part 40/40')
       expect(narrow).toMatch(/idle/)
       expect(narrow).toContain('❯')
+      if (isRealModel) {
+        // The whole reply went through an 80x24 pane: the last number it was asked for is in
+        // the scrollback, so nothing was dropped on the way.
+        expect(terminal.capture(400), 'the reply arrived in full').toMatch(LONG_REPLY_END)
+      } else {
+        expect(narrow).toContain('part 40/40')
+      }
 
       terminal.resize(200, 50)
       await new Promise((resolve) => setTimeout(resolve, 500))
-      terminal.type('now at the wider size')
-      terminal.send('Enter')
-      await terminal.waitFor(/agent › now at the wider size/, 30_000)
+      await sendAndAwaitAnswer(terminal, 'now at the wider size')
+      // Waiting for the prompt line is the assertion for the client half of this: it is
+      // written the moment Enter is pressed, at the new width, into a pane a long reply has
+      // already scrolled. Whether it is *still* in the capture below depends on how far the
+      // reply that follows pushed it up, which is not what this scenario is about.
+      await terminal.waitFor(/you › now at the wider size/, 60_000)
       await terminal.waitForIdle()
       await terminal.screenshot(shot, 'c2-02-wide-200x50')
       const wide = terminal.capture()
-      expect(wide).toContain('now at the wider size')
       expect(wide).toContain('❯')
-      // The reply printed before the resize keeps the 80-column wrapping it was written
-      // with; nothing reflows it, and nothing is left half-drawn either.
-      expect(wide).toContain('part 40/40')
+      expect(wide, 'the status line is back').toMatch(/idle/)
+      if (!isRealModel) {
+        expect(wide).toContain('now at the wider size')
+        // The reply printed before the resize keeps the 80-column wrapping it was written
+        // with; nothing reflows it, and nothing is left half-drawn either.
+        expect(wide).toContain('part 40/40')
+      }
     } finally {
       terminal.kill()
       await shot.close()
@@ -166,9 +200,7 @@ test.describe('cli scenarios', () => {
       terminal.send('Enter')
       await terminal.waitForIdle()
 
-      terminal.type('a message worth resuming')
-      terminal.send('Enter')
-      await terminal.waitFor(/agent › a message worth resuming/, 30_000)
+      await sendAndAwaitAnswer(terminal, 'a message worth resuming')
       await terminal.waitForIdle()
       const sessionId = (await terminal.waitFor(/sesn_[A-Z0-9]+/))[0]
 
@@ -187,7 +219,12 @@ test.describe('cli scenarios', () => {
 
       // -c: the most recent session, which is the one just resumed.
       terminal.run(`${CLI_COMMAND} --server ${CLI_SERVER} -c`)
-      await terminal.waitFor(/agent › a message worth resuming/, 30_000)
+      // The history that comes back holds both sides; which line is asserted depends on
+      // whether the reply's words are known.
+      await terminal.waitFor(
+        isRealModel ? /a message worth resuming/ : /agent › a message worth resuming/,
+        30_000,
+      )
       await terminal.waitForIdle()
       expect(terminal.capture()).toContain('a message worth resuming')
       await terminal.screenshot(shot, 'c3-03-continued')
@@ -208,18 +245,22 @@ test.describe('cli scenarios', () => {
       terminal.send('Enter')
       await terminal.waitForIdle()
 
-      terminal.type('__slow__ first question')
-      terminal.send('Enter')
-      await terminal.waitFor(/you › __slow__ first question/)
+      const firstQuestion = isRealModel ? LONG_REPLY_PROMPT : '__slow__ first question'
+      await sendAndAwaitAnswer(terminal, firstQuestion, { slow: !isRealModel })
       await terminal.waitFor(/\brunning\b/, 15_000)
-      await terminal.waitFor(/part 3\/40/)
+      if (!isRealModel) {
+        await terminal.waitFor(/part 3\/40/)
+      }
 
       terminal.type('second question')
       terminal.send('Enter')
       await terminal.waitFor(/second question \(queued\)/)
       await terminal.screenshot(shot, 'c4-01-steering-queued')
 
-      await terminal.waitFor(/agent › second question/, 60_000)
+      // The steering message is claimed when the brain answers it, and the `(queued)` marker
+      // goes with it. Counting `agent ›` lines would not do here: a long reply scrolls the
+      // first one off a 30-row pane, so the count never reaches two.
+      await terminal.waitUntil((screen) => !screen.includes('(queued)'), 120_000)
       await terminal.waitForIdle()
       expect(terminal.capture(), 'the queued marker is gone').not.toContain('(queued)')
     } finally {
@@ -242,17 +283,32 @@ test.describe('cli scenarios', () => {
       await terminal.waitForIdle()
 
       await test.step('Ctrl+C stops the stream and keeps the partial reply', async () => {
-        terminal.type('__slow__ interrupt me')
-        terminal.send('Enter')
+        const prompt = isRealModel ? LONG_REPLY_PROMPT : '__slow__ interrupt me'
+        await sendAndAwaitAnswer(terminal, prompt, { slow: !isRealModel })
         await terminal.waitFor(/\brunning\b/, 15_000)
-        await terminal.waitFor(/part 5\/40/, 20_000)
+        if (isRealModel) {
+          // Interrupt a reply that has actually said something. The `agent ›` line shows up
+          // with only the streaming cursor on it, before the first token.
+          await terminal.waitUntil(replyHasText, 60_000)
+        } else {
+          await terminal.waitFor(/part 5\/40/, 20_000)
+        }
         terminal.send('C-c')
-        await terminal.waitForIdle()
+        await terminal.waitForIdle(180_000)
 
         const screen = terminal.capture()
-        const interrupted = screen.slice(screen.lastIndexOf('you › __slow__ interrupt me'))
-        expect(interrupted, 'the partial reply stays on screen').toMatch(/part 1\/40/)
-        expect(interrupted, 'the reply stopped short').not.toContain('part 40/40')
+        const promptLine = prompt.split('\n')[0] ?? ''
+        const interrupted = screen.slice(screen.lastIndexOf(`you › ${promptLine}`))
+        expect(interrupted, 'the partial reply stays on screen').toMatch(
+          isRealModel ? /agent › / : /part 1\/40/,
+        )
+        if (isRealModel) {
+          // The reply was asked to count, one number per line, so the last number on a line of
+          // its own means it finished — which an interrupt mid-stream must prevent.
+          expect(interrupted, 'the reply stopped short of the end').not.toMatch(LONG_REPLY_END)
+        } else {
+          expect(interrupted, 'the reply stopped short').not.toContain('part 40/40')
+        }
         expect(interrupted, 'back at the prompt').toContain('❯')
         await terminal.screenshot(shot, 'c5-01-interrupted')
 
@@ -261,9 +317,7 @@ test.describe('cli scenarios', () => {
       })
 
       await test.step('a new message still works', async () => {
-        terminal.type('after the interrupt')
-        terminal.send('Enter')
-        await terminal.waitFor(/agent › after the interrupt/, 30_000)
+        await sendAndAwaitAnswer(terminal, 'after the interrupt')
         await terminal.waitForIdle()
       })
 
@@ -299,8 +353,13 @@ test.describe('cli scenarios', () => {
       await terminal.waitFor(/first line\s*\n\s+second line/)
       await terminal.screenshot(shot, 'c6-01-ctrl-j')
 
+      const beforeSend = occurrences(terminal.capture(), AGENT_LINE)
       terminal.send('Enter')
-      await terminal.waitFor(/agent › first line/, 30_000)
+      if (isRealModel) {
+        await terminal.waitUntil((screen) => occurrences(screen, AGENT_LINE) > beforeSend, 60_000)
+      } else {
+        await terminal.waitFor(/agent › first line/, 30_000)
+      }
       const sent = terminal.capture()
       expect(sent).toContain('second line')
 
@@ -370,7 +429,7 @@ test.describe('cli scenarios', () => {
       for (let index = before; index < PAGE + 1; index += 1) {
         await createAgent(request, {
           name: uniqueName(`QA C7b ${String(index)}`),
-          model: 'anthropic/claude-sonnet-5',
+          model: QA_MODEL,
           system: 'Answer briefly.',
         })
       }
@@ -382,7 +441,7 @@ test.describe('cli scenarios', () => {
     // Created last, so it is the newest — and the one a first-page-only listing cannot see.
     const newest = await createAgent(request, {
       name: uniqueName('QA C7b'),
-      model: 'anthropic/claude-sonnet-5',
+      model: QA_MODEL,
       system: 'Answer briefly.',
     })
 
@@ -412,6 +471,64 @@ test.describe('cli scenarios', () => {
         await shot.close()
       }
     })
+  })
+
+  // The failure a real provider actually produces, and what `oh` makes of it. The mock only
+  // fails on its scripted markers, so this one runs against a real model or not at all.
+  test('C11 a turn that fails says so in oh, and the chat keeps working', async ({
+    context,
+    request,
+  }) => {
+    test.skip(!isRealModel, 'the mock model answers whatever id an agent names')
+
+    const terminal = new Terminal('oh-qa-c11', 100, 30)
+    const shot = await context.newPage()
+    terminal.start()
+
+    try {
+      const agent = await createAgent(request, {
+        name: uniqueName('QA C11'),
+        model: 'openai/does-not-exist-123',
+        system: 'Answer briefly.',
+      })
+
+      terminal.run(`${CLI_COMMAND} --server ${CLI_SERVER} --agent '${agent.name}'`)
+      const sessionId = (await terminal.waitFor(/sesn_[A-Z0-9]+/, 30_000))[0]
+      await terminal.waitForIdle()
+
+      await test.step('the error is shown and the prompt comes back', async () => {
+        terminal.type('this model does not exist')
+        terminal.send('Enter')
+        await terminal.waitFor(/error:/, 60_000)
+        await terminal.waitFor(/does-not-exist-123/, 60_000)
+        await terminal.waitForIdle()
+        expect(terminal.capture(), 'the prompt is usable again').toContain('❯')
+        await terminal.screenshot(shot, 'c11-01-turn-error')
+      })
+
+      await test.step('the chat is still usable', async () => {
+        terminal.type('and again')
+        terminal.send('Enter')
+        // The notice is replaced rather than added to, so counting it does not work; what says
+        // the second message was answered at all is the session's log.
+        await expect
+          .poll(
+            async () =>
+              (await eventTypes(request, sessionId)).filter(
+                (type) => type === 'span.model_request_start',
+              ).length,
+            { timeout: 60_000, message: 'the second message should have started a turn' },
+          )
+          .toBe(2)
+        await terminal.waitForIdle()
+        const screen = terminal.capture()
+        expect(screen, 'the failure is still reported').toContain('error:')
+        expect(screen, 'the prompt is usable again').toContain('❯')
+      })
+    } finally {
+      terminal.kill()
+      await shot.close()
+    }
   })
 
   test('C9 a server that is not there, and a bad key', () => {

@@ -1,13 +1,23 @@
 import {
+  QA_MODEL,
   createAgent,
   createSession,
   expect,
+  isRealModel,
   openChat,
   sendFromComposer,
   shot,
   test,
+  waitForAnswer,
 } from './support'
-import { CLI_COMMAND, CLI_SERVER, Terminal } from './tmux'
+import {
+  AGENT_LINE,
+  CLI_COMMAND,
+  CLI_SERVER,
+  Terminal,
+  occurrences,
+  sendAndAwaitAnswer,
+} from './tmux'
 
 /** Leave a chat: one Ctrl+C arms the exit and says so, the second one takes it. */
 async function quit(terminal: Terminal): Promise<void> {
@@ -35,7 +45,7 @@ test.describe('C10 cross-client', () => {
     // A session per run, so `oh -s` below names something this test made.
     const agent = await createAgent(request, {
       name: `QA C10 ${Date.now().toString(36)}`,
-      model: 'anthropic/claude-sonnet-5',
+      model: QA_MODEL,
       system: 'Answer briefly.',
     })
 
@@ -45,7 +55,7 @@ test.describe('C10 cross-client', () => {
     if (((await agents.json()) as { data: unknown[] }).data.length < 2) {
       await createAgent(request, {
         name: `QA C10 decoy ${Date.now().toString(36)}`,
-        model: 'anthropic/claude-sonnet-5',
+        model: QA_MODEL,
         system: 'Answer briefly.',
       })
     }
@@ -67,25 +77,26 @@ test.describe('C10 cross-client', () => {
       })
 
       await test.step('what oh sends shows up in the browser', async () => {
-        terminal.type('sent from the terminal')
-        terminal.send('Enter')
-        await terminal.waitFor(/agent › sent from the terminal/)
+        await sendAndAwaitAnswer(terminal, 'sent from the terminal')
 
         await openChat(page, startedInChat)
         await expect(page.locator('article[data-role="user"]').last()).toContainText(
           'sent from the terminal',
         )
-        await expect(page.locator('article[data-role="agent"]').last()).toContainText(
-          'sent from the terminal',
-        )
+        await waitForAnswer(page, 'sent from the terminal')
         await shot(page, 'c10-01-oh-session-in-the-web')
       })
 
       await test.step('what the browser sends shows up in oh', async () => {
+        const before = occurrences(terminal.capture(), AGENT_LINE)
         await sendFromComposer(page, 'sent from the browser')
         // The agent's line, not the user's: the user's own message is echoed immediately and
         // the turn is still running behind it.
-        await terminal.waitFor(/agent › sent from the browser/, 30_000)
+        if (isRealModel) {
+          await terminal.waitUntil((screen) => occurrences(screen, AGENT_LINE) > before, 60_000)
+        } else {
+          await terminal.waitFor(/agent › sent from the browser/, 30_000)
+        }
         await terminal.waitForIdle()
         expect(terminal.capture()).toContain('you › sent from the browser')
       })

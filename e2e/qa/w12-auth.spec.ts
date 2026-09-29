@@ -7,6 +7,7 @@ import {
   sendFromComposer,
   shot,
   test,
+  waitForAnswer,
 } from './support'
 
 /**
@@ -61,9 +62,7 @@ test.describe('W12 auth', () => {
       await openChat(page, session!.id)
       await expect(composer(page)).toBeFocused()
       await sendFromComposer(page, 'authenticated and working')
-      await expect(page.locator('article[data-role="agent"]').last()).toContainText(
-        'authenticated and working',
-      )
+      await waitForAnswer(page, 'authenticated and working')
       await shot(page, 'w12-03-authenticated')
     })
 
