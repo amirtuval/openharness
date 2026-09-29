@@ -1,6 +1,8 @@
 import { execFileSync } from 'node:child_process'
 
-import { expect, test } from './support'
+import type { APIRequestContext } from '@playwright/test'
+
+import { createAgent, expect, test, uniqueName } from './support'
 import { CLI_COMMAND, CLI_SERVER, CLI_CWD, Terminal } from './tmux'
 
 /**
@@ -17,6 +19,51 @@ async function quit(terminal: Terminal): Promise<string> {
   const hint = await terminal.waitFor(/Resume this session with: oh -s sesn_[A-Z0-9]+/)
   await terminal.waitForShellPrompt()
   return hint[0]
+}
+
+/**
+ * Run `oh` the way a shell would, and answer what it printed and how it exited.
+ *
+ * The one-shot commands (`agents`, `sessions`, a bad argument) do not need a terminal: they
+ * write their output and exit, so this reads them straight from a pipe. The interactive
+ * screens go through {@link Terminal} instead.
+ */
+function oh(...args: string[]): { stdout: string; status: number } {
+  try {
+    const stdout = execFileSync('node', ['apps/tui/dist/index.js', ...args], {
+      cwd: CLI_CWD,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    return { stdout, status: 0 }
+  } catch (error) {
+    const failure = error as { stdout?: string; stderr?: string; status?: number }
+    return {
+      stdout: `${failure.stdout ?? ''}${failure.stderr ?? ''}`,
+      status: failure.status ?? -1,
+    }
+  }
+}
+
+/** Every agent the server has, oldest first — the list `oh agents` is supposed to print. */
+async function allAgents(request: APIRequestContext): Promise<{ id: string; name: string }[]> {
+  const agents: { id: string; name: string }[] = []
+  let page: string | null = null
+  for (;;) {
+    const response = await request.get('/v1/agents', {
+      params: { limit: 100, ...(page === null ? {} : { page }) },
+    })
+    expect(response.status(), await response.text()).toBe(200)
+    const body = (await response.json()) as {
+      data: { id: string; name: string }[]
+      next_page: string | null
+    }
+    agents.push(...body.data)
+    if (body.next_page === null) {
+      return agents
+    }
+    page = body.next_page
+  }
 }
 
 /**
@@ -40,7 +87,10 @@ test.describe('cli scenarios', () => {
       await terminal.waitFor(/Which agent\?/)
       await terminal.screenshot(shot, 'c1-01-agent-picker')
 
-      terminal.send('1', 'Enter')
+      // Enter takes the row the cursor starts on — the first agent. Every pick in this file
+      // is made that way: the picker only offers the number keys for a list of at most nine
+      // agents (a bare `12` would otherwise choose 1), and a QA server has more.
+      terminal.send('Enter')
       await terminal.waitForIdle()
 
       terminal.type('hello from the terminal')
@@ -70,7 +120,7 @@ test.describe('cli scenarios', () => {
     try {
       terminal.run(`${CLI_COMMAND} --server ${CLI_SERVER}`)
       await terminal.waitFor(/Which agent\?/)
-      terminal.send('1', 'Enter')
+      terminal.send('Enter')
       await terminal.waitForIdle()
 
       terminal.type('__slow__ a long reply please')
@@ -113,7 +163,7 @@ test.describe('cli scenarios', () => {
     try {
       terminal.run(`${CLI_COMMAND} --server ${CLI_SERVER}`)
       await terminal.waitFor(/Which agent\?/)
-      terminal.send('1', 'Enter')
+      terminal.send('Enter')
       await terminal.waitForIdle()
 
       terminal.type('a message worth resuming')
@@ -155,7 +205,7 @@ test.describe('cli scenarios', () => {
     try {
       terminal.run(`${CLI_COMMAND} --server ${CLI_SERVER}`)
       await terminal.waitFor(/Which agent\?/)
-      terminal.send('1', 'Enter')
+      terminal.send('Enter')
       await terminal.waitForIdle()
 
       terminal.type('__slow__ first question')
@@ -188,7 +238,7 @@ test.describe('cli scenarios', () => {
     try {
       terminal.run(`${CLI_COMMAND} --server ${CLI_SERVER}`)
       await terminal.waitFor(/Which agent\?/)
-      terminal.send('1', 'Enter')
+      terminal.send('Enter')
       await terminal.waitForIdle()
 
       await test.step('Ctrl+C stops the stream and keeps the partial reply', async () => {
@@ -239,7 +289,7 @@ test.describe('cli scenarios', () => {
     try {
       terminal.run(`${CLI_COMMAND} --server ${CLI_SERVER}`)
       await terminal.waitFor(/Which agent\?/)
-      terminal.send('1', 'Enter')
+      terminal.send('Enter')
       await terminal.waitForIdle()
 
       terminal.type('first line')
@@ -268,23 +318,6 @@ test.describe('cli scenarios', () => {
   })
 
   test('C7 commands and bad arguments', async () => {
-    const oh = (...args: string[]): { stdout: string; status: number } => {
-      try {
-        const stdout = execFileSync('node', ['apps/tui/dist/index.js', ...args], {
-          cwd: CLI_CWD,
-          encoding: 'utf8',
-          stdio: ['ignore', 'pipe', 'pipe'],
-        })
-        return { stdout, status: 0 }
-      } catch (error) {
-        const failure = error as { stdout?: string; stderr?: string; status?: number }
-        return {
-          stdout: `${failure.stdout ?? ''}${failure.stderr ?? ''}`,
-          status: failure.status ?? -1,
-        }
-      }
-    }
-
     await test.step('--version and --help', () => {
       const version = oh('--version')
       expect(version.status).toBe(0)
@@ -324,24 +357,64 @@ test.describe('cli scenarios', () => {
     })
   })
 
-  test('C9 a server that is not there, and a bad key', () => {
-    const oh = (...args: string[]): { stdout: string; status: number } => {
-      try {
-        const stdout = execFileSync('node', ['apps/tui/dist/index.js', ...args], {
-          cwd: CLI_CWD,
-          encoding: 'utf8',
-          stdio: ['ignore', 'pipe', 'pipe'],
-        })
-        return { stdout, status: 0 }
-      } catch (error) {
-        const failure = error as { stdout?: string; stderr?: string; status?: number }
-        return {
-          stdout: `${failure.stdout ?? ''}${failure.stderr ?? ''}`,
-          status: failure.status ?? -1,
-        }
-      }
-    }
+  // Regression coverage for issue #30: `oh agents`, the picker and `--agent` read one page of
+  // 20 (the protocol's `DEFAULT_PAGE_LIMIT`) and dropped `next_page`, so everything past the
+  // 20 oldest was invisible and `--agent <name>` called an agent that exists "missing". Fixed
+  // by PR #34: `listAllAgents` walks the cursor (`apps/tui/src/paging.ts`).
+  test('C7b every agent is reachable past the first page', async ({ request, context }) => {
+    // One page, which is what the CLI used to stop at.
+    const PAGE = 20
 
+    await test.step('the server has more agents than one page holds', async () => {
+      const before = (await allAgents(request)).length
+      for (let index = before; index < PAGE + 1; index += 1) {
+        await createAgent(request, {
+          name: uniqueName(`QA C7b ${String(index)}`),
+          model: 'anthropic/claude-sonnet-5',
+          system: 'Answer briefly.',
+        })
+      }
+      expect((await allAgents(request)).length, 'more than one page of agents').toBeGreaterThan(
+        PAGE,
+      )
+    })
+
+    // Created last, so it is the newest — and the one a first-page-only listing cannot see.
+    const newest = await createAgent(request, {
+      name: uniqueName('QA C7b'),
+      model: 'anthropic/claude-sonnet-5',
+      system: 'Answer briefly.',
+    })
+
+    await test.step('oh agents lists all of them', () => {
+      const listed = oh('agents', '--server', CLI_SERVER)
+      expect(listed.status).toBe(0)
+      const rows = listed.stdout.split('\n').filter((line) => line.trim() !== '')
+      expect(rows.length, 'a row per agent, not one page of them').toBeGreaterThan(PAGE)
+      expect(rows.at(-1), 'the newest agent is listed last').toContain(newest.name)
+      expect(listed.stdout).toContain(newest.id)
+    })
+
+    await test.step('oh --agent <name> finds the newest one', async () => {
+      const terminal = new Terminal('oh-qa-c7b', 80, 24)
+      const shot = await context.newPage()
+      terminal.start()
+      try {
+        terminal.run(`${CLI_COMMAND} --server ${CLI_SERVER} --agent '${newest.name}'`)
+        // Either the chat comes up on a session, or the error this scenario is about appears.
+        await terminal.waitFor(/sesn_[A-Z0-9]+|no agent matches/, 30_000)
+        expect(terminal.capture(), 'the agent was resolved').not.toContain('no agent matches')
+        await terminal.waitForIdle()
+        await terminal.screenshot(shot, 'c7b-01-agent-past-the-first-page')
+        await quit(terminal)
+      } finally {
+        terminal.kill()
+        await shot.close()
+      }
+    })
+  })
+
+  test('C9 a server that is not there, and a bad key', () => {
     const down = oh('agents', '--server', 'http://localhost:3999')
     expect(down.status).toBe(1)
     expect(down.stdout).toContain('could not reach the server at http://localhost:3999')

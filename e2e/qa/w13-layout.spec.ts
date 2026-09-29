@@ -95,4 +95,85 @@ test.describe('W13 layout and keyboard', () => {
 
     expect(consoleErrors, consoleErrors.join('\n')).toEqual([])
   })
+
+  // Regression coverage for issue #26: at 390 px the sidebar used to keep its 256 px and the
+  // chat pane was left with ~134 px (one word per line, a 58 px composer). Fixed by PR #33,
+  // which turns the same panel into an overlay drawer below `md`.
+  test('W13b at 390 px the chat keeps the viewport and the list is a drawer', async ({
+    page,
+    request,
+    consoleErrors,
+  }) => {
+    const agent = await createAgent(request, {
+      name: uniqueName('QA W13b'),
+      model: 'anthropic/claude-sonnet-5',
+      system: 'Answer briefly.',
+    })
+    const session = await createSession(request, agent.id)
+    await openChat(page, session.id)
+    await sendFromComposer(page, 'a message so the conversation is not empty')
+    await expect(page.locator('article[data-role="agent"]').last()).toContainText(
+      'a message so the conversation is not empty',
+    )
+
+    await page.setViewportSize({ width: 390, height: 844 })
+
+    // The panel and the control that opens it. `#app-sidebar` is the `aside` the shell moves
+    // over the content below `md`; the button is the one the top bar shows at that width.
+    const drawer = page.locator('#app-sidebar')
+    const menu = page.getByRole('button', { name: 'Navigation' })
+
+    await test.step('the sidebar gives up its column', async () => {
+      await expect(drawer, 'the 256px column is gone at this width').toBeHidden()
+
+      const widths = await page.evaluate(() => ({
+        main: document.querySelector('main')?.getBoundingClientRect().width ?? 0,
+        composer: document.querySelector('#composer-input')?.getBoundingClientRect().width ?? 0,
+      }))
+      // The bug's numbers were main 134 px and composer 58 px on a 390 px viewport.
+      expect(widths.main, 'the chat pane has the viewport').toBeGreaterThan(300)
+      expect(widths.composer, 'the composer is a usable width').toBeGreaterThan(250)
+      await shot(page, 'w13-04-narrow-390-chat')
+    })
+
+    await test.step('the drawer opens', async () => {
+      await menu.click()
+      await expect(menu).toHaveAttribute('aria-expanded', 'true')
+      await expect(drawer).toBeVisible()
+      await expect(drawer.getByRole('navigation', { name: 'Chats' })).toBeVisible()
+      await expect(drawer.locator(`a[href="#/s/${session.id}"]`)).toHaveAttribute(
+        'aria-current',
+        'page',
+      )
+      await shot(page, 'w13-05-narrow-390-drawer-open')
+    })
+
+    await test.step('Escape closes it', async () => {
+      await page.keyboard.press('Escape')
+      await expect(drawer).toBeHidden()
+      await expect(menu).toHaveAttribute('aria-expanded', 'false')
+    })
+
+    await test.step('the backdrop closes it too', async () => {
+      await menu.click()
+      await expect(drawer).toBeVisible()
+      // The scrim covers the viewport and the drawer sits above it on the left, so the part
+      // of it a thumb reaches is the strip to the right of the panel.
+      await page.locator('[data-slot="sidebar-backdrop"]').click({ position: { x: 340, y: 500 } })
+      await expect(drawer).toBeHidden()
+      await expect(menu).toHaveAttribute('aria-expanded', 'false')
+    })
+
+    await test.step('nothing was pushed sideways, then or now', async () => {
+      const overflow = await page.evaluate(() => ({
+        documentWidth: document.documentElement.scrollWidth,
+        viewportWidth: window.innerWidth,
+      }))
+      expect(overflow.documentWidth, 'the page does not scroll sideways').toBeLessThanOrEqual(
+        overflow.viewportWidth,
+      )
+    })
+
+    expect(consoleErrors, consoleErrors.join('\n')).toEqual([])
+  })
 })

@@ -3,6 +3,7 @@ import {
   createSession,
   expect,
   openChat,
+  sendFromComposer,
   sendMessage,
   shot,
   test,
@@ -50,9 +51,11 @@ test.describe('W9 session list', () => {
       await shot(page, 'w9-01-session-list')
     })
 
-    await test.step('each entry shows the agent and the model', async () => {
+    await test.step('each entry shows what the chat is about and the model', async () => {
       const newest = links.first()
-      await expect(newest).toContainText(made[2]!.agent)
+      // The label is the session's title — derived from the first message since #29 — and the
+      // agent's name only when there is no title to show (`apps/web/src/lib/format.ts`).
+      await expect(newest).toContainText(made[2]!.text)
       await expect(newest).toContainText('anthropic/claude-sonnet-5')
     })
 
@@ -73,9 +76,10 @@ test.describe('W9 session list', () => {
     expect(consoleErrors, consoleErrors.join('\n')).toEqual([])
   })
 
-  // Known bug: nothing in the web app ever sets a session title, so every chat with the same
-  // agent reads the same in the list. Reported on issue #14.
-  test.fail('W9b a chat gets a title to tell it apart', async ({ page, request }) => {
+  // Was `test.fail` as the reproduction of issue #29 (nothing ever set `Session.title`, so
+  // every chat with one agent read identically). Fixed by PR #32: the server derives the
+  // title from the first `user.message` and never overwrites one that exists.
+  test('W9b a chat gets a title to tell it apart', async ({ page, request }) => {
     await page.goto('/#/new')
     // Whatever agent the picker offers first: which one it is has nothing to do with the
     // title this test is about.
@@ -83,8 +87,7 @@ test.describe('W9 session list', () => {
     await expect(page).toHaveURL(/#\/s\/sesn_/)
 
     const sessionId = (await page.evaluate(() => window.location.hash)).replace('#/s/', '')
-    await page.getByLabel('Message').fill('a chat about the release checklist')
-    await page.getByLabel('Message').press('Enter')
+    await sendFromComposer(page, 'a chat about the release checklist')
     await expect(page.locator('article[data-role="agent"]').last()).toContainText(
       'release checklist',
     )
@@ -92,6 +95,33 @@ test.describe('W9 session list', () => {
     const session = await request.get(`/v1/sessions/${sessionId}`)
     const body = (await session.json()) as { title: string | null }
     expect(body.title, 'a session created from the UI has a title').not.toBeNull()
+    // The server derives it from the first line of the first message and never overwrites one
+    // that exists (`apps/server/src/titles.ts`).
+    expect(body.title, 'the title says what the chat is about').toBe(
+      'a chat about the release checklist',
+    )
+
+    // What the sidebar makes of that title is a bug of its own — it keeps the agent's name
+    // until the page is reloaded (#35); W9d below is its reproduction.
+  })
+
+  // Known bug (#35): the title is derived on the server when the first message is stored, but
+  // `useSessions` never refetches its list, so the sidebar row keeps the agent's name until
+  // something reloads the page. Fails today by design; the marker goes when #35 is fixed.
+  test.fail('W9d the sidebar shows a new title without a reload', async ({ page }) => {
+    await page.goto('/#/new')
+    await page.getByRole('button', { name: 'Create chat' }).click()
+    await expect(page).toHaveURL(/#\/s\/sesn_/)
+    const sessionId = (await page.evaluate(() => window.location.hash)).replace('#/s/', '')
+    await sendFromComposer(page, 'a chat about the release checklist')
+    await expect(page.locator('article[data-role="agent"]').last()).toContainText(
+      'release checklist',
+    )
+
+    // The list the sidebar is holding was loaded before this chat had a message.
+    await expect(page.locator(`a[href="#/s/${sessionId}"]`)).toContainText(
+      'a chat about the release checklist',
+    )
   })
 
   test('W9c the sidebar highlights the open chat', async ({ page, request, consoleErrors }) => {

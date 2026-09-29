@@ -52,33 +52,32 @@ test.describe('W7 reload', () => {
     expect(consoleErrors, consoleErrors.join('\n')).toEqual([])
   })
 
-  // Known bug: the text that had already streamed in is not part of what comes back after a
-  // reload, so the reply resumes mid-word. Reported on issue #14.
-  test.fail(
-    'W7b a reload mid-stream keeps the text that already arrived',
-    async ({ page, request }) => {
-      const agent = await createAgent(request, {
-        name: uniqueName('QA W7b'),
-        model: 'anthropic/claude-sonnet-5',
-        system: 'Answer briefly.',
-      })
-      const session = await createSession(request, agent.id)
-      await openChat(page, session.id)
+  // Was `test.fail` as the reproduction of issue #27 (the reply resumed mid-word after a
+  // reload, because the deltas that had already arrived were stream-only). Fixed by PR #32:
+  // the server hands a late connection one accumulated `event_delta` snapshot built from
+  // `SessionStore.getPreview`, so the beginning is there when the page comes back.
+  test('W7b a reload mid-stream keeps the text that already arrived', async ({ page, request }) => {
+    const agent = await createAgent(request, {
+      name: uniqueName('QA W7b'),
+      model: 'anthropic/claude-sonnet-5',
+      system: 'Answer briefly.',
+    })
+    const session = await createSession(request, agent.id)
+    await openChat(page, session.id)
 
-      await sendFromComposer(page, '__slow__ reload in the middle of this')
-      await expect(page.locator('article[data-role="agent"]').last()).toContainText('part 1/40')
-      await page.waitForTimeout(1200)
+    await sendFromComposer(page, '__slow__ reload in the middle of this')
+    await expect(page.locator('article[data-role="agent"]').last()).toContainText('part 1/40')
+    await page.waitForTimeout(1200)
 
-      await page.reload()
-      const reply = page.locator('article[data-role="agent"]').last()
-      await expect(reply).toContainText('part ', { timeout: 15_000 })
+    await page.reload()
+    const reply = page.locator('article[data-role="agent"]').last()
+    await expect(reply).toContainText('part ', { timeout: 15_000 })
 
-      const text = (await reply.textContent()) ?? ''
-      expect(text, `the reply resumed with: ${JSON.stringify(text.slice(0, 60))}`).toContain(
-        'part 1/40',
-      )
-    },
-  )
+    const text = (await reply.textContent()) ?? ''
+    expect(text, `the reply resumed with: ${JSON.stringify(text.slice(0, 60))}`).toContain(
+      'part 1/40',
+    )
+  })
 
   test('W7c a reload after the turn restores the whole conversation', async ({
     page,
