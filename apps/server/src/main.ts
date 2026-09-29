@@ -3,6 +3,7 @@ import { Kysely, PostgresDialect } from 'kysely'
 import { Pool } from 'pg'
 import type { Hono } from 'hono'
 import type { ModelFactory } from '@openharness/brain'
+import type { SessionId } from '@openharness/protocol'
 import { InMemorySessionStore, type SessionStore } from '@openharness/session'
 import {
   type PostgresSchema,
@@ -14,6 +15,7 @@ import { type AppEnv, type Logger, consoleLogger } from './types'
 import { createApp } from './app'
 import { ENV_VARS, type ServerConfig, describeConfig, readServerConfig } from './config'
 import { resolveModelFactory } from './model'
+import { PostgresPartitionScheduler } from './partition-scheduler'
 import { LocalScheduler, type SessionScheduler } from './scheduler'
 
 /**
@@ -63,15 +65,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   const opened = await openStore(config, options, logger)
   const model = options.model ?? resolveModelFactory(config).factory
 
-  const scheduler = new LocalScheduler({
-    store: opened.store,
-    model,
-    maxConcurrentSessions: config.maxConcurrentSessions,
-    drainTimeoutMs: config.drainTimeoutMs,
-    onError: (error, sessionId) => {
-      logger.error(`the turn for ${sessionId} failed`, error)
-    },
-  })
+  const scheduler = createScheduler(config, opened.store, model, logger)
 
   const app = createApp({
     store: opened.store,
@@ -174,6 +168,53 @@ function installSignalHandlers(logger: Logger): void {
 }
 
 /**
+ * The scheduler the configuration asks for.
+ *
+ * `local` runs every turn in this process; `postgres` shares the sessions with the other
+ * instances through partition leases, which is why it needs the store and why the config
+ * refuses to boot without a `DATABASE_URL`. Both are handed the same model and the same
+ * concurrency and drain limits — what changes is who owns a session, not how it is run.
+ */
+function createScheduler(
+  config: ServerConfig,
+  store: SessionStore,
+  model: ModelFactory,
+  logger: Logger,
+): SessionScheduler {
+  const onError = (error: unknown, sessionId: SessionId | undefined): void => {
+    logger.error(
+      sessionId === undefined ? 'the scheduler failed' : `the turn for ${sessionId} failed`,
+      error,
+    )
+  }
+  if (config.scheduler === 'postgres') {
+    return new PostgresPartitionScheduler({
+      store,
+      model,
+      instanceId: config.instanceId,
+      partitions: config.partitions,
+      ttlMs: config.leaseTtlMs,
+      heartbeatMs: config.heartbeatMs,
+      sweepMs: config.sweepMs,
+      maxConcurrentSessions: config.maxConcurrentSessions,
+      drainTimeoutMs: config.drainTimeoutMs,
+      onError,
+      onNotice: (message) => {
+        logger.info(message)
+      },
+    })
+  }
+  return new LocalScheduler({
+    store,
+    model,
+    maxConcurrentSessions: config.maxConcurrentSessions,
+    drainTimeoutMs: config.drainTimeoutMs,
+    partitionCount: config.partitions,
+    onError,
+  })
+}
+
+/**
  * The store the server runs on, and the way it is released again.
  *
  * `DATABASE_URL` means Postgres: one pool, migrated here, owned by this function. Without it
@@ -195,14 +236,19 @@ async function openStore(
         'Nothing is persisted — every session, agent and event is lost when this process exits. ' +
         'Set DATABASE_URL to run against Postgres.',
     )
-    return { store: new InMemorySessionStore(), close: () => Promise.resolve() }
+    return {
+      store: new InMemorySessionStore({ partitionCount: config.partitions }),
+      close: () => Promise.resolve(),
+    }
   }
 
   const pool = new Pool({ connectionString })
   const db = new Kysely<PostgresSchema>({ dialect: new PostgresDialect({ pool }) })
   const applied = await migrate(db)
   logger.info(`applied ${applied.length} migration file(s)`)
-  const store = createPostgresSessionStore({ pool })
+  // The store's partition count is what a session's `partition` column holds, and it has to be
+  // the scheduler's: `findSessionsNeedingWork` and a signal's channel both name partitions.
+  const store = createPostgresSessionStore({ pool }, { partitionCount: config.partitions })
   return {
     store,
     close: async () => {
