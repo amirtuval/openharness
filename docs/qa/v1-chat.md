@@ -101,11 +101,11 @@ start passing, which is the signal to delete the marker.
 
 ## Screenshots
 
-`docs/qa/v1-chat/` holds one key frame per scenario. `w*` are browser captures taken by the
-specs; `c*` are terminal captures — `tmux capture-pane` rendered as monospace text and
-screenshotted, so a scenario's screen can be looked at without re-running it. Every run of a
-spec rewrites its own files, so these are the frames from the pass above and not a curated
-set that has to be maintained by hand.
+`docs/qa/v1-chat/` holds one key frame per scenario, from the pass above. `w*` are browser
+captures; `c*` are terminal captures — `tmux capture-pane` rendered as monospace text and
+screenshotted, so a scenario's screen can be looked at without re-running it. The specs write
+every frame they take into the same folder, so a fresh run overwrites these and adds the ones
+that were left out here; the committed set is the one this report describes.
 
 | file                                       | shows                                            |
 | ------------------------------------------ | ------------------------------------------------ |
