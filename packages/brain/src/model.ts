@@ -1,6 +1,6 @@
 import type { ModelUsage } from '@openharness/protocol'
 import { ModelRouterLanguageModel } from '@mastra/core/llm'
-import type { LanguageModel, LanguageModelUsage, ModelMessage } from 'ai'
+import type { LanguageModel, ModelMessage } from 'ai'
 import { streamText } from 'ai'
 import { isFencedError } from '@openharness/session'
 
@@ -45,6 +45,61 @@ export const ZERO_MODEL_USAGE: ModelUsage = {
   cache_read_input_tokens: 0,
 }
 
+/** How deep a `{ total }` chain is followed before a value is called unreadable. */
+const MAX_USAGE_DEPTH = 3
+
+/** A value as a string-keyed record, or `null` when it is not an object. */
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : null
+}
+
+/**
+ * A value as a count the protocol accepts — a non-negative integer — or `undefined` when it
+ * carries no number at all. A numeric string counts: it is a count that arrived spelled out,
+ * not one that was lost.
+ */
+function asCount(value: unknown): number | undefined {
+  const spelled = typeof value === 'string' && value.trim() !== '' ? Number(value) : undefined
+  const count = typeof value === 'number' ? value : spelled
+  return count !== undefined && Number.isFinite(count) ? Math.max(0, Math.round(count)) : undefined
+}
+
+/**
+ * A usage report's count, wherever the report put it.
+ *
+ * A model that obeys the spec it declares reports `inputTokens: 10`. A model that does not —
+ * Mastra's router declares the `v2` provider spec and streams v3-shaped usage — reports the
+ * count one `total` down instead (`{ total: 10, noCache: 10, … }`), and the AI SDK's
+ * compatibility layer for the spec it declared wraps that object again, so the count can sit
+ * two `total`s down. Both arrive here as the usage object itself; the count is inside it.
+ */
+function countOf(value: unknown, depth = 0): number | undefined {
+  const count = asCount(value)
+  if (count !== undefined) {
+    return count
+  }
+  const record = asRecord(value)
+  if (record === null || depth >= MAX_USAGE_DEPTH) {
+    return undefined
+  }
+  return countOf(record.total, depth + 1)
+}
+
+/**
+ * The first readable `field` on a usage value, or on the usage values nested under its `total`s.
+ *
+ * This is how the cache counters survive the same mis-declaration: the SDK reads them from the
+ * v2 field names (`cachedInputTokens`) that a v3-shaped report does not have, so the breakdown
+ * a v2-declared model reports is only findable inside the usage object it sent.
+ */
+function detailOf(value: unknown, field: string, depth = 0): number | undefined {
+  const record = asRecord(value)
+  if (record === null || depth >= MAX_USAGE_DEPTH) {
+    return undefined
+  }
+  return asCount(record[field]) ?? detailOf(record.total, field, depth + 1)
+}
+
 /** How one model request is made. */
 export interface ModelRequestParams {
   /** The model to stream from, already resolved by the factory. */
@@ -85,6 +140,7 @@ export interface ModelRequestResult {
  */
 export async function streamModelRequest(params: ModelRequestParams): Promise<ModelRequestResult> {
   const failures: unknown[] = []
+  const stepUsages: ModelUsage[] = []
   let aborted = false
   let text = ''
   const result = streamText({
@@ -108,6 +164,11 @@ export async function streamModelRequest(params: ModelRequestParams): Promise<Mo
         await params.onTextDelta?.(part.text)
       } else if (part.type === 'abort') {
         aborted = true
+      } else if (part.type === 'finish-step') {
+        // The model's own report for one step, read as it arrives: the SDK's `result.usage`
+        // below is an *accumulation* over these, and a mis-declared provider spec corrupts it
+        // past recovery — the totals are only still numbers here (see `toModelUsage`).
+        stepUsages.push(toModelUsage(part.usage))
       }
     }
   } catch (error) {
@@ -129,7 +190,13 @@ export async function streamModelRequest(params: ModelRequestParams): Promise<Mo
     }
     return { text, usage: ZERO_MODEL_USAGE, error: failure, aborted: false }
   }
-  return { text, usage: toModelUsage(await result.usage), error: undefined, aborted: false }
+  const usage =
+    stepUsages.length === 0
+      ? // No step reported anything (a model that streams text without usage), so the SDK's
+        // total is the only report there is.
+        toModelUsage(await result.usage)
+      : stepUsages.reduce(addModelUsage)
+  return { text, usage, error: undefined, aborted: false }
 }
 
 /**
@@ -138,12 +205,40 @@ export async function streamModelRequest(params: ModelRequestParams): Promise<Mo
  * The protocol keeps Anthropic's four counters; the AI SDK reports totals plus a breakdown.
  * The two cache counters are the breakdown's read and write halves, so the numbers add up the
  * same way on both sides of the boundary.
+ *
+ * Takes `unknown` because the report that actually arrives is not always the shape its type
+ * promises. A model whose declared provider spec is older than the usage it emits — Mastra's
+ * router, which says `v2` and streams v3-shaped usage — has that usage reshaped by the SDK's
+ * compatibility layer into something no counter can be read off directly, and a request that
+ * accumulates such a report ends up with a *string* where the number was (issue #39). The
+ * protocol's schema is right to demand integers, so the count is recovered here, from wherever
+ * in the report it survived; a value that carries none is `0`, never a value the log would
+ * reject. The counters are the ones the request really spent, which is why the caller hands
+ * over the model's own step report rather than the SDK's accumulated total.
+ *
+ * @param usage what the request reported, in whatever shape it arrived
  */
-export function toModelUsage(usage: LanguageModelUsage): ModelUsage {
+export function toModelUsage(usage: unknown): ModelUsage {
+  const report = asRecord(usage) ?? {}
+  const details = asRecord(report.inputTokenDetails) ?? {}
+  const input = report.inputTokens
   return {
-    input_tokens: usage.inputTokens ?? 0,
-    output_tokens: usage.outputTokens ?? 0,
-    cache_read_input_tokens: usage.inputTokenDetails.cacheReadTokens ?? 0,
-    cache_creation_input_tokens: usage.inputTokenDetails.cacheWriteTokens ?? 0,
+    input_tokens: countOf(input) ?? 0,
+    output_tokens: countOf(report.outputTokens) ?? 0,
+    cache_read_input_tokens:
+      detailOf(details, 'cacheReadTokens') ?? detailOf(input, 'cacheRead') ?? 0,
+    cache_creation_input_tokens:
+      detailOf(details, 'cacheWriteTokens') ?? detailOf(input, 'cacheWrite') ?? 0,
+  }
+}
+
+/** One request's counters, step by step: every step of a request is spent inside the same span. */
+function addModelUsage(left: ModelUsage, right: ModelUsage): ModelUsage {
+  return {
+    input_tokens: left.input_tokens + right.input_tokens,
+    output_tokens: left.output_tokens + right.output_tokens,
+    cache_read_input_tokens: left.cache_read_input_tokens + right.cache_read_input_tokens,
+    cache_creation_input_tokens:
+      left.cache_creation_input_tokens + right.cache_creation_input_tokens,
   }
 }

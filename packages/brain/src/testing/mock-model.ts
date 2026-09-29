@@ -1,6 +1,7 @@
 import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from '@ai-sdk/provider'
 import type { ModelUsage } from '@openharness/protocol'
 import { FIXTURE_MODEL_USAGE } from '@openharness/protocol/fixtures'
+import type { LanguageModel } from 'ai'
 import { MockLanguageModelV4 } from 'ai/test'
 
 import type { ModelFactory } from '../model'
@@ -129,6 +130,33 @@ function streamOf(script: MockModelScript): ReadableStream<LanguageModelV4Stream
       controller.enqueue(await next())
     },
   })
+}
+
+/**
+ * A model that declares the wrong provider spec, the way Mastra's router does.
+ *
+ * `MockLanguageModelV4` declares `v4` and reports usage in the shape the AI SDK reads straight
+ * off. A real provider behind the router is worse company than that: `ModelRouterLanguageModel`
+ * declares `specificationVersion: 'v2'` while streaming v3-shaped usage, so `ai` runs its v2
+ * compatibility layer over a report that is already the newer shape and the counts end up
+ * nested inside an object where a number belongs — `0 + { … }`, the string issue #39 shipped.
+ * Nothing else about the mock changes; only the declaration it makes is wrong.
+ *
+ * ```ts
+ * const { factory } = mockModel({ text: ['Hello'], usage: { input_tokens: 9 } })
+ * const model = misdeclaredSpec(factory('anthropic/claude-sonnet-5'))
+ * ```
+ *
+ * @param model the model to mislabel
+ */
+export function misdeclaredSpec(model: LanguageModel): LanguageModel {
+  // A proxy, not a copy: `LanguageModel` is a union that includes a bare provider-id string,
+  // and the model this labels keeps its methods and its `supportedUrls` getter where they are.
+  return new Proxy(model as object, {
+    get(target, property, receiver): unknown {
+      return property === 'specificationVersion' ? 'v2' : Reflect.get(target, property, receiver)
+    },
+  }) as LanguageModel
 }
 
 /** One message of a recorded prompt, as the text it carried. */
