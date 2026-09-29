@@ -8,6 +8,7 @@ import type { Session, SessionStatus } from '@openharness/protocol'
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 
 import { describeError } from '../lib/errors'
+import { useSessionRefresh } from './use-session-refresh'
 import { useSettings } from './use-settings'
 
 /**
@@ -68,12 +69,17 @@ export function useSession(client: Client, sessionId: string): SessionView {
   const getSnapshot = useCallback(() => transcript.getState(), [transcript])
   const state = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
 
-  const [session, setSession] = useState<Session | null>(null)
+  const [loaded, setLoaded] = useState<Session | null>(null)
   const [loadingHistory, setLoadingHistory] = useState(true)
   const [requestError, setRequestError] = useState<string | null>(null)
   // A failure of our own is described with the server the client is pointed at, so a request
   // that never arrived can say where it did not arrive.
   const { serverUrl } = useSettings()
+  // The session as the freshest read of it: the mount fetch below, or — once this chat has
+  // said something — the re-read that turns the agent's name into the title the server
+  // derived (#35). Both the sidebar row and this header read that one copy.
+  const { sessions: fresh, refresh } = useSessionRefresh(client)
+  const session = fresh.get(sessionId) ?? loaded
 
   useEffect(() => {
     const controller = new AbortController()
@@ -85,7 +91,7 @@ export function useSession(client: Client, sessionId: string): SessionView {
         if (controller.signal.aborted) {
           return
         }
-        setSession(opened)
+        setLoaded(opened)
 
         for await (const event of client.sessions.events.iterate(
           sessionId,
@@ -128,6 +134,18 @@ export function useSession(client: Client, sessionId: string): SessionView {
     void follow()
     return () => controller.abort()
   }, [client, sessionId, transcript, serverUrl])
+
+  // A session is named by the request that stores its first message (`lib/session-refresh`),
+  // so a chat that has said something and still shows no title is one whose copy predates it:
+  // this tab's own send, or a first message another tab just streamed in. Ask for a re-read —
+  // the store decides whether there is one to make, and never makes a second.
+  const saidSomething = state.messages.some((message) => message.role === 'user')
+  const titled = session !== null && session.title !== null
+  useEffect(() => {
+    if (saidSomething && !titled) {
+      refresh(sessionId)
+    }
+  }, [saidSomething, titled, refresh, sessionId])
 
   const send = useCallback(
     async (text: string): Promise<void> => {

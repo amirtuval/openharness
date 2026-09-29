@@ -32,6 +32,36 @@ Two details worth knowing when reading it:
   Waiting for the stream would leave a visible gap between pressing Enter and seeing your own
   message.
 
+## The title that arrives without a reload (#35)
+
+A session has no title at creation, and the server derives one from the first `user.message`
+inside the request that stores it (`apps/server/src/titles.ts`, PR #32). That request answers
+with the stored events, the stream carries log events, and there is no `session.updated` — so
+nothing tells a client which already loaded the session that it has just been named. The chat
+header and the sidebar row kept showing the agent's name until something reloaded the page.
+
+`src/lib/session-refresh.ts` is the fix, and it is deliberately one mechanism rather than two
+refetches:
+
+- the store is keyed by client and shared (`sessionRefresh(client)`), so `useSessions` (the
+  shell's list) and `useSession` (the open chat) read the same copy of the same session;
+- **`useSession` decides when**: once the transcript holds a `user.message` and the session it
+  has still shows no title, it asks for one re-read. That covers both the local case — the
+  message this tab just sent, whose title the POST had already written — and a first message
+  that arrived from another writer over the stream;
+- **the store decides whether**: one read in flight at a time, an answered read marks the
+  session done (so nothing polls, and a session the server declined to name is not read
+  again), and a failed read is not a banner — the row simply keeps the name it had;
+- **both surfaces merge the result**: the sidebar maps its list through the fresh copies
+  (`withFreshSessions`, which returns the same array when there is nothing new), and the
+  header prefers the fresh session over the one its mount fetch found.
+
+This is not a second store in the sense the section above warns about: nothing about the
+conversation lives here — no messages, no status, no optimistic layer — just the freshest copy
+of a resource the server owns, read once for everyone who needs it. A `session.updated` stream
+event would do the same job from the server's side and was considered and rejected for v1 (it
+means a protocol addition); the day that lands, this module is what goes.
+
 ## Chat components: written here, on shadcn/ui
 
 The issue suggested AI Elements or assistant-ui. Both were looked at, and neither fits as
@@ -137,6 +167,10 @@ Practical notes for whoever adds the next test:
 - **`data-role`, `data-streaming`, `data-pending`** on each message article are the
   transcript's state made visible — that is how a test asks "is this reply still arriving?"
   without reaching into React.
+- **The fake does not name sessions.** The server derives a title from the first message
+  (PR #32) and the fake predates that, so a test about titles calls
+  `deriveSessionTitles(fake)` (`src/test-support/render-app.tsx`), which plays the server's
+  half: after a message is stored, `sessions.get` answers with the session named by it.
 
 ## Bundle
 
