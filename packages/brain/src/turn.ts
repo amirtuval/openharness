@@ -98,7 +98,10 @@ export type TurnOutcomeKind =
   | 'noop'
   /** The turn was cut short by an interrupt, by `signal` or by a queued `user.interrupt`. */
   | 'interrupted'
-  /** The turn died on a model failure that was not retryable, or ran out of retries. */
+  /**
+   * The turn died on a model failure that was not retryable, on retries that ran out, or on an
+   * event the protocol would not accept — all three end with `session.error`.
+   */
   | 'error'
 
 /** The summary {@link runTurn} resolves to. */
