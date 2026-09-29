@@ -55,11 +55,13 @@ browser console: fake mode puts it on `window` as `__openharnessFake`.
 ```
 src/
   main.tsx                     bootstrap: resolve the client (fake in dev mode), render <App>
-  App.tsx                      builds the client from the settings, routes, sidebar + screen
+  App.tsx                      the client from the settings, the routes, the app shell:
+                               sidebar (column or drawer), the top bar, the routed screen
   index.css                    Tailwind + the shadcn design tokens (dark follows the system)
   components/
     client-provider.tsx        the client in context, so screens can use it
-    sidebar.tsx                session list (newest first), New chat, Agents, Settings
+    sidebar.tsx                session list (newest first), New chat, Agents, Settings;
+                               the column from `md` up, the overlay drawer below it
     chat/
       chat-view.tsx            the chat screen: header, messages, errors, composer
       message-list.tsx         the scrolling conversation + stick-to-bottom
@@ -157,6 +159,25 @@ first page straight away and appends the later ones (`appendUnseen`, which drops
 was already added by a `create` while the walk was running), so the sidebar is usable while
 the rest of a long list is still loading. Both also return `truncated`, and neither decodes a
 cursor itself.
+
+## The responsive shell
+
+The sidebar is a fixed 256px column, and at 390px that is two thirds of the screen: the chat
+was left with ~134px and wrapped one word per line. Below the `md` breakpoint the same panel
+is therefore an overlay drawer over the content, opened from a small top bar that exists only
+at that size (it is rendered on every screen — the shell owns it, not the screens).
+`max-md:` variants do the switching, so from `md` up the layout is exactly what it was: no
+JavaScript breakpoint, nothing to hydrate, and the columns behave the same on the first paint
+as after it.
+
+The drawer is `aria-expanded`-state on a `aria-label`ed button, moves focus into the panel
+when it opens and back to the button when it closes. It closes on navigation (both the shell's
+route effect and the sidebar's own `onNavigate`, so re-picking the chat that is already open
+closes it too), on Escape, and on a backdrop click — a backdrop that is itself `md:hidden`, as
+is the button.
+
+The tests in `src/App.test.tsx` assert the switch and the behaviour, not the pixels: jsdom has
+no layout. What 390px looks like is a browser question.
 
 ## Chat components
 
