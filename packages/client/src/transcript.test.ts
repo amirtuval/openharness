@@ -217,6 +217,39 @@ describe('reduceTranscript', () => {
     expect(state.messages).toEqual([])
   })
 
+  it('drops a preview that is still open when the session goes idle', () => {
+    // The turn with no reply (#40), as one reaches the reducer: the preview is announced, no
+    // deltas follow, no `agent.message` is stored — and the `span.model_request_end` that would
+    // close the preview is missing, because a stored event this client cannot parse is skipped
+    // (`events/stream.ts`), which is what a real provider's span usage did to every turn. The
+    // idle is then the only evidence that the turn is over, and the bubble must not outlive it.
+    const start = makeModelRequestStart({ seq: 2 })
+    const preview = makeEventStart(idA)
+    const idle = makeStatusIdle({ seq: 3 })
+
+    const state = reduceEvents([makeStatusRunning({ seq: 1 }), start, preview, idle])
+
+    expect(state.messages).toEqual([])
+    expect(selectStreamingMessage(state)).toBeNull()
+    expect(state.status).toBe('idle')
+  })
+
+  it('drops a preview that had started to stream when the session goes idle', () => {
+    // Same turn, but the deltas arrived: the reply was never stored, so there is still nothing
+    // to keep — what is dropped is the preview, whether or not it had started to say something.
+    const start = makeModelRequestStart({ seq: 2 })
+    const state = reduceEvents([
+      makeStatusRunning({ seq: 1 }),
+      start,
+      makeEventStart(idA),
+      makeEventDelta(idA, 'half a repl'),
+      makeStatusIdle({ seq: 3 }),
+    ])
+
+    expect(state.messages).toEqual([])
+    expect(selectStreamingMessage(state)).toBeNull()
+  })
+
   it('ignores a preview for a message that is already stored', () => {
     const stored = makeAgentMessage('the reply', { seq: 2 })
     const state = reduceEvents([

@@ -232,9 +232,13 @@ The rules it implements, in one place:
   **replaces** the preview in place — same position, `streaming: false` — which is how a preview
   that a reconnect cut short still ends up whole. A preview can never rewrite a message that is
   already stored.
-- **Unreconciled previews are dropped** on `span.model_request_end`: a preview that no stored
-  event ever replaced belonged to a request that failed or was interrupted before the reply
-  could be written.
+- **Unreconciled previews are dropped** on `span.model_request_end` — and on
+  `session.status_idle`, which is the same statement about a turn that has ended: a preview no
+  stored event ever replaced belonged to a request that failed, was interrupted, or ended
+  without a reply, and there is nothing to keep. The idle half is what makes the rule hold when
+  the span end never arrives: a stored event this client cannot parse is skipped
+  (`events/stream.ts`), and without it a preview would stay `streaming` for the life of the
+  session — an empty reply bubble in a frontend that renders one (#40).
 - **`pending`** flags a user message the brain has not reached: the stored event's
   `processed_at` is `null`. A message queued _while_ a turn is running (a steering message)
   stays pending until the next `span.model_request_start` — that is the only signal the log
