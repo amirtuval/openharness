@@ -15,7 +15,8 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "qa:web": "playwright test --config=playwright.config.ts"
   },
   "dependencies": {
     "@openharness/client": "workspace:*",
@@ -26,6 +27,7 @@
   },
   "devDependencies": {
     "@openharness/config": "workspace:*",
+    "@playwright/test": "1.63.0",
     "@types/node": "26.6.3",
     "@types/pg": "8.23.1",
     "eslint": "10.11.0",

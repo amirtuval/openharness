@@ -141,3 +141,16 @@ and they spend their time waiting rather than computing.
   belongs in a separate issue.
 - Update this file whenever the behaviour or the public API changes.
 - Larger docs go in `e2e/docs/`.
+
+## Hands-on QA scripts (`qa/`)
+
+`qa/` holds the Playwright (web) and tmux (CLI) specs used for hands-on QA passes (see issue #14). They are
+**not** part of `yarn test` or CI.
+
+- Run: `yarn qa:web` against a running system (default `http://localhost:3000`, override with the base-URL env
+  var in `playwright.config.ts`), e.g. `OPENHARNESS_TEST_MODEL=mock docker compose up --build`.
+- Opt-ins: `QA_WITH_CLI=1` runs the CLI specs (needs `tmux` and a built `apps/tui`);
+  `QA_ALLOW_SERVER_RESTART=1` runs the scenario that stops and restarts the server.
+- Screenshots go to `e2e/qa-output/` (gitignored; override with `QA_SHOT_DIR`).
+- Results of each pass are reported as a comment on the QA issue, not committed.
+- A spec marked `test.fail` documents a known bug; remove the marker once the bug is fixed.
