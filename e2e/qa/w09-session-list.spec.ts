@@ -3,6 +3,7 @@ import {
   createAgent,
   createSession,
   expect,
+  expectNoErrorBanner,
   openChat,
   sendFromComposer,
   sendMessage,
@@ -38,6 +39,7 @@ test.describe('W9 session list', () => {
     const sidebar = page.getByRole('navigation', { name: 'Chats' })
     const links = sidebar.locator('a[href^="#/s/"]')
     await expect(links.first()).toBeVisible()
+    await expectNoErrorBanner(page)
 
     await test.step('newest first, matching the API', async () => {
       const listed = await request.get('/v1/sessions', { params: { limit: 10 } })
@@ -73,6 +75,9 @@ test.describe('W9 session list', () => {
         'page',
       )
       await expect(links.first()).not.toHaveAttribute('aria-current', 'page')
+      // Switching sessions is a fresh read of another log, and one of the three has a
+      // finished turn in it.
+      await expectNoErrorBanner(page)
     })
 
     expect(consoleErrors, consoleErrors.join('\n')).toEqual([])
@@ -89,8 +94,10 @@ test.describe('W9 session list', () => {
     await expect(page).toHaveURL(/#\/s\/sesn_/)
 
     const sessionId = (await page.evaluate(() => window.location.hash)).replace('#/s/', '')
+    await expectNoErrorBanner(page)
     await sendFromComposer(page, 'a chat about the release checklist')
     await waitForAnswer(page, 'a chat about the release checklist')
+    await expectNoErrorBanner(page)
 
     const session = await request.get(`/v1/sessions/${sessionId}`)
     const body = (await session.json()) as { title: string | null }
@@ -102,6 +109,7 @@ test.describe('W9 session list', () => {
     )
 
     // What the sidebar makes of that title, without a reload, is W9d below.
+    await expectNoErrorBanner(page)
   })
 
   // Was `test.fail` as the reproduction of issue #35: the title is derived on the server when
@@ -114,8 +122,10 @@ test.describe('W9 session list', () => {
     await page.getByRole('button', { name: 'Create chat' }).click()
     await expect(page).toHaveURL(/#\/s\/sesn_/)
     const sessionId = (await page.evaluate(() => window.location.hash)).replace('#/s/', '')
+    await expectNoErrorBanner(page)
     await sendFromComposer(page, 'a chat about the release checklist')
     await waitForAnswer(page, 'a chat about the release checklist')
+    await expectNoErrorBanner(page)
 
     // The list the sidebar is holding was loaded before this chat had a message.
     await expect(page.locator(`a[href="#/s/${sessionId}"]`)).toContainText(
@@ -126,6 +136,7 @@ test.describe('W9 session list', () => {
     await expect(
       page.getByRole('heading', { name: 'a chat about the release checklist' }),
     ).toBeVisible()
+    await expectNoErrorBanner(page)
   })
 
   test('W9c the sidebar highlights the open chat', async ({ page, request, consoleErrors }) => {
@@ -136,10 +147,13 @@ test.describe('W9 session list', () => {
     })
     const session = await createSession(request, agent.id)
     await openChat(page, session.id)
+    await expectNoErrorBanner(page)
     await expect(page.locator(`a[href="#/s/${session.id}"]`)).toHaveAttribute(
       'aria-current',
       'page',
     )
+    await expectNoErrorBanner(page)
+
     expect(consoleErrors, consoleErrors.join('\n')).toEqual([])
   })
 })

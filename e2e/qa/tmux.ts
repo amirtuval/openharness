@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import path from 'node:path'
 
-import type { Page } from '@playwright/test'
+import { expect, type Page } from '@playwright/test'
 
 import { isRealModel } from './support'
 
@@ -213,6 +213,30 @@ export function replyHasText(screen: string): boolean {
         .trim().length > 0
     )
   })
+}
+
+/**
+ * The `error: …` lines of a pane capture, if any.
+ *
+ * Anchored at the start of a line on purpose: `oh` writes an error as a line of its own above
+ * the status line (`components/notice-view.tsx`, `apps/tui/src/app.tsx`), while the words
+ * "error:" can turn up anywhere in a reply, a prompt or a command line — matching those would
+ * make the assertion below about the conversation rather than about the app.
+ */
+export function errorNoticeLines(screen: string): string[] {
+  return screen.split('\n').filter((line) => line.trimStart().startsWith('error:'))
+}
+
+/**
+ * Fail if the pane is showing an error notice.
+ *
+ * The CLI half of `expectNoErrorBanner` (`support.ts`): a failure `oh` reports inline — a
+ * failed turn, or a read it could not make sense of ("the server answered with something this
+ * client could not read") — is exactly what a scenario checking only for the text it expected
+ * would not notice. Scenarios that provoke an error on purpose (C9, C11) do not call this.
+ */
+export function expectNoErrorNotice(screen: string): void {
+  expect(errorNoticeLines(screen), 'the CLI is showing an error notice').toEqual([])
 }
 
 /** `text` with everything a regexp would read as syntax escaped. */

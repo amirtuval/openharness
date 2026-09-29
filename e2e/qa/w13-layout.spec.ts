@@ -4,6 +4,7 @@ import {
   createAgent,
   createSession,
   expect,
+  expectNoErrorBanner,
   openChat,
   sendFromComposer,
   shot,
@@ -27,6 +28,7 @@ test.describe('W13 layout and keyboard', () => {
     })
     const session = await createSession(request, agent.id)
     await openChat(page, session.id)
+    await expectNoErrorBanner(page)
     await sendFromComposer(page, 'a message so the conversation is not empty')
 
     await test.step('desktop width', async () => {
@@ -100,6 +102,8 @@ test.describe('W13 layout and keyboard', () => {
       await composer(page).fill('')
     })
 
+    await expectNoErrorBanner(page)
+
     expect(consoleErrors, consoleErrors.join('\n')).toEqual([])
   })
 
@@ -118,8 +122,10 @@ test.describe('W13 layout and keyboard', () => {
     })
     const session = await createSession(request, agent.id)
     await openChat(page, session.id)
+    await expectNoErrorBanner(page)
     await sendFromComposer(page, 'a message so the conversation is not empty')
     await waitForAnswer(page, 'a message so the conversation is not empty')
+    await expectNoErrorBanner(page)
 
     await page.setViewportSize({ width: 390, height: 844 })
 
@@ -178,6 +184,8 @@ test.describe('W13 layout and keyboard', () => {
         overflow.viewportWidth,
       )
     })
+
+    await expectNoErrorBanner(page)
 
     expect(consoleErrors, consoleErrors.join('\n')).toEqual([])
   })

@@ -2,6 +2,7 @@ import {
   QA_MODEL,
   composer,
   expect,
+  expectNoErrorBanner,
   sendFromComposer,
   shot,
   test,
@@ -72,6 +73,8 @@ test.describe('W1 first run', () => {
       await waitForAnswer(page, 'hello from W1')
       await shot(page, 'w1-03-first-chat')
     })
+
+    await expectNoErrorBanner(page)
 
     expect(consoleErrors, consoleErrors.join('\n')).toEqual([])
   })

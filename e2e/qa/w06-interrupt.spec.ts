@@ -5,6 +5,7 @@ import {
   createSession,
   eventTypes,
   expect,
+  expectNoErrorBanner,
   isRealModel,
   lastAgentText,
   openChat,
@@ -31,6 +32,7 @@ test.describe('W6 interrupt', () => {
     })
     const session = await createSession(request, agent.id)
     await openChat(page, session.id)
+    await expectNoErrorBanner(page)
 
     const prompt = isRealModel ? LONG_REPLY_PROMPT : '__slow__ something long please'
     await sendFromComposer(page, prompt)
@@ -65,6 +67,8 @@ test.describe('W6 interrupt', () => {
       await waitForAnswer(page, 'after the interrupt')
       await expect(status(page)).toHaveAttribute('aria-label', 'Status: Idle')
     })
+
+    await expectNoErrorBanner(page)
 
     expect(consoleErrors, consoleErrors.join('\n')).toEqual([])
   })

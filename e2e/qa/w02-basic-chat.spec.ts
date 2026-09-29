@@ -6,6 +6,7 @@ import {
   createSession,
   distanceFromBottom,
   expect,
+  expectNoErrorBanner,
   eventTypes,
   isRealModel,
   openChat,
@@ -37,6 +38,7 @@ test.describe('W2 basic chat', () => {
     })
     const session = await createSession(request, agent.id)
     await openChat(page, session.id)
+    await expectNoErrorBanner(page)
     await recordRendering(page)
 
     await test.step('the reply streams in piece by piece', async () => {
@@ -94,6 +96,8 @@ test.describe('W2 basic chat', () => {
       expect(await distanceFromBottom(page)).toBeLessThan(48)
       await expect(conversation(page)).toBeVisible()
     })
+
+    await expectNoErrorBanner(page)
 
     expect(consoleErrors, consoleErrors.join('\n')).toEqual([])
   })

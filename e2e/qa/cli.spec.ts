@@ -19,6 +19,7 @@ import {
   CLI_SERVER,
   CLI_CWD,
   Terminal,
+  expectNoErrorNotice,
   occurrences,
   replyHasText,
   sendAndAwaitAnswer,
@@ -130,6 +131,7 @@ test.describe('cli scenarios', () => {
         expect(screen).toContain('agent › hello from the terminal')
       }
       expect(screen, 'the status line is back').toMatch(/idle/)
+      expectNoErrorNotice(screen)
     } finally {
       terminal.kill()
       await shot.close()
@@ -154,6 +156,7 @@ test.describe('cli scenarios', () => {
       await terminal.waitForIdle(180_000)
       // Wrapped to the terminal width, and the status line and prompt are still there.
       const narrow = terminal.capture()
+      expectNoErrorNotice(narrow)
       expect(narrow).toMatch(/idle/)
       expect(narrow).toContain('❯')
       if (isRealModel) {
@@ -177,6 +180,7 @@ test.describe('cli scenarios', () => {
       const wide = terminal.capture()
       expect(wide).toContain('❯')
       expect(wide, 'the status line is back').toMatch(/idle/)
+      expectNoErrorNotice(wide)
       if (!isRealModel) {
         expect(wide).toContain('now at the wider size')
         // The reply printed before the resize keeps the 80-column wrapping it was written
@@ -213,6 +217,7 @@ test.describe('cli scenarios', () => {
       await terminal.waitFor(/a message worth resuming/)
       await terminal.waitForIdle()
       expect(terminal.capture()).toContain('a message worth resuming')
+      expectNoErrorNotice(terminal.capture())
       await terminal.screenshot(shot, 'c3-02-resumed')
 
       await quit(terminal)
@@ -227,6 +232,7 @@ test.describe('cli scenarios', () => {
       )
       await terminal.waitForIdle()
       expect(terminal.capture()).toContain('a message worth resuming')
+      expectNoErrorNotice(terminal.capture())
       await terminal.screenshot(shot, 'c3-03-continued')
     } finally {
       terminal.kill()
@@ -263,6 +269,7 @@ test.describe('cli scenarios', () => {
       await terminal.waitUntil((screen) => !screen.includes('(queued)'), 120_000)
       await terminal.waitForIdle()
       expect(terminal.capture(), 'the queued marker is gone').not.toContain('(queued)')
+      expectNoErrorNotice(terminal.capture())
     } finally {
       terminal.kill()
       await shot.close()
@@ -319,6 +326,7 @@ test.describe('cli scenarios', () => {
       await test.step('a new message still works', async () => {
         await sendAndAwaitAnswer(terminal, 'after the interrupt')
         await terminal.waitForIdle()
+        expectNoErrorNotice(terminal.capture())
       })
 
       await test.step('Ctrl+C twice when idle exits and restores the terminal', async () => {
@@ -364,6 +372,7 @@ test.describe('cli scenarios', () => {
       expect(sent).toContain('second line')
 
       await terminal.waitForIdle()
+      expectNoErrorNotice(terminal.capture())
       terminal.type('alt line one')
       terminal.send('M-Enter')
       await new Promise((resolve) => setTimeout(resolve, 200))
@@ -464,6 +473,7 @@ test.describe('cli scenarios', () => {
         await terminal.waitFor(/sesn_[A-Z0-9]+|no agent matches/, 30_000)
         expect(terminal.capture(), 'the agent was resolved').not.toContain('no agent matches')
         await terminal.waitForIdle()
+        expectNoErrorNotice(terminal.capture())
         await terminal.screenshot(shot, 'c7b-01-agent-past-the-first-page')
         await quit(terminal)
       } finally {

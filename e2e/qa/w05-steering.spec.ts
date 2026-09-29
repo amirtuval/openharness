@@ -5,6 +5,7 @@ import {
   createSession,
   eventTypes,
   expect,
+  expectNoErrorBanner,
   isRealModel,
   openChat,
   sendFromComposer,
@@ -32,6 +33,7 @@ test.describe('W5 steering', () => {
     })
     const session = await createSession(request, agent.id)
     await openChat(page, session.id)
+    await expectNoErrorBanner(page)
 
     const firstQuestion = isRealModel ? LONG_REPLY_PROMPT : '__slow__ the first question'
     await sendFromComposer(page, firstQuestion)
@@ -75,6 +77,8 @@ test.describe('W5 steering', () => {
       expect(log.filter((type) => type === 'agent.message')).toHaveLength(2)
       await shot(page, 'w5-02-steering-answered')
     })
+
+    await expectNoErrorBanner(page)
 
     expect(consoleErrors, consoleErrors.join('\n')).toEqual([])
   })

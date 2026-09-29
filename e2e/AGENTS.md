@@ -173,11 +173,35 @@ rather than for particular words, asking for a long reply instead of `__slow__` 
 (W11a/W11b) run on the mock and skip on a provider, and the provider-only ones (W11d/W11e/W11f,
 C11) do the reverse.
 
+### What a clean screen does not prove
+
+A client that **drops stored events it cannot parse** keeps rendering, so a session that has
+become unreadable still looks like a session: pass 3's "0[object Object]" usage (#39) made every
+real-provider session unreadable to `@openharness/client` while the scenarios — which watched the
+console and the text — passed. The app's own error surface is what says a read failed, so every
+scenario that opens, reloads or navigates a session now asserts it is clean:
+
+- `expectNoErrorBanner(page)` (`support.ts`) fails on any `role="alert"` the app is showing —
+  the chat's "Request failed" banner and the log's own turn errors are one component — and is
+  also checked over a short window, since a failed load renders in the pass that ends the load.
+- `expectNoErrorNotice(screen)` (`tmux.ts`) fails on the `error: …` line `oh` writes above its
+  status line, matched at the start of a line so a reply's own words cannot trip it.
+
+Scenarios that provoke an error on purpose (W11, W12, C9, C11) do not call either.
+
+W14 asks for `CRASH_REPLY_PROMPT` rather than `LONG_REPLY_PROMPT`: `docker compose kill` takes
+seconds, and a reply that streams for two of them is finished before the container is down — so
+the crash lands after the turn and the scenario fails on a premise it never had. The reply is
+sized to outlast the kill, and that it is still arriving is asserted just before the kill.
+
 ### A stack that is not plain `docker-compose.yml`
 
 A scenario that kills or recreates the server has to bring it back the way it was started.
 `QA_COMPOSE_ARGS` adds arguments to every `docker compose` the specs run, so a deployment that
-needs an override file keeps it:
+needs an override file keeps it. The environment is inherited the same way, so a variable the
+stack was started with has to be **exported** in the shell that runs the suite: a one-off
+`OPENHARNESS_TEST_MODEL=mock docker compose up -d` is not enough, and a restart scenario would
+bring the server back without it (W14's re-run would then be answered by the real router).
 
 ```bash
 QA_COMPOSE_ARGS="-f docker-compose.yml -f docker-compose.proxy.yml" \

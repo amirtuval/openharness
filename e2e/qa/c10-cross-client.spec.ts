@@ -3,6 +3,7 @@ import {
   createAgent,
   createSession,
   expect,
+  expectNoErrorBanner,
   isRealModel,
   openChat,
   sendFromComposer,
@@ -15,6 +16,7 @@ import {
   CLI_COMMAND,
   CLI_SERVER,
   Terminal,
+  expectNoErrorNotice,
   occurrences,
   sendAndAwaitAnswer,
 } from './tmux'
@@ -74,16 +76,19 @@ test.describe('C10 cross-client', () => {
         terminal.send('Enter')
         await terminal.waitForIdle()
         startedInChat = (await terminal.waitFor(/sesn_[A-Z0-9]+/))[0]
+        expectNoErrorNotice(terminal.capture())
       })
 
       await test.step('what oh sends shows up in the browser', async () => {
         await sendAndAwaitAnswer(terminal, 'sent from the terminal')
 
         await openChat(page, startedInChat)
+        await expectNoErrorBanner(page)
         await expect(page.locator('article[data-role="user"]').last()).toContainText(
           'sent from the terminal',
         )
         await waitForAnswer(page, 'sent from the terminal')
+        await expectNoErrorBanner(page)
         await shot(page, 'c10-01-oh-session-in-the-web')
       })
 
@@ -99,6 +104,7 @@ test.describe('C10 cross-client', () => {
         }
         await terminal.waitForIdle()
         expect(terminal.capture()).toContain('you › sent from the browser')
+        expectNoErrorNotice(terminal.capture())
       })
 
       await test.step('oh resumes the chat and shows both sides of it', async () => {
@@ -111,6 +117,7 @@ test.describe('C10 cross-client', () => {
         const screen = terminal.capture(400)
         expect(screen).toContain('sent from the terminal')
         expect(screen).toContain('sent from the browser')
+        expectNoErrorNotice(screen)
       })
     } finally {
       terminal.kill()
@@ -119,6 +126,7 @@ test.describe('C10 cross-client', () => {
     // And the other way round: a session the web app made, resumed by id in `oh`.
     const webSession = await createSession(request, agent.id)
     await openChat(page, webSession.id)
+    await expectNoErrorBanner(page)
     await sendFromComposer(page, 'started in the browser')
 
     terminal.start()
@@ -126,6 +134,7 @@ test.describe('C10 cross-client', () => {
       terminal.run(`${CLI_COMMAND} --server ${CLI_SERVER} -s ${webSession.id}`)
       await terminal.waitFor(/started in the browser/)
       expect(terminal.capture()).toContain('started in the browser')
+      expectNoErrorNotice(terminal.capture())
     } finally {
       terminal.kill()
     }

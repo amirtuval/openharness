@@ -1,6 +1,6 @@
 import {
-  LONG_REPLY_END,
-  LONG_REPLY_PROMPT,
+  CRASH_REPLY_END,
+  CRASH_REPLY_PROMPT,
   QA_MODEL,
   composeServer,
   conversation,
@@ -8,6 +8,7 @@ import {
   createSession,
   eventTypes,
   expect,
+  expectNoErrorBanner,
   isRealModel,
   lastAgentText,
   openChat,
@@ -48,8 +49,9 @@ test.describe('W14 crash recovery', () => {
     })
     const session = await createSession(request, agent.id)
     await openChat(page, session.id)
+    await expectNoErrorBanner(page)
 
-    const prompt = isRealModel ? LONG_REPLY_PROMPT : '__slow__ a long reply'
+    const prompt = isRealModel ? CRASH_REPLY_PROMPT : '__slow__ a long reply'
     await sendFromComposer(page, prompt)
 
     // Wait until the reply is genuinely under way: a crash before the first token would be a
@@ -61,6 +63,14 @@ test.describe('W14 crash recovery', () => {
     }
     const partial = await lastAgentText(page)
     expect(partial.trim().length, 'something had arrived before the crash').toBeGreaterThan(0)
+    // And that it is *still* arriving, asserted rather than hoped for: `docker compose kill`
+    // takes seconds while a real provider can answer a short reply in fewer, and a kill that
+    // lands after the turn leaves nothing to recover — which reads as this scenario's
+    // `brain_lost` assertion failing rather than as the premise it is.
+    await expect(status(page), 'the crash has to land mid-stream').toHaveAttribute(
+      'aria-label',
+      'Status: Running',
+    )
 
     await test.step('the server is killed mid-stream and comes back', async () => {
       composeServer({}, 'kill', 'server')
@@ -105,7 +115,7 @@ test.describe('W14 crash recovery', () => {
       )
       if (isRealModel) {
         expect(text, 'the re-run wrote the whole reply, not the fragment it replaced').toMatch(
-          LONG_REPLY_END,
+          CRASH_REPLY_END,
         )
       } else {
         expect(text, 'the re-run wrote the whole reply').toContain('part 40/40')
@@ -115,6 +125,9 @@ test.describe('W14 crash recovery', () => {
     await test.step('a reconnected tab shows the finished reply', async () => {
       await page.reload()
       await expect(conversation(page)).toBeVisible()
+      // The log this tab now reads holds a request the killed server left open and the one
+      // that replaced it — nothing in it is allowed to make the session unreadable.
+      await expectNoErrorBanner(page)
       await expect(status(page)).toHaveAttribute('aria-label', 'Status: Idle')
       const finalText = await lastAgentText(page)
       expect(finalText.length, 'the tab has the whole reply, not the fragment').toBeGreaterThan(

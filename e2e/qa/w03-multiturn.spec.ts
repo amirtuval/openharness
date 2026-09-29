@@ -4,6 +4,7 @@ import {
   createSession,
   distanceFromBottom,
   expect,
+  expectNoErrorBanner,
   isRealModel,
   openChat,
   sendFromComposer,
@@ -29,6 +30,7 @@ test.describe('W3 multi-turn', () => {
     })
     const session = await createSession(request, agent.id)
     await openChat(page, session.id)
+    await expectNoErrorBanner(page)
 
     // The mock echoes each prompt, which shows the turns landed in order but says nothing
     // about the session holding a conversation. Against a real provider the same three turns
@@ -69,6 +71,8 @@ test.describe('W3 multi-turn', () => {
     }
 
     await shot(page, 'w3-01-three-turns')
+    await expectNoErrorBanner(page)
+
     expect(consoleErrors, consoleErrors.join('\n')).toEqual([])
   })
 })

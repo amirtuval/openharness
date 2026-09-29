@@ -6,6 +6,7 @@ import {
   createSession,
   distanceFromBottom,
   expect,
+  expectNoErrorBanner,
   isRealModel,
   lastAgentText,
   openChat,
@@ -43,6 +44,7 @@ test.describe('W4 scrolling', () => {
       ),
     )
     await openChat(page, session.id)
+    await expectNoErrorBanner(page)
 
     const prompt = isRealModel ? LONG_REPLY_PROMPT : '__slow__ a long reply'
     await sendFromComposer(page, prompt)
@@ -78,6 +80,8 @@ test.describe('W4 scrolling', () => {
       ).toBeLessThan(48)
       await shot(page, 'w4-02-following-again')
     })
+
+    await expectNoErrorBanner(page)
 
     expect(consoleErrors, consoleErrors.join('\n')).toEqual([])
   })

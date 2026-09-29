@@ -5,6 +5,7 @@ import {
   createAgent,
   createSession,
   expect,
+  expectNoErrorBanner,
   isRealModel,
   lastAgentText,
   openChat,
@@ -43,6 +44,7 @@ test.describe('W7 reload', () => {
     })
     const session = await createSession(request, agent.id)
     await openChat(page, session.id)
+    await expectNoErrorBanner(page)
 
     await sendFromComposer(page, reloadPrompt)
     await waitForLongReplyStart(page, { minLength: 40 })
@@ -59,6 +61,7 @@ test.describe('W7 reload', () => {
 
     await page.reload()
     await expect(conversation(page)).toBeVisible()
+    await expectNoErrorBanner(page)
     await expect(page.locator('article[data-role="user"]').last()).toContainText(reloadPrompt)
 
     const reply = page.locator('article[data-role="agent"]').last()
@@ -76,6 +79,8 @@ test.describe('W7 reload', () => {
     await expect(status(page)).toHaveAttribute('aria-label', 'Status: Idle')
     await shot(page, 'w7-01-reloaded-mid-stream')
 
+    await expectNoErrorBanner(page)
+
     expect(consoleErrors, consoleErrors.join('\n')).toEqual([])
   })
 
@@ -91,6 +96,7 @@ test.describe('W7 reload', () => {
     })
     const session = await createSession(request, agent.id)
     await openChat(page, session.id)
+    await expectNoErrorBanner(page)
 
     await sendFromComposer(page, reloadPrompt)
     await waitForLongReplyStart(page, { minLength: 40 })
@@ -111,6 +117,7 @@ test.describe('W7 reload', () => {
     await page.reload()
     const reply = page.locator('article[data-role="agent"]').last()
     await expect(reply).toContainText(/\S/, { timeout: 15_000 })
+    await expectNoErrorBanner(page)
 
     if (isRealModel) {
       // Cut to a word boundary: the text may have been captured mid-token, and a partial word
@@ -139,6 +146,8 @@ test.describe('W7 reload', () => {
         message: 'the reply should have kept arriving after the reload',
       })
       .toBeGreaterThan(beforeReloadText.length)
+
+    await expectNoErrorBanner(page)
   })
 
   test('W7c a reload after the turn restores the whole conversation', async ({
@@ -153,6 +162,7 @@ test.describe('W7 reload', () => {
     })
     const session = await createSession(request, agent.id)
     await openChat(page, session.id)
+    await expectNoErrorBanner(page)
 
     await sendFromComposer(page, 'the only turn')
     await waitForAnswer(page, 'the only turn')
@@ -160,12 +170,17 @@ test.describe('W7 reload', () => {
 
     await page.reload()
     await expect(conversation(page)).toBeVisible()
+    // The reload reads the whole stored turn back — including the `span.model_request_end`
+    // #39 corrupted — so this is where a session that stopped being readable shows up.
+    await expectNoErrorBanner(page)
     await expect(page.locator('article[data-role]')).toHaveCount(2)
     await expect(page.locator('article[data-role="user"]').last()).toContainText('the only turn')
     // The reply is only known to be non-empty: nothing constrains how a model words one.
     await expect(page.locator('article[data-role="agent"]').last()).toContainText(/\S/)
     await expect(status(page)).toHaveAttribute('aria-label', 'Status: Idle')
     await shot(page, 'w7-02-reloaded-after-turn')
+
+    await expectNoErrorBanner(page)
 
     expect(consoleErrors, consoleErrors.join('\n')).toEqual([])
   })
