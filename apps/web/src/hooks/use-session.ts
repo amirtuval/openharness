@@ -8,6 +8,7 @@ import type { Session, SessionStatus } from '@openharness/protocol'
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 
 import { describeError } from '../lib/errors'
+import { useSettings } from './use-settings'
 
 /**
  * One open session: its transcript, its status, and the two things a user can do to it.
@@ -70,6 +71,9 @@ export function useSession(client: Client, sessionId: string): SessionView {
   const [session, setSession] = useState<Session | null>(null)
   const [loadingHistory, setLoadingHistory] = useState(true)
   const [requestError, setRequestError] = useState<string | null>(null)
+  // A failure of our own is described with the server the client is pointed at, so a request
+  // that never arrived can say where it did not arrive.
+  const { serverUrl } = useSettings()
 
   useEffect(() => {
     const controller = new AbortController()
@@ -92,7 +96,7 @@ export function useSession(client: Client, sessionId: string): SessionView {
         }
       } catch (caught) {
         if (!controller.signal.aborted) {
-          setRequestError(describeError(caught))
+          setRequestError(describeError(caught, { serverUrl }))
         }
       } finally {
         if (!controller.signal.aborted) {
@@ -116,14 +120,14 @@ export function useSession(client: Client, sessionId: string): SessionView {
         // An abort ends the iteration quietly; anything else — a bad key, an unknown session —
         // is worth showing, because the stream is not coming back on its own.
         if (!controller.signal.aborted) {
-          setRequestError(describeError(caught))
+          setRequestError(describeError(caught, { serverUrl }))
         }
       }
     }
 
     void follow()
     return () => controller.abort()
-  }, [client, sessionId, transcript])
+  }, [client, sessionId, transcript, serverUrl])
 
   const send = useCallback(
     async (text: string): Promise<void> => {
@@ -138,10 +142,10 @@ export function useSession(client: Client, sessionId: string): SessionView {
         // returns the stored event, and the reducer drops the stream's copy of it (same `seq`).
         transcript.apply(stored)
       } catch (caught) {
-        setRequestError(describeError(caught))
+        setRequestError(describeError(caught, { serverUrl }))
       }
     },
-    [client, sessionId, transcript],
+    [client, sessionId, transcript, serverUrl],
   )
 
   const interrupt = useCallback(async (): Promise<void> => {
@@ -149,9 +153,9 @@ export function useSession(client: Client, sessionId: string): SessionView {
     try {
       await client.interrupt(sessionId)
     } catch (caught) {
-      setRequestError(describeError(caught))
+      setRequestError(describeError(caught, { serverUrl }))
     }
-  }, [client, sessionId])
+  }, [client, sessionId, serverUrl])
 
   const dismissError = useCallback(() => {
     setRequestError(null)

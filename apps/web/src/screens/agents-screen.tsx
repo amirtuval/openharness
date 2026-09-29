@@ -9,6 +9,7 @@ import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card'
 import { useAgents } from '../hooks/use-agents'
+import { MAX_PAGE_ITEMS } from '../lib/paging'
 
 /**
  * The agents: a list, and one form for creating and editing.
@@ -18,7 +19,7 @@ import { useAgents } from '../hooks/use-agents'
  */
 export function AgentsScreen() {
   const client = useClient()
-  const { agents, loading, error, create, update, dismissError } = useAgents(client)
+  const { agents, loading, truncated, error, create, update, dismissError } = useAgents(client)
 
   const [editingId, setEditingId] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
@@ -70,6 +71,11 @@ export function AgentsScreen() {
             {loading ? <p className="text-sm text-muted-foreground">Loading…</p> : null}
             {!loading && agents.length === 0 ? (
               <p className="text-sm text-muted-foreground">No agents yet. Create the first one.</p>
+            ) : null}
+            {truncated ? (
+              <p className="text-sm text-muted-foreground">
+                and more… only the first {MAX_PAGE_ITEMS} are listed
+              </p>
             ) : null}
             {agents.map((agent) => (
               <AgentCard

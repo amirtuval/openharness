@@ -1,8 +1,10 @@
+import type { Client } from '@openharness/client'
 import { createFakeClient } from '@openharness/client/testing'
+import { newAgentId, type Agent } from '@openharness/protocol'
 import { makeAgent } from '@openharness/protocol/fixtures'
 import { describe, expect, it } from 'vitest'
 
-import { listingAgents, listingSessions } from '../test-support/fake'
+import { listingAgents, listingSessions, pagedAgents, seedAgents } from '../test-support/fake'
 import { resolveTarget, selectAgent } from './target'
 
 describe('selectAgent', () => {
@@ -153,5 +155,88 @@ describe('resolveTarget', () => {
     })
 
     expect(target).toEqual({ kind: 'session', session: fake.session })
+  })
+})
+
+describe('resolveTarget with a list longer than one page', () => {
+  /**
+   * 45 agents served 20 at a time, so the 45th is on the third page: the first two pages
+   * are all a client that ignores `next_page` ever sees.
+   */
+  async function thirdPage(): Promise<{ client: Client; last: Agent }> {
+    const fake = createFakeClient()
+    const agents = await seedAgents(fake, 45)
+    const last = agents.at(-1)
+    if (last === undefined) throw new Error('seedAgents did not create the agents')
+
+    return { client: pagedAgents(fake, agents), last }
+  }
+
+  it('finds an agent on the third page by name', async () => {
+    const { client, last } = await thirdPage()
+
+    const target = await resolveTarget(client, { continue: false, agent: 'Agent 45' })
+
+    expect(target.kind === 'session' && target.session.agent.id).toBe(last.id)
+    expect(target.kind === 'session' && target.session.agent.name).toBe('Agent 45')
+  })
+
+  it('finds an agent on the third page by id', async () => {
+    const { client, last } = await thirdPage()
+
+    const target = await resolveTarget(client, { continue: false, agent: last.id })
+
+    expect(target.kind === 'session' && target.session.agent.id).toBe(last.id)
+  })
+
+  it('reads an id instead of walking the list', async () => {
+    const fake = createFakeClient()
+    const [agent] = await seedAgents(fake, 1)
+    if (agent === undefined) throw new Error('seedAgents did not create the agent')
+    const client = {
+      ...fake,
+      agents: {
+        ...fake.agents,
+        list: () => Promise.reject(new Error('the list should not be read for an id')),
+      },
+    }
+
+    const target = await resolveTarget(client, { continue: false, agent: agent.id })
+
+    expect(target.kind === 'session' && target.session.agent.id).toBe(agent.id)
+  })
+
+  it('falls back to the name match when an id is not found', async () => {
+    const fake = createFakeClient()
+    // A name with the shape of an agent id, naming no agent that exists: the direct read
+    // 404s, and the name match is what finds it.
+    const name = newAgentId()
+    const named = await fake.agents.create({
+      name,
+      model: { id: 'anthropic/claude-sonnet-5' },
+    })
+    const client = pagedAgents(fake, [named])
+
+    const target = await resolveTarget(client, { continue: false, agent: name })
+
+    expect(target.kind === 'session' && target.session.agent.id).toBe(named.id)
+  })
+
+  it('offers every agent to the picker, not just the first page', async () => {
+    const { client, last } = await thirdPage()
+
+    const target = await resolveTarget(client, { continue: false })
+
+    expect(target.kind).toBe('choose')
+    expect(target.kind === 'choose' && target.agents).toHaveLength(45)
+    expect(target.kind === 'choose' && target.agents.at(-1)?.id).toBe(last.id)
+  })
+
+  it('reports a name that is nowhere in the list, listing all of it', async () => {
+    const { client } = await thirdPage()
+
+    await expect(resolveTarget(client, { continue: false, agent: 'Nope' })).rejects.toThrow(
+      /Agent 01, .*Agent 45/u,
+    )
   })
 })

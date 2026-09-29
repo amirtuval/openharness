@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 import { App, type ExitPayload } from './app'
 import type { ChatOptions } from './args'
-import { listingAgents } from './test-support/fake'
+import { listingAgents, pagedAgents, seedAgents } from './test-support/fake'
 import {
   frameOf,
   pressKey,
@@ -168,6 +168,42 @@ describe('App', () => {
 
     typeText(app, '2')
     await waitForFrame(app, 'Reviewer · anthropic/claude-opus-5-5 ·')
+  })
+
+  it('reaches an agent past the first page of the picker', async () => {
+    const fake = createFakeClient()
+    const agents = await seedAgents(fake, 45)
+    const app = renderApp(pagedAgents(fake, agents))
+
+    await waitForScreen(app, 'Which agent?')
+    await waitForFrame(app, '❯ 1. Agent 01 · anthropic/claude-sonnet-5')
+
+    // The window follows the cursor down to the agent on the third page of the list.
+    for (let press = 0; press < 44; press += 1) pressKey(app, 'down')
+    await waitForFrame(app, '❯ 45. Agent 45 · anthropic/claude-sonnet-5')
+    // Everything above it is out of the window, and the frame says so rather than growing.
+    expect(frameOf(app)).toContain('↑ 35 more')
+    expect(frameOf(app)).not.toContain('Agent 01 ·')
+
+    pressKey(app, 'enter')
+    await waitForFrame(app, 'Agent 45 · anthropic/claude-sonnet-5 · sesn_')
+
+    expect((await fake.sessions.list()).data[0]?.agent.name).toBe('Agent 45')
+  })
+
+  it('scrolls back up the picker too', async () => {
+    const fake = createFakeClient()
+    const agents = await seedAgents(fake, 45)
+    const app = renderApp(pagedAgents(fake, agents))
+
+    await waitForScreen(app, 'Which agent?')
+    for (let press = 0; press < 44; press += 1) pressKey(app, 'down')
+    await waitForFrame(app, '❯ 45. Agent 45')
+
+    for (let press = 0; press < 44; press += 1) pressKey(app, 'up')
+    await waitForFrame(app, '❯ 1. Agent 01 · anthropic/claude-sonnet-5')
+    expect(frameOf(app)).toContain('↓ 35 more')
+    expect(frameOf(app)).not.toContain('Agent 45 ·')
   })
 
   it('starts on the agent --agent names', async () => {

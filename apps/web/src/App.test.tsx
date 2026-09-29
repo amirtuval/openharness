@@ -1,8 +1,10 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { ApiError } from '@openharness/client'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 
 import { App } from './App'
+import { saveSettings } from './lib/settings'
 import {
   agentText,
   isStreaming,
@@ -224,5 +226,153 @@ describe('App', () => {
     render(<App client={fake} />)
 
     expect(await screen.findByRole('alert')).toHaveTextContent('No session')
+  })
+
+  it('names the server the app could not reach, instead of the browser’s "Failed to fetch"', async () => {
+    const user = userEvent.setup({ delay: null })
+    const fake = makeFake()
+    // What `fetch` throws when nothing is listening: the browser's TypeError, which the
+    // client passes through rather than wrapping.
+    fake.sendMessage = () => Promise.reject(new TypeError('Failed to fetch'))
+    saveSettings({ serverUrl: 'http://localhost:3000' })
+    renderApp(fake)
+
+    await user.type(await screen.findByLabelText('Message'), 'anyone there?')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(
+      "Can't reach the openharness server at http://localhost:3000. Check that it's running, or change the server URL in Settings.",
+    )
+    expect(alert).not.toHaveTextContent('Failed to fetch')
+  })
+
+  it('hints at the API key when the server will not take it', async () => {
+    const fake = makeFake()
+    fake.sessions.list = () => Promise.reject(new ApiError(401, 'Invalid API key.'))
+
+    renderApp(fake, { hash: '#/' })
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'The server rejected the request (401): Invalid API key. Check the API key in Settings.',
+    )
+  })
+})
+
+/** The backdrop that covers the screen while the drawer is open. */
+function backdrop(): HTMLElement {
+  const element = document.querySelector<HTMLElement>('[data-slot="sidebar-backdrop"]')
+  if (element === null) {
+    throw new Error('the sidebar backdrop is not rendered')
+  }
+  return element
+}
+
+/**
+ * The sidebar below `md`.
+ *
+ * jsdom has no layout and applies no stylesheet, so these assert the switch and the behaviour
+ * around it: the `max-md:` classes that decide whether the panel is in the layout or over it,
+ * the button that flips them, the three ways the drawer closes, and the focus that follows.
+ * What 390px actually looks like is a browser question — see the viewport check in the issue.
+ */
+describe('the sidebar below md', () => {
+  it('is a closed drawer with the right ARIA until the menu button opens it', async () => {
+    const user = userEvent.setup({ delay: null })
+    const fake = makeFake()
+    renderApp(fake)
+
+    const sidebar = await screen.findByRole('complementary', { name: 'Navigation' })
+    const menu = screen.getByRole('button', { name: 'Navigation' })
+
+    expect(menu).toHaveAttribute('aria-expanded', 'false')
+    expect(menu).toHaveAttribute('aria-controls', sidebar.id)
+    expect(sidebar).toHaveClass('max-md:hidden')
+    expect(document.querySelector('[data-slot="sidebar-backdrop"]')).toBeNull()
+
+    await user.click(menu)
+
+    expect(menu).toHaveAttribute('aria-expanded', 'true')
+    expect(sidebar).not.toHaveClass('max-md:hidden')
+    expect(backdrop()).toBeInTheDocument()
+    // Focus follows the drawer in, so a keyboard user lands in the list that just opened.
+    expect(sidebar).toHaveFocus()
+
+    await user.click(menu)
+
+    expect(menu).toHaveAttribute('aria-expanded', 'false')
+    expect(sidebar).toHaveClass('max-md:hidden')
+    expect(document.querySelector('[data-slot="sidebar-backdrop"]')).toBeNull()
+  })
+
+  it('closes when a chat is picked from it', async () => {
+    const user = userEvent.setup({ delay: null })
+    const fake = makeFake()
+    // Start on the home screen: the seeded chat is not the one already open.
+    renderApp(fake, { hash: '#/' })
+
+    const sidebar = await screen.findByRole('complementary', { name: 'Navigation' })
+    await user.click(screen.getByRole('button', { name: 'Navigation' }))
+    await user.click(within(sidebar).getByRole('link', { name: /Summarizer/ }))
+
+    expect(sidebar).toHaveClass('max-md:hidden')
+    await waitFor(() => {
+      expect(window.location.hash).toBe(`#/s/${fake.session.id}`)
+    })
+  })
+
+  it('closes on Escape and on a backdrop click, and gives the focus back to the button', async () => {
+    const user = userEvent.setup({ delay: null })
+    const fake = makeFake()
+    renderApp(fake)
+
+    const sidebar = await screen.findByRole('complementary', { name: 'Navigation' })
+    const menu = screen.getByRole('button', { name: 'Navigation' })
+
+    await user.click(menu)
+    await user.keyboard('{Escape}')
+    expect(sidebar).toHaveClass('max-md:hidden')
+    expect(document.querySelector('[data-slot="sidebar-backdrop"]')).toBeNull()
+    expect(menu).toHaveFocus()
+
+    await user.click(menu)
+    await user.click(backdrop())
+    expect(sidebar).toHaveClass('max-md:hidden')
+    expect(menu).toHaveFocus()
+  })
+
+  it('puts the menu button on every screen', async () => {
+    const fake = makeFake()
+    renderApp(fake, { hash: '#/' })
+
+    const screens: ReadonlyArray<readonly [hash: string, heading: string]> = [
+      ['#/new', 'New chat'],
+      ['#/agents', 'Agents'],
+      ['#/settings', 'Settings'],
+    ]
+
+    expect(await screen.findByRole('button', { name: 'Navigation' })).toBeInTheDocument()
+
+    for (const [hash, heading] of screens) {
+      window.location.hash = hash
+      await waitFor(() => {
+        expect(screen.getByRole('heading', { name: heading })).toBeInTheDocument()
+      })
+      expect(screen.getByRole('button', { name: 'Navigation' })).toBeInTheDocument()
+    }
+  })
+
+  it('leaves the desktop column as it was', async () => {
+    const fake = makeFake()
+    renderApp(fake)
+
+    const sidebar = await screen.findByRole('complementary', { name: 'Navigation' })
+
+    // The 256px column is still the layout from `md` up, and nothing hides it outside a
+    // breakpoint: every drawer rule is `max-md:`-scoped, so above the breakpoint the panel is
+    // the same static column it has always been.
+    expect(sidebar).toHaveClass('w-64', 'shrink-0')
+    expect(sidebar).not.toHaveClass('hidden')
+    expect([...sidebar.classList].filter((name) => name.startsWith('max-md:'))).not.toHaveLength(0)
   })
 })

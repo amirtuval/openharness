@@ -25,14 +25,14 @@ repo.
 
 ## The `oh` command
 
-| command                                 | what it does                              |
-| --------------------------------------- | ----------------------------------------- |
-| `oh`                                    | start a new chat                          |
-| `oh -s <id>` / `--session <id>`         | resume a session, showing its history     |
-| `oh -c` / `--continue`                  | resume the most recent session            |
-| `oh sessions`                           | list sessions: id, title, status, updated |
-| `oh agents`                             | list agents: id, name, model              |
-| `oh -v` / `--version`, `oh -h`/`--help` | print and stop                            |
+| command                                 | what it does                                   |
+| --------------------------------------- | ---------------------------------------------- |
+| `oh`                                    | start a new chat                               |
+| `oh -s <id>` / `--session <id>`         | resume a session, showing its history          |
+| `oh -c` / `--continue`                  | resume the most recent session                 |
+| `oh sessions`                           | list every session: id, title, status, updated |
+| `oh agents`                             | list every agent: id, name, model              |
+| `oh -v` / `--version`, `oh -h`/`--help` | print and stop                                 |
 
 Global flags: `--server <url>`, `--api-key <key>`, `--debug`.
 
@@ -62,12 +62,31 @@ none).
 
 ### Choosing an agent
 
-A new chat needs an agent, in this order: `--agent <id|name>` (id first, then exact name,
-then case-insensitive name — an ambiguous match is an error, not a guess); the only agent,
-when the server has exactly one; an interactive picker, when it has several; and a message
-saying to create one in the web app, when it has none. This CLI does not create agents.
+A new chat needs an agent, in this order: `--agent <id|name>`, matched against every agent
+the server has — by id, then exact name, then case-insensitive name, and an ambiguous match
+is an error rather than a guess. A value shaped like an `agent_…` id is read straight from
+the server first (`agents.get`): one request instead of a walk, with a value that misses
+that way still matched by name. Then: the only agent, when the server has exactly one; an
+interactive picker, when it has several; and a message saying to create one in the web app,
+when it has none. This CLI does not create agents.
 
 `--session` wins over everything: it names the session to resume, whatever agents exist.
+
+### Reading a list to the end
+
+`oh agents`, `oh sessions` and the list `--agent` matches against are the whole list, not
+its first page: `src/paging.ts` asks for `limit: MAX_PAGE_LIMIT` and follows
+`page: next_page` until the server answers `null`. A cursor is opaque — handed back byte for
+byte, never decoded. The walk stops at a cursor the server has already handed out (a server
+that repeats itself cannot be paged past) and fails after `MAX_LIST_PAGES` requests rather
+than returning a list that is silently short, because a short list is how an agent the
+server has comes to be reported as missing. `--continue` is the exception: `limit: 1`, the
+newest session, which is on the first page by construction.
+
+The picker draws every agent too, ten rows at a time, with the window following the cursor
+and the rows it leaves out counted above and below (`↑ 35 more`). A number key picks only
+while the list is at most nine long; with more, "12" would choose 1, so arrows are the way
+past nine.
 
 ## In the chat
 
@@ -108,6 +127,7 @@ src/
   signals.ts             SIGINT/SIGTERM/SIGHUP → handlers, and a disposer
   terminal.ts            restoreTerminal: raw mode off, cursor shown
   version.ts             the version injected at build time
+  paging.ts              listAll: walk next_page to the end of an agents/sessions list
   chat/
     session.ts           the runtime: transcript + stream + send/interrupt/dispose
     screen.tsx           the chat screen (transcript, status line, prompt)
@@ -148,9 +168,11 @@ working directory and cannot drift from `package.json`.
 package) and `ink-testing-library`: the app is rendered into a frame and asserted on, so no TTY
 is needed. The component tests drive the real client interface through `createFakeClient()`,
 plus `src/test-support/` for keystrokes and frame waits — the same fake the web app tests
-against, so a rule that changes on the server side fails here too. Everything else (args,
-config precedence, error mapping, the Ctrl+C rules, the transcript-driven runtime) is tested
-without Ink at all.
+against, so a rule that changes on the server side fails here too. `src/test-support/fake.ts`
+also seeds long lists and serves them a page at a time (`seedAgents`, `pagedAgents`,
+`pagedSessions`), for the tests where the first page is not the whole list. Everything else
+(args, config precedence, error mapping, the Ctrl+C rules, the transcript-driven runtime) is
+tested without Ink at all.
 
 Two things worth knowing before writing a test here:
 
