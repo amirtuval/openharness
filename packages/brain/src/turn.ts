@@ -16,6 +16,7 @@ import {
   statusRunning,
 } from './events'
 import { classifyModelError } from './errors'
+import { assertValidEvents, EventValidationError } from './validate'
 import {
   contextView,
   isUserInterrupt,
@@ -78,6 +79,11 @@ import { backoffDelay, resolveRetryPolicy } from './retry'
  *   .................................. span.model_request_end { error: model_error }
  *   .................................. session.error { retry_status: exhausted | terminal }
  *   .................................. session.status_idle, return error
+ *
+ * AN EVENT THE PROTOCOL DOES NOT ACCEPT (an event shaped by the model's report fails validation)
+ *   the span closes ............... span.model_request_end { error: model_error, usage: 0 }
+ *   .............................. session.error { type: unknown_error, retry_status: terminal }
+ *   .............................. session.status_idle, return error
  * ```
  *
  * `FencedError` short-circuits all of it: another owner has taken the partition over, so the
@@ -150,6 +156,9 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     if (events.length === 0) {
       return []
     }
+    // Every append goes through here, so this is where the protocol gets its say: an event in
+    // a shape the protocol does not describe is a log no client can read back (see `validate`).
+    assertValidEvents(events)
     return store.appendEvents(sessionId, events, writeOptions)
   }
   const markProcessed = async (eventIds: EventId[]): Promise<void> => {
@@ -211,6 +220,31 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     await markProcessed(interrupts.map((event) => event.id))
     await append([statusIdle()])
     return { outcome: 'interrupted' }
+  }
+
+  /**
+   * End a turn whose own event was not the protocol's shape, instead of storing it.
+   *
+   * The error path is the terminal model failure's, one step earlier: the span closes (with no
+   * usage — there is none to trust), the reason goes into the log as a `session.error`, and the
+   * session goes idle. Nothing is retried: rebuilding the same event would fail the same way.
+   */
+  const endInvalidEvent = async (
+    error: EventValidationError,
+    spanId: EventId,
+  ): Promise<TurnOutcome> => {
+    await append([
+      spanEnd(spanId, ZERO_MODEL_USAGE, { type: 'model_error', message: error.message }),
+    ])
+    await append([
+      sessionError({
+        type: 'unknown_error',
+        message: error.message,
+        retry_status: { type: 'terminal' },
+      }),
+      statusIdle(),
+    ])
+    return { outcome: 'error' }
   }
 
   // ---- Loop: one iteration per model request.
@@ -308,10 +342,20 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
 
     // A request that produced no text stores no message: an empty `agent.message` would be a
     // reply the model did not make. The span and the status still record that it ran.
-    if (result.text.length > 0) {
-      await append([agentMessage(eventId, result.text)])
+    try {
+      if (result.text.length > 0) {
+        await append([agentMessage(eventId, result.text)])
+      }
+      await append([spanEnd(start.id, result.usage)])
+    } catch (error) {
+      // The events a model's report shapes are the ones that can turn out not to be protocol
+      // events — a usage the protocol refuses is the case issue #39 shipped. Ending the turn is
+      // the loud failure: nothing malformed is stored, and the log says why.
+      if (!(error instanceof EventValidationError)) {
+        throw error
+      }
+      return await endInvalidEvent(error, start.id)
     }
-    await append([spanEnd(start.id, result.usage)])
     // A request that answered gets a fresh retry budget; the next one is a new question.
     retriesUsed = 0
 

@@ -40,6 +40,7 @@ src/
   errors.ts             classifyModelError: retryable or terminal, and which session.error
   retry.ts              RetryPolicy, backoff, and the injectable sleep
   events.ts             the events the loop appends, built in one place
+  validate.ts           the protocol check every appended event passes
   testing/
     harness.ts          a session on an in-memory store, and log helpers (tests only)
     mock-model.ts       scripted AI SDK mock models, and prompt assertions (tests only)
@@ -52,28 +53,28 @@ emits what that reaches.
 
 ### `@openharness/brain`
 
-| export                                                                        | what it is                                                             |
-| ----------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| `runTurn(sessionId, options)`                                                 | run one turn; resolves to a `TurnOutcome`                              |
-| `RunTurnOptions`                                                              | `{ store, model, signal?, fence?, contextStrategy?, retry? }`          |
-| `TurnOutcome`, `TurnOutcomeKind`                                              | `{ outcome: 'idle' \| 'noop' \| 'interrupted' \| 'error' }`            |
-| `ContextStrategy`, `ContextStrategyOptions`                                   | `(events, { model, system }) => ModelMessage[]`                        |
-| `createContextStrategy(config?)`, `ContextStrategyConfig`                     | the default strategy: the conversation, trimmed to a token budget      |
-| `DEFAULT_CONTEXT_STRATEGY`, `DEFAULT_CONTEXT_TOKEN_BUDGET`, `CHARS_PER_TOKEN` | its defaults                                                           |
-| `estimateTokens(text)`                                                        | the chars/4 estimate the budget is measured in                         |
-| `ModelFactory`                                                                | `(modelId) => LanguageModel` — how a `provider/model` becomes a model  |
-| `routerModelFactory`                                                          | the default factory: Mastra's model router                             |
-| `streamModelRequest(params)`, `ModelRequestParams`, `ModelRequestResult`      | one model request, as text, usage, error and abort                     |
-| `toModelUsage(usage)`, `ZERO_MODEL_USAGE`                                     | AI SDK usage → the protocol's four counters                            |
-| `classifyModelError(error)`, `ModelErrorClassification`                       | retryable or not, and the `session.error` type that says so            |
-| `isRetryableModelError(error)`                                                | the same answer, when only the boolean is wanted                       |
-| `RetryPolicy`, `ResolvedRetryPolicy`, `resolveRetryPolicy(policy?)`           | how failures are retried                                               |
-| `backoffDelay(attempt, policy)`, `abortableSleep`, `Sleep`                    | the delay, and the sleep that honors an abort                          |
-| `DEFAULT_MAX_RETRIES`, `DEFAULT_BASE_DELAY_MS`, `DEFAULT_MAX_DELAY_MS`        | `3`, `500`, `8000`                                                     |
-| `PACKAGE_NAME`, `DEPENDENCIES`                                                | the package name, and the edges that must resolve through built output |
+| export                                                                        | what it is                                                              |
+| ----------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `runTurn(sessionId, options)`                                                 | run one turn; resolves to a `TurnOutcome`                               |
+| `RunTurnOptions`                                                              | `{ store, model, signal?, fence?, contextStrategy?, retry? }`           |
+| `TurnOutcome`, `TurnOutcomeKind`                                              | `{ outcome: 'idle' \| 'noop' \| 'interrupted' \| 'error' }`             |
+| `ContextStrategy`, `ContextStrategyOptions`                                   | `(events, { model, system }) => ModelMessage[]`                         |
+| `createContextStrategy(config?)`, `ContextStrategyConfig`                     | the default strategy: the conversation, trimmed to a token budget       |
+| `DEFAULT_CONTEXT_STRATEGY`, `DEFAULT_CONTEXT_TOKEN_BUDGET`, `CHARS_PER_TOKEN` | its defaults                                                            |
+| `estimateTokens(text)`                                                        | the chars/4 estimate the budget is measured in                          |
+| `ModelFactory`                                                                | `(modelId) => LanguageModel` — how a `provider/model` becomes a model   |
+| `routerModelFactory`                                                          | the default factory: Mastra's model router                              |
+| `streamModelRequest(params)`, `ModelRequestParams`, `ModelRequestResult`      | one model request, as text, usage, error and abort                      |
+| `toModelUsage(usage)`, `ZERO_MODEL_USAGE`                                     | what a request reported → the protocol's four counters, always integers |
+| `classifyModelError(error)`, `ModelErrorClassification`                       | retryable or not, and the `session.error` type that says so             |
+| `isRetryableModelError(error)`                                                | the same answer, when only the boolean is wanted                        |
+| `RetryPolicy`, `ResolvedRetryPolicy`, `resolveRetryPolicy(policy?)`           | how failures are retried                                                |
+| `backoffDelay(attempt, policy)`, `abortableSleep`, `Sleep`                    | the delay, and the sleep that honors an abort                           |
+| `DEFAULT_MAX_RETRIES`, `DEFAULT_BASE_DELAY_MS`, `DEFAULT_MAX_DELAY_MS`        | `3`, `500`, `8000`                                                      |
+| `PACKAGE_NAME`, `DEPENDENCIES`                                                | the package name, and the edges that must resolve through built output  |
 
-`log.ts` and `events.ts` are internal: they are how the loop is written, not what a host talks
-to.
+`log.ts`, `events.ts` and `validate.ts` are internal: they are how the loop is written, not what
+a host talks to.
 
 ## The lifecycle
 
@@ -130,6 +131,13 @@ MODEL FAILURE — not retryable, or out of attempts
                                                              { retry_status: terminal | exhausted }
   ......................................................... session.status_idle, return error
 
+AN EVENT THE PROTOCOL DOES NOT ACCEPT — a write the schema refuses, before it is stored
+  the open span ........................................... span.model_request_end
+                                                             { error: model_error, model_usage: 0 }
+  ......................................................... session.error
+                                                             { type: unknown_error, retry_status: terminal }
+  ......................................................... session.status_idle, return error
+
 FENCED WRITE — any append or markProcessed the store refuses
   ......................................................... stop, write nothing more, rethrow
 ```
@@ -155,6 +163,11 @@ Notes on the corners:
   in a second request rather than letting the first answer it early — and the log keeps the
   order it really happened in, which puts the steering message before the reply to the message
   before it.
+- **Nothing is stored that the protocol would not accept.** Every append is checked against the
+  protocol's schema first (`validate.ts`), and an event that fails ends the turn there: the span
+  closes with no usage, `session.error { type: unknown_error, retry_status: terminal }` says what
+  the schema refused, and the session goes idle. The write path fails loudly rather than storing
+  a row every reader rejects — see the model seam below for why that matters.
 
 ## Extension points
 
@@ -187,6 +200,29 @@ after trying Mastra's `Agent` first. `Agent.stream()` swallows what this loop ne
 (including its status), an `abort` part, and a `usage` report. `streamRetries: 0` keeps the SDK
 from retrying underneath the loop.
 
+### Usage, and the provider spec Mastra gets wrong
+
+`ai@7` reads a model's `specificationVersion` and reshapes what it reports to match. Mastra's
+router declares the **v2** spec (`@mastra/core@1.71.0`, `dist/llm/model/router.d.ts`) while the
+model it resolves — its own bundled `OpenAIResponsesLanguageModel` — declares **v3** and reports
+v3-shaped usage, `{ inputTokens: { total, noCache, cacheRead, cacheWrite }, … }`. `ai` believes
+the declaration, so `convertV2UsageToV3` reads that object as if it were the v2 number and wraps
+it again; `streamText` then accumulates the steps with `0 + { … }` and the total becomes the
+_string_ `"0[object Object]"` (issue #39). No released or alpha version of either package agrees
+with itself, so the brain recovers the numbers itself:
+
+- `streamModelRequest` reads each step's own report (`finish-step`) as it streams — the totals
+  are still numbers there — and only falls back to the SDK's accumulated `result.usage` when no
+  step reported one.
+- `toModelUsage` accepts whatever shape arrives: a number, the v3 usage object, that object
+  wrapped once more by the compatibility layer, a numeric string, or nothing readable at all. It
+  always answers with the protocol's four counters, as non-negative integers, and `0` for a
+  count that cannot be recovered rather than a value the log would reject. Cache counters come
+  from the breakdown when the shape has one and from inside the usage object when it does not.
+
+Sessions whose turns ran before the fix keep the unreadable rows they were stored with; v1 is
+unreleased, so nothing migrates them — the fix is what stops new ones being written.
+
 ## Preview and stored ids
 
 `@openharness/protocol` says a stored `agent.message` has the id its `event_start` announced, so a
@@ -203,12 +239,18 @@ timers: retries run on an injected `sleep`, and the clock is a `TestClock`.
 
 - `turn.test.ts` is the acceptance suite: the exact event order of every path above, the preview
   ids, steering in a second request, interrupts at each point, the retry ladder, the six ways a
-  turn can be recovered, and a fenced write that stops the turn where it stands.
-- `context.test.ts`, `errors.test.ts`, `retry.test.ts`, `log.test.ts` and `model.test.ts` cover
-  the pieces on their own, including the branches the loop cannot reach.
+  turn can be recovered, a fenced write that stops the turn where it stands, and a turn against
+  a model that declares the wrong provider spec, whose stored log is checked against the
+  protocol event by event.
+- `context.test.ts`, `errors.test.ts`, `retry.test.ts`, `log.test.ts`, `model.test.ts` and
+  `validate.test.ts` cover the pieces on their own, including the branches the loop cannot
+  reach.
 - `src/testing/harness.ts` builds the session and reads the log back; `src/testing/mock-model.ts`
   scripts what each model request answers with, records the prompts, and can act mid-stream
-  (abort, append a steering message) between two chunks.
+  (abort, append a steering message) between two chunks. Its `misdeclaredSpec` is the one model
+  no provider has to be asked for: a mock that declares the `v2` provider spec over v3-shaped
+  usage, which is how the real router fails — the tests that use it assert the counts still reach
+  the log, as integers.
 
 ## Allowed `@openharness/*` dependencies
 

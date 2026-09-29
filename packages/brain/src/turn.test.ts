@@ -6,12 +6,13 @@ import {
   makeStatusRunning,
   makeUserMessage,
 } from '@openharness/protocol/fixtures'
-import { EVENT_TYPES, newSessionId, partitionOf } from '@openharness/protocol'
+import { EVENT_TYPES, newSessionId, partitionOf, StoredEventSchema } from '@openharness/protocol'
 import type { EventDelta, EventStart, StoredEvent, StreamEvent } from '@openharness/protocol'
 import { SessionNotFoundError, isFencedError } from '@openharness/session'
 import { describe, expect, it, vi } from 'vitest'
 
-import { mockModel, readPrompt, type MockModelScript } from './testing/mock-model'
+import type { ModelFactory } from './model'
+import { misdeclaredSpec, mockModel, readPrompt, type MockModelScript } from './testing/mock-model'
 import {
   eventTypes,
   interrupt,
@@ -85,6 +86,40 @@ describe('runTurn', () => {
       type: EVENT_TYPES.sessionStatusIdle,
       stop_reason: { type: 'end_turn' },
     })
+  })
+
+  it('stores the counts a mis-declared provider spec hides, as integers', async () => {
+    // Issue #39: the router declares the `v2` provider spec while reporting v3-shaped usage, so
+    // the AI SDK sums those reports into `"0[object Object]"`. The turn must store the counts
+    // the request really spent — and a log a client can replay, event for event.
+    const { store, sessionId } = await newSession([message('Hello')])
+    const { factory } = mockModel({
+      text: ['Hi'],
+      usage: { input_tokens: 9, output_tokens: 3, cache_read_input_tokens: 2 },
+    })
+    const model: ModelFactory = (modelId) => misdeclaredSpec(factory(modelId))
+
+    const outcome = await runTurn(sessionId, { store, model })
+
+    expect(outcome).toEqual({ outcome: 'idle' })
+    const log = await logOf(store, sessionId)
+    expect(log.find((event) => event.type === EVENT_TYPES.modelRequestEnd)).toMatchObject({
+      type: EVENT_TYPES.modelRequestEnd,
+      is_error: null,
+      model_usage: {
+        input_tokens: 9,
+        output_tokens: 3,
+        cache_read_input_tokens: 2,
+        cache_creation_input_tokens: 0,
+      },
+    })
+    // The other half of it: every event in the log is the event the protocol documents, which is
+    // what `@openharness/client` validates before it will show a session at all.
+    for (const event of log) {
+      expect(StoredEventSchema.safeParse(event).success, `${event.type} is a protocol event`).toBe(
+        true,
+      )
+    }
   })
 
   it('publishes the live preview under one id, before the reply it previews', async () => {

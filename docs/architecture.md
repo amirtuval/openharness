@@ -7,7 +7,10 @@ ideas carry the design:
 - **Brain** — a stateless harness loop. It holds no conversation state of its own; everything
   it needs is derived from the session it is given.
 - **Session** — a durable, append-only event log. It is the source of truth: replaying it
-  reconstructs the state of a run.
+  reconstructs the state of a run. The protocol is that log's schema, and a writer checks an
+  event against it before appending: one row in a shape no reader accepts makes the whole
+  session unreadable, so a turn that cannot write a valid event ends with an error instead
+  (see [`packages/brain/AGENTS.md`](../packages/brain/AGENTS.md)).
 - **Hands** — the things that actually act on the world (sandboxes, tools) behind a single
   `execute(name, input)` shape, so they can be swapped without touching the brain.
 
