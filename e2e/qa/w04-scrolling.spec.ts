@@ -1,20 +1,26 @@
 import {
+  LONG_REPLY_PROMPT,
+  QA_MODEL,
   conversation,
   createAgent,
   createSession,
   distanceFromBottom,
   expect,
+  isRealModel,
+  lastAgentText,
   openChat,
   seedTurns,
   sendFromComposer,
   shot,
   test,
   uniqueName,
+  waitForLongReplyStart,
 } from './support'
 
 /**
- * W4 — scrolling during a `__slow__` reply: scrolling up must stick, and coming back to the
- * bottom must start following again.
+ * W4 — scrolling during a long reply: scrolling up must stick, and coming back to the bottom
+ * must start following again. The reply is the mock's `__slow__` one, or a long answer from a
+ * real model, so the stream is still running while the reader is scrolling around in it.
  */
 test.describe('W4 scrolling', () => {
   test('W4 scrolling up during a stream holds, scrolling back resumes', async ({
@@ -24,7 +30,7 @@ test.describe('W4 scrolling', () => {
   }) => {
     const agent = await createAgent(request, {
       name: uniqueName('QA W4'),
-      model: 'anthropic/claude-sonnet-5',
+      model: QA_MODEL,
       system: 'Answer briefly.',
     })
     const session = await createSession(request, agent.id)
@@ -38,9 +44,9 @@ test.describe('W4 scrolling', () => {
     )
     await openChat(page, session.id)
 
-    await sendFromComposer(page, '__slow__ a long reply')
-    const reply = page.locator('article[data-role="agent"]').last()
-    await expect(reply).toContainText('part 1/40')
+    const prompt = isRealModel ? LONG_REPLY_PROMPT : '__slow__ a long reply'
+    await sendFromComposer(page, prompt)
+    await waitForLongReplyStart(page)
 
     await test.step('scroll up: the view stays where the reader put it', async () => {
       await conversation(page).evaluate((element) => {
@@ -50,12 +56,12 @@ test.describe('W4 scrolling', () => {
       await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible()
       await shot(page, 'w4-01-scrolled-up')
 
-      const before = await reply.textContent()
+      const before = await lastAgentText(page)
       await page.waitForTimeout(2000)
-      const after = await reply.textContent()
+      const after = await lastAgentText(page)
 
-      expect(after!.length, 'the reply kept streaming while scrolled up').toBeGreaterThan(
-        before!.length,
+      expect(after.length, 'the reply kept streaming while scrolled up').toBeGreaterThan(
+        before.length,
       )
       expect(await distanceFromBottom(page), 'the view did not jump back down').toBeGreaterThan(100)
     })

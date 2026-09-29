@@ -3,6 +3,8 @@ import path from 'node:path'
 
 import type { Page } from '@playwright/test'
 
+import { isRealModel } from './support'
+
 /**
  * A real pseudo-terminal for the CLI scenarios.
  *
@@ -107,6 +109,24 @@ export class Terminal {
   }
 
   /**
+   * Wait until the screen satisfies `predicate`, and answer the screen it did.
+   *
+   * {@link waitFor} matches a regexp, which is not enough to say "something *new* arrived":
+   * the mock's replies are recognisable by their text, a real model's are not.
+   */
+  async waitUntil(predicate: (screen: string) => boolean, timeoutMs = 30_000): Promise<string> {
+    const deadline = Date.now() + timeoutMs
+    for (;;) {
+      const screen = this.capture()
+      if (predicate(screen)) return screen
+      if (Date.now() > deadline) {
+        throw new Error(`the terminal never matched the predicate; it shows:\n${screen}`)
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200))
+    }
+  }
+
+  /**
    * Wait until the shell prompt is the last thing on screen.
    *
    * `oh` prints its resume hint as it unmounts, which is *before* the process is gone and the
@@ -165,4 +185,66 @@ export class Terminal {
 
 function escapeHtml(text: string): string {
   return text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+}
+
+/** The label every line of an agent message starts with (`components/message-view.tsx`). */
+export const AGENT_LINE = 'agent › '
+
+/** How many times `needle` occurs in a pane capture. */
+export function occurrences(haystack: string, needle: string): number {
+  return haystack.split(needle).length - 1
+}
+
+/**
+ * Whether any agent message on the screen has text in it yet.
+ *
+ * The cursor a streaming message ends with is drawn as soon as the reply is announced, before
+ * the first token arrives, so an `agent ›` line on its own only says a reply has *started*.
+ * Interrupting at that point is interrupting nothing.
+ */
+export function replyHasText(screen: string): boolean {
+  return screen.split('\n').some((line) => {
+    const at = line.indexOf(AGENT_LINE)
+    if (at === -1) return false
+    return (
+      line
+        .slice(at + AGENT_LINE.length)
+        .replaceAll('▌', '')
+        .trim().length > 0
+    )
+  })
+}
+
+/** `text` with everything a regexp would read as syntax escaped. */
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * Send a line to the chat and wait for the agent's answer to it to start arriving.
+ *
+ * The mock echoes its prompt, so the specs written for passes 1 and 2 wait for
+ * `agent › <the prompt>` — which is both "the reply started" and, at least for a short
+ * prompt, roughly "the reply is here". A real provider answers in its own words, so there is
+ * nothing in the reply to match: the wait is for one more agent line on the screen than there
+ * was before, which is the same event without the wording.
+ *
+ * `slow` marks a prompt the mock answers at length rather than echoing. Its reply is the
+ * counted-off `part 1/40 part 2/40 …`, so the prompt is not in it to be matched.
+ */
+export async function sendAndAwaitAnswer(
+  terminal: Terminal,
+  text: string,
+  options: { readonly slow?: boolean } = {},
+): Promise<void> {
+  const before = occurrences(terminal.capture(), AGENT_LINE)
+  terminal.type(text)
+  terminal.send('Enter')
+  if (isRealModel) {
+    await terminal.waitUntil((screen) => occurrences(screen, AGENT_LINE) > before, 60_000)
+    return
+  }
+  const firstLine = (text.split('\n')[0] ?? '').trim()
+  const expected = options.slow === true ? 'part 1/40' : escapeRegExp(firstLine)
+  await terminal.waitFor(new RegExp(`agent › ${expected}`), 60_000)
 }

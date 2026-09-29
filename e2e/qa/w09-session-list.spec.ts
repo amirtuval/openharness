@@ -1,4 +1,5 @@
 import {
+  QA_MODEL,
   createAgent,
   createSession,
   expect,
@@ -8,6 +9,7 @@ import {
   shot,
   test,
   uniqueName,
+  waitForAnswer,
   waitForIdle,
 } from './support'
 
@@ -22,7 +24,7 @@ test.describe('W9 session list', () => {
     for (const label of ['alpha', 'beta', 'gamma']) {
       const agent = await createAgent(request, {
         name: uniqueName(`QA W9 ${label}`),
-        model: 'anthropic/claude-sonnet-5',
+        model: QA_MODEL,
         system: 'Answer briefly.',
       })
       const session = await createSession(request, agent.id)
@@ -56,7 +58,7 @@ test.describe('W9 session list', () => {
       // The label is the session's title — derived from the first message since #29 — and the
       // agent's name only when there is no title to show (`apps/web/src/lib/format.ts`).
       await expect(newest).toContainText(made[2]!.text)
-      await expect(newest).toContainText('anthropic/claude-sonnet-5')
+      await expect(newest).toContainText(QA_MODEL)
     })
 
     await test.step('switching sessions works', async () => {
@@ -88,9 +90,7 @@ test.describe('W9 session list', () => {
 
     const sessionId = (await page.evaluate(() => window.location.hash)).replace('#/s/', '')
     await sendFromComposer(page, 'a chat about the release checklist')
-    await expect(page.locator('article[data-role="agent"]').last()).toContainText(
-      'release checklist',
-    )
+    await waitForAnswer(page, 'a chat about the release checklist')
 
     const session = await request.get(`/v1/sessions/${sessionId}`)
     const body = (await session.json()) as { title: string | null }
@@ -115,9 +115,7 @@ test.describe('W9 session list', () => {
     await expect(page).toHaveURL(/#\/s\/sesn_/)
     const sessionId = (await page.evaluate(() => window.location.hash)).replace('#/s/', '')
     await sendFromComposer(page, 'a chat about the release checklist')
-    await expect(page.locator('article[data-role="agent"]').last()).toContainText(
-      'release checklist',
-    )
+    await waitForAnswer(page, 'a chat about the release checklist')
 
     // The list the sidebar is holding was loaded before this chat had a message.
     await expect(page.locator(`a[href="#/s/${sessionId}"]`)).toContainText(
@@ -133,7 +131,7 @@ test.describe('W9 session list', () => {
   test('W9c the sidebar highlights the open chat', async ({ page, request, consoleErrors }) => {
     const agent = await createAgent(request, {
       name: uniqueName('QA W9c'),
-      model: 'anthropic/claude-sonnet-5',
+      model: QA_MODEL,
       system: 'Answer briefly.',
     })
     const session = await createSession(request, agent.id)

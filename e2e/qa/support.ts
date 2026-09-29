@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import path from 'node:path'
 
 import { expect, test as base, type APIRequestContext, type Page } from '@playwright/test'
@@ -22,9 +23,102 @@ export function uniqueName(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}`
 }
 
+/**
+ * The model the QA agents are created on.
+ *
+ * The mock passes leave this alone: the default is the model id the specs have always named,
+ * and the server under test runs `OPENHARNESS_TEST_MODEL=mock`, which answers every turn
+ * itself and never resolves the id. A pass against a real provider sets `QA_MODEL` to a
+ * router id (e.g. `openai/gpt-4.1-mini`) and runs the stack without that variable.
+ */
+export const QA_MODEL = process.env.QA_MODEL ?? 'anthropic/claude-sonnet-5'
+
+/**
+ * Whether this run is against a real provider rather than the mock model.
+ *
+ * Setting `QA_MODEL` at all is the signal: the default above is the model every spec has
+ * always named, and the mock passes do not set it. A spec that leans on the mock's scripted
+ * replies — the `__slow__`/`__fail_*__` markers, or the way it echoes its prompt — asks this
+ * and either adapts or skips.
+ */
+export const isRealModel = process.env.QA_MODEL !== undefined
+
+/**
+ * How far the long reply counts.
+ *
+ * Several scenarios need a reply that is still arriving when the next thing happens (a reload,
+ * a steering message, a Stop) and that is taller than a terminal pane. The mock has `__slow__`
+ * for that; a real model has to be asked for something long, and counting is the cheapest way
+ * to get something that streams steadily. It is deliberately not longer: a real provider is
+ * slower and rate-limited, and these scenarios do not need a *big* reply, only a live one.
+ */
+export const LONG_REPLY_COUNT = 60
+
+/** A prompt a real provider answers at length. */
+export const LONG_REPLY_PROMPT = `Count from 1 to ${String(LONG_REPLY_COUNT)}, one number per line. Nothing else.`
+
+/** The line the long reply ends with, which is how "it finished" reads on screen. */
+export const LONG_REPLY_END = new RegExp(`^\\s*${String(LONG_REPLY_COUNT)}\\s*$`, 'm')
+
+/**
+ * A longer reply still, for the scenario that reloads the page in the middle of one.
+ *
+ * {@link LONG_REPLY_COUNT} numbers stream in a couple of seconds — long enough for a steering
+ * message or a Stop, which are sent from the same page, but not for a reload, a reconnect and
+ * a replay. This is the one scenario whose reply has to outlast that round trip, so it asks for
+ * a bigger one.
+ */
+export const RELOAD_REPLY_PROMPT = 'Count from 1 to 150, one number per line. Nothing else.'
+
 /** The `x-api-key` header the server under test needs, or nothing when it is open. */
 export function authHeaders(): Record<string, string> {
   return API_KEY === '' ? {} : { 'x-api-key': API_KEY }
+}
+
+// --- the stack itself, for the scenarios that stop and start it -------------------------------------
+
+/** The container the compose file names for the server. */
+export const SERVER_CONTAINER = process.env.QA_SERVER_CONTAINER ?? 'openharness-server-1'
+
+/**
+ * Extra `docker compose` arguments, for a stack that is not plain `docker-compose.yml`.
+ *
+ * A restart scenario has to bring the server back up the way it was started, and a deployment
+ * can be more than the one file — this pass runs with a second one that puts an egress proxy in
+ * front of the container. Empty by default, so nothing changes for a plain stack.
+ */
+const COMPOSE_ARGS = (process.env.QA_COMPOSE_ARGS ?? '').split(' ').filter((arg) => arg !== '')
+
+/** The repository root: where `docker compose` finds the file the stack was started from. */
+const REPO_ROOT = path.resolve(import.meta.dirname, '../..')
+
+/**
+ * `docker compose` against the stack under test, from the repository root.
+ *
+ * `env` is merged over this process's environment, which is how a service's configuration is
+ * changed: `up -d` recreates a container whose environment differs from the running one.
+ */
+export function composeServer(env: NodeJS.ProcessEnv = {}, ...args: string[]): void {
+  execFileSync('docker', ['compose', ...COMPOSE_ARGS, ...args], {
+    cwd: REPO_ROOT,
+    env: { ...process.env, ...env },
+    stdio: 'pipe',
+  })
+}
+
+/** Wait for the server to answer `/health` again after a restart. */
+export async function waitForHealth(timeoutMs = 90_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    try {
+      const response = await fetch(`${BASE_URL}/health`)
+      if (response.ok) return
+    } catch {
+      // not up yet
+    }
+    if (Date.now() > deadline) throw new Error(`${BASE_URL}/health never came back`)
+    await new Promise((resolve) => setTimeout(resolve, 500))
+  }
 }
 
 /**
@@ -91,6 +185,37 @@ export async function createSession(
   })
   expect(response.status(), await response.text()).toBe(201)
   return (await response.json()) as { id: string }
+}
+
+/**
+ * Every agent the server has, oldest first.
+ *
+ * `next_page` matters here: the API answers one page at a time, and a QA server that has been
+ * used for a while holds far more agents than fit in one. A scenario that looks for the agent
+ * it just created has to walk the cursor, or it is looking for the newest agent in the oldest
+ * hundred.
+ */
+export async function listAllAgents(
+  request: APIRequestContext,
+): Promise<{ id: string; name: string; system: string | null; model: { id: string } }[]> {
+  const agents: { id: string; name: string; system: string | null; model: { id: string } }[] = []
+  let page = ''
+  for (;;) {
+    const response = await request.get('/v1/agents', {
+      headers: authHeaders(),
+      params: { limit: 100, ...(page === '' ? {} : { page }) },
+    })
+    expect(response.status(), await response.text()).toBe(200)
+    const body = (await response.json()) as {
+      data: { id: string; name: string; system: string | null; model: { id: string } }[]
+      next_page: string | null
+    }
+    agents.push(...body.data)
+    if (body.next_page === null) {
+      return agents
+    }
+    page = body.next_page
+  }
 }
 
 /** Read one session. */
@@ -205,13 +330,92 @@ export async function sendFromComposer(page: Page, text: string): Promise<void> 
   await input.press('Enter')
 }
 
+/**
+ * Wait for a long reply to be genuinely under way.
+ *
+ * The mock's `__slow__` reply counts itself off — `part 1/40`, `part 2/40`, … — so the marker
+ * is what says it has started. A real provider's reply carries no such marker, and waiting for
+ * its wording is not possible: there, "under way" is a length.
+ */
+export async function waitForLongReplyStart(
+  page: Page,
+  options: { readonly minLength?: number; readonly timeoutMs?: number } = {},
+): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? 60_000
+  if (!isRealModel) {
+    await expect(page.locator('article[data-role="agent"]').last()).toContainText('part 1/40', {
+      timeout: timeoutMs,
+    })
+    return
+  }
+  const minLength = options.minLength ?? 1
+  await expect
+    .poll(async () => (await lastAgentText(page)).trim().length >= minLength, {
+      timeout: timeoutMs,
+      message: `the long reply never reached ${String(minLength)} characters`,
+    })
+    .toBe(true)
+}
+
+/**
+ * The screen-reader line the app puts inside an agent message that is still being written.
+ *
+ * It is not part of the reply, but it is part of the element's `textContent` — so a read of
+ * "what the agent said" has to take it out, or an empty reply looks like a reply
+ * (`apps/web/src/components/chat/message-item.tsx`, and the same note in the package's own
+ * render-app test support).
+ */
+const REPLYING_STATUS = 'The assistant is replying…'
+
+/** `text` without the screen-reader status line. */
+function withoutReplyingStatus(text: string): string {
+  return text.replace(REPLYING_STATUS, '')
+}
+
 /** Every message on screen, oldest first, as `role:text`. */
 export async function transcript(page: Page): Promise<string[]> {
   return page
     .locator('article[data-role]')
-    .evaluateAll((nodes) =>
-      nodes.map((node) => `${node.getAttribute('data-role') ?? '?'}:${node.textContent ?? ''}`),
+    .evaluateAll(
+      (nodes, status) =>
+        nodes.map(
+          (node) =>
+            `${node.getAttribute('data-role') ?? '?'}:${(node.textContent ?? '').replace(status, '')}`,
+        ),
+      REPLYING_STATUS,
     )
+}
+
+/** The text of the agent's newest message, or `''` when there is none yet. */
+export async function lastAgentText(page: Page): Promise<string> {
+  const text = (await page.locator('article[data-role="agent"]').last().textContent()) ?? ''
+  return withoutReplyingStatus(text)
+}
+
+/**
+ * Wait for the agent's newest message to hold an answer to `prompt`.
+ *
+ * The mock model replies by echoing its prompt, and the specs written for passes 1 and 2 wait
+ * for a reply by looking for the prompt inside it. A real provider answers in its own words,
+ * so there is nothing to match on — only that a reply arrived, grown to `minLength`
+ * characters. Wording is not a contract, so neither mode asserts on it.
+ */
+export async function waitForAnswer(
+  page: Page,
+  prompt: string,
+  options: { readonly timeoutMs?: number; readonly minLength?: number } = {},
+): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? 60_000
+  const minLength = options.minLength ?? 1
+  await expect
+    .poll(
+      async () => {
+        const text = await lastAgentText(page)
+        return isRealModel ? text.trim().length >= minLength : text.includes(prompt)
+      },
+      { timeout: timeoutMs, message: `the agent never answered ${JSON.stringify(prompt)}` },
+    )
+    .toBe(true)
 }
 
 /** The status the header shows. */

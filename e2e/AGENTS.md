@@ -150,7 +150,36 @@ and they spend their time waiting rather than computing.
 - Run: `yarn qa:web` against a running system (default `http://localhost:3000`, override with the base-URL env
   var in `playwright.config.ts`), e.g. `OPENHARNESS_TEST_MODEL=mock docker compose up --build`.
 - Opt-ins: `QA_WITH_CLI=1` runs the CLI specs (needs `tmux` and a built `apps/tui`);
-  `QA_ALLOW_SERVER_RESTART=1` runs the scenario that stops and restarts the server.
+  `QA_ALLOW_SERVER_RESTART=1` runs the scenarios that stop, kill and recreate the server.
 - Screenshots go to `e2e/qa-output/` (gitignored; override with `QA_SHOT_DIR`).
 - Results of each pass are reported as a comment on the QA issue, not committed.
 - A spec marked `test.fail` documents a known bug; remove the marker once the bug is fixed.
+
+### The model the scenarios run
+
+Every agent the specs create is created on `QA_MODEL` (`support.ts`), which defaults to the id
+the specs have always named — the mock passes set nothing and are unchanged. **A pass against a
+real provider sets it**, to a router id, and runs the stack without `OPENHARNESS_TEST_MODEL`:
+
+```bash
+QA_MODEL=openai/gpt-4.1-mini yarn qa:web
+```
+
+`isRealModel` (the same variable, set at all) is what the specs branch on. The mock answers by
+echoing its prompt and by its `__slow__` / `__fail_*__` markers; a real provider does none of
+those, so a scenario that leans on them either adapts — waiting for a reply to have arrived
+rather than for particular words, asking for a long reply instead of `__slow__` — or skips with
+`test.skip(isRealModel, …)`. Mock coverage is never removed: the scripted-failure scenarios
+(W11a/W11b) run on the mock and skip on a provider, and the provider-only ones (W11d/W11e/W11f,
+C11) do the reverse.
+
+### A stack that is not plain `docker-compose.yml`
+
+A scenario that kills or recreates the server has to bring it back the way it was started.
+`QA_COMPOSE_ARGS` adds arguments to every `docker compose` the specs run, so a deployment that
+needs an override file keeps it:
+
+```bash
+QA_COMPOSE_ARGS="-f docker-compose.yml -f docker-compose.proxy.yml" \
+  QA_ALLOW_SERVER_RESTART=1 yarn qa:web qa/w14-recovery.spec.ts
+```

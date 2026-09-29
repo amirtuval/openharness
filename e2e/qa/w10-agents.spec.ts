@@ -1,13 +1,16 @@
 import {
+  QA_MODEL,
   createAgent,
   createSession,
   expect,
   getSession,
+  listAllAgents,
   openChat,
   sendFromComposer,
   shot,
   test,
   uniqueName,
+  waitForAnswer,
 } from './support'
 
 /** W10 — editing an agent: new sessions take the new prompt, existing ones keep their snapshot. */
@@ -20,14 +23,13 @@ test.describe('W10 agents', () => {
     // The Agents screen renders at most one page of agents (20, the protocol's default) and
     // drops `next_page`, so a freshly created agent is only reachable in the UI while the
     // server has fewer than that. Reported separately on this issue.
-    const listed = await request.get('/v1/agents', { params: { limit: 100 } })
-    const existing = ((await listed.json()) as { data: unknown[] }).data.length
+    const existing = (await listAllAgents(request)).length
     const uiCanSeeIt = existing < 20
 
     const name = uniqueName('QA W10')
     const agent = await createAgent(request, {
       name,
-      model: 'anthropic/claude-sonnet-5',
+      model: QA_MODEL,
       system: 'You are version one.',
     })
     const before = await createSession(request, agent.id)
@@ -73,7 +75,7 @@ test.describe('W10 agents', () => {
     await test.step('both chats still answer', async () => {
       await openChat(page, before.id)
       await sendFromComposer(page, 'still here')
-      await expect(page.locator('article[data-role="agent"]').last()).toContainText('still here')
+      await waitForAnswer(page, 'still here')
     })
 
     expect(consoleErrors, consoleErrors.join('\n')).toEqual([])
@@ -92,11 +94,7 @@ test.describe('W10 agents', () => {
     await page.getByRole('button', { name: 'Create agent' }).click()
     await expect(page.getByRole('status').filter({ hasText: `Created ${name}` })).toBeVisible()
 
-    const listed = await request.get('/v1/agents', { params: { limit: 100 } })
-    const body = (await listed.json()) as {
-      data: { name: string; system: string | null; model: { id: string } }[]
-    }
-    const created = body.data.find((entry) => entry.name === name)
+    const created = (await listAllAgents(request)).find((entry) => entry.name === name)
     expect(created?.system).toBe('You are terse.')
     expect(created?.model.id).toBe('openai/gpt-5.1')
 
@@ -110,7 +108,7 @@ test.describe('W10 agents', () => {
     for (let index = 0; index < 21; index += 1) {
       await createAgent(request, {
         name: uniqueName(`QA W10c ${index}`),
-        model: 'anthropic/claude-sonnet-5',
+        model: QA_MODEL,
         system: '',
       })
     }

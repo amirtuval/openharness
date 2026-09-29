@@ -1,15 +1,20 @@
 import { execFileSync } from 'node:child_process'
 
-import type { Page } from '@playwright/test'
+import type { APIRequestContext, Page } from '@playwright/test'
 
 import {
   BASE_URL,
+  QA_MODEL,
+  SERVER_CONTAINER,
+  composeServer,
   composer,
   createAgent,
   createSession,
   eventTypes,
   expect,
+  isRealModel,
   openChat,
+  readEvents,
   recordRendering,
   sawStatus,
   sendFromComposer,
@@ -17,33 +22,38 @@ import {
   status,
   test,
   uniqueName,
+  waitForAnswer,
+  waitForHealth,
 } from './support'
 
-/** The container the compose file names for the server, for the restart scenario. */
-const SERVER_CONTAINER = process.env.QA_SERVER_CONTAINER ?? 'openharness-server-1'
+/**
+ * Recreate the server container with a different provider credential.
+ *
+ * Changing a service's environment is what makes compose recreate it; `stop`/`start` would
+ * leave the process holding the old one. The key is handed over in the child's environment and
+ * is never written anywhere — see the note about credentials at the top of this pass.
+ */
+function restartServerWith(env: { readonly OPENAI_API_KEY: string }): void {
+  composeServer(env, 'up', '-d', 'server')
+}
 
-/** Wait for the server to answer `/health` again after a restart. */
-async function waitForHealth(timeoutMs = 90_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  for (;;) {
-    try {
-      const response = await fetch(`${BASE_URL}/health`)
-      if (response.ok) return
-    } catch {
-      // not up yet
-    }
-    if (Date.now() > deadline) throw new Error(`${BASE_URL}/health never came back`)
-    await new Promise((resolve) => setTimeout(resolve, 500))
-  }
+/**
+ * `<model requests so far>:<last status>`, for waiting on a turn without racing it.
+ *
+ * A session that has just failed reads `idle` before the next message's turn has even started,
+ * so "the session is idle" is not on its own evidence that a message was answered.
+ */
+async function turnSummary(request: APIRequestContext, sessionId: string): Promise<string> {
+  const types = await eventTypes(request, sessionId)
+  const requests = types.filter((type) => type === 'span.model_request_start').length
+  return `${String(requests)}:${types.at(-1) ?? 'none'}`
 }
 
 /** Send a message and answer whether the reply turned up, without failing if it did not. */
 async function sendAndWaitForReply(page: Page, text: string): Promise<boolean> {
   await sendFromComposer(page, text)
   try {
-    await expect(page.locator('article[data-role="agent"]').last()).toContainText(text, {
-      timeout: 15_000,
-    })
+    await waitForAnswer(page, text, { timeoutMs: 30_000 })
     return true
   } catch {
     return false
@@ -57,9 +67,10 @@ test.describe('W11 errors', () => {
     request,
     consoleErrors,
   }) => {
+    test.skip(isRealModel, 'the failure is scripted by the mock model (`__fail_retryable__`)')
     const agent = await createAgent(request, {
       name: uniqueName('QA W11a'),
-      model: 'anthropic/claude-sonnet-5',
+      model: QA_MODEL,
       system: 'Answer briefly.',
     })
     const session = await createSession(request, agent.id)
@@ -93,9 +104,10 @@ test.describe('W11 errors', () => {
     request,
     consoleErrors,
   }) => {
+    test.skip(isRealModel, 'the failure is scripted by the mock model (`__fail_terminal__`)')
     const agent = await createAgent(request, {
       name: uniqueName('QA W11b'),
-      model: 'anthropic/claude-sonnet-5',
+      model: QA_MODEL,
       system: 'Answer briefly.',
     })
     const session = await createSession(request, agent.id)
@@ -145,15 +157,17 @@ test.describe('W11 errors', () => {
 
     const agent = await createAgent(request, {
       name: uniqueName('QA W11c'),
-      model: 'anthropic/claude-sonnet-5',
+      model: QA_MODEL,
       system: 'Answer briefly.',
     })
     const session = await createSession(request, agent.id)
     await openChat(page, session.id)
     await sendFromComposer(page, 'before the outage')
-    await expect(page.locator('article[data-role="agent"]').last()).toContainText(
-      'before the outage',
-    )
+    await waitForAnswer(page, 'before the outage')
+    // A real model's reply starts arriving long before its turn is over; this scenario needs
+    // the session at rest before the server goes away, so that the next message is a new turn
+    // rather than a steering one.
+    await expect(status(page)).toHaveAttribute('aria-label', 'Status: Idle')
 
     try {
       execFileSync('docker', ['stop', SERVER_CONTAINER], { stdio: 'pipe' })
@@ -189,9 +203,7 @@ test.describe('W11 errors', () => {
         'after the outage',
       )
       await sendFromComposer(page, 'and after the reload')
-      await expect(page.locator('article[data-role="agent"]').last()).toContainText(
-        'and after the reload',
-      )
+      await waitForAnswer(page, 'and after the reload')
       await expect(page.getByRole('alert')).toHaveCount(0)
       await shot(page, 'w11-04-recovered')
     })
@@ -201,5 +213,188 @@ test.describe('W11 errors', () => {
       (entry) => !/Failed to load resource|net::ERR_/.test(entry),
     )
     expect(unexpected, unexpected.join('\n')).toEqual([])
+  })
+
+  // The failures a real provider actually produces. They need the router, so the mock cannot
+  // stand in for them; and they need a provider key, so the mock passes skip them.
+
+  test('W11d an unknown model id fails the turn once and leaves the session usable', async ({
+    page,
+    request,
+  }) => {
+    test.skip(!isRealModel, 'the mock model answers whatever id an agent names')
+
+    const agent = await createAgent(request, {
+      name: uniqueName('QA W11d'),
+      model: 'openai/does-not-exist-123',
+      system: 'Answer briefly.',
+    })
+    const session = await createSession(request, agent.id)
+    await openChat(page, session.id)
+    await sendFromComposer(page, 'this model does not exist')
+
+    await test.step('the app says what went wrong and goes back to idle', async () => {
+      const banner = page.getByRole('alert')
+      await expect(banner).toBeVisible({ timeout: 60_000 })
+      await expect(banner).toContainText('does-not-exist-123')
+      await expect(status(page)).toHaveAttribute('aria-label', 'Status: Idle')
+      await shot(page, 'w11-05-unknown-model')
+    })
+
+    await test.step('the log says it failed once, terminally', async () => {
+      const log = await readEvents(request, session.id)
+      const types = log.map((event) => String(event.type))
+      const error = log.find((event) => event.type === 'session.error')?.error as {
+        type: string
+        message: string
+        retry_status: { type: string }
+      }
+      expect(error.type).toBe('model_request_failed_error')
+      expect(error.message, 'the message names the model that could not be found').toContain(
+        'does-not-exist-123',
+      )
+      expect(error.retry_status.type, 'a bad model id is not worth retrying').toBe('terminal')
+      expect(
+        types.filter((type) => type === 'span.model_request_start'),
+        'asked the provider once, not three times',
+      ).toHaveLength(1)
+      expect(types, 'nothing was rescheduled').not.toContain('session.status_rescheduled')
+      expect(types.at(-1), 'the turn ended').toBe('session.status_idle')
+    })
+
+    await test.step('the session is not wedged', async () => {
+      // The model id is part of the session's snapshot, so this turn cannot start working —
+      // what is being checked is that the session accepts the next message and ends it the
+      // same clean way rather than sitting in `running`.
+      await sendFromComposer(page, 'and again')
+      // Wait for that turn rather than for the banner: the first failure's banner is still on
+      // screen, so it says nothing about whether this message has been answered yet.
+      await expect
+        .poll(async () => turnSummary(request, session.id), {
+          timeout: 60_000,
+          message: 'the second message should have started and ended a turn of its own',
+        })
+        .toBe('2:session.status_idle')
+      await expect(status(page)).toHaveAttribute('aria-label', 'Status: Idle')
+    })
+  })
+
+  test('W11e an agent whose provider has no credential fails cleanly', async ({
+    page,
+    request,
+  }) => {
+    test.skip(!isRealModel, 'without a real router there is no provider to miss a credential for')
+
+    // There is no Anthropic key in this environment on purpose: a missing credential has to
+    // read as a missing credential rather than as a hang or a retry storm.
+    const agent = await createAgent(request, {
+      name: uniqueName('QA W11e'),
+      model: 'anthropic/claude-sonnet-5',
+      system: 'Answer briefly.',
+    })
+    const session = await createSession(request, agent.id)
+    await openChat(page, session.id)
+    await sendFromComposer(page, 'anything at all')
+
+    await test.step('the app names the credential that is missing', async () => {
+      const banner = page.getByRole('alert')
+      await expect(banner).toBeVisible({ timeout: 60_000 })
+      await expect(banner).toContainText('ANTHROPIC_API_KEY')
+      await expect(status(page)).toHaveAttribute('aria-label', 'Status: Idle')
+      await shot(page, 'w11-06-missing-credential')
+    })
+
+    await test.step('the log says it failed once, terminally', async () => {
+      const log = await readEvents(request, session.id)
+      const types = log.map((event) => String(event.type))
+      const error = log.find((event) => event.type === 'session.error')?.error as {
+        type: string
+        message: string
+        retry_status: { type: string }
+      }
+      expect(error.retry_status.type, 'a missing key is not worth retrying').toBe('terminal')
+      expect(error.message).toContain('ANTHROPIC_API_KEY')
+      expect(
+        types.filter((type) => type === 'span.model_request_start'),
+        'asked the provider once, not three times',
+      ).toHaveLength(1)
+      expect(types).not.toContain('session.status_rescheduled')
+      expect(types.at(-1)).toBe('session.status_idle')
+    })
+
+    await test.step('the session is not wedged', async () => {
+      await sendFromComposer(page, 'and once more')
+      await expect
+        .poll(async () => turnSummary(request, session.id), {
+          timeout: 60_000,
+          message: 'the second message should have started and ended a turn of its own',
+        })
+        .toBe('2:session.status_idle')
+      await expect(status(page)).toHaveAttribute('aria-label', 'Status: Idle')
+    })
+  })
+
+  test('W11f an invalid provider key is reported, and restoring it recovers the session', async ({
+    page,
+    request,
+  }) => {
+    test.skip(!isRealModel, 'a provider that is never called cannot reject a key')
+    test.skip(
+      process.env.QA_ALLOW_SERVER_RESTART !== '1',
+      'set QA_ALLOW_SERVER_RESTART=1 to recreate the server container',
+    )
+
+    const agent = await createAgent(request, {
+      name: uniqueName('QA W11f'),
+      model: QA_MODEL,
+      system: 'Answer briefly.',
+    })
+    const session = await createSession(request, agent.id)
+    await openChat(page, session.id)
+
+    try {
+      await test.step('the server is restarted holding a key the provider rejects', async () => {
+        restartServerWith({ OPENAI_API_KEY: 'invalid' })
+        await waitForHealth()
+      })
+
+      await test.step('the turn fails once, terminally', async () => {
+        await sendFromComposer(page, 'with a key the provider will not take')
+        await expect(page.getByRole('alert')).toBeVisible({ timeout: 60_000 })
+        await expect(status(page)).toHaveAttribute('aria-label', 'Status: Idle')
+        await shot(page, 'w11-07-invalid-key')
+
+        const log = await readEvents(request, session.id)
+        const types = log.map((event) => String(event.type))
+        const error = log.find((event) => event.type === 'session.error')?.error as {
+          type: string
+          message: string
+          retry_status: { type: string }
+        }
+        expect(error.retry_status.type, 'a rejected key is not worth retrying').toBe('terminal')
+        expect(error.message.toLowerCase(), 'the message says the key was the problem').toMatch(
+          /api key|incorrect|invalid|authentication/,
+        )
+        expect(
+          types.filter((type) => type === 'span.model_request_start'),
+          'asked the provider once, not three times',
+        ).toHaveLength(1)
+        expect(types).not.toContain('session.status_rescheduled')
+        expect(types.at(-1)).toBe('session.status_idle')
+      })
+    } finally {
+      // Whatever happened above, put the real credential back: every scenario after this one
+      // runs against the same server.
+      restartServerWith({ OPENAI_API_KEY: process.env.OPENAI_API_KEY ?? '' })
+      await waitForHealth()
+    }
+
+    await test.step('the same session works once the key is right again', async () => {
+      await sendFromComposer(page, 'and now with the key that works')
+      await waitForAnswer(page, 'and now with the key that works', { timeoutMs: 90_000 })
+      await expect(status(page)).toHaveAttribute('aria-label', 'Status: Idle')
+      await expect(page.getByRole('alert'), 'the error is gone').toHaveCount(0)
+      await shot(page, 'w11-08-key-restored')
+    })
   })
 })

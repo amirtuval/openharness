@@ -1,14 +1,20 @@
 import {
+  LONG_REPLY_PROMPT,
+  QA_MODEL,
   createAgent,
   createSession,
   eventTypes,
   expect,
+  isRealModel,
+  lastAgentText,
   openChat,
   sendFromComposer,
   shot,
   status,
   test,
   uniqueName,
+  waitForAnswer,
+  waitForLongReplyStart,
 } from './support'
 
 /** W6 — Stop: the stream ends, the partial text stays, and the chat keeps working. */
@@ -20,27 +26,32 @@ test.describe('W6 interrupt', () => {
   }) => {
     const agent = await createAgent(request, {
       name: uniqueName('QA W6'),
-      model: 'anthropic/claude-sonnet-5',
+      model: QA_MODEL,
       system: 'Answer briefly.',
     })
     const session = await createSession(request, agent.id)
     await openChat(page, session.id)
 
-    await sendFromComposer(page, '__slow__ something long please')
-    const reply = page.locator('article[data-role="agent"]').last()
-    await expect(reply).toContainText('part 1/40')
+    const prompt = isRealModel ? LONG_REPLY_PROMPT : '__slow__ something long please'
+    await sendFromComposer(page, prompt)
+    // Enough of the reply to have something worth keeping, and early enough that there is
+    // still a long way to go: a Stop after the model has finished would test nothing.
+    await waitForLongReplyStart(page, { minLength: 40 })
     await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible()
 
     await test.step('Stop ends the stream and keeps what arrived', async () => {
       await page.getByRole('button', { name: 'Stop' }).click()
       await expect(status(page)).toHaveAttribute('aria-label', 'Status: Idle')
 
-      const stopped = (await reply.textContent()) ?? ''
-      expect(stopped, 'the partial reply is still on screen').toContain('part 1/40')
-      expect(stopped, 'the reply stopped short of the end').not.toContain('part 40/40')
+      const stopped = await lastAgentText(page)
+      expect(stopped.trim().length, 'the partial reply is still on screen').toBeGreaterThan(0)
+      if (!isRealModel) {
+        expect(stopped, 'the partial reply is still on screen').toContain('part 1/40')
+        expect(stopped, 'the reply stopped short of the end').not.toContain('part 40/40')
+      }
 
       await page.waitForTimeout(1500)
-      expect((await reply.textContent()) ?? '', 'nothing more arrived after Stop').toBe(stopped)
+      expect(await lastAgentText(page), 'nothing more arrived after Stop').toBe(stopped)
       await expect(page.getByRole('button', { name: 'Stop' })).toHaveCount(0)
       await shot(page, 'w6-01-after-stop')
 
@@ -51,9 +62,7 @@ test.describe('W6 interrupt', () => {
 
     await test.step('a new message works afterwards', async () => {
       await sendFromComposer(page, 'after the interrupt')
-      await expect(page.locator('article[data-role="agent"]').last()).toContainText(
-        'after the interrupt',
-      )
+      await waitForAnswer(page, 'after the interrupt')
       await expect(status(page)).toHaveAttribute('aria-label', 'Status: Idle')
     })
 

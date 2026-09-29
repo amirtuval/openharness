@@ -1,14 +1,18 @@
 import {
+  LONG_REPLY_PROMPT,
+  QA_MODEL,
   createAgent,
   createSession,
   eventTypes,
   expect,
+  isRealModel,
   openChat,
   sendFromComposer,
   shot,
   status,
   test,
   uniqueName,
+  waitForLongReplyStart,
 } from './support'
 
 /**
@@ -23,15 +27,15 @@ test.describe('W5 steering', () => {
   }) => {
     const agent = await createAgent(request, {
       name: uniqueName('QA W5'),
-      model: 'anthropic/claude-sonnet-5',
+      model: QA_MODEL,
       system: 'Answer briefly.',
     })
     const session = await createSession(request, agent.id)
     await openChat(page, session.id)
 
-    await sendFromComposer(page, '__slow__ the first question')
-    const firstReply = page.locator('article[data-role="agent"]').last()
-    await expect(firstReply).toContainText('part 1/40')
+    const firstQuestion = isRealModel ? LONG_REPLY_PROMPT : '__slow__ the first question'
+    await sendFromComposer(page, firstQuestion)
+    await waitForLongReplyStart(page)
 
     await test.step('the steering message shows as queued while the reply streams', async () => {
       await sendFromComposer(page, 'the second question')
@@ -47,8 +51,16 @@ test.describe('W5 steering', () => {
 
     await test.step('the agent answers it in the same turn', async () => {
       const secondReply = page.locator('article[data-role="agent"]').nth(1)
-      await expect(secondReply).toContainText('the second question', { timeout: 30_000 })
-      await expect(page.locator('article[data-role="agent"]')).toHaveCount(2)
+      // Nothing in a real answer names the question it answers, so there the arrival of a
+      // second reply is the whole of it; the event log below is the exact half of this check.
+      if (isRealModel) {
+        await expect(page.locator('article[data-role="agent"]')).toHaveCount(2, {
+          timeout: 60_000,
+        })
+      } else {
+        await expect(secondReply).toContainText('the second question', { timeout: 30_000 })
+        await expect(page.locator('article[data-role="agent"]')).toHaveCount(2)
+      }
       await expect(
         page.locator('article[data-role="user"]').last().getByText('queued'),
       ).toHaveCount(0)
