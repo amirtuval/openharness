@@ -12,7 +12,7 @@ import { expect, test as base, type APIRequestContext, type Page } from '@playwr
 export const BASE_URL = process.env.QA_BASE_URL ?? 'http://localhost:3000'
 
 /** Where screenshots land. Relative paths resolve against the `e2e` package folder. */
-const SHOT_DIR = process.env.QA_SHOT_DIR ?? '../docs/qa/v1-chat'
+const SHOT_DIR = process.env.QA_SHOT_DIR ?? 'qa-output'
 
 /** The API key the server under test expects, when it was started with one. */
 export const API_KEY = process.env.QA_API_KEY ?? ''

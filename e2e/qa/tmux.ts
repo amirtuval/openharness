@@ -11,7 +11,7 @@ import type { Page } from '@playwright/test'
  * `capture-pane` reads back what is on the screen — the same way a person would look at it.
  */
 
-const SHOT_DIR = process.env.QA_SHOT_DIR ?? '../docs/qa/v1-chat'
+const SHOT_DIR = process.env.QA_SHOT_DIR ?? 'qa-output'
 
 /** Where the CLI is run from. `apps/tui/dist/index.js` relative to the `e2e` package. */
 export const CLI_CWD = process.env.QA_OH_CWD ?? '../'
