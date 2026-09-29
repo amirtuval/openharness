@@ -3,6 +3,7 @@ import {
   createAgent,
   createSession,
   expect,
+  expectNoErrorBanner,
   getSession,
   listAllAgents,
   openChat,
@@ -74,9 +75,13 @@ test.describe('W10 agents', () => {
 
     await test.step('both chats still answer', async () => {
       await openChat(page, before.id)
+      await expectNoErrorBanner(page)
       await sendFromComposer(page, 'still here')
       await waitForAnswer(page, 'still here')
+      await expectNoErrorBanner(page)
     })
+
+    await expectNoErrorBanner(page)
 
     expect(consoleErrors, consoleErrors.join('\n')).toEqual([])
   })
@@ -97,6 +102,8 @@ test.describe('W10 agents', () => {
     const created = (await listAllAgents(request)).find((entry) => entry.name === name)
     expect(created?.system).toBe('You are terse.')
     expect(created?.model.id).toBe('openai/gpt-5.1')
+
+    await expectNoErrorBanner(page)
 
     expect(consoleErrors, consoleErrors.join('\n')).toEqual([])
   })

@@ -61,14 +61,38 @@ export const LONG_REPLY_PROMPT = `Count from 1 to ${String(LONG_REPLY_COUNT)}, o
 export const LONG_REPLY_END = new RegExp(`^\\s*${String(LONG_REPLY_COUNT)}\\s*$`, 'm')
 
 /**
+ * A longer reply still, for the scenario that kills the server in the middle of one.
+ *
+ * {@link LONG_REPLY_PROMPT} streams in about two seconds, and `docker compose kill` takes a
+ * couple more: a provider that answers that fast is finished before the container is down, so
+ * the crash lands after the turn and there is nothing for the next process to re-run. W14
+ * needs the request to still be open when the container goes, and this is a reply several
+ * times longer than the kill takes — the 400 numbers below stream for around seven seconds
+ * on `openai/gpt-4.1-mini`.
+ */
+export const CRASH_REPLY_COUNT = 400
+
+/** A prompt a real provider answers slowly enough to be interrupted by a container kill. */
+export const CRASH_REPLY_PROMPT = `Count from 1 to ${String(CRASH_REPLY_COUNT)}, one number per line. Nothing else.`
+
+/** The line the crash-recovery reply ends with. */
+export const CRASH_REPLY_END = new RegExp(`^\\s*${String(CRASH_REPLY_COUNT)}\\s*$`, 'm')
+
+/**
  * A longer reply still, for the scenario that reloads the page in the middle of one.
  *
  * {@link LONG_REPLY_COUNT} numbers stream in a couple of seconds — long enough for a steering
  * message or a Stop, which are sent from the same page, but not for a reload, a reconnect and
  * a replay. This is the one scenario whose reply has to outlast that round trip, so it asks for
- * a bigger one.
+ * a bigger one: at 150 the reload had to land inside a ~3 s window, which a fast provider beats
+ * on a slow round trip (the reload, the error-banner assertion this pass added, and the polling
+ * in between all count against it). Roughly twice that streams for around six seconds on
+ * `openai/gpt-4.1-mini`, which is the margin the premise needs.
  */
-export const RELOAD_REPLY_PROMPT = 'Count from 1 to 150, one number per line. Nothing else.'
+export const RELOAD_REPLY_COUNT = 300
+
+/** A prompt a real provider answers at length, for the mid-reload scenario. */
+export const RELOAD_REPLY_PROMPT = `Count from 1 to ${String(RELOAD_REPLY_COUNT)}, one number per line. Nothing else.`
 
 /** The `x-api-key` header the server under test needs, or nothing when it is open. */
 export function authHeaders(): Record<string, string> {
@@ -157,6 +181,65 @@ export function expectNoConsoleErrors(errors: readonly string[]): void {
 /** A screenshot in the report's folder, at a fixed size so runs are comparable. */
 export async function shot(page: Page, name: string): Promise<void> {
   await page.screenshot({ path: path.join(SHOT_DIR, `${name}.png`), animations: 'disabled' })
+}
+
+// --- what the app does when something fails ---------------------------------------------------------
+
+/**
+ * The app's error surfaces: everything it renders as `role="alert"`.
+ *
+ * Two things in the chat are `ErrorBanner`s — a request this app made that failed
+ * (`requestError`: the history load, the send, the interrupt) and a `session.error` from the
+ * log (`lastError`) — and the sidebar's own list failure is an alert too
+ * (`apps/web/src/components/chat/chat-view.tsx`, `sidebar.tsx`). So this is every in-app
+ * error surface, not only the one a scenario happens to be about.
+ */
+export function errorBanners(page: Page) {
+  return page.getByRole('alert')
+}
+
+/**
+ * How long {@link expectNoErrorBanner} watches the page before it says there is no banner.
+ *
+ * Short on purpose. It is not there to catch a banner that appears later in a scenario — every
+ * scenario calls this again once its turn is over, which is where a late one turns up — but to
+ * keep the check honest about the moment it is made: a scenario that has a premise riding on
+ * how long a live stream still lasts (a reload that has to land mid-stream, a kill that has to
+ * land mid-request) cannot afford a second of clock.
+ */
+const BANNER_SETTLE_MS = 500
+
+/**
+ * Fail if the app is showing an error banner.
+ *
+ * This is the assertion pass 3 was missing. The client **drops stored events it cannot parse**
+ * and keeps rendering, so a session that became unreadable still looked like a session: #39
+ * turned every real-provider session's usage into `"0[object Object]"`, `@openharness/client`
+ * refused to read the log, and the specs — which watched the console and the on-screen text —
+ * passed anyway. What says a read failed is this banner, so every scenario that opens,
+ * reloads or navigates a session asserts it is not there.
+ *
+ * A failed history load sets `requestError` in the same React pass that stops the "Loading the
+ * conversation…" line, so the banner is there by the time a navigation has settled;
+ * {@link BANNER_SETTLE_MS} is what makes "and it did not appear just after" part of the
+ * assertion rather than a race with the render.
+ *
+ * Scenarios that provoke an error on purpose — W11, W12, C9, C11 — are the ones where a banner
+ * is the expected reading, and they do not call this.
+ */
+export async function expectNoErrorBanner(page: Page, settleMs = BANNER_SETTLE_MS): Promise<void> {
+  const banners = errorBanners(page)
+  const deadline = Date.now() + settleMs
+  for (;;) {
+    const texts = (await banners.allTextContents())
+      .map((text) => text.trim())
+      .filter((text) => text !== '')
+    expect(texts, 'the app is showing an error banner').toEqual([])
+    if (Date.now() >= deadline) {
+      return
+    }
+    await page.waitForTimeout(100)
+  }
 }
 
 // --- a thin client for the HTTP API -----------------------------------------------------------------

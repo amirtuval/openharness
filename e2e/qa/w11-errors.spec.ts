@@ -277,6 +277,24 @@ test.describe('W11 errors', () => {
         .toBe('2:session.status_idle')
       await expect(status(page)).toHaveAttribute('aria-label', 'Status: Idle')
     })
+
+    await test.step('the agent switched back to a model that exists answers', async () => {
+      // A session keeps the agent it was created against, so "switched back" is the agent
+      // itself — the same one, on a model that resolves — and a new chat on it. This is the
+      // recovery an operator actually reaches for after naming a model that does not exist.
+      const updated = await request.post(`/v1/agents/${agent.id}`, {
+        data: { model: { id: QA_MODEL } },
+      })
+      expect(updated.status(), await updated.text()).toBe(200)
+
+      const next = await createSession(request, agent.id)
+      await openChat(page, next.id)
+      await sendFromComposer(page, 'the model exists again')
+      await waitForAnswer(page, 'the model exists again')
+      await expect(status(page)).toHaveAttribute('aria-label', 'Status: Idle')
+      await expect(page.getByRole('alert'), 'nothing failed this time').toHaveCount(0)
+      await shot(page, 'w11-09-agent-switched-back')
+    })
   })
 
   test('W11e an agent whose provider has no credential fails cleanly', async ({
