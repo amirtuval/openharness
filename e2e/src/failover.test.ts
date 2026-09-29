@@ -1,7 +1,12 @@
 import { readFile } from 'node:fs/promises'
 
 import { type Client } from '@openharness/client'
-import { EVENT_TYPES, type Session } from '@openharness/protocol'
+import {
+  DEFAULT_PARTITION_COUNT,
+  EVENT_TYPES,
+  partitionOf,
+  type Session,
+} from '@openharness/protocol'
 import { MOCK_SLOW_MARKER } from '@openharness/server'
 import { describe, expect, it } from 'vitest'
 
@@ -113,6 +118,22 @@ async function leasesAreHeld(): Promise<boolean> {
 }
 
 /** An agent and a session, the pair the test drives. */
+/** The instance holding the lease on the session's partition, per `partition_leases`. */
+async function partitionOwner(sessionId: string): Promise<string | undefined> {
+  const database = await harness.database()
+  const partition = partitionOf(sessionId, DEFAULT_PARTITION_COUNT)
+  return await withDatabaseClient(
+    async (client) => {
+      const result = await client.query<{ owner: string | null }>(
+        'select owner from partition_leases where partition = $1',
+        [partition],
+      )
+      return result.rows[0]?.owner ?? undefined
+    },
+    { database: database.name },
+  )
+}
+
 async function newSession(client: Client): Promise<Session> {
   const agent = await client.agents.create({
     name: 'Echo agent',
@@ -129,8 +150,12 @@ describe('two instances sharing a database', () => {
       return
     }
 
-    const first = await harness.server({ env: PARTITION_ENV })
-    const second = await harness.server({ env: PARTITION_ENV })
+    const first = await harness.server({
+      env: { ...PARTITION_ENV, OPENHARNESS_INSTANCE_ID: 'failover-first' },
+    })
+    const second = await harness.server({
+      env: { ...PARTITION_ENV, OPENHARNESS_INSTANCE_ID: 'failover-second' },
+    })
     const client = harness.client(first)
     const session = await newSession(client)
     const prompt = `${MOCK_SLOW_MARKER} outlive the instance that started me`
@@ -138,16 +163,18 @@ describe('two instances sharing a database', () => {
     const watcher = collectStream(client, session.id, { deltas: true, afterSeq: 0 })
     await client.sendMessage(session.id, prompt)
     await watcher.waitFor((events) => events.some(isPreviewDelta), 'the first preview delta')
-
-    // The instance that took the message is the one that goes down. Whether it *owns* the
-    // partition is #11's business: if it does, the survivor has to take the lease over; if
-    // it does not, the survivor already owns the turn and only has to notice the orphaned
-    // span. Either way nothing tells the survivor what happened.
-    await first.kill('SIGKILL')
     await watcher.stop()
 
+    // Kill the instance that *owns* the session's partition, which is the one running the
+    // turn. Which instance that is depends on how the two split the partitions at boot, so
+    // look it up rather than assuming the one that took the message.
+    const owner = await partitionOwner(session.id)
+    const [doomed, survivorServer] = owner === 'failover-first' ? [first, second] : [second, first]
+    expect(['failover-first', 'failover-second']).toContain(owner)
+    await doomed.kill('SIGKILL')
+
     // The survivor has to notice on its own: a lease TTL plus a whole `__slow__` reply.
-    const survivor = harness.client(second)
+    const survivor = harness.client(survivorServer)
     await waitForTurnEnd(survivor, session.id, { timeoutMs: 45_000 })
 
     const log = await readLog(survivor, session.id)
