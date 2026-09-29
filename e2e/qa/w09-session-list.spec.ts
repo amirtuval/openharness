@@ -106,7 +106,7 @@ test.describe('W9 session list', () => {
 
   // Was `test.fail` as the reproduction of issue #35: the title is derived on the server when
   // the first message is stored and nothing told the client, so the sidebar row — and the
-  // chat header — kept the agent's name until something reloaded the page. Fixed by PR #NUM:
+  // chat header — kept the agent's name until something reloaded the page. Fixed by PR #37:
   // the open chat re-reads the session once after its first message and both surfaces merge
   // that copy in.
   test('W9d the sidebar shows a new title without a reload', async ({ page }) => {
