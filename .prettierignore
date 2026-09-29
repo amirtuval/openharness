@@ -5,3 +5,6 @@ coverage
 .yarn
 *.tsbuildinfo
 yarn.lock
+test-results
+e2e/test-results
+e2e/qa-output
