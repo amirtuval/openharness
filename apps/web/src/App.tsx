@@ -55,7 +55,7 @@ export function App({ client: providedClient, fakeClient = false }: AppProps = {
 /** The frame around every screen: the sidebar, and the routed screen. */
 function AppShell({ route, fakeClient }: { route: Route; fakeClient: boolean }) {
   const client = useClient()
-  const { sessions, loading, error, create } = useSessions(client)
+  const { sessions, loading, error, truncated, create } = useSessions(client)
 
   return (
     <div className="flex h-full min-h-0">
@@ -63,6 +63,7 @@ function AppShell({ route, fakeClient }: { route: Route; fakeClient: boolean }) 
         sessions={sessions}
         loading={loading}
         error={error}
+        truncated={truncated}
         activeSessionId={route.name === 'chat' ? route.sessionId : undefined}
         fakeClient={fakeClient}
       />

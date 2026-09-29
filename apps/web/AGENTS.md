@@ -86,6 +86,7 @@ src/
     settings.ts                localStorage settings, a stable snapshot for React
     dev-fake-client.ts         dev-only fake client + the seeded scenario
     models.ts                  the model suggestions the agent form offers
+    paging.ts                  walking `next_page` for the two lists, with a safety cap
     errors.ts, format.ts, utils.ts
   test-support/render-app.tsx  render the app against a fake client; DOM readers
 ```
@@ -130,6 +131,33 @@ partial reply stays on screen, which is the transcript's rule, not the UI's.
 Failures never throw at the user: a failed load, send or interrupt lands in `requestError`,
 and a `session.error` from the log is `lastError` — both rendered inline above the composer.
 
+## Paging: the two lists
+
+`GET /v1/agents` and `GET /v1/sessions` answer one page at a time (`{ data, next_page }`), and
+the page size defaults to 20 — so a list that reads one page silently hides everything past
+it. The agents screen is where that bites hardest: an agent that is never rendered cannot be
+edited.
+
+`src/lib/paging.ts` is the one place that walks the pages. `listAllPages(fetchPage, options)`
+asks for `MAX_PAGE_LIMIT` (100, the protocol's maximum) and then keeps asking with
+`page: next_page` until the server answers `null`; cursors are opaque and are handed back
+exactly as they arrived. It stops on the first of:
+
+- `next_page === null` — the end of the list;
+- a cursor the server has already handed back (which would otherwise page forever);
+- `MAX_PAGE_ITEMS` (1000) items — a documented safety cap, so a server with a very long list
+  cannot make the browser hold an unbounded one;
+- an aborted signal.
+
+Only the cap sets `truncated`, and both lists render `and more… only the first 1000 are
+listed` when it does. Anything else is a complete list.
+
+`useAgents` and `useSessions` are the two callers and share the same shape: `onPage` sets the
+first page straight away and appends the later ones (`appendUnseen`, which drops an item that
+was already added by a `create` while the walk was running), so the sidebar is usable while
+the rest of a long list is still loading. Both also return `truncated`, and neither decodes a
+cursor itself.
+
 ## Chat components
 
 **Vercel AI Elements and assistant-ui were both evaluated and not used**; the chat is built
@@ -166,7 +194,8 @@ the app with the fake and provides a few DOM readers.
 | `src/screens/settings-screen.test.tsx`   | settings round-trip, an empty URL as same-origin                                                                                                |
 | `src/hooks/use-session.test.tsx`         | the hook's own contract: a failed load, and no duplicated message                                                                               |
 | `src/hooks/use-stick-to-bottom.test.tsx` | the auto-scroll rule, with a scroll geometry jsdom does not have                                                                                |
-| `src/lib/*.test.ts`                      | routes, the settings store, the fake-mode scenario                                                                                              |
+| `src/components/sidebar.test.tsx`        | the session list follows `next_page`, and the cap note                                                                                          |
+| `src/lib/*.test.ts`                      | routes, the settings store, the fake-mode scenario, the paging walk                                                                             |
 
 Timing matters: the fake streams with `delayMs: 0` by default, so a test that wants to observe
 a reply _while it streams_ passes a larger `delayMs` (and enough `chunks`) — otherwise the

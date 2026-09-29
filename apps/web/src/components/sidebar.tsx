@@ -2,6 +2,7 @@ import type { Session } from '@openharness/protocol'
 import { Bot, Plus, Settings } from 'lucide-react'
 
 import { relativeTime, sessionLabel } from '../lib/format'
+import { MAX_PAGE_ITEMS } from '../lib/paging'
 import { chatHash } from '../lib/router'
 import { cn } from '../lib/utils'
 import { Badge } from './ui/badge'
@@ -20,12 +21,15 @@ export function Sidebar({
   sessions,
   loading,
   error,
+  truncated,
   activeSessionId,
   fakeClient = false,
 }: {
   sessions: readonly Session[]
   loading: boolean
   error: string | null
+  /** The list hit the safety cap: the server has more sessions than are listed. */
+  truncated: boolean
   /** The open session, highlighted in the list. */
   activeSessionId: string | undefined
   /** Show that this run is on the fake client rather than a server. */
@@ -86,6 +90,12 @@ export function Sidebar({
             )
           })}
         </ul>
+
+        {truncated ? (
+          <p className="px-2 py-1 text-xs text-muted-foreground">
+            and more… only the first {MAX_PAGE_ITEMS} are listed
+          </p>
+        ) : null}
       </nav>
 
       <div className="flex flex-col gap-0.5 border-t p-2">
