@@ -80,12 +80,14 @@ src/
   hooks/
     use-session.ts             THE session hook: history, live stream, send, interrupt
     use-sessions.ts            the sidebar's list, plus create
+    use-session-refresh.ts     the re-read after a first message, shared by both of those
     use-agents.ts              the agents list, plus create and update
     use-stick-to-bottom.ts     auto-scroll that stays put when the reader scrolls up
     use-route.ts, use-settings.ts   thin React bindings over the two small stores
   lib/
     router.ts                  the hash routes (#/s/<id>, #/new, #/agents, #/settings)
     settings.ts                localStorage settings, a stable snapshot for React
+    session-refresh.ts         the one re-read of a session whose first message named it
     dev-fake-client.ts         dev-only fake client + the seeded scenario
     models.ts                  the model suggestions the agent form offers
     paging.ts                  walking `next_page` for the two lists, with a safety cap
@@ -129,6 +131,14 @@ transcript's `seq` rule, so nothing is duplicated. While a turn is running, `sen
 steering message — the server queues it, and the transcript shows it as `pending` until the
 next model request picks it up. `interrupt()` is the Stop button (`user.interrupt`); the
 partial reply stays on screen, which is the transcript's rule, not the UI's.
+
+**A session is named by the request that stores its first message** (`apps/server/src/titles.ts`,
+PR #32), which answers with the stored events rather than the session and is never announced on
+the stream. So once this chat's transcript holds a `user.message` and the session still shows no
+title, `useSession` asks `src/lib/session-refresh.ts` for one re-read: at most one per session,
+nothing polls, and the copy it reads is what both this header and the sidebar row render — which
+is why a new chat stops showing the agent's name a moment after the first message, with no reload
+and no second walk of the list.
 
 Failures never throw at the user: a failed load, send or interrupt lands in `requestError`,
 and a `session.error` from the log is `lastError` — both rendered inline above the composer.
@@ -233,15 +243,15 @@ Markdown is `react-markdown` + `remark-gfm` with the elements styled by hand; no
 `createFakeClient()` — no server, no mocked client. `src/test-support/render-app.tsx` renders
 the app with the fake and provides a few DOM readers.
 
-| file                                     | covers                                                                                                                                          |
-| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/App.test.tsx`                       | open a session, send → streamed reply, Stop → interrupted, reload → history, steering, retry → success, terminal error, new chat, request error |
-| `src/screens/agents-screen.test.tsx`     | list, create and edit an agent, the model suggestions                                                                                           |
-| `src/screens/settings-screen.test.tsx`   | settings round-trip, an empty URL as same-origin                                                                                                |
-| `src/hooks/use-session.test.tsx`         | the hook's own contract: a failed load, and no duplicated message                                                                               |
-| `src/hooks/use-stick-to-bottom.test.tsx` | the auto-scroll rule, with a scroll geometry jsdom does not have                                                                                |
-| `src/components/sidebar.test.tsx`        | the session list follows `next_page`, and the cap note                                                                                          |
-| `src/lib/*.test.ts`                      | routes, the settings store, the fake-mode scenario, the paging walk                                                                             |
+| file                                     | covers                                                                                                                                                                             |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/App.test.tsx`                       | open a session, send → streamed reply, Stop → interrupted, reload → history, steering, retry → success, terminal error, new chat, a title arriving without a reload, request error |
+| `src/screens/agents-screen.test.tsx`     | list, create and edit an agent, the model suggestions                                                                                                                              |
+| `src/screens/settings-screen.test.tsx`   | settings round-trip, an empty URL as same-origin                                                                                                                                   |
+| `src/hooks/use-session.test.tsx`         | the hook's own contract: a failed load, and no duplicated message                                                                                                                  |
+| `src/hooks/use-stick-to-bottom.test.tsx` | the auto-scroll rule, with a scroll geometry jsdom does not have                                                                                                                   |
+| `src/components/sidebar.test.tsx`        | the session list follows `next_page`, and the cap note                                                                                                                             |
+| `src/lib/*.test.ts`                      | routes, the settings store, the fake-mode scenario, the paging walk, the session re-read                                                                                           |
 
 Timing matters: the fake streams with `delayMs: 0` by default, so a test that wants to observe
 a reply _while it streams_ passes a larger `delayMs` (and enough `chunks`) — otherwise the

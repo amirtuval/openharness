@@ -1,9 +1,11 @@
 import type { Client } from '@openharness/client'
 import type { AgentId, Session } from '@openharness/protocol'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { describeError } from '../lib/errors'
 import { appendUnseen, listAllPages } from '../lib/paging'
+import { withFreshSessions } from '../lib/session-refresh'
+import { useSessionRefresh } from './use-session-refresh'
 import { useSettings } from './use-settings'
 
 /** Everything the session list needs, plus creating one. */
@@ -24,11 +26,17 @@ export interface SessionsView {
 
 /** The session list, and creating a session on an agent. */
 export function useSessions(client: Client): SessionsView {
-  const [sessions, setSessions] = useState<readonly Session[]>([])
+  const [listed, setSessions] = useState<readonly Session[]>([])
   const [loading, setLoading] = useState(true)
   const [truncated, setTruncated] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [revision, setRevision] = useState(0)
+  // A session re-read after its first message (#35, `lib/session-refresh`) is the fresher
+  // copy of its row: the title the server derived is not in the list this hook loaded. This
+  // is how the row changes without the list being fetched again — the shell's list, the
+  // open chat's header, one read.
+  const { sessions: fresh } = useSessionRefresh(client)
+  const sessions = useMemo(() => withFreshSessions(listed, fresh), [listed, fresh])
   // A failure of our own is described with the server the client is pointed at, so a request
   // that never arrived can say where it did not arrive.
   const { serverUrl } = useSettings()

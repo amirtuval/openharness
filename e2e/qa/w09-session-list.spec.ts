@@ -101,14 +101,15 @@ test.describe('W9 session list', () => {
       'a chat about the release checklist',
     )
 
-    // What the sidebar makes of that title is a bug of its own — it keeps the agent's name
-    // until the page is reloaded (#35); W9d below is its reproduction.
+    // What the sidebar makes of that title, without a reload, is W9d below.
   })
 
-  // Known bug (#35): the title is derived on the server when the first message is stored, but
-  // `useSessions` never refetches its list, so the sidebar row keeps the agent's name until
-  // something reloads the page. Fails today by design; the marker goes when #35 is fixed.
-  test.fail('W9d the sidebar shows a new title without a reload', async ({ page }) => {
+  // Was `test.fail` as the reproduction of issue #35: the title is derived on the server when
+  // the first message is stored and nothing told the client, so the sidebar row — and the
+  // chat header — kept the agent's name until something reloaded the page. Fixed by PR #NUM:
+  // the open chat re-reads the session once after its first message and both surfaces merge
+  // that copy in.
+  test('W9d the sidebar shows a new title without a reload', async ({ page }) => {
     await page.goto('/#/new')
     await page.getByRole('button', { name: 'Create chat' }).click()
     await expect(page).toHaveURL(/#\/s\/sesn_/)
@@ -122,6 +123,11 @@ test.describe('W9 session list', () => {
     await expect(page.locator(`a[href="#/s/${sessionId}"]`)).toContainText(
       'a chat about the release checklist',
     )
+    // The header reads the same re-read: a user who opens a chat, sends the first message and
+    // stays there must not be left looking at the agent's name either.
+    await expect(
+      page.getByRole('heading', { name: 'a chat about the release checklist' }),
+    ).toBeVisible()
   })
 
   test('W9c the sidebar highlights the open chat', async ({ page, request, consoleErrors }) => {

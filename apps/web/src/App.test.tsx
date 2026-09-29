@@ -7,10 +7,13 @@ import { App } from './App'
 import { saveSettings } from './lib/settings'
 import {
   agentText,
+  deriveSessionTitles,
   isStreaming,
   makeFake,
   messageElement,
+  recordListRequests,
   renderApp,
+  sessionRows,
   visibleText,
 } from './test-support/render-app'
 
@@ -217,6 +220,52 @@ describe('App', () => {
 
     const listed = await fake.sessions.list()
     expect(listed.data).toHaveLength(2)
+  })
+
+  it('shows the new title in the sidebar and the header without a reload', async () => {
+    const user = userEvent.setup({ delay: null })
+    const fake = makeFake()
+    // The fake does not name sessions the way the server does; this is that half.
+    deriveSessionTitles(fake)
+    const lists = recordListRequests(fake)
+    renderApp(fake, { hash: '#/new' })
+
+    await user.click(await screen.findByRole('button', { name: 'Create chat' }))
+    await waitFor(() => {
+      expect(window.location.hash).toMatch(/^#\/s\/sesn_/)
+    })
+    const sessionId = window.location.hash.replace('#/s/', '')
+    // The bug of #35: a new chat is listed and headed by the agent's name, because nothing
+    // has named the session yet.
+    expect(screen.getByRole('heading', { name: 'Summarizer' })).toBeInTheDocument()
+
+    await user.type(await screen.findByLabelText('Message'), 'a chat about the release checklist')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
+
+    // The server named the session inside the request that stored the message; both surfaces
+    // pick the title up from the one re-read, with no reload and no second walk of the list.
+    expect(
+      await screen.findByRole('heading', { name: 'a chat about the release checklist' }),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole('link', { name: /a chat about the release checklist/ }),
+    ).toHaveAttribute('href', `#/s/${sessionId}`)
+    expect(lists.sessions).toHaveLength(1)
+  })
+
+  it('names a chat by a first message it did not send', async () => {
+    const fake = makeFake()
+    deriveSessionTitles(fake)
+    renderApp(fake)
+    expect(await screen.findByRole('heading', { name: 'Summarizer' })).toBeInTheDocument()
+
+    // Another writer — the CLI, a second tab — says the first thing in the open session: the
+    // stream delivers the message, and the title it produced has to reach this tab too.
+    await fake.sendMessage(fake.session.id, 'what can you do?')
+
+    expect(await screen.findByRole('heading', { name: 'what can you do?' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /what can you do\?/ })).toBeInTheDocument()
+    expect(sessionRows()).toHaveLength(1)
   })
 
   it('shows a request error inline when the session does not exist', async () => {
