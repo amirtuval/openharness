@@ -1,8 +1,20 @@
+import { MAX_PAGE_LIMIT } from '@openharness/protocol'
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 
-import { makeFake, renderApp } from '../test-support/render-app'
+import { MAX_PAGE_ITEMS } from '../lib/paging'
+import { makeFake, recordListRequests, renderApp } from '../test-support/render-app'
+
+/** Create `count` agents through the API, the way the QA reproduction's curl loop does. */
+async function makeAgents(fake: ReturnType<typeof makeFake>, count: number): Promise<void> {
+  for (let index = 1; index <= count; index += 1) {
+    await fake.agents.create({
+      name: `T1 Agent ${String(index).padStart(2, '0')}`,
+      model: { id: 'anthropic/claude-sonnet-5' },
+    })
+  }
+}
 
 /** The agents screen: the list, and one form for creating and editing. */
 describe('AgentsScreen', () => {
@@ -80,5 +92,55 @@ describe('AgentsScreen', () => {
 
     expect(await screen.findByText('Renamed')).toBeInTheDocument()
     expect(screen.getByText('Saved Renamed.')).toBeInTheDocument()
+  })
+
+  it('lists every agent, past the server default page of 20', async () => {
+    const fake = makeFake()
+    await makeAgents(fake, 45)
+    const requests = recordListRequests(fake)
+    renderApp(fake, { hash: '#/agents' })
+
+    const list = within(await screen.findByRole('region', { name: 'Agent list' }))
+
+    // The 45th agent — and its Edit button, the only way to its system prompt — is on screen.
+    expect(await list.findByRole('button', { name: 'Edit T1 Agent 45' })).toBeInTheDocument()
+    expect(document.querySelectorAll('[data-slot="agent-card"]')).toHaveLength(46)
+
+    // The ask is a full page, not the default 20, which is what makes one request enough.
+    expect(requests.agents).toEqual([{ limit: MAX_PAGE_LIMIT, page: undefined }])
+  })
+
+  it('follows next_page until the server has no more agents', async () => {
+    const fake = makeFake()
+    await makeAgents(fake, 150)
+    const firstPage = await fake.agents.list({ limit: MAX_PAGE_LIMIT })
+    expect(firstPage.next_page).not.toBeNull()
+
+    const requests = recordListRequests(fake)
+    renderApp(fake, { hash: '#/agents' })
+
+    const list = within(await screen.findByRole('region', { name: 'Agent list' }))
+    expect(await list.findByRole('button', { name: 'Edit T1 Agent 150' })).toBeInTheDocument()
+    expect(document.querySelectorAll('[data-slot="agent-card"]')).toHaveLength(151)
+
+    // Two pages: the first with no cursor, the second with exactly the one the server sent.
+    expect(requests.agents).toEqual([
+      { limit: MAX_PAGE_LIMIT, page: undefined },
+      { limit: MAX_PAGE_LIMIT, page: firstPage.next_page ?? '' },
+    ])
+  })
+
+  it('says so when the safety cap cuts the list short', async () => {
+    const fake = makeFake()
+    await makeAgents(fake, MAX_PAGE_ITEMS + 5)
+    renderApp(fake, { hash: '#/agents' })
+
+    const list = within(await screen.findByRole('region', { name: 'Agent list' }))
+
+    expect(await list.findByText(/and more…/)).toBeInTheDocument()
+    expect(
+      list.getByText(`and more… only the first ${MAX_PAGE_ITEMS} are listed`),
+    ).toBeInTheDocument()
+    expect(document.querySelectorAll('[data-slot="agent-card"]')).toHaveLength(MAX_PAGE_ITEMS)
   })
 })

@@ -3,9 +3,8 @@ import type { AgentId, Session } from '@openharness/protocol'
 import { useCallback, useEffect, useState } from 'react'
 
 import { describeError } from '../lib/errors'
-
-/** How many sessions the sidebar loads. The server lists newest first. */
-const SESSION_PAGE_SIZE = 50
+import { appendUnseen, listAllPages } from '../lib/paging'
+import { useSettings } from './use-settings'
 
 /** Everything the session list needs, plus creating one. */
 export interface SessionsView {
@@ -13,6 +12,8 @@ export interface SessionsView {
   readonly sessions: readonly Session[]
   /** The list is still loading for the first time. */
   readonly loading: boolean
+  /** The list hit the safety cap; the server has more sessions than are shown. */
+  readonly truncated: boolean
   /** A failed list or create, as shown inline. */
   readonly error: string | null
   /** Create a session on `agentId`, refresh the list, and return it (`null` on failure). */
@@ -25,26 +26,48 @@ export interface SessionsView {
 export function useSessions(client: Client): SessionsView {
   const [sessions, setSessions] = useState<readonly Session[]>([])
   const [loading, setLoading] = useState(true)
+  const [truncated, setTruncated] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [revision, setRevision] = useState(0)
+  // A failure of our own is described with the server the client is pointed at, so a request
+  // that never arrived can say where it did not arrive.
+  const { serverUrl } = useSettings()
 
   useEffect(() => {
     const controller = new AbortController()
     const load = async (): Promise<void> => {
       setLoading(true)
+      // All of them, one page at a time: the sidebar is the only way to an older chat, so a
+      // list that stops after the first page hides those chats for good.
+      let firstPage = true
       try {
-        const response = await client.sessions.list(
-          { limit: SESSION_PAGE_SIZE },
-          { signal: controller.signal },
+        const result = await listAllPages(
+          (query, options) => client.sessions.list(query, options),
+          {
+            signal: controller.signal,
+            onPage: (page) => {
+              if (controller.signal.aborted) {
+                return
+              }
+              // The first page shows as soon as it arrives — the sidebar stays usable while
+              // the rest of a long list loads behind it.
+              if (firstPage) {
+                firstPage = false
+                setSessions(page)
+              } else {
+                setSessions((current) => appendUnseen(current, page))
+              }
+            },
+          },
         )
         if (controller.signal.aborted) {
           return
         }
-        setSessions(response.data)
+        setTruncated(result.truncated)
         setError(null)
       } catch (caught) {
         if (!controller.signal.aborted) {
-          setError(describeError(caught))
+          setError(describeError(caught, { serverUrl }))
         }
       } finally {
         if (!controller.signal.aborted) {
@@ -55,7 +78,7 @@ export function useSessions(client: Client): SessionsView {
 
     void load()
     return () => controller.abort()
-  }, [client, revision])
+  }, [client, revision, serverUrl])
 
   const refresh = useCallback(() => {
     setRevision((current) => current + 1)
@@ -69,12 +92,12 @@ export function useSessions(client: Client): SessionsView {
         setError(null)
         return session
       } catch (caught) {
-        setError(describeError(caught))
+        setError(describeError(caught, { serverUrl }))
         return null
       }
     },
-    [client],
+    [client, serverUrl],
   )
 
-  return { sessions, loading, error, create, refresh }
+  return { sessions, loading, truncated, error, create, refresh }
 }

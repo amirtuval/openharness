@@ -28,6 +28,45 @@ export function makeFake(options: FakeClientOptions = {}): FakeClient {
   return createFakeClient(options)
 }
 
+/** What one list request was asked for. */
+export interface ListRequest {
+  readonly limit: number | undefined
+  readonly page: string | undefined
+}
+
+/**
+ * Wrap a fake's two list endpoints so a test can see what the app asked them for.
+ *
+ * Paging is invisible from the rendered DOM — a list that followed `next_page` and one that
+ * happened to fit in a single page look the same — so the assertion "the requests carried the
+ * cursor" needs the requests themselves.
+ */
+export function recordListRequests(fake: FakeClient): {
+  readonly agents: ListRequest[]
+  readonly sessions: ListRequest[]
+} {
+  const agents: ListRequest[] = []
+  const sessions: ListRequest[] = []
+  const listAgents = fake.agents.list.bind(fake.agents)
+  const listSessions = fake.sessions.list.bind(fake.sessions)
+
+  fake.agents.list = (params, options) => {
+    agents.push({ limit: params?.limit, page: params?.page })
+    return listAgents(params, options)
+  }
+  fake.sessions.list = (params, options) => {
+    sessions.push({ limit: params?.limit, page: params?.page })
+    return listSessions(params, options)
+  }
+
+  return { agents, sessions }
+}
+
+/** The sidebar's list of chats, as the elements it renders. */
+export function sessionRows(): HTMLElement[] {
+  return [...document.querySelectorAll<HTMLElement>('nav[aria-label="Chats"] li')]
+}
+
 /** The message element for a role — the first one, for the single-message cases. */
 export function messageElement(role: 'user' | 'agent'): Element | null {
   return document.querySelector(`[data-role="${role}"]`)
