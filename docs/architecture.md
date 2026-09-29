@@ -18,8 +18,40 @@ that core. This document stays at that level; package details live in each packa
 ## Status
 
 The v1 epic ([#2](https://github.com/amirtuval/openharness/issues/2), "v1 chat") is in
-progress: a chat server with a web UI and a TUI. The epic tracks which packages are done. Each
-package's `AGENTS.md` describes what that package currently implements.
+progress: a chat server with a web UI and a TUI. What works end to end today: agents and
+sessions, a chat turn with streamed previews, steering a turn in flight, interrupting it,
+automatic retries of a failed model request, and sessions that survive the process that was
+running them — a turn a dead server left open is closed as `brain_lost` and run again by the
+next one. Several servers can share one database (`SCHEDULER=postgres`): they split the session
+space into leased partitions, and when one dies another takes its partitions over and finishes
+its turns (see `apps/server/docs/scheduling.md`).
+
+## How it runs
+
+One process serves the whole thing. `@openharness/server` is a Hono app that answers the HTTP
+API under `/v1`, streams a session's log over SSE, serves the built web app at `/`, and runs
+the brains: a scheduler picks up the sessions that need work and runs a turn against each of
+them. The store is Postgres when there is a `DATABASE_URL` (the server applies the migrations
+on boot) and in memory when there is not — which is for a quick trial, and says so at startup.
+
+```
+  web app ─┐                                     ┌─ brain ──► hands
+           ├─► @openharness/client ──► server ───┤
+  oh ──────┘   (HTTP + SSE)          (API, SSE, └─ session (append-only log)
+                                      scheduler)      │
+                                                      ▼
+                                                 Postgres
+```
+
+The clients — the web app and the TUI — talk to the server only through
+`@openharness/client`, and every piece of chat state in both of them comes from the same
+transcript reducer over the same events. That is why the end-to-end suite in
+[`e2e/`](../e2e/AGENTS.md) can drive the real server with the real client and say something
+about both frontends at once.
+
+The deployment in `docker-compose.yml` is the same shape in two containers: Postgres, and this
+server serving the web build it was built with (`OPENHARNESS_WEB_DIR`). One origin, one port,
+no CORS to configure.
 
 ## Package map
 
@@ -31,10 +63,10 @@ package's `AGENTS.md` describes what that package currently implements.
 | `@openharness/hands`    | `packages/hands`    | sandboxes and tools behind `execute(name, input)`          |
 | `@openharness/brain`    | `packages/brain`    | the stateless harness loop                                 |
 | `@openharness/client`   | `packages/client`   | client for the server, used by the web app and the TUI     |
-| `@openharness/server`   | `apps/server`       | Hono HTTP server: the chat API, SSE and the scheduler      |
+| `@openharness/server`   | `apps/server`       | Hono HTTP server: the chat API, SSE, the scheduler         |
 | `@openharness/web`      | `apps/web`          | Vite + React chat UI (Tailwind + shadcn/ui)                |
 | `@openharness/cli`      | `apps/tui`          | Ink + React terminal UI, installed as `oh`                 |
-| `@openharness/e2e`      | `e2e`               | cross-package tests                                        |
+| `@openharness/e2e`      | `e2e`               | cross-package tests: real servers, real Postgres           |
 
 ## Allowed dependency graph
 
@@ -71,3 +103,7 @@ Packages consume each other **only through built output**: the `exports` map poi
 `dist/` (`dist/index.js` + `dist/index.d.ts`), never at `src/`. Importing
 `@openharness/protocol` in `@openharness/brain` therefore requires protocol to be built first;
 turbo's `^build` dependency (and the per-package `yarn build:deps`) takes care of that.
+
+The `e2e` package follows the same rule in a different way: it does not import another
+package's internals, it _runs_ them — the built server in its own process, reached through
+`@openharness/server`'s exports.

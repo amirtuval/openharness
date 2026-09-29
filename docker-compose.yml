@@ -1,0 +1,70 @@
+# openharness, the way to run it: one Postgres, one server that serves the API and the web app.
+#
+#   docker compose up --build          # then open http://localhost:3000
+#
+# The server needs a model provider to answer with, so put a key in the environment or in a
+# `.env` file beside this one (see `.env.example`); without one it starts, serves the app and
+# fails every turn the way a missing credential should. `OPENHARNESS_TEST_MODEL=mock` runs the
+# deterministic test model instead, which is what the e2e suite uses.
+#
+# The credentials below are the *local* ones: the database is reachable from this compose
+# network only, and nothing here is meant to face the internet as it stands.
+
+name: openharness
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-openharness}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-openharness}
+      POSTGRES_DB: ${POSTGRES_DB:-openharness}
+    volumes:
+      # Postgres 18 keeps its data under /var/lib/postgresql (PGDATA is the version-specific
+      # directory inside it), so that is what is mounted.
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test:
+        ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-openharness} -d ${POSTGRES_DB:-openharness}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  server:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        # The server migrates on boot, so it must not start before Postgres accepts
+        # connections — and a container that has merely started is not yet one that does.
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-openharness}:${POSTGRES_PASSWORD:-openharness}@postgres:5432/${POSTGRES_DB:-openharness}
+      PORT: '3000'
+      # Provider credentials, passed through from the host environment or a `.env` file.
+      # The server does not read these itself: the model router does, when it resolves the
+      # provider an agent's model id names.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GOOGLE_GENERATIVE_AI_API_KEY: ${GOOGLE_GENERATIVE_AI_API_KEY:-}
+      # Optional: everything below is off unless it is set. `OPENHARNESS_TEST_MODEL=mock` runs
+      # the deterministic test model; `OPENHARNESS_API_KEY` requires `x-api-key` on /v1 (and
+      # then the same key has to be entered in the web app's settings).
+      OPENHARNESS_TEST_MODEL: ${OPENHARNESS_TEST_MODEL:-}
+      OPENHARNESS_API_KEY: ${OPENHARNESS_API_KEY:-}
+    ports:
+      - '3000:3000'
+    healthcheck:
+      # busybox wget, which the Alpine base image has: no curl to install just for this.
+      test: ['CMD', 'wget', '--quiet', '--output-document=-', 'http://127.0.0.1:3000/health']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  postgres-data:
