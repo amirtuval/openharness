@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react'
 
 import { describeError } from '../lib/errors'
 import { appendUnseen, listAllPages } from '../lib/paging'
+import { useSettings } from './use-settings'
 
 /** Everything the agents screen needs. */
 export interface AgentsView {
@@ -29,6 +30,9 @@ export function useAgents(client: Client): AgentsView {
   const [loading, setLoading] = useState(true)
   const [truncated, setTruncated] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // A failure of our own is described with the server the client is pointed at, so a request
+  // that never arrived can say where it did not arrive.
+  const { serverUrl } = useSettings()
 
   useEffect(() => {
     const controller = new AbortController()
@@ -61,7 +65,7 @@ export function useAgents(client: Client): AgentsView {
         setError(null)
       } catch (caught) {
         if (!controller.signal.aborted) {
-          setError(describeError(caught))
+          setError(describeError(caught, { serverUrl }))
         }
       } finally {
         if (!controller.signal.aborted) {
@@ -72,7 +76,7 @@ export function useAgents(client: Client): AgentsView {
 
     void load()
     return () => controller.abort()
-  }, [client])
+  }, [client, serverUrl])
 
   const create = useCallback(
     async (body: CreateAgentRequest): Promise<Agent | null> => {
@@ -82,11 +86,11 @@ export function useAgents(client: Client): AgentsView {
         setError(null)
         return created
       } catch (caught) {
-        setError(describeError(caught))
+        setError(describeError(caught, { serverUrl }))
         return null
       }
     },
-    [client],
+    [client, serverUrl],
   )
 
   const update = useCallback(
@@ -97,11 +101,11 @@ export function useAgents(client: Client): AgentsView {
         setError(null)
         return updated
       } catch (caught) {
-        setError(describeError(caught))
+        setError(describeError(caught, { serverUrl }))
         return null
       }
     },
-    [client],
+    [client, serverUrl],
   )
 
   const dismissError = useCallback(() => {

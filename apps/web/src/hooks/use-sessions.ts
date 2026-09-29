@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react'
 
 import { describeError } from '../lib/errors'
 import { appendUnseen, listAllPages } from '../lib/paging'
+import { useSettings } from './use-settings'
 
 /** Everything the session list needs, plus creating one. */
 export interface SessionsView {
@@ -28,6 +29,9 @@ export function useSessions(client: Client): SessionsView {
   const [truncated, setTruncated] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [revision, setRevision] = useState(0)
+  // A failure of our own is described with the server the client is pointed at, so a request
+  // that never arrived can say where it did not arrive.
+  const { serverUrl } = useSettings()
 
   useEffect(() => {
     const controller = new AbortController()
@@ -63,7 +67,7 @@ export function useSessions(client: Client): SessionsView {
         setError(null)
       } catch (caught) {
         if (!controller.signal.aborted) {
-          setError(describeError(caught))
+          setError(describeError(caught, { serverUrl }))
         }
       } finally {
         if (!controller.signal.aborted) {
@@ -74,7 +78,7 @@ export function useSessions(client: Client): SessionsView {
 
     void load()
     return () => controller.abort()
-  }, [client, revision])
+  }, [client, revision, serverUrl])
 
   const refresh = useCallback(() => {
     setRevision((current) => current + 1)
@@ -88,11 +92,11 @@ export function useSessions(client: Client): SessionsView {
         setError(null)
         return session
       } catch (caught) {
-        setError(describeError(caught))
+        setError(describeError(caught, { serverUrl }))
         return null
       }
     },
-    [client],
+    [client, serverUrl],
   )
 
   return { sessions, loading, truncated, error, create, refresh }

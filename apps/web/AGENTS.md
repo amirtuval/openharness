@@ -160,6 +160,31 @@ was already added by a `create` while the walk was running), so the sidebar is u
 the rest of a long list is still loading. Both also return `truncated`, and neither decodes a
 cursor itself.
 
+## Errors
+
+`src/lib/errors.ts` turns anything thrown into the one line a banner shows
+(`describeError(error, context)`), and it is the only place that decides what a failure is
+called. Its wording follows the TUI's (`apps/tui/src/errors.ts`) without importing from it —
+the frontends share the protocol and the client, not their errors.
+
+- **A request that never reached the server** is caught by what `fetch` throws, which is not
+  the same in every browser: a `TypeError` saying "Failed to fetch" (Chromium), "NetworkError
+  when attempting to fetch resource." (Firefox) or "Load failed" (Safari), or "fetch failed"
+  with `ECONNREFUSED`/`ENOTFOUND`/… in the `cause` chain under Node. The client wraps none of
+  this — only an answer from the server becomes an `ApiError` — so the original error is what
+  arrives, and the browser's words ("Failed to fetch") are what the reader used to see. It now
+  reads `Can't reach the openharness server at <url>. Check that it's running, or change the
+server URL in Settings.`, with **this site** in place of the URL when the setting is empty
+  and the app is calling its own origin.
+- **A key the server will not take** (401/403) keeps the server's own message and adds
+  `Check the API key in Settings.`
+- **Everything else** keeps its message; an abort is "The request was cancelled." rather than
+  a failure.
+
+The context is the configured server URL, read from the settings store by the three hooks that
+catch (`use-session`, `use-sessions`, `use-agents`) — the same store the client is built from,
+so the URL in the message is the URL that was called.
+
 ## The responsive shell
 
 The sidebar is a fixed 256px column, and at 390px that is two thirds of the screen: the chat

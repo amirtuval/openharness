@@ -1,8 +1,10 @@
+import { ApiError } from '@openharness/client'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 
 import { App } from './App'
+import { saveSettings } from './lib/settings'
 import {
   agentText,
   isStreaming,
@@ -224,6 +226,36 @@ describe('App', () => {
     render(<App client={fake} />)
 
     expect(await screen.findByRole('alert')).toHaveTextContent('No session')
+  })
+
+  it('names the server the app could not reach, instead of the browser’s "Failed to fetch"', async () => {
+    const user = userEvent.setup({ delay: null })
+    const fake = makeFake()
+    // What `fetch` throws when nothing is listening: the browser's TypeError, which the
+    // client passes through rather than wrapping.
+    fake.sendMessage = () => Promise.reject(new TypeError('Failed to fetch'))
+    saveSettings({ serverUrl: 'http://localhost:3000' })
+    renderApp(fake)
+
+    await user.type(await screen.findByLabelText('Message'), 'anyone there?')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(
+      "Can't reach the openharness server at http://localhost:3000. Check that it's running, or change the server URL in Settings.",
+    )
+    expect(alert).not.toHaveTextContent('Failed to fetch')
+  })
+
+  it('hints at the API key when the server will not take it', async () => {
+    const fake = makeFake()
+    fake.sessions.list = () => Promise.reject(new ApiError(401, 'Invalid API key.'))
+
+    renderApp(fake, { hash: '#/' })
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'The server rejected the request (401): Invalid API key. Check the API key in Settings.',
+    )
   })
 })
 
