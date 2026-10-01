@@ -27,13 +27,14 @@ import {
 } from './support'
 
 /**
- * Recreate the server container with a different provider credential.
+ * Recreate the server container with a different environment.
  *
  * Changing a service's environment is what makes compose recreate it; `stop`/`start` would
- * leave the process holding the old one. The key is handed over in the child's environment and
- * is never written anywhere — see the note about credentials at the top of this pass.
+ * leave the process holding the old one. What the scenarios below change is the **vault's
+ * master key** (`OPENHARNESS_SECRETS_KEY`, A5): nothing reads a provider key from the
+ * environment any more, so the environment is only where a deployment's own secrets live.
  */
-function restartServerWith(env: { readonly OPENAI_API_KEY: string }): void {
+function restartServerWith(env: { readonly OPENHARNESS_SECRETS_KEY: string }): void {
   composeServer(env, 'up', '-d', 'server')
 }
 
@@ -60,6 +61,11 @@ async function sendAndWaitForReply(page: Page, text: string): Promise<boolean> {
   }
 }
 
+/** The provider the pass has a key for, and the model whose provider it has none for (A5). */
+const QA_PROVIDER = process.env.QA_PROVIDER ?? 'openai'
+const QA_PROVIDER_KEY = process.env.QA_PROVIDER_KEY ?? ''
+const QA_MISSING_MODEL = process.env.QA_MISSING_MODEL ?? 'groq/llama-3.3-70b-versatile'
+
 /** W11 — failures: a retry, a terminal error, and a server that is not there. */
 test.describe('W11 errors', () => {
   test('W11a a retryable failure shows the retry and then succeeds', async ({
@@ -77,7 +83,11 @@ test.describe('W11 errors', () => {
     await openChat(page, session.id)
     await recordRendering(page)
 
-    await sendFromComposer(page, '__fail_retryable__ please answer anyway')
+    // The prompt carries a per-run suffix: the mock counts attempts **per prompt text**, and
+    // lives as long as the server process — so without it a second pass against the same
+    // running stack sends a prompt the model has already failed once, and the retry this
+    // scenario is about never happens (`apps/server/src/mock-model.ts`, `AttemptCounter`).
+    await sendFromComposer(page, `__fail_retryable__ please answer anyway ${uniqueName('pass')}`)
 
     await expect(page.locator('article[data-role="agent"]').last()).toContainText(
       'please answer anyway',
@@ -303,26 +313,32 @@ test.describe('W11 errors', () => {
   }) => {
     test.skip(!isRealModel, 'without a real router there is no provider to miss a credential for')
 
-    // There is no Anthropic key in this environment on purpose: a missing credential has to
-    // read as a missing credential rather than as a hang or a retry storm.
+    // This pass stores no key for the missing provider on purpose: a missing credential has to
+    // read as a missing credential (A5) — with the way out — rather than as a hang or a retry
+    // storm. (`QA_MISSING_MODEL` names a provider the pass has no key for.)
     const agent = await createAgent(request, {
       name: uniqueName('QA W11e'),
-      model: 'anthropic/claude-sonnet-5',
+      model: QA_MISSING_MODEL,
       system: 'Answer briefly.',
     })
     const session = await createSession(request, agent.id)
     await openChat(page, session.id)
     await sendFromComposer(page, 'anything at all')
 
-    await test.step('the app names the credential that is missing', async () => {
+    await test.step('the app names the credential that is missing, and where to add it', async () => {
       const banner = page.getByRole('alert')
       await expect(banner).toBeVisible({ timeout: 60_000 })
-      await expect(banner).toContainText('ANTHROPIC_API_KEY')
+      await expect(banner).toContainText('missing_provider_credential')
+      await expect(banner).toContainText(/No .* key is set/i)
+      await expect(banner.getByRole('link', { name: /Settings/ })).toHaveAttribute(
+        'href',
+        '#/settings',
+      )
       await expect(status(page)).toHaveAttribute('aria-label', 'Status: Idle')
       await shot(page, 'w11-06-missing-credential')
     })
 
-    await test.step('the log says it failed once, terminally', async () => {
+    await test.step('the log says it failed once, and never retried', async () => {
       const log = await readEvents(request, session.id)
       const types = log.map((event) => String(event.type))
       const error = log.find((event) => event.type === 'session.error')?.error as {
@@ -330,12 +346,15 @@ test.describe('W11 errors', () => {
         message: string
         retry_status: { type: string }
       }
-      expect(error.retry_status.type, 'a missing key is not worth retrying').toBe('terminal')
-      expect(error.message).toContain('ANTHROPIC_API_KEY')
+      expect(error.type).toBe('missing_provider_credential')
+      // The protocol's rule for this type: it is never retried, so its retry status is
+      // `exhausted` — not the `terminal` a provider failure ends with.
+      expect(error.retry_status.type, 'a missing key is not worth retrying').toBe('exhausted')
+      expect(error.message).toMatch(/No .* key is set/i)
       expect(
         types.filter((type) => type === 'span.model_request_start'),
-        'asked the provider once, not three times',
-      ).toHaveLength(1)
+        'a request with no key is never made',
+      ).toHaveLength(0)
       expect(types).not.toContain('session.status_rescheduled')
       expect(types.at(-1)).toBe('session.status_idle')
     })
@@ -347,16 +366,20 @@ test.describe('W11 errors', () => {
           timeout: 60_000,
           message: 'the second message should have started and ended a turn of its own',
         })
-        .toBe('2:session.status_idle')
+        .toBe('0:session.status_idle')
       await expect(status(page)).toHaveAttribute('aria-label', 'Status: Idle')
     })
   })
 
-  test('W11f an invalid provider key is reported, and restoring it recovers the session', async ({
+  test('W11f a credential the vault cannot open fails closed, and the key recovers it', async ({
     page,
     request,
   }) => {
-    test.skip(!isRealModel, 'a provider that is never called cannot reject a key')
+    test.skip(!isRealModel, 'the mock model needs no credential, so none can fail to open')
+    test.skip(
+      QA_PROVIDER_KEY === '',
+      'set QA_PROVIDER (and QA_PROVIDER_KEY) so the scenario has a credential to break',
+    )
     test.skip(
       process.env.QA_ALLOW_SERVER_RESTART !== '1',
       'set QA_ALLOW_SERVER_RESTART=1 to recreate the server container',
@@ -368,48 +391,52 @@ test.describe('W11 errors', () => {
       system: 'Answer briefly.',
     })
     const session = await createSession(request, agent.id)
-    await openChat(page, session.id)
+
+    // Store a working key first (the PUT validates it against the provider, A5).
+    const stored = await request.put(`/v1/provider-credentials/${QA_PROVIDER}`, {
+      data: { type: 'api_key', api_key: QA_PROVIDER_KEY },
+    })
+    expect(stored.status(), await stored.text()).toBe(200)
 
     try {
-      await test.step('the server is restarted holding a key the provider rejects', async () => {
-        restartServerWith({ OPENAI_API_KEY: 'invalid' })
+      await test.step('the master key is rotated to one nothing was sealed with', async () => {
+        restartServerWith({
+          OPENHARNESS_SECRETS_KEY: Buffer.from(
+            'qa-rotated-master-key-32-bytes-ope',
+            'utf8',
+          ).toString('base64'),
+        })
         await waitForHealth()
       })
 
-      await test.step('the turn fails once, terminally', async () => {
-        await sendFromComposer(page, 'with a key the provider will not take')
-        await expect(page.getByRole('alert')).toBeVisible({ timeout: 60_000 })
-        await expect(status(page)).toHaveAttribute('aria-label', 'Status: Idle')
-        await shot(page, 'w11-07-invalid-key')
+      await test.step('the turn fails closed, naming the missing credential', async () => {
+        await openChat(page, session.id)
+        await sendFromComposer(page, 'with a credential the vault cannot open')
 
-        const log = await readEvents(request, session.id)
-        const types = log.map((event) => String(event.type))
-        const error = log.find((event) => event.type === 'session.error')?.error as {
-          type: string
-          message: string
-          retry_status: { type: string }
-        }
-        expect(error.retry_status.type, 'a rejected key is not worth retrying').toBe('terminal')
-        expect(error.message.toLowerCase(), 'the message says the key was the problem').toMatch(
-          /api key|incorrect|invalid|authentication/,
-        )
-        expect(
-          types.filter((type) => type === 'span.model_request_start'),
-          'asked the provider once, not three times',
-        ).toHaveLength(1)
-        expect(types).not.toContain('session.status_rescheduled')
+        // A key that cannot be opened is a *missing* credential: the turn ends before any
+        // request, and the row is still there to be fixed rather than silently ignored.
+        const banner = page.getByRole('alert')
+        await expect(banner).toBeVisible({ timeout: 60_000 })
+        await expect(banner).toContainText('missing_provider_credential')
+        await expect(status(page)).toHaveAttribute('aria-label', 'Status: Idle')
+        await shot(page, 'w11-07-key-that-does-not-open')
+
+        const types = await eventTypes(request, session.id)
+        expect(types.filter((type) => type === 'span.model_request_start')).toHaveLength(0)
         expect(types.at(-1)).toBe('session.status_idle')
       })
     } finally {
-      // Whatever happened above, put the real credential back: every scenario after this one
-      // runs against the same server.
-      restartServerWith({ OPENAI_API_KEY: process.env.OPENAI_API_KEY ?? '' })
+      // Whatever happened above, put the stack's own master key back: every scenario after
+      // this one runs against the same server.
+      restartServerWith({
+        OPENHARNESS_SECRETS_KEY: process.env.OPENHARNESS_SECRETS_KEY ?? '',
+      })
       await waitForHealth()
     }
 
-    await test.step('the same session works once the key is right again', async () => {
-      await sendFromComposer(page, 'and now with the key that works')
-      await waitForAnswer(page, 'and now with the key that works', { timeoutMs: 90_000 })
+    await test.step('the same session works once the vault can open the key again', async () => {
+      await sendFromComposer(page, 'and now with the key that opens')
+      await waitForAnswer(page, 'and now with the key that opens', { timeoutMs: 90_000 })
       await expect(status(page)).toHaveAttribute('aria-label', 'Status: Idle')
       await expect(page.getByRole('alert'), 'the error is gone').toHaveCount(0)
       await shot(page, 'w11-08-key-restored')

@@ -94,7 +94,7 @@ test.describe('W10 agents', () => {
     const name = uniqueName('QA W10b')
     await page.goto('/#/agents')
     await page.getByLabel('Name').fill(name)
-    await page.getByLabel('Model').fill('openai/gpt-5.1')
+    await page.getByLabel('Model', { exact: true }).fill('openai/gpt-5.1')
     await page.getByLabel('System prompt').fill('You are terse.')
     await page.getByRole('button', { name: 'Create agent' }).click()
     await expect(page.getByRole('status').filter({ hasText: `Created ${name}` })).toBeVisible()

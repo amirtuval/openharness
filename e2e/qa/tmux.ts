@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process'
+import { existsSync, rmSync, statSync } from 'node:fs'
 import path from 'node:path'
 
 import { expect, type Page } from '@playwright/test'
@@ -19,6 +20,47 @@ const SHOT_DIR = process.env.QA_SHOT_DIR ?? 'qa-output'
 export const CLI_CWD = process.env.QA_OH_CWD ?? '../'
 export const CLI_COMMAND = process.env.QA_OH_CLI ?? 'node apps/tui/dist/index.js'
 export const CLI_SERVER = process.env.QA_BASE_URL ?? 'http://localhost:3000'
+
+/**
+ * The config directory the QA run's `oh` reads and writes.
+ *
+ * `oh` stores its session token in `$XDG_CONFIG_HOME/openharness/credentials.json` (0600), and
+ * the QA run must not touch the developer's own file: this is a scratch directory beside the
+ * screenshots. Every command the specs run names it explicitly, because the tmux server's
+ * environment — which a pane inherits — is not this process's.
+ */
+export const CLI_CONFIG_HOME = process.env.QA_OH_CONFIG_HOME ?? path.resolve(SHOT_DIR, 'oh-config')
+
+/** Where `oh` keeps the token for the server under test. */
+export function cliCredentialsPath(): string {
+  return path.join(CLI_CONFIG_HOME, 'openharness', 'credentials.json')
+}
+
+/** Forget any token a previous QA run left behind, so a login scenario starts signed out. */
+export function forgetCliCredentials(): void {
+  rmSync(path.dirname(cliCredentialsPath()), { recursive: true, force: true })
+}
+
+/**
+ * A shell line that runs `oh` against the server under test, with the QA run's own config
+ * directory.
+ *
+ * ```ts
+ * terminal.run(ohCommand('login', '--no-browser'))
+ * terminal.run(ohCommand('sessions'))
+ * ```
+ */
+export function ohCommand(...args: string[]): string {
+  return [`XDG_CONFIG_HOME=${CLI_CONFIG_HOME}`, CLI_COMMAND, '--server', CLI_SERVER, ...args].join(
+    ' ',
+  )
+}
+
+/** The mode bits of the stored credentials, when there are any. */
+export function cliCredentialsMode(): number | null {
+  const file = cliCredentialsPath()
+  return existsSync(file) ? statSync(file).mode & 0o777 : null
+}
 
 export class Terminal {
   constructor(
@@ -185,6 +227,99 @@ export class Terminal {
 
 function escapeHtml(text: string): string {
   return text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+}
+
+// --- signing the CLI in ---------------------------------------------------------------------
+
+/**
+ * The line `oh login --no-browser` prints: the URL to open, and the code it shows.
+ *
+ * `apps/tui/src/commands/auth.ts` writes it when no browser was opened — with `--no-browser`,
+ * or on a machine with no display. The URL is the web app's approval route
+ * (`<server>/#/device?user_code=…`), which is what {@link approveInBrowser} opens.
+ *
+ * The whitespace between the words is deliberate: a pane narrower than the line breaks it
+ * across two rows, and `capture-pane` reports that as a newline.
+ */
+export const CLI_LOGIN_HINT = /Open (\S+) in your browser and enter the code\s+(\S+?)\s*\./
+const CLI_LOGGED_IN = /Logged in as (\S+) on (\S+)/
+
+/**
+ * Approve a device code the way a person does: open the URL `oh login` printed and press
+ * Approve on the page.
+ *
+ * The page has to be signed in already (the device approval is a signed-in action, A6); the
+ * specs hand this the session-carrying page the fixtures built.
+ */
+export async function approveInBrowser(page: Page, url: string): Promise<void> {
+  await page.goto(url)
+  await expect(page.getByRole('heading', { name: 'Approve a CLI login' })).toBeVisible()
+  await page.getByRole('button', { name: 'Approve' }).click()
+  await expect(page.getByText('Approved')).toBeVisible()
+}
+
+/**
+ * Run a full `oh login --no-browser`, approved in the browser, and wait for it to finish.
+ *
+ * @returns the printed URL and the user code, for a spec that wants to assert on them
+ */
+export async function loginCli(
+  terminal: Terminal,
+  page: Page,
+): Promise<{ url: string; userCode: string }> {
+  terminal.run(ohCommand('login', '--no-browser'))
+  const hint = await terminal.waitFor(CLI_LOGIN_HINT, 30_000)
+  const [, url, userCode] = hint
+  if (url === undefined || userCode === undefined) {
+    throw new Error(`the login hint was not readable: ${hint[0]}`)
+  }
+  await approveInBrowser(page, url)
+  await terminal.waitFor(CLI_LOGGED_IN, 60_000)
+  return { url, userCode }
+}
+
+/** The email `oh` reported, once it has signed in. */
+export async function loggedInAs(terminal: Terminal): Promise<string> {
+  const match = await terminal.waitFor(CLI_LOGGED_IN, 30_000)
+  return match[1] ?? ''
+}
+
+/**
+ * Make sure `oh` has a token for the server under test, signing in through the device flow if
+ * it does not.
+ *
+ * The scenario specs are not about signing in, and a device login takes a browser and a poll:
+ * this checks with one cheap `oh whoami` and runs the flow only when the answer is "not signed
+ * in" — which is also what makes it correct after a spec has signed out. The token lands in
+ * the QA run's own config directory, where every `ohCommand` finds it.
+ */
+export async function ensureCliSignedIn(page: Page): Promise<void> {
+  if (cliIsSignedIn()) {
+    return
+  }
+  // Wide on purpose: the login line names a URL and a code, and a narrow pane wraps it.
+  const terminal = new Terminal('oh-qa-login', 120, 24)
+  terminal.start()
+  try {
+    await loginCli(terminal, page)
+  } finally {
+    terminal.kill()
+  }
+}
+
+/** Whether `oh` holds a token the server still accepts — asked with a real request. */
+function cliIsSignedIn(): boolean {
+  try {
+    execFileSync('node', ['apps/tui/dist/index.js', 'whoami', '--server', CLI_SERVER], {
+      cwd: CLI_CWD,
+      encoding: 'utf8',
+      env: { ...process.env, XDG_CONFIG_HOME: CLI_CONFIG_HOME },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    return true
+  } catch {
+    return false
+  }
 }
 
 /** The label every line of an agent message starts with (`components/message-view.tsx`). */
