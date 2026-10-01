@@ -9,6 +9,12 @@ import {
 } from '@openharness/protocol'
 import type { SessionStore, Unsubscribe } from '@openharness/session'
 
+import {
+  DEFAULT_SESSION_RECHECK_MS,
+  startSessionRecheck,
+  type SessionRecheck,
+} from './session-watch'
+
 /**
  * The server side of `GET /v1/sessions/{id}/events/stream`.
  *
@@ -48,6 +54,16 @@ import type { SessionStore, Unsubscribe } from '@openharness/session'
  *
  * The resume position is the last `seq` the client saw, so a client that reconnects having
  * seen `seq: 7` gets 8, 9, 10 … and never 7 again.
+ *
+ * ## Ending with the session (epic #65, A2; issue #76)
+ *
+ * A stream is one long request, so the `/v1` guard validates the session once and never again.
+ * A connection therefore watches its own session: it joins the app's revocation registry — the
+ * route wires that with `trackRevocation` — so a revocation notification (sign-out, `oh
+ * logout`, an operator deleting the row, a `revoke-other-sessions`) closes it promptly, on
+ * whichever instance published; and it re-checks the session every `recheckMs`, which covers
+ * expiry and a missed notification. Either way the client gets a final `event: error` frame
+ * ({@link SSE_SESSION_INVALID}) before the stream ends.
  */
 
 /** How long the stream may be quiet before a `: ping` comment goes out. */
@@ -55,6 +71,31 @@ export const SSE_KEEPALIVE_MS = 15_000
 
 /** The keepalive comment; a `:` line is a comment to every SSE client. */
 export const SSE_KEEPALIVE = ': ping\n\n'
+
+/**
+ * The one sentence a stream says when the session behind it ended the connection (epic #65,
+ * A2; issue #76). The AI SDK adapter's error chunk carries the same words as the SSE frame.
+ */
+export const SESSION_INVALID_MESSAGE = 'the session behind this stream was revoked or has expired'
+
+/**
+ * The final frame a stream ends with when the session behind it is revoked or has expired
+ * (epic #65, A2; issue #76).
+ *
+ * The payload is the protocol's error envelope with the reason, so a client that reads SSE
+ * frames can tell "your session is gone" from "the server went away" and route to sign-in
+ * instead of reconnecting — and an `EventSource` client, for which `error` is the reserved
+ * event name, fires its error handler. `@openharness/client` does not decode this frame (it
+ * is not a `StreamEvent` and is skipped like any unknown message); it learns the same fact
+ * from the 401 its own reconnect gets, which is not retryable and stops the stream loop.
+ */
+export const SSE_SESSION_INVALID = `event: error\ndata: ${JSON.stringify({
+  type: 'error',
+  error: {
+    type: 'authentication_error',
+    message: SESSION_INVALID_MESSAGE,
+  },
+})}\n\n`
 
 /** Headers every SSE response carries. */
 export const SSE_HEADERS: Record<string, string> = {
@@ -107,34 +148,76 @@ export interface SessionEventStreamOptions {
   readonly keepaliveMs?: number
   /** Aborting this ends the stream; the responder's own disconnect signal. */
   readonly signal?: AbortSignal
+  /**
+   * Register this stream's close hook with the app's revocation registry (epic #65, A2; issue
+   * #76) — the route passes `(close) => revocations.open(session.id, close)`. When the auth
+   * session behind the connection is revoked, the registry calls the hook and the stream ends
+   * with {@link SSE_SESSION_INVALID}.
+   *
+   * Omitted means the connection is not closed by a revocation, which is what a unit test of
+   * the stream itself wants.
+   */
+  readonly trackRevocation?: (close: () => void) => Unsubscribe
+  /**
+   * Re-validate the auth session — it exists, and it has not expired — while the stream is
+   * open (epic #65, A2; issue #76). The backstop for an expired session and for a revocation
+   * notification that was missed; `false` ends the stream with {@link SSE_SESSION_INVALID}.
+   */
+  readonly revalidate?: () => Promise<boolean>
+  /** How often {@link SessionEventStreamOptions.revalidate} runs; see the default constant. */
+  readonly recheckMs?: number
 }
 
 /**
+ * Why a stream ended, when it ends.
+ *
+ * `disconnect` is the client's own doing — an abort or a cancel — and needs no goodbye.
+ * `invalid_session` is a revocation or an expiry (epic #65, A2; issue #76): the client gets
+ * {@link SSE_SESSION_INVALID} before the connection closes, so it can route to sign-in.
+ */
+type EndReason = 'disconnect' | 'invalid_session'
+
+/**
  * The SSE body of a stream request: the replay, then everything that happens next, until the
- * client goes away.
+ * client goes away — or until the auth session behind the connection does (epic #65, A2; issue
+ * #76, see {@link SessionEventStreamOptions.trackRevocation} and
+ * {@link SessionEventStreamOptions.revalidate}).
  *
  * The returned stream is inert until something reads it — it is handed straight to a
  * `Response` — and cancelling it (which is what a client disconnect does to it) ends the
- * subscription and the keepalive timer with it.
+ * subscription, the keepalive timer and the re-check with it.
  */
 export function createSessionEventStream(
   options: SessionEventStreamOptions,
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder()
   const keepaliveMs = options.keepaliveMs ?? SSE_KEEPALIVE_MS
+  const recheckMs = options.recheckMs ?? DEFAULT_SESSION_RECHECK_MS
   const { store, sessionId, deltas } = options
 
   /** Events that arrived while the replay was still running; flushed once it is done. */
   const buffered: StreamEvent[] = []
   let wake: (() => void) | null = null
   let unsubscribe: Unsubscribe | null = null
+  let untrackRevocation: Unsubscribe | null = null
+  let recheck: SessionRecheck | null = null
+  let endReason: EndReason | null = null
   let closed = false
 
-  const close = (): void => {
+  const close = (reason: EndReason = 'invalid_session'): void => {
     if (closed) {
       return
     }
     closed = true
+    if (endReason === null) {
+      endReason = reason
+    }
+    const untrack = untrackRevocation
+    untrackRevocation = null
+    untrack?.()
+    const ticking = recheck
+    recheck = null
+    ticking?.stop()
     const off = unsubscribe
     unsubscribe = null
     off?.()
@@ -143,11 +226,33 @@ export function createSessionEventStream(
     resume?.()
   }
 
+  /**
+   * End the response: close everything, say goodbye if the session ended it, and end the
+   * body. Idempotent, and safe on every exit path — a client that went away gets nothing,
+   * because there is nobody left to tell.
+   */
+  const finalize = (controller: ReadableStreamDefaultController<Uint8Array>): void => {
+    close()
+    if (endReason === 'invalid_session') {
+      // The goodbye (epic #65, A2; issue #76): why the connection is ending, before it ends.
+      try {
+        controller.enqueue(encoder.encode(SSE_SESSION_INVALID))
+      } catch {
+        // The consumer already went away; there is nobody left to tell.
+      }
+    }
+    try {
+      controller.close()
+    } catch {
+      // The consumer already went away; there is nothing left to close.
+    }
+  }
+
   if (options.signal?.aborted === true) {
     // The client was already gone when the response was built; `abort` will not fire again.
-    close()
+    close('disconnect')
   } else {
-    options.signal?.addEventListener('abort', close, { once: true })
+    options.signal?.addEventListener('abort', () => close('disconnect'), { once: true })
   }
 
   /** Wait for an event, a close, or the keepalive interval — whichever comes first. */
@@ -167,18 +272,50 @@ export function createSessionEventStream(
 
   return new ReadableStream<Uint8Array>({
     async start(controller) {
+      // 0. Join the revocation registry first (epic #65, A2; issue #76), before the subscribe
+      //    below: a session revoked while the connection was still being set up must close it
+      //    too, and registering late would leave that revocation to the re-check.
+      if (!closed) {
+        untrackRevocation = options.trackRevocation?.(close) ?? null
+        if (closed) {
+          // `close` ran while the registration was in flight and saw nothing to untrack.
+          const untrack = untrackRevocation
+          untrackRevocation = null
+          untrack?.()
+        }
+      }
+      if (closed) {
+        finalize(controller)
+        return
+      }
+      if (options.revalidate !== undefined) {
+        // The backstop: expiry, and any revocation notification that was missed. `close`
+        // stamps the reason, and the response's end is where the final frame goes out.
+        recheck = startSessionRecheck({
+          intervalMs: recheckMs,
+          revalidate: options.revalidate,
+          onInvalid: () => close('invalid_session'),
+        })
+      }
+
       // 1. Subscribe before anything is read, so nothing that happens during the replay is
       //    missed. The store may deliver asynchronously; the buffer is what makes that safe.
-      unsubscribe = await store.subscribe(sessionId, (event) => {
-        buffered.push(event)
-        const resume = wake
-        wake = null
-        resume?.()
-      })
+      try {
+        unsubscribe = await store.subscribe(sessionId, (event) => {
+          buffered.push(event)
+          const resume = wake
+          wake = null
+          resume?.()
+        })
+      } catch (error) {
+        // The stream is erroring out; the reason is the caller's. Clean up and surface it.
+        close('disconnect')
+        throw error
+      }
       if (closed) {
         unsubscribe()
         unsubscribe = null
-        controller.close()
+        finalize(controller)
         return
       }
 
@@ -243,7 +380,7 @@ export function createSessionEventStream(
       try {
         await replay()
         flush()
-        // 4. Follow the session until the client goes away.
+        // 4. Follow the session until the client goes away — or the session behind it does.
         while (!closed) {
           const reason = await nextWake()
           if (closed) {
@@ -261,17 +398,12 @@ export function createSessionEventStream(
         close()
         return
       }
-      close()
-      try {
-        controller.close()
-      } catch {
-        // The consumer already went away; there is nothing left to close.
-      }
+      finalize(controller)
     },
 
     cancel() {
-      // The client disconnected: stop following the session and let the keepalive go.
-      close()
+      // The client disconnected: stop following the session, the keepalive and the re-check.
+      close('disconnect')
     },
   })
 }

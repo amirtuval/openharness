@@ -13,6 +13,8 @@ import type { SessionStore } from '@openharness/session'
 import type { AppEnv } from '../types'
 import { invalidRequest, notFoundError } from '../http/errors'
 import { sessionIdParam } from '../http/request'
+import { DEFAULT_SESSION_RECHECK_MS, startSessionRecheck } from '../session-watch'
+import { SESSION_INVALID_MESSAGE } from '../sse'
 import type { RouteDeps } from './deps'
 
 /**
@@ -37,6 +39,11 @@ import type { RouteDeps } from './deps'
  * `packages/brain`, "Preview and stored ids"). A `session.error` becomes an `error` chunk;
  * everything else in the log — spans, status transitions, the user's own events — has no UI
  * message equivalent and is skipped.
+ *
+ * The response is also long-lived, so it watches the auth session that opened it (epic #65,
+ * A2; issue #76) exactly as the SSE stream does: a revocation, or the periodic re-check
+ * finding the session gone or expired, ends the response with an `error` chunk carrying
+ * {@link SESSION_INVALID_MESSAGE} — the adapter's half of "a revoked session stops receiving".
  */
 export function registerAiSdkRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
   const chat = `${API_VERSION_PREFIX}/sessions/:session_id/ai-sdk/chat`
@@ -56,6 +63,22 @@ export function registerAiSdkRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
     // Follow the session before the message is appended: the turn may start — and finish —
     // before this handler returns, and a subscription established later would miss it.
     const live = await openSessionLive(deps.store, sessionId, c.req.raw.signal)
+    // The auth session behind this response (the guard resolved it): a revocation, or the
+    // re-check finding the session gone or expired, ends the response like a client
+    // disconnect does (epic #65, A2; issue #76) — `invalidSession` is what the error chunk
+    // below is written from, so the client can route to sign-in.
+    const authSession = c.get('session')
+    let invalidSession = false
+    const endInvalid = (): void => {
+      invalidSession = true
+      live.close()
+    }
+    const untrack = deps.revocations.open(authSession.id, endInvalid)
+    const recheck = startSessionRecheck({
+      intervalMs: deps.sessionRecheckMs ?? DEFAULT_SESSION_RECHECK_MS,
+      revalidate: () => deps.revalidateSession(c.req.raw.headers),
+      onInvalid: endInvalid,
+    })
     try {
       await deps.store.appendEvents(sessionId, [
         { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text }] },
@@ -68,10 +91,16 @@ export function registerAiSdkRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
           try {
             writer.write({ type: 'start' })
             await pumpTurn({ writer, live, signal: c.req.raw.signal })
+            if (invalidSession) {
+              writer.write({ type: 'error', errorText: SESSION_INVALID_MESSAGE })
+            }
           } finally {
-            // However the turn ended — idle, the client gone, an error — this request is
-            // done with the session. A subscription that outlives its reader would keep
-            // buffering every later event of the session for nobody.
+            // However the turn ended — idle, the client gone, an error, a revoked session —
+            // this request is done with the session. A subscription that outlives its reader
+            // would keep buffering every later event of the session for nobody, and a
+            // revocation registry entry that outlives its response would hold a dead closure.
+            recheck.stop()
+            untrack()
             live.close()
           }
         },
@@ -79,6 +108,8 @@ export function registerAiSdkRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
       })
       return createUIMessageStreamResponse({ stream })
     } catch (error) {
+      recheck.stop()
+      untrack()
       live.close()
       throw error
     }

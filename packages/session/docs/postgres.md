@@ -143,21 +143,22 @@ consequence is that **a migration file must never be edited once it has been app
 anywhere** — the runner will not re-run it, so an edit is silently ignored on existing
 databases while applying to new ones. Add a new file instead.
 
-| file                             | what it creates                                                                                     |
-| -------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `0001_agents.sql`                | `agents`, and the `(created_at, id)` index the agent list pages through                             |
-| `0002_sessions.sql`              | `sessions`, plus the indexes for the three ways sessions are queried                                |
-| `0003_events.sql`                | `events`, its uniqueness constraint and its two secondary indexes                                   |
-| `0004_partition_leases.sql`      | `partition_leases`                                                                                  |
-| `0005_events_id_unique.sql`      | the `unique` index that states the id guarantee (`events_id_key`) by name                           |
-| `0006_session_previews.sql`      | `session_previews`, the `unlogged` table of previews in flight                                      |
-| `0007_event_claims.sql`          | `event_claims`, the insert-only record of which events a turn claimed (D9)                          |
-| `0008_event_claims_backfill.sql` | the one-time copy of the pre-D9 `processed_at` values into claim rows (D9)                          |
-| `0009_event_supersessions.sql`   | `event_supersessions`, the insert-only record of the ranges events replace                          |
-| `0010_drop_session_previews.sql` | drops `session_previews`, the pre-D9 preview table (P4)                                             |
-| `0011_better_auth.sql`           | Better Auth's tables: `user`, `session`, `account`, `verification`, `deviceCode` (epic #65, A1)     |
-| `0012_ownership.sql`             | deletes the v1 data once, then `owner_id` on `agents` and `sessions` and the per-owner indexes (A4) |
-| `0013_provider_credentials.sql`  | `provider_credentials`, the sealed-blob table (epic #65, A5)                                        |
+| file                               | what it creates                                                                                     |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `0001_agents.sql`                  | `agents`, and the `(created_at, id)` index the agent list pages through                             |
+| `0002_sessions.sql`                | `sessions`, plus the indexes for the three ways sessions are queried                                |
+| `0003_events.sql`                  | `events`, its uniqueness constraint and its two secondary indexes                                   |
+| `0004_partition_leases.sql`        | `partition_leases`                                                                                  |
+| `0005_events_id_unique.sql`        | the `unique` index that states the id guarantee (`events_id_key`) by name                           |
+| `0006_session_previews.sql`        | `session_previews`, the `unlogged` table of previews in flight                                      |
+| `0007_event_claims.sql`            | `event_claims`, the insert-only record of which events a turn claimed (D9)                          |
+| `0008_event_claims_backfill.sql`   | the one-time copy of the pre-D9 `processed_at` values into claim rows (D9)                          |
+| `0009_event_supersessions.sql`     | `event_supersessions`, the insert-only record of the ranges events replace                          |
+| `0010_drop_session_previews.sql`   | drops `session_previews`, the pre-D9 preview table (P4)                                             |
+| `0011_better_auth.sql`             | Better Auth's tables: `user`, `session`, `account`, `verification`, `deviceCode` (epic #65, A1)     |
+| `0012_ownership.sql`               | deletes the v1 data once, then `owner_id` on `agents` and `sessions` and the per-owner indexes (A4) |
+| `0013_provider_credentials.sql`    | `provider_credentials`, the sealed-blob table (epic #65, A5)                                        |
+| `0014_auth_session_revocation.sql` | the `after delete` trigger on `"session"` that announces revoked sessions (#76)                     |
 
 To run them outside an application:
 
@@ -435,7 +436,10 @@ subscription:
 and `ohp_<partition>` for a partition's signals. A session id is arbitrary text and a channel
 name is a 63-byte identifier, so the session channel is a hash rather than the id itself.
 Channel names are quoted in `LISTEN`/`UNLISTEN`, and `pg_notify()` takes them as values, so
-the two never disagree about case.
+the two never disagree about case. The one revocation channel,
+`ohr_auth_session_revoked`, is a fixed name: revocations are rare and every listener has to
+hear about the sessions it holds open, so they share one channel and the payload names the
+session.
 
 **Payloads.** A notification is `{"seq": n}` — never the event, which is unbounded while a
 notification is not. A subscriber that sees it fetches `seq > lastSeen` in order, which is
@@ -453,6 +457,14 @@ hears one — not just the instance that sent it. A signal that nobody is listen
 dropped, exactly as the contract says. Note that missed signals are _not_ replayed on
 reconnect: they are hints, and a partition's new owner recovers by calling
 `findSessionsNeedingWork`.
+
+**Auth-session revocations** (epic #65, A2; issue #76) travel the same way, on the one
+`ohr_auth_session_revoked` channel, with the session **id** in the payload — never the token.
+The store's `notifyAuthSessionRevoked` publishes with `pg_notify` and `onAuthSessionRevoked`
+subscribes; the trigger test's counterpart in the database is
+`0014_auth_session_revocation.sql`, which announces every row deleted from `"session"`,
+whoever deleted it. A revocation missed while a listening connection was down is gone — it is
+a hint — and the server recovers by re-validating the session periodically.
 
 ## Running Postgres for this package's tests
 

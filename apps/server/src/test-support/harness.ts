@@ -177,6 +177,8 @@ export interface TestOptions {
   readonly drainTimeoutMs?: number
   /** The SSE keepalive interval. */
   readonly sseKeepaliveMs?: number
+  /** How often an open stream re-checks its auth session (#76); shortened by tests. */
+  readonly sessionRecheckMs?: number
   /** Which scheduler runs the brains; `local` unless the test asks for partitions. */
   readonly scheduler?: SchedulerKind
   /** This instance's id; the lease table's owner when the scheduler is the partitioned one. */
@@ -212,7 +214,7 @@ export function createTestApp(options: TestOptions = {}): TestContext {
     ...(options.drainTimeoutMs === undefined ? {} : { drainTimeoutMs: options.drainTimeoutMs }),
     onError: () => {},
   })
-  const auth = buildTestAuth(options, logger)
+  const auth = buildTestAuth(options, store, logger)
   const app = createApp({
     store,
     scheduler,
@@ -231,6 +233,9 @@ export function createTestApp(options: TestOptions = {}): TestContext {
     },
     ...(options.webDir === undefined ? {} : { webDir: options.webDir }),
     ...(options.sseKeepaliveMs === undefined ? {} : { sseKeepaliveMs: options.sseKeepaliveMs }),
+    ...(options.sessionRecheckMs === undefined
+      ? {}
+      : { sessionRecheckMs: options.sessionRecheckMs }),
     logger,
   })
   return context({
@@ -264,6 +269,9 @@ export async function startTestServer(options: TestOptions = {}): Promise<TestCo
     validateProviderCredential: options.validateProviderCredential ?? acceptAnyCredential,
     logger: silentLogger,
     ...(options.sseKeepaliveMs === undefined ? {} : { sseKeepaliveMs: options.sseKeepaliveMs }),
+    ...(options.sessionRecheckMs === undefined
+      ? {}
+      : { sessionRecheckMs: options.sessionRecheckMs }),
   })
   const baseUrl = `http://127.0.0.1:${started.port}`
   return context({
@@ -284,7 +292,7 @@ export async function startTestServer(options: TestOptions = {}): Promise<TestCo
 const acceptAnyCredential: ProviderCredentialValidator = () => Promise.resolve()
 
 /** The auth a test app runs with: Better Auth's memory adapter, dev login on by default. */
-function buildTestAuth(options: TestOptions, logger: Logger): Auth {
+function buildTestAuth(options: TestOptions, store: SessionStore, logger: Logger): Auth {
   const devLogin = options.devLogin ?? true
   const auth = createAuth(
     {
@@ -292,6 +300,11 @@ function buildTestAuth(options: TestOptions, logger: Logger): Auth {
       baseUrl: options.betterAuthUrl ?? TEST_PUBLIC_URL,
       devLogin,
       rateLimit: options.rateLimit ?? false,
+      // The same wiring `startServer` does: a deleted session is announced on the store's
+      // revocation channel, which is what closes its open streams (#76).
+      onSessionRevoked: (authSessionId) => {
+        void store.notifyAuthSessionRevoked(authSessionId).catch(() => undefined)
+      },
       providers: {
         ...(options.providers?.google === undefined ? {} : { google: options.providers.google }),
         ...(options.providers?.github === undefined ? {} : { github: options.providers.github }),

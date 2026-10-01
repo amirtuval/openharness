@@ -84,6 +84,9 @@ export function registerEventRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
       throw notFoundError(`no session with id ${sessionId}`)
     }
     const afterSeq = resumeFrom(c, query)
+    // The auth session behind the connection (the guard resolved it): the stream is closed
+    // when this session is revoked, and re-checks it while it is open (A2; issue #76).
+    const authSession = c.get('session')
     const stream = createSessionEventStream({
       store: deps.store,
       sessionId,
@@ -91,7 +94,10 @@ export function registerEventRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
       deltas: wantsDeltas(query),
       ...(afterSeq === undefined ? {} : { afterSeq }),
       ...(deps.sseKeepaliveMs === undefined ? {} : { keepaliveMs: deps.sseKeepaliveMs }),
+      ...(deps.sessionRecheckMs === undefined ? {} : { recheckMs: deps.sessionRecheckMs }),
       signal: c.req.raw.signal,
+      trackRevocation: (close) => deps.revocations.open(authSession.id, close),
+      revalidate: () => deps.revalidateSession(c.req.raw.headers),
     })
     return new Response(stream, { status: 200, headers: SSE_HEADERS })
   })

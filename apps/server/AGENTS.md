@@ -152,6 +152,22 @@ Better Auth's own schema check passes on the migrated database.
   any page's request; bearer requests are exempt, since a page cannot set that header
   cross-origin. `/v1/auth-config` is registered ahead of the guard; `/api/auth/*` is Better
   Auth's own.
+- **Revocation is immediate, and reaches open responses** (A2; issue #76). The guard validates
+  once per request, and an SSE stream is one long request — so the stream and the AI SDK
+  adapter watch their own session. `session-watch.ts` holds both halves:
+  `createSessionRevocations` keys every open response by the session **id** (`session.id`,
+  never the token) and is the app's `RouteDeps.revocations`; `startSessionRecheck` re-validates
+  the session with Better Auth (`auth.api.getSession` on the caller's own headers — the row
+  exists and has not expired) every `DEFAULT_SESSION_RECHECK_MS` (15 s, the "at most 30 s"
+  backstop), which is what closes a stream for an **expired** session and for a notification
+  that was missed. A revocation is published on the store's revocation channel
+  (`notifyAuthSessionRevoked`) by two sources: Better Auth's
+  `databaseHooks.session.delete.after` — sign-out, bearer `oh logout`, `revoke-other-sessions`,
+  every Better Auth deletion — wired in `auth.ts`/`main.ts`, and on Postgres a trigger on
+  `"session"` (`packages/session` migration `0014`), which is what catches an operator's plain
+  `delete`. Postgres announces with `NOTIFY`, so **every instance** closes its streams whichever
+  instance handled the revocation; the in-memory store does the same in-process. Payloads and
+  logs carry the session id only.
 - **Ownership** (A4): routes create with `c.get('user').id` and read through the store's
   **required** owner scope (`getAgent(…, { ownerId })`, `listAgents({ ownerId })`, …); another
   user's resource is a 404. The brain and the scheduler use the explicitly unscoped methods.
@@ -197,7 +213,11 @@ stack trace is never part of a response.
 - one message per event, `data: <the JSON StreamEvent>`;
 - every event carries `id: <seq>` — the resume position; every event is a stored one since P4,
   so the field is never absent;
-- `: ping` comments every 15 seconds when nothing else is happening.
+- `: ping` comments every 15 seconds when nothing else is happening;
+- `event: error` is the one named event, and it is the goodbye: the session behind the
+  connection was revoked or expired, the payload is the protocol's `authentication_error`
+  envelope, and the connection closes right after (see "Authentication and ownership" and
+  `SESSION_INVALID_MESSAGE` in `sse.ts`).
 
 The replay position comes from `after_seq` if the query carries it, otherwise from the
 `last-event-id` header a reconnecting client sends back, otherwise from nowhere — and "nowhere"
@@ -217,6 +237,15 @@ with `event_deltas[]=agent.message`, in **both** halves: a connection that did n
 sees a chunk in a replay either. Disconnecting cancels the body stream, and that is what ends
 the store subscription and the keepalive timer — there is nothing left running for a client
 that has gone away.
+
+The stream also ends when the **session** behind it does (A2; issue #76): the route registers
+the connection with the app's revocation registry and gives the stream a re-check, so a
+revocation closes it promptly — on every instance — and an expired session closes it within
+the re-check interval. The connection's last frame is `SSE_SESSION_INVALID`
+(`event: error`, the protocol's `authentication_error` envelope) whenever the stream ends for
+a session reason; a client disconnect sends nothing, because there is nobody to send it to.
+The AI SDK adapter follows the same rules with an `error` chunk carrying
+`SESSION_INVALID_MESSAGE`.
 
 ### Mid-reply connections (D9)
 
@@ -414,10 +443,15 @@ appended, so a turn that starts and finishes while the handler is still running 
 and it is released in a `finally` however the response ended, because a subscription that
 outlives its reader would keep buffering every later event of the session for nobody.
 
-`session.status_idle` is also the only thing that ends the response. A turn that dies without
-writing one (a store failure mid-turn, which the scheduler logs and drops) leaves the request
-open until the client disconnects: the client's own abort signal is what closes it. The
-protocol's SSE stream has the same stay-open-until-disconnected property.
+`session.status_idle` is also the only thing in the log that ends the response. A turn that
+dies without writing one (a store failure mid-turn, which the scheduler logs and drops) leaves
+the request open until the client disconnects: the client's own abort signal is what closes
+it. The protocol's SSE stream has the same stay-open-until-disconnected property.
+
+The session can also end the response (A2; issue #76): the adapter registers with the app's
+revocation registry and re-checks the session on a timer, exactly as the SSE stream does, and
+a revoked or expired session ends the response with an `error` chunk carrying
+`SESSION_INVALID_MESSAGE` — the same fact the SSE stream says with a final `event: error`.
 
 `trigger: 'regenerate-message'` is treated as "send the last user message again": v1 has no
 regenerate semantics, and answering the same prompt again is the closest honest reading.
@@ -464,6 +498,9 @@ drain.
 | `createSessionCredentialResolver(deps)`                                                                              | the session owner's sealed key, opened per model request (A5)                        |
 | `sealApiKey` / `openApiKey` / `credentialAad` / `credentialUpsert`                                                   | the credential sealing helpers (A5)                                                  |
 | `createAuthGuard(options)`                                                                                           | the `/v1` session + CSRF middleware (A2)                                             |
+| `createSessionRevocations(options)`                                                                                  | the registry of open responses a revocation closes, subscribed to the store (#76)    |
+| `startSessionRecheck(options)`, `DEFAULT_SESSION_RECHECK_MS`                                                         | the periodic session re-check of a long-lived response (#76)                         |
+| `SESSION_INVALID_MESSAGE`, `SSE_SESSION_INVALID`                                                                     | what a stream says when its session is revoked or expires (#76)                      |
 | `validateProviderApiKey`, `VALIDATABLE_PROVIDERS`                                                                    | the one cheap provider call a saved key is checked with                              |
 | `DEV_LOGIN_EMAIL`, `DEV_LOGIN_PASSWORD`, `DEV_LOGIN_STORED_EMAIL`                                                    | the documented dev user (A7)                                                         |
 | `OPENHARNESS_CLI_CLIENT_ID`, `DEVICE_CODE_EXPIRES_IN`                                                                | the device flow's client id and code lifetime (A6)                                   |
@@ -487,6 +524,7 @@ src/
   auth.ts               createAuth: Better Auth for this server (providers, plugins, sessions, dev login)
   auth-profile.ts       the A3 identity rules, and the provider options that enforce them
   auth-guard.ts         the /v1 session + CSRF middleware
+  session-watch.ts      revocation registry + periodic re-check for long-lived responses (#76)
   credentials.ts        sealing, opening and the session-bound credential resolver (A5)
   provider-validation.ts the one cheap provider call a saved key is checked with
   config.ts             the environment, parsed and checked
@@ -548,6 +586,14 @@ delete each other's sessions. Packages still run in parallel with each other.
   chunks are rows another instance can read, plus compaction against the real SQL. Same
   database rule as `partition-scheduler.test.ts`: `DATABASE_URL`, otherwise a container,
   otherwise skipped.
+- `sse-revocation.test.ts` — issue #76 over a real socket: a stream closes within about a
+  second when the session behind it signs out (cookie and bearer), is deleted through Better
+  Auth, or expires (the re-check, with its interval shortened); other sessions' and other
+  users' streams keep delivering; and the AI SDK adapter ends with the same error chunk.
+- `sse-revocation-postgres.test.ts` — the same closure where only a database can prove it:
+  two instances on one Postgres, the stream on one and the sign-out on the other (the
+  `NOTIFY` channel), and an operator's raw `delete from "session"` (the `0014` trigger).
+  Same database rule as the other Postgres suites.
 - `compaction.test.ts` — the job around `store.compact`: the retention window (nothing goes
   inside it, the superseded chunks go past it, idempotent), a reply still in flight staying
   put, the interval starting and stopping cleanly, `0` disabling it, a failing run that is

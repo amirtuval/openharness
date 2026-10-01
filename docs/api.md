@@ -158,6 +158,28 @@ data: {"type":"agent.message","id":"sevt_01H…","seq":12,"processed_at":"…","
   first with `GET …/events` (or `after_seq=0`) and pass the last `seq` to continue.
 - Comments (`: ping`, every 15 seconds) are keepalives and can be ignored.
 
+### When the session is revoked mid-stream
+
+A stream is one long request, so the server watches the session behind it (epic #65, A2): a
+sign-out, `oh logout`, "revoke other sessions" or an operator deleting the session row ends an
+open stream — on whichever instance holds it — within about a second, and an **expired**
+session ends it within at most half a minute (the periodic re-check; 15 seconds by default).
+
+What the client sees is one final frame before the connection closes:
+
+```
+event: error
+data: {"type":"error","error":{"type":"authentication_error","message":"the session behind this stream was revoked or has expired"}}
+```
+
+A client should treat it as it treats a 401 — stop reconnecting and route to sign-in.
+`@openharness/client` does exactly that in effect: it does not decode this frame (it is not a
+`StreamEvent`, so its parser skips it like any unknown message), it reconnects once as it
+would after any dropped connection, and the `401 authentication_error` that answers the
+reconnect is an `AuthenticationError` — never retryable — which stops the stream loop and
+tells the caller to sign in again. The AI SDK adapter's response says the same thing as an
+`error` chunk with the message above.
+
 ### Reloading mid-reply
 
 A client that connects while a reply is streaming — a reloaded page, a second tab — must not
@@ -226,7 +248,10 @@ curl localhost:3000/v1/me -H "Authorization: Bearer $TOKEN"
   on (it is off unless `OPENHARNESS_DEV_LOGIN=1`, and only ever on a localhost URL).
 
 - Sessions live in the database with a 7-day sliding expiry: every request looks the token
-  up, and a revoked one stops working immediately. There are no JWTs and no refresh tokens.
+  up, and a revoked one stops working immediately — **including the requests that are already
+  open**: an SSE stream (see [When the session is revoked mid-stream](#when-the-session-is-revoked-mid-stream))
+  and the AI SDK adapter's response end when the session behind them is revoked, or when it
+  expires. There are no JWTs and no refresh tokens.
 - **Sensitive actions require a fresh session**: `PUT` and `DELETE` on
   `/v1/provider-credentials` refuse a session older than the freshness window (one day after
   it was created) — with the same `401 authentication_error` as no session at all, which is

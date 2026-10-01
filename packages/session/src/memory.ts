@@ -60,6 +60,8 @@ import { assertEventIds, assertTtl, decodeKeyPage, decodeSeqPage, pageSize } fro
 import type {
   AppendableEvent,
   AppendEventsOptions,
+  AuthSessionId,
+  AuthSessionRevocationListener,
   CompactOptions,
   CreateSessionOptions,
   ListAgentsOptions,
@@ -140,6 +142,13 @@ export class InMemorySessionStore implements SessionStore {
   readonly #sessionListeners = new Map<string, Set<SessionEventListener>>()
 
   readonly #partitionListeners = new Map<number, Set<PartitionSignalListener>>()
+
+  /**
+   * Everyone listening for auth-session revocations (epic #65, issue #76). One set for the
+   * whole store rather than a map: unlike a session's events or a partition's signals, a
+   * revocation has no channel to key on — the notification names the session itself.
+   */
+  readonly #revocationListeners = new Set<AuthSessionRevocationListener>()
 
   constructor(options: InMemorySessionStoreOptions = {}) {
     this.#clock = options.now ?? systemClock
@@ -421,6 +430,24 @@ export class InMemorySessionStore implements SessionStore {
       if (listeners.size === 0) {
         this.#partitionListeners.delete(partition)
       }
+    })
+  }
+
+  // ------------------------------------------------- auth-session revocation
+
+  notifyAuthSessionRevoked(authSessionId: AuthSessionId): Promise<void> {
+    // Like a partition signal: at most once, to the listeners attached right now, in a
+    // microtask each so no listener runs while the notifier is still on the stack.
+    for (const listener of [...this.#revocationListeners]) {
+      queueMicrotask(() => void listener(authSessionId))
+    }
+    return resolved(undefined)
+  }
+
+  onAuthSessionRevoked(listener: AuthSessionRevocationListener): Promise<Unsubscribe> {
+    this.#revocationListeners.add(listener)
+    return resolved(() => {
+      this.#revocationListeners.delete(listener)
     })
   }
 

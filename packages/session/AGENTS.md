@@ -73,7 +73,8 @@ src/
     credentials-conformance.ts  runCredentialStoreConformance()
     clock.ts            createTestClock()
 migrations/             the SQL the Postgres stores need, applied by `migrate()`:
-                        0001–0010 the log, 0011 Better Auth, 0012 ownership, 0013 credentials
+                        0001–0010 the log, 0011 Better Auth, 0012 ownership, 0013 credentials,
+                        0014 the auth-session revocation trigger (#76)
 docs/postgres.md        the Postgres stores: schema, migrations, delivery, local setup
 ```
 
@@ -95,7 +96,8 @@ docs/postgres.md        the Postgres stores: schema, migrations, delivery, local
 | `CompactOptions`                                                                                                                                | what `compact()` takes: the retention cutoff (`olderThan: Date \| number`)                                                               |
 | `PartitionLease`, `PartitionSignal`, `PartitionSignalInput`, `PartitionSignalKind`                                                              | leases over a partition, and the signals sent to its owner                                                                               |
 | `TurnState`, `TurnStateKind`                                                                                                                    | what `getTurnState()` answers                                                                                                            |
-| `SessionEventListener`, `PartitionSignalListener`, `Unsubscribe`                                                                                | subscription plumbing                                                                                                                    |
+| `SessionEventListener`, `PartitionSignalListener`, `AuthSessionRevocationListener`, `Unsubscribe`                                               | subscription plumbing                                                                                                                    |
+| `AuthSessionId`                                                                                                                                 | a Better Auth session id (A2) — deliberately not a `SessionId`, which names a log                                                        |
 | `InMemorySessionStore`, `InMemorySessionStoreOptions`                                                                                           | the in-memory implementation and its `{ now, partitionCount }` options                                                                   |
 | `InMemoryCredentialStore`, `InMemoryCredentialStoreOptions`                                                                                     | the in-memory credential store and its `{ now }` option                                                                                  |
 | `Clock`, `systemClock`, `timestampAt()`                                                                                                         | the injectable time source, and how an instant is written as a timestamp                                                                 |
@@ -327,6 +329,15 @@ signals are a latency optimization and not a durable queue. No flow may depend o
 arriving: a partition's new owner recovers by asking `findSessionsNeedingWork`, which reports
 the sessions with pending user events or an open turn, oldest first.
 
+**Auth-session revocations are hints too** (epic #65, A2; issue #76).
+`notifyAuthSessionRevoked(authSessionId)` announces that a Better Auth session's row is gone —
+next to `signalPartition`, it reaches the listeners attached at that moment, once each, and a
+notification nobody is listening for is dropped. It carries the session's **id** and never its
+token. `onAuthSessionRevoked(listener)` is the subscription; on Postgres every instance
+listening hears a revocation whichever instance published it, which is what lets a server
+close the open streams of a session revoked elsewhere. Like a signal, a missed notification is
+recoverable rather than fatal: the server re-validates the session periodically.
+
 **Errors.** `SessionNotFoundError` (every session-scoped method except `getSession` and
 `updateSession`, which answer `null`),
 `AgentNotFoundError` (`createSession` with an unknown agent), `FencedError` (`appendEvents`),
@@ -463,6 +474,13 @@ and `0013_provider_credentials`:
   (`pcred_`), user, provider, type, the four sealed fields, `last4`, the timestamps and
   `validated_at`, unique on `(user_id, provider)` and `on delete cascade` from `"user"`. There
   is no plaintext column, and none may ever be added.
+- **`0014_auth_session_revocation.sql` — the revocation trigger** (A2; issue #76): an
+  `after delete … for each row` trigger on `"session"` that `pg_notify`s the deleted session's
+  **id** (never its token) on the `ohr_auth_session_revoked` channel
+  (`AUTH_SESSION_REVOCATION_CHANNEL`). Better Auth's own deletions are also announced by the
+  server's `session.delete.after` hook; the trigger is what catches an operator's plain SQL
+  and the cascade from a `"user"` delete. TRUNCATE does not fire row triggers, so a harness
+  emptying `session` announces nothing.
 
 **Appending.** `seq` is assigned inside the append transaction, under `select … for update` on
 the session row, so concurrent appends — from any number of connections, stores or processes —
@@ -494,7 +512,10 @@ or repeated notifications cannot duplicate or drop anything. (The pre-P4 store a
 ephemeral previews in the payload; a payload shaped like one is ignored now — there are none.)
 The connection reconnects with backoff and then catches up from the last delivered `seq`.
 Signal channels are per partition, so every instance listening for that partition hears a
-signal, not just the sender.
+signal, not just the sender. Auth-session revocations travel on the one
+`ohr_auth_session_revoked` channel with the session id as the payload — a revocation lost
+while the connection was down is not replayed, which is why the server's re-check exists
+(issue #76).
 
 **Time.** The store takes the same `Clock` and derives every `created_at`, `updated_at`,
 `processed_at`, lease `expires_at` and lease-expiry comparison from it. Nothing reads the
@@ -534,8 +555,8 @@ runSessionStoreConformance(async (clock) => new PostgresSessionStore({ pool, now
   will fail the lease and `processed_at` tests. Store absolute instants, computed in the
   store from the injected clock, and compare against them in SQL.
 - **Delivery may be asynchronous, and the suite allows for it.** It polls (bounded by real
-  time) for subscription and signal deliveries, and waits a moment before asserting that
-  nothing arrived. Nothing requires synchronous notification.
+  time) for subscription, signal and revocation deliveries, and waits a moment before
+  asserting that nothing arrived. Nothing requires synchronous notification.
 - **Partitions must match**: the suite uses the protocol's `partitionOf(sessionId)` with the
   default partition count, so a store's partition space has to be the server's.
 - **A supplied id has to be the stored event's id, and it has to be refused when it cannot

@@ -17,6 +17,19 @@ export interface SseMessage {
   readonly event: StreamEvent
 }
 
+/**
+ * The payload of the server's final `event: error` frame (epic #65, A2; issue #76): the
+ * protocol's error envelope telling the client why the stream is ending — the one reason this
+ * server sends today is `authentication_error`, a revoked or expired session.
+ */
+export interface SseEndError {
+  readonly type: 'error'
+  readonly error: {
+    readonly type: string
+    readonly message: string
+  }
+}
+
 /** A stream being followed: pull messages, or close it. */
 export interface SseReader extends AsyncIterable<SseMessage> {
   /**
@@ -27,6 +40,12 @@ export interface SseReader extends AsyncIterable<SseMessage> {
    * as well: everything after it is unread.
    */
   next(timeoutMs?: number): Promise<SseMessage | null>
+  /**
+   * Why the server ended the stream, once it has: the payload of a final `event: error`
+   * frame, or `null` when the stream simply ended (or is still open). Live, like the
+   * messages — read it after `next` resolves `null`.
+   */
+  readonly endError: SseEndError | null
   /** Stop reading; the connection is dropped. */
   close(): void
 }
@@ -49,6 +68,7 @@ export function openSse(response: Response): SseReader {
   const waiters: ((message: SseMessage | null) => void)[] = []
   let buffer = ''
   let ended = false
+  let endErrorValue: SseEndError | null = null
   /**
    * A message the server wrote that is not a `StreamEvent`.
    *
@@ -94,9 +114,9 @@ export function openSse(response: Response): SseReader {
           }
           const raw = buffer.slice(0, end)
           buffer = buffer.slice(end + 2)
-          let message: SseMessage | null
+          let frame: ParsedFrame
           try {
-            message = parseMessage(raw)
+            frame = parseMessage(raw)
           } catch (error) {
             // The frame is the story here, not the error: `data:` is what the server wrote.
             malformed =
@@ -107,11 +127,16 @@ export function openSse(response: Response): SseReader {
                 : new Error(String(error))
             break
           }
-          if (message !== null) {
-            push(message)
+          if (frame.kind === 'end-error') {
+            // The final frame (A2/#76): the server is about to close, on purpose.
+            endErrorValue = frame.payload
+            break
+          }
+          if (frame.kind === 'message') {
+            push(frame.message)
           }
         }
-        if (malformed !== null) {
+        if (malformed !== null || endErrorValue !== null) {
           break
         }
       }
@@ -151,6 +176,9 @@ export function openSse(response: Response): SseReader {
 
   return {
     next,
+    get endError() {
+      return endErrorValue
+    },
     close: () => {
       void reader.cancel().catch(() => {})
       finish()
@@ -177,9 +205,26 @@ export async function collectSse(response: Response): Promise<SseMessage[]> {
   return collected
 }
 
-/** Parse one raw SSE message; `null` for a message that carried no `data`. */
-function parseMessage(raw: string): SseMessage | null {
+/** What one raw SSE frame turned out to be. */
+type ParsedFrame =
+  /** A `data:` message carrying a `StreamEvent`. */
+  | { kind: 'message'; message: SseMessage }
+  /** A comment, a keepalive, or an `id`-only frame: nothing to dispatch. */
+  | { kind: 'none' }
+  /** The final `event: error` frame the server ends a stream with (epic #65, #76). */
+  | { kind: 'end-error'; payload: SseEndError }
+
+/**
+ * Parse one raw SSE frame.
+ *
+ * `event: error` is the one named event the server sends (a revoked or expired session,
+ * `apps/server/src/sse.ts`); its payload is the protocol's error envelope rather than a
+ * `StreamEvent`, so it is classified before the schema parse. Everything else with `data` is
+ * a `StreamEvent` or a bug.
+ */
+function parseMessage(raw: string): ParsedFrame {
   let id: string | null = null
+  let event: string | null = null
   const data: string[] = []
   for (const line of raw.split('\n')) {
     if (line.startsWith(':')) {
@@ -193,13 +238,44 @@ function parseMessage(raw: string): SseMessage | null {
     const value = line.slice(colon + 1).replace(/^ /, '')
     if (field === 'id') {
       id = value
+    } else if (field === 'event') {
+      event = value
     } else if (field === 'data') {
       data.push(value)
     }
   }
   if (data.length === 0) {
-    return null
+    return { kind: 'none' }
   }
   const payload: unknown = JSON.parse(data.join('\n'))
-  return { id, event: StreamEventSchema.parse(payload) }
+  if (event === 'error') {
+    return { kind: 'end-error', payload: endErrorOf(payload) }
+  }
+  return { kind: 'message', message: { id, event: StreamEventSchema.parse(payload) } }
+}
+
+/**
+ * The payload of an `event: error` frame, checked to be the envelope it claims to be.
+ *
+ * A frame that says `event: error` but does not carry the envelope is a server bug like any
+ * other malformed frame, so this throws and the reader reports it as one.
+ */
+function endErrorOf(payload: unknown): SseEndError {
+  if (
+    typeof payload === 'object' &&
+    payload !== null &&
+    (payload as { type?: unknown }).type === 'error'
+  ) {
+    const inner = (payload as { error?: unknown }).error
+    if (
+      typeof inner === 'object' &&
+      inner !== null &&
+      typeof (inner as { type?: unknown }).type === 'string' &&
+      typeof (inner as { message?: unknown }).message === 'string'
+    ) {
+      const { type, message } = inner as { type: string; message: string }
+      return { type: 'error', error: { type, message } }
+    }
+  }
+  throw new Error('an event: error frame without the protocol error envelope')
 }

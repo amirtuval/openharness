@@ -1755,6 +1755,52 @@ export function runSessionStoreConformance(
       })
     })
 
+    // ------------------------------------------------ auth-session revocations
+
+    describe('auth-session revocations', () => {
+      it('delivers a revocation to every listener, once each, named by session id', async () => {
+        const { store } = await setup()
+        const first: string[] = []
+        const second: string[] = []
+        await store.onAuthSessionRevoked((authSessionId) => {
+          first.push(authSessionId)
+        })
+        await store.onAuthSessionRevoked((authSessionId) => {
+          second.push(authSessionId)
+        })
+        await store.notifyAuthSessionRevoked('auth_session_one')
+        await store.notifyAuthSessionRevoked('auth_session_two')
+        await waitFor(() => first.length === 2 && second.length === 2, 'both revocations')
+        expect(first).toEqual(['auth_session_one', 'auth_session_two'])
+        expect(second).toEqual(['auth_session_one', 'auth_session_two'])
+      })
+
+      it('stops delivering once unsubscribed', async () => {
+        const { store } = await setup()
+        const received: string[] = []
+        const unsubscribe = await store.onAuthSessionRevoked((authSessionId) => {
+          received.push(authSessionId)
+        })
+        await store.notifyAuthSessionRevoked('auth_session_one')
+        await waitFor(() => received.length === 1, 'the first revocation')
+        unsubscribe()
+        await store.notifyAuthSessionRevoked('auth_session_two')
+        await settle()
+        expect(received).toEqual(['auth_session_one'])
+      })
+
+      it('drops a revocation nobody is listening for, and never replays one', async () => {
+        const { store } = await setup()
+        await store.notifyAuthSessionRevoked('auth_session_one')
+        const received: string[] = []
+        await store.onAuthSessionRevoked((authSessionId) => {
+          received.push(authSessionId)
+        })
+        await settle()
+        expect(received).toEqual([])
+      })
+    })
+
     // --------------------------------------------------- findSessionsNeedingWork
 
     describe('findSessionsNeedingWork', () => {

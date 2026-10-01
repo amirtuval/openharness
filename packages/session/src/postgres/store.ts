@@ -67,6 +67,8 @@ import type {
   PartitionSignal,
   PartitionSignalInput,
   PartitionSignalListener,
+  AuthSessionId,
+  AuthSessionRevocationListener,
   SessionEventListener,
   SessionStore,
   TurnState,
@@ -77,6 +79,9 @@ import { ListenConnection } from './listen'
 import {
   instant,
   agentFromRow,
+  AUTH_SESSION_REVOCATION_CHANNEL,
+  decodeAuthSessionRevocationNotification,
+  encodeAuthSessionRevocationNotification,
   encodePartitionNotification,
   encodeStoredNotification,
   eventFromRow,
@@ -147,6 +152,15 @@ export class PostgresSessionStore implements SessionStore {
 
   /** One entry per partition someone is listening for signals on. */
   readonly #signals = new Map<number, Set<PartitionSignalListener>>()
+
+  /**
+   * Everyone listening for auth-session revocations (epic #65, issue #76). One set, not a map:
+   * every revocation is announced on the same channel, and the payload names the session.
+   */
+  readonly #revocations = new Set<AuthSessionRevocationListener>()
+
+  /** Whether the revocation channel is being listened on, so it is `LISTEN`ed once. */
+  #listeningForRevocations = false
 
   #listen: ListenConnection | null = null
 
@@ -621,6 +635,36 @@ export class PostgresSessionStore implements SessionStore {
     })
   }
 
+  // ------------------------------------------------- auth-session revocation
+
+  async notifyAuthSessionRevoked(authSessionId: AuthSessionId): Promise<void> {
+    // Announced on the one revocation channel so every instance listening hears it, not just
+    // the one that handled the sign-out. Only the id travels: the payload is plaintext on the
+    // channel, and the token is the credential.
+    await sql`select pg_notify(${AUTH_SESSION_REVOCATION_CHANNEL}, ${encodeAuthSessionRevocationNotification(
+      authSessionId,
+    )})`.execute(this.#db)
+  }
+
+  async onAuthSessionRevoked(listener: AuthSessionRevocationListener): Promise<Unsubscribe> {
+    if (!this.#listeningForRevocations) {
+      // `ListenConnection.listen` is idempotent per channel, so a second subscriber arriving
+      // while this one is still awaiting the `LISTEN` costs nothing.
+      await this.#connection().listen(AUTH_SESSION_REVOCATION_CHANNEL)
+      this.#listeningForRevocations = true
+    }
+    this.#revocations.add(listener)
+    return once(() => {
+      this.#revocations.delete(listener)
+      if (this.#revocations.size === 0) {
+        this.#listeningForRevocations = false
+        // `Unsubscribe` is synchronous, so the `UNLISTEN` is best effort: the channel stays
+        // listened to until it lands, which only costs a notification nobody routes.
+        void this.#listen?.unlisten(AUTH_SESSION_REVOCATION_CHANNEL).catch(() => undefined)
+      }
+    })
+  }
+
   async findSessionsNeedingWork(partitions: readonly number[]): Promise<SessionId[]> {
     if (partitions.length === 0) {
       return []
@@ -754,6 +798,7 @@ export class PostgresSessionStore implements SessionStore {
     this.#sessions.clear()
     this.#channels.clear()
     this.#signals.clear()
+    this.#revocations.clear()
     const listen = this.#listen
     this.#listen = null
     if (listen !== null) {
@@ -1058,6 +1103,13 @@ export class PostgresSessionStore implements SessionStore {
 
   /** Hand one notification to whoever it belongs to. */
   async #dispatch(channel: string, payload: string): Promise<void> {
+    if (channel === AUTH_SESSION_REVOCATION_CHANNEL) {
+      const authSessionId = decodeAuthSessionRevocationNotification(payload)
+      if (authSessionId !== null) {
+        deliverTo(this.#revocations, authSessionId)
+      }
+      return
+    }
     if (isPartitionChannel(channel)) {
       const signal = decodePartitionNotification(payload)
       if (signal !== null) {

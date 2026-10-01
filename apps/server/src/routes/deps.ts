@@ -2,6 +2,7 @@ import type { SessionStore } from '@openharness/session'
 
 import type { SocialProviderName } from '../auth-profile'
 import type { SessionScheduler } from '../scheduler'
+import type { SessionRevocations } from '../session-watch'
 import type { ProviderCredentialDeps } from './provider-credentials'
 
 /**
@@ -23,6 +24,16 @@ export interface RouteDeps {
   readonly credentialRoutes: ProviderCredentialDeps
   /** The SSE keepalive interval; tests shorten it. */
   readonly sseKeepaliveMs?: number
+  /** The re-check interval of the long-lived routes (A2/#76); tests shorten it. */
+  readonly sessionRecheckMs?: number
+  /** The open responses a session revocation closes (A2/#76). */
+  readonly revocations: SessionRevocations
+  /**
+   * Re-validate the session behind a long-lived response (A2/#76): whether the row still
+   * exists and has not expired, read from the caller's own request headers. Wired to Better
+   * Auth in `app.ts`.
+   */
+  readonly revalidateSession: (headers: Headers) => Promise<boolean>
 }
 
 /** The auth surface the routes read (the guard in `app.ts` gets the Better Auth instance). */
