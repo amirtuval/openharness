@@ -149,7 +149,23 @@ export {
   type ProviderCredentialValidator,
   type ValidatableProvider,
 } from './provider-validation'
-export { SSE_KEEPALIVE, SSE_KEEPALIVE_MS, createSessionEventStream } from './sse'
+export {
+  SESSION_INVALID_MESSAGE,
+  SSE_KEEPALIVE,
+  SSE_KEEPALIVE_MS,
+  SSE_SESSION_INVALID,
+  createSessionEventStream,
+  type SessionEventStreamOptions,
+} from './sse'
+export {
+  DEFAULT_SESSION_RECHECK_MS,
+  createSessionRevocations,
+  startSessionRecheck,
+  type SessionRecheck,
+  type SessionRecheckOptions,
+  type SessionRevocations,
+  type SessionRevocationsOptions,
+} from './session-watch'
 export { consoleLogger, silentLogger, type AppEnv, type Logger } from './types'
 
 // `node dist/index.js` starts the server; importing this module never does.

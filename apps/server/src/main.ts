@@ -93,6 +93,8 @@ export interface StartServerOptions {
   readonly logger?: Logger
   /** The SSE keepalive interval, for a test that wants to see a `: ping` quickly. */
   readonly sseKeepaliveMs?: number
+  /** The session re-check interval (A2/#76), for a test that cannot wait 15 s for it. */
+  readonly sessionRecheckMs?: number
 }
 
 /**
@@ -119,6 +121,14 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
         ...(config.google === undefined ? {} : { google: config.google }),
         ...(config.github === undefined ? {} : { github: config.github }),
         ...(config.microsoft === undefined ? {} : { microsoft: config.microsoft }),
+      },
+      // A2/#76: every session Better Auth deletes is announced on the store's revocation
+      // channel, which closes that session's open streams — here and on every other
+      // instance. Only the id travels; the store never sees the token.
+      onSessionRevoked: (authSessionId) => {
+        void opened.store.notifyAuthSessionRevoked(authSessionId).catch((error: unknown) => {
+          logger.error('announcing a revoked session failed', error)
+        })
       },
     },
     opened.authDatabase,
@@ -169,6 +179,9 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     ...(config.webDir === undefined ? {} : { webDir: config.webDir }),
     ...(config.corsOrigins.length === 0 ? {} : { corsOrigins: config.corsOrigins }),
     ...(options.sseKeepaliveMs === undefined ? {} : { sseKeepaliveMs: options.sseKeepaliveMs }),
+    ...(options.sessionRecheckMs === undefined
+      ? {}
+      : { sessionRecheckMs: options.sessionRecheckMs }),
     logger,
   })
 

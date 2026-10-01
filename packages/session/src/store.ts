@@ -66,7 +66,11 @@ import type {
  *   a server that just took a partition over can ask it before it has done anything.
  * - **Signals are hints.** {@link SessionStore.signalPartition} delivers at most once, to the
  *   listeners attached at that moment; a signal nobody is listening for is dropped. Nothing may
- *   depend on receiving one: recovery runs {@link SessionStore.findSessionsNeedingWork}.
+ *   depend on receiving one: recovery runs {@link SessionStore.findSessionsNeedingWork}. The
+ *   same holds for the auth-session revocation channel
+ *   ({@link SessionStore.notifyAuthSessionRevoked}, epic #65, issue #76): it is what makes a
+ *   revocation prompt across instances, and a holder of an open response still re-validates
+ *   the session periodically in case the notification was missed.
  * - **Ownership** (epic #65, A4). Every agent and session belongs to exactly one user:
  *   {@link SessionStore.createAgent} and {@link SessionStore.createSession} take the owner's
  *   `user.id` and the stored resource carries it as `owner_id`. The reads a user-facing route
@@ -438,6 +442,43 @@ export interface SessionStore {
    */
   findSessionsNeedingWork(partitions: readonly number[]): Promise<SessionId[]>
 
+  // ------------------------------------------------- auth-session revocation
+
+  /**
+   * Announce that a Better Auth session was revoked (epic #65, A2; issue #76): its row is
+   * gone, and everything authenticated by it — an open stream included — must stop.
+   *
+   * This is the store's second hint channel, next to {@link SessionStore.signalPartition}, and
+   * it behaves the same way: it reaches the listeners attached at that moment, once each, and
+   * a revocation nobody is listening for is dropped. Nothing may depend on receiving one,
+   * because a server that holds an open response for an auth session re-validates the session
+   * periodically (`apps/server`'s re-check); that is what recovers a missed notification.
+   *
+   * The notification carries the auth session's **id** and never its token: an id is not a
+   * credential, a token is, and the payload of a `NOTIFY` is plaintext on a channel every
+   * listener sees.
+   *
+   * @param authSessionId the `id` of the revoked Better Auth `session` row
+   */
+  notifyAuthSessionRevoked(authSessionId: AuthSessionId): Promise<void>
+
+  /**
+   * Listen for revocations of auth sessions (epic #65, A2; issue #76).
+   *
+   * What a server uses to close the responses it still has open for a revoked session — SSE
+   * streams in particular, which are one long request and are never re-validated by the guard.
+   * The Postgres store announces on a dedicated `NOTIFY` channel, so **every instance** hears a
+   * revocation whichever instance handled the sign-out.
+   *
+   * Delivery may be asynchronous, and a revocation announced before the subscription was
+   * established — or while a lost listening connection was reconnecting — is not replayed: a
+   * revocation is a hint, and the holder of an open response re-validates the session
+   * periodically anyway (see {@link SessionStore.notifyAuthSessionRevoked}).
+   *
+   * @returns the function that ends the subscription
+   */
+  onAuthSessionRevoked(listener: AuthSessionRevocationListener): Promise<Unsubscribe>
+
   // ------------------------------------------------------------ partition leases
 
   /**
@@ -679,6 +720,20 @@ export interface TurnState {
    */
   readonly openSpan: ModelRequestStartEvent | null
 }
+
+/**
+ * A Better Auth session id (epic #65, A2): the `id` of one row in Better Auth's `session`
+ * table.
+ *
+ * Deliberately its own name rather than a bare `string`, and deliberately not a
+ * {@link SessionId}: that one identifies a conversation's event log, and confusing the two —
+ * closing a log's stream because the wrong session was revoked — is exactly the bug this type
+ * exists to prevent.
+ */
+export type AuthSessionId = string
+
+/** Called for every revocation of an auth session (epic #65, A2; issue #76). */
+export type AuthSessionRevocationListener = (authSessionId: AuthSessionId) => void | Promise<void>
 
 /** Called for every event of a subscribed session. */
 export type SessionEventListener = (event: StreamEvent) => void | Promise<void>

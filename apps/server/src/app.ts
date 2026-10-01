@@ -12,6 +12,7 @@ import { AgentNotFoundError, SessionNotFoundError, type SessionStore } from '@op
 import { consoleLogger, type AppEnv, type Logger } from './types'
 import { createAuthGuard } from './auth-guard'
 import { rewriteDevLoginRequest, type BetterAuthInstance } from './auth'
+import { createSessionRevocations } from './session-watch'
 import { errorResponse, httpErrorResponse, HttpError } from './http/errors'
 import { registerAgentRoutes } from './routes/agents'
 import { registerAiSdkRoutes } from './routes/ai-sdk'
@@ -44,6 +45,10 @@ import { serveWebAsset } from './static'
  *   surface and `/health` stays open.
  * - **Auth is the only thing checked before the route**; everything else is validated by the
  *   protocol's schemas, which is what turns a malformed request into a 400 and not a 500.
+ * - **A long-lived response outlives its session only until the session is revoked or expires**
+ *   (A2; issue #76): the SSE stream and the AI SDK adapter's stream re-check their session on
+ *   a timer, and a revocation notification — published by the sign-out path and, on Postgres,
+ *   by a trigger on the session table — closes them promptly on every instance.
  */
 export interface AppOptions {
   /** The session log every route reads and writes. */
@@ -87,6 +92,11 @@ export interface AppOptions {
   readonly corsOrigins?: readonly string[]
   /** The SSE keepalive interval in milliseconds; defaults to {@link SSE_KEEPALIVE_MS}. */
   readonly sseKeepaliveMs?: number
+  /**
+   * How often an open stream re-validates its auth session (A2/#76), in milliseconds;
+   * defaults to {@link DEFAULT_SESSION_RECHECK_MS}. Tests shorten it.
+   */
+  readonly sessionRecheckMs?: number
   /** Where the app logs unexpected failures; defaults to the console. */
   readonly logger?: Logger
 }
@@ -142,12 +152,24 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
     options.auth.instance.handler(await rewriteDevLoginRequest(c.req.raw, options.auth.devLogin)),
   )
 
+  // The two halves of "a revoked or expired session ends its open responses" (A2/#76): the
+  // registry of who is streaming under which session — swept by the store's revocation
+  // notifications — and the re-validation the streams run on their own timer.
+  const revocations = createSessionRevocations({ store: options.store, logger })
+  const revalidateSession = async (headers: Headers): Promise<boolean> =>
+    (await options.auth.instance.api.getSession({ headers })) !== null
+
   const deps: RouteDeps = {
     store: options.store,
     scheduler: options.scheduler,
     auth: { enabledProviders: options.auth.enabledProviders, devLogin: options.auth.devLogin },
     credentialRoutes: options.credentialRoutes,
+    revocations,
+    revalidateSession,
     ...(options.sseKeepaliveMs === undefined ? {} : { sseKeepaliveMs: options.sseKeepaliveMs }),
+    ...(options.sessionRecheckMs === undefined
+      ? {}
+      : { sessionRecheckMs: options.sessionRecheckMs }),
   }
 
   // `/v1/auth-config` is registered before the guard, and is the only `/v1` route that is:

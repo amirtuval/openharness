@@ -348,6 +348,43 @@ export function isPartitionChannel(channel: string): boolean {
   return channel.startsWith(PARTITION_CHANNEL_PREFIX)
 }
 
+/**
+ * The one `LISTEN` channel every auth-session revocation is announced on (epic #65, A2; issue
+ * #76).
+ *
+ * A single channel, not one per session like the log's: a revocation is rare, a listener has
+ * to hear about revocations for sessions it holds open rather than for one id it already
+ * knows, and the payload is small enough to name the session directly.
+ *
+ * The name is shared with the database: the `0014_auth_session_revocation.sql` trigger — which
+ * announces every deletion of a `session` row, whatever code path made it — calls
+ * `pg_notify()` with exactly this string, so the two have to move together.
+ */
+export const AUTH_SESSION_REVOCATION_CHANNEL = 'ohr_auth_session_revoked'
+
+/**
+ * The payload announcing that an auth session was revoked.
+ *
+ * Only the id: never the token, because a `NOTIFY` payload is plaintext every listener (and
+ * the server log, on some deployments) can read, and the token is the credential itself.
+ */
+export function encodeAuthSessionRevocationNotification(authSessionId: string): string {
+  return JSON.stringify({ authSessionId })
+}
+
+/**
+ * Read a revocation notification; `null` means the payload is not something the store wrote
+ * — the trigger's `json_build_object`, or the store's own `JSON.stringify` — and is ignored.
+ */
+export function decodeAuthSessionRevocationNotification(payload: string): string | null {
+  const decoded = asRecord(parseJson(payload))
+  if (decoded === null) {
+    return null
+  }
+  const authSessionId = decoded.authSessionId
+  return typeof authSessionId === 'string' && authSessionId.length > 0 ? authSessionId : null
+}
+
 // ----------------------------------------------------------------- notifications
 
 /**

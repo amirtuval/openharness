@@ -29,7 +29,10 @@ import type { Logger } from './types'
  *   {@link refuseUnverifiedUser} is the belt to their braces — a database hook that refuses
  *   any user creation whose email is not marked verified.
  * - **sessions** (A2): opaque tokens, 7-day expiry, sliding once a day, a fresh session
- *   (created within a day) for provider-credential writes, rate limiting on.
+ *   (created within a day) for provider-credential writes, rate limiting on. A deleted
+ *   session is a *revocation* (#76): the `session.delete.after` hook hands its id to
+ *   {@link AuthConfig.onSessionRevoked}, which the server connects to the store's revocation
+ *   channel — never the token, which must not travel.
  * - **the device flow** (A6) accepts exactly `openharness-cli`, approves at
  *   `${BETTER_AUTH_URL}/#/device` (the web app's hash route), and its codes expire in ten
  *   minutes.
@@ -122,6 +125,19 @@ export interface AuthConfig {
   readonly rateLimit?: boolean
   /** Which social providers have credentials configured. */
   readonly providers: SocialProviderCredentials
+  /**
+   * Called with the **id** of every auth session Better Auth deletes (epic #65, A2; issue
+   * #76): sign-out, `oh logout`, "revoke other sessions", and every other deletion through
+   * Better Auth. The server wires it to the store's revocation channel, which is what closes
+   * the open streams of a revoked session on every instance.
+   *
+   * The id — never the token; the hook is handed the whole deleted row and must pass on
+   * nothing else. A hook that throws is swallowed, because a sign-out must never fail
+   * because a notification could not be sent (the streams' periodic re-check is the
+   * backstop). Deletions Better Auth does not make — an operator's SQL — are the database
+   * trigger's job (`packages/session`, `0014_auth_session_revocation.sql`).
+   */
+  readonly onSessionRevoked?: (authSessionId: string) => void
 }
 
 /** The database Better Auth runs on: the server's Kysely/Postgres, or its in-memory store. */
@@ -235,6 +251,24 @@ export function createAuth(config: AuthConfig, database: AuthDatabase, logger: L
       user: {
         create: {
           before: refuseUnverifiedUser,
+        },
+      },
+      // A2/#76: a deleted session row is a revocation. Better Auth runs this hook for every
+      // deletion it makes — sign-out, the bearer sign-out, `revoke-other-sessions` and
+      // `revoke-sessions` (the bulk paths run it per row) — and the server passes the id on
+      // to the store's revocation channel. Only the id: the hook is handed the whole row,
+      // token included, and the token must not leave this process.
+      session: {
+        delete: {
+          after: (session) => {
+            try {
+              config.onSessionRevoked?.(session.id)
+            } catch {
+              // A sign-out must not fail because a notification could not be sent: the
+              // streams' periodic re-check is the backstop.
+            }
+            return Promise.resolve()
+          },
         },
       },
     },
