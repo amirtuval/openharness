@@ -173,7 +173,7 @@ if (target === null) {
         ),
       ])
 
-      const events = (await first.listEvents(session.id, { limit: MAX_PAGE_LIMIT })).data
+      const events = (await first.listEventsUnscoped(session.id, { limit: MAX_PAGE_LIMIT })).data
       const expected = Array.from({ length: 16 }, (_unused, index) => index + 1)
       // Gap-free and in order: the session row lock serializes the appends, and `seq` is read
       // from the log's own end inside each of those transactions.
@@ -212,8 +212,8 @@ if (target === null) {
 
       // The id landed once, in one of the two logs, and the loser stored nothing.
       const stored = [
-        ...(await first.listEvents(session.id)).data,
-        ...(await second.listEvents(other.id)).data,
+        ...(await first.listEventsUnscoped(session.id)).data,
+        ...(await second.listEventsUnscoped(other.id)).data,
       ]
       expect(stored.map((event) => event.id)).toEqual([id])
     })
@@ -245,12 +245,12 @@ if (target === null) {
       expect(isFencedError(error)).toBe(true)
       expect(error).toBeInstanceOf(FencedError)
       expect((error as FencedError).currentEpoch).toBe(currentEpoch)
-      expect((await owner.listEvents(session.id)).data).toHaveLength(1)
+      expect((await owner.listEventsUnscoped(session.id)).data).toHaveLength(1)
 
       await zombie.appendEvents(session.id, [userMessage('back')], {
         fence: { partition, epoch: currentEpoch },
       })
-      expect((await owner.listEvents(session.id)).data).toHaveLength(2)
+      expect((await owner.listEventsUnscoped(session.id)).data).toHaveLength(2)
     })
 
     it('delivers a burst of concurrent appends exactly once, in seq order', async () => {
@@ -272,7 +272,7 @@ if (target === null) {
         ),
       )
 
-      const stored = (await store.listEvents(session.id, { limit: MAX_PAGE_LIMIT })).data
+      const stored = (await store.listEventsUnscoped(session.id, { limit: MAX_PAGE_LIMIT })).data
       const expected = stored.map((event) => event.seq)
       expect(expected).toHaveLength(bursts * 2)
       await waitFor(() => received.length >= expected.length, 'the whole burst')
@@ -415,7 +415,9 @@ if (target === null) {
       // The claim did not touch the row: the column is still the null it was inserted with,
       // and the read derives `processed_at` from `event_claims` instead.
       expect(await rawProcessedAt()).toBeNull()
-      const reread = (await store.listEvents(session.id)).data.find((event) => event.id === id)
+      const reread = (await store.listEventsUnscoped(session.id)).data.find(
+        (event) => event.id === id,
+      )
       expect(reread?.processed_at).toBe(timestampAt(clock.currentMs))
     })
 
@@ -427,7 +429,7 @@ if (target === null) {
       expect(await migrate(db)).toEqual(files)
 
       const { store, session } = await seeded()
-      expect(await store.getSession(session.id)).toEqual(session)
+      expect(await store.getSession(session.id, { ownerId: OWNER_A })).toEqual(session)
     })
 
     it('leaves a pool it did not open alone, and ends one it did', async () => {
@@ -493,14 +495,14 @@ if (target === null) {
 
       // Everything the user owned is gone with them — the `on delete cascade` the ownership
       // migration and the credential table declare — and the events went with the session.
-      expect(await store.getAgent(agent.id)).toBeNull()
-      expect(await store.getSession(session.id)).toBeNull()
+      expect(await store.getAgent(agent.id, { ownerId: OWNER_A })).toBeNull()
+      expect(await store.getSession(session.id, { ownerId: OWNER_A })).toBeNull()
       expect(await credentials.get({ userId: OWNER_A, provider: 'anthropic' })).toBeNull()
       expect(await credentials.list({ userId: OWNER_A })).toEqual([])
       expect(await eventRows(session.id)).toEqual(new Map())
       // The other user is untouched, down to their own credential for the same provider.
-      expect(await store.getAgent(theirAgent.id)).not.toBeNull()
-      expect(await store.getSession(theirSession.id)).not.toBeNull()
+      expect(await store.getAgent(theirAgent.id, { ownerId: OWNER_B })).not.toBeNull()
+      expect(await store.getSession(theirSession.id, { ownerId: OWNER_B })).not.toBeNull()
       expect((await credentials.get({ userId: OWNER_B, provider: 'anthropic' }))?.last4).toBe(
         'bbbb',
       )

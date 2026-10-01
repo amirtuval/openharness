@@ -154,8 +154,8 @@ export function runSessionStoreConformance(
       it('reads an agent back, and answers null for an id nobody has', async () => {
         const { store } = await setup()
         const agent = await store.createAgent(agentInput(), OWNER_A)
-        expect(await store.getAgent(agent.id)).toEqual(agent)
-        expect(await store.getAgent(unknownAgentId())).toBeNull()
+        expect(await store.getAgent(agent.id, { ownerId: OWNER_A })).toEqual(agent)
+        expect(await store.getAgent(unknownAgentId(), { ownerId: OWNER_A })).toBeNull()
       })
 
       it('lists agents oldest first, and ends the list with next_page: null', async () => {
@@ -165,7 +165,7 @@ export function runSessionStoreConformance(
         const second = await store.createAgent(agentInput('Second'), OWNER_A)
         clock.advance(SECOND)
         const third = await store.createAgent(agentInput('Third'), OWNER_A)
-        const page = await store.listAgents()
+        const page = await store.listAgents({ ownerId: OWNER_A })
         expect(page.data.map((agent) => agent.id)).toEqual([first.id, second.id, third.id])
         expect(page.next_page).toBeNull()
       })
@@ -177,14 +177,16 @@ export function runSessionStoreConformance(
           created.push(await store.createAgent(agentInput(`Agent ${index}`), OWNER_A))
           clock.advance(SECOND)
         }
-        const page = await store.listAgents({ limit: 2 })
+        const page = await store.listAgents({ ownerId: OWNER_A, limit: 2 })
         expect(page.data.map((agent) => agent.id)).toEqual([created[0]?.id, created[1]?.id])
         expect(decodePageCursor(nextPageOf(page))).toEqual({
           kind: 'key',
           created_at: created[1]?.created_at,
           id: created[1]?.id,
         })
-        const all = await readAllPages((cursor) => store.listAgents({ limit: 2, page: cursor }))
+        const all = await readAllPages((cursor) =>
+          store.listAgents({ ownerId: OWNER_A, limit: 2, page: cursor }),
+        )
         expect(all.map((agent) => agent.id)).toEqual(created.map((agent) => agent.id))
       })
 
@@ -198,7 +200,9 @@ export function runSessionStoreConformance(
         // a position in a total order rather than in a list that shifts under a paging client.
         expect(new Set(created.map((agent) => agent.created_at)).size).toBe(1)
         const expected = [...created].sort(byKeysAsc).map((agent) => agent.id)
-        const all = await readAllPages((cursor) => store.listAgents({ limit: 2, page: cursor }))
+        const all = await readAllPages((cursor) =>
+          store.listAgents({ ownerId: OWNER_A, limit: 2, page: cursor }),
+        )
         expect(all.map((agent) => agent.id)).toEqual(expected)
       })
 
@@ -216,7 +220,7 @@ export function runSessionStoreConformance(
           created_at: agent.created_at,
           updated_at: timestampAt(clock.currentMs),
         })
-        expect(await store.getAgent(agent.id)).toEqual(updated)
+        expect(await store.getAgent(agent.id, { ownerId: OWNER_A })).toEqual(updated)
       })
 
       it('answers null when updating an agent that does not exist', async () => {
@@ -258,7 +262,7 @@ export function runSessionStoreConformance(
         expectExact(SessionSchema, session, 'a session')
 
         await store.updateAgent(agent.id, { name: 'Renamed', model: { id: 'other/model' } })
-        const reread = await store.getSession(session.id)
+        const reread = await store.getSession(session.id, { ownerId: OWNER_A })
         expect(reread?.agent.name).toBe(agent.name)
         expect(reread?.agent.model.id).toBe(agent.model.id)
       })
@@ -273,7 +277,7 @@ export function runSessionStoreConformance(
         })
         expect(session.title).toBe('A chat')
         expect(session.metadata).toEqual({ ticket: 'OH-4' })
-        expect(await store.getSession(session.id)).toEqual(session)
+        expect(await store.getSession(session.id, { ownerId: OWNER_A })).toEqual(session)
       })
 
       it('sets a title after creation, and advances updated_at', async () => {
@@ -290,10 +294,10 @@ export function runSessionStoreConformance(
           created_at: session.created_at,
           updated_at: timestampAt(clock.currentMs),
         })
-        expect(await store.getSession(session.id)).toEqual(updated)
+        expect(await store.getSession(session.id, { ownerId: OWNER_A })).toEqual(updated)
         expectExact(SessionSchema, updated, 'a session')
         // A title is metadata, not an event: the log is untouched.
-        expect(await store.listEvents(session.id)).toEqual({ data: [], next_page: null })
+        expect(await store.listEventsUnscoped(session.id)).toEqual({ data: [], next_page: null })
       })
 
       it('keeps the title it omits, clears the one it nulls, and answers null for an unknown session', async () => {
@@ -304,7 +308,7 @@ export function runSessionStoreConformance(
         expect((await store.updateSession(session.id, {}))?.title).toBe('First')
         clock.advance(SECOND)
         expect((await store.updateSession(session.id, { title: null }))?.title).toBeNull()
-        expect((await store.getSession(session.id))?.title).toBeNull()
+        expect((await store.getSession(session.id, { ownerId: OWNER_A }))?.title).toBeNull()
         expect(await store.updateSession(unknownSessionId(), { title: 'Nobody' })).toBeNull()
       })
 
@@ -314,7 +318,7 @@ export function runSessionStoreConformance(
         const title = 'x'.repeat(SESSION_TITLE_MAX_LENGTH)
         const updated = await store.updateSession(session.id, { title })
         expect(updated?.title).toBe(title)
-        const reread = await store.getSession(session.id)
+        const reread = await store.getSession(session.id, { ownerId: OWNER_A })
         expect(reread?.title).toBe(title)
         expect(reread?.updated_at).toBe(updated?.updated_at)
       })
@@ -329,7 +333,7 @@ export function runSessionStoreConformance(
             { type: EVENT_TYPES.userInterrupt },
           ],
         })
-        const events = (await store.listEvents(session.id)).data
+        const events = (await store.listEventsUnscoped(session.id)).data
         expect(events.map((event) => [event.type, event.seq])).toEqual([
           [EVENT_TYPES.userMessage, 1],
           [EVENT_TYPES.userInterrupt, 2],
@@ -343,8 +347,8 @@ export function runSessionStoreConformance(
       it('reads a session back, and answers null for one that does not exist', async () => {
         const { store } = await setup()
         const { session } = await seed(store)
-        expect(await store.getSession(session.id)).toEqual(session)
-        expect(await store.getSession(unknownSessionId())).toBeNull()
+        expect(await store.getSession(session.id, { ownerId: OWNER_A })).toEqual(session)
+        expect(await store.getSession(unknownSessionId(), { ownerId: OWNER_A })).toBeNull()
       })
 
       it('lists sessions newest first', async () => {
@@ -355,7 +359,7 @@ export function runSessionStoreConformance(
         const second = await store.createSession(agent.id, { ownerId: OWNER_A })
         clock.advance(SECOND)
         const third = await store.createSession(agent.id, { ownerId: OWNER_A })
-        const page = await store.listSessions()
+        const page = await store.listSessions({ ownerId: OWNER_A })
         expect(page.data.map((session) => session.id)).toEqual([third.id, second.id, first.id])
         expect(page.next_page).toBeNull()
       })
@@ -368,14 +372,16 @@ export function runSessionStoreConformance(
           created.push(await store.createSession(agent.id, { ownerId: OWNER_A }))
           clock.advance(SECOND)
         }
-        const page = await store.listSessions({ limit: 2 })
+        const page = await store.listSessions({ ownerId: OWNER_A, limit: 2 })
         expect(page.data.map((session) => session.id)).toEqual([created[4]?.id, created[3]?.id])
         expect(decodePageCursor(nextPageOf(page))).toEqual({
           kind: 'key',
           created_at: created[3]?.created_at,
           id: created[3]?.id,
         })
-        const all = await readAllPages((cursor) => store.listSessions({ limit: 2, page: cursor }))
+        const all = await readAllPages((cursor) =>
+          store.listSessions({ ownerId: OWNER_A, limit: 2, page: cursor }),
+        )
         expect(all.map((session) => session.id)).toEqual(
           [...created].reverse().map((session) => session.id),
         )
@@ -393,7 +399,9 @@ export function runSessionStoreConformance(
           .sort(byKeysAsc)
           .reverse()
           .map((session) => session.id)
-        const all = await readAllPages((cursor) => store.listSessions({ limit: 3, page: cursor }))
+        const all = await readAllPages((cursor) =>
+          store.listSessions({ ownerId: OWNER_A, limit: 3, page: cursor }),
+        )
         expect(all.map((session) => session.id)).toEqual(expected)
       })
 
@@ -404,7 +412,7 @@ export function runSessionStoreConformance(
         const mine = await store.createSession(wanted.id, { ownerId: OWNER_A })
         clock.advance(SECOND)
         await store.createSession(other.id, { ownerId: OWNER_A })
-        const page = await store.listSessions({ agentId: wanted.id })
+        const page = await store.listSessions({ ownerId: OWNER_A, agentId: wanted.id })
         expect(page.data.map((session) => session.id)).toEqual([mine.id])
       })
 
@@ -414,7 +422,7 @@ export function runSessionStoreConformance(
         (store: SessionStore, sessionId: SessionId) => Promise<unknown>
       > = {
         appendEvents: (store, sessionId) => store.appendEvents(sessionId, [userMessage('hi')]),
-        listEvents: (store, sessionId) => store.listEvents(sessionId),
+        listEventsUnscoped: (store, sessionId) => store.listEventsUnscoped(sessionId),
         getPendingUserEvents: (store, sessionId) => store.getPendingUserEvents(sessionId),
         getTurnState: (store, sessionId) => store.getTurnState(sessionId),
         subscribe: (store, sessionId) => store.subscribe(sessionId, () => undefined),
@@ -439,8 +447,8 @@ export function runSessionStoreConformance(
         const session = await store.createSession(agent.id, { ownerId: OWNER_A })
         expect(agent.owner_id).toBe(OWNER_A)
         expect(session.owner_id).toBe(OWNER_A)
-        expect((await store.getAgent(agent.id))?.owner_id).toBe(OWNER_A)
-        expect((await store.getSession(session.id))?.owner_id).toBe(OWNER_A)
+        expect((await store.getAgent(agent.id, { ownerId: OWNER_A }))?.owner_id).toBe(OWNER_A)
+        expect((await store.getSession(session.id, { ownerId: OWNER_A }))?.owner_id).toBe(OWNER_A)
         // The owner is not writable after creation: an update leaves it alone, and it is not
         // a field any request carries.
         const updated = await store.updateAgent(agent.id, { name: 'Renamed' })
@@ -452,9 +460,6 @@ export function runSessionStoreConformance(
         const agent = await store.createAgent(agentInput(), OWNER_A)
         expect(await store.getAgent(agent.id, { ownerId: OWNER_A })).toEqual(agent)
         expect(await store.getAgent(agent.id, { ownerId: OWNER_B })).toBeNull()
-        // The unscoped read is the brain's and the scheduler's form: it is not what a
-        // user-facing route uses, and it sees everything.
-        expect((await store.getAgent(agent.id))?.id).toBe(agent.id)
       })
 
       it('lists only the owner’s agents, and an empty list for a user with none', async () => {
@@ -467,12 +472,14 @@ export function runSessionStoreConformance(
         expect((await store.listAgents({ ownerId: 'user_nobody' })).data).toEqual([])
       })
 
-      it('answers null for another owner’s session, scoped and unscoped alike', async () => {
+      it('answers null for another owner’s session when scoped, and the internal read sees it', async () => {
         const { store } = await setup()
         const { session } = await seed(store)
         expect(await store.getSession(session.id, { ownerId: OWNER_A })).toEqual(session)
         expect(await store.getSession(session.id, { ownerId: OWNER_B })).toBeNull()
-        expect((await store.getSession(session.id))?.id).toBe(session.id)
+        // The unscoped read is the brain's form, under its own name: an explicitly named
+        // method rather than an optional owner, so a route cannot reach it by forgetting one.
+        expect((await store.getSessionUnscoped(session.id))?.id).toBe(session.id)
       })
 
       it('lists only the owner’s sessions, and an empty list for a user with none', async () => {
@@ -501,7 +508,20 @@ export function runSessionStoreConformance(
         )
         expectErrorIdentity(missing, 'SessionNotFoundError', SESSION_NOT_FOUND_ERROR_CODE)
         // The unscoped read — the brain's replay — still sees the log.
-        expect((await store.listEvents(session.id)).data).toHaveLength(1)
+        expect((await store.listEventsUnscoped(session.id)).data).toHaveLength(1)
+      })
+
+      it('reads any owner’s session and log through the explicitly unscoped internal methods', async () => {
+        const { store } = await setup()
+        const theirs = await store.createAgent(agentInput('Theirs'), OWNER_B)
+        const theirSession = await store.createSession(theirs.id, { ownerId: OWNER_B })
+        await append(store, theirSession.id, [userMessage('theirs')])
+        expect((await store.getSessionUnscoped(theirSession.id))?.owner_id).toBe(OWNER_B)
+        expect((await store.listEventsUnscoped(theirSession.id)).data).toHaveLength(1)
+        // The unscoped reads still refuse an id nothing has: they are owners of nothing.
+        const missingSession = await thrownBy(() => store.listEventsUnscoped(unknownSessionId()))
+        expectErrorIdentity(missingSession, 'SessionNotFoundError', SESSION_NOT_FOUND_ERROR_CODE)
+        expect(await store.getSessionUnscoped(unknownSessionId())).toBeNull()
       })
 
       it('refuses to create a session from another owner’s agent, and stores nothing', async () => {
@@ -511,7 +531,7 @@ export function runSessionStoreConformance(
         expectErrorIdentity(error, 'AgentNotFoundError', AGENT_NOT_FOUND_ERROR_CODE)
         expect(errorFields(error)).toMatchObject({ agentId: agent.id })
         expect((await store.listSessions({ ownerId: OWNER_A })).data).toEqual([])
-        expect((await store.listSessions()).data).toEqual([])
+        expect((await store.listSessions({ ownerId: OWNER_B })).data).toEqual([])
       })
 
       it('keeps two owners’ logs apart when both sides are scoped', async () => {
@@ -546,7 +566,7 @@ export function runSessionStoreConformance(
         for (const event of stored) {
           expect(event.id).toMatch(/^sevt_/)
         }
-        expect((await store.listEvents(session.id)).data).toEqual(stored)
+        expect((await store.listEventsUnscoped(session.id)).data).toEqual(stored)
       })
 
       it('continues the sequence across appends', async () => {
@@ -578,9 +598,13 @@ export function runSessionStoreConformance(
         const { session } = await seed(store)
         clock.advance(10 * SECOND)
         expect(await store.appendEvents(session.id, [])).toEqual([])
-        expect((await store.getSession(session.id))?.updated_at).toBe(session.updated_at)
+        expect((await store.getSession(session.id, { ownerId: OWNER_A }))?.updated_at).toBe(
+          session.updated_at,
+        )
         await append(store, session.id, [userMessage('later')])
-        expect((await store.getSession(session.id))?.updated_at).toBe(timestampAt(clock.currentMs))
+        expect((await store.getSession(session.id, { ownerId: OWNER_A }))?.updated_at).toBe(
+          timestampAt(clock.currentMs),
+        )
       })
 
       it('advances the session updated_at with every append', async () => {
@@ -588,7 +612,9 @@ export function runSessionStoreConformance(
         const { session } = await seed(store)
         clock.advance(10 * SECOND)
         await append(store, session.id, [userMessage('hi')])
-        expect((await store.getSession(session.id))?.updated_at).toBe(timestampAt(clock.currentMs))
+        expect((await store.getSession(session.id, { ownerId: OWNER_A }))?.updated_at).toBe(
+          timestampAt(clock.currentMs),
+        )
       })
 
       it('returns events that are exactly stored events', async () => {
@@ -600,7 +626,7 @@ export function runSessionStoreConformance(
           throw new Error('the store did not return the span start it was given')
         }
         await append(store, session.id, [spanEnd(start), sessionError(), statusRescheduled()])
-        for (const event of (await store.listEvents(session.id)).data) {
+        for (const event of (await store.listEventsUnscoped(session.id)).data) {
           expectExact(StoredEventSchema, event, 'a stored event')
         }
       })
@@ -626,7 +652,7 @@ export function runSessionStoreConformance(
         const { session } = await seed(store)
         const id = suppliedEventId()
         const [stored] = await append(store, session.id, [{ ...userMessage('one'), id }])
-        const page = await store.listEvents(session.id)
+        const page = await store.listEventsUnscoped(session.id)
         expect(page.data.find((event) => event.id === id)).toEqual(stored)
         expect(page.data.filter((event) => event.id === id)).toHaveLength(1)
 
@@ -691,7 +717,7 @@ export function runSessionStoreConformance(
 
         // Nothing of the refused batch: not the event with the taken id, and not the valid
         // event in front of it, because an append is one transaction.
-        expect((await store.listEvents(session.id)).data).toEqual([first])
+        expect((await store.listEventsUnscoped(session.id)).data).toEqual([first])
         expect(await store.getPendingUserEvents(session.id)).toEqual([first])
       })
 
@@ -710,7 +736,7 @@ export function runSessionStoreConformance(
           store.appendEvents(other.id, [{ ...userMessage('there'), id }]),
         )
         expectErrorIdentity(error, 'DuplicateEventIdError', DUPLICATE_EVENT_ID_ERROR_CODE)
-        expect((await store.listEvents(other.id)).data).toEqual([])
+        expect((await store.listEventsUnscoped(other.id)).data).toEqual([])
       })
 
       it('refuses the same id twice in one batch, and stores nothing', async () => {
@@ -725,8 +751,8 @@ export function runSessionStoreConformance(
         )
         expectErrorIdentity(error, 'DuplicateEventIdError', DUPLICATE_EVENT_ID_ERROR_CODE)
         expect(errorFields(error)).toMatchObject({ eventId: id })
-        expect((await store.listEvents(session.id)).data).toEqual([])
-        expect((await store.getSession(session.id))?.status).toBe('idle')
+        expect((await store.listEventsUnscoped(session.id)).data).toEqual([])
+        expect((await store.getSession(session.id, { ownerId: OWNER_A }))?.status).toBe('idle')
       })
 
       it('refuses an id that is not a valid event id, and stores nothing', async () => {
@@ -741,7 +767,7 @@ export function runSessionStoreConformance(
           )
           expect(error).toBeInstanceOf(RangeError)
         }
-        expect((await store.listEvents(session.id)).data).toEqual([])
+        expect((await store.listEventsUnscoped(session.id)).data).toEqual([])
       })
 
       it('fences an append that supplies an id like any other', async () => {
@@ -760,7 +786,7 @@ export function runSessionStoreConformance(
           }),
         )
         expect(isFencedError(error)).toBe(true)
-        expect((await store.listEvents(session.id)).data).toEqual([stored])
+        expect((await store.listEventsUnscoped(session.id)).data).toEqual([stored])
       })
     })
 
@@ -792,7 +818,7 @@ export function runSessionStoreConformance(
         const [span] = await append(store, session.id, [spanStartFor(ids)])
         expect(span?.processed_at).toBe(timestampAt(clock.currentMs))
 
-        const reread = (await store.listEvents(session.id)).data.filter((event) =>
+        const reread = (await store.listEventsUnscoped(session.id)).data.filter((event) =>
           ids.includes(event.id),
         )
         expect(reread.map((event) => event.processed_at)).toEqual([
@@ -818,7 +844,7 @@ export function runSessionStoreConformance(
           { ownerId: OWNER_A },
         )
         const [elsewhere] = await append(store, other.id, [userMessage('other')])
-        const before = (await store.listEvents(session.id)).data
+        const before = (await store.listEventsUnscoped(session.id)).data
         for (const consumed of [
           running?.id ?? unknownEventId(),
           elsewhere?.id ?? unknownEventId(),
@@ -829,7 +855,7 @@ export function runSessionStoreConformance(
           )
           expectErrorIdentity(error, 'ClaimConflictError', CLAIM_CONFLICT_ERROR_CODE)
         }
-        expect((await store.listEvents(session.id)).data).toEqual(before)
+        expect((await store.listEventsUnscoped(session.id)).data).toEqual(before)
         // The message is still queued, and the foreign event is untouched where it lives.
         expect((await store.getPendingUserEvents(session.id)).map((event) => event.id)).toEqual([
           message?.id,
@@ -880,7 +906,9 @@ export function runSessionStoreConformance(
         // The claim is the fact: no stored event changed, and every read of the consumed event
         // now derives its `processed_at` from the append that consumed it.
         expect(await store.getPendingUserEvents(session.id)).toEqual([])
-        const reread = (await store.listEvents(session.id)).data.find((event) => event.id === id)
+        const reread = (await store.listEventsUnscoped(session.id)).data.find(
+          (event) => event.id === id,
+        )
         expect(reread).toMatchObject({
           type: EVENT_TYPES.userMessage,
           processed_at: timestampAt(clock.currentMs),
@@ -903,7 +931,7 @@ export function runSessionStoreConformance(
         const [queued] = await append(store, session.id, [userMessage('hi')])
         const id = queued?.id ?? unknownEventId()
         await append(store, session.id, [spanStartFor([id])])
-        const before = (await store.listEvents(session.id)).data
+        const before = (await store.listEventsUnscoped(session.id)).data
 
         const error = await thrownBy(() =>
           store.appendEvents(session.id, [spanStartFor([id]), agentMessage('and stores nothing')]),
@@ -911,7 +939,7 @@ export function runSessionStoreConformance(
         expectErrorIdentity(error, 'ClaimConflictError', CLAIM_CONFLICT_ERROR_CODE)
         expect(errorFields(error)).toMatchObject({ sessionId: session.id, eventIds: [id] })
         // Nothing of the refused batch: not the span, and not the message behind it.
-        expect((await store.listEvents(session.id)).data).toEqual(before)
+        expect((await store.listEventsUnscoped(session.id)).data).toEqual(before)
       })
 
       it('refuses to claim a non-user event, a foreign event, or an id nothing names', async () => {
@@ -928,7 +956,7 @@ export function runSessionStoreConformance(
         const error = await thrownBy(() => store.appendEvents(session.id, [spanStartFor(consumed)]))
         expectErrorIdentity(error, 'ClaimConflictError', CLAIM_CONFLICT_ERROR_CODE)
         expect(errorFields(error)).toMatchObject({ eventIds: consumed })
-        expect((await store.listEvents(session.id)).data).toEqual([running])
+        expect((await store.listEventsUnscoped(session.id)).data).toEqual([running])
         // The foreign event is untouched where it lives, too.
         expect((await store.getPendingUserEvents(elsewhere.id)).map((event) => event.id)).toEqual([
           foreign?.id,
@@ -950,7 +978,7 @@ export function runSessionStoreConformance(
         expect((await store.getPendingUserEvents(session.id)).map((event) => event.id)).toEqual([
           id,
         ])
-        expect((await store.listEvents(session.id)).data).toEqual([queued])
+        expect((await store.listEventsUnscoped(session.id)).data).toEqual([queued])
       })
 
       it('claims nothing for a span with an empty consumes list', async () => {
@@ -975,7 +1003,9 @@ export function runSessionStoreConformance(
         const [end] = await append(store, session.id, [spanEndFor(start, [id])])
         expect(end?.type).toBe(EVENT_TYPES.modelRequestEnd)
         expect(await store.getPendingUserEvents(session.id)).toEqual([])
-        const reread = (await store.listEvents(session.id)).data.find((event) => event.id === id)
+        const reread = (await store.listEventsUnscoped(session.id)).data.find(
+          (event) => event.id === id,
+        )
         expect(reread).toMatchObject({
           type: EVENT_TYPES.userInterrupt,
           processed_at: timestampAt(clock.currentMs),
@@ -994,7 +1024,9 @@ export function runSessionStoreConformance(
         expect(idle?.type).toBe(EVENT_TYPES.sessionStatusIdle)
         expect(idle).toMatchObject({ consumes: [id] })
         expect(await store.getPendingUserEvents(session.id)).toEqual([])
-        const reread = (await store.listEvents(session.id)).data.find((event) => event.id === id)
+        const reread = (await store.listEventsUnscoped(session.id)).data.find(
+          (event) => event.id === id,
+        )
         expect(reread).toEqual({ ...interrupt, processed_at: timestampAt(clock.currentMs) })
       })
 
@@ -1008,7 +1040,7 @@ export function runSessionStoreConformance(
         if (start?.type !== EVENT_TYPES.modelRequestStart) {
           throw new Error('the store did not return the span start it was given')
         }
-        const before = (await store.listEvents(session.id)).data
+        const before = (await store.listEventsUnscoped(session.id)).data
 
         // The message is already claimed by the span start above...
         const batches: AppendableEvent[][] = [[spanEndFor(start, [id])], [statusIdleFor([id])]]
@@ -1018,7 +1050,7 @@ export function runSessionStoreConformance(
           expect(errorFields(error)).toMatchObject({ eventIds: [id] })
         }
         // ...and neither attempt stored anything of its batch.
-        expect((await store.listEvents(session.id)).data).toEqual(before)
+        expect((await store.listEventsUnscoped(session.id)).data).toEqual(before)
       })
 
       it('claims nothing for a span end or an idle with no list', async () => {
@@ -1069,7 +1101,7 @@ export function runSessionStoreConformance(
         expect(stored[1]).toMatchObject({ type: EVENT_TYPES.eventDelta, event_id: previewed })
 
         // Nothing supersedes them yet, so they are the log, chunk by chunk.
-        expect((await store.listEvents(session.id)).data).toEqual(stored)
+        expect((await store.listEventsUnscoped(session.id)).data).toEqual(stored)
       })
 
       it('delivers stored chunks to subscribers like any other event', async () => {
@@ -1113,7 +1145,7 @@ export function runSessionStoreConformance(
           deltaOf(streaming, 'wo'),
         ])
 
-        const replay = (await store.listEvents(session.id)).data
+        const replay = (await store.listEventsUnscoped(session.id)).data
         expect(replay.map((event) => event.seq)).toEqual([
           message?.seq,
           ...inFlight.map((event) => event.seq),
@@ -1121,7 +1153,7 @@ export function runSessionStoreConformance(
         expect(replay[0]).toEqual(message)
 
         // The debugging read is the raw log: the superseded chunks are still there.
-        const raw = (await store.listEvents(session.id, { includeSuperseded: true })).data
+        const raw = (await store.listEventsUnscoped(session.id, { includeSuperseded: true })).data
         expect(raw.map((event) => event.seq)).toEqual([
           ...chunks.map((event) => event.seq),
           message?.seq,
@@ -1137,27 +1169,29 @@ export function runSessionStoreConformance(
         const [message] = await append(store, session.id, [supersedingMessage(1, 2)])
         const [after] = await append(store, session.id, [statusRunning()])
 
-        expect((await store.listEvents(session.id, { order: 'desc' })).data).toEqual([
+        expect((await store.listEventsUnscoped(session.id, { order: 'desc' })).data).toEqual([
           after,
           message,
         ])
-        expect((await store.listEvents(session.id, { afterSeq: 1 })).data).toEqual([message, after])
+        expect((await store.listEventsUnscoped(session.id, { afterSeq: 1 })).data).toEqual([
+          message,
+          after,
+        ])
         expect(
-          (await store.listEvents(session.id, { types: [EVENT_TYPES.eventDelta] })).data,
+          (await store.listEventsUnscoped(session.id, { types: [EVENT_TYPES.eventDelta] })).data,
         ).toEqual([])
         expect(
           (
-            await store.listEvents(session.id, {
+            await store.listEventsUnscoped(session.id, {
               types: [EVENT_TYPES.eventDelta],
               includeSuperseded: true,
             })
           ).data,
         ).toHaveLength(1)
         // A seq cursor past the superseded chunks resumes on what follows them.
-        expect((await store.listEvents(session.id, { page: encodeSeqCursor(2) })).data).toEqual([
-          message,
-          after,
-        ])
+        expect(
+          (await store.listEventsUnscoped(session.id, { page: encodeSeqCursor(2) })).data,
+        ).toEqual([message, after])
       })
 
       it('pages over a log whose superseded chunks are skipped, without gaps or repeats', async () => {
@@ -1169,7 +1203,7 @@ export function runSessionStoreConformance(
         const [queued] = await append(store, session.id, [userMessage('next')])
 
         const all = await readAllPages((cursor) =>
-          store.listEvents(session.id, { limit: 1, page: cursor }),
+          store.listEventsUnscoped(session.id, { limit: 1, page: cursor }),
         )
         expect(all).toEqual([message, queued])
       })
@@ -1200,7 +1234,7 @@ export function runSessionStoreConformance(
           )
           expect(error).toBeInstanceOf(RangeError)
         }
-        expect((await store.listEvents(session.id)).data).toHaveLength(2)
+        expect((await store.listEventsUnscoped(session.id)).data).toHaveLength(2)
       })
 
       it('records a supersession only for the events that carry one', async () => {
@@ -1209,7 +1243,7 @@ export function runSessionStoreConformance(
         const [first] = await append(store, session.id, [deltaOf(suppliedEventId(), 'a')])
         const [plain] = await append(store, session.id, [agentMessage('answer')])
         // `plain` supersedes nothing, so the delta ahead of it is still replayed.
-        expect((await store.listEvents(session.id)).data).toEqual([first, plain])
+        expect((await store.listEventsUnscoped(session.id)).data).toEqual([first, plain])
       })
     })
 
@@ -1243,13 +1277,15 @@ export function runSessionStoreConformance(
 
         // What every reader sees did not change — replay already skipped the chunks — and the
         // raw read agrees with the replay read now that the rows are gone.
-        expect((await store.listEvents(session.id)).data).toEqual([first, message, ...inFlight])
-        expect((await store.listEvents(session.id, { includeSuperseded: true })).data).toEqual([
+        expect((await store.listEventsUnscoped(session.id)).data).toEqual([
           first,
           message,
           ...inFlight,
         ])
-        expect((await store.listEvents(session.id)).data).not.toContainEqual(chunks[0])
+        expect(
+          (await store.listEventsUnscoped(session.id, { includeSuperseded: true })).data,
+        ).toEqual([first, message, ...inFlight])
+        expect((await store.listEventsUnscoped(session.id)).data).not.toContainEqual(chunks[0])
       })
 
       it('leaves a chunk inside the window where it is, and deletes it once it is old enough', async () => {
@@ -1262,12 +1298,12 @@ export function runSessionStoreConformance(
         clock.advance(30 * SECOND)
         // A cutoff before the chunks were written leaves them alone: their window is not over.
         expect(await store.compact({ olderThan: clock.currentMs - 60 * SECOND })).toBe(0)
-        expect((await store.listEvents(session.id, { includeSuperseded: true })).data).toHaveLength(
-          3,
-        )
+        expect(
+          (await store.listEventsUnscoped(session.id, { includeSuperseded: true })).data,
+        ).toHaveLength(3)
         // Once the cutoff has moved past them, they go.
         expect(await store.compact({ olderThan: clock.currentMs })).toBe(2)
-        expect((await store.listEvents(session.id)).data).toHaveLength(1)
+        expect((await store.listEventsUnscoped(session.id)).data).toHaveLength(1)
       })
 
       it('rejects a cutoff that is not an instant', async () => {
@@ -1318,8 +1354,8 @@ export function runSessionStoreConformance(
         }).toThrow(TypeError)
 
         // None of it reached the log.
-        expect((await store.listEvents(session.id)).data).toEqual([message, running])
-        expect((await store.listEvents(session.id)).data[0]?.seq).toBe(1)
+        expect((await store.listEventsUnscoped(session.id)).data).toEqual([message, running])
+        expect((await store.listEventsUnscoped(session.id)).data[0]?.seq).toBe(1)
       })
     })
 
@@ -1331,18 +1367,18 @@ export function runSessionStoreConformance(
         const { session } = await seed(store)
         expect(session.status).toBe('idle')
         await append(store, session.id, [statusRunning()])
-        expect((await store.getSession(session.id))?.status).toBe('running')
+        expect((await store.getSession(session.id, { ownerId: OWNER_A }))?.status).toBe('running')
         await append(store, session.id, [statusIdle()])
-        expect((await store.getSession(session.id))?.status).toBe('idle')
+        expect((await store.getSession(session.id, { ownerId: OWNER_A }))?.status).toBe('idle')
       })
 
       it('takes the last status event of an append, not the first', async () => {
         const { store } = await setup()
         const { session } = await seed(store)
         await append(store, session.id, [statusRunning(), statusIdle()])
-        expect((await store.getSession(session.id))?.status).toBe('idle')
+        expect((await store.getSession(session.id, { ownerId: OWNER_A }))?.status).toBe('idle')
         await append(store, session.id, [statusIdle(), statusRunning()])
-        expect((await store.getSession(session.id))?.status).toBe('running')
+        expect((await store.getSession(session.id, { ownerId: OWNER_A }))?.status).toBe('running')
       })
 
       it('leaves the status running through an error and a reschedule', async () => {
@@ -1350,9 +1386,9 @@ export function runSessionStoreConformance(
         const { session } = await seed(store)
         await append(store, session.id, [statusRunning()])
         await append(store, session.id, [sessionError(), statusRescheduled()])
-        expect((await store.getSession(session.id))?.status).toBe('running')
+        expect((await store.getSession(session.id, { ownerId: OWNER_A }))?.status).toBe('running')
         await append(store, session.id, [statusIdle()])
-        expect((await store.getSession(session.id))?.status).toBe('idle')
+        expect((await store.getSession(session.id, { ownerId: OWNER_A }))?.status).toBe('idle')
       })
     })
 
@@ -1431,8 +1467,8 @@ export function runSessionStoreConformance(
           userMessage('two'),
           userMessage('three'),
         ])
-        expect((await store.listEvents(session.id)).data).toEqual(stored)
-        expect((await store.listEvents(session.id, { order: 'desc' })).data).toEqual(
+        expect((await store.listEventsUnscoped(session.id)).data).toEqual(stored)
+        expect((await store.listEventsUnscoped(session.id, { order: 'desc' })).data).toEqual(
           [...stored].reverse(),
         )
       })
@@ -1445,9 +1481,11 @@ export function runSessionStoreConformance(
           userMessage('two'),
           userMessage('three'),
         ])
-        expect((await store.listEvents(session.id, { afterSeq: 0 })).data).toEqual(stored)
-        expect((await store.listEvents(session.id, { afterSeq: 1 })).data).toEqual(stored.slice(1))
-        expect((await store.listEvents(session.id, { afterSeq: 3 })).data).toEqual([])
+        expect((await store.listEventsUnscoped(session.id, { afterSeq: 0 })).data).toEqual(stored)
+        expect((await store.listEventsUnscoped(session.id, { afterSeq: 1 })).data).toEqual(
+          stored.slice(1),
+        )
+        expect((await store.listEventsUnscoped(session.id, { afterSeq: 3 })).data).toEqual([])
       })
 
       it('filters by types, and keeps none for an empty filter', async () => {
@@ -1455,18 +1493,18 @@ export function runSessionStoreConformance(
         const { session } = await seed(store)
         await append(store, session.id, [userMessage('one'), statusRunning(), agentMessage('hi')])
         expect(
-          (await store.listEvents(session.id, { types: [EVENT_TYPES.userMessage] })).data.map(
-            (event) => event.type,
-          ),
+          (
+            await store.listEventsUnscoped(session.id, { types: [EVENT_TYPES.userMessage] })
+          ).data.map((event) => event.type),
         ).toEqual([EVENT_TYPES.userMessage])
         expect(
           (
-            await store.listEvents(session.id, {
+            await store.listEventsUnscoped(session.id, {
               types: [EVENT_TYPES.userMessage, EVENT_TYPES.agentMessage],
             })
           ).data.map((event) => event.type),
         ).toEqual([EVENT_TYPES.userMessage, EVENT_TYPES.agentMessage])
-        expect(await store.listEvents(session.id, { types: [] })).toEqual({
+        expect(await store.listEventsUnscoped(session.id, { types: [] })).toEqual({
           data: [],
           next_page: null,
         })
@@ -1480,15 +1518,15 @@ export function runSessionStoreConformance(
           session.id,
           Array.from({ length: 5 }, (_unused, index) => userMessage(`message ${index}`)),
         )
-        const firstPage = await store.listEvents(session.id, { limit: 2 })
+        const firstPage = await store.listEventsUnscoped(session.id, { limit: 2 })
         expect(firstPage.data.map((event) => event.seq)).toEqual([1, 2])
         expect(decodePageCursor(nextPageOf(firstPage))).toEqual({ kind: 'seq', seq: 2 })
         const ascending = await readAllPages((cursor) =>
-          store.listEvents(session.id, { limit: 2, page: cursor }),
+          store.listEventsUnscoped(session.id, { limit: 2, page: cursor }),
         )
         expect(ascending).toEqual(stored)
         const descending = await readAllPages((cursor) =>
-          store.listEvents(session.id, { limit: 2, order: 'desc', page: cursor }),
+          store.listEventsUnscoped(session.id, { limit: 2, order: 'desc', page: cursor }),
         )
         expect(descending).toEqual([...stored].reverse())
       })
@@ -1497,7 +1535,7 @@ export function runSessionStoreConformance(
         const { store } = await setup()
         const { session } = await seed(store)
         await append(store, session.id, [userMessage('one')])
-        expect(await store.listEvents(session.id, { page: encodeSeqCursor(99) })).toEqual({
+        expect(await store.listEventsUnscoped(session.id, { page: encodeSeqCursor(99) })).toEqual({
           data: [],
           next_page: null,
         })
@@ -1511,8 +1549,8 @@ export function runSessionStoreConformance(
           session.id,
           Array.from({ length: MAX_PAGE_LIMIT + 1 }, () => userMessage('hi')),
         )
-        expect((await store.listEvents(session.id, { limit: 0 })).data).toHaveLength(1)
-        const huge = await store.listEvents(session.id, { limit: MAX_PAGE_LIMIT * 10 })
+        expect((await store.listEventsUnscoped(session.id, { limit: 0 })).data).toHaveLength(1)
+        const huge = await store.listEventsUnscoped(session.id, { limit: MAX_PAGE_LIMIT * 10 })
         expect(huge.data).toHaveLength(MAX_PAGE_LIMIT)
         expect(huge.next_page).not.toBeNull()
       })
@@ -1523,18 +1561,18 @@ export function runSessionStoreConformance(
         await append(store, session.id, [userMessage('one')])
         const keyCursor = encodeKeyCursor(session)
         expect(
-          await thrownBy(() => store.listEvents(session.id, { page: keyCursor })),
+          await thrownBy(() => store.listEventsUnscoped(session.id, { page: keyCursor })),
         ).toBeInstanceOf(RangeError)
         expect(
-          await thrownBy(() => store.listEvents(session.id, { page: 'page_nonsense' })),
+          await thrownBy(() => store.listEventsUnscoped(session.id, { page: 'page_nonsense' })),
         ).toBeInstanceOf(RangeError)
         const seqCursor = encodeSeqCursor(1)
-        expect(await thrownBy(() => store.listAgents({ page: seqCursor }))).toBeInstanceOf(
-          RangeError,
-        )
-        expect(await thrownBy(() => store.listSessions({ page: seqCursor }))).toBeInstanceOf(
-          RangeError,
-        )
+        expect(
+          await thrownBy(() => store.listAgents({ ownerId: OWNER_A, page: seqCursor })),
+        ).toBeInstanceOf(RangeError)
+        expect(
+          await thrownBy(() => store.listSessions({ ownerId: OWNER_A, page: seqCursor })),
+        ).toBeInstanceOf(RangeError)
       })
     })
 
@@ -1915,7 +1953,7 @@ export function runSessionStoreConformance(
           currentEpoch: current.epoch,
           operation: 'appendEvents',
         })
-        expect((await store.listEvents(session.id)).data).toEqual([])
+        expect((await store.listEventsUnscoped(session.id)).data).toEqual([])
 
         const accepted = await store.appendEvents(session.id, [userMessage('owner')], {
           fence: { partition: stale.partition, epoch: current.epoch },

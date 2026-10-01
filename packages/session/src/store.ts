@@ -70,11 +70,13 @@ import type {
  * - **Ownership** (epic #65, A4). Every agent and session belongs to exactly one user:
  *   {@link SessionStore.createAgent} and {@link SessionStore.createSession} take the owner's
  *   `user.id` and the stored resource carries it as `owner_id`. The reads a user-facing route
- *   makes take a {@link OwnerScopeOptions} `{ ownerId }` and answer `null` (or throw
- *   {@link SessionNotFoundError} on a session-scoped read) for a resource that belongs to
- *   somebody else — a 404 on the wire, never a 403, so another user's resource does not even
- *   leak that it exists. A read without `ownerId` is unscoped, and that is what the brain and
- *   the scheduler use: they act *for* a session, not for a user.
+ *   makes take an {@link OwnerScope} `{ ownerId }` — **required**, so forgetting it is a
+ *   compile error — and answer `null` (or throw {@link SessionNotFoundError} on a
+ *   session-scoped read) for a resource that belongs to somebody else: a 404 on the wire,
+ *   never a 403, so another user's resource does not even leak that it exists. The brain and
+ *   the scheduler act *for* a session, not for a user, and use the explicitly named unscoped
+ *   methods ({@link SessionStore.getSessionUnscoped}, {@link SessionStore.listEventsUnscoped})
+ *   that no user-facing route may call.
  * - **Async.** Every method is asynchronous. Nothing may assume synchronous delivery: a store
  *   built on `LISTEN`/`NOTIFY`, or one that commits a transaction before it notifies, delivers
  *   subscriptions and signals a tick later than it stored the event.
@@ -103,24 +105,23 @@ export interface SessionStore {
   /**
    * Read one agent, or `null` when no agent has that id.
    *
-   * With `options.ownerId` the read is **owner-scoped** — the form a user-facing route uses:
-   * an agent that belongs to somebody else answers `null`, exactly as one that does not exist,
-   * so the caller turns both into the same 404 (epic #65, A4). Without it the read is
-   * unscoped, which is for server internals that already know whose agent they are dealing
-   * with.
+   * **Owner-scoped, and the owner is required** (epic #65, A4): an agent that belongs to
+   * somebody else answers `null`, exactly as one that does not exist, so the caller turns both
+   * into the same 404. Requiring the scope is deliberate — a read without it cannot be
+   * written, so a route cannot forget it and leak another user's agent by accident. There is
+   * no unscoped form: nothing internal reads an agent without already knowing its owner.
    */
-  getAgent(agentId: AgentId, options?: OwnerScopeOptions): Promise<Agent | null>
+  getAgent(agentId: AgentId, options: OwnerScope): Promise<Agent | null>
 
   /**
    * List agents, oldest first, ordered by `(created_at, id)`.
    *
-   * `options.ownerId` is the **owner-scoped** form a user-facing route uses: only that owner's
-   * agents come back — `data: []` for a user with none, never somebody else's. Omitted, the
-   * list is unscoped.
+   * **Owner-scoped, and the owner is required** (epic #65, A4): only that owner's agents come
+   * back — `data: []` for a user with none, never somebody else's.
    *
    * `page` and `next_page` are the protocol's opaque keyset cursor, passed through untouched.
    */
-  listAgents(options?: ListAgentsOptions): Promise<ListAgentsResponse>
+  listAgents(options: ListAgentsOptions): Promise<ListAgentsResponse>
 
   /**
    * Apply a partial update to an agent and return it, or `null` when no agent has that id.
@@ -158,22 +159,34 @@ export interface SessionStore {
    * Read a session's header (the log's metadata, not its events), or `null` when it does not
    * exist.
    *
-   * With `options.ownerId` the read is **owner-scoped** — the form a user-facing route uses:
-   * somebody else's session answers `null`, exactly as one that does not exist (epic #65, A4).
-   * Without it the read is unscoped, which is for the brain and the server internals: they act
-   * for a session, not for a user.
+   * **Owner-scoped, and the owner is required** (epic #65, A4): somebody else's session
+   * answers `null`, exactly as one that does not exist, so a user-facing route turns both into
+   * the same 404. Requiring the scope is deliberate — a route that forgets it does not
+   * compile. Server internals that act *for a session, not for a user* — the brain recovering
+   * a turn, the credential resolver looking up the session's owner — use the explicitly named
+   * {@link SessionStore.getSessionUnscoped} instead.
    */
-  getSession(sessionId: SessionId, options?: OwnerScopeOptions): Promise<Session | null>
+  getSession(sessionId: SessionId, options: OwnerScope): Promise<Session | null>
+
+  /**
+   * Read a session's header **without** an owner scope: any owner's session comes back.
+   *
+   * This is the internal form, and deliberately a different name rather than an optional
+   * argument (epic #65, A4): the brain, the scheduler and the server's credential resolver act
+   * for a session rather than for a user, and a user-facing route must not reach for it. A
+   * route scopes with {@link SessionStore.getSession} first and answers 404 for a `null`.
+   */
+  getSessionUnscoped(sessionId: SessionId): Promise<Session | null>
 
   /**
    * List sessions, newest first, ordered by `(created_at, id)` descending.
    *
-   * `options.ownerId` is the **owner-scoped** form a user-facing route uses: only that owner's
-   * sessions come back. Omitted, the list is unscoped.
+   * **Owner-scoped, and the owner is required** (epic #65, A4): only that owner's sessions
+   * come back, and the `agentId` filter narrows inside them.
    *
    * `page` and `next_page` are the protocol's opaque keyset cursor, passed through untouched.
    */
-  listSessions(options?: ListSessionsOptions): Promise<ListSessionsResponse>
+  listSessions(options: ListSessionsOptions): Promise<ListSessionsResponse>
 
   /**
    * Change a session's title, and return the session as it is afterwards — or `null` when no
@@ -287,16 +300,37 @@ export interface SessionStore {
    * leaves gaps in them; nothing else about reading changes. Pass `includeSuperseded: true` to
    * read the raw log instead — for debugging and tests.
    *
-   * `options.ownerId` is the **owner-scoped** form the user-facing route for a session's events
-   * uses: somebody else's session is answered with {@link SessionNotFoundError}, exactly like a
-   * session that does not exist, so a 404 on the wire leaks nothing (epic #65, A4). Omitted,
-   * the read is unscoped — which is the brain's replay.
+   * **Owner-scoped, and the owner is required** (epic #65, A4): somebody else's session is
+   * answered with {@link SessionNotFoundError}, exactly like a session that does not exist, so
+   * a 404 on the wire leaks nothing. Requiring the scope is deliberate — the user-facing route
+   * for a session's events (and the SSE replay it drives) cannot forget it. The brain's replay
+   * uses {@link SessionStore.listEventsUnscoped}, the explicitly named internal form.
    *
    * @throws SessionNotFoundError when the session does not exist, or belongs to another owner
    *   than `options.ownerId` names
    * @throws RangeError when `page` is not a `seq` cursor
    */
-  listEvents(sessionId: SessionId, options?: ListEventsOptions): Promise<ListEventsResponse>
+  listEvents(sessionId: SessionId, options: ListEventsOptions): Promise<ListEventsResponse>
+
+  /**
+   * Read a page of the log **without** an owner scope: any owner's session's log comes back.
+   *
+   * This is the internal form, and deliberately a different name rather than an optional
+   * argument (epic #65, A4): the brain replays the log of the session it is acting for, and
+   * the SSE route that has already answered 404 for a session it does not own may replay
+   * through it. A user-facing read must not reach for it — pass the caller's `ownerId` to
+   * {@link SessionStore.listEvents} instead, and a leak becomes a compile error.
+   *
+   * Everything else about the read is {@link SessionStore.listEvents}'s: the same filtering,
+   * cursors and supersession rules.
+   *
+   * @throws SessionNotFoundError when the session does not exist
+   * @throws RangeError when `page` is not a `seq` cursor
+   */
+  listEventsUnscoped(
+    sessionId: SessionId,
+    options?: UnscopedListEventsOptions,
+  ): Promise<ListEventsResponse>
 
   /**
    * The user events waiting to be folded into a turn: `processed_at` is `null`, ordered by `seq`.
@@ -498,24 +532,25 @@ export interface CreateSessionOptions {
 }
 
 /**
- * How a read is scoped to one owner (epic #65, A4).
+ * How a read is scoped to one owner (epic #65, A4): **required**, so a read that forgets its
+ * owner is a compile error, not a silent leak of somebody else's data.
  *
- * The read methods a user-facing route uses take these options, and the server passes the
- * authenticated caller's id: an agent or session that belongs to somebody else is left out of
- * a list, and a read of one answers `null` — or `SessionNotFoundError` on a session-scoped
- * read — exactly as for an id nothing has, so the route's 404 leaks nothing.
+ * The read methods a user-facing route uses take this, and the server passes the authenticated
+ * caller's id: an agent or session that belongs to somebody else is left out of a list, and a
+ * read of one answers `null` — or `SessionNotFoundError` on a session-scoped read — exactly as
+ * for an id nothing has, so the route's 404 leaks nothing.
  *
- * Omitted, the read is **unscoped**: any owner's resource comes back. That is the form the
- * brain and the scheduler use, because they act for a session rather than for a user, and it
- * is not a form a user-facing route may use.
+ * The brain and the scheduler do not use this: they act for a session rather than for a user,
+ * and use the explicitly named unscoped methods ({@link SessionStore.getSessionUnscoped},
+ * {@link SessionStore.listEventsUnscoped}) instead.
  */
-export interface OwnerScopeOptions {
-  /** The `user.id` to scope the read to; omitted, the read is unscoped. */
-  readonly ownerId?: UserId
+export interface OwnerScope {
+  /** The `user.id` the read is scoped to. */
+  readonly ownerId: UserId
 }
 
 /** Query of {@link SessionStore.listAgents}. */
-export interface ListAgentsOptions extends OwnerScopeOptions {
+export interface ListAgentsOptions extends OwnerScope {
   /** Page size; defaults to `DEFAULT_PAGE_LIMIT` and is capped at `MAX_PAGE_LIMIT`. */
   readonly limit?: number
   /** `next_page` from a previous call, passed back untouched. */
@@ -523,7 +558,7 @@ export interface ListAgentsOptions extends OwnerScopeOptions {
 }
 
 /** Query of {@link SessionStore.listSessions}. */
-export interface ListSessionsOptions extends OwnerScopeOptions {
+export interface ListSessionsOptions extends OwnerScope {
   /** Page size; defaults to `DEFAULT_PAGE_LIMIT` and is capped at `MAX_PAGE_LIMIT`. */
   readonly limit?: number
   /** `next_page` from a previous call, passed back untouched. */
@@ -532,8 +567,11 @@ export interface ListSessionsOptions extends OwnerScopeOptions {
   readonly agentId?: AgentId
 }
 
-/** Query of {@link SessionStore.listEvents}. */
-export interface ListEventsOptions extends OwnerScopeOptions {
+/** Query of {@link SessionStore.listEvents}: owner-scoped. */
+export interface ListEventsOptions extends OwnerScope, UnscopedListEventsOptions {}
+
+/** Query of {@link SessionStore.listEventsUnscoped}: the same filters, without the owner. */
+export interface UnscopedListEventsOptions {
   /** `asc` (default, oldest first) or `desc`. */
   readonly order?: ListOrder
   /** Page size; defaults to `DEFAULT_PAGE_LIMIT` and is capped at `MAX_PAGE_LIMIT`. */

@@ -60,7 +60,8 @@ import type {
   ListAgentsOptions,
   ListEventsOptions,
   ListSessionsOptions,
-  OwnerScopeOptions,
+  OwnerScope,
+  UnscopedListEventsOptions,
   PartitionFence,
   PartitionLease,
   PartitionSignal,
@@ -200,24 +201,22 @@ export class PostgresSessionStore implements SessionStore {
     return agentFromRow(row)
   }
 
-  async getAgent(agentId: AgentId, options: OwnerScopeOptions = {}): Promise<Agent | null> {
-    let query = this.#db.selectFrom('agents').selectAll().where('id', '=', agentId)
-    if (options.ownerId !== undefined) {
-      // The owner is part of the lookup, not a filter afterwards: an agent somebody else owns
-      // matches no row, which is the same `null` an unknown id answers (A4).
-      query = query.where('owner_id', '=', options.ownerId)
-    }
-    const row = await query.executeTakeFirst()
+  async getAgent(agentId: AgentId, options: OwnerScope): Promise<Agent | null> {
+    // The owner is part of the lookup, not a filter afterwards: an agent somebody else owns
+    // matches no row, which is the same `null` an unknown id answers (A4).
+    const row = await this.#db
+      .selectFrom('agents')
+      .selectAll()
+      .where('id', '=', agentId)
+      .where('owner_id', '=', options.ownerId)
+      .executeTakeFirst()
     return row === undefined ? null : agentFromRow(row)
   }
 
-  async listAgents(options: ListAgentsOptions = {}): Promise<ListAgentsResponse> {
+  async listAgents(options: ListAgentsOptions): Promise<ListAgentsResponse> {
     const cursor = options.page === undefined ? null : decodeKeyPage(options.page)
     const limit = pageSize(options.limit)
-    let query = this.#db.selectFrom('agents').selectAll()
-    if (options.ownerId !== undefined) {
-      query = query.where('owner_id', '=', options.ownerId)
-    }
+    let query = this.#db.selectFrom('agents').selectAll().where('owner_id', '=', options.ownerId)
     if (cursor !== null) {
       query = query.where(keyset(cursor, 'asc'))
     }
@@ -300,12 +299,17 @@ export class PostgresSessionStore implements SessionStore {
     })
   }
 
-  async getSession(sessionId: SessionId, options: OwnerScopeOptions = {}): Promise<Session | null> {
+  async getSession(sessionId: SessionId, options: OwnerScope): Promise<Session | null> {
     const row = await readSession(this.#db, sessionId)
     if (row === undefined || !ownsRow(row, options)) {
       return null
     }
     return sessionFromRow(row)
+  }
+
+  async getSessionUnscoped(sessionId: SessionId): Promise<Session | null> {
+    const row = await readSession(this.#db, sessionId)
+    return row === undefined ? null : sessionFromRow(row)
   }
 
   async updateSession(sessionId: SessionId, update: UpdateSessionRequest): Promise<Session | null> {
@@ -332,13 +336,10 @@ export class PostgresSessionStore implements SessionStore {
     })
   }
 
-  async listSessions(options: ListSessionsOptions = {}): Promise<ListSessionsResponse> {
+  async listSessions(options: ListSessionsOptions): Promise<ListSessionsResponse> {
     const cursor = options.page === undefined ? null : decodeKeyPage(options.page)
     const limit = pageSize(options.limit)
-    let query = this.#db.selectFrom('sessions').selectAll()
-    if (options.ownerId !== undefined) {
-      query = query.where('owner_id', '=', options.ownerId)
-    }
+    let query = this.#db.selectFrom('sessions').selectAll().where('owner_id', '=', options.ownerId)
     if (options.agentId !== undefined) {
       query = query.where('agent_id', '=', options.agentId)
     }
@@ -395,16 +396,30 @@ export class PostgresSessionStore implements SessionStore {
     }
   }
 
-  async listEvents(
-    sessionId: SessionId,
-    options: ListEventsOptions = {},
-  ): Promise<ListEventsResponse> {
+  async listEvents(sessionId: SessionId, options: ListEventsOptions): Promise<ListEventsResponse> {
     const session = await readSession(this.#db, sessionId)
     // Somebody else's session is answered exactly like one that does not exist, so the 404 a
     // user-facing route derives from this leaks nothing (epic #65, A4).
     if (session === undefined || !ownsRow(session, options)) {
       throw new SessionNotFoundError(sessionId)
     }
+    return this.#readEvents(sessionId, options)
+  }
+
+  async listEventsUnscoped(
+    sessionId: SessionId,
+    options: UnscopedListEventsOptions = {},
+  ): Promise<ListEventsResponse> {
+    if ((await readSession(this.#db, sessionId)) === undefined) {
+      throw new SessionNotFoundError(sessionId)
+    }
+    return this.#readEvents(sessionId, options)
+  }
+
+  async #readEvents(
+    sessionId: SessionId,
+    options: UnscopedListEventsOptions,
+  ): Promise<ListEventsResponse> {
     const order = options.order ?? DEFAULT_EVENT_ORDER
     const cursor = options.page === undefined ? null : decodeSeqPage(options.page)
     const limit = pageSize(options.limit)
@@ -1231,8 +1246,8 @@ async function readSession(db: Queryable, sessionId: SessionId): Promise<Session
  * owner's own rows, which is how a user-facing route answers the same "not found" for
  * somebody else's resource as for one that does not exist (epic #65, A4).
  */
-function ownsRow(row: { readonly owner_id: string }, options: OwnerScopeOptions): boolean {
-  return options.ownerId === undefined || row.owner_id === options.ownerId
+function ownsRow(row: { readonly owner_id: string }, options: OwnerScope): boolean {
+  return row.owner_id === options.ownerId
 }
 
 /**

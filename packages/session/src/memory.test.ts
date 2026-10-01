@@ -83,7 +83,7 @@ describe('InMemorySessionStore', () => {
     })
     void store.appendEvents(session.id, [userMessage('hi')])
     expect(received).toEqual([])
-    await store.listEvents(session.id)
+    await store.listEventsUnscoped(session.id)
     expect(received).toHaveLength(1)
   })
 
@@ -96,19 +96,19 @@ describe('InMemorySessionStore', () => {
     })
     await store.appendEvents(session.id, [userMessage('hi')])
 
-    const readBack = await store.getSession(session.id)
+    const readBack = await store.getSession(session.id, { ownerId: OWNER })
     if (readBack === null) {
       throw new Error('the session it just created is gone')
     }
     readBack.title = 'mutated'
     readBack.agent.name = 'mutated'
     readBack.metadata['ticket'] = 'mutated'
-    const after = await store.getSession(session.id)
+    const after = await store.getSession(session.id, { ownerId: OWNER })
     expect(after?.title).toBeNull()
     expect(after?.agent.name).toBe('Summarizer')
     expect(after?.metadata).toEqual({ ticket: 'OH-4' })
 
-    const [event] = await store.listEvents(session.id).then((page) => page.data)
+    const [event] = await store.listEventsUnscoped(session.id).then((page) => page.data)
     if (event === undefined) {
       throw new Error('the event it just appended is gone')
     }
@@ -119,14 +119,14 @@ describe('InMemorySessionStore', () => {
     expect(() => {
       Object.assign(event, { seq: 99 })
     }).toThrow(TypeError)
-    expect((await store.listEvents(session.id)).data[0]?.seq).toBe(1)
+    expect((await store.listEventsUnscoped(session.id)).data[0]?.seq).toBe(1)
 
-    const storedAgent = await store.getAgent(agent.id)
+    const storedAgent = await store.getAgent(agent.id, { ownerId: OWNER })
     if (storedAgent === null) {
       throw new Error('the agent it just created is gone')
     }
     storedAgent.model.id = 'mutated'
-    expect((await store.getAgent(agent.id))?.model.id).toBe('a/b')
+    expect((await store.getAgent(agent.id, { ownerId: OWNER }))?.model.id).toBe('a/b')
   })
 
   it('returns events that carry nothing but the protocol fields', async () => {
@@ -154,8 +154,10 @@ describe('InMemorySessionStore', () => {
       store.appendEvents(session.id, [userMessage('fine'), broken]),
     )
     expect(error).toBeInstanceOf(Error)
-    expect((await store.listEvents(session.id)).data).toEqual([])
-    expect((await store.getSession(session.id))?.updated_at).toBe(session.updated_at)
+    expect((await store.listEventsUnscoped(session.id)).data).toEqual([])
+    expect((await store.getSession(session.id, { ownerId: OWNER }))?.updated_at).toBe(
+      session.updated_at,
+    )
     const [stored] = await store.appendEvents(session.id, [userMessage('after')])
     expect(stored?.seq).toBe(1)
   })
@@ -205,8 +207,8 @@ describe('InMemorySessionStore', () => {
     const agent = await first.createAgent({ name: 'Summarizer', model: { id: 'a/b' } }, OWNER)
     const session = await first.createSession(agent.id, { ownerId: OWNER })
     await first.appendEvents(session.id, [userMessage('hi')])
-    expect(await second.getSession(session.id)).toBeNull()
-    expect(await second.getAgent(agent.id)).toBeNull()
+    expect(await second.getSession(session.id, { ownerId: OWNER })).toBeNull()
+    expect(await second.getAgent(agent.id, { ownerId: OWNER })).toBeNull()
     expect(await second.findSessionsNeedingWork([partitionOf(session.id)])).toEqual([])
     const sessionId: SessionId = session.id
     expect(sessionId).toBe(session.id)
