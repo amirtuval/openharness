@@ -15,16 +15,16 @@ _Last updated: 2026-10-01._
   on the mock model and on a real provider (OpenAI) are done and all of their bugs are fixed. The
   epic is waiting for the maintainer to test it by hand and approve it.
 - **The immutable event log** ([#46](https://github.com/amirtuval/openharness/issues/46), decision
-  D9 on the epic) is in progress. The protocol, session and client phases are merged. Next are
-  the brain and server switch-over, then the cleanup phase. After it:
-  - no stored event is ever modified;
-  - claims are events;
-  - streamed chunks are stored and later superseded and compacted.
+  D9 on the epic) is done (PRs #47, #49, #50, #52 and #54):
+  - no stored event is ever modified, and the event types are deep-readonly;
+  - claims are events (`consumes` on the event that claims);
+  - streamed chunks are stored, superseded by the event that finishes them, skipped on replay and
+    deleted after a retention window.
 - **Flaky server tests** ([#43](https://github.com/amirtuval/openharness/issues/43)) are open.
 
 ## Order
 
-1. Finish v1: the maintainer's manual test and approval, and the rest of #46.
+1. Finish v1: the maintainer's manual test and approval.
 2. Authentication
 3. Deployment and CI/CD
 4. Model selection and provider keys
