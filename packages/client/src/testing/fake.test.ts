@@ -79,6 +79,34 @@ describe('the fake client', () => {
     expect(logged?.type === EVENT_TYPES.userMessage ? logged.processed_at : null).not.toBeNull()
   })
 
+  it('emits deep-frozen events and derives processed_at instead of rewriting the log', async () => {
+    const fake = createFakeClient()
+    fake.respondWith('frozen')
+
+    const { events } = await runTurn(fake)
+
+    for (const event of events) {
+      expect(Object.isFrozen(event), JSON.stringify(event)).toBe(true)
+    }
+
+    // The live copy is the event exactly as it was written — a queued message — and it
+    // cannot be rewritten.
+    const streamed = events.find((event) => event.type === EVENT_TYPES.userMessage)
+    expect(streamed).toMatchObject({ type: EVENT_TYPES.userMessage, processed_at: null })
+    expect(() => {
+      ;(streamed as Record<string, unknown>).processed_at = 'rewritten'
+    }).toThrow(TypeError)
+
+    // The log keeps the event as written too; a read derives the processed timestamp from the
+    // brain's note, which is what source-of-truth readers see from phase P2a on.
+    const logged = fake.history().find((event) => event.type === EVENT_TYPES.userMessage)
+    expect(logged).toMatchObject({
+      type: EVENT_TYPES.userMessage,
+      content: [{ type: 'text', text: 'hello fake' }],
+    })
+    expect(logged?.type === EVENT_TYPES.userMessage ? logged.processed_at : null).not.toBeNull()
+  })
+
   it('reconciles its preview with the stored message', async () => {
     const fake = createFakeClient()
     fake.respondWith('A reply in pieces', { chunks: 4 })

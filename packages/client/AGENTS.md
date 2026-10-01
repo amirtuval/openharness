@@ -61,6 +61,7 @@ src/
   internal/async.ts     sleep and a small async queue (the fake's plumbing)
   testing/index.ts      createFakeClient
   testing/fake-brain.ts the fake's turn loop: log, scripts, subscribers
+  testing/freeze.ts     deepFreeze: the fakes hand out frozen events (D9)
   test-support/         test-only helpers (mock fetch, response builders)
 ```
 
@@ -174,19 +175,22 @@ history cannot break a transcript rebuild.
 the `x-api-key` header.
 
 - **`deltas`** opts in per connection with `event_deltas[]=agent.message`, which is what makes
-  the server send `event_start` and `event_delta` previews of an `agent.message`.
+  the server send `event_start` and `event_delta` chunks of an `agent.message`. From phase P3
+  the server stores those chunks as events; a chunk that carries a `seq` is a stored event and
+  takes the stored-event path below, and one without is a live preview. The client takes both.
 - **`afterSeq`** is where to start. Omitted means _live only_: the stream delivers what happens
   next, not the history. Load history with `events.iterate`, fold it into the transcript, and
   pass `transcript.getState().lastSeq` to continue exactly where it stopped. `afterSeq: 0`
   replays the whole log.
-- **Resume.** The client remembers the last stored event's `seq` and, when the connection drops
-  or the server closes it, reconnects with `last-event-id: <seq>` **and** `after_seq=<seq>`, so
-  the server resumes from the same position whichever one it honors. Anything at or below that
-  `seq` is dropped before it reaches the caller, so a resume can neither duplicate nor skip a
-  stored event. Reconnects back off from 500 ms to 15 s (with ±25% jitter).
-- **Previews are never replayed** after a reconnect: a preview in flight when the connection
-  dies is simply cut short, and the stored `agent.message` that replaces it arrives whole. The
-  transcript keeps the partial preview until then.
+- **Resume.** The client remembers the last stored event's `seq` — a stored chunk counts, so a
+  disconnect mid-reply resumes mid-reply — and, when the connection drops or the server closes
+  it, reconnects with `last-event-id: <seq>` **and** `after_seq=<seq>`, so the server resumes
+  from the same position whichever one it honors. Anything at or below that `seq` is dropped
+  before it reaches the caller, so a resume can neither duplicate nor skip a stored event.
+  Reconnects back off from 500 ms to 15 s (with ±25% jitter).
+- **Stream-only previews are never replayed** after a reconnect: a preview in flight when the
+  connection dies is simply cut short, and the stored `agent.message` that replaces it arrives
+  whole. The transcript keeps the partial preview until then.
 - **Keepalive comments** (`: ping`) and any other comment line are ignored.
 - **When it stops.** `signal.abort()` ends the iteration quietly — no throw — so a caller can
   `for await` without a try/catch. An `ApiError` that is not retryable (a bad key, an unknown
@@ -215,7 +219,7 @@ for await (const event of client.sessions.events.stream(sessionId, {
 
 ```ts
 interface TranscriptState {
-  messages: TranscriptMessage[] // { id, role: 'user' | 'agent', text, blocks, pending, streaming }
+  messages: TranscriptMessage[] // { id, role: 'user' | 'agent', text, blocks, pending, streaming, position }
   status: 'idle' | 'running' // from the session status events
   lastError: TranscriptError | null // { type, message, retryStatus }
   lastSeq: number // the `seq` to resume from
@@ -224,27 +228,42 @@ interface TranscriptState {
 
 The rules it implements, in one place:
 
-- **Messages come from stored events.** `user.message` appends a `user` message; `agent.message`
-  appends or replaces an `agent` message.
-- **Previews.** `event_start` opens an empty `agent` message with `streaming: true`, keyed by the
-  id of the event it previews; `event_delta`s extend it (per content-block `index`, so a
-  multi-block message accumulates correctly). The stored `agent.message` with the same id
-  **replaces** the preview in place — same position, `streaming: false` — which is how a preview
-  that a reconnect cut short still ends up whole. A preview can never rewrite a message that is
-  already stored.
-- **Unreconciled previews are dropped** on `span.model_request_end` — and on
-  `session.status_idle`, which is the same statement about a turn that has ended: a preview no
-  stored event ever replaced belonged to a request that failed, was interrupted, or ended
-  without a reply, and there is nothing to keep. The idle half is what makes the rule hold when
-  the span end never arrives: a stored event this client cannot parse is skipped
-  (`events/stream.ts`), and without it a preview would stay `streaming` for the life of the
-  session — an empty reply bubble in a frontend that renders one (#40).
+- **Messages come from stored events, keyed by id.** `user.message` adds a `user` message;
+  `agent.message` **replaces** whatever the transcript holds for the same id — a whole
+  preview, a partial one, or nothing at all — and never merges.
+- **Every message has a position, and `messages` stays sorted by it.** A stored preview sits
+  where its chunks started (its `event_start`'s `seq`, or its first delta's `seq` when the
+  start was skipped); a finished reply sits where it started (`supersedes.from_seq`, the
+  `{ from_seq, to_seq }` chunk range D9 adds); a user message sits at its `seq`. A stream-only
+  preview — today's server, chunks with no `seq` — sits just after everything stored so far
+  (`lastSeq + 0.5`), so its placement is exactly what it always was. A reply interleaved with a
+  steering message therefore renders identically for a client that followed its chunks and one
+  that only ever saw the stored message, live or after a reload.
+- **Stored chunks are stored events.** Since D9 (phase P3 on the server) the chunks are
+  `event_start` / `event_delta` with an `id` and a `seq`, so they flow through the
+  `seq <= lastSeq` dedupe, advance `lastSeq`, and make `Last-Event-ID` resume work mid-reply.
+  The client takes both forms: the stored form and the old stream-only preview.
+- **Previews.** `event_start` opens an empty `agent` message with `streaming: true`, keyed by
+  the id of the event it previews; `event_delta`s extend it (per content-block `index`, so a
+  multi-block message accumulates correctly). A delta for a message that is already stored is
+  ignored: the stored event is the record.
+- **Unreconciled previews are dropped** on `span.model_request_end` — including the previews of
+  a chunk range the span end `supersedes` — and on `session.status_idle`, which is the same
+  statement about a turn that has ended: a preview no stored event ever replaced belonged to a
+  request that failed, was interrupted, or ended without a reply, and there is nothing to keep.
+  The idle half is what makes the rule hold when the span end never arrives: a stored event
+  this client cannot parse is skipped (`events/stream.ts`), and without it a preview would stay
+  `streaming` for the life of the session — an empty reply bubble in a frontend that renders
+  one (#40).
 - **`pending`** flags a user message the brain has not reached: the stored event's
-  `processed_at` is `null`. A message queued _while_ a turn is running (a steering message)
-  stays pending until the next `span.model_request_start` — that is the only signal the log
-  gives that the queue was picked up — and it keeps its place in the conversation.
+  `processed_at` is `null`, and a `span.model_request_start` whose `consumes` lists the
+  message's id is what says the request picked it up. A message queued _while_ a turn is
+  running (a steering message) stays pending until the request that claims it, and it keeps its
+  place in the conversation. A span start with no `consumes` at all is a server from before
+  D9 and keeps the older reading: every pending message is cleared, as before.
 - **An interrupt keeps the partial reply**: the text produced so far is stored as an
-  `agent.message`, the span closes with an `interrupted` error, and the turn goes idle.
+  `agent.message` (carrying `supersedes` over its chunks), the span closes with an `interrupted`
+  error, and the turn goes idle.
 - **`status`** is `running` from `session.status_running` and `session.status_rescheduled` (a
   session that is retrying is not idle), and `idle` from `session.status_idle`.
 - **`lastError`** is the latest `session.error`, and is cleared by an `agent.message` (the turn
@@ -308,21 +327,28 @@ await fake.interrupt(fake.session.id)
 // → a user.interrupt, the partial agent.message, an interrupted span end, idle
 ```
 
-Two details that follow the server and can surprise a test:
+Details that follow the server and can surprise a test:
 
 - **A stream is live by default.** Without `afterSeq` it delivers only what happens next, so
   start reading _before_ sending the message that starts the turn (or pass `afterSeq: 0`).
 - **A reply's bubble is placed when its preview starts.** A steering message sent mid-reply
   lands after the reply, which is where it arrived in time.
+- **The events it emits are frozen.** The fake's log is append-only in the same sense the real
+  one is (D9): every event is deep-frozen before it is stored or delivered, and nothing
+  rewrites one — including `processed_at`, which a read derives from a note the brain keeps
+  beside the log, exactly as the real store does from phase P2a on. A test that tries to
+  rewrite an emitted event fails at the attempt instead of corrupting what other readers see.
 
 ## Testing
 
 `src/**/*.test.ts` with Vitest: `node` everywhere except `src/browser.test.ts`, which declares
 `@vitest-environment jsdom`. The suite drives a mock `fetch` (`src/test-support/mock-fetch.ts`)
 rather than a server: request building and response parsing, the SSE parser's edge cases,
-reconnect/resume, every transcript rule, and the fake against the real client on the same
-scripted scenario (the fake's events are replayed to the real client as an SSE body, and the two
-transcripts must be equal).
+reconnect/resume (including a resume mid-reply, from a stored chunk), every transcript rule,
+one scripted D9 session folded from five different client views that must all converge on the
+same conversation, frozen events through the reducer, and the fake against the real client on
+the same scripted scenario (the fake's events are replayed to the real client as an SSE body,
+and the two transcripts must be equal).
 
 ## Allowed `@openharness/*` dependencies
 

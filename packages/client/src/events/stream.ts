@@ -15,8 +15,12 @@ import { parseSseStream } from './sse'
  * Following a session's event stream.
  *
  * The stream is the live half of the session log: stored events arrive as they are written,
- * and — if the connection asked for them — `event_start` / `event_delta` previews arrive
- * while an `agent.message` is still being generated.
+ * and — if the connection asked for them — the chunks of a reply arrive while its
+ * `agent.message` is still being generated. A chunk comes in one of two forms, and `seq` tells
+ * them apart: the stored form (D9) is an `event_start` / `event_delta` with an `id` and a
+ * `seq`, delivered like any other stored event — so a client that drops mid-reply resumes
+ * mid-reply — and the stream-only preview has no envelope, is never replayed, and is a
+ * display aid for the connection that asked for it.
  *
  * A stream is long-lived and the network is not, so this is a reconnect loop rather than a
  * single request. What makes it safe is the `seq` on every stored event:
