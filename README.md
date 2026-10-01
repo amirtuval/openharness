@@ -34,9 +34,9 @@ and [`docs/api.md`](./docs/api.md) for the HTTP API.
 
 **Status: early development.** The v1 epic ([#2](https://github.com/amirtuval/openharness/issues/2))
 is building a chat server with a web UI and a terminal UI. Working end to end today: agents and
-sessions, streaming replies with live previews, steering a running turn, interrupting it,
-automatic retries, and sessions that survive a server restart. Each package's `AGENTS.md` says
-what it currently implements.
+sessions, streaming replies whose chunks are stored as they arrive, steering a running turn,
+interrupting it, automatic retries, and sessions that survive a server restart. Each package's
+`AGENTS.md` says what it currently implements.
 
 ## Quick start
 
