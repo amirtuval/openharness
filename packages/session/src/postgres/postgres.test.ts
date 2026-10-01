@@ -12,18 +12,31 @@ import {
   type EventId,
   type Session,
   type UserEventInput,
+  type UserId,
 } from '@openharness/protocol'
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql'
 import { Kysely, PostgresDialect, sql } from 'kysely'
 import { Pool } from 'pg'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 
+import type { UpsertCredentialInput } from '../credentials'
 import { DuplicateEventIdError, FencedError, isFencedError } from '../errors'
 import type { AppendableEvent } from '../store'
 import { timestampAt } from '../clock'
 import { createTestClock, type TestClock } from '../testing/clock'
-import { runSessionStoreConformance, type MakeSessionStore } from '../testing/conformance'
-import { createPostgresSessionStore, migrate, type PostgresSchema } from './index'
+import {
+  OWNER_A,
+  OWNER_B,
+  runSessionStoreConformance,
+  type MakeSessionStore,
+} from '../testing/conformance'
+import { runCredentialStoreConformance } from '../testing/credentials-conformance'
+import {
+  createPostgresCredentialStore,
+  createPostgresSessionStore,
+  migrate,
+  type PostgresSchema,
+} from './index'
 
 /**
  * The Postgres store's tests: the whole conformance suite, plus what only a shared store can
@@ -92,6 +105,9 @@ if (target === null) {
   /** Every store a test made, closed again afterwards so its listening connection goes. */
   const stores: ReturnType<typeof createPostgresSessionStore>[] = []
 
+  /** Every credential store a test made, closed again afterwards. */
+  const credentialStores: ReturnType<typeof createPostgresCredentialStore>[] = []
+
   beforeAll(async () => {
     let connectionString = DATABASE_URL
     if (connectionString === '') {
@@ -105,6 +121,7 @@ if (target === null) {
 
   afterEach(async () => {
     await Promise.all(stores.splice(0).map((store) => store.close()))
+    await Promise.all(credentialStores.splice(0).map((store) => store.close()))
   })
 
   afterAll(async () => {
@@ -121,7 +138,22 @@ if (target === null) {
     return track(createPostgresSessionStore({ pool }, { now: clock.now }))
   }
 
-  runSessionStoreConformance(makeStore, { name: 'PostgresSessionStore' })
+  runSessionStoreConformance(makeStore, {
+    name: 'PostgresSessionStore',
+    // `agents.owner_id` and `sessions.owner_id` are foreign keys into Better Auth's `"user"`
+    // table (0012_ownership.sql), so the suite's owners have to exist as rows before anything
+    // is created for them — which is what the server's Better Auth wiring will do in #61.
+    ensureUsers,
+  })
+
+  /** The credential store's conformance suite, on the same tables and users. */
+  runCredentialStoreConformance(
+    async (clock) => {
+      await truncateAll()
+      return trackCredentials(createPostgresCredentialStore({ pool }, { now: clock.now }))
+    },
+    { name: 'PostgresCredentialStore', ensureUsers },
+  )
 
   // -------------------------------------------------------------- extra tests
 
@@ -159,7 +191,10 @@ if (target === null) {
     it('refuses the same supplied id from two stores, for two sessions at once', async () => {
       const { store: first, session } = await seeded()
       const second = track(createPostgresSessionStore({ pool }, { now: () => START_MS }))
-      const other = await second.createSession((await second.createAgent(agentInput('Other'))).id)
+      const other = await second.createSession(
+        (await second.createAgent(agentInput('Other'), OWNER_A)).id,
+        { ownerId: OWNER_A },
+      )
       const id = newEventId()
 
       // Two appends to different sessions do not share the append lock, so nothing serializes
@@ -397,7 +432,7 @@ if (target === null) {
 
     it('leaves a pool it did not open alone, and ends one it did', async () => {
       const borrowed = track(createPostgresSessionStore({ pool }, { now: () => START_MS }))
-      await borrowed.createAgent(agentInput())
+      await borrowed.createAgent(agentInput(), OWNER_A)
       await borrowed.close()
       // The pool is the caller's: a store that borrowed it must not have ended it, so the
       // rest of the application — and this test — can keep using it.
@@ -407,10 +442,68 @@ if (target === null) {
         { connectionString: DATABASE_URL === '' ? connectionOf(container) : DATABASE_URL },
         { now: () => START_MS },
       )
-      const agent = await owned.createAgent(agentInput('Owned'))
+      const agent = await owned.createAgent(agentInput('Owned'), OWNER_A)
       expect(agent.name).toBe('Owned')
       await owned.close()
       await expect(owned.close()).resolves.toBeUndefined()
+    })
+  })
+
+  // ----------------------------------------- the credential store's extra tests
+
+  describe('PostgresCredentialStore: more than the contract asks', () => {
+    it('keeps one row per (user, provider) when two stores save at once', async () => {
+      await truncateAll()
+      await ensureUsers([OWNER_A])
+      const first = trackCredentials(
+        createPostgresCredentialStore({ pool }, { now: () => START_MS }),
+      )
+      const second = trackCredentials(
+        createPostgresCredentialStore({ pool }, { now: () => START_MS }),
+      )
+      // The upsert is one statement, so two uncoordinated saves of the same provider cannot
+      // both create a row: the unique constraint decides, and one of them replaces the other.
+      await Promise.all([
+        first.upsert({ ...credentialInput(), last4: '1111' }),
+        second.upsert({ ...credentialInput(), last4: '2222' }),
+      ])
+      const listed = await first.list({ userId: OWNER_A })
+      expect(listed).toHaveLength(1)
+      expect(['1111', '2222']).toContain(listed[0]?.last4)
+    })
+
+    it('deletes a user’s credentials, agents and sessions with the user', async () => {
+      await truncateAll()
+      await ensureUsers([OWNER_A, OWNER_B])
+      const store = track(createPostgresSessionStore({ pool }, { now: () => START_MS }))
+      const credentials = trackCredentials(
+        createPostgresCredentialStore({ pool }, { now: () => START_MS }),
+      )
+      const agent = await store.createAgent(agentInput(), OWNER_A)
+      const theirAgent = await store.createAgent(agentInput('Theirs'), OWNER_B)
+      const session = await store.createSession(agent.id, {
+        ownerId: OWNER_A,
+        initial_events: [userMessage('hi')],
+      })
+      const theirSession = await store.createSession(theirAgent.id, { ownerId: OWNER_B })
+      await credentials.upsert({ ...credentialInput(OWNER_A, 'a'), last4: 'aaaa' })
+      await credentials.upsert({ ...credentialInput(OWNER_B, 'b'), last4: 'bbbb' })
+
+      await sql`delete from "user" where id = ${OWNER_A}`.execute(db)
+
+      // Everything the user owned is gone with them — the `on delete cascade` the ownership
+      // migration and the credential table declare — and the events went with the session.
+      expect(await store.getAgent(agent.id)).toBeNull()
+      expect(await store.getSession(session.id)).toBeNull()
+      expect(await credentials.get({ userId: OWNER_A, provider: 'anthropic' })).toBeNull()
+      expect(await credentials.list({ userId: OWNER_A })).toEqual([])
+      expect(await eventRows(session.id)).toEqual(new Map())
+      // The other user is untouched, down to their own credential for the same provider.
+      expect(await store.getAgent(theirAgent.id)).not.toBeNull()
+      expect(await store.getSession(theirSession.id)).not.toBeNull()
+      expect((await credentials.get({ userId: OWNER_B, provider: 'anthropic' }))?.last4).toBe(
+        'bbbb',
+      )
     })
   })
 
@@ -421,9 +514,10 @@ if (target === null) {
     session: Session
   }> {
     await truncateAll()
+    await ensureUsers([OWNER_A, OWNER_B])
     const store = track(createPostgresSessionStore({ pool }, { now: clock.now }))
-    const agent = await store.createAgent(agentInput())
-    const session = await store.createSession(agent.id, { initial_events: [] })
+    const agent = await store.createAgent(agentInput(), OWNER_A)
+    const session = await store.createSession(agent.id, { ownerId: OWNER_A, initial_events: [] })
     return { store, clock, session }
   }
 
@@ -431,6 +525,30 @@ if (target === null) {
   function track(store: ReturnType<typeof createPostgresSessionStore>) {
     stores.push(store)
     return store
+  }
+
+  /** Remember a credential store so `afterEach` closes it. */
+  function trackCredentials(store: ReturnType<typeof createPostgresCredentialStore>) {
+    credentialStores.push(store)
+    return store
+  }
+
+  /**
+   * The `"user"` rows an owner needs before anything can be created for them.
+   *
+   * `owner_id` is a foreign key into Better Auth's `"user"` table, so a database that has
+   * never seen a user refuses to hold their agents, sessions or credentials. This is what the
+   * conformance suite calls between emptying the tables and the first owner-scoped write; the
+   * real rows come from Better Auth itself once the server mounts it (#61).
+   */
+  async function ensureUsers(userIds: readonly UserId[]): Promise<void> {
+    for (const userId of userIds) {
+      await sql`
+        insert into "user" ("id", "name", "email", "emailVerified")
+        values (${userId}, ${`Test user ${userId}`}, ${`${userId}@example.test`}, true)
+        on conflict ("id") do nothing
+      `.execute(db)
+    }
   }
 
   /**
@@ -448,20 +566,48 @@ if (target === null) {
     return new Map(rows.rows.map((row) => [row['id'] as string, row]))
   }
 
-  /** Empty every table, so a test starts where the previous one started. */
+  /** Empty every table of this package's schema, so a test starts where the previous one did. */
   async function truncateAll(): Promise<void> {
     // `event_claims` and `event_supersessions` reference `events`, so they are truncated in the
-    // same statement rather than with `cascade`: this is the complete list of the schema's
-    // tables, and a table missing from it should be a failure, not silently cascaded away.
-    // `session_previews` was dropped by `0010_drop_session_previews.sql` (P4).
+    // same statement rather than with `cascade`: this is the complete list of the tables the
+    // migrations create that this package owns, and a table missing from it should be a
+    // failure, not silently cascaded away. `session_previews` was dropped by
+    // `0010_drop_session_previews.sql` (P4). Better Auth's own tables (`"user"`, `"session"`,
+    // `"account"`, `"verification"`, `"deviceCode"`) are *not* truncated: the only rows in
+    // them are the ones `ensureUsers` inserts per test, and a `"user"` row carries the
+    // `owner_id`s everything else references.
     await sql`truncate table
-      events, event_claims, event_supersessions, sessions, agents, partition_leases`.execute(db)
+      events, event_claims, event_supersessions, sessions, agents, partition_leases,
+      provider_credentials`.execute(db)
   }
 }
 
 /** A `POST /v1/agents` body. */
 function agentInput(name = 'Summarizer'): CreateAgentRequest {
   return { name, model: { id: 'anthropic/claude-sonnet-5' }, system: 'You are concise.' }
+}
+
+/**
+ * One user's sealed `anthropic` key, as `upsert` takes it.
+ *
+ * The sealed fields are distinct recognizable strings per `tag` — a real blob comes from
+ * `@openharness/vault`, and the store treats every field as opaque, so a fixture is as good
+ * as a ciphertext for saying what came back out.
+ */
+function credentialInput(userId: UserId = OWNER_A, tag = 'one'): UpsertCredentialInput {
+  return {
+    userId,
+    provider: 'anthropic',
+    type: 'api_key',
+    sealed: {
+      ciphertext: `ciphertext:${tag}`,
+      nonce: `nonce:${tag}`,
+      wrappedKey: `wrapped-key:${tag}`,
+      kekVersion: 'test-v1',
+    },
+    last4: 'cdef',
+    validatedAt: timestampAt(START_MS),
+  }
 }
 
 /** A `user.message` to append. */

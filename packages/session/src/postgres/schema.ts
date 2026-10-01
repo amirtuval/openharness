@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import type {
   Agent,
   Metadata,
+  ProviderCredential,
   Session,
   SessionStatus,
   StoredEvent,
@@ -11,6 +12,7 @@ import type {
 import type { ColumnType, Selectable } from 'kysely'
 
 import { timestampAt } from '../clock'
+import type { SealedProviderCredential } from '../credentials'
 import { isUserEventType } from '../events'
 import { deepFreeze } from '../freeze'
 import type { AppendableEvent, PartitionSignal } from '../store'
@@ -27,9 +29,11 @@ import type { AppendableEvent, PartitionSignal } from '../store'
  * one page seek into the next one in the database.
  */
 
-/** `agents`: an agent configuration. */
+/** `agents`: an agent configuration, owned by one user. */
 export interface AgentsTable {
   id: string
+  /** The `user.id` the agent belongs to (epic #65, A4); written once, never updated. */
+  owner_id: string
   name: string
   description: string | null
   model_id: string
@@ -41,6 +45,8 @@ export interface AgentsTable {
 /** `sessions`: the header of a log, with the agent configuration it snapshotted. */
 export interface SessionsTable {
   id: string
+  /** The `user.id` the session belongs to (epic #65, A4); written once, never updated. */
+  owner_id: string
   status: SessionStatus
   partition: number
   title: string | null
@@ -137,6 +143,32 @@ export interface PartitionLeasesTable {
   expires_at: Date | null
 }
 
+/**
+ * `provider_credentials`: one user's sealed model-provider key, per provider (epic #65, A5).
+ *
+ * The row is a sealed blob and the metadata around it — there is no plaintext column, and
+ * none may ever be added (see `0013_provider_credentials.sql`). `unique (user_id, provider)`
+ * is what makes `upsert` an upsert and what `list` seeks by; `on delete cascade` from
+ * `"user"` takes a user's credentials with the user.
+ */
+export interface ProviderCredentialsTable {
+  /** A `pcred_` id; kept across a replacement of the same `(user_id, provider)`. */
+  id: string
+  user_id: string
+  provider: string
+  type: string
+  /** The sealed secret, field for field as the vault produced it. Opaque here. */
+  ciphertext: string
+  nonce: string
+  wrapped_key: string
+  kek_version: string
+  /** The last four characters of the plaintext, for recognition only. */
+  last4: string
+  created_at: Date
+  updated_at: Date
+  validated_at: Date
+}
+
 /** The database as this package sees it. */
 export interface PostgresSchema {
   agents: AgentsTable
@@ -145,6 +177,7 @@ export interface PostgresSchema {
   event_claims: EventClaimsTable
   event_supersessions: EventSupersessionsTable
   partition_leases: PartitionLeasesTable
+  provider_credentials: ProviderCredentialsTable
 }
 
 /** One row of `agents`. */
@@ -161,6 +194,15 @@ export type EventClaimRow = EventClaimsTable
 
 /** One row of `partition_leases`. */
 export type PartitionLeaseRow = PartitionLeasesTable
+
+/** One row of `provider_credentials`. */
+export type ProviderCredentialRow = ProviderCredentialsTable
+
+/** The columns a metadata read selects: every `provider_credentials` column but the sealed blob. */
+export type ProviderCredentialMetadataRow = Pick<
+  ProviderCredentialRow,
+  'id' | 'type' | 'provider' | 'last4' | 'created_at' | 'updated_at' | 'validated_at'
+>
 
 /**
  * An `events` row as every read here fetches it: with the claim its event has, if any.
@@ -186,6 +228,7 @@ export function agentFromRow(row: AgentRow): Agent {
   return {
     id: row.id as Agent['id'],
     type: 'agent',
+    owner_id: row.owner_id,
     name: row.name,
     description: row.description,
     model: { id: row.model_id },
@@ -200,6 +243,7 @@ export function sessionFromRow(row: SessionRow): Session {
   return {
     id: row.id as Session['id'],
     type: 'session',
+    owner_id: row.owner_id,
     status: row.status,
     title: row.title,
     metadata: row.metadata,
@@ -212,6 +256,40 @@ export function sessionFromRow(row: SessionRow): Session {
     created_at: timestampOf(row.created_at),
     updated_at: timestampOf(row.updated_at),
   }
+}
+
+/**
+ * The credential metadata a row carries: the `pcred_` id, the type and provider, the last
+ * four characters and the timestamps — and never the sealed columns.
+ *
+ * The store deep-freezes what it hands out (see the `CredentialStore` contract), so this is
+ * the one place a row becomes a value; a query that only lists metadata does not even select
+ * the sealed columns, which is what makes "`list` never reads a secret" a property of the
+ * SQL and not only of the mapping.
+ */
+export function credentialMetadataFromRow(row: ProviderCredentialMetadataRow): ProviderCredential {
+  return deepFreeze({
+    id: row.id as ProviderCredential['id'],
+    type: row.type as ProviderCredential['type'],
+    provider: row.provider,
+    last4: row.last4,
+    created_at: timestampOf(row.created_at),
+    updated_at: timestampOf(row.updated_at),
+    validated_at: timestampOf(row.validated_at),
+  })
+}
+
+/** The sealed record a row carries: the metadata above plus the sealed blob, deep-frozen. */
+export function credentialFromRow(row: ProviderCredentialRow): SealedProviderCredential {
+  return deepFreeze({
+    ...credentialMetadataFromRow(row),
+    sealed: {
+      ciphertext: row.ciphertext,
+      nonce: row.nonce,
+      wrappedKey: row.wrapped_key,
+      kekVersion: row.kek_version,
+    },
+  })
 }
 
 /**

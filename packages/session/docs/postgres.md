@@ -4,11 +4,12 @@
 the same log the in-memory fake keeps in `Map`s, in tables, with `LISTEN`/`NOTIFY` for live
 delivery. It passes the whole conformance suite unchanged — `src/postgres/postgres.test.ts`
 runs it against a real database — so anything the contract promises works the same here as it
-does in memory.
+does in memory. The subpath also exports `PostgresCredentialStore`, the durable half of the
+`CredentialStore` contract, on the same migrations.
 
-This document covers what is specific to this store: the schema, how the database is migrated,
-how `seq`, claims, supersession, compaction, fencing, leases and delivery are implemented,
-and how to run Postgres locally.
+This document covers what is specific to these stores: the schema, how the database is
+migrated, how `seq`, ownership, claims, supersession, compaction, fencing, leases and delivery
+are implemented, and how to run Postgres locally.
 
 ---
 
@@ -42,21 +43,37 @@ schema.
 
 ## The schema
 
-Six tables, in `migrations/`:
+Sixteen tables, in `migrations/`. Ten are this package's:
 
-| table                 | what a row is                                                                                       |
-| --------------------- | --------------------------------------------------------------------------------------------------- |
-| `agents`              | an agent configuration: name, description, model, system prompt, timestamps                         |
-| `sessions`            | a log's header: `status`, `partition`, title, metadata, and the agent snapshot                      |
-| `events`              | one stored event: `id`, `session_id`, `seq`, `type`, `payload jsonb`, `created_at`, `processed_at`  |
-| `event_claims`        | one claim of one user event: `event_id` (primary key), the claiming event or `null`, `claimed_at`   |
-| `event_supersessions` | one recorded chunk range: `from_seq`, `to_seq`, `by_event_id` (primary key), `by_seq`, `created_at` |
-| `partition_leases`    | who holds a partition, at which epoch, until when                                                   |
+| table                  | what a row is                                                                                           |
+| ---------------------- | ------------------------------------------------------------------------------------------------------- |
+| `agents`               | an agent configuration: `owner_id`, name, description, model, system prompt, timestamps                 |
+| `sessions`             | a log's header: `owner_id`, `status`, `partition`, title, metadata, and the agent snapshot              |
+| `events`               | one stored event: `id`, `session_id`, `seq`, `type`, `payload jsonb`, `created_at`, `processed_at`      |
+| `event_claims`         | one claim of one user event: `event_id` (primary key), the claiming event or `null`, `claimed_at`       |
+| `event_supersessions`  | one recorded chunk range: `from_seq`, `to_seq`, `by_event_id` (primary key), `by_seq`, `created_at`     |
+| `partition_leases`     | who holds a partition, at which epoch, until when                                                       |
+| `provider_credentials` | a user's sealed model-provider key, one per `(user_id, provider)`: the sealed blob, `last4`, timestamps |
+
+and six are **Better Auth's**, created by the same migrations and read and written by Better
+Auth itself (epic #65, decision A1): `user`, `session`, `account`, `verification` and
+`deviceCode`. They are the generator's schema, not this package's design — camelCase columns
+and all — because the server mounts Better Auth against them with its own migrator disabled.
+See [Better Auth's tables](#better-auths-tables) below.
 
 `session_previews`, the table of pre-D9 previews in flight, was dropped by
 `0010_drop_session_previews.sql` (P4); the chunks of a reply are rows of `events` since D9.
 
 Details that matter:
+
+- **`owner_id` is the user an agent or a session belongs to** (epic #65, A4): `text not null
+references "user" (id) on delete cascade`, written once at creation and never updated. The
+  reads a user-facing route makes filter on it (`where owner_id = $caller`), which is why both
+  tables carry an `(owner_id, created_at, id)` index beside their unscoped one — the same
+  `(created_at, id)` order, narrowed by the owner that comes first. It is Better Auth's opaque
+  id, so unlike this package's ids it carries no `collate "C"`: nothing orders by it. Deleting
+  the `"user"` row takes the user's agents, sessions and credentials with it, and the events
+  go with the sessions — one `delete from "user"` and nothing of that user is left.
 
 - **`id` columns are `text collate "C"`.** The ids are ASCII (`agent_`, `sesn_`, `sevt_` plus
   a ULID), and the lists are ordered and paged by `(created_at, id)`. Under the `C` collation
@@ -126,18 +143,21 @@ consequence is that **a migration file must never be edited once it has been app
 anywhere** — the runner will not re-run it, so an edit is silently ignored on existing
 databases while applying to new ones. Add a new file instead.
 
-| file                             | what it creates                                                            |
-| -------------------------------- | -------------------------------------------------------------------------- |
-| `0001_agents.sql`                | `agents`, and the `(created_at, id)` index the agent list pages through    |
-| `0002_sessions.sql`              | `sessions`, plus the indexes for the three ways sessions are queried       |
-| `0003_events.sql`                | `events`, its uniqueness constraint and its two secondary indexes          |
-| `0004_partition_leases.sql`      | `partition_leases`                                                         |
-| `0005_events_id_unique.sql`      | the `unique` index that states the id guarantee (`events_id_key`) by name  |
-| `0006_session_previews.sql`      | `session_previews`, the `unlogged` table of previews in flight             |
-| `0007_event_claims.sql`          | `event_claims`, the insert-only record of which events a turn claimed (D9) |
-| `0008_event_claims_backfill.sql` | the one-time copy of the pre-D9 `processed_at` values into claim rows (D9) |
-| `0009_event_supersessions.sql`   | `event_supersessions`, the insert-only record of the ranges events replace |
-| `0010_drop_session_previews.sql` | drops `session_previews`, the pre-D9 preview table (P4)                    |
+| file                             | what it creates                                                                                     |
+| -------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `0001_agents.sql`                | `agents`, and the `(created_at, id)` index the agent list pages through                             |
+| `0002_sessions.sql`              | `sessions`, plus the indexes for the three ways sessions are queried                                |
+| `0003_events.sql`                | `events`, its uniqueness constraint and its two secondary indexes                                   |
+| `0004_partition_leases.sql`      | `partition_leases`                                                                                  |
+| `0005_events_id_unique.sql`      | the `unique` index that states the id guarantee (`events_id_key`) by name                           |
+| `0006_session_previews.sql`      | `session_previews`, the `unlogged` table of previews in flight                                      |
+| `0007_event_claims.sql`          | `event_claims`, the insert-only record of which events a turn claimed (D9)                          |
+| `0008_event_claims_backfill.sql` | the one-time copy of the pre-D9 `processed_at` values into claim rows (D9)                          |
+| `0009_event_supersessions.sql`   | `event_supersessions`, the insert-only record of the ranges events replace                          |
+| `0010_drop_session_previews.sql` | drops `session_previews`, the pre-D9 preview table (P4)                                             |
+| `0011_better_auth.sql`           | Better Auth's tables: `user`, `session`, `account`, `verification`, `deviceCode` (epic #65, A1)     |
+| `0012_ownership.sql`             | deletes the v1 data once, then `owner_id` on `agents` and `sessions` and the per-owner indexes (A4) |
+| `0013_provider_credentials.sql`  | `provider_credentials`, the sealed-blob table (epic #65, A5)                                        |
 
 To run them outside an application:
 
@@ -148,6 +168,53 @@ DATABASE_URL=postgres://user:pass@localhost:5432/openharness yarn migrate
 `yarn migrate` runs the built `bin` (`dist/postgres/cli.js`), so build first. The command also
 accepts the connection string as its first argument, and exits non-zero when a migration
 fails, so a deploy step can gate on it.
+
+### Better Auth's tables
+
+`0011_better_auth.sql` creates the schema **Better Auth** needs (epic #65, decision A1): the
+core tables — `user`, `session`, `account`, `verification` — plus `deviceCode` from the
+`device-authorization` plugin (the one `oh login` uses). The `google`, `github` and `microsoft`
+social providers need no tables of their own (their accounts are `account` rows keyed by
+`providerId`), and `bearer` adds none either: a bearer token _is_ a `session` row looked up by
+`token`. A user's `email` is unique — a user _is_ a verified email (A3), and the same person
+through another provider is the same row.
+
+The SQL is **generated, not written**:
+
+```sh
+# in a scratch directory, with better-auth@1.7.7 installed
+npx @better-auth/cli generate --config ./auth.ts --output ./generated.sql
+```
+
+where `auth.ts` configures `betterAuth` with the Postgres/Kysely adapter, the three social
+providers and `deviceAuthorization()` + `bearer()`. The output is committed verbatim but for
+whitespace and the `if not exists` this package's migrator requires — `0011_better_auth.sql`
+reproduces it one statement per construct and records the version in its header.
+`npx @better-auth/cli migrate` against a scratch database produces the same schema, and
+re-running the generator over it answers "Your schema is already up to date."
+
+**The server sub-issue (#61) mounts Better Auth against these tables with its own migrator
+disabled, so they must match what Better Auth expects exactly.** Upgrading Better Auth means
+regenerating, diffing and adding a migration — never editing `0011` (no applied migration file
+is ever edited).
+
+### Ownership and the credential table
+
+`0012_ownership.sql` (decision A4) deletes every row of `events`, `event_claims`,
+`event_supersessions`, `sessions` and `agents` — v1 is unreleased, so there is no ownership to
+backfill — and then adds `owner_id text not null references "user" (id) on delete cascade` to
+`agents` and `sessions`, with an `(owner_id, created_at, id)` index for each owner-scoped
+list. The delete is wrapped in a `do $$ … $$` guard on the absence of the `owner_id` column:
+this migrator re-runs every file on every `migrate()` call, and without the guard a server
+restart months from now would empty every log in the database. Once the column exists the
+guard skips the deletes forever, so data created after the migration is safe.
+
+`0013_provider_credentials.sql` (decision A5) creates the credential table: one sealed key per
+`(user_id, provider)`, `on delete cascade` from `"user"`. Its columns are the sealed form
+(`ciphertext`, `nonce`, `wrapped_key`, `kek_version`), the `last4` recognition aid and the
+timestamps. **There is no plaintext column**, and the store that writes it
+(`PostgresCredentialStore`) never sees a plaintext either: the server seals with
+`@openharness/vault` and this package only moves blobs.
 
 ## `seq`: gap-free, in order, under concurrent appends
 
@@ -409,10 +476,13 @@ cd packages/session
 DATABASE_URL=postgres://postgres:postgres@localhost:5432/openharness yarn test
 ```
 
-The suite truncates every table before each test, so it is happy to share a database with
-anything else — but it will empty all six of them — `agents`, `sessions`, `events`,
-`event_claims`, `event_supersessions` and `partition_leases` — in whatever database
-`DATABASE_URL` points at. Point it at a scratch database.
+The suites truncate every table this package owns before each test, so they are happy to share
+a database with anything else — but they will empty all seven of them — `agents`, `sessions`,
+`events`, `event_claims`, `event_supersessions`, `partition_leases` and
+`provider_credentials` — in whatever database `DATABASE_URL` points at. Better Auth's tables
+are left alone apart from the two `"user"` rows the suites insert for their owners (the
+`ensureUsers` hook), so a database that also holds real sign-ins keeps them. Point
+`DATABASE_URL` at a scratch database anyway.
 
 ## Operational notes
 

@@ -10,6 +10,7 @@ import {
 import { FencedError, InMemorySessionStore } from '@openharness/session'
 
 import { SessionRunner } from './runner'
+import { PLACEHOLDER_OWNER_ID } from './placeholder-owner'
 import { LocalScheduler } from './scheduler'
 import {
   createScriptedModel,
@@ -41,8 +42,11 @@ async function fixture(
 ): Promise<{ context: TestContext; sessionId: SessionId }> {
   const test = createTestApp(options)
   context = test
-  const agent = await test.store.createAgent({ name: 'Agent', model: { id: 'test/model' } })
-  const session = await test.store.createSession(agent.id)
+  const agent = await test.store.createAgent(
+    { name: 'Agent', model: { id: 'test/model' } },
+    PLACEHOLDER_OWNER_ID,
+  )
+  const session = await test.store.createSession(agent.id, { ownerId: PLACEHOLDER_OWNER_ID })
   return { context: test, sessionId: session.id }
 }
 
@@ -124,8 +128,11 @@ describe('a wake that arrives while a turn is finishing', () => {
     const store = new WakingStore()
     const model = createScriptedModel({ text: ['answered after the wake'] })
     const runner = new SessionRunner({ store, model: model.factory })
-    const agent = await store.createAgent({ name: 'Agent', model: { id: 'test/model' } })
-    const session = await store.createSession(agent.id)
+    const agent = await store.createAgent(
+      { name: 'Agent', model: { id: 'test/model' } },
+      PLACEHOLDER_OWNER_ID,
+    )
+    const session = await store.createSession(agent.id, { ownerId: PLACEHOLDER_OWNER_ID })
     store.onTurnStateRead = async () => {
       await store.appendEvents(session.id, [
         { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: 'appended mid-read' }] },
@@ -164,8 +171,11 @@ describe('one turn at a time', () => {
   it('never has two model requests in flight for one session, even under steering', async () => {
     const test = createTestApp()
     context = test
-    const agent = await test.store.createAgent({ name: 'Agent', model: { id: 'test/model' } })
-    const session = await test.store.createSession(agent.id)
+    const agent = await test.store.createAgent(
+      { name: 'Agent', model: { id: 'test/model' } },
+      PLACEHOLDER_OWNER_ID,
+    )
+    const session = await test.store.createSession(agent.id, { ownerId: PLACEHOLDER_OWNER_ID })
     let steered = false
     test.model.push({
       text: ['one ', 'two ', 'three'],
@@ -190,8 +200,11 @@ describe('steering', () => {
   it('answers a message that arrived mid-request in a second request', async () => {
     const test = createTestApp()
     context = test
-    const agent = await test.store.createAgent({ name: 'Agent', model: { id: 'test/model' } })
-    const session = await test.store.createSession(agent.id)
+    const agent = await test.store.createAgent(
+      { name: 'Agent', model: { id: 'test/model' } },
+      PLACEHOLDER_OWNER_ID,
+    )
+    const session = await test.store.createSession(agent.id, { ownerId: PLACEHOLDER_OWNER_ID })
     let steered = false
     test.model.push({
       text: ['first reply'],
@@ -341,9 +354,12 @@ describe('concurrency', () => {
     const test = createTestApp({ maxConcurrentSessions: 1 })
     context = test
     test.model.push({ text: ['reply'], delayMs: 30 })
-    const agent = await test.store.createAgent({ name: 'Agent', model: { id: 'test/model' } })
-    const first = await test.store.createSession(agent.id)
-    const second = await test.store.createSession(agent.id)
+    const agent = await test.store.createAgent(
+      { name: 'Agent', model: { id: 'test/model' } },
+      PLACEHOLDER_OWNER_ID,
+    )
+    const first = await test.store.createSession(agent.id, { ownerId: PLACEHOLDER_OWNER_ID })
+    const second = await test.store.createSession(agent.id, { ownerId: PLACEHOLDER_OWNER_ID })
 
     await send(test, first.id, 'one')
     await send(test, second.id, 'two')
@@ -358,9 +374,12 @@ describe('concurrency', () => {
     const test = createTestApp({ maxConcurrentSessions: 4 })
     context = test
     test.model.push({ text: ['reply'], delayMs: 30 })
-    const agent = await test.store.createAgent({ name: 'Agent', model: { id: 'test/model' } })
-    const first = await test.store.createSession(agent.id)
-    const second = await test.store.createSession(agent.id)
+    const agent = await test.store.createAgent(
+      { name: 'Agent', model: { id: 'test/model' } },
+      PLACEHOLDER_OWNER_ID,
+    )
+    const first = await test.store.createSession(agent.id, { ownerId: PLACEHOLDER_OWNER_ID })
+    const second = await test.store.createSession(agent.id, { ownerId: PLACEHOLDER_OWNER_ID })
 
     await send(test, first.id, 'one')
     await send(test, second.id, 'two')
@@ -376,8 +395,11 @@ describe('stopping', () => {
     const test = createTestApp({ drainTimeoutMs: 2000 })
     context = test
     test.model.push({ text: ['one ', 'two ', 'three', ' four'], delayMs: 40 })
-    const agent = await test.store.createAgent({ name: 'Agent', model: { id: 'test/model' } })
-    const session = await test.store.createSession(agent.id)
+    const agent = await test.store.createAgent(
+      { name: 'Agent', model: { id: 'test/model' } },
+      PLACEHOLDER_OWNER_ID,
+    )
+    const session = await test.store.createSession(agent.id, { ownerId: PLACEHOLDER_OWNER_ID })
 
     await send(test, session.id, 'start')
     await test.model.waitForRequests(1)
@@ -405,8 +427,11 @@ describe('the fence', () => {
     const test = createTestApp({ replies: [{ text: ['never written'] }] })
     context = test
     const runner = new SessionRunner({ store: test.store, model: test.model.factory })
-    const agent = await test.store.createAgent({ name: 'Agent', model: { id: 'test/model' } })
-    const session = await test.store.createSession(agent.id)
+    const agent = await test.store.createAgent(
+      { name: 'Agent', model: { id: 'test/model' } },
+      PLACEHOLDER_OWNER_ID,
+    )
+    const session = await test.store.createSession(agent.id, { ownerId: PLACEHOLDER_OWNER_ID })
     await test.store.appendEvents(session.id, [
       { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: 'hello' }] },
     ])
@@ -424,8 +449,11 @@ describe('the fence', () => {
     const test = createTestApp({ replies: [{ text: ['written'] }] })
     context = test
     const runner = new SessionRunner({ store: test.store, model: test.model.factory })
-    const agent = await test.store.createAgent({ name: 'Agent', model: { id: 'test/model' } })
-    const session = await test.store.createSession(agent.id)
+    const agent = await test.store.createAgent(
+      { name: 'Agent', model: { id: 'test/model' } },
+      PLACEHOLDER_OWNER_ID,
+    )
+    const session = await test.store.createSession(agent.id, { ownerId: PLACEHOLDER_OWNER_ID })
     await test.store.appendEvents(session.id, [
       { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: 'hello' }] },
     ])

@@ -22,6 +22,7 @@ import {
   type SessionId,
   type StoredEvent,
   type StreamEvent,
+  type UserId,
 } from '@openharness/protocol'
 import { describe, expect, it } from 'vitest'
 
@@ -75,6 +76,10 @@ import { type TestClock, createTestClock } from './clock'
  * - **sessions** — the agent snapshot, creation options, `initial_events`, newest-first
  *   pagination, the agent filter, not-found behaviour, and the title an `updateSession` sets,
  *   keeps or clears.
+ * - **ownership** (epic #65, A4) — the owner a created resource carries, the scoped reads
+ *   (a second user gets `null` or an empty list for the first user's agents and sessions,
+ *   and `SessionNotFoundError` for their events), and the refusal to create a session from
+ *   somebody else's agent.
  * - **appending events** — `id`/`seq` assignment, `processed_at` per event kind, and the shape
  *   of what comes back.
  * - **caller-supplied event ids** — an id the caller brings is the stored event's id and keeps
@@ -113,10 +118,17 @@ export function runSessionStoreConformance(
 ): void {
   const name = options.name ?? 'SessionStore'
 
-  /** A store for one test, built on a clock that test can move. */
+  /**
+   * A store for one test, built on a clock that test can move — with the suite's two owners
+   * existing as users by the time the first of them creates anything, because a store whose
+   * schema references the user table (Postgres) cannot hold an owner the database has never
+   * heard of.
+   */
   async function setup(): Promise<{ store: SessionStore; clock: TestClock }> {
     const clock = createTestClock(START_MS)
-    return { store: await makeStore(clock), clock }
+    const store = await makeStore(clock)
+    await options.ensureUsers?.([OWNER_A, OWNER_B])
+    return { store, clock }
   }
 
   describe(`${name} conformance`, () => {
@@ -125,7 +137,7 @@ export function runSessionStoreConformance(
     describe('agents', () => {
       it('creates an agent stamped with the clock instant', async () => {
         const { store, clock } = await setup()
-        const agent = await store.createAgent(agentInput())
+        const agent = await store.createAgent(agentInput(), OWNER_A)
         expect(agent).toMatchObject({
           type: 'agent',
           name: 'Summarizer',
@@ -141,18 +153,18 @@ export function runSessionStoreConformance(
 
       it('reads an agent back, and answers null for an id nobody has', async () => {
         const { store } = await setup()
-        const agent = await store.createAgent(agentInput())
+        const agent = await store.createAgent(agentInput(), OWNER_A)
         expect(await store.getAgent(agent.id)).toEqual(agent)
         expect(await store.getAgent(unknownAgentId())).toBeNull()
       })
 
       it('lists agents oldest first, and ends the list with next_page: null', async () => {
         const { store, clock } = await setup()
-        const first = await store.createAgent(agentInput('First'))
+        const first = await store.createAgent(agentInput('First'), OWNER_A)
         clock.advance(SECOND)
-        const second = await store.createAgent(agentInput('Second'))
+        const second = await store.createAgent(agentInput('Second'), OWNER_A)
         clock.advance(SECOND)
-        const third = await store.createAgent(agentInput('Third'))
+        const third = await store.createAgent(agentInput('Third'), OWNER_A)
         const page = await store.listAgents()
         expect(page.data.map((agent) => agent.id)).toEqual([first.id, second.id, third.id])
         expect(page.next_page).toBeNull()
@@ -162,7 +174,7 @@ export function runSessionStoreConformance(
         const { store, clock } = await setup()
         const created: Agent[] = []
         for (let index = 0; index < 5; index += 1) {
-          created.push(await store.createAgent(agentInput(`Agent ${index}`)))
+          created.push(await store.createAgent(agentInput(`Agent ${index}`), OWNER_A))
           clock.advance(SECOND)
         }
         const page = await store.listAgents({ limit: 2 })
@@ -180,7 +192,7 @@ export function runSessionStoreConformance(
         const { store } = await setup()
         const created: Agent[] = []
         for (let index = 0; index < 4; index += 1) {
-          created.push(await store.createAgent(agentInput(`Agent ${index}`)))
+          created.push(await store.createAgent(agentInput(`Agent ${index}`), OWNER_A))
         }
         // All four share an instant, so the tie is broken by id: that is what makes the cursor
         // a position in a total order rather than in a list that shifts under a paging client.
@@ -192,7 +204,7 @@ export function runSessionStoreConformance(
 
       it('updates an agent, keeping what it omits and clearing what it nulls', async () => {
         const { store, clock } = await setup()
-        const agent = await store.createAgent(agentInput())
+        const agent = await store.createAgent(agentInput(), OWNER_A)
         clock.advance(5 * SECOND)
         const updated = await store.updateAgent(agent.id, { name: 'Renamed', system: null })
         expect(updated).toMatchObject({
@@ -214,7 +226,9 @@ export function runSessionStoreConformance(
 
       it('rejects a session for an agent that does not exist', async () => {
         const { store } = await setup()
-        const error = await thrownBy(() => store.createSession(unknownAgentId()))
+        const error = await thrownBy(() =>
+          store.createSession(unknownAgentId(), { ownerId: OWNER_A }),
+        )
         expectErrorIdentity(error, 'AgentNotFoundError', AGENT_NOT_FOUND_ERROR_CODE)
       })
     })
@@ -224,8 +238,8 @@ export function runSessionStoreConformance(
     describe('sessions', () => {
       it('snapshots the agent onto the session, and stops tracking it afterwards', async () => {
         const { store, clock } = await setup()
-        const agent = await store.createAgent(agentInput())
-        const session = await store.createSession(agent.id)
+        const agent = await store.createAgent(agentInput(), OWNER_A)
+        const session = await store.createSession(agent.id, { ownerId: OWNER_A })
         expect(session).toMatchObject({
           type: 'session',
           status: 'idle',
@@ -253,6 +267,7 @@ export function runSessionStoreConformance(
         const { store } = await setup()
         const { agent } = await seed(store)
         const session = await store.createSession(agent.id, {
+          ownerId: OWNER_A,
           title: 'A chat',
           metadata: { ticket: 'OH-4' },
         })
@@ -306,8 +321,9 @@ export function runSessionStoreConformance(
 
       it('appends initial_events in the creation transaction, unprocessed and numbered from 1', async () => {
         const { store } = await setup()
-        const agent = await store.createAgent(agentInput())
+        const agent = await store.createAgent(agentInput(), OWNER_A)
         const session = await store.createSession(agent.id, {
+          ownerId: OWNER_A,
           initial_events: [
             { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: 'hi' }] },
             { type: EVENT_TYPES.userInterrupt },
@@ -333,12 +349,12 @@ export function runSessionStoreConformance(
 
       it('lists sessions newest first', async () => {
         const { store, clock } = await setup()
-        const agent = await store.createAgent(agentInput())
-        const first = await store.createSession(agent.id)
+        const agent = await store.createAgent(agentInput(), OWNER_A)
+        const first = await store.createSession(agent.id, { ownerId: OWNER_A })
         clock.advance(SECOND)
-        const second = await store.createSession(agent.id)
+        const second = await store.createSession(agent.id, { ownerId: OWNER_A })
         clock.advance(SECOND)
-        const third = await store.createSession(agent.id)
+        const third = await store.createSession(agent.id, { ownerId: OWNER_A })
         const page = await store.listSessions()
         expect(page.data.map((session) => session.id)).toEqual([third.id, second.id, first.id])
         expect(page.next_page).toBeNull()
@@ -346,10 +362,10 @@ export function runSessionStoreConformance(
 
       it('pages through sessions with the keyset cursor, without gaps or duplicates', async () => {
         const { store, clock } = await setup()
-        const agent = await store.createAgent(agentInput())
+        const agent = await store.createAgent(agentInput(), OWNER_A)
         const created: Session[] = []
         for (let index = 0; index < 5; index += 1) {
-          created.push(await store.createSession(agent.id))
+          created.push(await store.createSession(agent.id, { ownerId: OWNER_A }))
           clock.advance(SECOND)
         }
         const page = await store.listSessions({ limit: 2 })
@@ -367,10 +383,10 @@ export function runSessionStoreConformance(
 
       it('pages sessions that share a created_at by id, newest first', async () => {
         const { store } = await setup()
-        const agent = await store.createAgent(agentInput())
+        const agent = await store.createAgent(agentInput(), OWNER_A)
         const created: Session[] = []
         for (let index = 0; index < 4; index += 1) {
-          created.push(await store.createSession(agent.id))
+          created.push(await store.createSession(agent.id, { ownerId: OWNER_A }))
         }
         expect(new Set(created.map((session) => session.created_at)).size).toBe(1)
         const expected = [...created]
@@ -383,11 +399,11 @@ export function runSessionStoreConformance(
 
       it('filters sessions by agent', async () => {
         const { store, clock } = await setup()
-        const wanted = await store.createAgent(agentInput('Wanted'))
-        const other = await store.createAgent(agentInput('Other'))
-        const mine = await store.createSession(wanted.id)
+        const wanted = await store.createAgent(agentInput('Wanted'), OWNER_A)
+        const other = await store.createAgent(agentInput('Other'), OWNER_A)
+        const mine = await store.createSession(wanted.id, { ownerId: OWNER_A })
         clock.advance(SECOND)
-        await store.createSession(other.id)
+        await store.createSession(other.id, { ownerId: OWNER_A })
         const page = await store.listSessions({ agentId: wanted.id })
         expect(page.data.map((session) => session.id)).toEqual([mine.id])
       })
@@ -412,6 +428,106 @@ export function runSessionStoreConformance(
           expect(errorFields(error)).toMatchObject({ sessionId: missing })
         })
       }
+    })
+
+    // -------------------------------------------------------------- ownership
+
+    describe('ownership', () => {
+      it('stamps a created agent and session with the owner they were created for', async () => {
+        const { store } = await setup()
+        const agent = await store.createAgent(agentInput(), OWNER_A)
+        const session = await store.createSession(agent.id, { ownerId: OWNER_A })
+        expect(agent.owner_id).toBe(OWNER_A)
+        expect(session.owner_id).toBe(OWNER_A)
+        expect((await store.getAgent(agent.id))?.owner_id).toBe(OWNER_A)
+        expect((await store.getSession(session.id))?.owner_id).toBe(OWNER_A)
+        // The owner is not writable after creation: an update leaves it alone, and it is not
+        // a field any request carries.
+        const updated = await store.updateAgent(agent.id, { name: 'Renamed' })
+        expect(updated?.owner_id).toBe(OWNER_A)
+      })
+
+      it('answers null for a scoped read of another owner’s agent', async () => {
+        const { store } = await setup()
+        const agent = await store.createAgent(agentInput(), OWNER_A)
+        expect(await store.getAgent(agent.id, { ownerId: OWNER_A })).toEqual(agent)
+        expect(await store.getAgent(agent.id, { ownerId: OWNER_B })).toBeNull()
+        // The unscoped read is the brain's and the scheduler's form: it is not what a
+        // user-facing route uses, and it sees everything.
+        expect((await store.getAgent(agent.id))?.id).toBe(agent.id)
+      })
+
+      it('lists only the owner’s agents, and an empty list for a user with none', async () => {
+        const { store, clock } = await setup()
+        const mine = await store.createAgent(agentInput('Mine'), OWNER_A)
+        clock.advance(SECOND)
+        const theirs = await store.createAgent(agentInput('Theirs'), OWNER_B)
+        expect((await store.listAgents({ ownerId: OWNER_A })).data).toEqual([mine])
+        expect((await store.listAgents({ ownerId: OWNER_B })).data).toEqual([theirs])
+        expect((await store.listAgents({ ownerId: 'user_nobody' })).data).toEqual([])
+      })
+
+      it('answers null for another owner’s session, scoped and unscoped alike', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        expect(await store.getSession(session.id, { ownerId: OWNER_A })).toEqual(session)
+        expect(await store.getSession(session.id, { ownerId: OWNER_B })).toBeNull()
+        expect((await store.getSession(session.id))?.id).toBe(session.id)
+      })
+
+      it('lists only the owner’s sessions, and an empty list for a user with none', async () => {
+        const { store, clock } = await setup()
+        const { agent, session } = await seed(store)
+        const theirs = await store.createAgent(agentInput('Theirs'), OWNER_B)
+        clock.advance(SECOND)
+        const theirSession = await store.createSession(theirs.id, { ownerId: OWNER_B })
+        expect((await store.listSessions({ ownerId: OWNER_A })).data).toEqual([session])
+        expect((await store.listSessions({ ownerId: OWNER_B })).data).toEqual([theirSession])
+        expect((await store.listSessions({ ownerId: 'user_nobody' })).data).toEqual([])
+        // The agent filter narrows inside the owner's own sessions, never across owners.
+        expect((await store.listSessions({ ownerId: OWNER_B, agentId: agent.id })).data).toEqual([])
+      })
+
+      it('rejects a scoped read of another owner’s events like a session that does not exist', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        await append(store, session.id, [userMessage('mine')])
+        expect((await store.listEvents(session.id, { ownerId: OWNER_A })).data).toHaveLength(1)
+        const error = await thrownBy(() => store.listEvents(session.id, { ownerId: OWNER_B }))
+        expectErrorIdentity(error, 'SessionNotFoundError', SESSION_NOT_FOUND_ERROR_CODE)
+        // Same answer as an id nothing has: the scoped read leaks nothing.
+        const missing = await thrownBy(() =>
+          store.listEvents(unknownSessionId(), { ownerId: OWNER_B }),
+        )
+        expectErrorIdentity(missing, 'SessionNotFoundError', SESSION_NOT_FOUND_ERROR_CODE)
+        // The unscoped read — the brain's replay — still sees the log.
+        expect((await store.listEvents(session.id)).data).toHaveLength(1)
+      })
+
+      it('refuses to create a session from another owner’s agent, and stores nothing', async () => {
+        const { store } = await setup()
+        const agent = await store.createAgent(agentInput('Theirs'), OWNER_B)
+        const error = await thrownBy(() => store.createSession(agent.id, { ownerId: OWNER_A }))
+        expectErrorIdentity(error, 'AgentNotFoundError', AGENT_NOT_FOUND_ERROR_CODE)
+        expect(errorFields(error)).toMatchObject({ agentId: agent.id })
+        expect((await store.listSessions({ ownerId: OWNER_A })).data).toEqual([])
+        expect((await store.listSessions()).data).toEqual([])
+      })
+
+      it('keeps two owners’ logs apart when both sides are scoped', async () => {
+        const { store } = await setup()
+        const mine = await store.createAgent(agentInput(), OWNER_A)
+        const theirs = await store.createAgent(agentInput(), OWNER_B)
+        const mineSession = await store.createSession(mine.id, { ownerId: OWNER_A })
+        const theirSession = await store.createSession(theirs.id, { ownerId: OWNER_B })
+        await append(store, mineSession.id, [userMessage('mine')])
+        await append(store, theirSession.id, [userMessage('theirs')])
+        const hers = await store.listEvents(mineSession.id, { ownerId: OWNER_A })
+        const his = await store.listEvents(theirSession.id, { ownerId: OWNER_B })
+        expect(hers.data).toHaveLength(1)
+        expect(his.data).toHaveLength(1)
+        expect(hers.data[0]?.id).not.toBe(his.data[0]?.id)
+      })
     })
 
     // ----------------------------------------------------------------- events
@@ -586,7 +702,10 @@ export function runSessionStoreConformance(
         await append(store, session.id, [{ ...userMessage('here'), id }])
 
         // An event id is the identity of one event for the whole store, not one per session.
-        const other = await store.createSession((await store.createAgent(agentInput('Other'))).id)
+        const other = await store.createSession(
+          (await store.createAgent(agentInput('Other'), OWNER_A)).id,
+          { ownerId: OWNER_A },
+        )
         const error = await thrownBy(() =>
           store.appendEvents(other.id, [{ ...userMessage('there'), id }]),
         )
@@ -694,7 +813,10 @@ export function runSessionStoreConformance(
         const { session } = await seed(store)
         const [message] = await append(store, session.id, [userMessage('one')])
         const [running] = await append(store, session.id, [statusRunning()])
-        const other = await store.createSession((await store.createAgent(agentInput())).id)
+        const other = await store.createSession(
+          (await store.createAgent(agentInput(), OWNER_A)).id,
+          { ownerId: OWNER_A },
+        )
         const [elsewhere] = await append(store, other.id, [userMessage('other')])
         const before = (await store.listEvents(session.id)).data
         for (const consumed of [
@@ -797,8 +919,8 @@ export function runSessionStoreConformance(
         const { session } = await seed(store)
         const [running] = await append(store, session.id, [statusRunning()])
         const elsewhere = await store
-          .createAgent(agentInput('Other'))
-          .then((agent) => store.createSession(agent.id))
+          .createAgent(agentInput('Other'), OWNER_A)
+          .then((agent) => store.createSession(agent.id, { ownerId: OWNER_A }))
         const [foreign] = await append(store, elsewhere.id, [userMessage('there')])
         const nothing = unknownEventId()
         const consumed = [running?.id ?? unknownEventId(), foreign?.id ?? unknownEventId(), nothing]
@@ -1520,10 +1642,10 @@ export function runSessionStoreConformance(
 
       it('delivers to the session subscribed to, and to no other', async () => {
         const { store, clock } = await setup()
-        const agent = await store.createAgent(agentInput())
-        const one = await store.createSession(agent.id)
+        const agent = await store.createAgent(agentInput(), OWNER_A)
+        const one = await store.createSession(agent.id, { ownerId: OWNER_A })
         clock.advance(SECOND)
-        const other = await store.createSession(agent.id)
+        const other = await store.createSession(agent.id, { ownerId: OWNER_A })
         const received: StreamEvent[] = []
         await store.subscribe(one.id, (event) => {
           received.push(event)
@@ -1539,10 +1661,10 @@ export function runSessionStoreConformance(
     describe('partition signals', () => {
       it('delivers a signal to the partition listeners, once each', async () => {
         const { store, clock } = await setup()
-        const agent = await store.createAgent(agentInput())
-        const one = await store.createSession(agent.id)
+        const agent = await store.createAgent(agentInput(), OWNER_A)
+        const one = await store.createSession(agent.id, { ownerId: OWNER_A })
         clock.advance(SECOND)
-        const other = await store.createSession(agent.id)
+        const other = await store.createSession(agent.id, { ownerId: OWNER_A })
         const partition = partitionOf(one.id)
         const elsewhere = partitionOf(other.id)
         const received: string[] = []
@@ -1606,10 +1728,10 @@ export function runSessionStoreConformance(
 
       it('finds sessions with an open turn, running or not', async () => {
         const { store, clock } = await setup()
-        const agent = await store.createAgent(agentInput())
-        const running = await store.createSession(agent.id)
+        const agent = await store.createAgent(agentInput(), OWNER_A)
+        const running = await store.createSession(agent.id, { ownerId: OWNER_A })
         clock.advance(SECOND)
-        const unfinished = await store.createSession(agent.id)
+        const unfinished = await store.createSession(agent.id, { ownerId: OWNER_A })
         await append(store, running.id, [statusRunning(), spanStart()])
         await append(store, unfinished.id, [statusRunning()])
         const partitions = [partitionOf(running.id), partitionOf(unfinished.id)]
@@ -1618,10 +1740,10 @@ export function runSessionStoreConformance(
 
       it('leaves out sessions with nothing to do', async () => {
         const { store, clock } = await setup()
-        const agent = await store.createAgent(agentInput())
-        const idle = await store.createSession(agent.id)
+        const agent = await store.createAgent(agentInput(), OWNER_A)
+        const idle = await store.createSession(agent.id, { ownerId: OWNER_A })
         clock.advance(SECOND)
-        const handled = await store.createSession(agent.id)
+        const handled = await store.createSession(agent.id, { ownerId: OWNER_A })
         const [message] = await append(store, handled.id, [userMessage('hi')])
         await append(store, handled.id, [spanStartFor([message?.id ?? unknownEventId()])])
         const partitions = [partitionOf(idle.id), partitionOf(handled.id)]
@@ -1641,10 +1763,10 @@ export function runSessionStoreConformance(
 
       it('returns each session once, oldest first', async () => {
         const { store, clock } = await setup()
-        const agent = await store.createAgent(agentInput())
-        const older = await store.createSession(agent.id)
+        const agent = await store.createAgent(agentInput(), OWNER_A)
+        const older = await store.createSession(agent.id, { ownerId: OWNER_A })
         clock.advance(SECOND)
-        const newer = await store.createSession(agent.id)
+        const newer = await store.createSession(agent.id, { ownerId: OWNER_A })
         await append(store, older.id, [statusRunning()])
         await append(store, newer.id, [statusRunning(), userMessage('hi')])
         const partitions = [partitionOf(older.id), partitionOf(newer.id)]
@@ -1873,7 +1995,29 @@ export type MakeSessionStore = (clock: TestClock) => SessionStore | Promise<Sess
 export interface SessionStoreConformanceOptions {
   /** The implementation's name; the suite's blocks are titled `${name} conformance`. */
   readonly name?: string
+  /**
+   * Makes sure the given users exist, for a store whose schema references them.
+   *
+   * The suite creates everything as one of {@link OWNER_A} and {@link OWNER_B} (epic #65, A4),
+   * and the Postgres tables reference Better Auth's `"user"` row for both, so a Postgres store
+   * needs a way to seed them; the store's factory has already emptied the tables by the time
+   * this is called, once per test. A store without users — the in-memory one — leaves it out.
+   */
+  readonly ensureUsers?: (userIds: readonly UserId[]) => Promise<void>
 }
+
+/**
+ * The two users everything in the suite belongs to.
+ *
+ * They are fixed strings rather than generated ones so that an implementation can seed them
+ * ({@link SessionStoreConformanceOptions.ensureUsers}) and so that a failure names the same
+ * owner twice. Nothing about them is special beyond being valid `UserId`s: a user id is
+ * Better Auth's opaque string, whatever a store's user rows happen to hold.
+ */
+export const OWNER_A: UserId = 'user_conformance_a'
+
+/** The second user; see {@link OWNER_A}. */
+export const OWNER_B: UserId = 'user_conformance_b'
 
 /** The instant every test's clock starts at; fixed, so a timestamp in a failure is readable. */
 const START_MS = Date.UTC(2026, 2, 15, 10, 0, 0)
@@ -1897,8 +2041,8 @@ function agentInput(name = 'Summarizer'): CreateAgentRequest {
 
 /** An agent and a session for it: what most tests start from. */
 async function seed(store: SessionStore): Promise<{ agent: Agent; session: Session }> {
-  const agent = await store.createAgent(agentInput())
-  const session = await store.createSession(agent.id)
+  const agent = await store.createAgent(agentInput(), OWNER_A)
+  const session = await store.createSession(agent.id, { ownerId: OWNER_A })
   return { agent, session }
 }
 

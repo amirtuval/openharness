@@ -14,6 +14,8 @@ import type { PostgresSchema } from '@openharness/session/postgres'
 import type { AppendableEvent, AppendEventsOptions, PartitionFence } from '@openharness/session'
 import type { SessionId, StoredEvent } from '@openharness/protocol'
 
+import { ensurePlaceholderUser } from '../placeholder-owner'
+
 /**
  * A real Postgres for the tests that need one, which is every test of the partitioned
  * scheduler: leases, epochs and the signals between instances are properties of the shared
@@ -98,6 +100,9 @@ export async function startPostgres(
   const pool = new Pool({ connectionString, max: POOL_SIZE })
   const db = new Kysely<PostgresSchema>({ dialect: new PostgresDialect({ pool }) })
   await migrate(db)
+  // `owner_id` references Better Auth's `"user"` row, so the owner the tests create as has to
+  // exist before the first agent does — exactly what the server does on boot until #61.
+  await ensurePlaceholderUser(db)
   const stores: PostgresSessionStore[] = []
   const fixture: PostgresFixture = {
     pool,

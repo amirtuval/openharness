@@ -23,6 +23,15 @@ import type { TestClock } from '@openharness/session/testing'
 /** The model id sessions run, spelled the way the protocol's `ModelConfig` is. */
 export const TEST_MODEL_ID = 'anthropic/claude-sonnet-5'
 
+/**
+ * The owner the fixture creates its agent and session as (epic #65, A4).
+ *
+ * The brain never looks at ownership — it acts for a session — so any valid user id does; the
+ * real one is Better Auth's, wired by the server (#61). Exported so a test that creates its
+ * own resources against this store's partition space names the same owner.
+ */
+export const TEST_OWNER_ID = 'user_brain_tests'
+
 /** The system prompt the test agent is created with. */
 export const TEST_SYSTEM = 'You are a concise technical assistant.'
 
@@ -48,12 +57,21 @@ export async function newSession(
 ): Promise<TestSession> {
   const clock = options.clock ?? createTestClock()
   const store = new InMemorySessionStore({ now: clock.now })
-  const agent = await store.createAgent({
-    name: 'Summarizer',
-    model: { id: TEST_MODEL_ID },
-    system: options.system === undefined ? TEST_SYSTEM : options.system,
+  // Every agent and session belongs to one user (epic #65, A4). The brain never looks at
+  // ownership — it acts for a session — so the fixture's owner is just a valid id; the real
+  // one comes from Better Auth once the server wires it (#61).
+  const agent = await store.createAgent(
+    {
+      name: 'Summarizer',
+      model: { id: TEST_MODEL_ID },
+      system: options.system === undefined ? TEST_SYSTEM : options.system,
+    },
+    TEST_OWNER_ID,
+  )
+  const session = await store.createSession(agent.id, {
+    ownerId: TEST_OWNER_ID,
+    initial_events: initialEvents,
   })
-  const session = await store.createSession(agent.id, { initial_events: initialEvents })
   return { store, sessionId: session.id, clock }
 }
 

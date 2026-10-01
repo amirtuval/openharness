@@ -9,6 +9,7 @@ import {
 import type { AppEnv } from '../types'
 import { agentIdParam, parseBody, parseQuery } from '../http/request'
 import { notFoundError } from '../http/errors'
+import { PLACEHOLDER_OWNER_ID } from '../placeholder-owner'
 import type { RouteDeps } from './deps'
 
 /**
@@ -23,7 +24,10 @@ export function registerAgentRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
 
   app.post(agents, async (c) => {
     const body = await parseBody(c, CreateAgentRequestSchema)
-    return c.json(await deps.store.createAgent(body), 201)
+    // Every agent belongs to a user (epic #65, A4); until #61 authenticates callers, that
+    // user is the placeholder. The scoped reads land with the same issue: an unscoped read
+    // returns exactly what the placeholder's reads will return.
+    return c.json(await deps.store.createAgent(body, PLACEHOLDER_OWNER_ID), 201)
   })
 
   app.get(agents, async (c) => {

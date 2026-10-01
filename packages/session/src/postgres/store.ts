@@ -23,6 +23,7 @@ import {
   type StoredEvent,
   type UpdateAgentRequest,
   type UserEvent,
+  type UserId,
 } from '@openharness/protocol'
 import {
   Kysely,
@@ -59,6 +60,7 @@ import type {
   ListAgentsOptions,
   ListEventsOptions,
   ListSessionsOptions,
+  OwnerScopeOptions,
   PartitionFence,
   PartitionLease,
   PartitionSignal,
@@ -182,10 +184,11 @@ export class PostgresSessionStore implements SessionStore {
 
   // ------------------------------------------------------------------ agents
 
-  async createAgent(input: CreateAgentRequest): Promise<Agent> {
+  async createAgent(input: CreateAgentRequest, ownerId: UserId): Promise<Agent> {
     const now = this.#clock()
     const row: AgentRow = {
       id: newAgentId(now),
+      owner_id: ownerId,
       name: input.name,
       description: input.description ?? null,
       model_id: input.model.id,
@@ -197,20 +200,28 @@ export class PostgresSessionStore implements SessionStore {
     return agentFromRow(row)
   }
 
-  async getAgent(agentId: AgentId): Promise<Agent | null> {
-    const row = await this.#db
-      .selectFrom('agents')
-      .selectAll()
-      .where('id', '=', agentId)
-      .executeTakeFirst()
+  async getAgent(agentId: AgentId, options: OwnerScopeOptions = {}): Promise<Agent | null> {
+    let query = this.#db.selectFrom('agents').selectAll().where('id', '=', agentId)
+    if (options.ownerId !== undefined) {
+      // The owner is part of the lookup, not a filter afterwards: an agent somebody else owns
+      // matches no row, which is the same `null` an unknown id answers (A4).
+      query = query.where('owner_id', '=', options.ownerId)
+    }
+    const row = await query.executeTakeFirst()
     return row === undefined ? null : agentFromRow(row)
   }
 
   async listAgents(options: ListAgentsOptions = {}): Promise<ListAgentsResponse> {
     const cursor = options.page === undefined ? null : decodeKeyPage(options.page)
     const limit = pageSize(options.limit)
-    const query = this.#db.selectFrom('agents').selectAll()
-    const rows = await (cursor === null ? query : query.where(keyset(cursor, 'asc')))
+    let query = this.#db.selectFrom('agents').selectAll()
+    if (options.ownerId !== undefined) {
+      query = query.where('owner_id', '=', options.ownerId)
+    }
+    if (cursor !== null) {
+      query = query.where(keyset(cursor, 'asc'))
+    }
+    const rows = await query
       .orderBy('created_at', 'asc')
       .orderBy('id', 'asc')
       .limit(limit + 1)
@@ -251,20 +262,25 @@ export class PostgresSessionStore implements SessionStore {
 
   // ---------------------------------------------------------------- sessions
 
-  async createSession(agentId: AgentId, options: CreateSessionOptions = {}): Promise<Session> {
+  async createSession(agentId: AgentId, options: CreateSessionOptions): Promise<Session> {
     const now = this.#clock()
     const id = newSessionId(now)
     return this.#db.transaction().execute(async (trx) => {
+      // The owner is part of the lookup: an agent that belongs to somebody else is "not
+      // found" for this session, the same answer an unknown id gets (A4) — otherwise the
+      // snapshot would hand the other user's agent configuration over.
       const agent = await trx
         .selectFrom('agents')
         .selectAll()
         .where('id', '=', agentId)
+        .where('owner_id', '=', options.ownerId)
         .executeTakeFirst()
       if (agent === undefined) {
         throw new AgentNotFoundError(agentId)
       }
       const row: SessionRow = {
         id,
+        owner_id: options.ownerId,
         status: 'idle',
         partition: partitionOf(id, this.#partitionCount),
         title: options.title ?? null,
@@ -284,9 +300,12 @@ export class PostgresSessionStore implements SessionStore {
     })
   }
 
-  async getSession(sessionId: SessionId): Promise<Session | null> {
+  async getSession(sessionId: SessionId, options: OwnerScopeOptions = {}): Promise<Session | null> {
     const row = await readSession(this.#db, sessionId)
-    return row === undefined ? null : sessionFromRow(row)
+    if (row === undefined || !ownsRow(row, options)) {
+      return null
+    }
+    return sessionFromRow(row)
   }
 
   async updateSession(sessionId: SessionId, update: UpdateSessionRequest): Promise<Session | null> {
@@ -317,6 +336,9 @@ export class PostgresSessionStore implements SessionStore {
     const cursor = options.page === undefined ? null : decodeKeyPage(options.page)
     const limit = pageSize(options.limit)
     let query = this.#db.selectFrom('sessions').selectAll()
+    if (options.ownerId !== undefined) {
+      query = query.where('owner_id', '=', options.ownerId)
+    }
     if (options.agentId !== undefined) {
       query = query.where('agent_id', '=', options.agentId)
     }
@@ -377,7 +399,10 @@ export class PostgresSessionStore implements SessionStore {
     sessionId: SessionId,
     options: ListEventsOptions = {},
   ): Promise<ListEventsResponse> {
-    if ((await readSession(this.#db, sessionId)) === undefined) {
+    const session = await readSession(this.#db, sessionId)
+    // Somebody else's session is answered exactly like one that does not exist, so the 404 a
+    // user-facing route derives from this leaks nothing (epic #65, A4).
+    if (session === undefined || !ownsRow(session, options)) {
       throw new SessionNotFoundError(sessionId)
     }
     const order = options.order ?? DEFAULT_EVENT_ORDER
@@ -1196,6 +1221,18 @@ async function lockSession(
 /** The session's row, or `undefined` when no session has that id. */
 async function readSession(db: Queryable, sessionId: SessionId): Promise<SessionRow | undefined> {
   return db.selectFrom('sessions').selectAll().where('id', '=', sessionId).executeTakeFirst()
+}
+
+/**
+ * Whether a row belongs to the owner a read was scoped to.
+ *
+ * An unscoped read — no `ownerId` — matches any row: that is the brain's and the scheduler's
+ * form, and they act for a session rather than for a user. A scoped read matches only the
+ * owner's own rows, which is how a user-facing route answers the same "not found" for
+ * somebody else's resource as for one that does not exist (epic #65, A4).
+ */
+function ownsRow(row: { readonly owner_id: string }, options: OwnerScopeOptions): boolean {
+  return options.ownerId === undefined || row.owner_id === options.ownerId
 }
 
 /**

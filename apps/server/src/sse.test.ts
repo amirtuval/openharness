@@ -13,6 +13,7 @@ import {
 } from '@openharness/protocol'
 import type { SessionStore } from '@openharness/session'
 
+import { PLACEHOLDER_OWNER_ID } from './placeholder-owner'
 import { SSE_HEADERS, createSessionEventStream } from './sse'
 import {
   HELD_REPLY_TEST_TIMEOUT_MS,
@@ -660,8 +661,12 @@ describe('the stream filter', () => {
   /** A log with a message and the chunks of a reply in flight, none of them superseded. */
   async function seed(): Promise<{ store: SessionStore; sessionId: SessionId }> {
     const store: SessionStore = new ObservableStore()
-    const agent = await store.createAgent({ name: 'Agent', model: { id: 'test/model' } })
+    const agent = await store.createAgent(
+      { name: 'Agent', model: { id: 'test/model' } },
+      PLACEHOLDER_OWNER_ID,
+    )
     const session = await store.createSession(agent.id, {
+      ownerId: PLACEHOLDER_OWNER_ID,
       initial_events: [
         { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: 'hello' }] },
       ],

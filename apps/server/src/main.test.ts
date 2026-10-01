@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { API_VERSION_PREFIX, EVENT_TYPES } from '@openharness/protocol'
 import { InMemorySessionStore } from '@openharness/session'
 
+import { PLACEHOLDER_OWNER_ID } from './placeholder-owner'
 import { main, startServer } from './main'
 import { PostgresPartitionScheduler } from './partition-scheduler'
 import type { Logger } from './types'
@@ -65,8 +66,11 @@ describe('startServer', () => {
 
   it('recovers a session a previous process left open', async () => {
     const store = new InMemorySessionStore()
-    const agent = await store.createAgent({ name: 'Agent', model: { id: 'test/model' } })
-    const session = await store.createSession(agent.id)
+    const agent = await store.createAgent(
+      { name: 'Agent', model: { id: 'test/model' } },
+      PLACEHOLDER_OWNER_ID,
+    )
+    const session = await store.createSession(agent.id, { ownerId: PLACEHOLDER_OWNER_ID })
     await store.appendEvents(session.id, [
       { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: 'before the crash' }] },
       { type: EVENT_TYPES.sessionStatusRunning },
@@ -100,8 +104,11 @@ describe('startServer', () => {
     })
     started.push(first)
     const store = new InMemorySessionStore()
-    const agent = await store.createAgent({ name: 'Agent', model: { id: 'test/model' } })
-    const session = await store.createSession(agent.id)
+    const agent = await store.createAgent(
+      { name: 'Agent', model: { id: 'test/model' } },
+      PLACEHOLDER_OWNER_ID,
+    )
+    const session = await store.createSession(agent.id, { ownerId: PLACEHOLDER_OWNER_ID })
     await store.appendEvents(session.id, [
       { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: 'left over' }] },
       { type: EVENT_TYPES.sessionStatusRunning },
@@ -133,8 +140,11 @@ describe('startServer', () => {
       logger: recordingLogger(),
     })
     started.push(server)
-    const agent = await store.createAgent({ name: 'Agent', model: { id: 'test/model' } })
-    const session = await store.createSession(agent.id)
+    const agent = await store.createAgent(
+      { name: 'Agent', model: { id: 'test/model' } },
+      PLACEHOLDER_OWNER_ID,
+    )
+    const session = await store.createSession(agent.id, { ownerId: PLACEHOLDER_OWNER_ID })
 
     await fetch(
       `http://127.0.0.1:${server.port}${API_VERSION_PREFIX}/sessions/${session.id}/events`,
@@ -173,8 +183,11 @@ describe('startServer', () => {
     expect(server.scheduler).toBeInstanceOf(PostgresPartitionScheduler)
     const scheduler = server.scheduler as PostgresPartitionScheduler
 
-    const agent = await store.createAgent({ name: 'Agent', model: { id: 'test/model' } })
-    const session = await store.createSession(agent.id)
+    const agent = await store.createAgent(
+      { name: 'Agent', model: { id: 'test/model' } },
+      PLACEHOLDER_OWNER_ID,
+    )
+    const session = await store.createSession(agent.id, { ownerId: PLACEHOLDER_OWNER_ID })
     await fetch(
       `http://127.0.0.1:${server.port}${API_VERSION_PREFIX}/sessions/${session.id}/events`,
       {
@@ -212,8 +225,11 @@ describe('startServer', () => {
     expect(server.compactor.running).toBe(true)
 
     // A turn over HTTP, so the message reaches the scheduler the way a client's would.
-    const agent = await store.createAgent({ name: 'Agent', model: { id: 'test/model' } })
-    const session = await store.createSession(agent.id)
+    const agent = await store.createAgent(
+      { name: 'Agent', model: { id: 'test/model' } },
+      PLACEHOLDER_OWNER_ID,
+    )
+    const session = await store.createSession(agent.id, { ownerId: PLACEHOLDER_OWNER_ID })
     const response = await fetch(
       `http://127.0.0.1:${server.port}${API_VERSION_PREFIX}/sessions/${session.id}/events`,
       {
