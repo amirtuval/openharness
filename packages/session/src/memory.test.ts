@@ -102,7 +102,12 @@ describe('InMemorySessionStore', () => {
     if (event === undefined) {
       throw new Error('the event it just appended is gone')
     }
-    event.seq = 99
+    // An event is not just a copy: it is deep-frozen, because the log is immutable (D9). A
+    // write to it throws rather than forking the caller's view from what the store holds.
+    expect(Object.isFrozen(event)).toBe(true)
+    expect(() => {
+      event.seq = 99
+    }).toThrow(TypeError)
     expect((await store.listEvents(session.id)).data[0]?.seq).toBe(1)
 
     const storedAgent = await store.getAgent(agent.id)

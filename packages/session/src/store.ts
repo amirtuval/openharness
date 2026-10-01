@@ -40,6 +40,16 @@ import type {
  *   as given (see {@link SessionStore.appendEvents}) — so a turn can never observe half an
  *   append. The events returned to the caller are the stored events: `StoredEvent` exactly,
  *   with no extra field (notably no `created_at` — the protocol has none).
+ * - **Immutability.** No stored event is ever modified: the log is append-only, appends are
+ *   the only way in, and the one deletion — {@link SessionStore.compact} — removes superseded
+ *   stream chunks and nothing else. Every implementation hands out events it will never
+ *   change, and both implementations deep-freeze what they return, so a caller that tries to
+ *   write to one throws instead of forking the log it was handed.
+ * - **Claims.** A turn's claim on the user events it answers is itself in the log: the append
+ *   of a `span.model_request_start` carrying `consumes` claims those ids (D9, issue #46), and
+ *   {@link SessionStore.markProcessed} is the equivalent for writers that have not moved to
+ *   that form yet. A claim is recorded once and never removed; `processed_at` on a user event
+ *   is derived from it on every read. An event that is claimed cannot be claimed again.
  * - **Durability per append.** An append is one transaction. `initial_events` on
  *   {@link SessionStore.createSession} are part of the session's creation transaction, not
  *   appends that follow it.
@@ -148,6 +158,28 @@ export interface SessionStore {
    * without the assigned ones. Inputs are stored as given and not validated: callers validate
    * with the protocol schemas.
    *
+   * ## Stored chunks, claims and supersession
+   *
+   * Three of the shapes an append can carry since D9 (issue #46) do more than land in the log
+   * — each in the same transaction as the events themselves, so a reader never sees half of
+   * any of them:
+   *
+   * - **Stored chunks.** An `event_start` or `event_delta` in its stored form is an ordinary
+   *   event: it gets a `seq` and a `processed_at` like everything else, is delivered to
+   *   subscribers like everything else, and is skipped by replay once superseded. It is the
+   *   same shape the stream-only preview of the same name carries, plus the envelope.
+   * - **`consumes`.** A `span.model_request_start` whose `consumes` names user events claims
+   *   them: the store records a claim per id, and from then on those events read with
+   *   `processed_at` set (see {@link SessionStore.markProcessed}) and no longer count as
+   *   pending. Every id must be a pending `user.message` / `user.interrupt` of this session
+   *   that no earlier claim took, or the whole append is refused with
+   *   {@link ClaimConflictError} and nothing is stored.
+   * - **`supersedes`.** An `agent.message` or `span.model_request_end` that carries
+   *   `supersedes` records the chunk range it replaces: replay skips the range and
+   *   {@link SessionStore.compact} deletes it after the retention window. The range has to lie
+   *   within this session and end before the superseding event's own `seq`, or the append is
+   *   refused with a `RangeError`.
+   *
    * ## Supplying an id
    *
    * An event may bring its own `id` (see {@link AppendableEvent}), and the store then writes it
@@ -172,7 +204,9 @@ export interface SessionStore {
    * @throws SessionNotFoundError when the session does not exist
    * @throws FencedError when `options.fence` is not the partition's current live lease
    * @throws DuplicateEventIdError when an event id is already stored, or repeated in the batch
-   * @throws RangeError when an event's `id` is not a valid event id
+   * @throws ClaimConflictError when a `consumes` id is not a pending user event of this session
+   * @throws RangeError when an event's `id` is not a valid event id, or when a `supersedes`
+   *   range does not lie within this session before the superseding event's own `seq`
    */
   appendEvents(
     sessionId: SessionId,
@@ -181,12 +215,17 @@ export interface SessionStore {
   ): Promise<StoredEvent[]>
 
   /**
-   * Mark user events as processed, and return those that were still pending.
+   * Claim user events, and return those that were still pending.
    *
-   * `processed_at` is set to the clock's current instant. Events that are already processed, ids
-   * that name no event of this session, and ids of events that are not user events are ignored,
-   * so marking twice is a no-op — the call is a claim, not an assertion, and what it returns is
-   * what this call took.
+   * This is the pre-D9 way to record a turn's claim, kept working for the writers that have not
+   * moved to `consumes` yet (D9, issue #46): it records a claim per id — the same claim
+   * {@link SessionStore.appendEvents} records for a `span.model_request_start` — and from then
+   * on those events read with `processed_at` set to the clock's instant at the claim. Nothing
+   * about the stored events changes; a claim is a fact recorded beside them, not an edit.
+   *
+   * Events that are already claimed, ids that name no event of this session, and ids of events
+   * that are not user events are ignored, so claiming twice is a no-op — the call is a claim,
+   * not an assertion, and what it returns is what this call took.
    *
    * @throws SessionNotFoundError when the session does not exist
    * @throws FencedError when `options.fence` is not the partition's current live lease
@@ -203,6 +242,14 @@ export interface SessionStore {
    * `order` defaults to `asc` (oldest first). `after_seq` keeps only events with a greater
    * `seq`, whatever the order; `types` keeps only those event types (`[]` keeps none). `page`
    * resumes at a `seq` position. `next_page` is `null` on the last page.
+   *
+   * This is the replay read, so since D9 (issue #46) it **skips superseded chunks**: a stored
+   * `event_start` / `event_delta` whose `seq` a recorded `supersedes` range covers is left out,
+   * which is what lets a client resuming by `seq` see a reply once, whole, however far into the
+   * stream it was when it disconnected. The chunks of a message still in flight are not
+   * superseded by anything, so they are included. Cursors stay `seq` positions and skipping
+   * leaves gaps in them; nothing else about reading changes. Pass `includeSuperseded: true` to
+   * read the raw log instead — for debugging and tests.
    *
    * @throws SessionNotFoundError when the session does not exist
    * @throws RangeError when `page` is not a `seq` cursor
@@ -238,6 +285,32 @@ export interface SessionStore {
    * @throws SessionNotFoundError when the session does not exist
    */
   getTurnState(sessionId: SessionId): Promise<TurnState>
+
+  /**
+   * Delete the stored stream chunks a supersession covers — older than the retention window —
+   * and return how many went.
+   *
+   * This is physical compaction, and the **only** way an event is ever deleted from a log
+   * (D9, issue #46). It deletes stored `event_start` / `event_delta` events whose `seq` a
+   * recorded `supersedes` range covers, and nothing else, ever: a chunk that is not superseded
+   * (one still in flight) and a superseded chunk inside the window stay where they are.
+   *
+   * Deleting changes no reader's answer: replay with
+   * {@link SessionStore.listEvents} already skips superseded chunks, so correctness does not
+   * depend on this having run, or on the window's length. The window is what keeps raw chunks
+   * around for debugging and what keeps deletes off the append path; a server runs this
+   * periodically with its retention window (`OPENHARNESS_DELTA_RETENTION_MS`).
+   *
+   * Idempotent, and safe to run from several instances at once: whoever deletes a row first
+   * owns it, and everyone else simply finds fewer rows. `seq` values are never reused — a
+   * superseded chunk is always followed by the event that superseded it, which is not a chunk
+   * and is never deleted — so gaps in the sequence are the normal state of a compacted log.
+   *
+   * @param options.olderThan the cutoff: only a chunk the store wrote strictly before this
+   *   instant is deleted. A `Date`, or milliseconds since the Unix epoch.
+   * @throws RangeError when `olderThan` is not a valid instant
+   */
+  compact(options: CompactOptions): Promise<number>
 
   // ------------------------------------------------------- live subscription
 
@@ -475,6 +548,21 @@ export interface ListEventsOptions {
   readonly afterSeq?: number
   /** Return only these event types; an empty array returns none. Omit for all of them. */
   readonly types?: StoredEventType[]
+  /**
+   * Return superseded chunks too. `false` (the default) makes this the replay read, which
+   * skips stored `event_start` / `event_delta` events a recorded `supersedes` range covers;
+   * `true` reads the raw log — for debugging and tests, not for a client's transcript.
+   */
+  readonly includeSuperseded?: boolean
+}
+
+/** Options of {@link SessionStore.compact}. */
+export interface CompactOptions {
+  /**
+   * The retention cutoff: a stored chunk covered by a supersession is deleted only when the
+   * store wrote it strictly before this instant. A `Date`, or milliseconds since the epoch.
+   */
+  readonly olderThan: Date | number
 }
 
 /** Options of {@link SessionStore.appendEvents}. */

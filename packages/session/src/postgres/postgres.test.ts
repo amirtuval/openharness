@@ -334,6 +334,55 @@ if (target === null) {
       expect(await second.getPreview(session.id)).toBeNull()
     })
 
+    it('never rewrites a stored row, whatever happens to the session', async () => {
+      const { store, clock, session } = await seeded()
+      const previewed = newEventId()
+      const [queued] = await store.appendEvents(session.id, [userMessage('hi')])
+      const chunks = await store.appendEvents(session.id, [
+        storedEventStart(previewed),
+        storedEventDelta(previewed, 'Hel'),
+        storedEventDelta(previewed, 'lo'),
+      ])
+      const before = await eventRows(session.id)
+
+      // Everything a log goes through since D9: a claim by `consumes`, a supersession over the
+      // chunk range, and the compaction that deletes the chunks once the window has passed.
+      const [span] = await store.appendEvents(session.id, [
+        {
+          type: EVENT_TYPES.modelRequestStart,
+          consumes: [queued?.id ?? ('sevt_00000000000000000000000000' as EventId)],
+          model: 'anthropic/claude-sonnet-5',
+        },
+      ])
+      await store.appendEvents(session.id, [
+        {
+          type: EVENT_TYPES.agentMessage,
+          content: [{ type: 'text', text: 'Hello' }],
+          supersedes: { from_seq: 2, to_seq: 4 },
+        },
+      ])
+      clock.advance(2 * SECOND)
+      expect(await store.compact({ olderThan: clock.currentMs })).toBe(3)
+
+      const after = await eventRows(session.id)
+      // A row that is still there is the row it was, field for field: an append may add rows,
+      // compaction may remove superseded chunks, and nothing else may touch a stored event.
+      for (const [id, row] of after) {
+        if (before.has(id)) {
+          expect(row).toEqual(before.get(id))
+        }
+      }
+      // The rows that disappeared are exactly the chunks the supersession covered...
+      const gone = [...before.keys()].filter((id) => !after.has(id)).sort()
+      expect(gone).toEqual(chunks.map((event) => event.id).sort())
+      // ...and the claim is a row of its own, not a value written back onto the user event.
+      expect(after.get(queued?.id ?? 'sevt_00000000000000000000000000')?.processed_at).toBeNull()
+      const claims = await sql<{ event_id: string; claimed_by_event_id: string | null }>`
+        select event_id, claimed_by_event_id from event_claims where session_id = ${session.id}
+      `.execute(db)
+      expect(claims.rows).toEqual([{ event_id: queued?.id, claimed_by_event_id: span?.id }])
+    })
+
     it('applies its migrations idempotently', async () => {
       // The suite's `beforeAll` has already migrated this database; running again must be a
       // no-op that leaves the schema usable, which is what makes it safe on every deploy.
@@ -383,9 +432,28 @@ if (target === null) {
     return store
   }
 
+  /**
+   * Every `events` row of a session, keyed by id and exactly as the table holds it: what "a
+   * stored event never changes" is about. Comparing two snapshots is how the immutability of
+   * the log is tested against the real SQL, not only against the store's JavaScript.
+   */
+  async function eventRows(sessionId: string): Promise<Map<string, Record<string, unknown>>> {
+    const rows = await sql<Record<string, unknown>>`
+      select id, session_id, seq, type, payload, created_at, processed_at
+        from events
+       where session_id = ${sessionId}
+       order by seq asc
+    `.execute(db)
+    return new Map(rows.rows.map((row) => [row['id'] as string, row]))
+  }
+
   /** Empty every table, so a test starts where the previous one started. */
   async function truncateAll(): Promise<void> {
-    await sql`truncate table events, session_previews, sessions, agents, partition_leases`.execute(
+    // `event_claims` and `event_supersessions` reference `events`, so they are truncated in the
+    // same statement rather than with `cascade`: this is the complete list of the schema's
+    // tables, and a table missing from it should be a failure, not silently cascaded away.
+    await sql`truncate table
+      events, event_claims, event_supersessions, session_previews, sessions, agents, partition_leases`.execute(
       db,
     )
   }
@@ -418,6 +486,20 @@ function deltaOf(id: EventId, text: string): StreamOnlyEvent {
 /** An `agent.message` to append under the id `id`, as the brain appends one its previews announced. */
 function agentMessageUnder(id: EventId, text: string): AppendableEvent {
   return { id, type: EVENT_TYPES.agentMessage, content: [{ type: 'text', text }] }
+}
+
+/** A stored `event_start` chunk previewing `id`, as a brain appends one since D9. */
+function storedEventStart(id: EventId): AppendableEvent {
+  return { type: EVENT_TYPES.eventStart, event: { type: EVENT_TYPES.agentMessage, id } }
+}
+
+/** A stored `event_delta` chunk carrying `text` for the message `id`, as a brain appends one. */
+function storedEventDelta(id: EventId, text: string): AppendableEvent {
+  return {
+    type: EVENT_TYPES.eventDelta,
+    event_id: id,
+    delta: { type: 'content_delta', index: 0, content: { type: 'text', text } },
+  }
 }
 
 /** Whether a Docker daemon looks reachable, so testcontainers has something to talk to. */

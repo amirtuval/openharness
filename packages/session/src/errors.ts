@@ -25,6 +25,9 @@ export const AGENT_NOT_FOUND_ERROR_CODE = 'agent_not_found'
 /** The `code` of a {@link DuplicateEventIdError}. Stable across builds. */
 export const DUPLICATE_EVENT_ID_ERROR_CODE = 'duplicate_event_id'
 
+/** The `code` of a {@link ClaimConflictError}. Stable across builds. */
+export const CLAIM_CONFLICT_ERROR_CODE = 'claim_conflict'
+
 /** What a {@link FencedError} reports: which write, which partition, and why it was refused. */
 export interface FencedErrorDetails {
   /** The partition the write carried a fence for. */
@@ -150,5 +153,42 @@ export class DuplicateEventIdError extends Error {
     this.name = 'DuplicateEventIdError'
     this.sessionId = sessionId
     this.eventId = eventId
+  }
+}
+
+/**
+ * An append was refused because a `span.model_request_start` could not take the claims it
+ * carried (D9, issue #46).
+ *
+ * A claim is the append of the span start itself — atomic and fenced like any other write —
+ * and it can only name user events of the same session that no earlier claim took. The append
+ * is refused **whole** when any id it consumes is not a pending `user.message` /
+ * `user.interrupt` of this session: a foreign id, an event of another type, an id that names
+ * nothing, one that is already claimed (including one this same batch lists twice), and one
+ * whose claim was taken by a concurrent write in the moment between this append's validation
+ * and its insert. Nothing from that batch is appended, so the caller re-reads the pending
+ * events and tries again. See {@link SessionStore.appendEvents}.
+ */
+export class ClaimConflictError extends Error {
+  /** Stable, machine-readable code; see {@link CLAIM_CONFLICT_ERROR_CODE}. */
+  readonly code = CLAIM_CONFLICT_ERROR_CODE
+
+  /** The session the refused append named. */
+  readonly sessionId: SessionId
+
+  /**
+   * The ids that could not be claimed — the pending user events shared with the log and this
+   * batch, in the order the batch named them.
+   */
+  readonly eventIds: readonly EventId[]
+
+  constructor(sessionId: SessionId, eventIds: readonly EventId[]) {
+    super(
+      `cannot claim ${eventIds.length === 1 ? 'event' : 'events'} in ${sessionId}: ` +
+        `${eventIds.join(', ')} ${eventIds.length === 1 ? 'is' : 'are'} not pending user events of this session`,
+    )
+    this.name = 'ClaimConflictError'
+    this.sessionId = sessionId
+    this.eventIds = [...eventIds]
   }
 }

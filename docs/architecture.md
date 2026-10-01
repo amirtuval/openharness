@@ -10,7 +10,10 @@ ideas carry the design:
   reconstructs the state of a run. The protocol is that log's schema, and a writer checks an
   event against it before appending: one row in a shape no reader accepts makes the whole
   session unreadable, so a turn that cannot write a valid event ends with an error instead
-  (see [`packages/brain/AGENTS.md`](../packages/brain/AGENTS.md)).
+  (see [`packages/brain/AGENTS.md`](../packages/brain/AGENTS.md)). The log is immutable: a
+  stored event is never modified — a claim on a user message is a record of its own, not a
+  write to the event — and the only deletion is compacting the streamed chunks a finished
+  reply superseded (D9, [#46](https://github.com/amirtuval/openharness/issues/46)).
 - **Hands** — the things that actually act on the world (sandboxes, tools) behind a single
   `execute(name, input)` shape, so they can be swapped without touching the brain.
 

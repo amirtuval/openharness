@@ -6,8 +6,10 @@ Postgres implementation production runs on, and the conformance suite all of the
 
 A session is a log of events — the user's messages, the agent's replies, the status
 transitions that bracket a turn, and the spans around every model request. It is the source of
-truth for a run, and it is why the brain holds no state of its own. Around the log sit the
-leases that decide who may write to it, and the signals that wake that owner up.
+truth for a run, and it is why the brain holds no state of its own. The log is immutable
+(D9, issue #46): events are appended and never modified, and the one deletion — compaction of
+superseded stream chunks — is a single contract method. Around the log sit the leases that
+decide who may write to it, and the signals that wake that owner up.
 
 ## Commands
 
@@ -41,8 +43,10 @@ src/
   store.ts              SessionStore, its vocabulary, and the semantics in TSDoc
   memory.ts             InMemorySessionStore: the fake, and the reference behaviour
   clock.ts              Clock, systemClock, timestampAt()
-  errors.ts             FencedError, SessionNotFoundError, AgentNotFoundError, DuplicateEventIdError
+  errors.ts             FencedError, SessionNotFoundError, AgentNotFoundError, DuplicateEventIdError, ClaimConflictError
   inputs.ts             the argument checks both stores share (limits, cursors, lease ttls)
+  events.ts             the event rules both stores share (claims' types, supersession ranges)
+  freeze.ts             deepFreeze(): how the immutability of the log is enforced at runtime
   postgres/
     index.ts            the `@openharness/session/postgres` entry point
     store.ts            PostgresSessionStore and createPostgresSessionStore
@@ -51,6 +55,7 @@ src/
     migrate.ts          migrate(): the SQL-file runner
     cli.ts              the `openharness-session-migrate` bin
     postgres.test.ts    the conformance suite against Postgres, plus extra tests
+    no-updates.test.ts  the source scan proving no SQL path writes back to the log
   testing/
     index.ts            the subpath entry: re-exports, plus the suite and the test clock
     conformance.ts      runSessionStoreConformance()
@@ -63,32 +68,33 @@ docs/postgres.md        the Postgres store: schema, migrations, delivery, local 
 
 ### `@openharness/session`
 
-| export                                                                                                             | what it is                                                                                                           |
-| ------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------- |
-| `SessionStore`                                                                                                     | the storage and signaling contract; every method is async, and documented below                                      |
-| `AppendableEvent`                                                                                                  | an event a caller appends: a `StoredEvent` minus `seq` and `processed_at`, plus an optional `id` the caller supplies |
-| `CreateSessionOptions`, `ListAgentsOptions`, `ListSessionsOptions`, `ListEventsOptions`                            | the options objects of the list and create methods                                                                   |
-| `UpdateSessionRequest`                                                                                             | what `updateSession()` changes: the title, or nothing                                                                |
-| `AppendEventsOptions`, `MarkProcessedOptions`, `PartitionFence`                                                    | the optional fence a brain attaches to a write                                                                       |
-| `PartitionLease`, `PartitionSignal`, `PartitionSignalInput`, `PartitionSignalKind`                                 | leases over a partition, and the signals sent to its owner                                                           |
-| `TurnState`, `TurnStateKind`                                                                                       | what `getTurnState()` answers                                                                                        |
-| `SessionPreview`                                                                                                   | what `getPreview()` answers: the id in flight, and the text so far                                                   |
-| `SessionEventListener`, `PartitionSignalListener`, `Unsubscribe`                                                   | subscription plumbing                                                                                                |
-| `InMemorySessionStore`, `InMemorySessionStoreOptions`                                                              | the in-memory implementation and its `{ now, partitionCount }` options                                               |
-| `Clock`, `systemClock`, `timestampAt()`                                                                            | the injectable time source, and how an instant is written as a timestamp                                             |
-| `FencedError`, `SessionNotFoundError`, `AgentNotFoundError`, `DuplicateEventIdError`, `isFencedError()`            | the typed failures a store raises                                                                                    |
-| `FENCED_ERROR_CODE`, `SESSION_NOT_FOUND_ERROR_CODE`, `AGENT_NOT_FOUND_ERROR_CODE`, `DUPLICATE_EVENT_ID_ERROR_CODE` | the stable `code` of each error, for detection across bundles                                                        |
-| `PACKAGE_NAME`                                                                                                     | this package's name; lets a dependent prove the import resolved                                                      |
+| export                                                                                                                                          | what it is                                                                                                           |
+| ----------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `SessionStore`                                                                                                                                  | the storage and signaling contract; every method is async, and documented below                                      |
+| `AppendableEvent`                                                                                                                               | an event a caller appends: a `StoredEvent` minus `seq` and `processed_at`, plus an optional `id` the caller supplies |
+| `CreateSessionOptions`, `ListAgentsOptions`, `ListSessionsOptions`, `ListEventsOptions`                                                         | the options objects of the list and create methods                                                                   |
+| `UpdateSessionRequest`                                                                                                                          | what `updateSession()` changes: the title, or nothing                                                                |
+| `AppendEventsOptions`, `MarkProcessedOptions`, `PartitionFence`                                                                                 | the optional fence a brain attaches to a write                                                                       |
+| `CompactOptions`                                                                                                                                | what `compact()` takes: the retention cutoff (`olderThan: Date \| number`)                                           |
+| `PartitionLease`, `PartitionSignal`, `PartitionSignalInput`, `PartitionSignalKind`                                                              | leases over a partition, and the signals sent to its owner                                                           |
+| `TurnState`, `TurnStateKind`                                                                                                                    | what `getTurnState()` answers                                                                                        |
+| `SessionPreview`                                                                                                                                | what `getPreview()` answers: the id in flight, and the text so far                                                   |
+| `SessionEventListener`, `PartitionSignalListener`, `Unsubscribe`                                                                                | subscription plumbing                                                                                                |
+| `InMemorySessionStore`, `InMemorySessionStoreOptions`                                                                                           | the in-memory implementation and its `{ now, partitionCount }` options                                               |
+| `Clock`, `systemClock`, `timestampAt()`                                                                                                         | the injectable time source, and how an instant is written as a timestamp                                             |
+| `FencedError`, `SessionNotFoundError`, `AgentNotFoundError`, `DuplicateEventIdError`, `ClaimConflictError`, `isFencedError()`                   | the typed failures a store raises                                                                                    |
+| `FENCED_ERROR_CODE`, `SESSION_NOT_FOUND_ERROR_CODE`, `AGENT_NOT_FOUND_ERROR_CODE`, `DUPLICATE_EVENT_ID_ERROR_CODE`, `CLAIM_CONFLICT_ERROR_CODE` | the stable `code` of each error, for detection across bundles                                                        |
+| `PACKAGE_NAME`                                                                                                                                  | this package's name; lets a dependent prove the import resolved                                                      |
 
 ### `@openharness/session/postgres`
 
-| export                                                                                                          | what it is                                                                        |
-| --------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| `PostgresSessionStore`, `createPostgresSessionStore(config, options?)`                                          | the durable implementation; `{ connectionString }` or `{ pool }`, plus options    |
-| `PostgresSessionStoreOptions`, `PostgresSessionStoreConfig`                                                     | its options (`now`, `partitionCount`, `onError`) and the two ways to reach a DB   |
-| `migrate(db, options?)`                                                                                         | applies `migrations/`, idempotently, in one locked transaction; returns the files |
-| `MigrateOptions`                                                                                                | `{ migrationsDir? }`, for a migrations directory that is not this package's       |
-| `PostgresSchema`, `AgentsTable`, `SessionsTable`, `EventsTable`, `SessionPreviewsTable`, `PartitionLeasesTable` | the Kysely table types, for a caller that wants to query alongside the store      |
+| export                                                                                                                                                         | what it is                                                                        |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `PostgresSessionStore`, `createPostgresSessionStore(config, options?)`                                                                                         | the durable implementation; `{ connectionString }` or `{ pool }`, plus options    |
+| `PostgresSessionStoreOptions`, `PostgresSessionStoreConfig`                                                                                                    | its options (`now`, `partitionCount`, `onError`) and the two ways to reach a DB   |
+| `migrate(db, options?)`                                                                                                                                        | applies `migrations/`, idempotently, in one locked transaction; returns the files |
+| `MigrateOptions`                                                                                                                                               | `{ migrationsDir? }`, for a migrations directory that is not this package's       |
+| `PostgresSchema`, `AgentsTable`, `SessionsTable`, `EventsTable`, `EventClaimsTable`, `EventSupersessionsTable`, `SessionPreviewsTable`, `PartitionLeasesTable` | the Kysely table types, for a caller that wants to query alongside the store      |
 
 This entry point is a separate subpath on purpose: it is the only module that depends on `pg`
 and `kysely`, and a consumer that only needs the contract, the fake or the suite must not load
@@ -141,11 +147,51 @@ and an append that breaks either is refused **whole** — nothing in that batch 
 `seq` stays the store's either way: a supplied id changes which event an append writes, not
 where in the log it lands.
 
-**`processed_at`.** A user event is stored with `processed_at: null`, which is what makes it
-_queued_. `getPendingUserEvents` lists the queued ones in `seq` order; `markProcessed` sets
-`processed_at` from the clock and returns only the events it actually claimed, so marking twice
-is a no-op and two callers racing for the same event cannot both win. Every event the brain
-appends is stored with `processed_at` already set.
+**The log is immutable** (D9, issue #46). No stored event is ever modified: the contract has
+no method that edits one, the event types name what a store returns through the protocol's
+`Immutable*` aliases, and both stores deep-freeze the events they keep and hand out, so a
+mutation throws instead of forking a reader's copy from the log the store wrote. The one
+deletion is compaction, below. A brain reads what it needs and appends what it learns; nothing
+rewrites history.
+
+**`processed_at` is derived from a claim.** A user event is stored with `processed_at: null` —
+the stored event never changes — and the claim taken on it is a fact recorded beside it:
+`markProcessed` (still used by today's brain) or, from P3 on, the `consumes` list of the
+`span.model_request_start` that answers it. Every read — the events list, the pending list, a
+subscription payload — returns a user event's `processed_at` as the claim's `claimed_at`, or
+`null` while no claim has it. "Pending" means exactly "no claim"; `getPendingUserEvents` lists
+those in `seq` order. Claiming twice is a no-op and two callers racing for the same event
+cannot both win — claims are insert-only and the event id's primary key decides. A `consumes`
+claim that cannot be made refuses the whole append with `ClaimConflictError`, because a span
+may not say it answers something that is not waiting: a foreign id, a non-user event, an
+already-claimed event, or an id the batch names twice. Every event that is not a user event is
+stored with `processed_at` already set, and keeps it.
+
+**Stored chunks.** Since D9 a streamed reply is stored as it streams: `event_start` and
+`event_delta` in their stored form are ordinary events — `seq`, `processed_at`, delivery and
+all — appended like anything else. The stored form is the stream-only preview of the same name
+plus the envelope; the protocol's `isStoredEvent()` tells the two apart by `seq`, and the
+chunks of a reply in flight are resumable by `seq` like every other event.
+
+**Supersession.** The event that finishes a reply — the stored `agent.message`, or the
+`span.model_request_end` when the request ended without one — carries `supersedes:
+{ from_seq, to_seq }` over the chunks it replaces. `appendEvents` records the range,
+insert-only, after checking it lies within the session and ends before the superseding event's
+own `seq`; a range that does not fit is a `RangeError` and the whole append is refused. Replay
+then skips it: `listEvents` leaves out stored chunks whose `seq` a recorded range covers,
+while the chunks of a message still in flight — nothing supersedes them — come back like any
+other event. `includeSuperseded: true` reads the raw log instead, for debugging and tests.
+Cursors stay `seq` positions, and skipped chunks leave gaps in them; nothing else changes.
+
+**Compaction** — `compact({ olderThan })` — is the only code path that deletes from a log: it
+removes stored chunks a recorded supersession covers, once the store wrote them strictly
+before the cutoff, and nothing else, ever. It returns how many events it deleted, is
+idempotent, and is safe to run from several instances at once. It changes no reader's answer —
+replay already skips those chunks — so a client never needs to know whether, or how recently,
+it ran; the retention window only keeps raw chunks around for debugging. `seq` values are
+never reused (a superseded chunk is always followed by the event that superseded it, which is
+not a chunk and is never deleted), so gaps in the sequence are the normal state of a compacted
+log.
 
 **Status.** `session.status_running` sets the session's `status` to `running` and
 `session.status_idle` sets it to `idle` — in the same transaction as the append. A
@@ -162,8 +208,11 @@ title is stored as given — the protocol's `SESSION_TITLE_MAX_LENGTH` is the ca
 like every other bound this package does not enforce.
 
 **The in-flight preview** (`publishEphemeral` and `getPreview`) is the other piece of state
-that is not the log. Previews go only to the connections attached when they are published, so a
-client that connects mid-reply cannot see what was already sent; the store keeps the answer:
+that is not the log — the pre-D9 way to serve a connection that arrives mid-reply. From P3 the
+brain stores its chunks instead (above), which is what makes a reply in flight resumable by
+`seq`, and P4 removes this mechanism along with `session_previews`. Until then it works as it
+always did: previews go only to the connections attached when they are published, so a client
+that connects mid-reply cannot see what was already sent, and the store keeps the answer:
 
 - an **`event_start`** begins a preview — `{ eventId, text: '' }` — replacing whatever the
   session was previewing before, because there is **at most one preview per session**;
@@ -232,9 +281,12 @@ the sessions with pending user events or an open turn, oldest first.
 **Errors.** `SessionNotFoundError` (every session-scoped method except `getSession` and
 `updateSession`, which answer `null`),
 `AgentNotFoundError` (`createSession` with an unknown agent), `FencedError` (`appendEvents`,
-`markProcessed`) and `DuplicateEventIdError` (`appendEvents` carrying an id the log already
-holds, or the same id twice). `getSession`, `updateSession`, `getAgent` and `updateAgent` answer
-`null` instead.
+`markProcessed`), `DuplicateEventIdError` (`appendEvents` carrying an id the log already
+holds, or the same id twice) and `ClaimConflictError` (`appendEvents` whose `consumes` names
+an event that is not a pending user event of the session). A `supersedes` range that does not
+fit before its own event is a `RangeError`, like the other argument checks — `page` cursors,
+supplied event ids, lease ttls, and `compact()`'s cutoff. `getSession`, `updateSession`,
+`getAgent` and `updateAgent` answer `null` instead.
 Each error is a real class with a stable `name` and `code`, so `instanceof` works from the
 built output and `isFencedError()` recognises one that crossed a bundle boundary.
 
@@ -256,15 +308,36 @@ one exception, and only to be _stricter_: it rebuilds each appended event throug
 the whole suite against a real database. [docs/postgres.md](./docs/postgres.md) is the long
 version; this is the shape of it.
 
-**Schema.** Five tables, all created by `migrations/`: `agents`, `sessions` (with the
+**Schema.** Seven tables, all created by `migrations/`: `agents`, `sessions` (with the
 `partitionOf` partition and the `status` the log's last status event implies), `events` (`id`,
 `session_id`, `seq`, `type`, `payload jsonb`, `created_at`, `processed_at`, `unique
 (session_id, seq)`, an index on `(session_id, seq)` and a partial index for queued user
-events), `session_previews` (an **`unlogged`** table: one row per session whose `agent.message`
-is being previewed — `session_id` primary key, `event_id`, `text`, `updated_at`) and
-`partition_leases` (`partition`, `owner`, `epoch`, `expires_at`). Ids are `text collate "C"`,
-so SQL ordering is the byte order the protocol's keyset cursors use; every timestamp is
-`timestamptz` written from the injected clock, never from `now()`.
+events), `event_claims` (one row per claim of a user event: `event_id` primary key, the
+claiming span or `null`, `claimed_at` — the primary key is what makes double-claiming fail
+atomically), `event_supersessions` (one row per recorded `{ from_seq, to_seq }` range:
+`by_event_id` primary key, `by_seq`, and a `check (by_seq > to_seq)`), `session_previews` (an
+
+**`unlogged`** table: one row per session whose `agent.message` is being previewed —
+`session_id` primary key, `event_id`, `text`, `updated_at`) and `partition_leases`
+(`partition`, `owner`, `epoch`, `expires_at`). Ids are `text collate "C"`, so SQL ordering is
+the byte order the protocol's keyset cursors use; every timestamp is `timestamptz` written
+from the injected clock, never from `now()`.
+
+`event_claims` and `event_supersessions` deliberately carry **no foreign keys**. They are facts
+about events, not a second copy of the log, and the log's tables are emptied wholesale — every
+harness that truncates `events` for the next test does it in one statement, and Postgres
+refuses to truncate a table a foreign key points at, so a reference here would break tooling
+outside this package (it did, until the reference came out). The store is the only writer and
+every read joins back to `events`; a row whose event a truncation removed is an orphan that
+matches nothing. What the contract needs is uniqueness, and the primary keys provide that on
+their own.
+
+**The events table is written once per event and never touched again.** There is no SQL path
+that writes back to a row of `events`: claims and supersessions are rows of their own, a user
+event's `processed_at` is derived by joining `event_claims`, and the one delete is
+`compact()`, which removes only superseded chunks. `src/postgres/no-updates.test.ts` scans
+this package's source for the two spellings such a write would use and fails on either, so
+the rule cannot come back in a later change unnoticed.
 
 The preview row is what lets `getPreview` answer for a connection the streaming brain never
 talked to: `publishEphemeral` writes it — an `event_start` resetting the row, an `event_delta`
@@ -277,7 +350,10 @@ a reply it will see in full when the stored message lands.
 **Migrations.** Plain SQL files in `migrations/`, applied in name order by `migrate(db)` — one
 transaction under an advisory lock, every statement `if not exists`, so it is idempotent and
 safe to run from two instances at once. There is no ledger: a file that has been applied
-anywhere must never be edited. `yarn migrate` runs the built bin.
+anywhere must never be edited. `yarn migrate` runs the built bin. D9 added `0007_event_claims`,
+`0008_event_claims_backfill` (one-time: the pre-D9 `events.processed_at` of user events is
+copied into claim rows, so a log written before the change reads exactly as it did) and
+`0009_event_supersessions`.
 
 **Appending.** `seq` is assigned inside the append transaction, under `select … for update` on
 the session row, so concurrent appends — from any number of connections, stores or processes —
@@ -285,6 +361,13 @@ serialize and the numbers are gap-free and ordered. `initial_events` go through 
 in the creation transaction. An event's id is the caller's when it supplied one: `events.id` is
 unique across the whole table, so a taken id fails the insert and rolls the append back — the
 store answers `DuplicateEventIdError`, and the id is the one the log already holds.
+
+The same transaction records what the batch carries beside its events: an insert into
+`event_claims` for every `consumes` id (the joined select is what refuses a foreign, non-user
+or already-claimed id, and `on conflict … do nothing` decides a race with a concurrent claim),
+and an insert into `event_supersessions` for every `supersedes` range. Both are insert-only,
+and a batch whose claims cannot all be made rolls back whole — a claim that says more than the
+log holds is never half-recorded.
 
 **Fencing and leases.** A fenced write checks `partition_leases` in its own transaction and
 throws `FencedError` on a mismatch. `acquirePartition` is a single conditional upsert that
@@ -373,10 +456,16 @@ relative paths. `yarn check:deps` at the repo root enforces this.
   two stores, a supplied event id two of them try to take, fencing across stores, a burst that
   must be delivered exactly once, catching up after the listening connection is killed, a
   dropped oversized ephemeral event (which is not accumulated into the preview either), the
-  in-flight preview a second store reads out of the table, idempotent migrations, and
-  `close()` leaving a borrowed pool alone.
+  in-flight preview a second store reads out of the table, idempotent migrations, `close()`
+  leaving a borrowed pool alone, and the append-only guarantee against the real SQL: a
+  snapshot of every `events` row is compared before and after claims, a supersession and a
+  compaction, and no surviving row may differ by a field.
+- `postgres/no-updates.test.ts` scans this package's source for the two spellings a write back
+  to `events` would use and fails on either. It needs no database, so the append-only rule is
+  guarded even where the Postgres suite is skipped.
 - `memory.test.ts` covers what the fake promises _on top of_ the contract: the injected
-  clock, the copies it hands out, microtask delivery, and error identity.
+  clock, the copies it hands out (events deep-frozen, sessions and agents mutable clones),
+  microtask delivery, and error identity.
 - `index.test.ts` and `testing/clock.test.ts` cover the entry points and the test clock.
 
 ## Rules
