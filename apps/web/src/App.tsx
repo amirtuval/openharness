@@ -87,6 +87,27 @@ function AppShell({ route, fakeClient }: { route: Route; fakeClient: boolean }) 
     void beginSessionCheck(client)
   }, [client])
 
+  // The last client whose check answered "signed in", and the user it answered with.
+  //
+  // A settings save rebuilds the client (the `useMemo` in `App`), and the effect above re-runs
+  // for the new one — which is right, because another server means another session. What must
+  // not happen is the screen being *torn down* while that re-check runs: Settings keeps its
+  // "Saved" confirmation in local state, and the "Checking your session…" branch below would
+  // unmount it in the same tick it is set (issue #81). So a re-check on a rebuilt client keeps
+  // the frame up with the previous user until the new client has answered — a signed-out
+  // answer still puts the sign-in page in place, and the first check of all has nothing to
+  // keep and shows the checking screen, as before.
+  const lastSignedIn = useRef<{ client: Client; user: User } | null>(null)
+  useEffect(() => {
+    if (authState.status === 'signed-in') {
+      lastSignedIn.current = { client, user: authState.user }
+    }
+  }, [authState, client])
+
+  const onSignOut = useCallback((): void => {
+    void signOutSession(client, auth)
+  }, [client, auth])
+
   // Signed in *and* on the sign-in page — the reader followed a `#/signin` link, or the
   // server sent them back there after a social sign-in. Where they meant to go is in the
   // route; without one, home.
@@ -97,12 +118,19 @@ function AppShell({ route, fakeClient }: { route: Route; fakeClient: boolean }) 
   }, [authState.status, route])
 
   if (authState.status === 'checking') {
+    const previous = lastSignedIn.current
+    if (previous === null || previous.client === client) {
+      return (
+        <CenteredScreen>
+          <p role="status" className="text-sm text-muted-foreground">
+            Checking your session…
+          </p>
+        </CenteredScreen>
+      )
+    }
+    // The client was rebuilt under a signed-in app: a re-check, not a cold start (issue #81).
     return (
-      <CenteredScreen>
-        <p role="status" className="text-sm text-muted-foreground">
-          Checking your session…
-        </p>
-      </CenteredScreen>
+      <AppFrame route={route} fakeClient={fakeClient} user={previous.user} onSignOut={onSignOut} />
     )
   }
 
@@ -112,14 +140,7 @@ function AppShell({ route, fakeClient }: { route: Route; fakeClient: boolean }) 
   }
 
   return (
-    <AppFrame
-      route={route}
-      fakeClient={fakeClient}
-      user={authState.user}
-      onSignOut={(): void => {
-        void signOutSession(client, auth)
-      }}
-    />
+    <AppFrame route={route} fakeClient={fakeClient} user={authState.user} onSignOut={onSignOut} />
   )
 }
 

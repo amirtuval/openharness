@@ -239,12 +239,9 @@ test.describe('W26 §10 oh login and friends', () => {
   })
 
   test('W26e the device page with a code the server never issued', async ({ page }) => {
-    // KNOWN BUG (#80): the server answers a clear `400
-    // {"error":"invalid_request","error_description":"Invalid user code"}`, but the page shows
-    // the stand-in "The sign-in request failed." — the description never reaches the reader.
-    // `test.fail` keeps the suite green until #80 is fixed; remove the marker then (the last
-    // assertion is the one that flips).
-    test.fail(true, 'issue #80: the device page drops the server’s error_description')
+    // Fixed by #80: the page used to drop the server's `400
+    // {"error":"invalid_request","error_description":"Invalid user code"}` and show the
+    // stand-in "The sign-in request failed."; it now reads the body and says so in a sentence.
     // The code alphabet is `[A-HJ-NP-Z2-9]{8}` (the server's own shape), so this is a
     // well-formed code nobody issued — the case a phishing terminal hits.
     await page.goto(`${BASE_URL}/#/device?user_code=ZZZZZZZZ`)
@@ -252,7 +249,7 @@ test.describe('W26 §10 oh login and friends', () => {
     await expect(page.getByRole('button', { name: 'Approve' })).toHaveCount(0)
     await expect(page.getByText('Approved')).toHaveCount(0)
     await shot(page, 'w26-10-wrong-code')
-    await expect(page.getByRole('alert')).toContainText(/Invalid user code/i)
+    await expect(page.getByRole('alert')).toContainText(/not one this server issued/i)
   })
 
   test('W26f Ctrl+C during the login poll writes no token', async ({ context }) => {

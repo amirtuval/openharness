@@ -36,6 +36,15 @@ The state is **per client instance** (`authStateFor(client)`). A settings change
 builds a new client, and until that client has been asked, its answer is `checking` — never
 another client's answer.
 
+**The re-check does not tear the screen down.** Saving a server URL rebuilds the client
+(`App`'s `useMemo`), and the gate re-runs `me()` for the new one — deliberately, because another
+server means another session. What it must not do is replace the frame while that check is in
+flight: the previous client's user keeps the sidebar and the screen up until the new client has
+answered (a signed-out answer still puts the sign-in page in place). That is what lets a screen
+whose own state only changed the settings keep it — Settings' "Saved" confirmation was the first
+one to need the guarantee (issue #81). Only the very first check of a page load has nothing to
+keep, and it is the one that shows "Checking your session…".
+
 **Two failures are deliberately not routed.** The Model providers card handles a 401 from a
 _credential write_ itself, because the server wants a **fresh** session there (Better Auth's
 `freshAge`) and "your session is too old" is a different message from "you are signed out" —
@@ -94,6 +103,16 @@ What it calls, in order:
 The screens states are explicit — verifying, ready, approved, denied, failed — and the two
 decisions are the same page with different copy afterwards, so the reader is never left
 wondering whether something happened.
+
+Failures reach the reader in the server's own terms. Better Auth's sign-in endpoints answer with
+a `message`, which the page shows as-is; the device endpoints answer with the OAuth pair
+`{"error": …, "error_description": …}` instead — a body with no `message` at all — so
+`describeError` in `src/lib/auth-client.ts` maps the codes the server actually sends to a
+sentence: `invalid_request` / "Invalid user code" (not a code this server issued),
+`expired_token` (run `oh login` again), `access_denied`, and a 429 (rate-limited, with the wait
+when the answer names one). Everything else falls back to the server's `error_description`, then
+the bare code, then the stand-in "The sign-in request failed." — and a 401 still means "sign in
+again" rather than a printed code (issue #80).
 
 ## Model providers (`src/components/settings/model-providers.tsx`)
 

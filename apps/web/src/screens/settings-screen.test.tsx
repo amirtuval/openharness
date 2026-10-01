@@ -4,6 +4,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 
+import { App } from '../App'
 import { SETTINGS_STORAGE_KEY, getSettings } from '../lib/settings'
 import { makeFake, renderApp } from '../test-support/render-app'
 
@@ -18,6 +19,42 @@ describe('SettingsScreen', () => {
       'placeholder',
       `(same origin: ${window.location.origin})`,
     )
+  })
+
+  it('keeps the save confirmation when the rebuilt client re-checks the session', async () => {
+    const user = userEvent.setup({ delay: null })
+    const fake = makeFake()
+    const first = renderApp(fake, { hash: '#/settings' })
+
+    // A first-time save: the field was empty, so the URL really changes — which, in the app,
+    // rebuilds the client from it (`App`'s `useMemo`) and re-runs the session check for the
+    // new one, because another server means another session (issue #81).
+    await user.type(await screen.findByLabelText('Server URL'), 'http://localhost:8787')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(await screen.findByText('Saved — the next request uses it.')).toBeInTheDocument()
+
+    // The rebuild, with the new client's `me()` held open so the frame is asserted while the
+    // re-check is in flight rather than after it.
+    const rebuilt = createFakeClient()
+    let answer: (() => void) | undefined
+    rebuilt.me = () =>
+      new Promise((resolve) => {
+        answer = () => {
+          resolve(rebuilt.user)
+        }
+      })
+    first.rerender(<App client={rebuilt} />)
+
+    // The re-check must not replace the frame: "Checking your session…" would unmount
+    // Settings and drop the confirmation with it.
+    expect(screen.queryByText('Checking your session…')).not.toBeInTheDocument()
+    expect(screen.getByText('Saved — the next request uses it.')).toBeInTheDocument()
+
+    answer?.()
+
+    // And it survives the answer too: the screen was never remounted.
+    expect(await screen.findByLabelText('Server URL')).toHaveValue('http://localhost:8787')
+    expect(screen.getByText('Saved — the next request uses it.')).toBeInTheDocument()
   })
 
   it('saves the server URL to localStorage, and no key anywhere', async () => {

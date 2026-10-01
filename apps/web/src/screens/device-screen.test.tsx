@@ -70,6 +70,156 @@ describe('DeviceScreen', () => {
     expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
   })
 
+  // The device endpoints answer with the OAuth pair `{"error": …, "error_description": …}`,
+  // a body with no `message` — what the page used to drop on the floor (issue #80). The
+  // codes below are the ones the server actually sends, captured during the #74 pass.
+
+  it('reads a code the server never issued as the server’s own sentence', async () => {
+    mockAuthClient.device.mockResolvedValueOnce({
+      data: null,
+      error: {
+        error: 'invalid_request',
+        error_description: 'Invalid user code',
+        status: 400,
+        statusText: 'Bad Request',
+      },
+    })
+    const fake = makeFake()
+
+    renderApp(fake, { hash: DEVICE_HASH })
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(/not one this server issued/)
+    expect(alert).not.toHaveTextContent('The sign-in request failed.')
+    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+  })
+
+  it('says an expired code means running `oh login` again', async () => {
+    mockAuthClient.device.mockResolvedValueOnce({
+      data: null,
+      error: {
+        error: 'expired_token',
+        error_description: 'User code has expired',
+        status: 400,
+        statusText: 'Bad Request',
+      },
+    })
+    const fake = makeFake()
+
+    renderApp(fake, { hash: DEVICE_HASH })
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('This code has expired. Run `oh login` again for a fresh one.')
+    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+  })
+
+  it('shows a rate-limit answer with the wait it names', async () => {
+    mockAuthClient.device.mockResolvedValueOnce({
+      data: null,
+      error: {
+        message: 'Too many requests. Please try again later.',
+        status: 429,
+        statusText: 'Too Many Requests',
+        retry_after: 30,
+      },
+    })
+    const fake = makeFake()
+
+    renderApp(fake, { hash: DEVICE_HASH })
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Too many requests — try again in 30 seconds.')
+    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+  })
+
+  it('maps a refused approval, and keeps a code’s other refusals in the server’s words', async () => {
+    const user = userEvent.setup({ delay: null })
+    const fake = makeFake()
+    mockAuthClient.device.approve.mockResolvedValueOnce({
+      data: null,
+      error: {
+        error: 'access_denied',
+        error_description: 'You are not authorized to approve this device authorization',
+        status: 403,
+      },
+    })
+
+    const first = renderApp(fake, { hash: DEVICE_HASH })
+    await user.click(await screen.findByRole('button', { name: 'Approve' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(
+      'The server refused this request. Run `oh login` again to start over.',
+    )
+    expect(screen.queryByText('Approved')).not.toBeInTheDocument()
+    first.unmount()
+
+    // `invalid_request` covers more than a wrong code: a code that was already decided says
+    // so in its description, and that is what the reader sees.
+    mockAuthClient.device.approve.mockResolvedValueOnce({
+      data: null,
+      error: {
+        error: 'invalid_request',
+        error_description: 'Device code already processed',
+        status: 400,
+      },
+    })
+    renderApp(fake, { hash: DEVICE_HASH })
+    await user.click(await screen.findByRole('button', { name: 'Approve' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Device code already processed')
+  })
+
+  it('reports a failed deny through the same mapping', async () => {
+    const user = userEvent.setup({ delay: null })
+    const fake = makeFake()
+    mockAuthClient.device.deny.mockResolvedValueOnce({
+      data: null,
+      error: { error: 'expired_token', error_description: 'User code has expired', status: 400 },
+    })
+
+    renderApp(fake, { hash: DEVICE_HASH })
+    await user.click(await screen.findByRole('button', { name: 'Deny' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'This code has expired. Run `oh login` again for a fresh one.',
+    )
+  })
+
+  it('falls back to the description, then the code, then the stand-in', async () => {
+    const fake = makeFake()
+
+    // Each section scripts the answer itself (not `…Once`) because a second `renderApp` in
+    // one test mounts the screen twice: the fresh shell's session check briefly steps through
+    // the checking state, so the device effect runs again with the client already checked.
+    // A description with no mapped code: the server's own explanation is shown.
+    mockAuthClient.device.mockResolvedValue({
+      data: null,
+      error: {
+        error: 'server_error',
+        error_description: 'The device store is unreachable',
+        status: 500,
+      },
+    })
+    const described = renderApp(fake, { hash: DEVICE_HASH })
+    expect(await screen.findByRole('alert')).toHaveTextContent('The device store is unreachable')
+    described.unmount()
+
+    // A bare code: better the code than no reason at all.
+    mockAuthClient.device.mockResolvedValue({
+      data: null,
+      error: { error: 'server_error', status: 500 },
+    })
+    const bare = renderApp(fake, { hash: DEVICE_HASH })
+    expect(await screen.findByRole('alert')).toHaveTextContent('server_error')
+    bare.unmount()
+
+    // Nothing to go on: the stand-in.
+    mockAuthClient.device.mockResolvedValue({ data: null, error: {} })
+    renderApp(fake, { hash: DEVICE_HASH })
+    expect(await screen.findByRole('alert')).toHaveTextContent('The sign-in request failed.')
+  })
+
   it('reports a code that was already decided', async () => {
     mockAuthClient.device.mockResolvedValueOnce({ data: { status: 'approved' }, error: null })
     const fake = makeFake()
