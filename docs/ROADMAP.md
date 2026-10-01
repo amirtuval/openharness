@@ -35,33 +35,32 @@ needs to know who owns what. The features that cost money or can act on the worl
 calls, tools) should land on a platform that already has users, environments and a trustworthy
 CI.
 
-## 2. Authentication
+## 2. Authentication (in progress: [epic #65](https://github.com/amirtuval/openharness/issues/65))
 
-Today the server has one optional static API key (`x-api-key`).
+**Decided** (details and the sub-issues are on the epic):
 
-**Scope:**
-
-- users, and login for the web app;
-- personal API keys for the SDK and scripts;
-- `oh login` for the CLI, likely an OAuth device flow, as `gh auth login` does;
-- ownership of agents and sessions, checked on every route and every SSE stream.
-
-**Decided:**
-
-- A `user.message` records **who sent it**, since several people may share a session.
-
-**Open:**
-
-- **Tenancy model.** One of:
-  - (a) self-hosted, one team per deployment;
-  - (b) multi-tenant, with organizations, workspaces and roles;
-  - (c) one team now, with an `org_id` in the data model so that organizations can be added later.
-
-  Managed Agents scopes product configuration at the agent level and end users at the session
-  level, which maps well onto our resources.
-
-- **Login method:** our own OAuth/OIDC (which providers?), or a hosted provider (Clerk, Auth0,
-  Keycloak, …).
+- **Sign-in** with Google, GitHub or Microsoft, through [Better Auth](https://www.better-auth.com)
+  running inside our server against our Postgres. Sign-up is open.
+- **A user is a verified email.** Any of the three providers can sign in the same user; only
+  provider-verified emails are accepted.
+- **Server-side sessions,** not JWTs or refresh tokens: an opaque token checked against the
+  database on every request, 7-day sliding expiry, and revocation that takes effect immediately.
+  The web app uses an httpOnly cookie; the CLI uses a bearer token.
+- **`oh login`** opens the browser on a sign-in page (the device-code flow, RFC 8628) and stores
+  a token. `oh logout` and `oh whoami` round it out.
+- **Every agent and session belongs to its creator.** Nothing is shared, and there are no
+  organizations or teams yet.
+- **Users bring their own model keys.** The server has no provider keys of its own:
+  - keys are stored in Postgres with envelope encryption (a new `@openharness/vault` package,
+    with the master key in `OPENHARNESS_SECRETS_KEY`; a KMS can replace it later);
+  - they are write-only and validated on save;
+  - they are decrypted only for one model request.
+  - Supported now: any provider that takes a single API key (OpenAI, Anthropic, Google,
+    OpenRouter, Groq, Fireworks, …).
+  - The code that read provider keys from environment variables is removed. Local development
+    uses the same encrypted settings.
+- **A username/password dev login,** only when the server's public URL is localhost.
+- **The static `OPENHARNESS_API_KEY` is removed,** and existing v1 data is deleted.
 
 ## 3. Deployment and CI/CD
 
@@ -87,12 +86,21 @@ Today there is CI (lint, typecheck and tests with turbo `--affected`) and `docke
   VM with Compose.
 - **Postgres:** a managed service (Neon, RDS, Supabase) or self-run.
 
-## 4. Model selection and provider keys
+## 4. Model selection
 
 **Scope:**
 
-- provider API keys **per user or organization**, stored encrypted and **write-only** (set,
-  never read back). This is the start of the secret store that MCP and tools will need;
+- **more credential types**, on top of the single-API-key providers that authentication (#65)
+  supports:
+  - Bedrock (AWS access keys or an assumed role);
+  - Vertex (a GCP service account or workload identity);
+  - Azure OpenAI (endpoint, key and deployment);
+  - custom OpenAI-compatible base URLs, which need SSRF protection first;
+  - possibly signing in with a provider subscription, if the terms allow it.
+
+  The credential store keeps a type plus an encrypted payload, so these are new types rather
+  than a new design;
+
 - a **model catalog**: the models each configured provider offers, with their context windows;
 - **modes** (an idea from Amp): a named preset that bundles a model, a reasoning effort, a
   system prompt addition and a tool set behind a stable name such as `smart`, `fast` or
@@ -100,7 +108,7 @@ Today there is CI (lint, typecheck and tests with turbo `--affected`) and `docke
   change what a mode maps to without touching every agent. A raw model id stays available for
   those who want it;
 - choosing the mode or model per agent, per session, and **switching mid-session**;
-- usage and cost per user or organization, from the token counts the spans already store, and
+- usage and cost per user, from the token counts the spans already store, and
   possibly budgets that stop a session at a limit, with usage events so clients can show
   spending live (as Managed Agents' `session.usage` does).
 
@@ -128,8 +136,8 @@ own.
 2. **Remote MCP servers** (Streamable HTTP) as `agent.mcp_tool_use`:
    - MCP servers are configured on the agent;
    - each request records the tools it offered;
-   - credentials go in the write-only secret store from phase 4, never in the agent config
-     returned by the API.
+   - credentials go in the encrypted per-user store from authentication (#65), never in the
+     agent config returned by the API.
 3. **Pausing for the user** (`session.status_idle {stop_reason: requires_action}`), which
    covers three features with one mechanism:
    - client-run tools (`agent.custom_tool_use` → `user.custom_tool_result`);
@@ -151,6 +159,11 @@ own.
 
 ## Later: not ordered yet
 
+- **Programmatic access:** personal API keys, SDK and script access (no static server key
+  any more).
+- **Organizations, teams and sharing:** shared agents and sessions, roles, invitations, and an
+  `author` on each user event once a session can have several people.
+- **CLI and web polish:** a lot of smaller UX work in both clients, collected while testing v1.
 - **Context compaction:** summarizing old history for the model. This is separate from #46's
   event-store compaction.
 - **Agent versioning:** sessions pin a version, and the log records which configuration served
