@@ -28,6 +28,20 @@ export function makeFake(options: FakeClientOptions = {}): FakeClient {
   return createFakeClient(options)
 }
 
+/**
+ * Sign a signed-out fake back in, the way the server does once a sign-in succeeds.
+ *
+ * A fake's session is its `authenticated` flag, and the device flow is the one path that
+ * turns it on (`oh login`'s approval — see `@openharness/client/testing`); a test whose UI
+ * signs in calls this from the mocked Better Auth call to stand in for the cookie the server
+ * would have set.
+ */
+export async function signInFake(fake: FakeClient): Promise<void> {
+  fake.scriptDeviceLogin({ pendingPolls: 0 })
+  const start = await fake.auth.startDeviceLogin()
+  await fake.auth.pollDeviceLogin(start.deviceCode)
+}
+
 /** What one list request was asked for. */
 export interface ListRequest {
   readonly limit: number | undefined

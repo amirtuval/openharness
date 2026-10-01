@@ -27,6 +27,7 @@
   "dependencies": {
     "@openharness/client": "workspace:*",
     "@openharness/protocol": "workspace:*",
+    "better-auth": "1.7.6",
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
     "lucide-react": "1.48.0",
@@ -35,7 +36,8 @@
     "react-dom": "19.3.0",
     "react-markdown": "10.1.0",
     "remark-gfm": "4.0.1",
-    "tailwind-merge": "3.7.0"
+    "tailwind-merge": "3.7.0",
+    "zod": "4.6.5"
   },
   "devDependencies": {
     "@openharness/config": "workspace:*",

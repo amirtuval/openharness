@@ -1,5 +1,5 @@
-import type { Session } from '@openharness/protocol'
-import { Bot, Plus, Settings } from 'lucide-react'
+import type { Session, User } from '@openharness/protocol'
+import { Bot, LogOut, Plus, Settings } from 'lucide-react'
 import type { Ref } from 'react'
 
 import { relativeTime, sessionLabel } from '../lib/format'
@@ -34,6 +34,8 @@ export function Sidebar({
   error,
   truncated,
   activeSessionId,
+  user,
+  onSignOut,
   fakeClient = false,
   open = false,
   onNavigate,
@@ -46,6 +48,10 @@ export function Sidebar({
   truncated: boolean
   /** The open session, highlighted in the list. */
   activeSessionId: string | undefined
+  /** Who the app is signed in as — shown at the foot, with the way out. */
+  user: User | null
+  /** Sign out; the shell revokes the session and shows the sign-in page. */
+  onSignOut: (() => void) | undefined
   /** Show that this run is on the fake client rather than a server. */
   fakeClient?: boolean
   /** Shown as the overlay drawer below `md`; ignored from `md` up, where it is always visible. */
@@ -140,6 +146,59 @@ export function Sidebar({
           Settings
         </a>
       </div>
+
+      {user === null ? null : (
+        <div className="flex items-center gap-2 border-t p-2">
+          <UserAvatar user={user} />
+          <span
+            className="min-w-0 flex-1 truncate text-xs text-muted-foreground"
+            title={user.email}
+          >
+            {user.email}
+          </span>
+          {onSignOut === undefined ? null : (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="shrink-0 text-muted-foreground"
+              aria-label="Sign out"
+              onClick={onSignOut}
+            >
+              <LogOut aria-hidden="true" />
+              Sign out
+            </Button>
+          )}
+        </div>
+      )}
     </aside>
+  )
+}
+
+/**
+ * The signed-in user's picture, or a stand-in.
+ *
+ * The identity is the email (epic #65, A3), which the row shows as text; the avatar is only
+ * decoration, and a provider that gave no picture gets the first letter instead of an empty
+ * circle.
+ */
+function UserAvatar({ user }: { user: User }) {
+  const initial = (user.name ?? user.email).trim().slice(0, 1).toUpperCase()
+  return user.image === undefined ? (
+    <span
+      aria-hidden="true"
+      data-slot="user-avatar"
+      className="flex size-7 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-medium"
+    >
+      {initial}
+    </span>
+  ) : (
+    <img
+      aria-hidden="true"
+      data-slot="user-avatar"
+      src={user.image}
+      alt=""
+      className="size-7 shrink-0 rounded-full"
+    />
   )
 }

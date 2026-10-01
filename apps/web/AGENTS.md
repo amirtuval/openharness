@@ -1,11 +1,12 @@
 # @openharness/web
 
 The openharness web app: a chat UI for the v1 API, built with Vite + React + TypeScript,
-Tailwind and shadcn/ui. It talks to the server only through `@openharness/client`, and every
-piece of chat state comes from the client's transcript reducer — there is no second store.
+Tailwind and shadcn/ui. It talks to the server only through `@openharness/client`, signs in
+through Better Auth's browser client, and every piece of chat state comes from the client's
+transcript reducer — there is no second store.
 
 The long version of the decisions below, and what to watch out for, is in
-[`docs/chat-ui.md`](./docs/chat-ui.md).
+[`docs/chat-ui.md`](./docs/chat-ui.md) and [`docs/auth.md`](./docs/auth.md).
 
 ## Commands
 
@@ -44,6 +45,10 @@ OPENHARNESS_PROXY_TARGET=http://localhost:8787 yarn dev
 settings — the default — the app calls `/v1` on its own origin, which is exactly what the
 proxy answers in dev and what a static `dist/` served next to the API wants in production.
 
+The fake is signed in and has no sign-in page of its own — it answers `me()` and every other
+`/v1` call — so fake mode still develops the chat without a server; the sign-in page appears
+against a real one (or with `authenticated: false` in a test).
+
 Fake mode is development-only by construction: the gate is
 `import.meta.env.DEV && import.meta.env.VITE_OPENHARNESS_FAKE === '1'`, which a production
 build replaces with `false`, and the fake itself is a dynamic import — so neither the branch
@@ -60,8 +65,13 @@ src/
   index.css                    Tailwind + the shadcn design tokens (dark follows the system)
   components/
     client-provider.tsx        the client in context, so screens can use it
-    sidebar.tsx                session list (newest first), New chat, Agents, Settings;
+    auth-provider.tsx          the Better Auth browser client in context
+    provider-icon.tsx          the Google / GitHub / Microsoft marks, inline
+    sidebar.tsx                session list (newest first), New chat, Agents, Settings,
+                               and the signed-in user with Sign out at the foot;
                                the column from `md` up, the overlay drawer below it
+    settings/
+      model-providers.tsx      Settings -> Model providers: the list, add/replace, delete
     chat/
       chat-view.tsx            the chat screen: header, messages, errors, composer
       message-list.tsx         the scrolling conversation + stick-to-bottom
@@ -76,17 +86,27 @@ src/
     home-screen.tsx            no chat open
     new-chat-screen.tsx        pick an agent, create the session, go to the chat
     agents-screen.tsx          list, create, edit
-    settings-screen.tsx        server URL + API key, stored in localStorage
+    settings-screen.tsx        the server URL (localStorage), then Model providers
+    sign-in-screen.tsx         one button per provider, the dev form when offered
+    device-screen.tsx          the device-approval page `oh login` opens
   hooks/
     use-session.ts             THE session hook: history, live stream, send, interrupt
     use-sessions.ts            the sidebar's list, plus create
     use-session-refresh.ts     the re-read after a first message, shared by both of those
     use-agents.ts              the agents list, plus create and update
+    use-auth.ts                the auth store's React binding
+    use-auth-config.ts         GET /v1/auth-config for the sign-in page
+    use-provider-credentials.ts  the credentials list, plus save and delete
     use-stick-to-bottom.ts     auto-scroll that stays put when the reader scrolls up
     use-route.ts, use-settings.ts   thin React bindings over the two small stores
   lib/
-    router.ts                  the hash routes (#/s/<id>, #/new, #/agents, #/settings)
+    router.ts                  the hash routes (#/s/<id>, #/new, #/agents, #/settings,
+                               #/signin, #/device?user_code=...)
+    auth-config.ts             GET /v1/auth-config, validated with a local zod schema
+    auth-client.ts             Better Auth's browser client, narrowed to the calls we make
+    auth-store.ts              who we are signed in as, and "a 401 means sign in again"
     settings.ts                localStorage settings, a stable snapshot for React
+    providers.ts               the model-provider names the pickers offer
     session-refresh.ts         the one re-read of a session whose first message named it
     dev-fake-client.ts         dev-only fake client + the seeded scenario
     models.ts                  the model suggestions the agent form offers
@@ -97,13 +117,20 @@ src/
 
 ### Routes
 
-| route             | screen                         |
-| ----------------- | ------------------------------ |
-| `#/`              | home (no chat open)            |
-| `#/s/<sessionId>` | the chat                       |
-| `#/new`           | new chat: pick an agent        |
-| `#/agents`        | agents: list, create, edit     |
-| `#/settings`      | settings: server URL + API key |
+| route                       | screen                                      |
+| --------------------------- | ------------------------------------------- |
+| `#/`                        | home (no chat open)                         |
+| `#/s/<sessionId>`           | the chat                                    |
+| `#/new`                     | new chat: pick an agent                     |
+| `#/agents`                  | agents: list, create, edit                  |
+| `#/settings`                | server URL, and Settings -> Model providers |
+| `#/signin`                  | sign in (`?next=<hash>` to return there)    |
+| `#/device?user_code=<code>` | the device-approval page `oh login` opens   |
+
+Signed out — a 401 from `client.me()` at startup or from any later call — the shell renders the
+sign-in page in place of everything else, and signing in puts the reader back on the route they
+were on; `#/device` is the one route that is reached signed out on purpose, and it signs the
+reader in first (a device code is claimed by the session that approves it).
 
 Hash routes, so the build stays a static bundle that any static host can serve without a
 rewrite rule. Chat links are real `<a href="#/s/…">`, so Back, middle-click and a reload land
@@ -186,14 +213,31 @@ the frontends share the protocol and the client, not their errors.
   reads `Can't reach the openharness server at <url>. Check that it's running, or change the
 server URL in Settings.`, with **this site** in place of the URL when the setting is empty
   and the app is calling its own origin.
-- **A key the server will not take** (401/403) keeps the server's own message and adds
-  `Check the API key in Settings.`
+- **A session the server will not take** (a 401) keeps the server's own message and adds
+  `Sign in again to continue.` Most 401s never reach a banner: `noteAuthenticationError`
+  turns them into the sign-in page first (see `docs/auth.md`). A 403 is reported as what it
+  is — a refusal, not a missing session.
 - **Everything else** keeps its message; an abort is "The request was cancelled." rather than
   a failure.
 
-The context is the configured server URL, read from the settings store by the three hooks that
-catch (`use-session`, `use-sessions`, `use-agents`) — the same store the client is built from,
-so the URL in the message is the URL that was called.
+The context is the configured server URL, read from the settings store by the hooks that catch
+(`use-session`, `use-sessions`, `use-agents`, `use-provider-credentials`) — the same store the
+client is built from, so the URL in the message is the URL that was called.
+
+## Authentication
+
+A browser's session is a **cookie** the server sets (epic #65, A2): the app cannot read it,
+never stores a token, and `@openharness/client` sends `credentials: 'include'` on every request.
+Signing in is Better Auth's own `/api/auth/*` surface (A1), through the typed adapter in
+`src/lib/auth-client.ts`; who we are comes from `client.me()`; and a **401 from any call**
+becomes the sign-in page through `src/lib/auth-store.ts`. Settings -> Model providers is the
+write-only credential API (A5) with a UI. The full picture — routes, the exact Better Auth
+calls, and the device-approval page's `verification_uri` shape — is in
+[`docs/auth.md`](./docs/auth.md).
+
+The one thing to remember while reading the shell: **`#/device?user_code=<code>` is the URL
+`oh login` opens**, and signed out it signs the reader in first, because verifying a device
+code claims it for the session.
 
 ## The responsive shell
 
@@ -242,17 +286,26 @@ Markdown is `react-markdown` + `remark-gfm` with the elements styled by hand; no
 
 `src/**/*.test.tsx` with Vitest (jsdom) and Testing Library, driving
 `createFakeClient()` — no server, no mocked client. `src/test-support/render-app.tsx` renders
-the app with the fake and provides a few DOM readers.
+the app with the fake and provides a few DOM readers; `src/test-support/better-auth-client-mock.ts`
+is the other seam (see `docs/auth.md`).
 
-| file                                     | covers                                                                                                                                                                             |
-| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/App.test.tsx`                       | open a session, send → streamed reply, Stop → interrupted, reload → history, steering, retry → success, terminal error, new chat, a title arriving without a reload, request error |
-| `src/screens/agents-screen.test.tsx`     | list, create and edit an agent, the model suggestions                                                                                                                              |
-| `src/screens/settings-screen.test.tsx`   | settings round-trip, an empty URL as same-origin                                                                                                                                   |
-| `src/hooks/use-session.test.tsx`         | the hook's own contract: a failed load, and no duplicated message                                                                                                                  |
-| `src/hooks/use-stick-to-bottom.test.tsx` | the auto-scroll rule, with a scroll geometry jsdom does not have                                                                                                                   |
-| `src/components/sidebar.test.tsx`        | the session list follows `next_page`, and the cap note                                                                                                                             |
-| `src/lib/*.test.ts`                      | routes, the settings store, the fake-mode scenario, the paging walk, the session re-read                                                                                           |
+**Better Auth is mocked at the module boundary for every test file** (`vitest.setup.ts` maps
+`better-auth/client` and its plugin entry to the double in `src/test-support/`), because a
+social sign-in leaves the page and cannot be run in a test. The app code is untouched: the
+tests drive the same calls it makes, and assert their arguments. `GET /v1/auth-config` — the
+one request outside `@openharness/client` — is stubbed at `fetch` where a test needs it.
+
+| file                                     | covers                                                                                                                                                                                                                                                           |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/App.test.tsx`                       | open a session, send → streamed reply, Stop → interrupted, reload → history, steering, retry → success, terminal error, new chat, a title arriving without a reload, request error, a 401 sending the reader to sign in, the missing-provider-credential message |
+| `src/screens/agents-screen.test.tsx`     | list, create and edit an agent, the model suggestions, the models marked "no key"                                                                                                                                                                                |
+| `src/screens/settings-screen.test.tsx`   | settings round-trip, an empty URL as same-origin, credentials add/replace/delete, no key in the DOM, the rejected-key and fresh-session errors                                                                                                                   |
+| `src/screens/sign-in-screen.test.tsx`    | the 401 landing, provider buttons per auth-config, the dev form gating and sign-in, returning to the route, sign-out, a later 401                                                                                                                                |
+| `src/screens/device-screen.test.tsx`     | approve, deny, an invalid code, an already-decided code, signing in first, the code through a social sign-in                                                                                                                                                     |
+| `src/hooks/use-session.test.tsx`         | the hook's own contract: a failed load, and no duplicated message                                                                                                                                                                                                |
+| `src/hooks/use-stick-to-bottom.test.tsx` | the auto-scroll rule, with a scroll geometry jsdom does not have                                                                                                                                                                                                 |
+| `src/components/sidebar.test.tsx`        | the session list follows `next_page`, and the cap note                                                                                                                                                                                                           |
+| `src/lib/*.test.ts`                      | routes, the settings store, the fake-mode scenario, the paging walk, the session re-read                                                                                                                                                                         |
 
 Timing matters: the fake streams with `delayMs: 0` by default, so a test that wants to observe
 a reply _while it streams_ passes a larger `delayMs` (and enough `chunks`) — otherwise the
@@ -266,6 +319,10 @@ Only these (see the table in `docs/architecture.md`):
 - `@openharness/client` (and its `./testing` subpath in dev and in tests)
 
 `@openharness/config` is additionally allowed as a **devDependency**.
+
+The app also depends on `better-auth` (its browser client — the only way to sign in; epic #65,
+A1) and on `zod`, which the local schema for `GET /v1/auth-config` uses. Neither is an
+`@openharness/*` package, so `yarn check:deps` has nothing to say about them.
 
 Packages consume each other through built output only (`exports` → `dist/`), never through
 relative paths. `yarn check:deps` at the repo root enforces this.

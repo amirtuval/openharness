@@ -1,7 +1,7 @@
-import { ApiError } from '@openharness/client'
+import { AuthenticationError } from '@openharness/client'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { App } from './App'
 import { saveSettings } from './lib/settings'
@@ -173,6 +173,29 @@ describe('App', () => {
     })
   })
 
+  it('turns a missing provider credential into a way to fix it', async () => {
+    const user = userEvent.setup({ delay: null })
+    const fake = makeFake()
+    fake.failWith({
+      type: 'missing_provider_credential',
+      message: 'No anthropic credential is saved for this account.',
+      retryStatus: 'exhausted',
+    })
+    renderApp(fake)
+
+    await user.type(await screen.findByLabelText('Message'), 'hello')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
+
+    // The error is the agent's, not the request's — and there is exactly one thing to do
+    // about it, so the banner says where (epic #65, A5).
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('missing_provider_credential')
+    expect(alert).toHaveTextContent('No anthropic credential is saved for this account.')
+    expect(
+      within(alert).getByRole('link', { name: 'Add a key in Settings → Model providers' }),
+    ).toHaveAttribute('href', '#/settings')
+  })
+
   it('keeps a terminal error on screen until something replaces it', async () => {
     const user = userEvent.setup({ delay: null })
     const fake = makeFake({ delayMs: 150 })
@@ -296,15 +319,28 @@ describe('App', () => {
     expect(alert).not.toHaveTextContent('Failed to fetch')
   })
 
-  it('hints at the API key when the server will not take it', async () => {
+  it('sends the reader to sign in when a normal call answers 401', async () => {
     const fake = makeFake()
-    fake.sessions.list = () => Promise.reject(new ApiError(401, 'Invalid API key.'))
-
-    renderApp(fake, { hash: '#/' })
-
-    expect(await screen.findByRole('alert')).toHaveTextContent(
-      'The server rejected the request (401): Invalid API key. Check the API key in Settings.',
+    // The session ends behind the app's back. The sidebar's list is the first to find out.
+    fake.sessions.list = () => Promise.reject(new AuthenticationError('Not signed in.'))
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ providers: [], dev_login: false }), { status: 200 }),
+        ),
+      ),
     )
+    try {
+      renderApp(fake, { hash: '#/' })
+
+      // Not an inline banner: there is no session to retry it with.
+      expect(
+        await screen.findByRole('heading', { name: 'Sign in to openharness' }),
+      ).toBeInTheDocument()
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })
 

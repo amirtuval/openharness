@@ -3,6 +3,7 @@ import { useEffect, useRef } from 'react'
 import { useClient } from '../client-provider'
 import { useSession } from '../../hooks/use-session'
 import { shortId, sessionLabel } from '../../lib/format'
+import { settingsHash } from '../../lib/router'
 import { Composer } from './composer'
 import { ErrorBanner } from './error-banner'
 import { MessageList } from './message-list'
@@ -61,6 +62,16 @@ export function ChatView({ sessionId }: { sessionId: string }) {
                   : lastError.type
               }
               message={lastError.message}
+              // The one error in the log the reader can fix themselves: the session's owner
+              // has no key for the model's provider (epic #65, A5), so the turn ended and no
+              // retry will help until one is saved.
+              action={
+                lastError.type === 'missing_provider_credential' ? (
+                  <a className="underline underline-offset-2" href={settingsHash()}>
+                    Add a key in Settings → Model providers
+                  </a>
+                ) : undefined
+              }
             />
           )}
           {requestError === null ? null : (
