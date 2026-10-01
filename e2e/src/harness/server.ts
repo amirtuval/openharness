@@ -168,12 +168,24 @@ function serverEnvironment(options: ServerProcessOptions, port: number): NodeJS.
       name.startsWith('OPENHARNESS_') ||
       name.startsWith('BETTER_AUTH_') ||
       name === ENV_VARS.databaseUrl ||
-      name === 'PORT'
+      name === 'PORT' ||
+      // Test-runner markers: vitest sets `NODE_ENV=test` *and* `TEST=true` on its own
+      // process, and Better Auth's `isTest()` reads **either** one — so a child that
+      // inherited `TEST` would keep treating itself as a test process whatever `NODE_ENV`
+      // says below (#79).
+      name === 'NODE_ENV' ||
+      name === 'TEST'
     ) {
       continue
     }
     env[name] = value
   }
+  // The child runs as a deployment does, **not** as vitest does (#79): Better Auth skips its
+  // whole origin check when `isTest()` — `NODE_ENV=test` or `TEST` set — so a server started
+  // under vitest's environment would never exercise the CSRF rule a deployment enforces, or
+  // notice a misconfigured `trustedOrigins`. Only this process gets it; vitest keeps its own
+  // `NODE_ENV`/`TEST` (both are dropped from the copy above).
+  env.NODE_ENV = 'production'
   env[ENV_VARS.databaseUrl] = options.databaseUrl
   env[ENV_VARS.port] = String(port)
   env[ENV_VARS.betterAuthUrl] = options.publicUrl ?? baseUrlFor(port)

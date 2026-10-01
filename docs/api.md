@@ -235,6 +235,13 @@ curl localhost:3000/v1/me -H "Authorization: Bearer $TOKEN"
   cookie need an `Origin` header of the deployment's own URL (`BETTER_AUTH_URL`); a request
   from anywhere else is refused with `403 permission_error`. Bearer tokens (the CLI) do not
   need it — a page cannot attach that header cross-origin.
+- **A non-browser client signing in by email/password must send an `Origin` of the server's
+  public URL** (the dev login; the same `BETTER_AUTH_URL` the cookie rule above names).
+  Sign-in is Better Auth's Fetch-Metadata CSRF check: a cookieless sign-in POST that carries
+  `Sec-Fetch-*` headers — Node's own `fetch` sends `sec-fetch-mode: cors` — but no `Origin`
+  is refused (`403`, `MISSING_OR_NULL_ORIGIN`), as is one from another origin
+  (`INVALID_ORIGIN`). A `curl` that sends neither is left alone. The CLI is unaffected:
+  `oh login` uses the device flow, whose endpoints carry no such check.
 - **What sign-in is available** is `GET /v1/auth-config`, the one `/v1` route that needs no
   session (the web app reads it before showing the sign-in screen):
 

@@ -152,6 +152,14 @@ Better Auth's own schema check passes on the migrated database.
   any page's request; bearer requests are exempt, since a page cannot set that header
   cross-origin. `/v1/auth-config` is registered ahead of the guard; `/api/auth/*` is Better
   Auth's own.
+- **Better Auth's own origin check is on outside a test process.** `/api/auth/*` refuses a
+  sign-in POST whose `Origin` is not `trustedOrigins`' entry — the public URL — and a
+  cookieless one that carries Fetch-Metadata headers (Node's `fetch` sends
+  `sec-fetch-mode: cors`) with no `Origin` at all (`MISSING_OR_NULL_ORIGIN`, 403). Better
+  Auth skips the whole check when `NODE_ENV=test` — which is what vitest sets — so
+  `AuthConfig.enforceOriginCheck` (tests only; nothing sets it in production, and nothing
+  anywhere turns the check off) forces it on for `auth.test.ts`, and the e2e suite runs its
+  servers with `NODE_ENV=production` for the same reason (#79).
 - **Revocation is immediate, and reaches open responses** (A2; issue #76). The guard validates
   once per request, and an SSE stream is one long request — so the stream and the AI SDK
   adapter watch their own session. `session-watch.ts` holds both halves:
@@ -614,7 +622,9 @@ delete each other's sessions. Packages still run in parallel with each other.
   hook cannot activate without the variable.
 - `auth.test.ts` — the front door: the 401 sweep over every route, cookie and bearer, the
   CSRf rule, the device flow end to end (code, approve, token, bearer request), sign-out
-  revoking, the dev login and its guard, and the rate limiter refusing the fourth sign-in.
+  revoking, the dev login and its guard, the rate limiter refusing the fourth sign-in, and
+  Better Auth's own origin check run with `enforceOriginCheck` — vitest's `NODE_ENV=test`
+  skips it by default, which is the blind spot #79 fixed.
 - `auth-profile.test.ts` — the A3 rules with mocked profiles: Microsoft's nOAuth claims,
   GitHub's primary-verified email, Google's `email_verified`, and the 403 each refusal is.
 - `isolation.test.ts` — two users, every `/v1` route walked as the second one: 404 for a

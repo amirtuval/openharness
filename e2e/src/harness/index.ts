@@ -78,7 +78,13 @@ export async function signIn(
 ): Promise<SignedIn> {
   const response = await fetch(`${server.baseUrl}/api/auth/sign-in/email`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    // The Origin a browser would send, and the one Better Auth trusts: the servers run with
+    // `NODE_ENV=production` (#79), where Better Auth's Fetch-Metadata CSRF check is on — and
+    // Node's `fetch` sends `sec-fetch-mode: cors`, which makes a sign-in without this header
+    // a `MISSING_OR_NULL_ORIGIN` refusal on a real deployment. The harness's servers are
+    // deployed at their listener address (`BETTER_AUTH_URL` defaults to exactly it), so that
+    // is the trusted origin.
+    headers: { 'content-type': 'application/json', origin: server.baseUrl },
     body: JSON.stringify({
       email: options.email ?? DEV_LOGIN_EMAIL,
       password: options.password ?? DEV_LOGIN_PASSWORD,

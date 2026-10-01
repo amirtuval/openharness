@@ -150,7 +150,9 @@ async function signInWithCookie(
 ): Promise<{ token: string; cookie: string }> {
   const response = await fetch(`${server.baseUrl}/api/auth/sign-in/email`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    // The Origin a browser sends — required now that the servers run in production mode
+    // (#79): without it, Node's `fetch` (which sends `sec-fetch-mode: cors`) is refused.
+    headers: { 'content-type': 'application/json', origin: server.baseUrl },
     body: JSON.stringify({ email, password }),
   })
   const body = (await response.json()) as { token?: string }
