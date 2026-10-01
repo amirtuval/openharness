@@ -1,4 +1,4 @@
-import { ApiError } from '@openharness/client'
+import { ApiError, AuthenticationError } from '@openharness/client'
 import { createFakeClient } from '@openharness/client/testing'
 import { describe, expect, it } from 'vitest'
 
@@ -155,7 +155,7 @@ describe('createChatSession', () => {
 
   it('shows a failed send as an inline notice', async () => {
     const fake = createFakeClient()
-    const client = failing(fake, 'sendMessage', new ApiError(401, 'invalid api key'))
+    const client = failing(fake, 'sendMessage', new AuthenticationError('Not signed in.'))
     const session = createChatSession({
       client,
       session: fake.session,
@@ -167,8 +167,20 @@ describe('createChatSession', () => {
 
     const notice = session.getState().notice
     expect(notice?.kind).toBe('error')
-    expect(notice?.text).toContain('401')
-    expect(notice?.hints.join(' ')).toContain('--api-key')
+    expect(notice?.text).toContain('not signed in to http://localhost:3000')
+    expect(notice?.text).toContain('oh login')
+    session.dispose()
+  })
+
+  it('shows a server failure as an inline notice', async () => {
+    const fake = createFakeClient()
+    const client = failing(fake, 'sendMessage', new ApiError(500, 'boom'))
+    const session = createChatSession({ client, session: fake.session, context: {} })
+    await session.start()
+
+    await session.send('Hello.')
+
+    expect(session.getState().notice?.text).toContain('boom')
     session.dispose()
   })
 

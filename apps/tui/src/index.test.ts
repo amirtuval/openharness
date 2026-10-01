@@ -1,4 +1,9 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+import { FAKE_SESSION_TOKEN } from '@openharness/client/testing'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { run, type RunOptions } from './index'
 
@@ -137,5 +142,116 @@ describe('run', () => {
     expect(out).toBe('')
     expect(err).toContain('the chat needs a terminal')
     expect(err).toContain('oh sessions')
+  })
+
+  it('no longer takes --api-key: it is an unknown flag (epic #65, A8)', async () => {
+    const { code, err } = await runCaptured(['--api-key', 'oh_key'])
+
+    expect(code).toBe(2)
+    expect(err).toContain('--api-key')
+  })
+})
+
+describe('run: auth', () => {
+  let directory: string
+
+  beforeEach(() => {
+    directory = mkdtempSync(join(tmpdir(), 'oh-run-'))
+  })
+
+  afterEach(() => {
+    rmSync(directory, { recursive: true, force: true })
+  })
+
+  /** The environment pointing the CLI at the dev fake and a throwaway config directory. */
+  function fakeEnv(): Record<string, string> {
+    return { OPENHARNESS_FAKE: '1', XDG_CONFIG_HOME: directory }
+  }
+
+  /** The credentials file, as the CLI wrote it. */
+  function storedTokens(): Record<string, string> {
+    const path = join(directory, 'openharness', 'credentials.json')
+    return (JSON.parse(readFileSync(path, 'utf8')) as { servers: Record<string, string> }).servers
+  }
+
+  it('`oh login --no-browser` prints the URL and code and stores the token', async () => {
+    const { code, out, err } = await runCaptured(['login', '--no-browser'], fakeEnv())
+
+    expect(code).toBe(0)
+    expect(err).toBe('')
+    expect(out).toContain('http://localhost:3000/device?user_code=FAKE-CODE')
+    expect(out).toContain('FAKE-CODE')
+    expect(out).toContain('Logged in as ada@example.com on http://localhost:3000')
+    expect(storedTokens()).toEqual({ 'http://localhost:3000': FAKE_SESSION_TOKEN })
+  })
+
+  it('`oh whoami` prints the signed-in user after a login', async () => {
+    await runCaptured(['login', '--no-browser'], fakeEnv())
+
+    const { code, out } = await runCaptured(['whoami'], fakeEnv())
+
+    expect(code).toBe(0)
+    expect(out.trim()).toBe('Logged in as ada@example.com on http://localhost:3000')
+  })
+
+  it('`oh whoami` is the not-signed-in error, exit 1, without a token', async () => {
+    const { code, out, err } = await runCaptured(['whoami'], {
+      OPENHARNESS_URL: 'http://127.0.0.1:1',
+      XDG_CONFIG_HOME: directory,
+    })
+
+    expect(code).toBe(1)
+    expect(out).toBe('')
+    expect(err).toContain('not signed in to http://127.0.0.1:1. Run `oh login`.')
+  })
+
+  it('`oh logout` forgets the token, and whoami says so afterwards', async () => {
+    await runCaptured(['login', '--no-browser'], fakeEnv())
+
+    const loggedOut = await runCaptured(['logout'], fakeEnv())
+    expect(loggedOut.code).toBe(0)
+    expect(loggedOut.out).toContain('Logged out of http://localhost:3000.')
+    expect(storedTokens()).toEqual({})
+
+    const after = await runCaptured(['whoami'], fakeEnv())
+    expect(after.code).toBe(1)
+    expect(after.err).toContain('not signed in')
+  })
+
+  it('keeps tokens per server: --server selects the identity', async () => {
+    await runCaptured(['login', '--no-browser', '--server', 'http://one.test'], fakeEnv())
+    await runCaptured(['login', '--no-browser'], fakeEnv())
+
+    expect(storedTokens()).toEqual({
+      'http://one.test': FAKE_SESSION_TOKEN,
+      'http://localhost:3000': FAKE_SESSION_TOKEN,
+    })
+
+    await runCaptured(['logout', '--server', 'http://one.test'], fakeEnv())
+
+    expect(storedTokens()).toEqual({ 'http://localhost:3000': FAKE_SESSION_TOKEN })
+  })
+
+  it('exits 2, naming the file, when the credentials file cannot be used', async () => {
+    const path = join(directory, 'openharness')
+    mkdirSync(path, { recursive: true })
+    writeFileSync(join(path, 'credentials.json'), '{oops')
+
+    const { code, err } = await runCaptured(['whoami'], fakeEnv())
+
+    expect(code).toBe(2)
+    expect(err).toContain('credentials.json')
+    expect(err).toContain('invalid JSON')
+  })
+
+  it('exits 2, naming it, when the config file still sets apiKey', async () => {
+    const path = join(directory, 'openharness')
+    mkdirSync(path, { recursive: true })
+    writeFileSync(join(path, 'config.json'), '{ "server": "http://x.test", "apiKey": "k" }')
+
+    const { code, err } = await runCaptured(['agents'], fakeEnv())
+
+    expect(code).toBe(2)
+    expect(err).toContain("'apiKey'")
   })
 })

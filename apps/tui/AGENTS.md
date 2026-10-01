@@ -25,40 +25,82 @@ repo.
 
 ## The `oh` command
 
-| command                                 | what it does                                   |
-| --------------------------------------- | ---------------------------------------------- |
-| `oh`                                    | start a new chat                               |
-| `oh -s <id>` / `--session <id>`         | resume a session, showing its history          |
-| `oh -c` / `--continue`                  | resume the most recent session                 |
-| `oh sessions`                           | list every session: id, title, status, updated |
-| `oh agents`                             | list every agent: id, name, model              |
-| `oh -v` / `--version`, `oh -h`/`--help` | print and stop                                 |
+| command                                 | what it does                                       |
+| --------------------------------------- | -------------------------------------------------- |
+| `oh`                                    | start a new chat                                   |
+| `oh -s <id>` / `--session <id>`         | resume a session, showing its history              |
+| `oh -c` / `--continue`                  | resume the most recent session                     |
+| `oh sessions`                           | list every session: id, title, status, updated     |
+| `oh agents`                             | list every agent: id, name, model                  |
+| `oh login`                              | sign in through the browser (the device flow)      |
+| `oh logout`                             | revoke the session on the server, forget the token |
+| `oh whoami`                             | print the signed-in email and server               |
+| `oh -v` / `--version`, `oh -h`/`--help` | print and stop                                     |
 
-Global flags: `--server <url>`, `--api-key <key>`, `--debug`.
+Global flags: `--server <url>`, `--debug`; `oh login` also takes `--no-browser`.
 
-Exit codes: `0` did what it was asked (including a chat the user ended), `1` the server or the
-network said no, `2` the command line or the configuration was wrong — and also a chat asked
-for without a terminal, since stdin has to be a TTY to read a key — and `130`/`143` when the
-process was signalled.
+Exit codes: `0` did what it was asked (including a chat the user ended, and a `logout` whose
+server-side revoke could not be reached — the token is still gone locally); `1` the server,
+the network or the sign-in state said no, so a 401 is the not-signed-in error described under
+"Signing in" below; `2` the command line or the configuration was wrong (including an
+unusable config or credentials file, named in the message) — and also a chat asked for
+without a terminal, since stdin has to be a TTY to read a key; and `130`/`143` when the
+process was signalled, which is also how a running `oh login` is cancelled.
 
 Unknown flags are errors, not positionals: `node:util`'s `parseArgs` runs in strict mode, the
-message goes to stderr, and the exit code is `2`.
+message goes to stderr, and the exit code is `2`. `--api-key` was removed (epic #65, A8) and
+is one of them.
 
 ### Configuration precedence
 
 Highest first:
 
-1. `--server` / `--api-key`
-2. `OPENHARNESS_URL` / `OPENHARNESS_API_KEY`
+1. `--server`
+2. `OPENHARNESS_URL`
 3. `~/.config/openharness/config.json` (or `$XDG_CONFIG_HOME/openharness/config.json`, which
-   is ignored when it is not an absolute path):
-   `{ "server": "http://localhost:3000", "apiKey": "oh_..." }`
+   is ignored when it is not an absolute path): `{ "server": "http://localhost:3000" }`
 4. `http://localhost:3000`
 
 A missing config file is fine. A file that exists and does not parse, holds the wrong types,
 or names a key that does not exist is an error (exit `2`) naming the file and the problem. An
-empty environment variable counts as unset; a missing API key is fine (the server may need
-none).
+empty environment variable counts as unset. There is no API key setting any more: `oh login`
+is the only way in.
+
+### Signing in
+
+`oh login` runs the device flow (RFC 8628) through `client.auth`: it asks for a code, prints
+the sign-in URL and the user code (always, in that order — SSH and CI have no browser to
+open), opens the browser at `verificationUriComplete` (falling back to `verificationUri`)
+unless `--no-browser` is given, there is no display (`DISPLAY` and `WAYLAND_DISPLAY` both
+unset on Linux), `CI` is set, or the session is an SSH one. `xdg-open` / `open` / `start` per
+platform, detached; a command that is not installed does not fail the login, because the
+printed URL is the fallback. Then it polls at the server's interval until approval —
+`authorization_pending` and `slow_down` are handled by the client — and, on success, prints
+`Logged in as <email> on <server>` from `client.me()`.
+
+The session token is stored **per server URL** in
+`~/.config/openharness/credentials.json` (XDG rules as for the config file):
+
+```json
+{ "servers": { "http://localhost:3000": "<session token>" } }
+```
+
+The file is written atomically (a temp file beside it, then a rename), with permissions
+`0600`; the directory is created `0700`. A missing file is fine; a file that exists and
+cannot be used is an error (exit `2`) naming it. Every other command — chat, `sessions`,
+`agents`, `-c`, `-s` — sends the token for the selected `--server` as `Authorization: Bearer`
+and answers a 401 with this line, on stderr, and exit `1`:
+
+```
+oh: not signed in to <server>. Run `oh login`.
+```
+
+`oh logout` revokes the token on the server (`client.auth.signOut()`), then deletes it
+locally. If the server cannot be reached, the token is still deleted locally and a warning
+goes to stderr; the exit code stays `0`. `oh whoami` prints the same `Logged in as <email> on
+<server>` line, or the not-signed-in error. Ctrl+C during `oh login` aborts the poll, prints
+`oh: login cancelled.` and exits `130` (`143` for `SIGTERM`). Expired codes and denied
+logins are reported with their own one-liners, exit `1`.
 
 ### Choosing an agent
 
@@ -122,6 +164,8 @@ src/
   app.tsx                the top-level screen: resolve the session, then chat
   args.ts                parseArgs: commands, flags, usage errors
   config.ts              flags > env > config file > default, and its errors
+  credentials.ts         credentials.json: one token per server, atomic, 0600
+  browser.ts             open the sign-in page (xdg-open / open / start), and when not to
   errors.ts              ApiError / fetch failures → a message and hints
   help.ts                the --help text
   signals.ts             SIGINT/SIGTERM/SIGHUP → handlers, and a disposer
@@ -136,6 +180,7 @@ src/
   components/            message-view, transcript-view, status-line, prompt-input,
                          notice-view, agent-picker
   commands/list.ts       `oh sessions` / `oh agents`
+  commands/auth.ts       `oh login` / `oh logout` / `oh whoami`
   dev/fake.ts            OPENHARNESS_FAKE: the fake client, seeded, dev only
   test-support/          test-only helpers (fake clients, keystrokes, frame waits)
 ```
@@ -152,6 +197,11 @@ stream in. The fake is seeded with three agents (so the picker comes up unless `
 one), a scripted conversation, and a session with history behind it for `--continue` and
 `-s <id>`. It is a development and QA aid — the entry point is loaded lazily, so a normal `oh`
 never reads it, and nothing in this package enables it on its own. See `src/dev/fake.ts`.
+
+The auth commands run against the fake too: `oh login` asks it for the (deterministic) codes,
+polls it once, and stores its `FAKE_SESSION_TOKEN` in the real credentials file — point
+`XDG_CONFIG_HOME` at a scratch directory when you do that by hand. `oh logout` signs the fake
+out; `oh whoami` reads what the login stored.
 
 ## Public API
 
@@ -173,6 +223,13 @@ also seeds long lists and serves them a page at a time (`seedAgents`, `pagedAgen
 `pagedSessions`), for the tests where the first page is not the whole list. Everything else
 (args, config precedence, error mapping, the Ctrl+C rules, the transcript-driven runtime) is
 tested without Ink at all.
+
+The auth side is tested at both levels: `src/credentials.ts` against a temp directory (the
+atomic write, `0600`/`0700`, per-server tokens, the errors a broken file produces),
+`src/browser.ts` with an injected spawn (the CI / SSH / no-display skips and the per-platform
+command), `src/commands/auth.ts` against the fake's scripted device flow (approval, expiry,
+denial, cancellation, revoke failures), and `src/index.test.ts` drives `run()` all the way
+through `login` / `whoami` / `logout` with `XDG_CONFIG_HOME` pointed at a temp directory.
 
 Two things worth knowing before writing a test here:
 

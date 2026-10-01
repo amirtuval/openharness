@@ -1,5 +1,15 @@
 import { ApiError, ResponseValidationError } from '@openharness/client'
 
+/**
+ * The line a signed-out caller gets, wherever it asks for something that needs a session
+ * (epic #65, A6): the fix is always the same — sign in through the browser.
+ *
+ * @param server the server that refused, when the caller knows it
+ */
+export function notSignedInMessage(server: string | undefined): string {
+  return `not signed in to ${server ?? 'the server'}. Run \`oh login\`.`
+}
+
 /** A failure as the UI shows it: one line, then the hints worth acting on. */
 export interface ErrorReport {
   /** What went wrong, in one line. */
@@ -84,15 +94,18 @@ export function describeError(error: unknown, context: ErrorContext = {}): Error
 }
 
 function describeApiError(error: ApiError, context: ErrorContext): ErrorReport {
-  const report = { message: apiErrorMessage(error), hints: apiErrorHints(error, context) }
+  const report = { message: apiErrorMessage(error, context), hints: apiErrorHints(error, context) }
   return withStack(report, error, context)
 }
 
-function apiErrorMessage(error: ApiError): string {
+function apiErrorMessage(error: ApiError, context: ErrorContext): string {
   switch (error.status) {
     case 401:
+      // An `AuthenticationError`, nearly always — the server wants a session token, and the
+      // CLI has none stored for this server (or the one it has is expired or revoked).
+      return notSignedInMessage(context.server)
     case 403:
-      return `the server rejected the request (${error.status}): ${error.message}`
+      return `the server rejected the request (403): ${error.message}`
     case 404:
       return `not found: ${error.message}`
     case 429:
@@ -108,9 +121,9 @@ function apiErrorHints(error: ApiError, context: ErrorContext): readonly string[
   switch (error.type) {
     case 'authentication_error':
     case 'permission_error':
-      return [
-        'check the API key: pass --api-key, set OPENHARNESS_API_KEY, or add "apiKey" to the config file.',
-      ]
+      // The 401 message already says what to do (`oh login`); a 403 is the server saying no,
+      // and there is nothing the caller can pass to change that.
+      return []
     case 'not_found_error':
       return ['check the id — `oh sessions` lists the sessions the server has.']
     case 'rate_limit_error':

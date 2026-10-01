@@ -33,7 +33,15 @@ describe('Sidebar', () => {
 
   it('says so when the safety cap cuts the list short', () => {
     render(
-      <Sidebar sessions={[]} loading={false} error={null} truncated activeSessionId={undefined} />,
+      <Sidebar
+        sessions={[]}
+        loading={false}
+        error={null}
+        truncated
+        activeSessionId={undefined}
+        user={null}
+        onSignOut={undefined}
+      />,
     )
 
     expect(
@@ -49,6 +57,8 @@ describe('Sidebar', () => {
         error={null}
         truncated={false}
         activeSessionId={undefined}
+        user={null}
+        onSignOut={undefined}
       />,
     )
 

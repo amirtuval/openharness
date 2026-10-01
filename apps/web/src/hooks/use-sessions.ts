@@ -3,6 +3,7 @@ import type { AgentId, Session } from '@openharness/protocol'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { describeError } from '../lib/errors'
+import { noteAuthenticationError } from '../lib/auth-store'
 import { appendUnseen, listAllPages } from '../lib/paging'
 import { withFreshSessions } from '../lib/session-refresh'
 import { useSessionRefresh } from './use-session-refresh'
@@ -74,7 +75,7 @@ export function useSessions(client: Client): SessionsView {
         setTruncated(result.truncated)
         setError(null)
       } catch (caught) {
-        if (!controller.signal.aborted) {
+        if (!controller.signal.aborted && !noteAuthenticationError(client, caught)) {
           setError(describeError(caught, { serverUrl }))
         }
       } finally {
@@ -100,7 +101,9 @@ export function useSessions(client: Client): SessionsView {
         setError(null)
         return session
       } catch (caught) {
-        setError(describeError(caught, { serverUrl }))
+        if (!noteAuthenticationError(client, caught)) {
+          setError(describeError(caught, { serverUrl }))
+        }
         return null
       }
     },

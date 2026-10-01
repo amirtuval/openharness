@@ -1,4 +1,4 @@
-import { ApiError } from '@openharness/client'
+import { ApiError, AuthenticationError } from '@openharness/client'
 
 /** What {@link describeError} needs to say which server could not be reached. */
 export interface ErrorContext {
@@ -11,10 +11,14 @@ export interface ErrorContext {
  *
  * Request failures in this app are shown inline rather than thrown at the user, so every
  * `catch` ends up here. Three of them are worth words of their own — a request that was
- * cancelled (nothing to report), a server that is not there, and a key the server would not
- * take — because the browser's own words for the first of those ("Failed to fetch") name
- * neither the server nor anything the reader can do about it. The rest keep the message they
- * arrived with, which is the only part that knows what actually happened.
+ * cancelled (nothing to report), a server that is not there, and a session the server will
+ * not accept — because the browser's own words for the first of those ("Failed to fetch")
+ * name neither the server nor anything the reader can do about it. The rest keep the message
+ * they arrived with, which is the only part that knows what actually happened.
+ *
+ * A 401 is usually not shown at all: `noteAuthenticationError` turns it into the sign-in
+ * page. It reaches here when a screen wants to say more than "sign in" — the Model providers
+ * card, whose writes need a *fresh* session, links to the sign-in page itself.
  *
  * @param error anything that was thrown
  * @param context the server the client was pointed at, for the unreachable message
@@ -41,14 +45,19 @@ export function describeError(error: unknown, context: ErrorContext = {}): strin
 /**
  * A failed HTTP answer.
  *
- * A rejected key is the one status the reader can do something about, and the app knows where
- * that something is, so it says so; the server's own message stays in front, because it is the
- * only part that knows what was wrong with the key. The wording follows the CLI's
+ * A rejected session is the one status the reader can do something about, and the app knows
+ * where that something is, so it says so; the server's own message stays in front, because it
+ * is the only part that knows what was wrong. The wording follows the CLI's
  * (`apps/tui/src/errors.ts`), which the issue asks this to match.
  */
 function describeApiError(error: ApiError): string {
-  if (error.status === 401 || error.status === 403) {
-    return `The server rejected the request (${error.status}): ${error.message} Check the API key in Settings.`
+  // The client makes an `AuthenticationError` of every 401 it sees; the status is the same
+  // rule for a 401 from anywhere else (`noteAuthenticationError` reads it the same way).
+  if (error instanceof AuthenticationError || error.status === 401) {
+    return `${error.message} Sign in again to continue.`
+  }
+  if (error.status === 403) {
+    return `The server refused the request (403): ${error.message}`
   }
   return error.message
 }

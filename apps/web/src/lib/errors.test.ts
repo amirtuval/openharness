@@ -1,4 +1,4 @@
-import { ApiError } from '@openharness/client'
+import { ApiError, AuthenticationError } from '@openharness/client'
 import { describe, expect, it } from 'vitest'
 
 import { describeError } from './errors'
@@ -50,14 +50,14 @@ describe('describeError', () => {
     expect(describeError(error, { serverUrl: SERVER })).toBe(UNREACHABLE_AT(SERVER))
   })
 
-  it('hints at the API key when the server will not take ours', () => {
-    const error = new ApiError(401, 'Invalid API key.')
+  it('points a refused session at signing in again', () => {
+    const error = new AuthenticationError('Not signed in.')
 
-    expect(describeError(error)).toBe(
-      'The server rejected the request (401): Invalid API key. Check the API key in Settings.',
-    )
-    expect(describeError(new ApiError(403, 'Forbidden.'))).toContain(
-      'Check the API key in Settings.',
+    expect(describeError(error)).toBe('Not signed in. Sign in again to continue.')
+    // The plain 401 the client did not build from a response is still a session problem.
+    expect(describeError(new ApiError(401, 'Not signed in.'))).toContain('Sign in again')
+    expect(describeError(new ApiError(403, 'Forbidden.'))).toBe(
+      'The server refused the request (403): Forbidden.',
     )
   })
 

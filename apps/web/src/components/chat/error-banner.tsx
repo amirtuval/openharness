@@ -1,4 +1,5 @@
 import { CircleAlert, X } from 'lucide-react'
+import type { ReactNode } from 'react'
 
 import { Button } from '../ui/button'
 
@@ -9,16 +10,23 @@ import { Button } from '../ui/button'
  * transcript keeps it visible until a reply supersedes it — and a failed request of our own
  * (the send, the interrupt, the history load). Both are worth showing without hiding the
  * conversation behind a dialog.
+ *
+ * Some failures come with the one thing to do about them — a provider with no key is fixed in
+ * Settings, a stale session by signing in again — and that goes in {@link action}, under the
+ * message, rather than in the words.
  */
 export function ErrorBanner({
   title,
   message,
+  action,
   onDismiss,
 }: {
   /** A short label: the error type, or what the app was doing. */
   title: string
   /** The server's message, or ours. */
   message: string
+  /** What the reader can do about it, when there is a specific thing. */
+  action?: ReactNode | undefined
   /** When given, the banner can be closed. */
   onDismiss?: (() => void) | undefined
 }) {
@@ -31,6 +39,7 @@ export function ErrorBanner({
       <div className="min-w-0 flex-1">
         <p className="font-medium">{title}</p>
         <p className="break-words text-destructive/90">{message}</p>
+        {action === undefined ? null : <div className="mt-1">{action}</div>}
       </div>
       {onDismiss === undefined ? null : (
         <Button

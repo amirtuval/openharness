@@ -116,8 +116,15 @@ node apps/tui/dist/index.js                       # oh, from the repo
 oh                                                # the same thing, once installed
 ```
 
-`oh` starts a new chat against `http://localhost:3000` (override with `--server`, or with
-`OPENHARNESS_URL`, or in `~/.config/openharness/config.json`; same for `--api-key`).
+`oh` signs in with `oh login`: the device flow prints a URL and a code, opens the browser at
+it (skipped with `--no-browser`, in CI, over SSH, or when there is no display), and stores
+the session token per server in `~/.config/openharness/credentials.json`, mode `0600`.
+`oh whoami` prints the signed-in email and server, and `oh logout` revokes the token on the
+server and forgets it locally. Every other command sends the stored token as
+`Authorization: Bearer`.
+
+`oh` starts a new chat against `http://localhost:3000` (override with `--server`, with
+`OPENHARNESS_URL`, or in `~/.config/openharness/config.json`).
 `oh sessions` lists sessions, `oh -c` continues the most recent one, `oh -s <id>` resumes a
 particular one. `apps/tui/AGENTS.md` documents the keys and the exit codes.
 

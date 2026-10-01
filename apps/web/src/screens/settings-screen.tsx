@@ -1,5 +1,6 @@
 import { useState } from 'react'
 
+import { ModelProvidersCard } from '../components/settings/model-providers'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
@@ -8,17 +9,21 @@ import { useSettings } from '../hooks/use-settings'
 import { SETTINGS_STORAGE_KEY, saveSettings } from '../lib/settings'
 
 /**
- * Where the server is, and how to authenticate to it.
+ * Where the server is, and the model-provider keys this account runs on.
  *
- * Both values live in `localStorage` (key `openharness:settings`) and are read by the app root
- * when it builds the client, so saving takes effect at once: the next request goes to the new
- * server. An empty URL means **same origin** — which is what the Vite dev proxy and a static
- * build served next to the API both want.
+ * There used to be a second field here — the static `x-api-key` — and it is gone (epic #65,
+ * A8): signing in is Better Auth's job now (the sign-in page, the device-approval page), and
+ * what authentication the browser does is a cookie it cannot read, let alone store. What is
+ * left in `localStorage` is the server URL, under `openharness:settings`, and an empty URL
+ * means **same origin** — which is what the Vite dev proxy and a static build served next to
+ * the API both want.
+ *
+ * The provider keys live on the server (A5), encrypted, write-only; {@link ModelProvidersCard}
+ * is where they are managed.
  */
 export function SettingsScreen() {
   const settings = useSettings()
   const [serverUrl, setServerUrl] = useState(settings.serverUrl)
-  const [apiKey, setApiKey] = useState(settings.apiKey)
   const [saved, setSaved] = useState(false)
 
   return (
@@ -27,7 +32,8 @@ export function SettingsScreen() {
         <div className="space-y-1">
           <h1 className="text-base font-medium">Settings</h1>
           <p className="text-sm text-muted-foreground">
-            Stored in this browser, under <code className="font-mono">{SETTINGS_STORAGE_KEY}</code>.
+            Connection details are stored in this browser, under{' '}
+            <code className="font-mono">{SETTINGS_STORAGE_KEY}</code>.
           </p>
         </div>
 
@@ -44,7 +50,7 @@ export function SettingsScreen() {
               className="flex flex-col gap-4"
               onSubmit={(event) => {
                 event.preventDefault()
-                saveSettings({ serverUrl: serverUrl.trim(), apiKey: apiKey.trim() })
+                saveSettings({ serverUrl: serverUrl.trim() })
                 setSaved(true)
               }}
             >
@@ -61,25 +67,9 @@ export function SettingsScreen() {
                     setSaved(false)
                   }}
                 />
-              </div>
-
-              <div className="flex flex-col gap-1.5">
-                <Label htmlFor="settings-api-key">API key</Label>
-                <Input
-                  id="settings-api-key"
-                  type="password"
-                  value={apiKey}
-                  autoComplete="off"
-                  spellCheck={false}
-                  placeholder="oh_…"
-                  onChange={(event) => {
-                    setApiKey(event.target.value)
-                    setSaved(false)
-                  }}
-                />
                 <p className="text-xs text-muted-foreground">
-                  Sent as the <code className="font-mono">x-api-key</code> header. Leave it empty
-                  when the server needs no auth.
+                  Signing in, signing out and the device-approval page all happen on this server
+                  too.
                 </p>
               </div>
 
@@ -94,6 +84,8 @@ export function SettingsScreen() {
             </form>
           </CardContent>
         </Card>
+
+        <ModelProvidersCard />
       </div>
     </div>
   )

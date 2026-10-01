@@ -3,6 +3,7 @@ import type { Agent, CreateAgentRequest, UpdateAgentRequest } from '@openharness
 import { useCallback, useEffect, useState } from 'react'
 
 import { describeError } from '../lib/errors'
+import { noteAuthenticationError } from '../lib/auth-store'
 import { appendUnseen, listAllPages } from '../lib/paging'
 import { useSettings } from './use-settings'
 
@@ -64,7 +65,7 @@ export function useAgents(client: Client): AgentsView {
         setTruncated(result.truncated)
         setError(null)
       } catch (caught) {
-        if (!controller.signal.aborted) {
+        if (!controller.signal.aborted && !noteAuthenticationError(client, caught)) {
           setError(describeError(caught, { serverUrl }))
         }
       } finally {
@@ -86,7 +87,9 @@ export function useAgents(client: Client): AgentsView {
         setError(null)
         return created
       } catch (caught) {
-        setError(describeError(caught, { serverUrl }))
+        if (!noteAuthenticationError(client, caught)) {
+          setError(describeError(caught, { serverUrl }))
+        }
         return null
       }
     },
@@ -101,7 +104,9 @@ export function useAgents(client: Client): AgentsView {
         setError(null)
         return updated
       } catch (caught) {
-        setError(describeError(caught, { serverUrl }))
+        if (!noteAuthenticationError(client, caught)) {
+          setError(describeError(caught, { serverUrl }))
+        }
         return null
       }
     },

@@ -8,6 +8,7 @@ import type { Session, SessionStatus } from '@openharness/protocol'
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 
 import { describeError } from '../lib/errors'
+import { noteAuthenticationError } from '../lib/auth-store'
 import { useSessionRefresh } from './use-session-refresh'
 import { useSettings } from './use-settings'
 
@@ -101,7 +102,7 @@ export function useSession(client: Client, sessionId: string): SessionView {
           transcript.apply(event)
         }
       } catch (caught) {
-        if (!controller.signal.aborted) {
+        if (!controller.signal.aborted && !noteAuthenticationError(client, caught)) {
           setRequestError(describeError(caught, { serverUrl }))
         }
       } finally {
@@ -123,9 +124,10 @@ export function useSession(client: Client, sessionId: string): SessionView {
           transcript.apply(event)
         }
       } catch (caught) {
-        // An abort ends the iteration quietly; anything else — a bad key, an unknown session —
-        // is worth showing, because the stream is not coming back on its own.
-        if (!controller.signal.aborted) {
+        // An abort ends the iteration quietly; anything else — a revoked session, an unknown
+        // session — is worth showing, because the stream is not coming back on its own. A
+        // 401 is not shown at all: it signs the app out and the sign-in page takes over.
+        if (!controller.signal.aborted && !noteAuthenticationError(client, caught)) {
           setRequestError(describeError(caught, { serverUrl }))
         }
       }
@@ -160,7 +162,9 @@ export function useSession(client: Client, sessionId: string): SessionView {
         // returns the stored event, and the reducer drops the stream's copy of it (same `seq`).
         transcript.apply(stored)
       } catch (caught) {
-        setRequestError(describeError(caught, { serverUrl }))
+        if (!noteAuthenticationError(client, caught)) {
+          setRequestError(describeError(caught, { serverUrl }))
+        }
       }
     },
     [client, sessionId, transcript, serverUrl],
@@ -171,7 +175,9 @@ export function useSession(client: Client, sessionId: string): SessionView {
     try {
       await client.interrupt(sessionId)
     } catch (caught) {
-      setRequestError(describeError(caught, { serverUrl }))
+      if (!noteAuthenticationError(client, caught)) {
+        setRequestError(describeError(caught, { serverUrl }))
+      }
     }
   }, [client, sessionId, serverUrl])
 

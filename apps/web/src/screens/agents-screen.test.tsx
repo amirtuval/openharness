@@ -130,6 +130,37 @@ describe('AgentsScreen', () => {
     ])
   })
 
+  it('marks the models whose provider has no saved key, and links to Settings', async () => {
+    const user = userEvent.setup({ delay: null })
+    const fake = makeFake()
+    await fake.providerCredentials.put('anthropic', {
+      type: 'api_key',
+      api_key: 'sk-ant-abcdef1234',
+    })
+    renderApp(fake, { hash: '#/agents' })
+
+    const suggestions = within(await screen.findByRole('list', { name: 'Model suggestions' }))
+
+    // anthropic has a key saved, so its suggestions carry no mark; openai has none, so it does.
+    expect(
+      suggestions.getByRole('button', { name: 'anthropic/claude-sonnet-5' }),
+    ).not.toHaveTextContent('no key')
+    expect(suggestions.getByRole('button', { name: /openai\/gpt-5\.1/ })).toHaveTextContent(
+      'no key',
+    )
+
+    // Typing a model whose provider has no key says where the fix is.
+    await user.type(screen.getByLabelText('Model'), 'groq/llama-4')
+    expect(await screen.findByText(/No groq key saved/)).toBeInTheDocument()
+    expect(
+      screen.getByRole('link', { name: 'add one in Settings → Model providers' }),
+    ).toHaveAttribute('href', '#/settings')
+
+    // Picking a suggestion fills the field, and the mark disappears with a saved key.
+    await user.click(suggestions.getByRole('button', { name: /openai\/gpt-5\.1/ }))
+    expect(screen.getByLabelText('Model')).toHaveValue('openai/gpt-5.1')
+  })
+
   it('says so when the safety cap cuts the list short', async () => {
     const fake = makeFake()
     await makeAgents(fake, MAX_PAGE_ITEMS + 5)
