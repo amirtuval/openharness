@@ -120,7 +120,7 @@ packages/
   client/    @openharness/client   client used by the web app and the TUI
 e2e/         @openharness/e2e      cross-package tests: real servers, real Postgres
 docker/      the image the compose file builds
-docs/        architecture, api, development, workflow, decisions
+docs/        architecture, api, development, workflow, decisions, roadmap
 ```
 
 Every package is self-contained: you can build, typecheck, lint, format-check and test it from
@@ -136,6 +136,9 @@ API and the packages it may depend on.
   to work inside a single package.
 - [`docs/workflow.md`](./docs/workflow.md) — issues, epics, PR policy, docs-before-merge.
 - [`docs/decisions/`](./docs/decisions/README.md) — ADR convention (no ADRs yet).
+- [`docs/ROADMAP.md`](./docs/ROADMAP.md) — what comes after v1, in order, with what is decided
+  and what is still open; [`docs/research/`](./docs/research/harness-features.md) holds the harness
+  feature survey behind it.
 - [`AGENTS.md`](./AGENTS.md) — repo-wide rules for implementation agents.
 
 ## License
