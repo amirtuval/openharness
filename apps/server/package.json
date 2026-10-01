@@ -37,7 +37,7 @@
     "@openharness/session": "workspace:*",
     "@openharness/vault": "workspace:*",
     "ai": "7.0.118",
-    "better-auth": "1.7.7",
+    "better-auth": "1.7.6",
     "hono": "4.13.9",
     "kysely": "0.29.6",
     "pg": "8.23.0",

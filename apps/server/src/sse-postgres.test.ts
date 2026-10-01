@@ -178,7 +178,7 @@ if (SOURCE === null) {
         })
         context = test
         // Better Auth validates the schema it is configured against on every request; this
-        // asks it directly, so a migration that drifts from what 1.7.7 expects fails here by
+        // asks it directly, so a migration that drifts from what 1.7.6 expects fails here by
         // name rather than as a strange sign-in failure later.
         const authContext = await test.auth.auth.$context
         const checkSchema: unknown = (authContext as { checkSchema?: unknown }).checkSchema

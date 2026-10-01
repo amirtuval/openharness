@@ -445,12 +445,13 @@ and `0013_provider_credentials`:
   `account`, `verification` and the device-authorization plugin's `deviceCode`, for a config
   with the core library, the `google`, `github` and `microsoft` social providers and the
   `device-authorization` and `bearer` plugins. The SQL is **generated, not hand-written**: it
-  came out of **Better Auth 1.7.7**'s CLI (`npx @better-auth/cli generate`, with the
+  came out of **Better Auth 1.7.6**'s CLI (`npx @better-auth/cli generate`, with the
   Postgres/Kysely adapter) in a scratch directory, and is committed verbatim but for
   whitespace and the `if not exists` the migrator needs. The server sub-issue (#61) mounts
   Better Auth against these tables with its own migrator disabled, so if the Better Auth
   version moves, regenerate and diff: **they have to match exactly.** The file's header
-  records the same provenance.
+  records the same provenance — and records that the 1.7.6 regeneration was diffed against
+  the file and matched (only whitespace, statement order and the `if not exists` differ).
 - **`0012_ownership.sql` — delete the v1 data, then ownership** (decision A4): v1 is
   unreleased, so there is no backfill — all rows of `events`, `event_claims`,
   `event_supersessions`, `sessions` and `agents` are deleted, and `agents` and `sessions` gain

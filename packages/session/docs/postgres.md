@@ -182,7 +182,7 @@ through another provider is the same row.
 The SQL is **generated, not written**:
 
 ```sh
-# in a scratch directory, with better-auth@1.7.7 installed
+# in a scratch directory, with better-auth@1.7.6 installed (the version the repo pins)
 npx @better-auth/cli generate --config ./auth.ts --output ./generated.sql
 ```
 

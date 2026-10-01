@@ -120,7 +120,8 @@ is for local development and quick trials, and nothing survives a restart.
 
 ## Authentication and ownership (epic #65)
 
-**Better Auth** (1.7.7) is mounted at `/api/auth/*` in this app (`app.ts`), configured in
+**Better Auth** (1.7.6 — one version for the whole repo, `apps/web` included) is mounted at
+`/api/auth/*` in this app (`app.ts`), configured in
 `auth.ts` and run against the same database the log uses — the Kysely handle `main.ts` already
 built for the migrations, or Better Auth's in-memory adapter when there is no `DATABASE_URL`.
 Its own migrator is never called: the tables (`user`, `session`, `account`, `verification`,
