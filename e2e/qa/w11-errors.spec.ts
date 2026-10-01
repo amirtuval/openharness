@@ -161,8 +161,18 @@ test.describe('W11 errors', () => {
     await test.step('point the app at the server by URL', async () => {
       await page.goto('/#/settings')
       await page.getByLabel('Server URL').fill(BASE_URL)
-      await page.getByRole('button', { name: 'Save' }).click()
-      await expect(page.getByRole('status').filter({ hasText: 'Saved' })).toBeVisible()
+      // `exact` because the Model providers card below the URL has its own "Save key" button,
+      // and the role-name match is a substring match: without it this locator is ambiguous
+      // (found while running §11.3 of the #74 pass).
+      await page.getByRole('button', { name: 'Save', exact: true }).click()
+      // The inline "Saved" confirmation is not the thing to wait for: saving a *new* URL
+      // rebuilds the client, the auth gate re-checks the session, and the screen remounts
+      // with the confirmation gone (issue #81, filed by the #74 pass). The save lands in
+      // `localStorage` either way, and that is what this scenario needs.
+      await page.waitForFunction(
+        (url) => (localStorage.getItem('openharness:settings') ?? '').includes(url),
+        BASE_URL,
+      )
     })
 
     const agent = await createAgent(request, {

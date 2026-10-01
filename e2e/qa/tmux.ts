@@ -6,6 +6,55 @@ import { expect, type Page } from '@playwright/test'
 
 import { isRealModel } from './support'
 
+/** The mode bits of a directory, or `null` when it is not there. */
+export function modeOf(directory: string): number | null {
+  return existsSync(directory) ? statSync(directory).mode & 0o777 : null
+}
+
+/** A shell line that runs `oh` against the server under test, with a config home of its own. */
+export function ohCommandIn(home: string, ...args: string[]): string {
+  return [`XDG_CONFIG_HOME=${home}`, CLI_COMMAND, '--server', CLI_SERVER, ...args].join(' ')
+}
+
+/**
+ * Run `oh` the way a shell would, and answer what it printed and how it exited.
+ *
+ * The one-shot commands (`whoami`, `sessions`, a bad argument) write their output and exit, so
+ * they read fine from a pipe; the interactive screens go through {@link Terminal} instead.
+ */
+export function oh(
+  args: readonly string[],
+  options: { readonly configHome?: string } = {},
+): { stdout: string; status: number } {
+  try {
+    const stdout = execFileSync('node', ['apps/tui/dist/index.js', ...args], {
+      cwd: CLI_CWD,
+      encoding: 'utf8',
+      // The QA run's own config directory, so the developer's stored tokens are never read or
+      // written by a scenario.
+      env: { ...process.env, XDG_CONFIG_HOME: options.configHome ?? CLI_CONFIG_HOME },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    return { stdout, status: 0 }
+  } catch (error) {
+    const failure = error as { stdout?: string; stderr?: string; status?: number }
+    return {
+      stdout: `${failure.stdout ?? ''}${failure.stderr ?? ''}`,
+      status: failure.status ?? -1,
+    }
+  }
+}
+
+/**
+ * A config directory for `oh` that holds nothing: the state a machine that never signed in is
+ * in, without touching the session the other scenarios share.
+ */
+export function scratchConfigHome(label: string): string {
+  const home = path.join(CLI_CONFIG_HOME, `scratch-${label}`)
+  rmSync(home, { recursive: true, force: true })
+  return home
+}
+
 /**
  * A real pseudo-terminal for the CLI scenarios.
  *

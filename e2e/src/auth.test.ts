@@ -1,5 +1,6 @@
 import { ApiError, createClient } from '@openharness/client'
 import { ApiErrorBodySchema } from '@openharness/protocol'
+import { DEV_LOGIN_EMAIL, DEV_LOGIN_PASSWORD, SESSION_INVALID_MESSAGE } from '@openharness/server'
 import { describe, expect, it } from 'vitest'
 
 import {
@@ -10,9 +11,12 @@ import {
   e2eHarness,
   readLog,
   signIn,
+  sleep,
   textOf,
+  waitFor,
   waitForTurnEnd,
   withDatabaseClient,
+  type ServerProcess,
 } from './harness'
 
 /**
@@ -39,6 +43,153 @@ async function errorOf(work: () => Promise<unknown>): Promise<ApiError> {
     throw error
   }
   throw new Error('expected the call to fail, but it resolved')
+}
+
+/** The payload of the final `event: error` frame a stream ends with (#76). */
+interface EndErrorFrame {
+  readonly type: 'error'
+  readonly error: { readonly type: string; readonly message: string }
+}
+
+/** A raw SSE response followed in the background: the frames, and whether the body ended. */
+interface FollowedSse {
+  /** The raw frames seen so far, in arrival order; comments and keepalives included. */
+  readonly frames: readonly string[]
+  /** Resolves when the body ends (or the connection is torn down). */
+  readonly ended: Promise<void>
+  /** Whether the body has ended. */
+  readonly done: boolean
+  /** The payload of the last `event: error` frame, if one arrived. */
+  endError(): EndErrorFrame | null
+}
+
+/**
+ * Follow an SSE response off the wire.
+ *
+ * Not through `@openharness/client`: the client skips the `event: error` goodbye — it is not
+ * a `StreamEvent` — and learns the same fact from the 401 its reconnect gets. A test about
+ * the goodbye itself has to read the frames.
+ */
+function followSse(response: Response): FollowedSse {
+  if (response.body === null) {
+    throw new Error('the stream response has no body')
+  }
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  const frames: string[] = []
+  let buffer = ''
+  let done = false
+  const ended = (async () => {
+    try {
+      for (;;) {
+        const { done: finished, value } = await reader.read()
+        if (finished) {
+          return
+        }
+        buffer += decoder.decode(value, { stream: true })
+        for (;;) {
+          const end = buffer.indexOf('\n\n')
+          if (end === -1) {
+            break
+          }
+          frames.push(buffer.slice(0, end))
+          buffer = buffer.slice(end + 2)
+        }
+      }
+    } catch {
+      // The connection was torn down with the stream still open — the server was killed at
+      // teardown, which is what a test that leaves someone's stream open invites. That is an
+      // end too, and not a failure of anything the test is about.
+    } finally {
+      done = true
+    }
+  })()
+  return {
+    frames,
+    ended,
+    get done(): boolean {
+      return done
+    },
+    endError: () => {
+      for (let index = frames.length - 1; index >= 0; index -= 1) {
+        const frame = frames[index]
+        if (frame === undefined || !frame.startsWith('event: error')) {
+          continue
+        }
+        const data = frame.split('\n').find((line) => line.startsWith('data: '))
+        return data === undefined
+          ? null
+          : (JSON.parse(data.slice('data: '.length)) as EndErrorFrame)
+      }
+      return null
+    },
+  }
+}
+
+/** The `seq` of every message the followed stream delivered, in arrival order. */
+function deliveredSeqs(stream: FollowedSse): number[] {
+  return stream.frames.flatMap((frame) => {
+    const data = frame.split('\n').find((line) => line.startsWith('data: '))
+    if (data === undefined) {
+      return []
+    }
+    try {
+      const parsed = JSON.parse(data.slice('data: '.length)) as { seq?: unknown }
+      return typeof parsed.seq === 'number' ? [parsed.seq] : []
+    } catch {
+      return []
+    }
+  })
+}
+
+/** Sign in over the dev login and answer the cookie a browser would hold (#76 tests). */
+async function signInWithCookie(
+  server: ServerProcess,
+  email: string,
+  password: string,
+): Promise<{ token: string; cookie: string }> {
+  const response = await fetch(`${server.baseUrl}/api/auth/sign-in/email`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  })
+  const body = (await response.json()) as { token?: string }
+  const setCookie = response.headers.get('set-cookie')
+  if (!response.ok || typeof body.token !== 'string' || setCookie === null) {
+    throw new Error(`signing in with a cookie failed: ${response.status}`)
+  }
+  return { token: body.token, cookie: setCookie.split(';')[0] ?? '' }
+}
+
+/** End a session the way the web app does (cookie) or `oh logout` does (bearer). */
+function signOut(
+  server: ServerProcess,
+  credential: { readonly cookie: string } | { readonly token: string },
+): Promise<Response> {
+  const headers: Record<string, string> = { 'content-type': 'application/json' }
+  if ('cookie' in credential) {
+    // A cookie-authenticated write is origin-checked (CSRF); a bearer request cannot be.
+    headers.cookie = credential.cookie
+    headers.origin = server.baseUrl
+  } else {
+    headers.authorization = `Bearer ${credential.token}`
+  }
+  // Better Auth reads a JSON body for the call (an empty object is what the web app sends).
+  return fetch(`${server.baseUrl}/api/auth/sign-out`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({}),
+  })
+}
+
+/** Fail when `stream` has not ended `ms` after this is called. */
+async function endedWithin(stream: FollowedSse, ms: number, what: string): Promise<void> {
+  await Promise.race([
+    stream.ended,
+    sleep(ms).then(() => {
+      throw new Error(`${what} did not end within ${String(ms)}ms`)
+    }),
+  ])
 }
 
 describe('a server that authenticates', () => {
@@ -190,14 +341,9 @@ describe('a server that authenticates', () => {
     // holds everywhere: the session row is gone, so nothing new can be started with its token —
     // including a fresh `GET …/events/stream`, which is how a dropped stream would come back.
     //
-    // The other half — a stream that is *already open* when the revocation happens — is
-    // issue amirtuval/openharness#76: `createSessionEventStream` never asks again whose session
-    // it is following, so whether the connection keeps delivering depends on whether it drops
-    // first: when it does, the client's reconnect is refused (401) and the stream ends, which
-    // is why a CI run does not reproduce it; on a machine where the connection stays up, the
-    // events keep arriving after the sign-out. The fix belongs in `apps/server` (re-check the
-    // session while a stream is open); a test for it cannot be written here without depending
-    // on which of the two happens, so #76 carries the reproduction instead.
+    // The other half — a stream that is *already open* when the revocation happens — is the
+    // two tests below: since #76 the connection watches its own session, gets a final
+    // `event: error` with `authentication_error`, and ends.
     const server = await harness.server()
     const signedIn = await harness.user(server)
     const client = clientFor(server, signedIn)
@@ -230,5 +376,102 @@ describe('a server that authenticates', () => {
     const after = clientFor(server, await harness.user(server, { fresh: true }))
     const sent = await after.sendMessage(session.id, 'after the sign-out')
     await waitForTurnEnd(after, session.id, { afterSeq: sent.seq })
+  })
+
+  it('ends an open stream when the browser session signs out (#76)', async () => {
+    // A stream is one long request, so the `/v1` guard validated it once and never again; the
+    // fix is that the connection watches its own session, and a revocation closes it with a
+    // final `event: error` (the protocol's `authentication_error` envelope) — promptly, not on
+    // some timeout. Someone else's stream must not be disturbed by it.
+    const server = await harness.server()
+    const alice = await signInWithCookie(server, DEV_LOGIN_EMAIL, DEV_LOGIN_PASSWORD)
+    const aliceClient = createClient({ baseUrl: server.baseUrl, token: alice.token })
+
+    const agent = await aliceClient.agents.create({
+      name: 'Revocation agent',
+      model: { id: 'anthropic/claude-sonnet-5' },
+    })
+    const session = await aliceClient.sessions.create({ agent: agent.id })
+
+    // A second person, whose stream is the control group.
+    const bob = await harness.user(server, { email: 'bob@revocation.test', password: 'bob-pw' })
+    const bobClient = clientFor(server, bob)
+    const bobAgent = await bobClient.agents.create({
+      name: 'Bystander agent',
+      model: { id: 'anthropic/claude-sonnet-5' },
+    })
+    const bobSession = await bobClient.sessions.create({ agent: bobAgent.id })
+
+    const aliceStream = followSse(
+      await fetch(`${server.baseUrl}/v1/sessions/${session.id}/events/stream`, {
+        headers: { cookie: alice.cookie },
+      }),
+    )
+    const bobStream = followSse(
+      await fetch(`${server.baseUrl}/v1/sessions/${bobSession.id}/events/stream`, {
+        headers: { authorization: `Bearer ${bob.token}` },
+      }),
+    )
+
+    // Both streams are established — each has delivered a first turn — before anything is
+    // revoked, so the close cannot be blamed on the connection not having been up yet.
+    const aSent = await aliceClient.sendMessage(session.id, 'before the sign-out')
+    await waitFor(`A's stream to deliver seq ${String(aSent.seq)}`, () =>
+      deliveredSeqs(aliceStream).includes(aSent.seq) ? true : undefined,
+    )
+    const bSent = await bobClient.sendMessage(bobSession.id, 'before the sign-out')
+    await waitFor(`B's stream to deliver seq ${String(bSent.seq)}`, () =>
+      deliveredSeqs(bobStream).includes(bSent.seq) ? true : undefined,
+    )
+
+    const signedOutAt = Date.now()
+    const refusal = await signOut(server, { cookie: alice.cookie })
+    expect(refusal.status).toBe(200)
+
+    // A's stream gets the goodbye and ends within about two seconds of the sign-out.
+    await endedWithin(aliceStream, 2000, "A's stream after the sign-out")
+    expect(Date.now() - signedOutAt).toBeLessThan(2000)
+    const frame = aliceStream.endError()
+    expect(frame?.error.type).toBe('authentication_error')
+    expect(frame?.error.message).toBe(SESSION_INVALID_MESSAGE)
+
+    // B's stream is untouched, and still delivers: B sends another turn and sees it arrive.
+    expect(bobStream.done).toBe(false)
+    const bAfter = await bobClient.sendMessage(bobSession.id, 'after the other sign-out')
+    await waitFor(`B's stream to deliver seq ${String(bAfter.seq)}`, () =>
+      deliveredSeqs(bobStream).includes(bAfter.seq) ? true : undefined,
+    )
+    expect(bobStream.done).toBe(false)
+  })
+
+  it('ends an open stream when its bearer signs out (oh logout, #76)', async () => {
+    const server = await harness.server()
+    const alice = await harness.user(server)
+    const client = clientFor(server, alice)
+
+    const agent = await client.agents.create({
+      name: 'Bearer revocation agent',
+      model: { id: 'anthropic/claude-sonnet-5' },
+    })
+    const session = await client.sessions.create({ agent: agent.id })
+
+    const stream = followSse(
+      await fetch(`${server.baseUrl}/v1/sessions/${session.id}/events/stream`, {
+        headers: { authorization: `Bearer ${alice.token}` },
+      }),
+    )
+    const sent = await client.sendMessage(session.id, 'before the bearer sign-out')
+    await waitFor(`the stream to deliver seq ${String(sent.seq)}`, () =>
+      deliveredSeqs(stream).includes(sent.seq) ? true : undefined,
+    )
+
+    // `oh logout`'s path: the same `/api/auth/sign-out`, authenticated with the bearer.
+    const refusal = await signOut(server, { token: alice.token })
+    expect(refusal.status).toBe(200)
+
+    await endedWithin(stream, 2000, 'the stream after the bearer sign-out')
+    const frame = stream.endError()
+    expect(frame?.error.type).toBe('authentication_error')
+    expect(frame?.error.message).toBe(SESSION_INVALID_MESSAGE)
   })
 })

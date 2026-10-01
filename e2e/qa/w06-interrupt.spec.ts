@@ -1,6 +1,6 @@
 import {
-  LONG_REPLY_PROMPT,
   QA_MODEL,
+  RELOAD_REPLY_PROMPT,
   createAgent,
   createSession,
   eventTypes,
@@ -34,10 +34,13 @@ test.describe('W6 interrupt', () => {
     await openChat(page, session.id)
     await expectNoErrorBanner(page)
 
-    const prompt = isRealModel ? LONG_REPLY_PROMPT : '__slow__ something long please'
+    // 300 numbers rather than 60: a real provider streams the shorter reply faster than the
+    // Stop button can be looked for (#74 §12), and a Stop after the model has finished would
+    // test nothing. The mock's `__slow__` is unchanged.
+    const prompt = isRealModel ? RELOAD_REPLY_PROMPT : '__slow__ something long please'
     await sendFromComposer(page, prompt)
     // Enough of the reply to have something worth keeping, and early enough that there is
-    // still a long way to go: a Stop after the model has finished would test nothing.
+    // still a long way to go.
     await waitForLongReplyStart(page, { minLength: 40 })
     await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible()
 
