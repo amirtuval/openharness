@@ -2,7 +2,7 @@ import { serve } from '@hono/node-server'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool } from 'pg'
 import type { Hono } from 'hono'
-import type { ModelFactory } from '@openharness/brain'
+import type { ModelFactory, ResolveCredential } from '@openharness/brain'
 import type { SessionId } from '@openharness/protocol'
 import { InMemorySessionStore, type SessionStore } from '@openharness/session'
 import {
@@ -50,6 +50,12 @@ export interface StartServerOptions {
   readonly store?: SessionStore
   /** Use this model factory instead of the one the config resolves. */
   readonly model?: ModelFactory
+  /**
+   * Use this credential resolver instead of the one the config resolves (epic #65, A5). A
+   * test that swaps in a model factory almost always swaps this too: a scripted model ignores
+   * credentials, but the brain still asks for one before every request.
+   */
+  readonly resolveCredential?: ResolveCredential
   /** Where to log; defaults to the console. */
   readonly logger?: Logger
   /** The SSE keepalive interval, for a test that wants to see a `: ping` quickly. */
@@ -66,9 +72,11 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   const logger = options.logger ?? consoleLogger
   const config = options.config ?? readServerConfig()
   const opened = await openStore(config, options, logger)
-  const model = options.model ?? resolveModelFactory(config).factory
+  const resolvedModel = resolveModelFactory(config)
+  const model = options.model ?? resolvedModel.factory
+  const resolveCredential = options.resolveCredential ?? resolvedModel.resolveCredential
 
-  const scheduler = createScheduler(config, opened.store, model, logger)
+  const scheduler = createScheduler(config, opened.store, model, resolveCredential, logger)
   // Compaction is the store's, not a scheduler's: it deletes superseded chunks whoever ran the
   // turn that superseded them, so every instance runs it in either scheduler mode.
   const compactor = new DeltaCompactor({
@@ -186,13 +194,15 @@ function installSignalHandlers(logger: Logger): void {
  *
  * `local` runs every turn in this process; `postgres` shares the sessions with the other
  * instances through partition leases, which is why it needs the store and why the config
- * refuses to boot without a `DATABASE_URL`. Both are handed the same model and the same
- * concurrency and drain limits — what changes is who owns a session, not how it is run.
+ * refuses to boot without a `DATABASE_URL`. Both are handed the same model, credential
+ * resolver and concurrency and drain limits — what changes is who owns a session, not how it
+ * is run.
  */
 function createScheduler(
   config: ServerConfig,
   store: SessionStore,
   model: ModelFactory,
+  resolveCredential: ResolveCredential,
   logger: Logger,
 ): SessionScheduler {
   const onError = (error: unknown, sessionId: SessionId | undefined): void => {
@@ -205,6 +215,7 @@ function createScheduler(
     return new PostgresPartitionScheduler({
       store,
       model,
+      resolveCredential,
       instanceId: config.instanceId,
       partitions: config.partitions,
       ttlMs: config.leaseTtlMs,
@@ -221,6 +232,7 @@ function createScheduler(
   return new LocalScheduler({
     store,
     model,
+    resolveCredential,
     maxConcurrentSessions: config.maxConcurrentSessions,
     drainTimeoutMs: config.drainTimeoutMs,
     partitionCount: config.partitions,

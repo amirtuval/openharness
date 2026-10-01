@@ -13,7 +13,11 @@ import { PACKAGE_NAME as SESSION_PACKAGE_NAME } from '@openharness/session'
  *
  * - **{@link runTurn}** (`./turn`) — the loop, and the lifecycle it writes.
  * - **{@link ContextStrategy}** (`./context`) — how the log becomes model messages.
- * - **{@link ModelFactory}** (`./model`) — how a `provider/model` id becomes a model to stream.
+ * - **{@link ModelFactory}** (`./model`) — how a `provider/model` id becomes a model to stream,
+ *   made with the {@link ModelCredential} the request runs under.
+ * - **{@link ResolveCredential}** (`./model`) — where that credential comes from: the session
+ *   owner's own provider key, never the environment (epic #65, A5).
+ * - **{@link redactSecret}** (`./redact`) — scrubbing a key out of provider error text.
  * - **{@link RetryPolicy}** (`./retry`) — how retryable failures are retried.
  * - **{@link classifyModelError}** (`./errors`) — retryable or terminal, and which
  *   `session.error` type says so.
@@ -37,5 +41,6 @@ export const DEPENDENCIES = [
 export * from './context'
 export * from './errors'
 export * from './model'
+export * from './redact'
 export * from './retry'
 export * from './turn'

@@ -1,7 +1,15 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { ZERO_MODEL_USAGE, streamModelRequest, toModelUsage } from './model'
-import { misdeclaredSpec, mockModel } from './testing/mock-model'
+import {
+  ZERO_MODEL_USAGE,
+  isUsableCredential,
+  missingCredentialMessage,
+  providerOf,
+  routerModelFactory,
+  streamModelRequest,
+  toModelUsage,
+} from './model'
+import { TEST_CREDENTIAL, misdeclaredSpec, mockModel } from './testing/mock-model'
 
 describe('toModelUsage', () => {
   it('maps the AI SDK report onto the protocol counters', () => {
@@ -119,7 +127,7 @@ describe('streamModelRequest', () => {
     const chunks: string[] = []
 
     const result = await streamModelRequest({
-      model: factory('anthropic/claude-sonnet-5'),
+      model: factory('anthropic/claude-sonnet-5', TEST_CREDENTIAL),
       messages,
       onTextDelta: (text) => {
         chunks.push(text)
@@ -142,7 +150,7 @@ describe('streamModelRequest', () => {
     })
 
     const result = await streamModelRequest({
-      model: misdeclaredSpec(factory('anthropic/claude-sonnet-5')),
+      model: misdeclaredSpec(factory('anthropic/claude-sonnet-5', TEST_CREDENTIAL)),
       messages,
     })
 
@@ -159,7 +167,7 @@ describe('streamModelRequest', () => {
     const { factory } = mockModel({ failWith: failure })
 
     const result = await streamModelRequest({
-      model: factory('anthropic/claude-sonnet-5'),
+      model: factory('anthropic/claude-sonnet-5', TEST_CREDENTIAL),
       messages,
     })
 
@@ -171,7 +179,7 @@ describe('streamModelRequest', () => {
     const { factory } = mockModel({ text: ['par'], failAfterText: failure })
 
     const result = await streamModelRequest({
-      model: factory('anthropic/claude-sonnet-5'),
+      model: factory('anthropic/claude-sonnet-5', TEST_CREDENTIAL),
       messages,
     })
 
@@ -188,7 +196,7 @@ describe('streamModelRequest', () => {
     })
 
     const result = await streamModelRequest({
-      model: factory('anthropic/claude-sonnet-5'),
+      model: factory('anthropic/claude-sonnet-5', TEST_CREDENTIAL),
       messages,
       signal: controller.signal,
     })
@@ -202,7 +210,10 @@ describe('streamModelRequest', () => {
     const failure = Object.assign(new Error('Overloaded.'), { statusCode: 503 })
     const { factory, calls } = mockModel({ failWith: failure })
 
-    await streamModelRequest({ model: factory('anthropic/claude-sonnet-5'), messages })
+    await streamModelRequest({
+      model: factory('anthropic/claude-sonnet-5', TEST_CREDENTIAL),
+      messages,
+    })
 
     expect(calls).toHaveLength(1)
   })
@@ -212,7 +223,7 @@ describe('streamModelRequest', () => {
     const { factory, calls } = mockModel({ text: ['hi'] })
 
     await streamModelRequest({
-      model: factory('anthropic/claude-sonnet-5'),
+      model: factory('anthropic/claude-sonnet-5', TEST_CREDENTIAL),
       messages,
       signal: controller.signal,
     })
@@ -229,10 +240,80 @@ describe('streamModelRequest', () => {
 
     await expect(
       streamModelRequest({
-        model: factory('anthropic/claude-sonnet-5'),
+        model: factory('anthropic/claude-sonnet-5', TEST_CREDENTIAL),
         messages,
         onTextDelta,
       }),
     ).rejects.toThrow(fenced)
+  })
+})
+
+describe('providerOf', () => {
+  it('reads the provider as everything before the first slash', () => {
+    expect(providerOf('anthropic/claude-sonnet-5')).toBe('anthropic')
+    expect(providerOf('openai/gpt-4o')).toBe('openai')
+    expect(providerOf('openrouter/anthropic/claude-sonnet-5')).toBe('openrouter')
+  })
+
+  it('treats an id with no slash as its own provider', () => {
+    expect(providerOf('anthropic')).toBe('anthropic')
+  })
+})
+
+describe('isUsableCredential', () => {
+  it('answers no for a missing credential and for a blank key', () => {
+    // A blank key is not merely useless: Mastra's router reads a falsy `apiKey` as "none
+    // given" and falls back to the environment, so it must never be treated as a credential.
+    expect(isUsableCredential(null)).toBe(false)
+    expect(isUsableCredential({ apiKey: '' })).toBe(false)
+    expect(isUsableCredential({ apiKey: '   ' })).toBe(false)
+  })
+
+  it('answers yes for a key with anything in it', () => {
+    expect(isUsableCredential({ apiKey: 'sk-live-abc123' })).toBe(true)
+  })
+})
+
+describe('missingCredentialMessage', () => {
+  it('names the provider the way a person writes it', () => {
+    expect(missingCredentialMessage('openai')).toBe(
+      'No OpenAI key is set. Add one in Settings → Model providers.',
+    )
+    expect(missingCredentialMessage('anthropic')).toBe(
+      'No Anthropic key is set. Add one in Settings → Model providers.',
+    )
+  })
+
+  it('falls back to capitalising a provider it does not know', () => {
+    expect(missingCredentialMessage('mistral')).toBe(
+      'No Mistral key is set. Add one in Settings → Model providers.',
+    )
+  })
+})
+
+describe('routerModelFactory', () => {
+  /** The router's auth resolution: private in its type, an ordinary method at runtime. */
+  interface RouterInternals {
+    resolveAuth(provider: string, model: string): Promise<{ apiKey?: string; source?: string }>
+  }
+
+  it('authenticates each request with the explicit key, never the environment', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'sk-env-decoy-that-must-not-be-used')
+    try {
+      const model = routerModelFactory('openai/gpt-4o', {
+        apiKey: 'sk-explicit-from-the-owner',
+      }) as unknown as RouterInternals
+
+      // Mastra's `resolveAuth` returns a config-supplied key verbatim — `source: 'explicit'`
+      // — without asking the gateway that would read `OPENAI_API_KEY`. That is the property
+      // epic #65 (A5) rests on, and the one pinned here so a Mastra upgrade cannot silently
+      // undo it.
+      await expect(model.resolveAuth('openai', 'gpt-4o')).resolves.toMatchObject({
+        apiKey: 'sk-explicit-from-the-owner',
+        source: 'explicit',
+      })
+    } finally {
+      vi.unstubAllEnvs()
+    }
   })
 })

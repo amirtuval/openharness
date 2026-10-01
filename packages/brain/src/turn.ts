@@ -6,7 +6,6 @@ import type {
   StoredEvent,
   Supersedes,
 } from '@openharness/protocol'
-import type { LanguageModel } from 'ai'
 import type { AppendableEvent, PartitionFence, SessionStore } from '@openharness/session'
 import { SessionNotFoundError } from '@openharness/session'
 
@@ -34,8 +33,15 @@ import {
   needsModelRequest,
   readLog,
 } from './log'
-import type { ModelFactory } from './model'
-import { streamModelRequest, ZERO_MODEL_USAGE } from './model'
+import type { ModelFactory, ResolveCredential } from './model'
+import {
+  isUsableCredential,
+  missingCredentialMessage,
+  providerOf,
+  streamModelRequest,
+  ZERO_MODEL_USAGE,
+} from './model'
+import { redactSecret } from './redact'
 import type { RetryPolicy } from './retry'
 import { backoffDelay, resolveRetryPolicy } from './retry'
 
@@ -70,15 +76,28 @@ import { backoffDelay, resolveRetryPolicy } from './retry'
  *
  * LOOP (per model request)
  *   1. an aborted signal, or a queued user.interrupt ....... INTERRUPT
- *   2. claim the queued user.message events; the claim is the append of the span start below
- *   3. no unanswered message left ........................... session.status_idle, return idle
- *   4. ............. span.model_request_start { consumes, model }
- *   5. stream ....... stored event_start (one sevt_ id), then one stored event_delta per chunk
- *   6. text streamed ......... agent.message { supersedes: the chunk range }
+ *   2. no unanswered message left ........................... session.status_idle, return idle
+ *   3. no credential for the model's provider ............... session.error
+ *                                                             { missing_provider_credential,
+ *                                                               retry_status: exhausted }
+ *                                                             session.status_idle
+ *                                                             { consumes: the queued ids }
+ *                                                             return error
+ *   4. claim the queued user.message events; the claim is the append of the span start below
+ *   5. ............. span.model_request_start { consumes, model }
+ *   6. stream ....... stored event_start (one sevt_ id), then one stored event_delta per chunk
+ *   7. text streamed ......... agent.message { supersedes: the chunk range }
  *      no text ................................... (no message; the span end supersedes)
- *   7. .............................. span.model_request_end { model_usage }
- *   8. another user.message arrived .......................... loop from 1
- *   9. otherwise ............................................. session.status_idle, return idle
+ *   8. .............................. span.model_request_end { model_usage }
+ *   9. another user.message arrived .......................... loop from 1
+ *  10. otherwise ............................................. session.status_idle, return idle
+ *
+ * MODEL FAILURE — no credential for the model's provider (epic #65, A5)
+ *   The credential is resolved before the span start, so no span is opened for a request that
+ *   was never made and no chunk exists to supersede — shown above as step 3. The messages the
+ *   request would have answered are claimed by the idle event that ends the turn, the way an
+ *   interrupt's are (P4): leaving them queued would make the scheduler run the same failing
+ *   turn again. Nothing is retried.
  *
  * INTERRUPT (an aborted signal, or a queued user.interrupt)
  *   partial text streamed ............ agent.message { supersedes: the chunk range }
@@ -125,8 +144,9 @@ export type TurnOutcomeKind =
   /** The turn was cut short by an interrupt, by `signal` or by a queued `user.interrupt`. */
   | 'interrupted'
   /**
-   * The turn died on a model failure that was not retryable, on retries that ran out, or on an
-   * event the protocol would not accept — all three end with `session.error`.
+   * The turn died on a model failure that was not retryable, on retries that ran out, on a
+   * model request with no credential to make it, or on an event the protocol would not accept
+   * — all four end with `session.error`.
    */
   | 'error'
 
@@ -142,6 +162,16 @@ export interface RunTurnOptions {
   readonly store: SessionStore
   /** The model to stream from, resolved by the session's `agent.model.id`. */
   readonly model: ModelFactory
+  /**
+   * Where the credential for each model request comes from — the session owner's own provider
+   * key, resolved per request (epic #65, A5).
+   *
+   * The brain holds no provider key of its own and never reads one from the environment: a
+   * request is made only with a credential this resolver answered, and an owner who has none
+   * for the model's provider ends the turn with `missing_provider_credential` rather than
+   * letting Mastra's router fall back to `OPENAI_API_KEY` and friends.
+   */
+  readonly resolveCredential: ResolveCredential
   /** Aborting this ends the turn at the next safe point; see the lifecycle above. */
   readonly signal?: AbortSignal
   /**
@@ -181,11 +211,15 @@ interface PartialReply {
  * is not the writer's any more — for a `ClaimConflictError`, which means another owner claimed
  * the user events this request was about to answer, and for a `SessionNotFoundError`.
  *
+ * Each request is made with a credential `resolveCredential` answered for its provider, and
+ * with no other: an owner who has none ends the turn with `missing_provider_credential` before
+ * a span is opened — the provider keys of the environment are never a fallback (epic #65, A5).
+ *
  * @param sessionId the session to run; a `sesn_` id
- * @param options the store, the model factory, and the turn's knobs
+ * @param options the store, the model factory, the credential resolver, and the turn's knobs
  */
 export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Promise<TurnOutcome> {
-  const { store, model, signal, fence } = options
+  const { store, model, resolveCredential, signal, fence } = options
   const strategy = options.contextStrategy ?? DEFAULT_CONTEXT_STRATEGY
   const retry = resolveRetryPolicy(options.retry)
   const writeOptions = fence === undefined ? undefined : { fence }
@@ -318,8 +352,6 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
   }
 
   // ---- Loop: one iteration per model request.
-  let languageModel: LanguageModel | undefined
-  const requestModel = (): LanguageModel => (languageModel ??= model(agentModel.id))
   let retriesUsed = 0
   for (;;) {
     // An interrupt that arrived before this request started — a queued user.interrupt covers
@@ -345,6 +377,25 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
         return { outcome: 'idle' }
       }
     }
+    // The credential this request is made with, asked for before anything is claimed. A
+    // request that cannot be made opens no span — every span start is a real model request,
+    // and this one has none — and streams nothing, so there is no chunk range to supersede.
+    // The turn still ends on it, and its idle event claims the messages it could not answer;
+    // leaving them queued would make the scheduler that finds work in the log run the same
+    // failing turn again, and again (epic #65, A5).
+    const provider = providerOf(agentModel.id)
+    const credential = await resolveCredential(provider)
+    if (!isUsableCredential(credential)) {
+      await append([
+        sessionError({
+          type: 'missing_provider_credential',
+          message: missingCredentialMessage(provider),
+          retry_status: { type: 'exhausted' },
+        }),
+        statusIdle(claims),
+      ])
+      return { outcome: 'error' }
+    }
     const [start] = await append([spanStart(claims, agentModel.id)])
     if (start === undefined) {
       throw new Error('the store did not return the span it was asked to append')
@@ -363,8 +414,10 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       throw new Error('the store did not return the event_start it was asked to append')
     }
     let lastChunkSeq = chunkOpen.seq
+    // One model per request, built with this request's credential: the resolved key lives for
+    // exactly this request and is not held on to between them.
     const result = await streamModelRequest({
-      model: requestModel(),
+      model: model(agentModel.id, credential),
       messages,
       signal,
       onTextDelta: async (text) => {
@@ -389,11 +442,15 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
 
     if (result.error !== undefined) {
       const classification = classifyModelError(result.error)
+      // A provider that rejected the key may quote it back in the error text (a 401 naming
+      // the key it did not like); it is scrubbed before the message reaches the log, and the
+      // rest of what the provider said is kept.
+      const message = redactSecret(classification.message, credential.apiKey)
       // Partial output is never stored, so the span end supersedes the chunks this attempt
       // streamed. The retry below mints a new message id and its own `event_start`.
       await append([
         spanEnd(start.id, ZERO_MODEL_USAGE, {
-          error: { type: 'model_error', message: classification.message },
+          error: { type: 'model_error', message },
           supersedes: range,
         }),
       ])
@@ -402,7 +459,7 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
         await append([
           sessionError({
             type: classification.type,
-            message: classification.message,
+            message,
             retry_status: { type: 'retrying' },
           }),
           statusRescheduled(),
@@ -419,7 +476,7 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       await append([
         sessionError({
           type: classification.type,
-          message: classification.message,
+          message,
           retry_status: { type: classification.retryable ? 'exhausted' : 'terminal' },
         }),
         statusIdle(),

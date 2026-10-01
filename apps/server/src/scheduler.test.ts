@@ -15,6 +15,7 @@ import {
   createScriptedModel,
   createTestApp,
   readHistory,
+  resolveTestCredential,
   waitFor,
   waitForIdle,
   type TestContext,
@@ -123,7 +124,11 @@ describe('a wake that arrives while a turn is finishing', () => {
     // without looking at the flag again would leave the message queued until a restart.
     const store = new WakingStore()
     const model = createScriptedModel({ text: ['answered after the wake'] })
-    const runner = new SessionRunner({ store, model: model.factory })
+    const runner = new SessionRunner({
+      store,
+      model: model.factory,
+      resolveCredential: resolveTestCredential,
+    })
     const agent = await store.createAgent({ name: 'Agent', model: { id: 'test/model' } })
     const session = await store.createSession(agent.id)
     store.onTurnStateRead = async () => {
@@ -146,7 +151,11 @@ describe('one turn at a time', () => {
     const { context: test, sessionId } = await fixture({
       replies: [{ text: ['slow'], delayMs: 50 }],
     })
-    const runner = new SessionRunner({ store: test.store, model: test.model.factory })
+    const runner = new SessionRunner({
+      store: test.store,
+      model: test.model.factory,
+      resolveCredential: resolveTestCredential,
+    })
     await test.store.appendEvents(sessionId, [
       { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: 'Hi' }] },
     ])
@@ -404,7 +413,11 @@ describe('the fence', () => {
   it('reaches the store, so a turn without the partition lease writes nothing', async () => {
     const test = createTestApp({ replies: [{ text: ['never written'] }] })
     context = test
-    const runner = new SessionRunner({ store: test.store, model: test.model.factory })
+    const runner = new SessionRunner({
+      store: test.store,
+      model: test.model.factory,
+      resolveCredential: resolveTestCredential,
+    })
     const agent = await test.store.createAgent({ name: 'Agent', model: { id: 'test/model' } })
     const session = await test.store.createSession(agent.id)
     await test.store.appendEvents(session.id, [
@@ -423,7 +436,11 @@ describe('the fence', () => {
   it('lets a turn through under the lease its owner holds', async () => {
     const test = createTestApp({ replies: [{ text: ['written'] }] })
     context = test
-    const runner = new SessionRunner({ store: test.store, model: test.model.factory })
+    const runner = new SessionRunner({
+      store: test.store,
+      model: test.model.factory,
+      resolveCredential: resolveTestCredential,
+    })
     const agent = await test.store.createAgent({ name: 'Agent', model: { id: 'test/model' } })
     const session = await test.store.createSession(agent.id)
     await test.store.appendEvents(session.id, [
@@ -442,7 +459,11 @@ describe('the fence', () => {
 describe('an external signal', () => {
   it('stops the pass without writing anything, and without losing the work', async () => {
     const { context: test, sessionId } = await fixture({ replies: [{ text: ['never'] }] })
-    const runner = new SessionRunner({ store: test.store, model: test.model.factory })
+    const runner = new SessionRunner({
+      store: test.store,
+      model: test.model.factory,
+      resolveCredential: resolveTestCredential,
+    })
     await test.store.appendEvents(sessionId, [
       { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: 'hello' }] },
     ])
@@ -464,8 +485,17 @@ describe('the runner', () => {
   it('is a plain object a scheduler can share', async () => {
     const store = new InMemorySessionStore()
     const model = createScriptedModel({ text: ['hi'] })
-    const runner = new SessionRunner({ store, model: model.factory })
-    const scheduler = new LocalScheduler({ store, model: model.factory, runner })
+    const runner = new SessionRunner({
+      store,
+      model: model.factory,
+      resolveCredential: resolveTestCredential,
+    })
+    const scheduler = new LocalScheduler({
+      store,
+      model: model.factory,
+      resolveCredential: resolveTestCredential,
+      runner,
+    })
 
     expect(scheduler.runner).toBe(runner)
     await scheduler.stop()

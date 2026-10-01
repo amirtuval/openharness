@@ -26,7 +26,7 @@ import {
   slowReplyText,
 } from './mock-model'
 import { resolveModelFactory } from './model'
-import { testConfig, readHistory, waitForIdle } from './test-support'
+import { testConfig, readHistory, resolveTestCredential, waitForIdle } from './test-support'
 
 /**
  * The deterministic test model: what it answers, how it fails, and the fact that it cannot
@@ -42,6 +42,7 @@ async function runTurn(
   const scheduler = new LocalScheduler({
     store,
     model: createMockModelFactory(),
+    resolveCredential: resolveTestCredential,
     onError: () => {},
     ...(options.retry === undefined ? {} : { retry: options.retry }),
   })

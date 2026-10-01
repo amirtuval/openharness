@@ -22,7 +22,12 @@ import {
 } from '../partition-scheduler'
 import { LocalScheduler, type SessionScheduler } from '../scheduler'
 import { type AppEnv, silentLogger } from '../types'
-import { type ScriptedModel, type ScriptedReply, createScriptedModel } from './model'
+import {
+  type ScriptedModel,
+  type ScriptedReply,
+  createScriptedModel,
+  resolveTestCredential,
+} from './model'
 
 /**
  * Starting a server for a test: a fresh in-memory store, a scheduler with a scripted model,
@@ -99,6 +104,7 @@ export function createTestApp(options: TestOptions = {}): TestContext {
   const scheduler = new LocalScheduler({
     store,
     model: model.factory,
+    resolveCredential: resolveTestCredential,
     ...(options.maxConcurrentSessions === undefined
       ? {}
       : { maxConcurrentSessions: options.maxConcurrentSessions }),
@@ -133,6 +139,7 @@ export async function startTestServer(options: TestOptions = {}): Promise<TestCo
     config: testConfig(options),
     store,
     model: model.factory,
+    resolveCredential: resolveTestCredential,
     logger: silentLogger,
     ...(options.sseKeepaliveMs === undefined ? {} : { sseKeepaliveMs: options.sseKeepaliveMs }),
   })
