@@ -14,7 +14,14 @@ import { z } from 'zod'
  * Note that the HTTP error types here (`not_found_error`, `rate_limit_error`, ...) are a
  * different vocabulary from the types carried inside a stored `session.error` event
  * (`model_overloaded_error`, ...): the first describes a failed HTTP request, the second
- * describes a failed turn. Both use the `_error` suffix.
+ * describes a failed turn. Both mostly use the `_error` suffix; the exceptions are this
+ * package's own extensions, `invalid_provider_credential` here and
+ * `missing_provider_credential` in `events/session.ts`.
+ *
+ * Authentication failures are the `authentication_error` (401) type: a request with no
+ * session cookie, or with a bearer token that is missing, malformed, expired or revoked.
+ * Sign-in itself is not an HTTP API of this protocol — it is Better Auth's `/api/auth/*`
+ * surface (epic #65, A1).
  */
 
 /** Every error type the API returns. */
@@ -26,6 +33,9 @@ export const API_ERROR_TYPES = [
   'not_found_error',
   'conflict_error',
   'request_too_large',
+  // extension: Anthropic has no provider credentials to reject, and this is the one type
+  // here that does not end in `_error` (epic #65, A5).
+  'invalid_provider_credential',
   'rate_limit_error',
   'api_error',
   'timeout_error',
@@ -48,18 +58,24 @@ export const ApiErrorTypeSchema = z.enum(API_ERROR_TYPES)
 export const API_ERROR_STATUS_BY_TYPE: Record<ApiErrorType, number> = {
   /** 400 — malformed request, bad parameters, or a request rejected on its content. */
   invalid_request_error: 400,
-  /** 401 — the API key is missing, malformed, revoked or expired. */
+  /** 401 — not signed in: no session cookie or bearer token, or the one presented is invalid or expired. */
   authentication_error: 401,
   /** 402 — the caller cannot pay for the request (billing or payment problem). */
   billing_error: 402,
-  /** 403 — the key is valid but not allowed to use this resource. */
+  /** 403 — the caller is signed in but not allowed to use this resource. */
   permission_error: 403,
-  /** 404 — the resource id in the path does not exist. */
+  /**
+   * 404 — the resource id in the path does not exist — or it exists and belongs to another
+   * user. v1 has no sharing, so another user's agent, session or credential is answered as
+   * missing rather than forbidden (epic #65, A4): a 403 would confirm it exists.
+   */
   not_found_error: 404,
   /** 409 — the request conflicts with the resource's current state. */
   conflict_error: 409,
   /** 413 — the request body is too large. */
   request_too_large: 413,
+  /** 422 — a provider credential failed validation against its provider on save. */
+  invalid_provider_credential: 422,
   /** 429 — rate limited, or a spend limit was reached. */
   rate_limit_error: 429,
   /** 500 — an unexpected internal error. */

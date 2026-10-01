@@ -47,6 +47,18 @@ describe('AgentSchema', () => {
     expect(AgentSchema.parse({ ...agent, description: null, system: null }).description).toBeNull()
   })
 
+  it('carries the owner the server assigned, and tolerates its absence for now', () => {
+    // During the transition (through #61) pre-auth agents have no owner. From #61 on the
+    // server sets it on every agent; the field is read-only either way.
+    expect(AgentSchema.parse({ ...agent, owner_id: 'Qm3xT7bR9kL2nV5wZ8yA4cD6fG1hJ0pS' })).toEqual({
+      ...agent,
+      owner_id: 'Qm3xT7bR9kL2nV5wZ8yA4cD6fG1hJ0pS',
+    })
+    expect(AgentSchema.parse(agent)).toEqual(agent)
+    expect(AgentSchema.safeParse({ ...agent, owner_id: '' }).success).toBe(false)
+    expect(AgentSchema.safeParse({ ...agent, owner_id: 7 }).success).toBe(false)
+  })
+
   it('rejects a bad id, an empty name and a missing timestamp', () => {
     expect(AgentSchema.safeParse({ ...agent, id: 'agent_nope' }).success).toBe(false)
     expect(
@@ -71,6 +83,19 @@ describe('agent request schemas', () => {
     expect(CreateAgentRequestSchema.safeParse({ name: 'A' }).success).toBe(false)
     expect(CreateAgentRequestSchema.safeParse({ model: { id: 'x/y' } }).success).toBe(false)
     expect(CreateAgentRequestSchema.safeParse({ name: 'A', model: { id: '' } }).success).toBe(false)
+  })
+
+  it('never takes owner_id from a request: the server assigns the owner', () => {
+    // Unknown fields are stripped, so a client that sends an owner_id does not set one —
+    // there is no wire path that lets a caller pick who owns an agent.
+    const created = CreateAgentRequestSchema.parse({
+      name: 'A',
+      model: { id: 'x/y' },
+      owner_id: 'somebody-else',
+    })
+    expect(created).not.toHaveProperty('owner_id')
+    const updated = UpdateAgentRequestSchema.parse({ owner_id: 'somebody-else' })
+    expect(updated).not.toHaveProperty('owner_id')
   })
 
   it('accepts an empty update body, since every field is optional', () => {

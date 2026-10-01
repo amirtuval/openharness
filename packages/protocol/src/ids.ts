@@ -3,14 +3,16 @@ import { z } from 'zod'
 /**
  * Resource and event identifiers.
  *
- * Every id is `<prefix><ULID>`, using the same prefixes as Anthropic's Managed Agents API:
- * `agent_` for agents, `sesn_` for sessions and `sevt_` for stored session events. A ULID is
- * 26 Crockford base32 characters: a 48-bit millisecond timestamp followed by 80 random bits,
- * so ids sort by creation time and are globally unique without coordination.
+ * Every id is `<prefix><ULID>`, using the same prefixes as Anthropic's Managed Agents API —
+ * `agent_` for agents, `sesn_` for sessions and `sevt_` for stored session events — plus
+ * `pcred_` for provider credentials (an openharness extension; Anthropic has no such
+ * resource). A ULID is 26 Crockford base32 characters: a 48-bit millisecond timestamp
+ * followed by 80 random bits, so ids sort by creation time and are globally unique without
+ * coordination.
  *
  * The ids this module produces are also **branded** at the type level
- * ({@link AgentId}, {@link SessionId}, {@link EventId}), so a session id cannot be passed
- * where an event id is expected.
+ * ({@link AgentId}, {@link SessionId}, {@link EventId}, {@link ProviderCredentialId}), so a
+ * session id cannot be passed where an event id is expected.
  */
 
 /** The id prefixes this protocol uses, keyed by the kind of thing they name. */
@@ -18,15 +20,17 @@ export const ID_PREFIXES = {
   agent: 'agent_',
   session: 'sesn_',
   event: 'sevt_',
+  providerCredential: 'pcred_',
 } as const
 
-/** A key of {@link ID_PREFIXES}: `'agent' | 'session' | 'event'`. */
+/** A key of {@link ID_PREFIXES}: `'agent' | 'session' | 'event' | 'providerCredential'`. */
 export type IdType = keyof typeof ID_PREFIXES
 
 const ID_PREFIX_ENTRIES: readonly (readonly [IdType, string])[] = [
   ['agent', ID_PREFIXES.agent],
   ['session', ID_PREFIXES.session],
   ['event', ID_PREFIXES.event],
+  ['providerCredential', ID_PREFIXES.providerCredential],
 ]
 
 /** Length of the ULID part of an id. */
@@ -148,6 +152,11 @@ export function isEventId(value: unknown): value is string {
   return isId(value, 'event')
 }
 
+/** Whether `value` is a `pcred_` id. */
+export function isProviderCredentialId(value: unknown): value is string {
+  return isId(value, 'providerCredential')
+}
+
 /**
  * Parse an id into its prefix and ULID.
  *
@@ -199,6 +208,11 @@ export function newEventId(timestampMs?: number): EventId {
   return EventIdSchema.parse(generateId('event', timestampMs))
 }
 
+/** A new `pcred_` id: a provider credential's metadata row. */
+export function newProviderCredentialId(timestampMs?: number): ProviderCredentialId {
+  return ProviderCredentialIdSchema.parse(generateId('providerCredential', timestampMs))
+}
+
 /**
  * Branded `agent_` id. Any agent id in this package is interchangeable with `string`, but a
  * session or event id is not.
@@ -225,3 +239,14 @@ export const EventIdSchema = z
   .brand<'EventId'>()
 
 export type EventId = z.infer<typeof EventIdSchema>
+
+/**
+ * Branded `pcred_` id. // extension: Anthropic's Managed Agents API has no provider
+ * credentials, so this prefix is openharness' own.
+ */
+export const ProviderCredentialIdSchema = z
+  .string()
+  .refine(isProviderCredentialId, { error: 'must be a `pcred_` id' })
+  .brand<'ProviderCredentialId'>()
+
+export type ProviderCredentialId = z.infer<typeof ProviderCredentialIdSchema>

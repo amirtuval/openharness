@@ -128,16 +128,36 @@ export const SessionErrorTypeSchema = z.enum([
   'billing_error',
   /** A credential's allowed hosts are not permitted by the environment's network policy. */
   'credential_host_unreachable_error',
+  /**
+   * // extension: the session owner has no stored credential for the model's provider
+   * (epic #65, A5). The server never uses provider keys of its own, so the turn cannot make
+   * a model request at all; the `message` names the provider (`anthropic`, `openai`, …) so a
+   * client can point the user at the right Settings entry.
+   *
+   * **Non-retryable.** Nothing is rescheduled: the turn ends with `session.status_idle`, and
+   * `retry_status.type` is `exhausted` — {@link SessionErrorSchema} refuses the pairing with
+   * any other retry status. A new prompt after the credential is added works.
+   */
+  'missing_provider_credential',
 ])
 
 export type SessionErrorType = z.infer<typeof SessionErrorTypeSchema>
 
 /** The `error` object of a `session.error` event. */
-export const SessionErrorSchema = z.object({
-  type: SessionErrorTypeSchema,
-  message: z.string(),
-  retry_status: RetryStatusSchema,
-})
+export const SessionErrorSchema = z
+  .object({
+    type: SessionErrorTypeSchema,
+    message: z.string(),
+    retry_status: RetryStatusSchema,
+  })
+  .refine(
+    (error) =>
+      error.type !== 'missing_provider_credential' || error.retry_status.type === 'exhausted',
+    {
+      error:
+        'missing_provider_credential is never retried: retry_status must be `exhausted` (epic #65, A5)',
+    },
+  )
 
 export type SessionError = z.infer<typeof SessionErrorSchema>
 

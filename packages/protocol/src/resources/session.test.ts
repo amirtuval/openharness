@@ -55,6 +55,17 @@ describe('SessionSchema', () => {
     expect(SessionSchema.parse({ ...session, title: null, metadata: {} }).title).toBeNull()
   })
 
+  it('carries the owner the server assigned, and tolerates its absence for now', () => {
+    // Same transition as agents: pre-auth sessions (through #61) may have no owner; after
+    // #61 the server always sets it, and a session owned by someone else answers 404.
+    expect(
+      SessionSchema.parse({ ...session, owner_id: 'Qm3xT7bR9kL2nV5wZ8yA4cD6fG1hJ0pS' }),
+    ).toEqual({ ...session, owner_id: 'Qm3xT7bR9kL2nV5wZ8yA4cD6fG1hJ0pS' })
+    expect(SessionSchema.parse(session)).toEqual(session)
+    expect(SessionSchema.safeParse({ ...session, owner_id: '' }).success).toBe(false)
+    expect(SessionSchema.safeParse({ ...session, owner_id: null }).success).toBe(false)
+  })
+
   it('rejects the statuses v1 does not have', () => {
     expect(SessionStatusSchema.safeParse('idle').success).toBe(true)
     expect(SessionStatusSchema.safeParse('running').success).toBe(true)
@@ -99,6 +110,14 @@ describe('CreateSessionRequestSchema', () => {
 
   it('rejects a session id where an agent id belongs', () => {
     expect(CreateSessionRequestSchema.safeParse({ agent: newSessionId() }).success).toBe(false)
+  })
+
+  it('never takes owner_id from a request: the server assigns the owner', () => {
+    const parsed = CreateSessionRequestSchema.parse({
+      agent: newAgentId(),
+      owner_id: 'somebody-else',
+    })
+    expect(parsed).not.toHaveProperty('owner_id')
   })
 
   it('rejects more initial events than Anthropic allows', () => {

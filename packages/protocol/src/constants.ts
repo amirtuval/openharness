@@ -10,8 +10,14 @@
 export const API_VERSION_PREFIX = '/v1'
 
 /**
- * Header carrying the API key. Anthropic spells this `x-api-key`; openharness keeps the
- * spelling so existing Anthropic clients and tooling work unchanged.
+ * The header v1 used to carry its static API key.
+ *
+ * @deprecated The static key is gone (authentication epic #65, A8 — it supersedes D5 of epic
+ * #2): nothing this package models authenticates with `x-api-key` any more. A caller signs in
+ * through Better Auth and presents a session cookie (web) or a bearer token (CLI), and those
+ * header-level details are the server's, not the protocol's. This constant survives only
+ * because the current server and client still import it; it is removed once they stop
+ * (#60, #61).
  */
 export const API_KEY_HEADER = 'x-api-key'
 

@@ -63,11 +63,36 @@ describe('error types and status codes', () => {
       not_found_error: 404,
       conflict_error: 409,
       request_too_large: 413,
+      invalid_provider_credential: 422,
       rate_limit_error: 429,
       api_error: 500,
       timeout_error: 504,
       overloaded_error: 529,
     })
+  })
+
+  it('serves invalid_provider_credential as 422', () => {
+    // The one API error type that does not end in `_error`, and the one Anthropic does not
+    // have: a provider credential that failed its validation call on save (epic #65, A5).
+    expect(httpStatusForErrorType('invalid_provider_credential')).toBe(422)
+    expect(isApiErrorType('invalid_provider_credential')).toBe(true)
+    expect(
+      ApiErrorBodySchema.safeParse(
+        apiErrorBody('invalid_provider_credential', 'the openai key was rejected'),
+      ).success,
+    ).toBe(true)
+  })
+
+  it('authenticates with a session or a bearer token, not an api key', () => {
+    // The 401 the API answers a caller that is not signed in (epic #65, A2); the same type
+    // covers an expired or revoked session. Sign-in itself is Better Auth's, not this API's.
+    expect(httpStatusForErrorType('authentication_error')).toBe(401)
+  })
+
+  it('answers another user’s resource with 404, not 403', () => {
+    // A4: a resource that exists but is not the caller's is indistinguishable from one that
+    // does not exist, so its existence never leaks.
+    expect(httpStatusForErrorType('not_found_error')).toBe(404)
   })
 
   it('gives every error type a status', () => {

@@ -4,6 +4,7 @@ import {
   AgentSchema,
   ModelRequestEndEventSchema,
   ModelRequestStartEventSchema,
+  ProviderCredentialSchema,
   SendEventsRequestSchema,
   SendEventsResponseSchema,
   SessionEventSchema,
@@ -14,6 +15,7 @@ import {
   StreamEventSchema,
   UserEventSchema,
   UserMessageEventSchema,
+  UserSchema,
 } from '../index'
 import {
   FIXTURE_MODEL_USAGE,
@@ -23,6 +25,7 @@ import {
   makeContentDelta,
   makeModelRequestEnd,
   makeModelRequestStart,
+  makeProviderCredential,
   makeSession,
   makeSessionAgent,
   makeSessionError,
@@ -31,6 +34,7 @@ import {
   makeStatusRunning,
   makeStoredEventDelta,
   makeStoredEventStart,
+  makeUser,
   makeUserInterrupt,
   makeUserMessage,
   sampleAgent,
@@ -68,6 +72,29 @@ describe('fixture builders', () => {
       expect(StreamEventSchema.safeParse(event).success, event.type).toBe(true)
     }
     expect(built).toHaveLength(11)
+  })
+
+  it('builds a user that parses, with the profile fields optional', () => {
+    expect(UserSchema.safeParse(makeUser()).success).toBe(true)
+    expect(makeUser({ email: 'grace@example.com' }).email).toBe('grace@example.com')
+    expect(UserSchema.safeParse(makeUser({ image: 'https://example.com/p.png' })).success).toBe(
+      true,
+    )
+    expect(UserSchema.safeParse(makeUser({ name: undefined })).success).toBe(true)
+  })
+
+  it('builds a provider credential that parses, metadata only', () => {
+    expect(ProviderCredentialSchema.safeParse(makeProviderCredential()).success).toBe(true)
+    expect(makeProviderCredential({ provider: 'openai', last4: 'wxyz' })).toMatchObject({
+      provider: 'openai',
+      last4: 'wxyz',
+    })
+    // No secret is part of a credential's metadata, fixture or not.
+    expect(makeProviderCredential()).not.toHaveProperty('api_key')
+    expect(
+      ProviderCredentialSchema.safeParse(makeProviderCredential({ validated_at: undefined }))
+        .success,
+    ).toBe(true)
   })
 
   it('build content deltas that parse', () => {

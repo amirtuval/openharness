@@ -5,6 +5,7 @@ import { UserEventInputSchema } from '../events/user'
 import { AgentIdSchema, SessionIdSchema } from '../ids'
 import { NextPageSchema, PageCursorStringSchema } from '../pagination'
 import { AGENT_NAME_MAX_LENGTH, ModelConfigSchema } from './agent'
+import { UserIdSchema } from './user'
 
 /**
  * The `session` resource and the endpoints that manage it:
@@ -61,6 +62,18 @@ export type SessionAgent = z.infer<typeof SessionAgentSchema>
 export const SessionSchema = z.object({
   id: SessionIdSchema,
   type: z.literal('session'),
+  /**
+   * // extension: the user this session belongs to (epic #65, A4).
+   *
+   * Read-only, set by the server from the authenticated caller at creation; no request ever
+   * carries it. A session whose owner is not the caller answers `404`, exactly as an agent
+   * does, so a session's existence never leaks across users.
+   *
+   * Optional only during the transition: while the server still serves pre-auth data
+   * (through #61) it may be absent. From #61 on the server sets it on every session, and it
+   * is to become required.
+   */
+  owner_id: UserIdSchema.optional(),
   status: SessionStatusSchema,
   title: z.string().max(SESSION_TITLE_MAX_LENGTH).nullable(),
   metadata: MetadataSchema,

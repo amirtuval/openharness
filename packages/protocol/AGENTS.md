@@ -1,9 +1,9 @@
 # @openharness/protocol
 
 The shared protocol between brain, session, hands and the frontends: the wire types and
-schemas every package agrees on. It defines the HTTP API, the session event log, the error
-envelope, ids and pagination — and nothing else. No I/O, no state, `zod` as the only runtime
-dependency.
+schemas every package agrees on. It defines the HTTP API, the session event log, users and
+provider credentials, the error envelope, ids and pagination — and nothing else. No I/O, no
+state, `zod` as the only runtime dependency.
 
 The contract follows Anthropic's [Managed Agents](https://platform.claude.com/docs/en/managed-agents/overview)
 API — the same event names, field names, id prefixes and error envelope — for the subset v1
@@ -60,7 +60,9 @@ src/
   readonly.ts           DeepReadonly, the helper the immutable event types are built with
   resources/
     agent.ts            the agent resource + its endpoints
+    provider-credential.ts  provider credential metadata (write-only) + its endpoints
     session.ts          the session resource + its endpoints
+    user.ts             the signed-in user: GET /v1/me, UserIdSchema (owner_id)
   events/
     common.ts           the event vocabulary, the fields every stored event carries, supersedes
     user.ts             user.message, user.interrupt (+ the shapes a client sends)
@@ -84,13 +86,18 @@ Two entry points, named in `package.json`'s `exports`. Both resolve to built out
 
 | export                                                                                                    | what it is                                                      |
 | --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| `AgentSchema` / `Agent`                                                                                   | the `agent` resource                                            |
+| `AgentSchema` / `Agent`                                                                                   | the `agent` resource (carries a read-only `owner_id`)           |
 | `CreateAgentRequestSchema`, `UpdateAgentRequestSchema`                                                    | bodies of `POST /v1/agents`, `POST /v1/agents/{agent_id}`       |
 | `ListAgentsQuerySchema`, `ListAgentsResponseSchema`                                                       | `GET /v1/agents`                                                |
 | `ModelConfigSchema` / `ModelConfig`                                                                       | `{ id }`, where `id` is a Mastra router string `provider/model` |
-| `SessionSchema` / `Session`, `SessionAgentSchema` / `SessionAgent`                                        | the `session` resource and its agent snapshot                   |
+| `SessionSchema` / `Session`, `SessionAgentSchema` / `SessionAgent`                                        | the `session` resource (read-only `owner_id`) and its snapshot  |
 | `SessionStatusSchema`, `StopReasonSchema`                                                                 | `idle`/`running`; `{ type: 'end_turn' }`                        |
 | `CreateSessionRequestSchema`, `ListSessionsQuerySchema`, `ListSessionsResponseSchema`                     | the sessions endpoints                                          |
+| `UserSchema` / `User`, `GetMeResponseSchema` / `GetMeResponse`                                            | the signed-in user; `GET /v1/me`                                |
+| `UserIdSchema` / `UserId`                                                                                 | an opaque Better Auth user id; what `owner_id` holds            |
+| `ProviderCredentialSchema` / `ProviderCredential`, `ProviderCredentialTypeSchema`                         | credential metadata (`api_key` only today); never the secret    |
+| `ApiKeyProviderCredentialSchema`, `PutProviderCredentialRequestSchema` / `PutProviderCredentialRequest`   | body of `PUT /v1/provider-credentials/{provider}` (write-only)  |
+| `ListProviderCredentialsResponseSchema` / `ListProviderCredentialsResponse`                               | `GET /v1/provider-credentials`                                  |
 | `AGENT_NAME_MAX_LENGTH`, `AGENT_DESCRIPTION_MAX_LENGTH`, `SESSION_TITLE_MAX_LENGTH`, `MAX_INITIAL_EVENTS` | limits Anthropic documents                                      |
 
 **Events**
@@ -122,26 +129,40 @@ event **type** (`StoredEvent`, `StreamEvent`, the members, the domain sub-unions
 
 **Errors**
 
-| export                                                                                        | what it is                                                 |
-| --------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
-| `ApiErrorBodySchema` / `ApiErrorBody`, `ApiErrorSchema` / `ApiError`, `ApiErrorTypeSchema`    | the `{ type: 'error', error: { type, message } }` envelope |
-| `API_ERROR_TYPES`, `API_ERROR_STATUS_BY_TYPE`, `httpStatusForErrorType()`, `isApiErrorType()` | error types and their HTTP statuses                        |
-| `apiErrorBody()`                                                                              | build a body for the wire                                  |
+| export                                                                                        | what it is                                                    |
+| --------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `ApiErrorBodySchema` / `ApiErrorBody`, `ApiErrorSchema` / `ApiError`, `ApiErrorTypeSchema`    | the `{ type: 'error', error: { type, message } }` envelope    |
+| `API_ERROR_TYPES`, `API_ERROR_STATUS_BY_TYPE`, `httpStatusForErrorType()`, `isApiErrorType()` | error types and their HTTP statuses (auth: 401/404/422 below) |
+| `apiErrorBody()`                                                                              | build a body for the wire                                     |
+
+The auth epic (#65) uses three of those types: `authentication_error` (401) for a caller who
+is not signed in, or whose session or bearer token is invalid or expired; `not_found_error`
+(404) for a resource that is another user's — answered as missing, never 403 (A4); and the
+extension type `invalid_provider_credential` (422) for a credential that failed validation on
+save. It is the one API error type that does not end in `_error`.
 
 **Ids, pagination, constants**
 
-| export                                                                                                                                                                                                | what it is                                                   |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| `ID_PREFIXES`, `IdType`, `ULID_LENGTH`, `ulid()`, `isUlid()`                                                                                                                                          | id building blocks: `agent_`, `sesn_`, `sevt_` + ULID        |
-| `generateId()`, `newAgentId()`, `newSessionId()`, `newEventId()`                                                                                                                                      | generators                                                   |
-| `parseId()` / `ParsedId`, `tryParseId()`, `isId()`, `isAgentId()`, `isSessionId()`, `isEventId()`                                                                                                     | parsing and validation                                       |
-| `AgentIdSchema` / `AgentId`, `SessionIdSchema` / `SessionId`, `EventIdSchema` / `EventId`                                                                                                             | branded id schemas                                           |
-| `PAGE_CURSOR_PREFIX`, `PageCursorSchema` / `PageCursor`, `SeqCursorSchema` / `SeqCursor`, `KeyCursorSchema` / `KeyCursor`, `PageCursorStringSchema`, `NextPageSchema`                                 | opaque pagination cursors: `seq` and keyset `key` positions  |
-| `encodeSeqCursor()`, `encodeKeyCursor()`, `KeyCursorPosition`, `decodePageCursor()`, `tryDecodePageCursor()`, `isPageCursor()`                                                                        | writing a cursor, and reading one back                       |
-| `API_VERSION_PREFIX`, `API_KEY_HEADER`, `ANTHROPIC_VERSION_HEADER`, `ANTHROPIC_BETA_HEADER`, `API_VERSION_DATE`, `LAST_EVENT_ID_HEADER`, `REQUEST_ID_HEADER`, `JSON_CONTENT_TYPE`, `SSE_CONTENT_TYPE` | the wire constants                                           |
-| `DEFAULT_PARTITION_COUNT`, `partitionOf()`                                                                                                                                                            | session → partition ownership hash                           |
-| `TimestampSchema`, `MetadataSchema`, `PageLimitSchema`, `ListOrderSchema`, `DEFAULT_PAGE_LIMIT`, `MAX_PAGE_LIMIT`, `METADATA_MAX_PAIRS`, `METADATA_MAX_KEY_LENGTH`, `METADATA_MAX_VALUE_LENGTH`       | shared scalars and limits                                    |
-| `PACKAGE_NAME`                                                                                                                                                                                        | the package name; lets a dependent prove the import resolved |
+| export                                                                                                                                                                                          | what it is                                                      |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| `ID_PREFIXES`, `IdType`, `ULID_LENGTH`, `ulid()`, `isUlid()`                                                                                                                                    | id building blocks: `agent_`, `sesn_`, `sevt_`, `pcred_` + ULID |
+| `generateId()`, `newAgentId()`, `newSessionId()`, `newEventId()`, `newProviderCredentialId()`                                                                                                   | generators                                                      |
+| `parseId()` / `ParsedId`, `tryParseId()`, `isId()`, `isAgentId()`, `isSessionId()`, `isEventId()`, `isProviderCredentialId()`                                                                   | parsing and validation                                          |
+| `AgentIdSchema` / `AgentId`, `SessionIdSchema` / `SessionId`, `EventIdSchema` / `EventId`, `ProviderCredentialIdSchema` / `ProviderCredentialId`                                                | branded id schemas                                              |
+| `PAGE_CURSOR_PREFIX`, `PageCursorSchema` / `PageCursor`, `SeqCursorSchema` / `SeqCursor`, `KeyCursorSchema` / `KeyCursor`, `PageCursorStringSchema`, `NextPageSchema`                           | opaque pagination cursors: `seq` and keyset `key` positions     |
+| `encodeSeqCursor()`, `encodeKeyCursor()`, `KeyCursorPosition`, `decodePageCursor()`, `tryDecodePageCursor()`, `isPageCursor()`                                                                  | writing a cursor, and reading one back                          |
+| `API_VERSION_PREFIX`, `ANTHROPIC_VERSION_HEADER`, `ANTHROPIC_BETA_HEADER`, `API_VERSION_DATE`, `LAST_EVENT_ID_HEADER`, `REQUEST_ID_HEADER`, `JSON_CONTENT_TYPE`, `SSE_CONTENT_TYPE`             | the wire constants                                              |
+| `API_KEY_HEADER`                                                                                                                                                                                | **deprecated** dead weight (see below); not part of the API     |
+| `DEFAULT_PARTITION_COUNT`, `partitionOf()`                                                                                                                                                      | session → partition ownership hash                              |
+| `TimestampSchema`, `MetadataSchema`, `PageLimitSchema`, `ListOrderSchema`, `DEFAULT_PAGE_LIMIT`, `MAX_PAGE_LIMIT`, `METADATA_MAX_PAIRS`, `METADATA_MAX_KEY_LENGTH`, `METADATA_MAX_VALUE_LENGTH` | shared scalars and limits                                       |
+| `PACKAGE_NAME`                                                                                                                                                                                  | the package name; lets a dependent prove the import resolved    |
+
+`API_KEY_HEADER` (`x-api-key`) is **deprecated**. It is v1's static-key header — D5 of epic
+#2, superseded by the auth epic (#65, A8): nothing authenticates with it any more, and the
+authentication headers that do exist (a Better Auth session cookie for the web app, a bearer
+token for the CLI) are the server's business, not this package's. The constant is still
+exported only because today's `apps/server` and `packages/client` import it; it is removed
+once they stop (#60, #61). Nothing new should use it.
 
 ### `@openharness/protocol/fixtures`
 
@@ -150,6 +171,7 @@ Builders for every resource and event, and one realistic sample session.
 | export                                                                                     | what it is                                                                                                                      |
 | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
 | `makeAgent()`, `makeSessionAgent()`, `makeSession()`                                       | resource builders; each takes `Partial<T>` overrides                                                                            |
+| `makeUser()`, `makeProviderCredential()`                                                   | the signed-in user (a fixed opaque id) and credential metadata; never a secret                                                  |
 | `makeUserMessage()`, `makeUserInterrupt()`, `makeAgentMessage()`                           | message and interrupt builders                                                                                                  |
 | `makeStatusRunning()`, `makeStatusIdle()`, `makeStatusRescheduled()`, `makeSessionError()` | session status builders                                                                                                         |
 | `makeModelRequestStart()`, `makeModelRequestEnd()`                                         | span builders; the end builder takes the start it closes                                                                        |
@@ -161,6 +183,37 @@ Builders for every resource and event, and one realistic sample session.
 The event builders allocate a running `seq` and a fresh `sevt_` id; pass `seq` or `id` in the
 overrides for a specific one. They construct plain typed values rather than calling `.parse()`,
 so a test can assert that what a builder produces really does parse against the schemas.
+
+## Authentication and ownership (epic #65, wave 1)
+
+This package carries the **wire types** of v2 authentication — users, provider credentials,
+the error types and ownership — and nothing of the mechanism. Sign-in itself, the
+device-code flow and the `/api/auth/*` endpoints are Better Auth's own surface, mounted by
+the server (`apps/server`); the client wraps the few of them `oh login` needs. They are not
+part of this protocol, and no schema here names a cookie, a token or an auth header.
+
+- **The caller:** `GET /v1/me` answers `User` — `{ id, email, name?, image?, created_at }`
+  — unwrapped. The web app authenticates with a Better Auth session cookie, the CLI with
+  `Authorization: Bearer`; both resolve to this same user (A2). A request that is not signed
+  in, or whose session or token is invalid or expired, is a 401 `authentication_error`.
+- **Ownership:** `AgentSchema` and `SessionSchema` carry `owner_id` — read-only, set by the
+  server from the caller; no request carries it, and an unknown `owner_id` in a request body
+  is stripped like any unknown field. Another user's resource is answered **404**, never 403,
+  so its existence does not leak (A4). During the transition (through #61) `owner_id` is
+  optional in the schema, because a pre-auth server serves resources that have none; from
+  #61 on the server always sets it.
+- **Provider credentials:** write-only. `PUT /v1/provider-credentials/{provider}` takes
+  `PutProviderCredentialRequestSchema` — a discriminated union on `type` with the single
+  member `api_key` today, so `aws`, `gcp_service_account` and `azure` land later as new
+  members — and answers `ProviderCredentialSchema`: metadata only, never the secret.
+  `GET /v1/provider-credentials` lists that metadata for the caller's own credentials, and
+  `DELETE /v1/provider-credentials/{provider}` answers 204. A credential that fails its
+  validation call on save is a 422 `invalid_provider_credential`. A model request for a
+  provider the owner has no credential for ends the turn with the non-retryable
+  `missing_provider_credential` session error, whose message names the provider.
+- **Ids:** a credential's `pcred_` id is this package's, so it is a ULID like the rest
+  (`newProviderCredentialId()`); a user's id is Better Auth's — opaque, with no prefix of
+  ours — and that is exactly what `owner_id` holds.
 
 ## Page cursors
 
@@ -235,15 +288,20 @@ column points at the definition in code; the same list appears in the TSDoc ther
 
 ### Extensions — things Anthropic does not have
 
-| extension                                                        | where                                                   | why                                                                                                                                                                                                                                                                                                                                    |
-| ---------------------------------------------------------------- | ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `seq` on every stored event                                      | `events/common.ts`, `EventSeqSchema`                    | Anthropic orders the log by `processed_at`, which is not monotonic across a crash and collides at millisecond resolution. `seq` is the ordering key, the pagination cursor and the SSE resume position. Starts at 1, +1 per event, per session.                                                                                        |
-| `after_seq` on the events list and stream queries                | `events/api.ts`                                         | Exact resume: `after_seq=0` reads from the start, `after_seq=<last seen seq>` re-reads nothing. Complements `page` and the `last-event-id` header.                                                                                                                                                                                     |
-| `span.model_request_end.error`                                   | `events/span.ts`                                        | Anthropic only has `is_error`. The reason is needed to tell an interrupt (`interrupted`) from a lost brain (`brain_lost`) from a failed model request (`model_error`) — all three close a span without a normal reply.                                                                                                                 |
-| `consumes` and `model` on `span.model_request_start`             | `events/span.ts`                                        | Anthropic marks a user event processed out of band; openharness records the claim in the log: `consumes` lists the `user.message`/`user.interrupt` ids the request answers, `model` is the `provider/model` that served it (per request, so a mid-session model change stays visible). Optional only so a pre-D9 log keeps validating. |
-| `consumes` on `span.model_request_end` and `session.status_idle` | `events/span.ts`, `events/session.ts`                   | P4: an interrupt is answered by the event that ends the work it stopped — the open request's span end, or the turn's idle event when nothing was running — so the claim rides on that event instead of on a request opened for the interrupt. Optional, likewise, for pre-P4 logs.                                                     |
-| `supersedes` on `agent.message` and `span.model_request_end`     | `events/common.ts`, `events/agent.ts`, `events/span.ts` | The `{ from_seq, to_seq }` chunk range the event replaces (D9): replay skips the range and a compaction job deletes it later. No Anthropic equivalent — Anthropic never stores the chunks.                                                                                                                                             |
-| stored `event_start` / `event_delta`                             | `events/stream.ts`                                      | Anthropic only streams the previews. openharness stores each chunk as a normal event (same `type` strings, plus `id`/`seq`/`processed_at`), which is what makes a reply in flight resumable by `seq`; `supersedes` compacts them away. Since P4 this is the only form.                                                                 |
+| extension                                                              | where                                                   | why                                                                                                                                                                                                                                                                                                                                    |
+| ---------------------------------------------------------------------- | ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `seq` on every stored event                                            | `events/common.ts`, `EventSeqSchema`                    | Anthropic orders the log by `processed_at`, which is not monotonic across a crash and collides at millisecond resolution. `seq` is the ordering key, the pagination cursor and the SSE resume position. Starts at 1, +1 per event, per session.                                                                                        |
+| `after_seq` on the events list and stream queries                      | `events/api.ts`                                         | Exact resume: `after_seq=0` reads from the start, `after_seq=<last seen seq>` re-reads nothing. Complements `page` and the `last-event-id` header.                                                                                                                                                                                     |
+| `span.model_request_end.error`                                         | `events/span.ts`                                        | Anthropic only has `is_error`. The reason is needed to tell an interrupt (`interrupted`) from a lost brain (`brain_lost`) from a failed model request (`model_error`) — all three close a span without a normal reply.                                                                                                                 |
+| `consumes` and `model` on `span.model_request_start`                   | `events/span.ts`                                        | Anthropic marks a user event processed out of band; openharness records the claim in the log: `consumes` lists the `user.message`/`user.interrupt` ids the request answers, `model` is the `provider/model` that served it (per request, so a mid-session model change stays visible). Optional only so a pre-D9 log keeps validating. |
+| `consumes` on `span.model_request_end` and `session.status_idle`       | `events/span.ts`, `events/session.ts`                   | P4: an interrupt is answered by the event that ends the work it stopped — the open request's span end, or the turn's idle event when nothing was running — so the claim rides on that event instead of on a request opened for the interrupt. Optional, likewise, for pre-P4 logs.                                                     |
+| `supersedes` on `agent.message` and `span.model_request_end`           | `events/common.ts`, `events/agent.ts`, `events/span.ts` | The `{ from_seq, to_seq }` chunk range the event replaces (D9): replay skips the range and a compaction job deletes it later. No Anthropic equivalent — Anthropic never stores the chunks.                                                                                                                                             |
+| stored `event_start` / `event_delta`                                   | `events/stream.ts`                                      | Anthropic only streams the previews. openharness stores each chunk as a normal event (same `type` strings, plus `id`/`seq`/`processed_at`), which is what makes a reply in flight resumable by `seq`; `supersedes` compacts them away. Since P4 this is the only form.                                                                 |
+| `user` resource and `GET /v1/me`                                       | `resources/user.ts`                                     | Anthropic has no user resource: its API is account-scoped by the key that calls it. openharness has real users (epic #65), and everything a caller does is scoped to the one `/v1/me` names.                                                                                                                                           |
+| `owner_id` on `agent` and `session`                                    | `resources/agent.ts`, `resources/session.ts`            | Every agent and session belongs to exactly one user (A4): nothing is shared, another user's resource is a 404, and no request carries the field. Optional in the schema only while pre-auth data is still served (through #61).                                                                                                        |
+| provider credentials (`pcred_`, the `/v1/provider-credentials` routes) | `resources/provider-credential.ts`, `ids.ts`            | Anthropic holds the model-provider keys; openharness users bring their own (A5). The API is write-only: the secret goes up, metadata comes back, and the credential store's other forms (`aws`, …) become new members of the request union.                                                                                            |
+| `invalid_provider_credential` (422)                                    | `errors.ts`                                             | The one API error type without the `_error` suffix: a credential that failed validation on save (A5).                                                                                                                                                                                                                                  |
+| `missing_provider_credential` session error                            | `events/session.ts`                                     | The owner has no stored credential for the model's provider, so the turn cannot make a model request. Non-retryable — the schema pins `retry_status` to `exhausted` — and the message names the provider.                                                                                                                              |
 
 ### Deviations — subsets and changed shapes
 
