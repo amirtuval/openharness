@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
+import type { EventId } from '../ids'
 import { newEventId } from '../ids'
 import {
   AgentEventSchema,
@@ -15,15 +16,23 @@ import {
   SessionStatusRescheduledEventSchema,
   SessionStatusRunningEventSchema,
   SpanEventSchema,
+  StoredEventDeltaSchema,
   StoredEventSchema,
+  StoredEventStartSchema,
   StreamEventSchema,
   StreamOnlyEventSchema,
+  SupersedesSchema,
   UserEventInputSchema,
   UserEventSchema,
   UserInterruptEventSchema,
   UserMessageEventInputSchema,
   UserMessageEventSchema,
   isStoredEvent,
+} from './index'
+import type {
+  ImmutableAgentMessageEvent,
+  ImmutableStoredEvent,
+  ImmutableUserMessageEvent,
 } from './index'
 
 const eventId = (): string => newEventId()
@@ -100,6 +109,21 @@ const storedSamples = {
       cache_read_input_tokens: 0,
     },
     is_error: null,
+  },
+  event_start: {
+    id: eventId(),
+    type: 'event_start',
+    seq: 10,
+    processed_at: '2026-03-15T10:00:00Z',
+    event: { type: 'agent.message', id: eventId() },
+  },
+  event_delta: {
+    id: eventId(),
+    type: 'event_delta',
+    seq: 11,
+    processed_at: '2026-03-15T10:00:00Z',
+    event_id: eventId(),
+    delta: { type: 'content_delta', index: 0, content: { type: 'text', text: 'Here' } },
   },
 } as const
 
@@ -476,5 +500,231 @@ describe('user event inputs', () => {
       ...input,
     })
     expect(stored.content).toEqual(input.content)
+  })
+})
+
+describe('span.model_request_start claims (D9)', () => {
+  it('still parses without consumes and model: events stored before D9', () => {
+    const parsed = ModelRequestStartEventSchema.parse(storedSamples['span.model_request_start'])
+    expect(parsed.consumes).toBeUndefined()
+    expect(parsed.model).toBeUndefined()
+    expect(StoredEventSchema.safeParse(storedSamples['span.model_request_start']).success).toBe(
+      true,
+    )
+  })
+
+  it('carries the user events the request claims, and the model that served it', () => {
+    const first = newEventId()
+    const second = newEventId()
+    const parsed = ModelRequestStartEventSchema.parse({
+      ...storedSamples['span.model_request_start'],
+      consumes: [first, second],
+      model: 'anthropic/claude-sonnet-5',
+    })
+    expect(parsed.consumes).toEqual([first, second])
+    expect(parsed.model).toBe('anthropic/claude-sonnet-5')
+  })
+
+  it('accepts an empty consumes array, and a `provider/model` model string', () => {
+    expect(
+      ModelRequestStartEventSchema.safeParse({
+        ...storedSamples['span.model_request_start'],
+        consumes: [],
+        model: 'mistral/codestral',
+      }).success,
+    ).toBe(true)
+  })
+
+  it('rejects a consumed id that is not a `sevt_` id', () => {
+    for (const consumed of ['user_01H…', 'sesn_01JQZ8R6X9M4V0W7Y2B3C5D6E7', 'nope']) {
+      expect(
+        ModelRequestStartEventSchema.safeParse({
+          ...storedSamples['span.model_request_start'],
+          consumes: [consumed],
+        }).success,
+        consumed,
+      ).toBe(false)
+    }
+  })
+
+  it('rejects a model that is not a non-empty string', () => {
+    for (const model of ['', 42, null]) {
+      expect(
+        ModelRequestStartEventSchema.safeParse({
+          ...storedSamples['span.model_request_start'],
+          model,
+        }).success,
+        String(model),
+      ).toBe(false)
+    }
+  })
+})
+
+describe('supersedes (D9)', () => {
+  it('accepts a range on the message that replaces its chunks', () => {
+    const parsed = AgentMessageEventSchema.parse({
+      ...storedSamples['agent.message'],
+      supersedes: { from_seq: 10, to_seq: 14 },
+    })
+    expect(parsed.supersedes).toEqual({ from_seq: 10, to_seq: 14 })
+  })
+
+  it('accepts a range on the span end that closes a request without a message', () => {
+    for (const error of [undefined, { type: 'interrupted' }, { type: 'brain_lost' }]) {
+      expect(
+        ModelRequestEndEventSchema.safeParse({
+          ...storedSamples['span.model_request_end'],
+          supersedes: { from_seq: 7, to_seq: 7 },
+          ...(error === undefined ? {} : { is_error: true, error }),
+        }).success,
+        error?.type ?? 'no error',
+      ).toBe(true)
+    }
+  })
+
+  it('accepts a single-event range: a request that streamed no text supersedes its start', () => {
+    expect(SupersedesSchema.safeParse({ from_seq: 5, to_seq: 5 }).success).toBe(true)
+  })
+
+  it('rejects a range whose from_seq is after its to_seq', () => {
+    expect(SupersedesSchema.safeParse({ from_seq: 9, to_seq: 3 }).success).toBe(false)
+    expect(
+      StoredEventSchema.safeParse({
+        ...storedSamples['agent.message'],
+        supersedes: { from_seq: 9, to_seq: 3 },
+      }).success,
+    ).toBe(false)
+    expect(
+      ModelRequestEndEventSchema.safeParse({
+        ...storedSamples['span.model_request_end'],
+        supersedes: { from_seq: 9, to_seq: 3 },
+      }).success,
+    ).toBe(false)
+  })
+
+  it('rejects a seq bound that is not a positive integer', () => {
+    for (const bad of [0, -1, 1.5]) {
+      expect(
+        SupersedesSchema.safeParse({ from_seq: bad, to_seq: 4 }).success,
+        `from_seq ${bad}`,
+      ).toBe(false)
+      expect(
+        SupersedesSchema.safeParse({ from_seq: 1, to_seq: bad }).success,
+        `to_seq ${bad}`,
+      ).toBe(false)
+    }
+  })
+
+  it('leaves supersedes off events that supersede nothing: pre-D9 events still parse', () => {
+    expect(StoredEventSchema.safeParse(storedSamples['agent.message']).success).toBe(true)
+    const parsed = AgentMessageEventSchema.parse(storedSamples['agent.message'])
+    expect(parsed.supersedes).toBeUndefined()
+  })
+})
+
+describe('stored chunks (D9)', () => {
+  it('parses a stored event_start as a stored event', () => {
+    const parsed = StoredEventSchema.parse(storedSamples.event_start)
+    expect(parsed.type).toBe('event_start')
+    expect(StoredEventStartSchema.safeParse(storedSamples.event_start).success).toBe(true)
+    expect(parsed.type === 'event_start' && parsed.event.id).toBe(
+      storedSamples.event_start.event.id,
+    )
+  })
+
+  it('parses a stored event_delta as a stored event', () => {
+    const parsed = StoredEventSchema.parse(storedSamples.event_delta)
+    expect(parsed.type).toBe('event_delta')
+    expect(StoredEventDeltaSchema.safeParse(storedSamples.event_delta).success).toBe(true)
+    expect(parsed.type === 'event_delta' && parsed.event_id).toBe(
+      storedSamples.event_delta.event_id,
+    )
+    expect(parsed.type === 'event_delta' && parsed.delta.content.text).toBe('Here')
+  })
+
+  it('rejects a chunk without the stored envelope: that is the stream-only form', () => {
+    const { id: _id, seq: _seq, processed_at: _processedAt, ...start } = storedSamples.event_start
+    expect(StoredEventSchema.safeParse(start).success).toBe(false)
+    expect(EventStartSchema.safeParse(start).success).toBe(true)
+  })
+
+  it('parses a stored chunk as its stream-only shape too, with the envelope dropped', () => {
+    // The stored form is a superset of the preview, which is what lets a reader that does not
+    // care which form it holds read `event` / `event_id` / `delta` either way.
+    expect(EventStartSchema.parse(storedSamples.event_start)).toEqual({
+      type: 'event_start',
+      event: storedSamples.event_start.event,
+    })
+    expect(EventDeltaSchema.parse(storedSamples.event_delta)).toEqual({
+      type: 'event_delta',
+      event_id: storedSamples.event_delta.event_id,
+      delta: storedSamples.event_delta.delta,
+    })
+  })
+
+  it('tells stored chunks from stream-only chunks by seq', () => {
+    const previewStart = { type: 'event_start', event: storedSamples.event_start.event } as const
+    const previewDelta = {
+      type: 'event_delta',
+      event_id: storedSamples.event_delta.event_id,
+      delta: storedSamples.event_delta.delta,
+    } as const
+
+    const stored = StreamEventSchema.parse(storedSamples.event_start)
+    const preview = StreamEventSchema.parse(previewStart)
+    expect(isStoredEvent(stored)).toBe(true)
+    expect(isStoredEvent(preview)).toBe(false)
+    expect(isStoredEvent(StreamEventSchema.parse(storedSamples.event_delta))).toBe(true)
+    expect(isStoredEvent(StreamEventSchema.parse(previewDelta))).toBe(false)
+  })
+
+  it('accepts both chunk forms in the stream union', () => {
+    for (const sample of [storedSamples.event_start, storedSamples.event_delta]) {
+      expect(StreamEventSchema.safeParse(sample).success, sample.type).toBe(true)
+      expect(StreamOnlyEventSchema.safeParse(sample).success, sample.type).toBe(true)
+    }
+    expect(
+      StreamEventSchema.safeParse({
+        type: 'event_delta',
+        event_id: storedSamples.event_delta.event_id,
+        delta: storedSamples.event_delta.delta,
+      }).success,
+    ).toBe(true)
+  })
+})
+
+describe('the immutable event types (D9)', () => {
+  it('makes a stored event and everything inside it readonly', () => {
+    const event: ImmutableStoredEvent = StoredEventSchema.parse(storedSamples['agent.message'])
+
+    // Each assignment below is a compile error — the `@ts-expect-error` is what proves it.
+    // They run against a throwaway parsed value, so nothing here is frozen or observed.
+    // @ts-expect-error — `seq` is readonly: a stored event is never renumbered
+    event.seq = 2
+    // @ts-expect-error — `id` is readonly, and it is still the branded `EventId`
+    event.id = newEventId()
+    if (event.type === 'agent.message') {
+      // @ts-expect-error — nested fields are readonly: the text of an event never changes
+      event.content[0]!.text = 'rewritten'
+      // @ts-expect-error — and so is the array: content cannot be replaced block by block
+      event.content[0] = { type: 'text', text: 'appended' }
+      // @ts-expect-error — a `supersedes` range is readonly through and through
+      event.supersedes = { from_seq: 1, to_seq: 2 }
+    }
+
+    expect(event.type).toBe('agent.message')
+  })
+
+  it('keeps branded ids usable: DeepReadonly must not turn `EventId` into an object', () => {
+    const event: ImmutableUserMessageEvent = UserMessageEventSchema.parse(
+      storedSamples['user.message'],
+    )
+    const id: EventId = event.id
+    expect(id).toBe(storedSamples['user.message'].id)
+
+    const typed: ImmutableAgentMessageEvent = AgentMessageEventSchema.parse(
+      storedSamples['agent.message'],
+    )
+    expect(typed.content.map((block) => block.text)).toEqual(['hi'])
   })
 })

@@ -2,20 +2,34 @@ import { z } from 'zod'
 
 import { TextBlockSchema } from '../content'
 import { EventIdSchema } from '../ids'
-import { EVENT_TYPES } from './common'
+import type { DeepReadonly } from '../readonly'
+import { EVENT_TYPES, EventSeqSchema, ProcessedAtSchema } from './common'
 
 /**
- * Stream-only preview events.
+ * Preview events: `event_start` and `event_delta`, in the two forms they take.
  *
  * A connection opts in per event type with the `event_deltas[]` query parameter on
- * `GET /v1/sessions/{session_id}/events/stream`. Previews are a best-effort display aid: the
- * buffers event is the record, and a client that ignores previews still receives a complete,
+ * `GET /v1/sessions/{session_id}/events/stream`. A preview is a best-effort display aid: the
+ * stored event is the record, and a client that ignores previews still receives a complete,
  * correct stream.
  *
- * Unlike stored events these carry no `id`, no `seq` and no `processed_at` of their own. The
- * only identifier they carry is the id of the event they preview, and the identifier always
- * lines up: `event_start.event.id`, every `event_delta.event_id` and the stored event's `id`
- * are the same `sevt_` value.
+ * Since D9 (issue #46) a streamed reply is stored chunk by chunk, so `event_start` and
+ * `event_delta` are **stored events** with the usual envelope — `id`, `seq`, `processed_at` —
+ * and {@link StoredEventStartSchema} / {@link StoredEventDeltaSchema} below are that form.
+ * The original stream-only form — no envelope of its own, published to live connections while
+ * the reply streams — is {@link EventStartSchema} / {@link EventDeltaSchema}, kept unchanged
+ * for the servers, stores and clients that still publish and read it; the pair is removed in
+ * phase P4.
+ *
+ * A reader tells the two apart by `seq`: the stored form has one, the preview does not (see
+ * `isStoredEvent()` in `union.ts`, and `STREAM_ONLY_EVENT_TYPES` in `common.ts`). The stored
+ * form is a superset of the preview — parsing a stored chunk with the stream-only schema
+ * succeeds and drops the envelope — so a reader that does not care which form it holds can
+ * always read `event` / `event_id` / `delta`.
+ *
+ * In both forms the only identifier a chunk announces is the id of the event it previews, and
+ * the identifiers always line up: `event_start.event.id`, every `event_delta.event_id` and the
+ * stored event's `id` are the same `sevt_` value.
  *
  * The wire format is deliberately *not* the Messages API streaming format — the delta type is
  * `content_delta`, not `content_block_delta`, and there are no per-block start/stop events.
@@ -75,7 +89,44 @@ export const EventDeltaSchema = z.object({
 
 export type EventDelta = z.infer<typeof EventDeltaSchema>
 
-/** Any stream-only event. */
+/**
+ * The stored form of an `event_start` (D9): the preview's fields plus the stored envelope.
+ *
+ * Appended by the brain as a reply starts streaming (phase P3). The message it previews is
+ * stored later under `event.id`, and either that `agent.message` — or the
+ * `span.model_request_end` that closes the request without one — carries a `supersedes` range
+ * over this event and the deltas that follow it.
+ */
+export const StoredEventStartSchema = EventStartSchema.extend({
+  id: EventIdSchema,
+  seq: EventSeqSchema,
+  processed_at: ProcessedAtSchema,
+})
+
+export type StoredEventStart = z.infer<typeof StoredEventStartSchema>
+
+/** {@link StoredEventStart}, deep-readonly: the shape a store returns (D9). */
+export type ImmutableStoredEventStart = DeepReadonly<StoredEventStart>
+
+/** The stored form of an `event_delta` (D9): one streamed fragment, as a log entry. */
+export const StoredEventDeltaSchema = EventDeltaSchema.extend({
+  id: EventIdSchema,
+  seq: EventSeqSchema,
+  processed_at: ProcessedAtSchema,
+})
+
+export type StoredEventDelta = z.infer<typeof StoredEventDeltaSchema>
+
+/** {@link StoredEventDelta}, deep-readonly: the shape a store returns (D9). */
+export type ImmutableStoredEventDelta = DeepReadonly<StoredEventDelta>
+
+/**
+ * Any stream-only event: the preview pair as a live connection receives it, with no envelope.
+ *
+ * Not to be confused with {@link StoredEventStartSchema} / {@link StoredEventDeltaSchema} —
+ * since D9 those are the *stored* forms of the same two event names, and they are what
+ * `StoredEventSchema` carries. This union is unchanged from before D9 and is removed in P4.
+ */
 export const StreamOnlyEventSchema = z.discriminatedUnion('type', [
   EventStartSchema,
   EventDeltaSchema,

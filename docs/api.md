@@ -72,21 +72,56 @@ The log is the source of truth, and `seq` is the order it happened in: `1`, `2`,
 session. It is also the SSE `id` and the resume position, so a client that reconnects with
 `last-event-id: 7` gets `8` next — never `7` twice, never a gap.
 
-| event                        | who writes it | what it means                                         |
-| ---------------------------- | ------------- | ----------------------------------------------------- |
-| `user.message`               | the client    | a message, until the brain claims it (`processed_at`) |
-| `user.interrupt`             | the client    | stop the turn in flight                               |
-| `agent.message`              | the brain     | a reply, under the `sevt_` id its previews announced  |
-| `session.status_running`     | the brain     | a turn started (also after a retry)                   |
-| `session.status_idle`        | the brain     | the turn ended; the session is waiting for input      |
-| `session.status_rescheduled` | the brain     | a transient failure; it is retrying                   |
-| `session.error`              | the brain     | what went wrong, and whether it is retrying           |
-| `span.model_request_start`   | the brain     | a model request began                                 |
-| `span.model_request_end`     | the brain     | it finished, with `model_usage` and any error         |
+| event                        | who writes it | what it means                                        |
+| ---------------------------- | ------------- | ---------------------------------------------------- |
+| `user.message`               | the client    | a message, until the brain claims it                 |
+| `user.interrupt`             | the client    | stop the turn in flight                              |
+| `agent.message`              | the brain     | a reply, under the `sevt_` id its previews announced |
+| `session.status_running`     | the brain     | a turn started (also after a retry)                  |
+| `session.status_idle`        | the brain     | the turn ended; the session is waiting for input     |
+| `session.status_rescheduled` | the brain     | a transient failure; it is retrying                  |
+| `session.error`              | the brain     | what went wrong, and whether it is retrying          |
+| `span.model_request_start`   | the brain     | a model request began, and the user events it claims |
+| `span.model_request_end`     | the brain     | it finished, with `model_usage` and any error        |
+| `event_start`                | the brain     | a reply started streaming — a stored chunk since D9  |
+| `event_delta`                | the brain     | a streamed fragment of it — a stored chunk since D9  |
 
-`event_start` and `event_delta` are stream-only: they never enter the log, and they carry no
-`seq`. They preview an `agent.message` under the id it will be stored as, which is how a UI
-renders a reply while it is still being written and then swaps in the real event.
+### Claims, chunks and superseding (D9)
+
+The log is immutable: once an event is appended no field of it changes, and the only deletion
+is compaction ([issue #46](https://github.com/amirtuval/openharness/issues/46)). Four fields
+carry that:
+
+- `span.model_request_start` lists `consumes`, the ids of the `user.message` / `user.interrupt`
+  events the request answers, and `model`, the `provider/model` that served it. The claim _is_
+  that append: an event already consumed by one span cannot be consumed again. `processed_at`
+  stays in the payload and is derived on read from the span that consumed the event.
+- `event_start` and `event_delta` are **stored events**, with `id`, `seq` and `processed_at`
+  like any other — a reply in flight is part of the log, so reconnecting mid-reply is
+  `after_seq` / `last-event-id` alone. They keep the names and shapes of Anthropic's previews,
+  and a connection that asked for `event_deltas[]=agent.message` still gets the envelope-less
+  previews on the live stream.
+- The event that finishes a reply — the `agent.message`, or the `span.model_request_end` that
+  closes a request that stored none (an interrupt, a brain that died, a reply that streamed no
+  text) — carries `supersedes: { from_seq, to_seq }`, the chunk range it replaces, inclusive
+  and with `from_seq <= to_seq`. **Replay skips superseded chunks**, so a resumed client sees
+  the reply once, whole. The chunks stay for a retention window and are then deleted by
+  compaction; whether compaction has run is invisible to a reader.
+
+```json
+{"type":"span.model_request_start","id":"sevt_…","seq":3,"processed_at":"…",
+ "consumes":["sevt_…","sevt_…"],"model":"anthropic/claude-sonnet-5"}
+{"type":"event_start","id":"sevt_…","seq":4,"processed_at":"…",
+ "event":{"type":"agent.message","id":"sevt_…"}}
+{"type":"event_delta","id":"sevt_…","seq":5,"processed_at":"…","event_id":"sevt_…",
+ "delta":{"type":"content_delta","index":0,"content":{"type":"text","text":"Hello"}}}
+{"type":"agent.message","id":"sevt_…","seq":6,"processed_at":"…",
+ "content":[{"type":"text","text":"Hello there"}],"supersedes":{"from_seq":4,"to_seq":5}}
+```
+
+`consumes`, `model` and `supersedes` are optional in the schema so that a log written before
+D9 keeps validating; from phase P3 on the server writes all three on every event that takes
+them.
 
 ## Reading the stream
 
@@ -116,6 +151,9 @@ and **one** `event_delta` carrying the whole text accumulated so far (`index: 0`
 follow continue from there, and the stored `agent.message` — the same `sevt_` id — replaces the
 preview as it always does. A delta that arrives while that snapshot is being read is not
 delivered twice.
+
+From phase P3 on the chunks are stored events instead (see above), so the replay itself carries
+a reply in flight — minus any chunk already superseded — and no snapshot is needed.
 
 ## Authentication
 

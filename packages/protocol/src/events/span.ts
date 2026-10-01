@@ -1,7 +1,8 @@
 import { z } from 'zod'
 
 import { EventIdSchema } from '../ids'
-import { EVENT_TYPES, EventSeqSchema, ProcessedAtSchema } from './common'
+import type { DeepReadonly } from '../readonly'
+import { EVENT_TYPES, EventSeqSchema, ProcessedAtSchema, SupersedesSchema } from './common'
 
 /**
  * Span events: observability markers that wrap a model request.
@@ -54,15 +55,47 @@ export const SpanErrorSchema = z.object({
 
 export type SpanError = z.infer<typeof SpanErrorSchema>
 
-/** A model request started. */
+/**
+ * A model request started, and the user events it claims.
+ *
+ * Since D9 (issue #46) this event is also the *claim*: the request it opens answers exactly
+ * the user events its `consumes` lists, so "which user message is still waiting for an answer"
+ * is a question a reader answers from the log itself, with no mutable `processed_at` column
+ * behind it. A claim is ordinary event data: an event that is already consumed by one span
+ * cannot be consumed again, and the store enforces that when the span is appended — atomic and
+ * fenced like every other write (phase P2a).
+ */
 export const ModelRequestStartEventSchema = z.object({
   id: EventIdSchema,
   type: z.literal(EVENT_TYPES.modelRequestStart),
   seq: EventSeqSchema,
   processed_at: ProcessedAtSchema,
+  /**
+   * // extension: the user events this request claims — the `sevt_` ids of the
+   * `user.message` / `user.interrupt` events it folds into the request.
+   *
+   * Optional for the D9 transition only, so events stored before D9 and writers that have not
+   * been ported yet still validate; phase P3 makes the brain set it on every request it
+   * appends, and it is then never absent in a log written from scratch. An empty array claims
+   * nothing.
+   */
+  consumes: z.array(EventIdSchema).optional(),
+  /**
+   * // extension: the model that served this request, a Mastra router string
+   * (`provider/model`) — the same spelling as `model.id` on the agent.
+   *
+   * It is recorded per request rather than read off the agent so that a session which changes
+   * models mid-conversation keeps, for every request, the model that actually ran — per-model
+   * context budgets and the usage the span end reports are then both attributable. Optional
+   * for the D9 transition only, like `consumes` above.
+   */
+  model: z.string().min(1).optional(),
 })
 
 export type ModelRequestStartEvent = z.infer<typeof ModelRequestStartEventSchema>
+
+/** {@link ModelRequestStartEvent}, deep-readonly: the shape a store returns (D9). */
+export type ImmutableModelRequestStartEvent = DeepReadonly<ModelRequestStartEvent>
 
 /**
  * A model request finished.
@@ -90,9 +123,21 @@ export const ModelRequestEndEventSchema = z.object({
    * writes the two consistently.
    */
   error: SpanErrorSchema.optional(),
+  /**
+   * // extension: the chunk range this span end replaces (D9, issue #46).
+   *
+   * A request whose streamed chunks will have no `agent.message` of their own — it was
+   * interrupted before storing one, it streamed no text at all, or a recovering brain closes
+   * it with `brain_lost` after a crash — supersedes the orphaned chunks here instead. See
+   * {@link SupersedesSchema} for the range's meaning and who reads it.
+   */
+  supersedes: SupersedesSchema.optional(),
 })
 
 export type ModelRequestEndEvent = z.infer<typeof ModelRequestEndEventSchema>
+
+/** {@link ModelRequestEndEvent}, deep-readonly: the shape a store returns (D9). */
+export type ImmutableModelRequestEndEvent = DeepReadonly<ModelRequestEndEvent>
 
 /** Any stored span event. */
 export const SpanEventSchema = z.discriminatedUnion('type', [

@@ -57,16 +57,17 @@ src/
   pagination.ts         page cursors: `seq` (events) and keyset `key` (agents, sessions)
   errors.ts             the Anthropic error envelope, error types and status codes
   content.ts            message content blocks (text only in v1)
+  readonly.ts           DeepReadonly, the helper the immutable event types are built with
   resources/
     agent.ts            the agent resource + its endpoints
     session.ts          the session resource + its endpoints
   events/
-    common.ts           the event vocabulary and the fields every stored event carries
+    common.ts           the event vocabulary, the fields every stored event carries, supersedes
     user.ts             user.message, user.interrupt (+ the shapes a client sends)
     agent.ts            agent.message
     session.ts          status events, session.error, stop_reason
-    span.ts             span.model_request_start / _end, model_usage
-    stream.ts           stream-only event_start / event_delta
+    span.ts             span.model_request_start / _end, model_usage, claims (consumes/model)
+    stream.ts           event_start / event_delta: stream-only previews and their stored forms
     union.ts            StoredEvent, StreamEvent and isStoredEvent()
     api.ts              the three events endpoints
   fixtures/index.ts     subpath `@openharness/protocol/fixtures`
@@ -94,20 +95,24 @@ Two entry points, named in `package.json`'s `exports`. Both resolve to built out
 
 **Events**
 
-| export                                                                                                                                                                                                    | what it is                                       |
-| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
-| `EVENT_TYPES`, `STORED_EVENT_TYPES`, `STREAM_ONLY_EVENT_TYPES`, `EventType`, `StoredEventType`                                                                                                            | the vocabulary as constants and types            |
-| `UserMessageEventSchema`, `UserInterruptEventSchema`, `UserEventSchema`                                                                                                                                   | stored user events                               |
-| `UserMessageEventInputSchema`, `UserInterruptEventInputSchema`, `UserEventInputSchema`                                                                                                                    | the same shapes as a client sends them           |
-| `AgentMessageEventSchema`, `AgentEventSchema`                                                                                                                                                             | stored agent events                              |
-| `SessionStatusRunningEventSchema`, `SessionStatusIdleEventSchema`, `SessionStatusRescheduledEventSchema`, `SessionErrorEventSchema`, `SessionEventSchema`                                                 | stored session events                            |
-| `SessionErrorSchema`, `SessionErrorTypeSchema`, `RetryStatusSchema`, `RetryStatusTypeSchema`                                                                                                              | the typed `session.error` payload                |
-| `ModelRequestStartEventSchema`, `ModelRequestEndEventSchema`, `ModelUsageSchema`, `SpanEventSchema`, `SpanErrorSchema`, `SpanErrorTypeSchema`                                                             | span events, usage, and the span error extension |
-| `EventStartSchema`, `EventDeltaSchema`, `ContentDeltaSchema`, `DeltaTypeSchema`, `StreamOnlyEventSchema`                                                                                                  | stream-only previews                             |
-| `StoredEventSchema` / `StoredEvent`, `StreamEventSchema` / `StreamEvent`, `isStoredEvent()`                                                                                                               | the unions everything else codes against         |
-| `EventSeqSchema`, `AfterSeqSchema`, `ProcessedAtSchema`, `QueuedProcessedAtSchema`                                                                                                                        | the fields every stored event carries            |
-| `SendEventsRequestSchema`, `SendEventsResponseSchema`, `ListEventsQuerySchema`, `ListEventsResponseSchema`, `StreamEventsQuerySchema`, `StoredEventTypeSchema`, `DEFAULT_EVENT_ORDER`, `MAX_EVENT_DELTAS` | the events endpoints                             |
-| `TextBlockSchema`, `ContentBlockSchema`, `ContentBlocksSchema`                                                                                                                                            | message content                                  |
+| export                                                                                                                                                                                                    | what it is                                              |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| `EVENT_TYPES`, `STORED_EVENT_TYPES`, `STREAM_ONLY_EVENT_TYPES`, `EventType`, `StoredEventType`                                                                                                            | the vocabulary as constants and types                   |
+| `UserMessageEventSchema`, `UserInterruptEventSchema`, `UserEventSchema`                                                                                                                                   | stored user events                                      |
+| `UserMessageEventInputSchema`, `UserInterruptEventInputSchema`, `UserEventInputSchema`                                                                                                                    | the same shapes as a client sends them                  |
+| `AgentMessageEventSchema`, `AgentEventSchema`                                                                                                                                                             | stored agent events                                     |
+| `SessionStatusRunningEventSchema`, `SessionStatusIdleEventSchema`, `SessionStatusRescheduledEventSchema`, `SessionErrorEventSchema`, `SessionEventSchema`                                                 | stored session events                                   |
+| `SessionErrorSchema`, `SessionErrorTypeSchema`, `RetryStatusSchema`, `RetryStatusTypeSchema`                                                                                                              | the typed `session.error` payload                       |
+| `ModelRequestStartEventSchema`, `ModelRequestEndEventSchema`, `ModelUsageSchema`, `SpanEventSchema`, `SpanErrorSchema`, `SpanErrorTypeSchema`                                                             | span events, usage, and the span error extension        |
+| `EventStartSchema`, `EventDeltaSchema`, `ContentDeltaSchema`, `DeltaTypeSchema`, `StreamOnlyEventSchema`                                                                                                  | stream-only previews                                    |
+| `StoredEventStartSchema` / `StoredEventStart`, `StoredEventDeltaSchema` / `StoredEventDelta`                                                                                                              | the stored forms of the chunks (D9)                     |
+| `SupersedesSchema` / `Supersedes`                                                                                                                                                                         | the `{ from_seq, to_seq }` a stored event replaces (D9) |
+| `StoredEventSchema` / `StoredEvent`, `StreamEventSchema` / `StreamEvent`, `isStoredEvent()`                                                                                                               | the unions everything else codes against                |
+| `ImmutableStoredEvent`, `ImmutableStreamEvent` and one `Immutable<Member>` per type above                                                                                                                 | the same unions and members, deep-readonly (D9)         |
+| `DeepReadonly<T>`                                                                                                                                                                                         | the mapped type the `Immutable*` aliases are built with |
+| `EventSeqSchema`, `AfterSeqSchema`, `ProcessedAtSchema`, `QueuedProcessedAtSchema`                                                                                                                        | the fields every stored event carries                   |
+| `SendEventsRequestSchema`, `SendEventsResponseSchema`, `ListEventsQuerySchema`, `ListEventsResponseSchema`, `StreamEventsQuerySchema`, `StoredEventTypeSchema`, `DEFAULT_EVENT_ORDER`, `MAX_EVENT_DELTAS` | the events endpoints                                    |
+| `TextBlockSchema`, `ContentBlockSchema`, `ContentBlocksSchema`                                                                                                                                            | message content                                         |
 
 **Errors**
 
@@ -143,6 +148,7 @@ Builders for every resource and event, and one realistic sample session.
 | `makeStatusRunning()`, `makeStatusIdle()`, `makeStatusRescheduled()`, `makeSessionError()` | session status builders                                                                                                               |
 | `makeModelRequestStart()`, `makeModelRequestEnd()`                                         | span builders; the end builder takes the start it closes                                                                              |
 | `makeEventStart()`, `makeEventDelta()`, `makeContentDelta()`                               | stream-preview builders                                                                                                               |
+| `makeStoredEventStart()`, `makeStoredEventDelta()`                                         | the stored forms of the two previews: the same shapes plus the envelope (D9)                                                          |
 | `fixtureTimestamp()`, `FIXTURE_MODEL_USAGE`                                                | a fixed epoch offset by seconds; default token counts                                                                                 |
 | `sampleAgent`, `sampleSession`                                                             | one of each resource                                                                                                                  |
 | `sampleSessionHistory`                                                                     | a full turn, a steering message, an interrupt, a retried error, and a queued message — 32 events, `seq` 1..32                         |
@@ -180,6 +186,41 @@ carries, so two spellings can never mean the same page.
 Clients never parse a cursor, and `PageCursorStringSchema` — what `page` is validated with —
 accepts either kind. Which kind an endpoint expects is the server's business.
 
+## The immutable log (D9, #46)
+
+The log is append-only, and [D9](https://github.com/amirtuval/openharness/issues/46) is what
+makes the types say so. This package is its first phase and is **additive**: it describes the
+shapes the later phases write, and changes nothing about what today's brain, server or clients
+send. The rules, and where each one lives:
+
+- **Claims are events.** `span.model_request_start` carries `consumes` — the ids of the
+  `user.message` / `user.interrupt` events the request answers — and `model`, the
+  `provider/model` that served it. Both are optional until the brain sets them on every
+  request (P3); `processed_at` on a user event becomes a value the store derives on read,
+  not a column an update rewrites (P2a).
+- **Streamed chunks are stored events.** `event_start` and `event_delta` keep their names and
+  shapes (D2) and gain the stored envelope (`id`, `seq`, `processed_at`), so a reply in flight
+  is resumable by `seq` like anything else. The stream-only schemas, `StreamOnlyEventSchema`
+  and `STREAM_ONLY_EVENT_TYPES` stay for the transition and are removed in P4.
+- **The event that finishes a reply supersedes its chunks.** The stored `agent.message` — and,
+  for a request that ends without one (an interrupt, a `brain_lost` recovery, a reply that
+  streamed no text), the `span.model_request_end` — carries `supersedes: { from_seq, to_seq }`,
+  inclusive, `from_seq <= to_seq` enforced by the schema. Replay skips the range; the store
+  deletes it after the retention window (P2a).
+- **Stored events are deep-readonly.** `ImmutableStoredEvent`, `ImmutableStreamEvent` and one
+  `Immutable<Member>` per stored event are `DeepReadonly<…>` views of the schema-inferred
+  types (`DeepReadonly` is exported too). The plain names (`StoredEvent`, `AgentMessageEvent`,
+  …) are still the mutable `z.infer` shapes, and stay that way until the packages that need to
+  change do so in their own phases: making them the immutable ones today breaks
+  `packages/session` (`StoredEvent[]` returned into `ListEventsResponse.data`) and
+  `packages/client` (the fake brain rewrites `processed_at` on a stored event), and neither is
+  this package's to edit. The domain sub-unions (`UserEvent`, `SessionEvent`, …) have no
+  immutable twin yet; a consumer that needs one can spell it as the union of the
+  `Immutable<Member>` types.
+- **A stored chunk and a stream-only chunk are told apart by `seq`**, not by `type` — see
+  `isStoredEvent()`. Everything that reads a stream keeps working either way: the stored form
+  is a superset, so the stream-only schemas parse it and drop the envelope.
+
 ## Deviations and extensions
 
 Everything below is a deliberate difference from Anthropic's Managed Agents API. The `where`
@@ -187,11 +228,14 @@ column points at the definition in code; the same list appears in the TSDoc ther
 
 ### Extensions — things Anthropic does not have
 
-| extension                                         | where                                | why                                                                                                                                                                                                                                             |
-| ------------------------------------------------- | ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `seq` on every stored event                       | `events/common.ts`, `EventSeqSchema` | Anthropic orders the log by `processed_at`, which is not monotonic across a crash and collides at millisecond resolution. `seq` is the ordering key, the pagination cursor and the SSE resume position. Starts at 1, +1 per event, per session. |
-| `after_seq` on the events list and stream queries | `events/api.ts`                      | Exact resume: `after_seq=0` reads from the start, `after_seq=<last seen seq>` re-reads nothing. Complements `page` and the `last-event-id` header.                                                                                              |
-| `span.model_request_end.error`                    | `events/span.ts`                     | Anthropic only has `is_error`. The reason is needed to tell an interrupt (`interrupted`) from a lost brain (`brain_lost`) from a failed model request (`model_error`) — all three close a span without a normal reply.                          |
+| extension                                                    | where                                                   | why                                                                                                                                                                                                                                                                                                                                            |
+| ------------------------------------------------------------ | ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `seq` on every stored event                                  | `events/common.ts`, `EventSeqSchema`                    | Anthropic orders the log by `processed_at`, which is not monotonic across a crash and collides at millisecond resolution. `seq` is the ordering key, the pagination cursor and the SSE resume position. Starts at 1, +1 per event, per session.                                                                                                |
+| `after_seq` on the events list and stream queries            | `events/api.ts`                                         | Exact resume: `after_seq=0` reads from the start, `after_seq=<last seen seq>` re-reads nothing. Complements `page` and the `last-event-id` header.                                                                                                                                                                                             |
+| `span.model_request_end.error`                               | `events/span.ts`                                        | Anthropic only has `is_error`. The reason is needed to tell an interrupt (`interrupted`) from a lost brain (`brain_lost`) from a failed model request (`model_error`) — all three close a span without a normal reply.                                                                                                                         |
+| `consumes` and `model` on `span.model_request_start`         | `events/span.ts`                                        | Anthropic marks a user event processed out of band; openharness records the claim in the log: `consumes` lists the `user.message`/`user.interrupt` ids the request answers, `model` is the `provider/model` that served it (per request, so a mid-session model change stays visible). Optional until phase P3 fills them in on every request. |
+| `supersedes` on `agent.message` and `span.model_request_end` | `events/common.ts`, `events/agent.ts`, `events/span.ts` | The `{ from_seq, to_seq }` chunk range the event replaces (D9): replay skips the range and a compaction job deletes it later. No Anthropic equivalent — Anthropic never stores the chunks.                                                                                                                                                     |
+| stored `event_start` / `event_delta`                         | `events/stream.ts`                                      | Anthropic only streams the previews. openharness stores each chunk as a normal event (same `type` strings, plus `id`/`seq`/`processed_at`), which is what makes a reply in flight resumable by `seq`; `supersedes` compacts them away.                                                                                                         |
 
 ### Deviations — subsets and changed shapes
 
@@ -233,7 +277,10 @@ places, in this order:
    that matches who writes it — `QueuedProcessedAtSchema` for user events, `ProcessedAtSchema`
    for anything the server produces. Add `// extension:` to any field Anthropic does not have.
 3. **Add it to the domain union** at the bottom of the same file, then to `StoredEventSchema`
-   and `StreamEventSchema` in `union.ts`.
+   and `StreamEventSchema` in `union.ts`. A stored type that reuses a `type` string an
+   existing member already has cannot go _inside_ the discriminated union — zod throws on a
+   duplicate discriminator value when it parses — so it is added to the surrounding
+   `z.union` instead, the way the stored chunks are.
 4. **Add a builder** in `src/fixtures/index.ts` and a valid sample to `storedSamples` in
    `src/events/events.test.ts` — that table is asserted against `STORED_EVENT_TYPES`, so a
    type without a sample fails the suite.
