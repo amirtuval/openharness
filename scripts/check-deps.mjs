@@ -20,6 +20,7 @@ const SHARED_CONFIG = '@openharness/config'
 const ALLOWED = {
   [SHARED_CONFIG]: [],
   '@openharness/protocol': [],
+  '@openharness/vault': [],
   '@openharness/hands': ['@openharness/protocol'],
   '@openharness/session': ['@openharness/protocol'],
   '@openharness/client': ['@openharness/protocol'],
@@ -29,6 +30,7 @@ const ALLOWED = {
     '@openharness/session',
     '@openharness/brain',
     '@openharness/hands',
+    '@openharness/vault',
   ],
   '@openharness/web': ['@openharness/protocol', '@openharness/client'],
   '@openharness/cli': ['@openharness/protocol', '@openharness/client'],

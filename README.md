@@ -114,6 +114,7 @@ apps/
 packages/
   config/    @openharness/config   shared tsconfig / ESLint / Prettier / Vitest config
   protocol/  @openharness/protocol shared wire types and schemas
+  vault/     @openharness/vault    envelope encryption for user secrets
   session/   @openharness/session  the append-only session event log
   hands/     @openharness/hands    sandboxes and tools
   brain/     @openharness/brain    the stateless harness loop

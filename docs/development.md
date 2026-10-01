@@ -14,7 +14,7 @@ yarn install --immutable # exact install from yarn.lock
 
 ```
 apps/      server, web, tui      (things you run)
-packages/  config, protocol, session, hands, brain, client
+packages/  config, protocol, vault, session, hands, brain, client
 e2e/       cross-package tests
 docs/      high level docs, this file included
 scripts/   repo scripts (check-deps.mjs)
