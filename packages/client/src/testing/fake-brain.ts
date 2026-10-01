@@ -3,6 +3,7 @@ import {
   EVENT_TYPES,
   MAX_PAGE_LIMIT,
   encodeSeqCursor,
+  isStoredEvent,
   newEventId,
   tryDecodePageCursor,
 } from '@openharness/protocol'
@@ -29,6 +30,7 @@ import type {
 
 import type { StreamOptions } from '../events/stream'
 import { AsyncQueue, sleep } from '../internal/async'
+import { deepFreeze } from './freeze'
 
 /**
  * The in-memory brain behind one fake session: its log, its script and its turn loop.
@@ -38,6 +40,16 @@ import { AsyncQueue, sleep } from '../internal/async'
  * (`event_start` and deltas) → the stored `agent.message` → `span.model_request_end`, and
  * finally `session.status_idle`. A retryable failure inserts `session.error` and
  * `session.status_rescheduled` before the next request; a terminal one ends the turn.
+ *
+ * Two D9 properties hold here too:
+ *
+ * - **The log is append-only.** Every event is deep-frozen before it is stored or delivered,
+ *   and nothing rewrites one. The brain's "I have picked this message up" note lives beside
+ *   the log ({@link FakeBrain} keeps it private) and reads derive `processed_at` from it.
+ * - **It speaks today's server.** A preview is stream-only (`event_start` / `event_delta`
+ *   with no `seq`), and a span start carries no `consumes` — the shapes phase P3's server
+ *   will replace. The client takes both formats, so a component tested against this fake
+ *   keeps working when it does.
  */
 
 /** A reply the fake's brain produces for the next model request. */
@@ -115,9 +127,16 @@ class Subscriber {
   }
 }
 
-/** Whether an event exists only on a stream; `false` narrows the event to a stored one. */
+/**
+ * Whether an event exists only on a stream; `false` narrows the event to a stored one.
+ *
+ * `seq` is the test, not the event type: since D9 a stored `event_start` / `event_delta`
+ * carries the same `type` as its stream-only preview. The fake emits the stream-only form, but
+ * a subscriber has to gate on the form: a stored chunk is a log event like any other, and only
+ * a preview is something a connection opts into with `deltas`.
+ */
 export function isPreview(event: StreamEvent): event is EventStart | EventDelta {
-  return event.type === EVENT_TYPES.eventStart || event.type === EVENT_TYPES.eventDelta
+  return !isStoredEvent(event)
 }
 
 /** The in-memory brain of one fake session. */
@@ -130,6 +149,16 @@ export class FakeBrain {
   readonly #subscribers = new Set<Subscriber>()
   readonly #delayMs: number
   readonly #now: () => Date
+  /**
+   * When the brain reached each queued user event, keyed by its id.
+   *
+   * The log itself is never rewritten (D9): a user event says `processed_at: null` from the
+   * moment it is written, and "the brain has picked this up" is a note kept beside it, which
+   * reads derive from. That is also what the real store does from phase P2a on — the column
+   * becomes a value derived on read — so a test that reads the log later sees exactly what a
+   * test against the server would.
+   */
+  readonly #processedAt = new Map<string, string>()
   #seq = 0
   #turn: Promise<void> | null = null
   #interruptRequested = false
@@ -150,9 +179,14 @@ export class FakeBrain {
     this.#scripts.push(script)
   }
 
-  /** The session's log, in the order a server would have written it. */
+  /**
+   * The session's log, in the order a server would have written it.
+   *
+   * A read derives the user events' `processed_at` from the brain's notes; the log's own
+   * copies are never rewritten.
+   */
   history(): readonly StoredEvent[] {
-    return this.#log
+    return this.#log.map((event) => this.#view(event))
   }
 
   /** Append a user event as the server would: with an `id`, a `seq` and a `processed_at`. */
@@ -172,15 +206,15 @@ export class FakeBrain {
             seq: this.#nextSeq(),
             processed_at: null,
           }
+    deepFreeze(stored)
     this.#log.push(stored)
-    // Subscribers and callers get a copy: the log's copy is rewritten in place when the
-    // brain reaches the message, and the wire shows a message as it was written — queued —
-    // not as it looks later.
-    this.#broadcast({ ...stored })
+    // Subscribers and callers get the stored event itself: it is frozen, and it says what
+    // the wire says — a queued message, `processed_at: null` — however much later it is read.
+    this.#broadcast(stored)
     if (stored.type === EVENT_TYPES.userInterrupt) {
       this.#interruptRequested = true
     }
-    return { ...stored }
+    return stored
   }
 
   /**
@@ -227,7 +261,9 @@ export class FakeBrain {
 
   /** The stored events after `afterSeq`, in order; nothing when `afterSeq` is omitted. */
   backlog(afterSeq: number | undefined): readonly StoredEvent[] {
-    return afterSeq === undefined ? [] : this.#log.filter((event) => event.seq > afterSeq)
+    return afterSeq === undefined
+      ? []
+      : this.#log.filter((event) => event.seq > afterSeq).map((event) => this.#view(event))
   }
 
   /** One page of the log, honoring `limit`, `order`, `page`, `types[]` and `after_seq`. */
@@ -242,7 +278,7 @@ export class FakeBrain {
       events = [...events].reverse()
     }
     const limit = clampLimit(params.limit)
-    const page = events.slice(0, limit)
+    const page = events.slice(0, limit).map((event) => this.#view(event))
     const last = page.at(-1)
     return {
       data: page,
@@ -263,11 +299,12 @@ export class FakeBrain {
         break
       }
       // The brain folds the queued messages into the request it is about to make, so from
-      // here on they are processed. The server rewrites `processed_at` on the stored event —
-      // which is what a later `events.list`, or a reload, sees.
+      // here on they are processed. The note is kept beside the log — a later `events.list`,
+      // or a reload, derives `processed_at` from it — because the log's own event is frozen
+      // and never rewritten.
       const processedAt = this.#timestamp()
       for (const message of queued) {
-        message.processed_at = processedAt
+        this.#processedAt.set(message.id, processedAt)
       }
       retry = false
 
@@ -302,10 +339,12 @@ export class FakeBrain {
     const fragments = chunkText(reply.text, reply.chunks)
     const delay = reply.delayMs ?? this.#delayMs
 
-    this.#broadcast({
-      type: EVENT_TYPES.eventStart,
-      event: { type: EVENT_TYPES.agentMessage, id: messageId },
-    })
+    this.#broadcast(
+      deepFreeze({
+        type: EVENT_TYPES.eventStart,
+        event: { type: EVENT_TYPES.agentMessage, id: messageId },
+      }),
+    )
     let partial = ''
     for (const fragment of fragments) {
       if (this.#interruptRequested) {
@@ -313,11 +352,13 @@ export class FakeBrain {
       }
       await sleep(delay)
       partial += fragment
-      this.#broadcast({
-        type: EVENT_TYPES.eventDelta,
-        event_id: messageId,
-        delta: { type: 'content_delta', index: 0, content: { type: 'text', text: fragment } },
-      })
+      this.#broadcast(
+        deepFreeze({
+          type: EVENT_TYPES.eventDelta,
+          event_id: messageId,
+          delta: { type: 'content_delta', index: 0, content: { type: 'text', text: fragment } },
+        }),
+      )
     }
 
     const interrupted = this.#interruptRequested
@@ -362,12 +403,31 @@ export class FakeBrain {
   #queuedUserMessages(): UserMessageEvent[] {
     return this.#log.filter(
       (event): event is UserMessageEvent =>
-        event.type === EVENT_TYPES.userMessage && event.processed_at === null,
+        event.type === EVENT_TYPES.userMessage && !this.#processedAt.has(event.id),
     )
+  }
+
+  /**
+   * The event as a read of the log shows it: the stored value, with the user events'
+   * `processed_at` derived from the brain's notes. The log's own object is left alone.
+   */
+  #view(event: StoredEvent): StoredEvent {
+    if (
+      (event.type === EVENT_TYPES.userMessage || event.type === EVENT_TYPES.userInterrupt) &&
+      event.processed_at === null
+    ) {
+      const at = this.#processedAt.get(event.id)
+      if (at !== undefined) {
+        return deepFreeze({ ...event, processed_at: at })
+      }
+    }
+    return event
   }
 
   /** Write a stored event to the log, move the session header along, and deliver it live. */
   #emit(event: StoredEvent): void {
+    // The log is append-only (D9): every event is frozen before anything can hold it.
+    deepFreeze(event)
     this.#log.push(event)
     if (event.type === EVENT_TYPES.sessionStatusRunning) {
       this.session.status = 'running'

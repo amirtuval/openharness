@@ -1,4 +1,4 @@
-import { EVENT_TYPES, isStoredEvent } from '@openharness/protocol'
+import { EVENT_TYPES, isStoredEvent, newEventId } from '@openharness/protocol'
 import {
   makeAgentMessage,
   makeEventDelta,
@@ -7,6 +7,8 @@ import {
   makeStatusIdle,
   makeStatusRescheduled,
   makeStatusRunning,
+  makeStoredEventDelta,
+  makeStoredEventStart,
   makeUserMessage,
 } from '@openharness/protocol/fixtures'
 import type { StreamEvent } from '@openharness/protocol'
@@ -227,6 +229,52 @@ describe('delivering events', () => {
 
     expect(events).toEqual(TURN)
     expect(debug.length).toBeGreaterThan(0)
+  })
+
+  it('treats a stored chunk as a stored event, and resumes from it', async () => {
+    vi.useFakeTimers()
+    const messageId = newEventId()
+    const running = makeStatusRunning({ seq: 1 })
+    const user = makeUserMessage('hello', { seq: 2, processed_at: '2026-03-15T10:00:02Z' })
+    // A reply in flight, stored chunk by chunk (D9): the same `type` strings as the previews
+    // above, and a `seq` on every one.
+    const chunks: StreamEvent[] = [
+      makeStoredEventStart(messageId, { seq: 3 }),
+      makeStoredEventDelta(messageId, 'the whole ', { seq: 4 }),
+      makeStoredEventDelta(messageId, 'reply', { seq: 5 }),
+    ]
+    const message = makeAgentMessage('the whole reply', { seq: 6, id: messageId })
+    const idle = makeStatusIdle({ seq: 7 })
+
+    // The connection dies mid-reply; the client resumes from the last chunk it saw.
+    const bodies = [
+      sseResponse(sseLines([running, user, ...chunks]), { failWith: new Error('reset') }),
+      sseResponse(sseLines([message, idle])),
+    ]
+    const { client, mock } = clientWith((_request, call) => bodies[call] ?? sseResponse([]))
+    const controller = new AbortController()
+
+    const collected: StreamEvent[] = []
+    const iterating = (async () => {
+      for await (const event of client.sessions.events.stream(SESSION_ID, {
+        signal: controller.signal,
+      })) {
+        collected.push(event)
+        if (event.type === EVENT_TYPES.sessionStatusIdle) {
+          controller.abort()
+        }
+      }
+    })()
+    await vi.advanceTimersByTimeAsync(1000)
+    await iterating
+
+    expect(collected).toEqual([running, user, ...chunks, message, idle])
+    // Every chunk is a stored event, and the resume position is the last one seen — which is
+    // what lets a client that dropped mid-reply pick the reply back up where it stopped.
+    expect(collected.filter(isStoredEvent).map((event) => event.seq)).toEqual([1, 2, 3, 4, 5, 6, 7])
+    expect(mock.requests.length).toBeGreaterThanOrEqual(2)
+    expect(mock.requests[1]?.headers.get('last-event-id')).toBe('5')
+    expect(new URL(mock.urlOf(1)).searchParams.get('after_seq')).toBe('5')
   })
 
   it('delivers previews before the stored message that replaces them', async () => {

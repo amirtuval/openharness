@@ -1,4 +1,4 @@
-import { newEventId } from '@openharness/protocol'
+import { EVENT_TYPES, isStoredEvent, newEventId } from '@openharness/protocol'
 import {
   makeAgentMessage,
   makeEventDelta,
@@ -9,6 +9,9 @@ import {
   makeStatusIdle,
   makeStatusRescheduled,
   makeStatusRunning,
+  makeStoredEventDelta,
+  makeStoredEventStart,
+  makeUserInterrupt,
   makeUserMessage,
   sampleSessionHistory,
   sampleStreamPreview,
@@ -17,6 +20,7 @@ import {
 import type { StreamEvent } from '@openharness/protocol'
 import { describe, expect, it, vi } from 'vitest'
 
+import { deepFreeze } from './testing/freeze'
 import {
   createTranscript,
   initialTranscriptState,
@@ -391,6 +395,361 @@ describe('reduceTranscript', () => {
   })
 })
 
+describe('stored chunks (D9)', () => {
+  it('accumulates stored deltas into the preview of their message', () => {
+    const state = reduceEvents([
+      makeStoredEventStart(idA, { seq: 1 }),
+      makeStoredEventDelta(idA, 'Hel', { seq: 2 }),
+      makeStoredEventDelta(idA, 'lo, ', { seq: 3 }),
+      makeStoredEventDelta(idA, 'world', { seq: 4 }),
+    ])
+
+    expect(asPairs(state)).toEqual(['agent:Hello, world'])
+    expect(messageById(state, idA)).toMatchObject({ streaming: true, position: 1 })
+    expect(state.lastSeq).toBe(4)
+  })
+
+  it('opens a stored preview at its first delta when the start was skipped', () => {
+    // A client that joined mid-reply never saw the `event_start`; its first delta is where
+    // the bubble can open.
+    const state = reduceEvents([
+      makeUserMessage('earlier', { seq: 1, processed_at: fixtureTimestamp(1) }),
+      makeStoredEventDelta(idA, 'the tail of ', { seq: 10 }),
+      makeStoredEventDelta(idA, 'a reply', { seq: 11 }),
+    ])
+
+    expect(asPairs(state)).toEqual(['user:earlier', 'agent:the tail of a reply'])
+    expect(messageById(state, idA).position).toBe(10)
+  })
+
+  it('deduplicates stored chunks like any other stored event', () => {
+    const chunk = makeStoredEventDelta(idA, 'once', { seq: 4 })
+    const state = reduceEvents([
+      makeStoredEventStart(idA, { seq: 3 }),
+      chunk,
+      chunk,
+      makeStoredEventStart(idA, { seq: 3 }),
+    ])
+
+    expect(asPairs(state)).toEqual(['agent:once'])
+    expect(state.lastSeq).toBe(4)
+  })
+
+  it('ignores a stored delta for a message whose reply is already stored', () => {
+    const stored = makeAgentMessage('the reply', { seq: 5, id: idA })
+    const state = reduceEvents([stored, makeStoredEventDelta(idA, 'more', { seq: 6 })])
+
+    expect(asPairs(state)).toEqual(['agent:the reply'])
+    expect(messageById(state, idA).streaming).toBe(false)
+    // The chunk was still seen, and still moves the resume position past it.
+    expect(state.lastSeq).toBe(6)
+  })
+
+  it('drops a stored preview when the turn ends without reconciling it', () => {
+    const state = reduceEvents([
+      makeStatusRunning({ seq: 1 }),
+      makeModelRequestStart({ seq: 2 }),
+      makeStoredEventStart(idA, { seq: 3 }),
+      makeStoredEventDelta(idA, 'never stored', { seq: 4 }),
+      makeStatusIdle({ seq: 5 }),
+    ])
+
+    expect(state.messages).toEqual([])
+    expect(state.status).toBe('idle')
+  })
+
+  it('clears pending only for the messages a span start claims', () => {
+    const claimed = makeUserMessage('claimed', { seq: 1, processed_at: null, id: idA })
+    const steering = makeUserMessage('steering', { seq: 2, processed_at: null, id: idB })
+    const start = makeModelRequestStart({ seq: 3, id: idC, consumes: [claimed.id] })
+
+    const state = reduceEvents([claimed, steering, start])
+
+    expect(messageById(state, claimed.id).pending).toBe(false)
+    // A message sent while the turn runs stays pending until the request that claims it.
+    expect(messageById(state, steering.id).pending).toBe(true)
+  })
+
+  it('clears nothing when a span start claims nothing', () => {
+    const queued = makeUserMessage('queued', { seq: 1, processed_at: null, id: idA })
+    const state = reduceEvents([queued, makeModelRequestStart({ seq: 2, id: idB, consumes: [] })])
+
+    expect(messageById(state, queued.id).pending).toBe(true)
+  })
+})
+
+describe('positions (D9)', () => {
+  it('places a stream-only preview after everything stored so far, and keeps it there', () => {
+    // Today's server: no `seq` on the chunks. The bubble opens after the stored events, and
+    // the stored message that replaces it does not move it.
+    const state = reduceEvents([
+      makeUserMessage('hello', { seq: 1, processed_at: fixtureTimestamp(1) }),
+      makeStatusRunning({ seq: 2 }),
+      makeEventStart(idA),
+      makeEventDelta(idA, 'the reply'),
+    ])
+
+    expect(messageById(state, idA).position).toBe(2.5)
+
+    const stored = reduceTranscript(state, makeAgentMessage('the reply', { seq: 3, id: idA }))
+
+    expect(asPairs(stored)).toEqual(['user:hello', 'agent:the reply'])
+    expect(messageById(stored, idA).position).toBe(2.5)
+  })
+
+  it('moves a reply back to where it started when its message supersedes its chunks', () => {
+    // The reply's chunks run 13..52, a steering message arrives at 30, and the stored message
+    // lands at 53. A client that accumulated the preview placed the reply at 13; a client
+    // that only ever saw the stored message must place it there too.
+    const messageId = idA
+    const steering = makeUserMessage('actually, wait', { seq: 30, processed_at: null, id: idB })
+    const stored = makeAgentMessage('steered reply', {
+      seq: 53,
+      id: messageId,
+      supersedes: { from_seq: 13, to_seq: 52 },
+    })
+
+    const withChunks = reduceEvents([
+      makeStoredEventStart(messageId, { seq: 13 }),
+      makeStoredEventDelta(messageId, 'steered ', { seq: 14 }),
+      steering,
+      makeStoredEventDelta(messageId, 'reply', { seq: 52 }),
+      stored,
+    ])
+    const storedOnly = reduceEvents([steering, stored])
+
+    expect(withChunks.messages.map((message) => message.id)).toEqual([messageId, steering.id])
+    expect(storedOnly.messages.map((message) => message.id)).toEqual([messageId, steering.id])
+    expect(storedOnly.messages[0]?.position).toBe(13)
+    expect(messageById(withChunks, messageId).position).toBe(13)
+  })
+})
+
+describe('one reply, five clients (D9 convergence)', () => {
+  const REPLY = 'openharness streams a reply in fragments'
+
+  /**
+   * A scripted turn in the D9 shapes. `seq` 1..27, all of it stored:
+   *
+   * ```
+   * 1      session.status_running
+   * 2      span.model_request_start   (claims the message that started the turn)
+   * 3      event_start  M1            (the first stored chunk)
+   * 4..13  event_delta  M1            (ten fragments)
+   * 14     user.message U2            (sent mid-reply: steering)
+   * 15..24 event_delta  M1            (ten more fragments)
+   * 25     agent.message M1           (supersedes 3..24)
+   * 26     span.model_request_end
+   * 27     session.status_idle
+   * ```
+   */
+  function scriptedTurn(): {
+    events: StreamEvent[]
+    messageId: string
+    steeringId: string
+  } {
+    const messageId = newEventId()
+    const steeringId = newEventId()
+    // The message this request claims started the turn before the window every client below
+    // replays — the one a client that joins mid-turn cannot have seen. `consumes` naming an
+    // id the transcript does not hold is harmless.
+    const claimed = makeUserMessage('the message that started the turn')
+    const start = makeModelRequestStart({
+      seq: 2,
+      consumes: [claimed.id],
+      model: 'anthropic/claude-sonnet-5',
+    })
+    const fragments = splitText(REPLY, 20)
+
+    const events: StreamEvent[] = [
+      makeStatusRunning({ seq: 1 }),
+      start,
+      makeStoredEventStart(messageId, { seq: 3 }),
+      ...fragments
+        .slice(0, 10)
+        .map((text, index) => makeStoredEventDelta(messageId, text, { seq: 4 + index })),
+      makeUserMessage('actually, wait', { seq: 14, id: steeringId, processed_at: null }),
+      ...fragments
+        .slice(10)
+        .map((text, index) => makeStoredEventDelta(messageId, text, { seq: 15 + index })),
+      makeAgentMessage(REPLY, {
+        seq: 25,
+        id: messageId,
+        supersedes: { from_seq: 3, to_seq: 24 },
+      }),
+      makeModelRequestEnd(start, { seq: 26 }),
+      makeStatusIdle({ seq: 27 }),
+    ]
+    return { events, messageId, steeringId }
+  }
+
+  /** The stored events of `events` at or after `seq`. */
+  function from(events: readonly StreamEvent[], seq: number): StreamEvent[] {
+    return events.filter((event) => isStoredEvent(event) && event.seq >= seq)
+  }
+
+  /** The stored events of `events` at or before `seq`. */
+  function upTo(events: readonly StreamEvent[], seq: number): StreamEvent[] {
+    return events.filter((event) => isStoredEvent(event) && event.seq <= seq)
+  }
+
+  it('shows the same conversation to every view of the stream', () => {
+    const { events, messageId, steeringId } = scriptedTurn()
+    const withoutChunks = (event: StreamEvent): boolean =>
+      event.type !== EVENT_TYPES.eventStart && event.type !== EVENT_TYPES.eventDelta
+
+    const views: Record<string, StreamEvent[]> = {
+      // (a) a client that followed everything.
+      everything: events,
+      // (b) a client that joined mid-reply: its first event is a stored delta.
+      'joined mid-chunks': from(events, 8),
+      // (c) a client that had the reply streaming, disconnected mid-chunks, and resumed
+      // after the superseded chunks were deleted — the next event it gets is the message.
+      'resumed with the chunks removed': [...upTo(events, 20), ...from(events, 25)],
+      // (d) a log whose chunks were already superseded: only the stored message remains.
+      'no chunks at all': events.filter(withoutChunks),
+      // (e) a client that did not ask for deltas: no chunk ever reaches it.
+      'no deltas': events.filter(withoutChunks),
+    }
+
+    const expected = reduceEvents(events)
+
+    for (const [client, eventsSeen] of Object.entries(views)) {
+      const state = reduceEvents(eventsSeen)
+      expect(state.messages, client).toEqual(expected.messages)
+      expect(state.lastSeq, client).toBe(27)
+    }
+
+    expect(expected.messages.map((message) => `${message.role}:${message.text}`)).toEqual([
+      `agent:${REPLY}`,
+      'user:actually, wait',
+    ])
+    expect(expected.messages[0]?.id).toBe(messageId)
+    expect(expected.messages[1]?.id).toBe(steeringId)
+    // M1 sorts where it started, ahead of the steering message it was interleaved with.
+    expect(expected.messages[0]?.position).toBe(3)
+    expect(expected.messages[1]?.position).toBe(14)
+    expect(expected.messages[0]?.streaming).toBe(false)
+    expect(expected.messages[1]?.pending).toBe(true)
+    expect(expected.status).toBe('idle')
+  })
+
+  it('folds deep-frozen events without writing to them', () => {
+    const { events, messageId } = scriptedTurn()
+    const frozen = events.map((event) => deepFreeze(event))
+    const preview = deepFreeze([makeEventStart(idE), makeEventDelta(idE, 'a preview')])
+    const before = JSON.stringify(frozen)
+
+    const state = reduceTranscriptAll(reduceEvents(preview), frozen)
+
+    expect(messageById(state, messageId).text).toBe(REPLY)
+    expect(messageById(state, messageId).streaming).toBe(false)
+    expect(selectStreamingMessage(state)).toBeNull()
+    expect(JSON.stringify(frozen)).toBe(before)
+  })
+})
+
+describe('interrupts and crashes (D9)', () => {
+  it('keeps the partial reply of an interrupt that supersedes its chunks', () => {
+    const messageId = idA
+    const start = makeModelRequestStart({ seq: 2, id: idB })
+    const script: StreamEvent[] = [
+      makeStatusRunning({ seq: 1 }),
+      start,
+      makeStoredEventStart(messageId, { seq: 3, id: idC }),
+      makeStoredEventDelta(messageId, 'Events in ', { seq: 4 }),
+      makeStoredEventDelta(messageId, 'a log,', { seq: 5 }),
+      makeUserInterrupt({ seq: 6, id: idD }),
+      makeAgentMessage('Events in a log,', {
+        seq: 7,
+        id: messageId,
+        supersedes: { from_seq: 3, to_seq: 5 },
+      }),
+      makeModelRequestEnd(start, {
+        seq: 8,
+        id: idE,
+        is_error: true,
+        error: { type: 'interrupted', message: 'Interrupted by the user.' },
+      }),
+      makeStatusIdle({ seq: 9 }),
+    ]
+
+    const state = reduceEvents(script)
+
+    expect(asPairs(state)).toEqual(['agent:Events in a log,'])
+    expect(messageById(state, messageId).position).toBe(3)
+    expect(selectStreamingMessage(state)).toBeNull()
+    expect(state.status).toBe('idle')
+
+    // A client whose chunks were already gone: the stored message alone, same conversation.
+    const storedOnly = reduceEvents(
+      script.filter(
+        (event) => event.type !== EVENT_TYPES.eventStart && event.type !== EVENT_TYPES.eventDelta,
+      ),
+    )
+    expect(storedOnly.messages).toEqual(state.messages)
+  })
+
+  it('leaves no ghost preview when a crash closes the span and the request is re-run', () => {
+    const crashedId = idA
+    const retryId = idE
+    const crashedStart = makeModelRequestStart({ seq: 2, id: idB })
+    const retryStart = makeModelRequestStart({ seq: 7, id: idD })
+    const script: StreamEvent[] = [
+      makeStatusRunning({ seq: 1 }),
+      crashedStart,
+      makeStoredEventStart(crashedId, { seq: 3 }),
+      makeStoredEventDelta(crashedId, 'half a rep', { seq: 4 }),
+      makeStoredEventDelta(crashedId, 'ly', { seq: 5 }),
+      // The recovering brain closes the orphaned span, superseding what it streamed…
+      makeModelRequestEnd(crashedStart, {
+        seq: 6,
+        id: idC,
+        is_error: true,
+        error: { type: 'brain_lost', message: 'The brain died.' },
+        supersedes: { from_seq: 3, to_seq: 5 },
+      }),
+      // …and the request runs again under a new message id.
+      retryStart,
+      makeStoredEventStart(retryId, { seq: 8 }),
+      makeStoredEventDelta(retryId, 'a fresh reply', { seq: 9 }),
+      makeAgentMessage('a fresh reply', {
+        seq: 10,
+        id: retryId,
+        supersedes: { from_seq: 8, to_seq: 9 },
+      }),
+      makeModelRequestEnd(retryStart, { seq: 11 }),
+      makeStatusIdle({ seq: 12 }),
+    ]
+
+    const state = reduceEvents(script)
+
+    expect(state.messages.map((message) => message.id)).toEqual([retryId])
+    expect(asPairs(state)).toEqual(['agent:a fresh reply'])
+    expect(state.messages.some((message) => message.id === crashedId)).toBe(false)
+    expect(selectStreamingMessage(state)).toBeNull()
+    expect(state.status).toBe('idle')
+
+    // A client that resumed after the crashed chunks were deleted never had the ghost
+    // preview; it must end up with the same conversation. The span end that superseded them
+    // is still there — and finds nothing to drop.
+    const chunksGone = reduceEvents(
+      script.filter((event) => !isStoredEvent(event) || event.seq < 3 || event.seq > 5),
+    )
+    expect(chunksGone.messages).toEqual(state.messages)
+  })
+})
+
+/** `text`, split into `count` fragments: the pieces a reply is streamed in. */
+function splitText(text: string, count: number): string[] {
+  const size = Math.ceil(text.length / count)
+  const fragments: string[] = []
+  for (let index = 0; index < text.length; index += size) {
+    fragments.push(text.slice(index, index + size))
+  }
+  return fragments
+}
+
 describe('selectors', () => {
   it('read the transcript', () => {
     const state = reduceEvents(sampleSessionHistory)
@@ -439,6 +798,7 @@ describe('the state a UI reads', () => {
       'blocks',
       'id',
       'pending',
+      'position',
       'role',
       'streaming',
       'text',
