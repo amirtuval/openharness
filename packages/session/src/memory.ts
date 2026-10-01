@@ -3,7 +3,6 @@ import {
   DEFAULT_PARTITION_COUNT,
   EVENT_TYPES,
   StoredEventSchema,
-  UserEventSchema,
   encodeKeyCursor,
   encodeSeqCursor,
   newAgentId,
@@ -13,7 +12,12 @@ import {
   type Agent,
   type AgentId,
   type CreateAgentRequest,
+  type DeepReadonly,
   type EventId,
+  type ImmutableStreamEvent,
+  type ImmutableStoredEvent,
+  type ImmutableUserInterruptEvent,
+  type ImmutableUserMessageEvent,
   type KeyCursor,
   type KeyCursorPosition,
   type ListAgentsResponse,
@@ -24,7 +28,6 @@ import {
   type Session,
   type SessionId,
   type StoredEvent,
-  type StreamEvent,
   type StreamOnlyEvent,
   type Timestamp,
   type UpdateAgentRequest,
@@ -34,14 +37,24 @@ import {
 import { type Clock, systemClock, timestampAt } from './clock'
 import {
   AgentNotFoundError,
+  ClaimConflictError,
   DuplicateEventIdError,
   FencedError,
   SessionNotFoundError,
 } from './errors'
+import {
+  cutoffOf,
+  isSupersededChunk,
+  isUserEventType,
+  supersessionsOf,
+  type SupersessionRecord,
+} from './events'
+import { deepFreeze } from './freeze'
 import { assertEventIds, assertTtl, decodeKeyPage, decodeSeqPage, pageSize } from './inputs'
 import type {
   AppendableEvent,
   AppendEventsOptions,
+  CompactOptions,
   CreateSessionOptions,
   ListAgentsOptions,
   ListEventsOptions,
@@ -56,9 +69,19 @@ import type {
   SessionPreview,
   SessionStore,
   TurnState,
+  TurnStateKind,
   Unsubscribe,
   UpdateSessionRequest,
 } from './store'
+
+/**
+ * The user events, deep-readonly. The protocol has no `ImmutableUserEvent` yet — the domain
+ * sub-unions have no immutable twin until P4 — so this is the union of the two members that do.
+ */
+type ImmutableUserEvent = ImmutableUserMessageEvent | ImmutableUserInterruptEvent
+
+/** The stream-only events, deep-readonly; the protocol has no alias for these two yet either. */
+type ImmutableStreamOnlyEvent = DeepReadonly<StreamOnlyEvent>
 
 /**
  * The in-memory `SessionStore`: the test fake for every other package, and the reference
@@ -79,8 +102,11 @@ import type {
  *   `LISTEN`/`NOTIFY` store will have. Awaiting the call that published an event is enough for
  *   the listener to have seen it, but the contract does not promise that: read state, do not
  *   assume a listener ran.
- * - **Everything handed out is a copy.** Read a session, an agent or an event and you own it;
- *   mutating it cannot reach into the store. Each appended event is also rebuilt through
+ * - **Everything handed out is a copy, and events are deep-frozen.** Read a session, an agent
+ *   or an event and you own it; mutating a session or an agent cannot reach into the store.
+ *   Events go further, because the log is immutable (D9, issue #46): what is stored is frozen
+ *   — and so is every copy handed out — so writing to one throws instead of forking the log
+ *   the caller holds from the log the store wrote. Each appended event is also rebuilt through
  *   `StoredEventSchema`, so what comes back out is exactly the wire shape — and an event the
  *   schema rejects leaves the log untouched, because an append is all-or-nothing.
  */
@@ -99,6 +125,17 @@ export class InMemorySessionStore implements SessionStore {
    * Postgres store gets the same guarantee from the primary key on `events.id`.
    */
   readonly #eventIds = new Set<EventId>()
+
+  /**
+   * Every claim recorded so far, keyed by the claimed event's id — the in-memory
+   * `event_claims` table (D9, issue #46). Claims are facts about user events: a claim makes
+   * the event read with a `processed_at`, takes it out of the pending list, and can never be
+   * taken again. Nothing here is ever updated or removed; compaction does not touch claims.
+   */
+  readonly #claims = new Map<EventId, ClaimRecord>()
+
+  /** The chunk ranges each session's stored events have superseded, oldest first. */
+  readonly #supersessions = new Map<SessionId, SupersessionRecord[]>()
 
   /**
    * The preview in flight for each session whose current `agent.message` is being streamed:
@@ -242,7 +279,7 @@ export class InMemorySessionStore implements SessionStore {
     for (const event of stored) {
       this.#deliver(sessionId, event)
     }
-    return resolved(stored.map(clone))
+    return resolved(stored.map((event) => this.#share(event)))
   }
 
   markProcessed(
@@ -253,18 +290,18 @@ export class InMemorySessionStore implements SessionStore {
     const record = this.#requireSession(sessionId)
     this.#assertFence(options.fence, 'markProcessed')
     const wanted = new Set<string>(eventIds)
-    const processedAt = timestampAt(this.#clock())
+    const now = this.#clock()
+    const claimedAt = timestampAt(now)
     const marked: UserEvent[] = []
     for (const entry of record.events) {
       const event = entry.event
-      if (!isPendingUserEvent(event) || !wanted.has(event.id)) {
+      if (!isUserEvent(event) || !wanted.has(event.id) || this.#claims.has(event.id)) {
         continue
       }
-      const processed = UserEventSchema.parse({ ...event, processed_at: processedAt })
-      entry.event = processed
-      marked.push(processed)
+      this.#claims.set(event.id, { claimedAtMs: now, claimedByEventId: null })
+      marked.push(this.#shareUser(event, claimedAt))
     }
-    return resolved(marked.map(clone))
+    return resolved(marked)
   }
 
   listEvents(sessionId: SessionId, options: ListEventsOptions = {}): Promise<ListEventsResponse> {
@@ -274,6 +311,10 @@ export class InMemorySessionStore implements SessionStore {
     const afterSeq = options.afterSeq
     const types = options.types === undefined ? null : new Set<string>(options.types)
     let events = record.events.map((entry) => entry.event)
+    if (options.includeSuperseded !== true) {
+      const ranges = this.#supersessions.get(sessionId)
+      events = events.filter((event) => !isSupersededChunk(event, ranges))
+    }
     if (cursor !== null) {
       events = events.filter((event) =>
         order === 'asc' ? event.seq > cursor.seq : event.seq < cursor.seq,
@@ -291,20 +332,60 @@ export class InMemorySessionStore implements SessionStore {
     const limit = pageSize(options.limit)
     const data = events.slice(0, limit)
     const next_page = events.length > limit ? encodeSeqCursor(lastOf(data).seq) : null
-    return resolved({ data: data.map(clone), next_page })
+    return resolved({ data: data.map((event) => this.#share(event)), next_page })
   }
 
   getPendingUserEvents(sessionId: SessionId): Promise<UserEvent[]> {
     const record = this.#requireSession(sessionId)
+    // Pending is "no claim", not "no `processed_at`": the claim is the fact, and the
+    // timestamp a reader sees is derived from it.
     const pending = record.events
       .map((entry) => entry.event)
-      .filter(isPendingUserEvent)
-      .map(clone)
+      .filter(
+        (event): event is ImmutableUserEvent => isUserEvent(event) && !this.#claims.has(event.id),
+      )
+      .map((event) => this.#shareUser(event, null))
     return resolved(pending)
   }
 
   getTurnState(sessionId: SessionId): Promise<TurnState> {
-    return resolved(clone(turnStateOf(this.#requireSession(sessionId))))
+    const state = turnStateOf(this.#requireSession(sessionId))
+    const openSpan = state.openSpan
+    return resolved(
+      openSpan === null
+        ? { state: state.state, openSpan: null }
+        : {
+            state: state.state,
+            // The cast is the boundary until P4 makes the contract's types readonly: what the
+            // store hands out is the immutable event, under the mutable name callers expect.
+            openSpan: this.#share(openSpan) as ModelRequestStartEvent,
+          },
+    )
+  }
+
+  compact(options: CompactOptions): Promise<number> {
+    const cutoffMs = cutoffOf(options)
+    let deleted = 0
+    for (const [sessionId, ranges] of this.#supersessions) {
+      const record = this.#sessions.get(sessionId)
+      if (record === undefined) {
+        continue
+      }
+      const kept: EventRecord[] = []
+      for (const entry of record.events) {
+        if (isSupersededChunk(entry.event, ranges) && entry.createdAtMs < cutoffMs) {
+          // The one deletion in this store. The id goes back into the free pool with the row,
+          // exactly as deleting the row does in Postgres — and no reader is affected, because
+          // replay already skipped the chunk.
+          this.#eventIds.delete(entry.event.id)
+          deleted += 1
+        } else {
+          kept.push(entry)
+        }
+      }
+      record.events.splice(0, record.events.length, ...kept)
+    }
+    return resolved(deleted)
   }
 
   // ------------------------------------------------------- live subscription
@@ -369,7 +450,7 @@ export class InMemorySessionStore implements SessionStore {
     const found = [...this.#sessions.values()]
       .sort((left, right) => compareKeys(left.session, right.session))
       .filter((record) => wanted.has(partitionOf(record.session.id, this.#partitionCount)))
-      .filter(needsWork)
+      .filter((record) => this.#needsWork(record))
       .map((record) => record.session.id)
     return resolved(found)
   }
@@ -442,13 +523,15 @@ export class InMemorySessionStore implements SessionStore {
   }
 
   /**
-   * Append into a live record: assign the fields the caller does not own, advance the session's
-   * status and `updated_at`, and hand back the stored events. Delivery is the caller's job, so
-   * that a subscription is only notified once the whole append — or the whole creation — landed.
+   * Append into a live record: assign the fields the caller does not own, record the claims
+   * and supersessions the batch carries, advance the session's status and `updated_at`, and
+   * hand back the stored events. Delivery is the caller's job, so that a subscription is only
+   * notified once the whole append — or the whole creation — landed.
    *
    * Build first, commit second: an event this store refuses — one the protocol schema rejects,
-   * an id that is not an event id, or one the log already holds — leaves the log exactly as it
-   * was, because an append is one transaction.
+   * an id that is not an event id or one the log already holds, a `consumes` id that is not a
+   * pending user event of this session, or a `supersedes` range that does not fit — leaves the
+   * log exactly as it was, because an append is one transaction.
    */
   #append(record: SessionRecord, events: readonly AppendableEvent[], now: number): StoredEvent[] {
     assertEventIds(record.session.id, events)
@@ -466,11 +549,28 @@ export class InMemorySessionStore implements SessionStore {
       stored.push(storedEventFrom(input, { id, seq, processedAt }))
       seq += 1
     }
+    // Everything this batch records beside the events is checked first, so a batch that cannot
+    // be recorded whole is refused whole — nothing stored, nothing claimed.
+    const claims = this.#claimsFor(record, stored, now)
+    const supersessions = supersessionsOf(stored, now)
     for (const event of stored) {
-      record.events.push({ event, createdAtMs: now })
+      // Frozen before it reaches the log: the store's own state is immutable too, not only the
+      // copies it hands out.
+      record.events.push({ event: deepFreeze(event), createdAtMs: now })
       this.#eventIds.add(event.id)
     }
     record.nextSeq = seq
+    for (const claim of claims) {
+      this.#claims.set(claim.eventId, {
+        claimedAtMs: claim.claimedAtMs,
+        claimedByEventId: claim.claimedByEventId,
+      })
+    }
+    if (supersessions.length > 0) {
+      const ranges = this.#supersessions.get(record.session.id) ?? []
+      ranges.push(...supersessions)
+      this.#supersessions.set(record.session.id, ranges)
+    }
     for (const event of stored) {
       if (event.type === EVENT_TYPES.sessionStatusRunning) {
         record.session.status = 'running'
@@ -485,6 +585,65 @@ export class InMemorySessionStore implements SessionStore {
       this.#previews.delete(record.session.id)
     }
     return stored
+  }
+
+  /**
+   * The claims a batch is allowed to record: every id its `span.model_request_start` events
+   * name in `consumes`, checked against the log as it is now.
+   *
+   * A claim is rejected — and with it the whole append — when the id names no event of this
+   * session, an event that is not a user event, one that is already claimed, or one this same
+   * batch names twice. All the offending ids are collected so the error names them together.
+   */
+  #claimsFor(record: SessionRecord, stored: readonly StoredEvent[], now: number): PendingClaim[] {
+    const claims: PendingClaim[] = []
+    const namedHere = new Set<EventId>()
+    const conflicts: EventId[] = []
+    for (const event of stored) {
+      if (event.type !== EVENT_TYPES.modelRequestStart || event.consumes === undefined) {
+        continue
+      }
+      for (const consumed of event.consumes) {
+        const target = eventWithId(record, consumed)
+        if (
+          namedHere.has(consumed) ||
+          target === undefined ||
+          !isUserEvent(target) ||
+          this.#claims.has(consumed)
+        ) {
+          conflicts.push(consumed)
+          continue
+        }
+        namedHere.add(consumed)
+        claims.push({ eventId: consumed, claimedByEventId: event.id, claimedAtMs: now })
+      }
+    }
+    if (conflicts.length > 0) {
+      throw new ClaimConflictError(record.session.id, conflicts)
+    }
+    return claims
+  }
+
+  /**
+   * The event a caller sees: the stored value with the fields the store derives — today only a
+   * user event's `processed_at`, from the claim that took it — deep-frozen so the copy cannot
+   * be written to.
+   *
+   * The cast is the boundary until P4 turns the contract's types readonly: the store keeps and
+   * hands out an immutable event (see {@link EventRecord}), and the mutable names
+   * (`StoredEvent`, `UserEvent`) are what today's callers expect.
+   */
+  #share(event: ImmutableStoredEvent): StoredEvent {
+    const claim = this.#claims.get(event.id)
+    return deepFreeze({
+      ...structuredClone(event),
+      processed_at: derivedProcessedAt(event, claim),
+    }) as StoredEvent
+  }
+
+  /** {@link InMemorySessionStore.#share} for a user event, at the user-event type callers take. */
+  #shareUser(event: ImmutableUserEvent, processedAt: Timestamp | null): UserEvent {
+    return deepFreeze({ ...structuredClone(event), processed_at: processedAt }) as UserEvent
   }
 
   /**
@@ -526,17 +685,28 @@ export class InMemorySessionStore implements SessionStore {
     })
   }
 
+  /** Whether a session has work waiting: a pending user event, or an open turn. */
+  #needsWork(record: SessionRecord): boolean {
+    const pending = record.events.some(
+      (entry) => isUserEvent(entry.event) && !this.#claims.has(entry.event.id),
+    )
+    return pending || turnStateOf(record).state !== 'idle'
+  }
+
   /**
    * Hand an event to a session's subscribers, in a microtask each: a store that notifies after
    * it commits, and one that notifies over a connection, are both allowed to be late, and the
    * conformance suite may not depend on synchronous delivery.
+   *
+   * The payload is a deep-frozen copy — derived the way a read derives it when it is a stored
+   * event — so no listener can write to what another listener of the same event holds.
    */
-  #deliver(sessionId: SessionId, event: StreamEvent): void {
+  #deliver(sessionId: SessionId, event: ImmutableStreamEvent): void {
     const listeners = this.#sessionListeners.get(sessionId)
     if (listeners === undefined || listeners.size === 0) {
       return
     }
-    const payload = clone(event)
+    const payload = isStored(event) ? this.#share(event) : shareStreamOnly(event)
     for (const listener of [...listeners]) {
       queueMicrotask(() => void listener(payload))
     }
@@ -560,13 +730,38 @@ export interface InMemorySessionStoreOptions {
 
 /** One event in a session's log, with the internal creation time the protocol has no field for. */
 interface EventRecord {
-  event: StoredEvent
+  /**
+   * The event as stored: deep-frozen, and read-only in the types too, so nothing in this store
+   * can write to it even by accident. Every hand-out clones it through
+   * {@link InMemorySessionStore} `#share`, which is also where a derived `processed_at` comes
+   * from — the log itself never carries one on a user event.
+   */
+  event: ImmutableStoredEvent
   /**
    * When the store wrote the event. Never leaves the store: the protocol's stored events carry
    * `seq` and `processed_at` and no `created_at`, and the conformance suite asserts that what a
    * read returns is exactly a `StoredEvent`.
    */
   readonly createdAtMs: number
+}
+
+/**
+ * A recorded claim: when a user event was claimed, and by what.
+ *
+ * The in-memory half of `event_claims` (D9, issue #46). A claim taken by
+ * {@link SessionStore.markProcessed} has no claiming event — `claimedByEventId` is `null` —
+ * and one taken by a `span.model_request_start`'s `consumes` names that span.
+ */
+interface ClaimRecord {
+  /** When the claim was made, as the injected clock read it. */
+  readonly claimedAtMs: number
+  /** The `span.model_request_start` that claimed the event, or `null` for `markProcessed`. */
+  readonly claimedByEventId: EventId | null
+}
+
+/** A claim a batch wants to record, before it is recorded: {@link ClaimRecord} with its event. */
+interface PendingClaim extends ClaimRecord {
+  readonly eventId: EventId
 }
 
 /** The preview in flight for one session: the id its `event_start` named, and the text so far. */
@@ -627,19 +822,41 @@ function storedEventFrom(input: AppendableEvent, assigned: AssignedEventFields):
   })
 }
 
-/** Whether an event type is one the user writes; those are queued with `processed_at: null`. */
-function isUserEventType(type: string): boolean {
-  return type === EVENT_TYPES.userMessage || type === EVENT_TYPES.userInterrupt
-}
-
 /** Whether a stored event is a user event. */
-function isUserEvent(event: StoredEvent): event is UserEvent {
+function isUserEvent(event: ImmutableStoredEvent): event is ImmutableUserEvent {
   return isUserEventType(event.type)
 }
 
-/** Whether a stored event is a user event that no turn has taken yet. */
-function isPendingUserEvent(event: StoredEvent): event is UserEvent {
-  return isUserEvent(event) && event.processed_at === null
+/** Whether a stream or stored event is one the log holds, i.e. one with a `seq`; see the protocol. */
+function isStored(event: ImmutableStreamEvent): event is ImmutableStoredEvent {
+  return 'seq' in event
+}
+
+/**
+ * A deep-frozen copy of a stream-only event — at the type the contract uses, which for these
+ * two happens to be structurally identical to their immutable twin (neither carries an array).
+ */
+function shareStreamOnly(event: ImmutableStreamOnlyEvent): StreamOnlyEvent {
+  return deepFreeze(structuredClone(event))
+}
+
+/**
+ * The `processed_at` a reader sees: a user event's comes from the claim that took it — `null`
+ * while none has — and every other event keeps the one the store wrote when it appended it.
+ */
+function derivedProcessedAt(
+  event: ImmutableStoredEvent,
+  claim: ClaimRecord | undefined,
+): Timestamp | null {
+  if (isUserEvent(event)) {
+    return claim === undefined ? null : timestampAt(claim.claimedAtMs)
+  }
+  return event.processed_at
+}
+
+/** The session's event with this id, or `undefined` when the log holds none. */
+function eventWithId(record: SessionRecord, eventId: EventId): ImmutableStoredEvent | undefined {
+  return record.events.find((entry) => entry.event.id === eventId)?.event
 }
 
 /**
@@ -647,20 +864,21 @@ function isPendingUserEvent(event: StoredEvent): event is UserEvent {
  * is `running`, and an open turn with nothing in flight is `unfinished`. See
  * {@link SessionStore.getTurnState}.
  */
-function turnStateOf(record: SessionRecord): TurnState {
+function turnStateOf(record: SessionRecord): {
+  readonly state: TurnStateKind
+  readonly openSpan: ImmutableStoredEvent | null
+} {
   const events = record.events.map((entry) => entry.event)
   const lastStatus = findLastStatusEvent(events)
   if (lastStatus === null || lastStatus.type === EVENT_TYPES.sessionStatusIdle) {
     return { state: 'idle', openSpan: null }
   }
   const openSpan = findOpenSpan(events)
-  return openSpan === null
-    ? { state: 'unfinished', openSpan: null }
-    : { state: 'running', openSpan }
+  return { state: openSpan === null ? 'unfinished' : 'running', openSpan }
 }
 
 /** The last status event in a log, or `null` when the log has none. */
-function findLastStatusEvent(events: readonly StoredEvent[]): StoredEvent | null {
+function findLastStatusEvent(events: readonly ImmutableStoredEvent[]): ImmutableStoredEvent | null {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
     if (event === undefined) {
@@ -683,8 +901,8 @@ function findLastStatusEvent(events: readonly StoredEvent[]): StoredEvent | null
  * A turn opens one span at a time, so the answer is the only open span in practice; if a log
  * somehow holds several, the oldest is the one a recovering brain has to close first.
  */
-function findOpenSpan(events: readonly StoredEvent[]): ModelRequestStartEvent | null {
-  const unclosed = new Map<EventId, ModelRequestStartEvent>()
+function findOpenSpan(events: readonly ImmutableStoredEvent[]): ImmutableStoredEvent | null {
+  const unclosed = new Map<EventId, ImmutableStoredEvent>()
   for (const event of events) {
     if (event.type === EVENT_TYPES.modelRequestStart) {
       unclosed.set(event.id, event)
@@ -703,20 +921,15 @@ function findOpenSpan(events: readonly StoredEvent[]): ModelRequestStartEvent | 
  * the log is the authority, and the preview was its display stand-in — or the model request the
  * preview belonged to ended, whether or not it produced a message.
  */
-function endsPreview(preview: PreviewRecord | undefined, stored: readonly StoredEvent[]): boolean {
+function endsPreview(
+  preview: PreviewRecord | undefined,
+  stored: readonly ImmutableStoredEvent[],
+): boolean {
   if (preview === undefined) {
     return false
   }
   return stored.some(
     (event) => event.id === preview.eventId || event.type === EVENT_TYPES.modelRequestEnd,
-  )
-}
-
-/** Whether a session has work waiting: a pending user event, or an open turn. */
-function needsWork(record: SessionRecord): boolean {
-  return (
-    record.events.some((entry) => isPendingUserEvent(entry.event)) ||
-    turnStateOf(record).state !== 'idle'
   )
 }
 

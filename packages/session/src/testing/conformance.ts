@@ -29,6 +29,7 @@ import { describe, expect, it } from 'vitest'
 import { timestampAt } from '../clock'
 import {
   AGENT_NOT_FOUND_ERROR_CODE,
+  CLAIM_CONFLICT_ERROR_CODE,
   DUPLICATE_EVENT_ID_ERROR_CODE,
   DuplicateEventIdError,
   FENCED_ERROR_CODE,
@@ -82,6 +83,17 @@ import { type TestClock, createTestClock } from './clock'
  *   when an id is taken, repeated in it, or not a valid event id.
  * - **the `processed_at` lifecycle** — pending events, marking, marking twice, and ids that are
  *   not pending user events.
+ * - **claims** (D9, issue #46) — `processed_at` derived from the claim on every read, claiming
+ *   through a `span.model_request_start`'s `consumes`, the `ClaimConflictError` a claim that
+ *   cannot be made raises, and one event never being claimed twice.
+ * - **stored chunks** — `event_start` / `event_delta` appended as stored events, with a `seq`,
+ *   a `processed_at` and a delivery like any other event.
+ * - **supersession and replay** — a recorded `supersedes` range skipped by reads but included
+ *   still in flight, `includeSuperseded` as the debugging read, and the `RangeError` a range
+ *   that does not fit raises.
+ * - **compaction** — the retention window, only superseded chunks deleted, idempotence, and
+ *   readers seeing the same log before and after.
+ * - **immutability** — a returned event is deep-frozen, so writing to it throws.
  * - **status updates** — the session `status` mirroring the log, and a reschedule not ending a
  *   turn.
  * - **turn state** — `idle`, `running` (with the open span) and `unfinished`, from the log.
@@ -710,6 +722,418 @@ export function runSessionStoreConformance(
           store.markProcessed(session.id, [id]),
         ])
         expect([...firstCall, ...secondCall].map((event) => event.id)).toEqual([id])
+      })
+    })
+
+    // ------------------------------------------------------- claims (D9, #46)
+
+    describe('claims', () => {
+      it('claims user events by appending the span that consumes them', async () => {
+        const { store, clock } = await setup()
+        const { session } = await seed(store)
+        const [queued] = await append(store, session.id, [userMessage('answer me')])
+        const id = queued?.id ?? unknownEventId()
+        expect((await store.getPendingUserEvents(session.id)).map((event) => event.id)).toEqual([
+          id,
+        ])
+
+        clock.advance(4 * SECOND)
+        const [span] = await append(store, session.id, [spanStartFor([id])])
+        expect(span?.type).toBe(EVENT_TYPES.modelRequestStart)
+
+        // The claim is the fact: no stored event changed, and every read of the consumed event
+        // now derives its `processed_at` from the append that consumed it.
+        expect(await store.getPendingUserEvents(session.id)).toEqual([])
+        const reread = (await store.listEvents(session.id)).data.find((event) => event.id === id)
+        expect(reread).toMatchObject({
+          type: EVENT_TYPES.userMessage,
+          processed_at: timestampAt(clock.currentMs),
+        })
+        expect(reread).toEqual({ ...queued, processed_at: timestampAt(clock.currentMs) })
+      })
+
+      it('stops counting a claimed session as one needing work', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const [queued] = await append(store, session.id, [userMessage('hi')])
+        expect(await store.findSessionsNeedingWork([partitionOf(session.id)])).toEqual([session.id])
+        await append(store, session.id, [spanStartFor([queued?.id ?? unknownEventId()])])
+        expect(await store.findSessionsNeedingWork([partitionOf(session.id)])).toEqual([])
+      })
+
+      it('refuses a claim on an event another claim already took, and stores nothing', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const [queued] = await append(store, session.id, [userMessage('hi')])
+        const id = queued?.id ?? unknownEventId()
+        await append(store, session.id, [spanStartFor([id])])
+        const before = (await store.listEvents(session.id)).data
+
+        const error = await thrownBy(() =>
+          store.appendEvents(session.id, [spanStartFor([id]), agentMessage('and stores nothing')]),
+        )
+        expectErrorIdentity(error, 'ClaimConflictError', CLAIM_CONFLICT_ERROR_CODE)
+        expect(errorFields(error)).toMatchObject({ sessionId: session.id, eventIds: [id] })
+        // Nothing of the refused batch: not the span, and not the message behind it.
+        expect((await store.listEvents(session.id)).data).toEqual(before)
+      })
+
+      it('refuses to claim a non-user event, a foreign event, or an id nothing names', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const [running] = await append(store, session.id, [statusRunning()])
+        const elsewhere = await store
+          .createAgent(agentInput('Other'))
+          .then((agent) => store.createSession(agent.id))
+        const [foreign] = await append(store, elsewhere.id, [userMessage('there')])
+        const nothing = unknownEventId()
+        const consumed = [running?.id ?? unknownEventId(), foreign?.id ?? unknownEventId(), nothing]
+
+        const error = await thrownBy(() => store.appendEvents(session.id, [spanStartFor(consumed)]))
+        expectErrorIdentity(error, 'ClaimConflictError', CLAIM_CONFLICT_ERROR_CODE)
+        expect(errorFields(error)).toMatchObject({ eventIds: consumed })
+        expect((await store.listEvents(session.id)).data).toEqual([running])
+        // The foreign event is untouched where it lives, too.
+        expect((await store.getPendingUserEvents(elsewhere.id)).map((event) => event.id)).toEqual([
+          foreign?.id,
+        ])
+      })
+
+      it('refuses a batch that names the same event twice, in one span or across two', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const [queued] = await append(store, session.id, [userMessage('hi')])
+        const id = queued?.id ?? unknownEventId()
+
+        for (const batch of [[spanStartFor([id, id])], [spanStartFor([id]), spanStartFor([id])]]) {
+          const error = await thrownBy(() => store.appendEvents(session.id, batch))
+          expectErrorIdentity(error, 'ClaimConflictError', CLAIM_CONFLICT_ERROR_CODE)
+          expect(errorFields(error)).toMatchObject({ eventIds: [id] })
+        }
+        // Neither attempt claimed it, and neither stored anything.
+        expect((await store.getPendingUserEvents(session.id)).map((event) => event.id)).toEqual([
+          id,
+        ])
+        expect((await store.listEvents(session.id)).data).toEqual([queued])
+      })
+
+      it('claims nothing for a span with an empty consumes list', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const [queued] = await append(store, session.id, [userMessage('hi')])
+        const [span] = await append(store, session.id, [spanStartFor([])])
+        expect(span?.type).toBe(EVENT_TYPES.modelRequestStart)
+        expect((await store.getPendingUserEvents(session.id)).map((event) => event.id)).toEqual([
+          queued?.id,
+        ])
+      })
+
+      it('lets markProcessed and consumes race for an event, but never both win', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const [first] = await append(store, session.id, [userMessage('one')])
+        const [second] = await append(store, session.id, [userMessage('two')])
+        const firstId = first?.id ?? unknownEventId()
+        const secondId = second?.id ?? unknownEventId()
+
+        // `consumes` took the first, so `markProcessed` claims nothing of it...
+        await append(store, session.id, [spanStartFor([firstId])])
+        expect(await store.markProcessed(session.id, [firstId])).toEqual([])
+
+        // ...and `markProcessed` took the second, so a span may not consume it.
+        await store.markProcessed(session.id, [secondId])
+        const error = await thrownBy(() =>
+          store.appendEvents(session.id, [spanStartFor([secondId])]),
+        )
+        expectErrorIdentity(error, 'ClaimConflictError', CLAIM_CONFLICT_ERROR_CODE)
+        expect(await store.getPendingUserEvents(session.id)).toEqual([])
+      })
+    })
+
+    // -------------------------------------------------------- stored chunks
+
+    describe('stored chunks', () => {
+      it('appends stored event_start and event_delta events like any other event', async () => {
+        const { store, clock } = await setup()
+        const { session } = await seed(store)
+        clock.advance(SECOND)
+        const previewed = suppliedEventId()
+        const stored = await append(store, session.id, [
+          eventStart(previewed),
+          deltaOf(previewed, 'Hel'),
+          deltaOf(previewed, 'lo'),
+        ])
+
+        expect(stored.map((event) => event.seq)).toEqual([1, 2, 3])
+        expect(stored.map((event) => event.type)).toEqual([
+          EVENT_TYPES.eventStart,
+          EVENT_TYPES.eventDelta,
+          EVENT_TYPES.eventDelta,
+        ])
+        for (const event of stored) {
+          // The stored form is the preview plus the envelope: an id, a seq, a processed_at.
+          expect(isStoredEvent(event)).toBe(true)
+          expect(event.id).toMatch(/^sevt_/)
+          expect(event).toMatchObject({ processed_at: timestampAt(clock.currentMs) })
+        }
+        // The message being previewed is named from the inside, as it always was.
+        expect(stored[0]).toMatchObject({
+          type: EVENT_TYPES.eventStart,
+          event: { type: EVENT_TYPES.agentMessage, id: previewed },
+        })
+        expect(stored[1]).toMatchObject({ type: EVENT_TYPES.eventDelta, event_id: previewed })
+
+        // Nothing supersedes them yet, so they are the log, chunk by chunk.
+        expect((await store.listEvents(session.id)).data).toEqual(stored)
+      })
+
+      it('delivers stored chunks to subscribers like any other event', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const received: StreamEvent[] = []
+        await store.subscribe(session.id, (event) => {
+          received.push(event)
+        })
+        const previewed = suppliedEventId()
+        const stored = await append(store, session.id, [
+          eventStart(previewed),
+          deltaOf(previewed, 'streamed'),
+        ])
+        await waitFor(() => received.length === 2, 'the two stored chunks')
+        expect(received.map((event) => event.type)).toEqual([
+          EVENT_TYPES.eventStart,
+          EVENT_TYPES.eventDelta,
+        ])
+        expect(received).toEqual(stored)
+      })
+    })
+
+    // -------------------------------------------------- supersession and replay
+
+    describe('supersession and replay', () => {
+      it('skips superseded chunks on replay, and keeps the ones still in flight', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const replied = suppliedEventId()
+        const chunks = await append(store, session.id, [
+          eventStart(replied),
+          deltaOf(replied, 'Hel'),
+          deltaOf(replied, 'lo'),
+        ])
+        const [message] = await append(store, session.id, [supersedingMessage(1, 3)])
+        // A second reply, still streaming: nothing supersedes its chunks yet.
+        const streaming = suppliedEventId()
+        const inFlight = await append(store, session.id, [
+          eventStart(streaming),
+          deltaOf(streaming, 'wo'),
+        ])
+
+        const replay = (await store.listEvents(session.id)).data
+        expect(replay.map((event) => event.seq)).toEqual([
+          message?.seq,
+          ...inFlight.map((event) => event.seq),
+        ])
+        expect(replay[0]).toEqual(message)
+
+        // The debugging read is the raw log: the superseded chunks are still there.
+        const raw = (await store.listEvents(session.id, { includeSuperseded: true })).data
+        expect(raw.map((event) => event.seq)).toEqual([
+          ...chunks.map((event) => event.seq),
+          message?.seq,
+          ...inFlight.map((event) => event.seq),
+        ])
+      })
+
+      it('skips the range in both orders, from a cursor, and after a resume', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const replied = suppliedEventId()
+        await append(store, session.id, [eventStart(replied), deltaOf(replied, 'Hel')])
+        const [message] = await append(store, session.id, [supersedingMessage(1, 2)])
+        const [after] = await append(store, session.id, [statusRunning()])
+
+        expect((await store.listEvents(session.id, { order: 'desc' })).data).toEqual([
+          after,
+          message,
+        ])
+        expect((await store.listEvents(session.id, { afterSeq: 1 })).data).toEqual([message, after])
+        expect(
+          (await store.listEvents(session.id, { types: [EVENT_TYPES.eventDelta] })).data,
+        ).toEqual([])
+        expect(
+          (
+            await store.listEvents(session.id, {
+              types: [EVENT_TYPES.eventDelta],
+              includeSuperseded: true,
+            })
+          ).data,
+        ).toHaveLength(1)
+        // A seq cursor past the superseded chunks resumes on what follows them.
+        expect((await store.listEvents(session.id, { page: encodeSeqCursor(2) })).data).toEqual([
+          message,
+          after,
+        ])
+      })
+
+      it('pages over a log whose superseded chunks are skipped, without gaps or repeats', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const replied = suppliedEventId()
+        await append(store, session.id, [eventStart(replied), deltaOf(replied, 'a')])
+        const [message] = await append(store, session.id, [supersedingMessage(1, 2)])
+        const [queued] = await append(store, session.id, [userMessage('next')])
+
+        const all = await readAllPages((cursor) =>
+          store.listEvents(session.id, { limit: 1, page: cursor }),
+        )
+        expect(all).toEqual([message, queued])
+      })
+
+      it('refuses a range that does not lie before the superseding event', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        await append(store, session.id, [
+          eventStart(suppliedEventId()),
+          deltaOf(suppliedEventId(), 'x'),
+        ])
+        // The message will land at seq 3, so a range that reaches it is a claim about the
+        // future, and the append is refused whole. (A range that is malformed on its face —
+        // `from_seq` over `to_seq`, a `seq` of zero — is the protocol schema's business, and
+        // the schemas the callers run reject those before a store sees them.)
+        for (const range of [
+          { from_seq: 1, to_seq: 3 },
+          { from_seq: 3, to_seq: 3 },
+        ]) {
+          const error = await thrownBy(() =>
+            store.appendEvents(session.id, [
+              {
+                type: EVENT_TYPES.agentMessage,
+                content: [{ type: 'text', text: 'no' }],
+                supersedes: range,
+              },
+            ]),
+          )
+          expect(error).toBeInstanceOf(RangeError)
+        }
+        expect((await store.listEvents(session.id)).data).toHaveLength(2)
+      })
+
+      it('records a supersession only for the events that carry one', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const [first] = await append(store, session.id, [deltaOf(suppliedEventId(), 'a')])
+        const [plain] = await append(store, session.id, [agentMessage('answer')])
+        // `plain` supersedes nothing, so the delta ahead of it is still replayed.
+        expect((await store.listEvents(session.id)).data).toEqual([first, plain])
+      })
+    })
+
+    // ------------------------------------------------------------- compaction
+
+    describe('compaction', () => {
+      it('deletes only superseded chunks, only past the window, and is idempotent', async () => {
+        const { store, clock } = await setup()
+        const { session } = await seed(store)
+        const replied = suppliedEventId()
+        const [first] = await append(store, session.id, [userMessage('first')])
+        const chunks = await append(store, session.id, [
+          eventStart(replied),
+          deltaOf(replied, 'Hel'),
+        ])
+        // A range wide enough to cover the user event in front of the chunks: compaction still
+        // deletes only the two chunks, because only chunks are ever deleted.
+        const [message] = await append(store, session.id, [supersedingMessage(1, 3)])
+        const streaming = suppliedEventId()
+        const inFlight = await append(store, session.id, [
+          eventStart(streaming),
+          deltaOf(streaming, 'st'),
+        ])
+
+        // The window: the chunks were written before the cutoff that follows them, and not
+        // before the cutoff that is now — nothing older than "now" is deleted.
+        expect(await store.compact({ olderThan: clock.currentMs })).toBe(0)
+        expect(await store.compact({ olderThan: new Date(clock.currentMs + SECOND) })).toBe(2)
+        // Idempotent: a second run has nothing left to delete.
+        expect(await store.compact({ olderThan: clock.currentMs + SECOND })).toBe(0)
+
+        // What every reader sees did not change — replay already skipped the chunks — and the
+        // raw read agrees with the replay read now that the rows are gone.
+        expect((await store.listEvents(session.id)).data).toEqual([first, message, ...inFlight])
+        expect((await store.listEvents(session.id, { includeSuperseded: true })).data).toEqual([
+          first,
+          message,
+          ...inFlight,
+        ])
+        expect((await store.listEvents(session.id)).data).not.toContainEqual(chunks[0])
+      })
+
+      it('leaves a chunk inside the window where it is, and deletes it once it is old enough', async () => {
+        const { store, clock } = await setup()
+        const { session } = await seed(store)
+        const replied = suppliedEventId()
+        await append(store, session.id, [eventStart(replied), deltaOf(replied, 'Hel')])
+        await append(store, session.id, [supersedingMessage(1, 2)])
+
+        clock.advance(30 * SECOND)
+        // A cutoff before the chunks were written leaves them alone: their window is not over.
+        expect(await store.compact({ olderThan: clock.currentMs - 60 * SECOND })).toBe(0)
+        expect((await store.listEvents(session.id, { includeSuperseded: true })).data).toHaveLength(
+          3,
+        )
+        // Once the cutoff has moved past them, they go.
+        expect(await store.compact({ olderThan: clock.currentMs })).toBe(2)
+        expect((await store.listEvents(session.id)).data).toHaveLength(1)
+      })
+
+      it('rejects a cutoff that is not an instant', async () => {
+        const { store } = await setup()
+        for (const olderThan of [Number.NaN, new Date(Number.NaN), 'yesterday']) {
+          const error = await thrownBy(() => store.compact({ olderThan: olderThan as number }))
+          expect(error).toBeInstanceOf(RangeError)
+        }
+      })
+    })
+
+    // ------------------------------------------------------------ immutability
+
+    describe('immutability', () => {
+      it('freezes the events it returns, so mutating one throws', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const [message, running] = await append(store, session.id, [
+          userMessage('hi'),
+          statusRunning(),
+        ])
+        for (const event of [message, running]) {
+          if (event === undefined) {
+            throw new Error('the store did not return the event it was given')
+          }
+          expect(Object.isFrozen(event)).toBe(true)
+          expect(() => {
+            event.seq = 99
+          }).toThrow(TypeError)
+          expect(() => {
+            event.processed_at = timestampAt(0)
+          }).toThrow(TypeError)
+        }
+
+        // Nested values too: the content array, and the blocks inside it.
+        if (message?.type !== EVENT_TYPES.userMessage) {
+          throw new Error('the first event is not the user message it was given')
+        }
+        const [block] = message.content
+        expect(() => {
+          message.content.push({ type: 'text', text: 'more' })
+        }).toThrow(TypeError)
+        expect(() => {
+          if (block?.type === 'text') {
+            block.text = 'changed'
+          }
+        }).toThrow(TypeError)
+
+        // None of it reached the log.
+        expect((await store.listEvents(session.id)).data).toEqual([message, running])
+        expect((await store.listEvents(session.id)).data[0]?.seq).toBe(1)
       })
     })
 
@@ -1577,6 +2001,20 @@ function sessionError(): AppendableEvent {
 /** A `span.model_request_start` to append. */
 function spanStart(): AppendableEvent {
   return { type: EVENT_TYPES.modelRequestStart }
+}
+
+/** A `span.model_request_start` claiming the user events it is given (D9). */
+function spanStartFor(consumes: EventId[]): AppendableEvent {
+  return { type: EVENT_TYPES.modelRequestStart, consumes, model: 'anthropic/claude-sonnet-5' }
+}
+
+/** An `agent.message` that supersedes the chunk range `from`..`to`, inclusive (D9). */
+function supersedingMessage(from: number, to: number): AppendableEvent {
+  return {
+    type: EVENT_TYPES.agentMessage,
+    content: [{ type: 'text', text: 'the whole reply' }],
+    supersedes: { from_seq: from, to_seq: to },
+  }
 }
 
 /** A `span.model_request_end` that closes `start`. */

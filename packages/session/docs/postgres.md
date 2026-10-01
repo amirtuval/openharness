@@ -7,8 +7,8 @@ runs it against a real database — so anything the contract promises works the 
 does in memory.
 
 This document covers what is specific to this store: the schema, how the database is migrated,
-how `seq`, fencing, leases and delivery are implemented, where the in-flight preview of a
-streaming reply is kept, and how to run Postgres locally.
+how `seq`, claims, supersession, compaction, fencing, leases and delivery are implemented,
+where the in-flight preview of a streaming reply is kept, and how to run Postgres locally.
 
 ---
 
@@ -42,15 +42,17 @@ schema.
 
 ## The schema
 
-Five tables, in `migrations/`:
+Seven tables, in `migrations/`:
 
-| table              | what a row is                                                                                      |
-| ------------------ | -------------------------------------------------------------------------------------------------- |
-| `agents`           | an agent configuration: name, description, model, system prompt, timestamps                        |
-| `sessions`         | a log's header: `status`, `partition`, title, metadata, and the agent snapshot                     |
-| `events`           | one stored event: `id`, `session_id`, `seq`, `type`, `payload jsonb`, `created_at`, `processed_at` |
-| `session_previews` | the `agent.message` being streamed right now: its `event_id` and the text its deltas carried       |
-| `partition_leases` | who holds a partition, at which epoch, until when                                                  |
+| table                 | what a row is                                                                                       |
+| --------------------- | --------------------------------------------------------------------------------------------------- |
+| `agents`              | an agent configuration: name, description, model, system prompt, timestamps                         |
+| `sessions`            | a log's header: `status`, `partition`, title, metadata, and the agent snapshot                      |
+| `events`              | one stored event: `id`, `session_id`, `seq`, `type`, `payload jsonb`, `created_at`, `processed_at`  |
+| `event_claims`        | one claim of one user event: `event_id` (primary key), the claiming span or `null`, `claimed_at`    |
+| `event_supersessions` | one recorded chunk range: `from_seq`, `to_seq`, `by_event_id` (primary key), `by_seq`, `created_at` |
+| `session_previews`    | the `agent.message` being streamed right now: its `event_id` and the text its deltas carried        |
+| `partition_leases`    | who holds a partition, at which epoch, until when                                                   |
 
 Details that matter:
 
@@ -78,6 +80,22 @@ Details that matter:
   whole store, because it is what a stored event shares with its stream-only previews (see
   [caller-supplied ids](#caller-supplied-ids)). The primary key already enforces it, and
   `0005_events_id_unique.sql` declares a `unique` index named `events_id_key` beside it.
+- **`event_claims.event_id` is the primary key** — claiming is `insert … on conflict do
+nothing`, so two writers racing for the same event cannot both win, and nothing here is ever
+  written a second time or deleted (see [claims](#claims-are-rows-not-columns)). A claim names
+  the user event it takes and, when an append's `consumes` made it, the
+  `span.model_request_start` that made it.
+- **`event_supersessions` is insert-only too**, and `by_event_id` is its primary key: one
+  event carries one `supersedes` range. `check (to_seq >= from_seq)` and `check (by_seq >
+to_seq)` are the range rules in the schema's own words (see
+  [supersession and compaction](#supersession-and-compaction)).
+- **Neither of the two new tables has a foreign key**, on purpose. The log's tables are
+  truncated wholesale — a test harness that empties `events` for the next test does it in one
+  statement, and Postgres refuses to truncate a table a foreign key points at — so a reference
+  from `event_claims` or `event_supersessions` would break tooling outside this package. The
+  store is their only writer, every read joins back to `events`, and a row a truncation leaves
+  behind simply matches nothing. What the contract needs is uniqueness, and the primary keys
+  provide that on their own.
 - **`sessions.partition`** is `partitionOf(sessionId)` — stored, not recomputed, so
   `findSessionsNeedingWork` is an index range scan per partition.
 - **`session_previews` is `unlogged`**, and holds at most one row per session: `session_id`
@@ -105,14 +123,17 @@ consequence is that **a migration file must never be edited once it has been app
 anywhere** — the runner will not re-run it, so an edit is silently ignored on existing
 databases while applying to new ones. Add a new file instead.
 
-| file                        | what it creates                                                           |
-| --------------------------- | ------------------------------------------------------------------------- |
-| `0001_agents.sql`           | `agents`, and the `(created_at, id)` index the agent list pages through   |
-| `0002_sessions.sql`         | `sessions`, plus the indexes for the three ways sessions are queried      |
-| `0003_events.sql`           | `events`, its uniqueness constraint and its two secondary indexes         |
-| `0004_partition_leases.sql` | `partition_leases`                                                        |
-| `0005_events_id_unique.sql` | the `unique` index that states the id guarantee (`events_id_key`) by name |
-| `0006_session_previews.sql` | `session_previews`, the `unlogged` table of previews in flight            |
+| file                             | what it creates                                                            |
+| -------------------------------- | -------------------------------------------------------------------------- |
+| `0001_agents.sql`                | `agents`, and the `(created_at, id)` index the agent list pages through    |
+| `0002_sessions.sql`              | `sessions`, plus the indexes for the three ways sessions are queried       |
+| `0003_events.sql`                | `events`, its uniqueness constraint and its two secondary indexes          |
+| `0004_partition_leases.sql`      | `partition_leases`                                                         |
+| `0005_events_id_unique.sql`      | the `unique` index that states the id guarantee (`events_id_key`) by name  |
+| `0006_session_previews.sql`      | `session_previews`, the `unlogged` table of previews in flight             |
+| `0007_event_claims.sql`          | `event_claims`, the insert-only record of which events a turn claimed (D9) |
+| `0008_event_claims_backfill.sql` | the one-time copy of the pre-D9 `processed_at` values into claim rows (D9) |
+| `0009_event_supersessions.sql`   | `event_supersessions`, the insert-only record of the ranges events replace |
 
 To run them outside an application:
 
@@ -150,9 +171,8 @@ an append.
 `createSession`'s `initial_events` go through the same code path inside the creation
 transaction: they are in the log before the session is visible.
 
-`markProcessed` claims rather than asserts: one `update … where processed_at is null
-returning *` sets `processed_at` for exactly the rows that were still queued, so two callers
-racing for the same event cannot both win, and marking twice is a no-op.
+`markProcessed` claims rather than asserts, and since D9 the claim is a row of its own rather
+than a value written onto the event — see [claims](#claims-are-rows-not-columns) below.
 
 ## Caller-supplied ids
 
@@ -185,6 +205,109 @@ same id twice in one batch (`DuplicateEventIdError`), are refused by both stores
 this — they are argument checks, and `0005_events_id_unique.sql` is what covers the case a
 single process cannot see: two appends, to the same session or to different ones, racing for
 the same id.
+
+## Claims are rows, not columns
+
+A user event is queued until a turn claims it. Before D9 that claim was the `processed_at`
+column on the event itself, and claiming wrote to `events` — a client that already held the
+event never learned it had changed. Now the claim is a row of `event_claims`, that table is
+insert-only, and `processed_at` is derived on read by joining it:
+
+```sql
+-- markProcessed: claim what is still unclaimed, and claim nothing twice
+insert into event_claims (session_id, event_id, claimed_by_event_id, claimed_at)
+select distinct $1, e.id, null, $2
+  from events e
+ where e.session_id = $1
+   and e.id = any($3::text[])
+   and e.type in ('user.message', 'user.interrupt')
+on conflict (event_id) do nothing
+returning event_id, claimed_at
+```
+
+`on conflict (event_id) do nothing` is the race: two callers insert, one commits and the other
+writes nothing — exactly what the old conditional write decided. The select is the filter: an
+id from another session, an event of another type, or one already claimed matches no row and
+is ignored, because `markProcessed` is a claim and not an assertion.
+
+An append whose `span.model_request_start` carries `consumes` claims in its own transaction,
+with `claimed_by_event_id` set to the span:
+
+```sql
+insert into event_claims (session_id, event_id, claimed_by_event_id, claimed_at)
+select $1, claim.event_id, claim.by_event_id, $2
+  from unnest($3::text[], $4::text[]) as claim (event_id, by_event_id)
+  join events e
+    on e.id = claim.event_id
+   and e.session_id = $1
+   and e.type in ('user.message', 'user.interrupt')
+on conflict (event_id) do nothing
+returning event_id
+```
+
+This one is an assertion, not a claim: the span states what it answers, so an id the insert
+produces no row for — foreign, non-user, already claimed, or named twice in one batch — fails
+the store's check, the append throws `ClaimConflictError`, and the transaction rolls back
+with the events it had already written. The difference is deliberate: `markProcessed` is a
+caller taking whatever of a list is still there, while `consumes` is the log recording
+exactly what a request answered.
+
+**Reading `processed_at`.** Every read that can return a user event joins the claim:
+`listEvents` and the subscription fetch `left join event_claims`; `getPendingUserEvents` is
+the anti-join — `left join … where c.event_id is null` — which is what "queued" means now,
+still in `seq` order. The `events.processed_at` column is no longer written with a value for a
+user event and no longer read; `0008_event_claims_backfill.sql` copied every pre-D9 value into
+a claim row, so logs written before the change read exactly as they did, and P4 drops the
+column.
+
+## Supersession and compaction
+
+Since D9 a streamed reply is stored as it streams (`event_start`, `event_delta`), and the
+event that finishes it — the `agent.message`, or the `span.model_request_end` for a request
+that ends without one — carries `supersedes: { from_seq, to_seq }`. The append records the
+range in `event_supersessions`, after checking in the store that `from_seq` is positive,
+`to_seq` is not before it, and `to_seq` is strictly before the superseding event's own `seq`;
+anything else is a `RangeError` and the append is refused whole. The table's `check`
+constraints say the same thing in the schema's own words.
+
+Readers then skip it. `listEvents` leaves a stored chunk out when a recorded range covers its
+`seq`:
+
+```sql
+not exists (
+  select 1
+    from event_supersessions s
+   where s.session_id = e.session_id
+     and e.type in ('event_start', 'event_delta')
+     and e.seq between s.from_seq and s.to_seq
+)
+```
+
+— so a client resuming at any `seq` sees the reply once, whole, however far into the stream
+it had got. `includeSuperseded: true` reads the raw log instead, for debugging. Live delivery
+is not filtered: a subscriber hears every event as it happens, and reconciling by id is the
+client's business (the protocol's transcript rules are written for exactly that).
+
+`compact({ olderThan })` is the **only** delete in this package, and it deletes only what a
+range covers, that is a chunk, and that is older than the cutoff:
+
+```sql
+delete from events e
+ using event_supersessions s
+ where e.session_id = s.session_id
+   and e.type in ('event_start', 'event_delta')
+   and e.seq between s.from_seq and s.to_seq
+   and e.created_at < $1
+```
+
+It returns how many events it deleted, is idempotent, and two instances running it at once
+simply split the rows between them. Nothing else is ever deleted: `event_claims` and
+`event_supersessions` are insert-only and outlive the chunks they name, and a superseded
+chunk always has the event that superseded it _after_ it, which is not a chunk and is never
+deleted — so `seq` is never reused, and the gaps a compaction leaves are the normal state of
+a compacted log. `src/postgres/no-updates.test.ts` scans this package's source for the two
+spellings a write back to `events` would use, so "written once, read forever" cannot break
+unnoticed.
 
 ## The in-flight preview
 
@@ -341,9 +464,9 @@ DATABASE_URL=postgres://postgres:postgres@localhost:5432/openharness yarn test
 ```
 
 The suite truncates every table before each test, so it is happy to share a database with
-anything else — but it will empty `agents`, `sessions`, `events`, `session_previews` and
-`partition_leases` in whatever database `DATABASE_URL` points at. Point it at a scratch
-database.
+anything else — but it will empty all seven of them — `agents`, `sessions`, `events`,
+`event_claims`, `event_supersessions`, `session_previews` and `partition_leases` — in whatever
+database `DATABASE_URL` points at. Point it at a scratch database.
 
 ## Operational notes
 

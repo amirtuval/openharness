@@ -11,6 +11,8 @@ import type {
 } from '@openharness/protocol'
 
 import { timestampAt } from '../clock'
+import { isUserEventType } from '../events'
+import { deepFreeze } from '../freeze'
 import type { AppendableEvent, PartitionSignal } from '../store'
 
 /**
@@ -64,6 +66,57 @@ export interface EventsTable {
 }
 
 /**
+ * `event_claims`: which user events a turn has claimed, insert-only (D9, issue #46).
+ *
+ * A claim is a fact about a user event, never an edit of one: `markProcessed` and a
+ * `span.model_request_start` carrying `consumes` both write a row here, and nothing ever
+ * writes a claim twice or removes one. The primary key on `event_id` is what makes claiming a
+ * claim: two writers racing for the same event both insert, one commits and one does nothing,
+ * exactly as the old conditional write decided. `claimed_by_event_id` names the span that
+ * claimed the event, and is `null` for a claim `markProcessed` recorded. `claimed_at` is the
+ * injected clock's instant at the claim, and is what a reader sees as the event's
+ * `processed_at` — the `events.processed_at` column is the pre-D9 spelling of the same fact
+ * and is no longer read for user events (P4 drops it).
+ *
+ * It carries no foreign keys on purpose (see `0007_event_claims.sql`): the log's tables are
+ * truncated wholesale by test harnesses, and Postgres refuses to truncate a table a foreign
+ * key points at.
+ */
+export interface EventClaimsTable {
+  session_id: string
+  /** The claimed `user.message` / `user.interrupt`; primary key, so a claim is made once. */
+  event_id: string
+  /** The `span.model_request_start` that claimed it, or `null` for `markProcessed`. */
+  claimed_by_event_id: string | null
+  claimed_at: Date
+}
+
+/**
+ * `event_supersessions`: the chunk ranges the log has replaced, insert-only (D9, issue #46).
+ *
+ * A reply is stored twice over — as the `event_start` / `event_delta` chunks it streamed in,
+ * and as the finished `agent.message` (or, for a request that ended without one, the
+ * `span.model_request_end`) — and the finished event carries `supersedes: { from_seq, to_seq }`
+ * over the chunks it replaces. A row of this table is that range as recorded: the reader uses
+ * it to skip the range on replay, and {@link SessionStore.compact} to delete it once it is
+ * older than the retention window. It is never updated and never deleted; `by_seq` is the
+ * superseding event's own `seq`, and the range always ends before it. Like `event_claims`, it
+ * carries no foreign keys on purpose, so the log's tables stay truncatable in one statement.
+ */
+export interface EventSupersessionsTable {
+  session_id: string
+  /** The first replaced `seq` — the reply's `event_start`. */
+  from_seq: number
+  /** The last replaced `seq` — the reply's final `event_delta`. */
+  to_seq: number
+  /** The event that carries the range; primary key, so a range is recorded once. */
+  by_event_id: string
+  /** The superseding event's own `seq`; strictly after `to_seq`. */
+  by_seq: number
+  created_at: Date
+}
+
+/**
  * `session_previews`: the preview in flight for a session's current `agent.message`.
  *
  * One row per session at most. An `event_start` resets it — `event_id` and an empty `text` —
@@ -94,6 +147,8 @@ export interface PostgresSchema {
   agents: AgentsTable
   sessions: SessionsTable
   events: EventsTable
+  event_claims: EventClaimsTable
+  event_supersessions: EventSupersessionsTable
   session_previews: SessionPreviewsTable
   partition_leases: PartitionLeasesTable
 }
@@ -107,8 +162,20 @@ export type SessionRow = SessionsTable
 /** One row of `events`. */
 export type EventRow = EventsTable
 
+/** One row of `event_claims`. */
+export type EventClaimRow = EventClaimsTable
+
 /** One row of `partition_leases`. */
 export type PartitionLeaseRow = PartitionLeasesTable
+
+/**
+ * An `events` row as every read here fetches it: with the claim its event has, if any.
+ *
+ * `claimed_at` is what a user event's `processed_at` is derived from (see
+ * {@link eventFromRow}), so a read that can return a user event joins `event_claims` — a
+ * `left join`, so the column is `null` exactly when nothing has claimed the event.
+ */
+export type EventWithClaimRow = EventRow & { readonly claimed_at: Date | null }
 
 /** A clock instant as a `timestamptz` parameter: the store never asks the database for time. */
 export function instant(milliseconds: number): Date {
@@ -155,16 +222,29 @@ export function sessionFromRow(row: SessionRow): Session {
 
 /**
  * The stored event a row carries: the payload the caller sent, plus the three fields the
- * store assigns. `processed_at` is `null` on a user event that is still queued.
+ * store assigns, with the fields the store derives filled in.
+ *
+ * Since D9 (issue #46) a user event's `processed_at` is derived, not stored: it is the
+ * `claimed_at` of the claim the read joined in — `null` while nothing has claimed the event,
+ * which is what "queued" means now. Every other event keeps the `processed_at` the store wrote
+ * when it appended it. The event comes back deep-frozen: an event is immutable, and a copy
+ * anything could write to would be a second log.
  */
-export function eventFromRow(row: EventRow): StoredEvent {
+export function eventFromRow(row: EventWithClaimRow): StoredEvent {
   const payload = row.payload as AppendableEvent
-  return {
+  const processed_at = isUserEventType(row.type)
+    ? row.claimed_at === null
+      ? null
+      : timestampOf(row.claimed_at)
+    : row.processed_at === null
+      ? null
+      : timestampOf(row.processed_at)
+  return deepFreeze({
     ...payload,
     id: row.id as StoredEvent['id'],
     seq: row.seq,
-    processed_at: row.processed_at === null ? null : timestampOf(row.processed_at),
-  } as StoredEvent
+    processed_at,
+  }) as StoredEvent
 }
 
 // --------------------------------------------------------------------- channels

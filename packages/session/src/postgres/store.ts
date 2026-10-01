@@ -38,14 +38,17 @@ import { Pool, type ClientConfig } from 'pg'
 import { type Clock, systemClock } from '../clock'
 import {
   AgentNotFoundError,
+  ClaimConflictError,
   DuplicateEventIdError,
   FencedError,
   SessionNotFoundError,
 } from '../errors'
+import { cutoffOf, isUserEventType, supersessionsOf, type SupersessionRecord } from '../events'
 import { assertEventIds, assertTtl, decodeKeyPage, decodeSeqPage, pageSize } from '../inputs'
 import type {
   AppendableEvent,
   AppendEventsOptions,
+  CompactOptions,
   CreateSessionOptions,
   ListAgentsOptions,
   ListEventsOptions,
@@ -80,6 +83,7 @@ import {
   timestampOf,
   type AgentRow,
   type EventRow,
+  type EventWithClaimRow,
   type PartitionLeaseRow,
   type PostgresSchema,
   type SessionRow,
@@ -381,21 +385,26 @@ export class PostgresSessionStore implements SessionStore {
       if (eventIds.length === 0) {
         return []
       }
-      // The claim is the `update`: rows that are already processed, that belong to another
-      // session, or that are not user events do not match, so two callers racing for the same
-      // event cannot both win — the loser's `where` re-checks under the row lock and matches
-      // nothing.
-      const claimed = await sql<EventRow>`
+      // The claim is the insert, and nothing about the events changes: rows that are already
+      // claimed, that belong to another session, or that are not user events do not match the
+      // select, and the primary key on `event_id` decides a race — two callers insert, one
+      // commits and the other's `on conflict do nothing` writes no row, so they cannot both
+      // win. `distinct` keeps an id the caller repeated from reaching the insert twice.
+      const claimed = await sql<EventWithClaimRow>`
         with claimed as (
-          update events
-             set processed_at = ${instant(now)}
-           where session_id = ${sessionId}
-             and id = any(${eventIds}::text[])
-             and processed_at is null
-             and type in (${EVENT_TYPES.userMessage}, ${EVENT_TYPES.userInterrupt})
-          returning *
+          insert into event_claims (session_id, event_id, claimed_by_event_id, claimed_at)
+          select distinct ${sessionId}, e.id, null, ${instant(now)}::timestamptz
+            from events e
+           where e.session_id = ${sessionId}
+             and e.id = any(${eventIds}::text[])
+             and e.type in (${EVENT_TYPES.userMessage}, ${EVENT_TYPES.userInterrupt})
+          on conflict (event_id) do nothing
+          returning event_id, claimed_at
         )
-        select * from claimed order by seq asc
+        select e.*, claimed.claimed_at
+          from claimed
+          join events e on e.id = claimed.event_id
+         order by e.seq asc
       `.execute(trx)
       return claimed.rows.map(eventFromRow).filter(isUserEvent)
     })
@@ -414,18 +423,37 @@ export class PostgresSessionStore implements SessionStore {
     if (options.types !== undefined && options.types.length === 0) {
       return { data: [], next_page: null }
     }
-    let query = this.#db.selectFrom('events').selectAll().where('session_id', '=', sessionId)
+    // The claim is joined in, not stored on the row: a user event's `processed_at` is the
+    // `claimed_at` of the claim that took it, so a read always sees the fact as it is now.
+    let query = this.#db
+      .selectFrom('events as e')
+      .leftJoin('event_claims as c', 'c.event_id', 'e.id')
+      .selectAll('e')
+      .select('c.claimed_at as claimed_at')
+      .where('e.session_id', '=', sessionId)
+    if (options.includeSuperseded !== true) {
+      // Replay skips superseded chunks: an `event_start` / `event_delta` in a recorded range
+      // does not come back. The filter is part of the query, so a page is a page of what a
+      // reader gets and the `seq` cursor keeps seeking exactly the same way.
+      query = query.where(sql<SqlBool>`not exists (
+        select 1
+          from event_supersessions s
+         where s.session_id = e.session_id
+           and e.type in (${EVENT_TYPES.eventStart}, ${EVENT_TYPES.eventDelta})
+           and e.seq between s.from_seq and s.to_seq
+      )`)
+    }
     if (cursor !== null) {
-      query = query.where('seq', order === 'asc' ? '>' : '<', cursor.seq)
+      query = query.where('e.seq', order === 'asc' ? '>' : '<', cursor.seq)
     }
     if (options.afterSeq !== undefined) {
-      query = query.where('seq', '>', options.afterSeq)
+      query = query.where('e.seq', '>', options.afterSeq)
     }
     if (options.types !== undefined) {
-      query = query.where('type', 'in', options.types)
+      query = query.where('e.type', 'in', options.types)
     }
     const rows = await query
-      .orderBy('seq', order)
+      .orderBy('e.seq', order)
       .limit(limit + 1)
       .execute()
     const data = rows.slice(0, limit)
@@ -439,13 +467,17 @@ export class PostgresSessionStore implements SessionStore {
     if ((await readSession(this.#db, sessionId)) === undefined) {
       throw new SessionNotFoundError(sessionId)
     }
+    // Pending is "no claim", not "no `processed_at`": the claim is the fact, and the events
+    // that do not have one are the ones a turn has not folded in yet, in `seq` order.
     const rows = await this.#db
-      .selectFrom('events')
-      .selectAll()
-      .where('session_id', '=', sessionId)
-      .where('processed_at', 'is', null)
-      .where('type', 'in', [EVENT_TYPES.userMessage, EVENT_TYPES.userInterrupt])
-      .orderBy('seq', 'asc')
+      .selectFrom('events as e')
+      .leftJoin('event_claims as c', 'c.event_id', 'e.id')
+      .selectAll('e')
+      .select('c.claimed_at as claimed_at')
+      .where('e.session_id', '=', sessionId)
+      .where('e.type', 'in', [EVENT_TYPES.userMessage, EVENT_TYPES.userInterrupt])
+      .where('c.event_id', 'is', null)
+      .orderBy('e.seq', 'asc')
       .execute()
     return rows.map(eventFromRow).filter(isUserEvent)
   }
@@ -473,6 +505,27 @@ export class PostgresSessionStore implements SessionStore {
     return openSpan === null
       ? { state: 'unfinished', openSpan: null }
       : { state: 'running', openSpan }
+  }
+
+  async compact(options: CompactOptions): Promise<number> {
+    const cutoff = cutoffOf(options)
+    // One statement: delete what a recorded supersession covers, that is a chunk, that is old
+    // enough — and nothing else. Two instances running this at once simply split the rows
+    // between them; a second run finds nothing and deletes nothing, because the rows a first
+    // run deleted are gone rather than merely matched again.
+    const deleted = await sql<{ count: number }>`
+      with deleted as (
+        delete from events e
+         using event_supersessions s
+         where e.session_id = s.session_id
+           and e.type in (${EVENT_TYPES.eventStart}, ${EVENT_TYPES.eventDelta})
+           and e.seq between s.from_seq and s.to_seq
+           and e.created_at < ${instant(cutoff)}
+        returning e.id
+      )
+      select count(*)::int as count from deleted
+    `.execute(this.#db)
+    return deleted.rows[0]?.count ?? 0
   }
 
   // ------------------------------------------------------- live subscription
@@ -622,8 +675,10 @@ export class PostgresSessionStore implements SessionStore {
              select 1
                from events e
               where e.session_id = s.id
-                and e.processed_at is null
                 and e.type in (${EVENT_TYPES.userMessage}, ${EVENT_TYPES.userInterrupt})
+                and not exists (
+                  select 1 from event_claims c where c.event_id = e.id
+                )
            )
            -- An open turn: the last status event is not session.status_idle. A log with no
            -- status event at all is idle, which is what the coalesce supplies.
@@ -750,17 +805,23 @@ export class PostgresSessionStore implements SessionStore {
 
   /**
    * Append events to a session's log inside an open transaction, assign `seq` from the log's
-   * own end, follow the status events onto the session row, and announce what was written.
+   * own end, record the claims and supersessions the batch carries, follow the status events
+   * onto the session row, and announce what was written.
    *
    * The caller has already taken the session's row lock and checked the fence, so this is
-   * where the append actually happens: one multi-row insert, one session update, and one
-   * notification per event — all in the caller's transaction, which is what makes a
-   * subscription hear about an event exactly when it commits.
+   * where the append actually happens: one multi-row insert, one claim insert, one
+   * supersession insert, one session update, and one notification per event — all in the
+   * caller's transaction, which is what makes a subscription hear about an event exactly when
+   * it commits, and what makes the whole batch one transaction.
    *
    * An event that brought its own id is written under it, and the unique constraint on
    * `events.id` is what refuses one the log already holds: the insert fails and the
    * transaction rolls back whole. {@link PostgresSessionStore.appendEvents} turns that into a
    * `DuplicateEventIdError`.
+   *
+   * The batch's claims and supersessions are checked inside this transaction, and both kinds
+   * of refusal — a claim that cannot be made, a range that does not fit — abort it whole:
+   * nothing of the batch is stored, nothing is claimed, and no range is recorded.
    */
   async #append(
     trx: Transaction<PostgresSchema>,
@@ -786,11 +847,27 @@ export class PostgresSessionStore implements SessionStore {
         type: input.type,
         payload,
         created_at: at,
-        // A user event is queued until a turn claims it; everything else happened now.
+        // A user event is queued until a turn claims it; everything else happened now. The
+        // column is never written with a value for a user event any more — its `processed_at`
+        // is derived from the claim on read (P4 drops the column).
         processed_at: isUserEventType(input.type) ? null : at,
       }
     })
+    // What the batch records beside its events, checked before anything commits. The events
+    // go in first so the claim rows can reference the span starts that carry them; a refusal
+    // rolls the whole transaction back, so nothing of the batch survives it.
+    const claims = claimsOf(events, rows)
+    const supersessions = supersessionsOf(appendedEvents(events, rows), now)
     await trx.insertInto('events').values(rows).execute()
+    if (claims.length > 0) {
+      const conflicts = await this.#claim(trx, sessionId, claims, at)
+      if (conflicts !== null) {
+        throw new ClaimConflictError(sessionId, conflicts)
+      }
+    }
+    if (supersessions.length > 0) {
+      await this.#recordSupersessions(trx, sessionId, supersessions, at)
+    }
     const status = statusAfter(events)
     await trx
       .updateTable('sessions')
@@ -815,7 +892,82 @@ export class PostgresSessionStore implements SessionStore {
     await sql`select pg_notify(${channel}, payload) from unnest(${payloads}::text[]) as payload`.execute(
       trx,
     )
-    return rows.map(eventFromRow)
+    // Nothing this batch wrote can be claimed yet — a `consumes` list names events already in
+    // the log — so the returned events carry no claim, and a user event among them is queued.
+    return rows.map((row) => eventFromRow({ ...row, claimed_at: null }))
+  }
+
+  /**
+   * Claim the user events a batch's `consumes` lists, in the append's transaction.
+   *
+   * One insert, insert-only. The select joins each requested id to the log, so an id that names
+   * no event of this session, an event of another type, or an event another claim already took
+   * never becomes a row; `on conflict (event_id) do nothing` is what decides a race with a
+   * concurrent claim — the loser writes nothing — without failing the statement. An id the
+   * batch names twice is caught here too: it is deduplicated for the insert, and reported.
+   *
+   * The events are already in the transaction (the append inserts them first, so a claim can
+   * reference the span start that carries it), so a refusal throws and the caller's rollback
+   * takes them back out: an append that cannot claim what it says it does is not stored.
+   *
+   * @returns the ids that are not left pending — already claimed, foreign, not user events, or
+   *   named twice — or `null` when every claim landed
+   */
+  async #claim(
+    trx: Transaction<PostgresSchema>,
+    sessionId: SessionId,
+    claims: readonly ConsumedClaim[],
+    at: Date,
+  ): Promise<EventId[] | null> {
+    const unique = new Map<EventId, ConsumedClaim>()
+    for (const claim of claims) {
+      if (!unique.has(claim.eventId)) {
+        unique.set(claim.eventId, claim)
+      }
+    }
+    const asked = [...unique.values()]
+    const inserted = await sql<{ event_id: string }>`
+      insert into event_claims (session_id, event_id, claimed_by_event_id, claimed_at)
+      select ${sessionId}, claim.event_id, claim.by_event_id, ${at}::timestamptz
+        from unnest(${asked.map((claim) => claim.eventId)}::text[], ${asked.map((claim) => claim.byEventId)}::text[])
+             as claim (event_id, by_event_id)
+        join events e
+          on e.id = claim.event_id
+         and e.session_id = ${sessionId}
+         and e.type in (${EVENT_TYPES.userMessage}, ${EVENT_TYPES.userInterrupt})
+      on conflict (event_id) do nothing
+      returning event_id
+    `.execute(trx)
+    const claimed = new Set(inserted.rows.map((row) => row.event_id))
+    const seen = new Set<EventId>()
+    const conflicts: EventId[] = []
+    for (const claim of claims) {
+      const duplicated = seen.has(claim.eventId)
+      seen.add(claim.eventId)
+      if ((duplicated || !claimed.has(claim.eventId)) && !conflicts.includes(claim.eventId)) {
+        conflicts.push(claim.eventId)
+      }
+    }
+    return conflicts.length === 0 ? null : conflicts
+  }
+
+  /** Record the chunk ranges a batch supersedes, in the append's transaction. Insert-only. */
+  async #recordSupersessions(
+    trx: Transaction<PostgresSchema>,
+    sessionId: SessionId,
+    supersessions: readonly SupersessionRecord[],
+    at: Date,
+  ): Promise<void> {
+    await sql`
+      insert into event_supersessions (session_id, from_seq, to_seq, by_event_id, by_seq, created_at)
+      select ${sessionId}, range.from_seq, range.to_seq, range.by_event_id, range.by_seq, ${at}::timestamptz
+        from unnest(
+               ${supersessions.map((range) => range.fromSeq)}::int[],
+               ${supersessions.map((range) => range.toSeq)}::int[],
+               ${supersessions.map((range) => range.byEventId)}::text[],
+               ${supersessions.map((range) => range.bySeq)}::int[]
+             ) as range (from_seq, to_seq, by_event_id, by_seq)
+    `.execute(trx)
   }
 
   /**
@@ -904,9 +1056,10 @@ export class PostgresSessionStore implements SessionStore {
 
   /** The oldest `span.model_request_start` in the log that no end event closed, or `null`. */
   async #openSpan(sessionId: SessionId): Promise<ModelRequestStartEvent | null> {
-    const rows = await sql<EventRow>`
-      select e.*
+    const rows = await sql<EventWithClaimRow>`
+      select e.*, c.claimed_at
         from events e
+        left join event_claims c on c.event_id = e.id
        where e.session_id = ${sessionId}
          and e.type = ${EVENT_TYPES.modelRequestStart}
          and not exists (
@@ -1043,14 +1196,22 @@ export class PostgresSessionStore implements SessionStore {
     }
   }
 
-  /** A batch of stored events, in `seq` order, from just after `afterSeq`. */
-  async #eventsAfter(sessionId: SessionId, afterSeq: number): Promise<EventRow[]> {
+  /**
+   * A batch of stored events, in `seq` order, from just after `afterSeq`.
+   *
+   * Live delivery hands out every event, superseded chunks included — a subscriber hears what
+   * happened, and reconciliation by `seq` and `id` is the reader's business. The claim join is
+   * what makes a delivered user event carry the `processed_at` a read of the same event gives.
+   */
+  async #eventsAfter(sessionId: SessionId, afterSeq: number): Promise<EventWithClaimRow[]> {
     return this.#db
-      .selectFrom('events')
-      .selectAll()
-      .where('session_id', '=', sessionId)
-      .where('seq', '>', afterSeq)
-      .orderBy('seq', 'asc')
+      .selectFrom('events as e')
+      .leftJoin('event_claims as c', 'c.event_id', 'e.id')
+      .selectAll('e')
+      .select('c.claimed_at as claimed_at')
+      .where('e.session_id', '=', sessionId)
+      .where('e.seq', '>', afterSeq)
+      .orderBy('e.seq', 'asc')
       .limit(FETCH_BATCH_SIZE)
       .execute()
   }
@@ -1232,14 +1393,51 @@ function statusAfter(events: readonly AppendableEvent[]): SessionStatus | null {
   return status
 }
 
-/** Whether an event type is one the user writes; those are queued until a turn claims them. */
-function isUserEventType(type: string): boolean {
-  return type === EVENT_TYPES.userMessage || type === EVENT_TYPES.userInterrupt
-}
-
 /** Whether a stored event is a user event. */
 function isUserEvent(event: StoredEvent): event is UserEvent {
   return isUserEventType(event.type)
+}
+
+/** A claim a batch wants to record: the consumed event, and the span start that consumes it. */
+interface ConsumedClaim {
+  readonly eventId: EventId
+  readonly byEventId: EventId
+}
+
+/**
+ * The claims a batch carries: for every `span.model_request_start` with a `consumes` list,
+ * each id it names, paired with that span's id — read off the row, which is where the id the
+ * store assigned (or the caller supplied) lives.
+ */
+function claimsOf(events: readonly AppendableEvent[], rows: readonly EventRow[]): ConsumedClaim[] {
+  const claims: ConsumedClaim[] = []
+  events.forEach((input, index) => {
+    if (input.type !== EVENT_TYPES.modelRequestStart || input.consumes === undefined) {
+      return
+    }
+    const row = rows[index]
+    if (row === undefined) {
+      return
+    }
+    for (const consumed of input.consumes) {
+      claims.push({ eventId: consumed, byEventId: row.id as EventId })
+    }
+  })
+  return claims
+}
+
+/**
+ * The batch as events with their assigned ids and seqs — what `supersessionsOf` reads. The
+ * events are not stored yet; the `seq` an append gives them is `rows[index].seq`.
+ */
+function appendedEvents(
+  events: readonly AppendableEvent[],
+  rows: readonly EventRow[],
+): (AppendableEvent & { readonly id: EventId; readonly seq: number })[] {
+  return events.flatMap((input, index) => {
+    const row = rows[index]
+    return row === undefined ? [] : [{ ...input, id: row.id as EventId, seq: row.seq }]
+  })
 }
 
 /** The last item of an array the caller has already proved non-empty. */

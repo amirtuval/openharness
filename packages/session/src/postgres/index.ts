@@ -22,7 +22,9 @@ export { migrate } from './migrate'
 export type { MigrateOptions } from './migrate'
 export type {
   AgentsTable,
+  EventClaimsTable,
   EventsTable,
+  EventSupersessionsTable,
   PartitionLeasesTable,
   PostgresSchema,
   SessionPreviewsTable,
