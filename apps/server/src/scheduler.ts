@@ -1,4 +1,9 @@
-import type { ContextStrategy, ModelFactory, RetryPolicy } from '@openharness/brain'
+import type {
+  ContextStrategy,
+  ModelFactory,
+  ResolveCredential,
+  RetryPolicy,
+} from '@openharness/brain'
 import { DEFAULT_PARTITION_COUNT, type SessionId } from '@openharness/protocol'
 import type { PartitionSignalKind, SessionStore } from '@openharness/session'
 
@@ -61,8 +66,13 @@ export interface LocalSchedulerOptions {
   /** How a session's `agent.model.id` becomes a model to stream from. */
   readonly model: ModelFactory
   /**
-   * The runner to run passes with. Omitted, one is built from `store` and `model`; #11 passes
-   * a runner it shares with its own partition logic.
+   * Where each model request's provider credential comes from (epic #65, A5); see
+   * `SessionRunnerOptions.resolveCredential`.
+   */
+  readonly resolveCredential: ResolveCredential
+  /**
+   * The runner to run passes with. Omitted, one is built from `store`, `model` and
+   * `resolveCredential`; #11 passes a runner it shares with its own partition logic.
    */
   readonly runner?: SessionRunner
   /** How many sessions may have a turn in flight at once; defaults to 4. */
@@ -123,6 +133,7 @@ export class LocalScheduler implements SessionScheduler {
       new SessionRunner({
         store: options.store,
         model: options.model,
+        resolveCredential: options.resolveCredential,
         ...(options.retry === undefined ? {} : { retry: options.retry }),
         ...(options.contextStrategy === undefined
           ? {}

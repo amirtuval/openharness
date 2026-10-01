@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   ApiError,
+  AuthenticationError,
   ResponseValidationError,
   apiErrorFromResponse,
   errorTypeForStatus,
@@ -75,6 +76,44 @@ describe('ApiError', () => {
     for (const status of terminal) {
       expect(new ApiError(status, 'x').retryable, `status ${status}`).toBe(false)
     }
+  })
+})
+
+describe('AuthenticationError', () => {
+  it('is built for a 401, from the envelope', () => {
+    const error = apiErrorFromResponse(
+      401,
+      { type: 'error', error: { type: 'authentication_error', message: 'Sign in first.' } },
+      { statusText: 'Unauthorized' },
+    )
+
+    expect(error).toBeInstanceOf(AuthenticationError)
+    expect(error).toBeInstanceOf(ApiError)
+    expect(error.name).toBe('AuthenticationError')
+    expect(error.status).toBe(401)
+    expect(error.type).toBe('authentication_error')
+    expect(error.message).toBe('Sign in first.')
+    expect(error.retryable).toBe(false)
+  })
+
+  it('is built for a 401 whose body is not the envelope', () => {
+    const error = apiErrorFromResponse(401, '<html>login</html>', {
+      statusText: 'Unauthorized',
+      requestId: 'req_proxy',
+    })
+
+    expect(error).toBeInstanceOf(AuthenticationError)
+    expect(error.message).toBe('The request failed with HTTP status 401 Unauthorized.')
+    expect(error.requestId).toBe('req_proxy')
+  })
+
+  it('keeps the message and request id from the caller when built directly', () => {
+    const error = new AuthenticationError('Expired.', { requestId: 'req_1' })
+
+    expect(error.message).toBe('Expired.')
+    expect(error.requestId).toBe('req_1')
+    expect(error.status).toBe(401)
+    expect(error.type).toBe('authentication_error')
   })
 })
 

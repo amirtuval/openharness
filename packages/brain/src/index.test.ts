@@ -22,6 +22,7 @@ import {
   streamModelRequest,
   toModelUsage,
 } from './index'
+import { TEST_CREDENTIAL } from './testing/mock-model'
 
 describe('@openharness/brain', () => {
   it('exposes its package name', () => {
@@ -65,10 +66,10 @@ describe('@openharness/brain', () => {
     })
   })
 
-  it('builds a model from a router string without a key', () => {
+  it('builds a model from a router string, authenticated by the credential it is given', () => {
     // Constructing the router model touches no provider and no network: resolving the provider
-    // happens on the first request, which is the host's business, not this constructor's.
-    expect(routerModelFactory('anthropic/claude-sonnet-5')).toMatchObject({
+    // and authenticating happen on the first request, with the credential the caller supplied.
+    expect(routerModelFactory('anthropic/claude-sonnet-5', TEST_CREDENTIAL)).toMatchObject({
       provider: 'anthropic',
       modelId: 'claude-sonnet-5',
     })

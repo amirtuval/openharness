@@ -1,4 +1,9 @@
-import type { ContextStrategy, ModelFactory, RetryPolicy } from '@openharness/brain'
+import type {
+  ContextStrategy,
+  ModelFactory,
+  ResolveCredential,
+  RetryPolicy,
+} from '@openharness/brain'
 import { DEFAULT_PARTITION_COUNT, partitionOf, type SessionId } from '@openharness/protocol'
 import {
   isFencedError,
@@ -98,6 +103,11 @@ export interface PostgresPartitionSchedulerOptions {
   /** How a session's `agent.model.id` becomes a model to stream from. */
   readonly model: ModelFactory
   /**
+   * Where each model request's provider credential comes from (epic #65, A5); see
+   * `SessionRunnerOptions.resolveCredential`.
+   */
+  readonly resolveCredential: ResolveCredential
+  /**
    * This instance's id, stable for its lifetime — what the lease table records as the owner.
    * Two live instances sharing one id would fence each other's writes, so it must be unique.
    */
@@ -111,8 +121,9 @@ export interface PostgresPartitionSchedulerOptions {
   /** How often owned partitions are re-scanned for missed work; 60 seconds by default. */
   readonly sweepMs?: number
   /**
-   * The runner to run passes with. Omitted, one is built from `store` and `model`; a host that
-   * runs several schedulers against the same store passes its own.
+   * The runner to run passes with. Omitted, one is built from `store`, `model` and
+   * `resolveCredential`; a host that runs several schedulers against the same store passes its
+   * own.
    */
   readonly runner?: SessionRunner
   /** How many sessions may have a turn in flight at once; defaults to 4. */
@@ -239,6 +250,7 @@ export class PostgresPartitionScheduler implements SessionScheduler {
         new SessionRunner({
           store: options.store,
           model: options.model,
+          resolveCredential: options.resolveCredential,
           ...(options.retry === undefined ? {} : { retry: options.retry }),
           ...(options.contextStrategy === undefined
             ? {}

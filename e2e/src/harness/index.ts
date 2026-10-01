@@ -1,6 +1,6 @@
 import { afterAll } from 'vitest'
 
-import { createClient, type Client } from '@openharness/client'
+import { createClient, type Client, type FetchLike } from '@openharness/client'
 
 import { createE2eDatabase, type E2eDatabase } from './database'
 import {
@@ -64,11 +64,21 @@ export function e2eHarness(label: string): E2eHarness {
       started.push(server)
       return server
     },
-    client: (server, options = {}) =>
-      createClient({
-        baseUrl: server.baseUrl,
-        ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
-      }),
+    client: (server, options = {}) => {
+      if (options.apiKey === undefined) {
+        return createClient({ baseUrl: server.baseUrl })
+      }
+      // The SDK's static `x-api-key` option is gone (epic #65, A8), but the v1 server still
+      // asks for that key — it goes with #61, which rewrites this suite's expectations with
+      // #64. Until then the harness presents the key itself, the way the removed option did.
+      const apiKey = options.apiKey
+      const withApiKey: FetchLike = (input, init) => {
+        const headers = new Headers(init?.headers)
+        headers.set('x-api-key', apiKey)
+        return globalThis.fetch(input, { ...init, headers })
+      }
+      return createClient({ baseUrl: server.baseUrl, fetch: withApiKey })
+    },
     get servers(): readonly ServerProcess[] {
       return started
     },

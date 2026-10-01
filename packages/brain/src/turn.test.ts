@@ -22,12 +22,21 @@ import type {
 } from '@openharness/protocol'
 import { InMemorySessionStore, isFencedError } from '@openharness/session'
 import type { AppendableEvent, AppendEventsOptions, SessionStore } from '@openharness/session'
+import { inspect } from 'node:util'
 import { describe, expect, it, vi } from 'vitest'
 
 import { eventDelta, eventStart, spanStart } from './events'
 import { isClaimConflictError } from './errors'
 import type { ModelFactory } from './model'
-import { misdeclaredSpec, mockModel, readPrompt, type MockModelScript } from './testing/mock-model'
+import { routerModelFactory } from './model'
+import { REDACTED_PLACEHOLDER } from './redact'
+import {
+  misdeclaredSpec,
+  mockModel,
+  readPrompt,
+  resolveTestCredential,
+  type MockModelScript,
+} from './testing/mock-model'
 import {
   TEST_MODEL_ID,
   TEST_OWNER_ID,
@@ -141,12 +150,40 @@ function spanEndRange(log: readonly StoredEvent[], n: number): Supersedes | unde
   return ends[n]?.supersedes
 }
 
+/**
+ * Run `body` with everything written to the console captured, and answer it as text.
+ *
+ * The brain has no logger of its own, but the libraries it streams through might: this is how
+ * the credential tests see that nothing on the path — the AI SDK included — writes a key out.
+ */
+async function captureConsole(body: () => Promise<void>): Promise<string> {
+  const levels = ['log', 'info', 'warn', 'error', 'debug'] as const
+  const captured: string[] = []
+  const spies = levels.map((level) =>
+    vi.spyOn(console, level).mockImplementation((...args: unknown[]) => {
+      captured.push(...args.map((arg) => inspect(arg)))
+    }),
+  )
+  try {
+    await body()
+  } finally {
+    for (const spy of spies) {
+      spy.mockRestore()
+    }
+  }
+  return captured.join('\n')
+}
+
 describe('runTurn', () => {
   it('does nothing when there is no turn and nothing queued', async () => {
     const { store, sessionId } = await newSession()
     const { factory, calls } = mockModel({ text: ['unused'] })
 
-    const outcome = await runTurn(sessionId, { store, model: factory })
+    const outcome = await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+    })
 
     expect(outcome).toEqual({ outcome: 'noop' })
     expect(await rawLogOf(store, sessionId)).toEqual([])
@@ -157,7 +194,11 @@ describe('runTurn', () => {
     const { store, sessionId } = await newSession([message('Hello')])
     const { factory } = mockModel({ text: ['Hi ', 'there'] })
 
-    const outcome = await runTurn(sessionId, { store, model: factory })
+    const outcome = await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+    })
 
     expect(outcome).toEqual({ outcome: 'idle' })
     const raw = await rawLogOf(store, sessionId)
@@ -233,7 +274,7 @@ describe('runTurn', () => {
       }
     })
 
-    await runTurn(sessionId, { store, model: factory })
+    await runTurn(sessionId, { store, model: factory, resolveCredential: resolveTestCredential })
     await settle()
 
     // A chunk is a stored event: it reaches a live subscriber with its `id` and `seq`, and in
@@ -272,9 +313,14 @@ describe('runTurn', () => {
       text: ['Hi'],
       usage: { input_tokens: 9, output_tokens: 3, cache_read_input_tokens: 2 },
     })
-    const model: ModelFactory = (modelId) => misdeclaredSpec(factory(modelId))
+    const model: ModelFactory = (modelId, credential) =>
+      misdeclaredSpec(factory(modelId, credential))
 
-    const outcome = await runTurn(sessionId, { store, model })
+    const outcome = await runTurn(sessionId, {
+      store,
+      model,
+      resolveCredential: resolveTestCredential,
+    })
 
     expect(outcome).toEqual({ outcome: 'idle' })
     const log = await rawLogOf(store, sessionId)
@@ -309,7 +355,11 @@ describe('runTurn', () => {
       { text: ['Answering the steering message'] },
     )
 
-    const outcome = await runTurn(sessionId, { store, model: factory })
+    const outcome = await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+    })
 
     expect(outcome).toEqual({ outcome: 'idle' })
     const raw = await rawLogOf(store, sessionId)
@@ -372,7 +422,12 @@ describe('runTurn', () => {
     })
     const { factory } = mockModel({ text: ['Par', 'tial'] })
 
-    const outcome = await runTurn(sessionId, { store, model: factory, signal: controller.signal })
+    const outcome = await runTurn(sessionId, {
+      store,
+      model: factory,
+      signal: controller.signal,
+      resolveCredential: resolveTestCredential,
+    })
 
     expect(outcome).toEqual({ outcome: 'interrupted' })
     const raw = await rawLogOf(store, sessionId)
@@ -412,7 +467,12 @@ describe('runTurn', () => {
     })
     const { factory } = mockModel({ text: [] })
 
-    const outcome = await runTurn(sessionId, { store, model: factory, signal: controller.signal })
+    const outcome = await runTurn(sessionId, {
+      store,
+      model: factory,
+      signal: controller.signal,
+      resolveCredential: resolveTestCredential,
+    })
 
     expect(outcome).toEqual({ outcome: 'interrupted' })
     const raw = await rawLogOf(store, sessionId)
@@ -435,7 +495,11 @@ describe('runTurn', () => {
     const { store, sessionId } = await newSession([message('Hello')])
     const { factory, calls } = mockModel({ text: [] })
 
-    const outcome = await runTurn(sessionId, { store, model: factory })
+    const outcome = await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+    })
 
     expect(outcome).toEqual({ outcome: 'idle' })
     expect(calls).toHaveLength(1)
@@ -458,7 +522,11 @@ describe('runTurn', () => {
     const { store, sessionId } = await newSession([interrupt(), message('Hello')])
     const { factory, calls } = mockModel({ text: ['unused'] })
 
-    const outcome = await runTurn(sessionId, { store, model: factory })
+    const outcome = await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+    })
 
     expect(outcome).toEqual({ outcome: 'interrupted' })
     const raw = await rawLogOf(store, sessionId)
@@ -498,7 +566,12 @@ describe('runTurn', () => {
       },
     })
 
-    const outcome = await runTurn(sessionId, { store, model: factory, signal: controller.signal })
+    const outcome = await runTurn(sessionId, {
+      store,
+      model: factory,
+      signal: controller.signal,
+      resolveCredential: resolveTestCredential,
+    })
 
     expect(outcome).toEqual({ outcome: 'interrupted' })
     const raw = await rawLogOf(store, sessionId)
@@ -526,6 +599,7 @@ describe('runTurn', () => {
     const outcome = await runTurn(sessionId, {
       store,
       model: factory,
+      resolveCredential: resolveTestCredential,
       signal: controller.signal,
       retry: {
         sleep: async () => {
@@ -553,7 +627,12 @@ describe('runTurn', () => {
     controller.abort()
     const { factory, calls } = mockModel({ text: ['unused'] })
 
-    const outcome = await runTurn(sessionId, { store, model: factory, signal: controller.signal })
+    const outcome = await runTurn(sessionId, {
+      store,
+      model: factory,
+      signal: controller.signal,
+      resolveCredential: resolveTestCredential,
+    })
 
     expect(outcome).toEqual({ outcome: 'interrupted' })
     expect(eventTypes(await rawLogOf(store, sessionId))).toEqual([
@@ -572,6 +651,7 @@ describe('runTurn', () => {
     const outcome = await runTurn(sessionId, {
       store,
       model: factory,
+      resolveCredential: resolveTestCredential,
       retry: { sleep, jitter: () => 0.5 },
     })
 
@@ -633,6 +713,7 @@ describe('runTurn', () => {
     const outcome = await runTurn(sessionId, {
       store,
       model: factory,
+      resolveCredential: resolveTestCredential,
       retry: { sleep: async () => {} },
     })
 
@@ -657,7 +738,12 @@ describe('runTurn', () => {
     const sleep = vi.fn(async () => {})
     const { factory, calls } = mockModel({ failWith: rateLimited() })
 
-    const outcome = await runTurn(sessionId, { store, model: factory, retry: { sleep } })
+    const outcome = await runTurn(sessionId, {
+      store,
+      model: factory,
+      retry: { sleep },
+      resolveCredential: resolveTestCredential,
+    })
 
     expect(outcome).toEqual({ outcome: 'error' })
     expect(calls).toHaveLength(4)
@@ -686,7 +772,12 @@ describe('runTurn', () => {
       failWith: Object.assign(new Error('Bad request.'), { statusCode: 400 }),
     })
 
-    const outcome = await runTurn(sessionId, { store, model: factory, retry: { sleep } })
+    const outcome = await runTurn(sessionId, {
+      store,
+      model: factory,
+      retry: { sleep },
+      resolveCredential: resolveTestCredential,
+    })
 
     expect(outcome).toEqual({ outcome: 'error' })
     expect(calls).toHaveLength(1)
@@ -715,6 +806,7 @@ describe('runTurn', () => {
     const outcome = await runTurn(sessionId, {
       store,
       model: factory,
+      resolveCredential: resolveTestCredential,
       signal: controller.signal,
       retry: {
         sleep: () => {
@@ -739,6 +831,178 @@ describe('runTurn', () => {
     await expectClean(store, sessionId)
   })
 
+  it('ends the turn with missing_provider_credential when the owner has no key', async () => {
+    const { store, sessionId } = await newSession([message('Hello')])
+    const { factory, calls } = mockModel({ text: ['never sent'] })
+    const resolveCredential = vi.fn(() => Promise.resolve(null))
+
+    const outcome = await runTurn(sessionId, { store, model: factory, resolveCredential })
+
+    expect(outcome).toEqual({ outcome: 'error' })
+    // The credential is asked for by provider, and a request with no key to make it is never
+    // attempted: no span is opened — every span start is a real model request — and nothing
+    // streams, so there is no chunk range to supersede.
+    expect(resolveCredential).toHaveBeenCalledWith('anthropic')
+    expect(calls).toHaveLength(0)
+    const raw = await rawLogOf(store, sessionId)
+    expect(eventTypes(raw)).toEqual([
+      EVENT_TYPES.userMessage,
+      EVENT_TYPES.sessionStatusRunning,
+      EVENT_TYPES.sessionError,
+      EVENT_TYPES.sessionStatusIdle,
+    ])
+    expect(raw[2]).toMatchObject({
+      error: {
+        type: 'missing_provider_credential',
+        message: 'No Anthropic key is set. Add one in Settings → Model providers.',
+        retry_status: { type: 'exhausted' },
+      },
+    })
+    expect(raw.some(isSpanStart)).toBe(false)
+    // The message the turn could not answer is claimed by the idle event that ends it, the
+    // way an interrupt's is: left queued, the scheduler would run the same failing turn again.
+    expect(raw.at(-1)).toMatchObject({
+      type: EVENT_TYPES.sessionStatusIdle,
+      consumes: [raw[0]?.id],
+    })
+    expect(await store.getPendingUserEvents(sessionId)).toEqual([])
+    await expectClean(store, sessionId)
+  })
+
+  it('never falls back to a provider key in the environment', async () => {
+    // A5: even with the variables set, the router must not find them — and it cannot, because
+    // it is never constructed without a key `resolveCredential` answered. A blank key counts
+    // as no key: Mastra reads a falsy `apiKey` as "none given" and would fall back.
+    const decoy = 'sk-env-decoy-2b7f41c9ae05'
+    vi.stubEnv('OPENAI_API_KEY', decoy)
+    vi.stubEnv('ANTHROPIC_API_KEY', decoy)
+    const fetchSpy = vi.fn(() =>
+      Promise.reject(new Error('the provider must not be reached without a credential')),
+    )
+    vi.stubGlobal('fetch', fetchSpy)
+    try {
+      for (const credential of [null, { apiKey: '' }, { apiKey: '   ' }]) {
+        const { store, sessionId } = await newSession([message('Hello')])
+
+        const outcome = await runTurn(sessionId, {
+          store,
+          model: routerModelFactory,
+          resolveCredential: () => Promise.resolve(credential),
+        })
+
+        expect(outcome).toEqual({ outcome: 'error' })
+        const raw = await rawLogOf(store, sessionId)
+        expect(raw.find((event) => event.type === EVENT_TYPES.sessionError)).toMatchObject({
+          error: { type: 'missing_provider_credential' },
+        })
+        expect(JSON.stringify(raw)).not.toContain(decoy)
+      }
+      expect(fetchSpy).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllEnvs()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('builds each model request with the credential the resolver answered', async () => {
+    const { store, sessionId } = await newSession([message('Hello')])
+    const sleep = vi.fn(async () => {})
+    const { factory } = mockModel({ failWith: rateLimited() }, { text: ['Recovered'] })
+    const seen: { modelId: string; apiKey: string }[] = []
+    const model: ModelFactory = (modelId, credential) => {
+      seen.push({ modelId, apiKey: credential.apiKey })
+      return factory(modelId, credential)
+    }
+    const resolveCredential = vi.fn(() => Promise.resolve({ apiKey: 'the-owners-own-key' }))
+
+    const outcome = await runTurn(sessionId, { store, model, resolveCredential, retry: { sleep } })
+
+    expect(outcome).toEqual({ outcome: 'idle' })
+    // Once per model request, the retry included: the key lives for one request and is asked
+    // for again rather than held on to.
+    expect(resolveCredential).toHaveBeenCalledTimes(2)
+    expect(resolveCredential).toHaveBeenCalledWith('anthropic')
+    expect(seen).toEqual([
+      { modelId: TEST_MODEL_ID, apiKey: 'the-owners-own-key' },
+      { modelId: TEST_MODEL_ID, apiKey: 'the-owners-own-key' },
+    ])
+  })
+
+  it('never stores or logs the credential, even when a provider echoes it back', async () => {
+    const apiKey = 'sk-live-oh-2f81c9a4d7e6b305'
+    const resolve = (): Promise<{ apiKey: string }> => Promise.resolve({ apiKey })
+    const logs: StoredEvent[][] = []
+
+    const captured = await captureConsole(async () => {
+      // A normal turn.
+      const first = await newSession([message('Hello')])
+      const normal = mockModel({ text: ['Hi'] })
+      await runTurn(first.sessionId, {
+        store: first.store,
+        model: normal.factory,
+        resolveCredential: resolve,
+      })
+      logs.push(await rawLogOf(first.store, first.sessionId))
+
+      // A 401 that quotes the key back, as a provider's error body does.
+      const second = await newSession([message('Hello')])
+      const unauthorized = mockModel({
+        failWith: Object.assign(
+          new Error(`Incorrect API key provided: ${apiKey}. You can find your API key at ...`),
+          { statusCode: 401 },
+        ),
+      })
+      await runTurn(second.sessionId, {
+        store: second.store,
+        model: unauthorized.factory,
+        resolveCredential: resolve,
+      })
+      logs.push(await rawLogOf(second.store, second.sessionId))
+
+      // A retryable failure that echoes the key with a few characters cut off either end.
+      const third = await newSession([message('Hello')])
+      const rateLimitedWithKey = mockModel(
+        {
+          failWith: Object.assign(
+            new Error(`Rate limited for key ${apiKey.slice(4)} (…${apiKey.slice(0, -4)}).`),
+            { statusCode: 503 },
+          ),
+        },
+        { text: ['Recovered'] },
+      )
+      await runTurn(third.sessionId, {
+        store: third.store,
+        model: rateLimitedWithKey.factory,
+        resolveCredential: resolve,
+        retry: { sleep: async () => {} },
+      })
+      logs.push(await rawLogOf(third.store, third.sessionId))
+    })
+
+    const stored = JSON.stringify(logs)
+    for (const variant of [apiKey, apiKey.slice(4), apiKey.slice(0, -4)]) {
+      expect(stored, 'stored events').not.toContain(variant)
+      expect(captured, 'console output').not.toContain(variant)
+    }
+    // The message is still the provider's, with the key replaced — the log says what happened.
+    const unauthorized = logs[1]?.find((event) => event.type === EVENT_TYPES.sessionError)
+    expect(unauthorized).toMatchObject({
+      error: {
+        type: 'model_request_failed_error',
+        message: `Incorrect API key provided: ${REDACTED_PLACEHOLDER}. You can find your API key at ...`,
+        retry_status: { type: 'terminal' },
+      },
+    })
+    const rateLimitedSpan = logs[2]?.find(
+      (event) => event.type === EVENT_TYPES.modelRequestEnd && event.is_error === true,
+    )
+    expect(rateLimitedSpan).toMatchObject({
+      error: {
+        message: `Rate limited for key ${REDACTED_PLACEHOLDER} (…${REDACTED_PLACEHOLDER}).`,
+      },
+    })
+  })
+
   it('stops at a fenced write and writes nothing more', async () => {
     const { store, sessionId } = await newSession([message('Hello')])
     const partition = partitionOf(sessionId)
@@ -757,6 +1021,7 @@ describe('runTurn', () => {
         store,
         model: factory,
         fence: { partition, epoch: lease!.epoch },
+        resolveCredential: resolveTestCredential,
       }),
     ).rejects.toSatisfy(isFencedError)
 
@@ -811,9 +1076,9 @@ describe('runTurn', () => {
     store.rivalTargets = [pending?.id ?? newEventId()]
     const { factory, calls } = mockModel({ text: ['unused'] })
 
-    await expect(runTurn(session.id, { store, model: factory })).rejects.toSatisfy(
-      isClaimConflictError,
-    )
+    await expect(
+      runTurn(session.id, { store, model: factory, resolveCredential: resolveTestCredential }),
+    ).rejects.toSatisfy(isClaimConflictError)
 
     expect(calls).toHaveLength(0)
     // The rival's claiming span is the last thing in the log; the brain's own span start —
@@ -840,7 +1105,11 @@ describe('runTurn', () => {
     const crashed = spanStartOf(stored[2])
     const { factory, calls } = mockModel({ text: ['Recovered'] })
 
-    const outcome = await runTurn(sessionId, { store, model: factory })
+    const outcome = await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+    })
 
     expect(outcome).toEqual({ outcome: 'idle' })
     expect(calls).toHaveLength(1)
@@ -878,7 +1147,11 @@ describe('runTurn', () => {
     const start = spanStartOf(stored[1])
     const { factory, calls } = mockModel({ text: ['a second reply'] })
 
-    const outcome = await runTurn(sessionId, { store, model: factory })
+    const outcome = await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+    })
 
     expect(outcome).toEqual({ outcome: 'idle' })
     expect(calls).toHaveLength(0)
@@ -912,7 +1185,11 @@ describe('runTurn', () => {
     ])
     const { factory, calls } = mockModel({ text: ['a second reply'] })
 
-    const outcome = await runTurn(sessionId, { store, model: factory })
+    const outcome = await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+    })
 
     // The turn was open but its reply was already in the log: the brain closes it rather than
     // asking the model the same question again.
@@ -951,7 +1228,11 @@ describe('runTurn', () => {
     ])
     const { factory, calls } = mockModel({ text: ['Recovered'] })
 
-    const outcome = await runTurn(sessionId, { store, model: factory })
+    const outcome = await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+    })
 
     expect(outcome).toEqual({ outcome: 'idle' })
     expect(calls).toHaveLength(1)
@@ -978,7 +1259,11 @@ describe('runTurn', () => {
     ])
     const { factory, calls } = mockModel({ text: ['Recovered'] })
 
-    const outcome = await runTurn(sessionId, { store, model: factory })
+    const outcome = await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+    })
 
     expect(outcome).toEqual({ outcome: 'idle' })
     expect(calls).toHaveLength(1)
@@ -1008,7 +1293,11 @@ describe('runTurn', () => {
     ])
     const { factory, calls } = mockModel({ text: ['Recovered'] })
 
-    const outcome = await runTurn(sessionId, { store, model: factory })
+    const outcome = await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+    })
 
     expect(outcome).toEqual({ outcome: 'idle' })
     expect(calls).toHaveLength(1)
@@ -1036,7 +1325,9 @@ describe('runTurn', () => {
     const { store } = await newSession()
     const { factory, calls } = mockModel({ text: ['unused'] })
 
-    await expect(runTurn(newSessionId(), { store, model: factory })).rejects.toMatchObject({
+    await expect(
+      runTurn(newSessionId(), { store, model: factory, resolveCredential: resolveTestCredential }),
+    ).rejects.toMatchObject({
       name: 'SessionNotFoundError',
     })
     expect(calls).toHaveLength(0)
@@ -1053,7 +1344,12 @@ describe('runTurn', () => {
     // claim and preview calls), so a spy on the log's own rows is what proves nothing else ran.
     const fence = { partition, epoch: lease!.epoch }
 
-    await runTurn(sessionId, { store, model: factory, fence })
+    await runTurn(sessionId, {
+      store,
+      model: factory,
+      fence,
+      resolveCredential: resolveTestCredential,
+    })
 
     expect(append.mock.calls.length).toBeGreaterThan(0)
     for (const [, , options] of append.mock.calls) {
@@ -1075,7 +1371,11 @@ describe('runTurn', () => {
       const { store, sessionId } = await newSession(initial)
       const { factory, calls } = mockModel({ text: ['Hi'] })
 
-      const outcome = await runTurn(sessionId, { store, model: factory })
+      const outcome = await runTurn(sessionId, {
+        store,
+        model: factory,
+        resolveCredential: resolveTestCredential,
+      })
 
       const raw = await rawLogOf(store, sessionId)
       const spans = raw.filter(isSpanStart).length
@@ -1102,6 +1402,7 @@ describe('runTurn', () => {
     await runTurn(sessionId, {
       store,
       model: factory,
+      resolveCredential: resolveTestCredential,
       contextStrategy: (events) =>
         [
           {
@@ -1131,6 +1432,7 @@ describe('runTurn', () => {
     const outcome = await runTurn(sessionId, {
       store,
       model: factory,
+      resolveCredential: resolveTestCredential,
       retry: { maxRetries: 1, sleep },
     })
 

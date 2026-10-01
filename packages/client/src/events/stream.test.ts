@@ -13,6 +13,7 @@ import type { StreamEvent } from '@openharness/protocol'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createClient, type Client } from '../client'
+import { AuthenticationError } from '../errors'
 import type { DebugHook } from '../http'
 import {
   collect,
@@ -94,9 +95,9 @@ describe('stream requests', () => {
     expect(new URL(mock.urlOf(1)).searchParams.get('event_deltas[]')).toBe(EVENT_TYPES.agentMessage)
   })
 
-  it('sends the api key and accepts an event stream', async () => {
+  it('sends the bearer token and the cookie and accepts an event stream', async () => {
     const mock = createMockFetch(() => sseResponse(sseLines([makeStatusIdle({ seq: 1 })])))
-    const client = createClient({ baseUrl: BASE_URL, apiKey: 'oh_key', fetch: mock.fetch })
+    const client = createClient({ baseUrl: BASE_URL, token: 'oh_token', fetch: mock.fetch })
     const controller = new AbortController()
 
     for await (const _event of client.sessions.events.stream(SESSION_ID, {
@@ -106,7 +107,8 @@ describe('stream requests', () => {
     }
 
     const request = mock.requests[0]
-    expect(request?.headers.get('x-api-key')).toBe('oh_key')
+    expect(request?.headers.get('authorization')).toBe('Bearer oh_token')
+    expect(request?.init?.credentials).toBe('include')
     expect(request?.headers.get('accept')).toBe('text/event-stream')
     expect(request?.headers.get('last-event-id')).toBeNull()
   })
@@ -141,12 +143,29 @@ describe('stream requests', () => {
   })
 
   it('throws when the stream request is refused with a status that will not fix itself', async () => {
-    const { client } = clientWith(() => errorResponse(401, 'authentication_error', 'Bad key.'))
+    const { client } = clientWith(() => errorResponse(403, 'permission_error', 'No.'))
 
     await expect(collect(client.sessions.events.stream(SESSION_ID))).rejects.toMatchObject({
+      status: 403,
+      type: 'permission_error',
+    })
+  })
+
+  it('stops on a 401 instead of reconnecting, with an AuthenticationError', async () => {
+    const { client, mock } = clientWith(() =>
+      errorResponse(401, 'authentication_error', 'Not signed in.'),
+    )
+
+    const failure = collect(client.sessions.events.stream(SESSION_ID))
+    await expect(failure).rejects.toBeInstanceOf(AuthenticationError)
+    await expect(failure).rejects.toMatchObject({
+      name: 'AuthenticationError',
       status: 401,
       type: 'authentication_error',
+      retryable: false,
     })
+    // Retrying a 401 forever would only hide "sign in again": one request, then done.
+    expect(mock.requests).toHaveLength(1)
   })
 
   it('refuses a 200 that is not an event stream', async () => {

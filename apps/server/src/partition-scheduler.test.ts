@@ -19,6 +19,7 @@ import {
   historyTypes,
   postgresSource,
   readHistory,
+  resolveTestCredential,
   startPostgres,
   waitFor,
   waitForIdle,
@@ -126,6 +127,7 @@ if (SOURCE === null) {
     const scheduler = new PostgresPartitionScheduler({
       store,
       model: model.factory,
+      resolveCredential: resolveTestCredential,
       instanceId: name,
       partitions: PARTITIONS,
       ttlMs: options.ttlMs ?? TTL_MS,
@@ -630,6 +632,7 @@ if (SOURCE === null) {
           new PostgresPartitionScheduler({
             store: db.store(),
             model: createScriptedModel().factory,
+            resolveCredential: resolveTestCredential,
             instanceId: 'bad',
             ttlMs: 100,
             heartbeatMs: 100,

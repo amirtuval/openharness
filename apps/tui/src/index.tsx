@@ -125,7 +125,7 @@ async function connect(
   if (isFakeMode(env)) {
     return { client: await createDevClient(), banner: FAKE_BANNER }
   }
-  return { client: createClient({ baseUrl: config.server, apiKey: config.apiKey }) }
+  return { client: createClient({ baseUrl: config.server }) }
 }
 
 /** The streams the chat renders into. */

@@ -1,5 +1,5 @@
 import type { LanguageModelV4StreamPart } from '@ai-sdk/provider'
-import type { ModelFactory } from '@openharness/brain'
+import type { ModelCredential, ModelFactory, ResolveCredential } from '@openharness/brain'
 import { MockLanguageModelV4 } from 'ai/test'
 
 /**
@@ -42,6 +42,18 @@ export interface ScriptedModel {
 }
 
 const TEXT_ID = 'scripted-text-1'
+
+/** The credential a scripted request is made with. The scripted model ignores it. */
+export const TEST_CREDENTIAL: ModelCredential = { apiKey: 'oh-server-test-key' }
+
+/**
+ * The credential resolver a runner with a scripted model is given.
+ *
+ * The brain asks for a credential before every model request — a turn with none ends with
+ * `missing_provider_credential` instead of streaming — and the scripted model does not care
+ * what it is handed, so a test passes this and the turn runs.
+ */
+export const resolveTestCredential: ResolveCredential = () => Promise.resolve(TEST_CREDENTIAL)
 
 /** Build a {@link ScriptedModel} from the replies the first requests answer with. */
 export function createScriptedModel(...replies: ScriptedReply[]): ScriptedModel {

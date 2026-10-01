@@ -48,7 +48,7 @@ describe('in a DOM environment', () => {
     const mock = createMockFetch(() => sseResponse(sseLines(events)))
     const client = createClient({
       baseUrl: 'https://api.test',
-      apiKey: 'oh_key',
+      token: 'oh_token',
       fetch: mock.fetch,
     })
     const transcript = createTranscript()
@@ -64,7 +64,8 @@ describe('in a DOM environment', () => {
       }
     }
 
-    expect(mock.requests[0]?.headers.get('x-api-key')).toBe('oh_key')
+    expect(mock.requests[0]?.headers.get('authorization')).toBe('Bearer oh_token')
+    expect(mock.requests[0]?.init?.credentials).toBe('include')
     expect(mock.requests[0]?.headers.get('accept')).toBe('text/event-stream')
     expect(transcript.getState().messages.map((message) => message.text)).toEqual([
       'hello from a browser',
