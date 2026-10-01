@@ -99,13 +99,33 @@ interface RawAuthClient {
   }
 }
 
-/** A Better Auth client answer: `data` on success, `error` with a message on failure. */
+/** A Better Auth client answer: `data` on success, `error` with the failure on failure. */
 interface RawCallResult<T = unknown> {
   readonly data?: T | null | undefined
-  readonly error?:
-    | { readonly message?: string | undefined; readonly status?: number | undefined }
-    | null
-    | undefined
+  readonly error?: RawCallError | null | undefined
+}
+
+/**
+ * A failed call, as Better Auth's client reports it.
+ *
+ * The library folds the response body into the error, so the device endpoints'
+ * `{"error":"invalid_request","error_description":"Invalid user code"}` arrives as fields
+ * beside `status` — which is why `message` alone cannot be the thing this app reads.
+ */
+interface RawCallError {
+  readonly message?: string | undefined
+  readonly status?: number | undefined
+  /** The OAuth-style error code, when the body carried one. */
+  readonly error?: unknown
+  /** The code's human explanation, when the body carried one. */
+  readonly error_description?: unknown
+  /**
+   * The wait a rate-limit answer asks for, in seconds, when a body carries it. Better Auth's
+   * own rate limiter sends it as the `X-Retry-After` header instead, which its client does
+   * not surface — so in practice the rate-limit sentence is the whole message.
+   */
+  readonly retry_after?: unknown
+  readonly retryAfter?: unknown
 }
 
 /**
@@ -167,25 +187,77 @@ async function callResult<T>(
   try {
     const result = await call()
     if (result.error != null) {
-      return {
-        data: null,
-        error: describeError(result.error.message),
-        httpStatus: typeof result.error.status === 'number' ? result.error.status : null,
-      }
+      const httpStatus = typeof result.error.status === 'number' ? result.error.status : null
+      return { data: null, error: describeError(result.error, httpStatus), httpStatus }
     }
     return { data: result.data ?? null, error: null, httpStatus: null }
   } catch (caught) {
     return {
       data: null,
-      error: describeError(caught instanceof Error ? caught.message : undefined),
+      error: describeError({ message: caught instanceof Error ? caught.message : undefined }, null),
       httpStatus: null,
     }
   }
 }
 
-/** The message to show for a failed call: the server's, or a stand-in when it gave none. */
-function describeError(message: string | undefined): string {
-  return message !== undefined && message !== '' ? message : 'The sign-in request failed.'
+/** What a failure says when neither the server nor the transport gave a reason. */
+const GENERIC_FAILURE = 'The sign-in request failed.'
+
+/**
+ * The message to show for a failed call.
+ *
+ * Better Auth's sign-in endpoints answer with a `message`, which is shown as-is. The device
+ * endpoints (A6) answer with the OAuth pair `{"error": …, "error_description": …}` instead —
+ * a shape with no `message` — so the codes a reader can act on are mapped to a sentence here,
+ * and everything else falls back, in order, to the server's own words: `message`, then
+ * `error_description`, then the bare code, then {@link GENERIC_FAILURE}.
+ */
+function describeError(failure: RawCallError, httpStatus: number | null): string {
+  if (httpStatus === 429) {
+    const seconds = retryAfterSeconds(failure)
+    return seconds === null
+      ? 'Too many requests — wait a moment and try again.'
+      : `Too many requests — try again in ${seconds} seconds.`
+  }
+
+  const code = textOf(failure.error)
+  const description = textOf(failure.error_description)
+
+  if (code === 'expired_token') {
+    return 'This code has expired. Run `oh login` again for a fresh one.'
+  }
+  if (code === 'access_denied') {
+    return 'The server refused this request. Run `oh login` again to start over.'
+  }
+  // `invalid_request` is the device endpoints' 400 for a code this server never issued — but
+  // approve and deny also answer it for a code that was already decided or claimed by
+  // someone else's session, and those refusals keep their description. Only the "invalid user
+  // code" form (the code, the description, or both) is the reader's mistake, and gets the
+  // sentence that says so.
+  if (isInvalidUserCode(description) || (code === 'invalid_request' && description === null)) {
+    return 'This code is not one this server issued. Check it against your terminal, or run `oh login` again.'
+  }
+
+  return failure.message ?? description ?? code ?? GENERIC_FAILURE
+}
+
+/** A string when the body carried a usable one, `null` otherwise. */
+function textOf(value: unknown): string | null {
+  return typeof value === 'string' && value !== '' ? value : null
+}
+
+/** Whether a description is the device flow's own words for a code it does not know. */
+function isInvalidUserCode(description: string | null): boolean {
+  return description !== null && /invalid user code/i.test(description)
+}
+
+/** The wait a rate-limit answer asked for, in whole seconds, when it named one. */
+function retryAfterSeconds(failure: RawCallError): number | null {
+  const raw = failure.retry_after ?? failure.retryAfter
+  const seconds = typeof raw === 'string' ? Number(raw) : raw
+  return typeof seconds === 'number' && Number.isFinite(seconds) && seconds > 0
+    ? Math.ceil(seconds)
+    : null
 }
 
 /** The status the verification answered with, or `null` for anything unrecognized. */

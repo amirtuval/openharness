@@ -16,7 +16,22 @@ import { vi } from 'vitest'
 /** A Better Auth answer, in the shape the library uses. */
 export interface AuthMockResult<T = unknown> {
   readonly data: T | null
-  readonly error: { readonly message: string } | null
+  readonly error: AuthMockError | null
+}
+
+/**
+ * The failure a scripted call answers with.
+ *
+ * Better Auth folds the response body into the error, so a body the device endpoints send —
+ * `{"error":"invalid_request","error_description":"Invalid user code"}` — is scripted as the
+ * fields it is, beside `status`.
+ */
+export interface AuthMockError {
+  readonly message?: string | undefined
+  readonly status?: number | undefined
+  readonly error?: string | undefined
+  readonly error_description?: string | undefined
+  readonly retry_after?: number | string | undefined
 }
 
 /**
