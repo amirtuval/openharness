@@ -69,11 +69,11 @@ export const SessionSchema = z.object({
    * carries it. A session whose owner is not the caller answers `404`, exactly as an agent
    * does, so a session's existence never leaks across users.
    *
-   * Optional only during the transition: while the server still serves pre-auth data
-   * (through #61) it may be absent. From #61 on the server sets it on every session, and it
-   * is to become required.
+   * Required since #61: the server sets it on every session it creates, so a session without
+   * one cannot exist — and a response that omits it fails this schema rather than passing as
+   * unowned.
    */
-  owner_id: UserIdSchema.optional(),
+  owner_id: UserIdSchema,
   status: SessionStatusSchema,
   title: z.string().max(SESSION_TITLE_MAX_LENGTH).nullable(),
   metadata: MetadataSchema,

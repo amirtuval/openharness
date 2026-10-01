@@ -14,6 +14,7 @@ import {
 const session = {
   id: newSessionId(),
   type: 'session',
+  owner_id: 'Qm3xT7bR9kL2nV5wZ8yA4cD6fG1hJ0pS',
   status: 'idle',
   title: 'README summary',
   metadata: { source: 'test' },
@@ -55,13 +56,12 @@ describe('SessionSchema', () => {
     expect(SessionSchema.parse({ ...session, title: null, metadata: {} }).title).toBeNull()
   })
 
-  it('carries the owner the server assigned, and tolerates its absence for now', () => {
-    // Same transition as agents: pre-auth sessions (through #61) may have no owner; after
-    // #61 the server always sets it, and a session owned by someone else answers 404.
-    expect(
-      SessionSchema.parse({ ...session, owner_id: 'Qm3xT7bR9kL2nV5wZ8yA4cD6fG1hJ0pS' }),
-    ).toEqual({ ...session, owner_id: 'Qm3xT7bR9kL2nV5wZ8yA4cD6fG1hJ0pS' })
+  it('requires the owner the server assigned, like agents', () => {
+    // Required since #61: the server sets it on every session it creates, and a session
+    // owned by someone else answers 404 (A4).
     expect(SessionSchema.parse(session)).toEqual(session)
+    const { owner_id: _owner, ...withoutOwner } = session
+    expect(SessionSchema.safeParse(withoutOwner).success).toBe(false)
     expect(SessionSchema.safeParse({ ...session, owner_id: '' }).success).toBe(false)
     expect(SessionSchema.safeParse({ ...session, owner_id: null }).success).toBe(false)
   })

@@ -14,6 +14,7 @@ import {
 const agent = {
   id: newAgentId(),
   type: 'agent',
+  owner_id: 'Qm3xT7bR9kL2nV5wZ8yA4cD6fG1hJ0pS',
   name: 'Summarizer',
   description: 'Summarizes a repository.',
   model: { id: 'anthropic/claude-sonnet-5' },
@@ -47,14 +48,12 @@ describe('AgentSchema', () => {
     expect(AgentSchema.parse({ ...agent, description: null, system: null }).description).toBeNull()
   })
 
-  it('carries the owner the server assigned, and tolerates its absence for now', () => {
-    // During the transition (through #61) pre-auth agents have no owner. From #61 on the
-    // server sets it on every agent; the field is read-only either way.
-    expect(AgentSchema.parse({ ...agent, owner_id: 'Qm3xT7bR9kL2nV5wZ8yA4cD6fG1hJ0pS' })).toEqual({
-      ...agent,
-      owner_id: 'Qm3xT7bR9kL2nV5wZ8yA4cD6fG1hJ0pS',
-    })
+  it('requires the owner the server assigned, and accepts nothing else as one', () => {
+    // Required since #61: every agent the server creates carries its owner, so an agent
+    // without one is not a valid response any more (A4).
     expect(AgentSchema.parse(agent)).toEqual(agent)
+    const { owner_id: _owner, ...withoutOwner } = agent
+    expect(AgentSchema.safeParse(withoutOwner).success).toBe(false)
     expect(AgentSchema.safeParse({ ...agent, owner_id: '' }).success).toBe(false)
     expect(AgentSchema.safeParse({ ...agent, owner_id: 7 }).success).toBe(false)
   })

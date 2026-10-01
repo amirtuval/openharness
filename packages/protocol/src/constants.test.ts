@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
 import {
-  API_KEY_HEADER,
   API_VERSION_PREFIX,
   DEFAULT_PARTITION_COUNT,
   LAST_EVENT_ID_HEADER,
@@ -12,7 +11,6 @@ import { newSessionId } from './ids'
 describe('API constants', () => {
   it('matches the Anthropic header and route spellings', () => {
     expect(API_VERSION_PREFIX).toBe('/v1')
-    expect(API_KEY_HEADER).toBe('x-api-key')
     expect(LAST_EVENT_ID_HEADER).toBe('last-event-id')
     expect(DEFAULT_PARTITION_COUNT).toBe(64)
   })
