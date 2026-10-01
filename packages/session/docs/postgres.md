@@ -8,7 +8,7 @@ does in memory.
 
 This document covers what is specific to this store: the schema, how the database is migrated,
 how `seq`, claims, supersession, compaction, fencing, leases and delivery are implemented,
-where the in-flight preview of a streaming reply is kept, and how to run Postgres locally.
+and how to run Postgres locally.
 
 ---
 
@@ -42,17 +42,19 @@ schema.
 
 ## The schema
 
-Seven tables, in `migrations/`:
+Six tables, in `migrations/`:
 
 | table                 | what a row is                                                                                       |
 | --------------------- | --------------------------------------------------------------------------------------------------- |
 | `agents`              | an agent configuration: name, description, model, system prompt, timestamps                         |
 | `sessions`            | a log's header: `status`, `partition`, title, metadata, and the agent snapshot                      |
 | `events`              | one stored event: `id`, `session_id`, `seq`, `type`, `payload jsonb`, `created_at`, `processed_at`  |
-| `event_claims`        | one claim of one user event: `event_id` (primary key), the claiming span or `null`, `claimed_at`    |
+| `event_claims`        | one claim of one user event: `event_id` (primary key), the claiming event or `null`, `claimed_at`   |
 | `event_supersessions` | one recorded chunk range: `from_seq`, `to_seq`, `by_event_id` (primary key), `by_seq`, `created_at` |
-| `session_previews`    | the `agent.message` being streamed right now: its `event_id` and the text its deltas carried        |
 | `partition_leases`    | who holds a partition, at which epoch, until when                                                   |
+
+`session_previews`, the table of pre-D9 previews in flight, was dropped by
+`0010_drop_session_previews.sql` (P4); the chunks of a reply are rows of `events` since D9.
 
 Details that matter:
 
@@ -77,14 +79,15 @@ Details that matter:
   provides the `(session_id, seq)` access path; the explicit index is kept because the schema
   documents it as part of the contract.
 - **`events.id` is unique across the whole table** — an event id identifies one event for the
-  whole store, because it is what a stored event shares with its stream-only previews (see
+  whole store, because it is what a reply's chunks share with the message they become (see
   [caller-supplied ids](#caller-supplied-ids)). The primary key already enforces it, and
   `0005_events_id_unique.sql` declares a `unique` index named `events_id_key` beside it.
 - **`event_claims.event_id` is the primary key** — claiming is `insert … on conflict do
 nothing`, so two writers racing for the same event cannot both win, and nothing here is ever
   written a second time or deleted (see [claims](#claims-are-rows-not-columns)). A claim names
-  the user event it takes and, when an append's `consumes` made it, the
-  `span.model_request_start` that made it.
+  the user event it takes and the event whose `consumes` made it — a
+  `span.model_request_start`, a `span.model_request_end` or a `session.status_idle` (P4); the
+  column is nullable only for rows the pre-P4 `markProcessed` wrote.
 - **`event_supersessions` is insert-only too**, and `by_event_id` is its primary key: one
   event carries one `supersedes` range. `check (to_seq >= from_seq)` and `check (by_seq >
 to_seq)` are the range rules in the schema's own words (see
@@ -98,10 +101,10 @@ to_seq)` are the range rules in the schema's own words (see
   provide that on their own.
 - **`sessions.partition`** is `partitionOf(sessionId)` — stored, not recomputed, so
   `findSessionsNeedingWork` is an index range scan per partition.
-- **`session_previews` is `unlogged`**, and holds at most one row per session: `session_id`
-  (primary key, `on delete cascade`), the `event_id` the previewing `event_start` announced,
-  the accumulated `text`, and `updated_at` from the injected clock. See
-  [the in-flight preview](#the-in-flight-preview).
+- **`events.processed_at` is never written for a user event** (P4): a user event is queued,
+  the column is left out of the insert, and the `processed_at` a read reports comes from the
+  claim row alone. It is still written for every other event type, and rows written before
+  the change keep whatever they carry.
 - **`partition_leases.owner is null` means free**, and a `check` keeps owner and `expires_at`
   in step: an owned lease always has an expiry, a free one has neither.
 
@@ -134,6 +137,7 @@ databases while applying to new ones. Add a new file instead.
 | `0007_event_claims.sql`          | `event_claims`, the insert-only record of which events a turn claimed (D9) |
 | `0008_event_claims_backfill.sql` | the one-time copy of the pre-D9 `processed_at` values into claim rows (D9) |
 | `0009_event_supersessions.sql`   | `event_supersessions`, the insert-only record of the ranges events replace |
+| `0010_drop_session_previews.sql` | drops `session_previews`, the pre-D9 preview table (P4)                    |
 
 To run them outside an application:
 
@@ -171,15 +175,18 @@ an append.
 `createSession`'s `initial_events` go through the same code path inside the creation
 transaction: they are in the log before the session is visible.
 
-`markProcessed` claims rather than asserts, and since D9 the claim is a row of its own rather
-than a value written onto the event — see [claims](#claims-are-rows-not-columns) below.
+A claim rides along in the append's own transaction, and since D9 it is a row of its own rather
+than a value written onto the event — see [claims](#claims-are-rows-not-columns) below. For a
+user event the append writes no `processed_at`: the column is left out of the insert (`NULL` in
+the row), because the value a read reports is the claim's.
 
 ## Caller-supplied ids
 
-An append may carry its own `sevt_` id (`AppendableEvent.id`) — the one the brain published the
-event's `event_start`/`event_delta` previews under, so that a client replaces the preview with
-the stored event. The store writes the event under exactly that id; `events.id` is where it
-lands, and the payload holds the event body without it, as it does for the ids the store mints.
+An append may carry its own `sevt_` id (`AppendableEvent.id`) — the one the brain put on the
+reply's `event_start`/`event_delta` chunks, so that the finished `agent.message` lines up with
+what a client accumulated. The store writes the event under exactly that id; `events.id` is
+where it lands, and the payload holds the event body without it, as it does for the ids the
+store mints.
 
 The id is checked by the database rather than by a read first, because it is unique across the
 whole table and not just within a session:
@@ -211,27 +218,9 @@ the same id.
 A user event is queued until a turn claims it. Before D9 that claim was the `processed_at`
 column on the event itself, and claiming wrote to `events` — a client that already held the
 event never learned it had changed. Now the claim is a row of `event_claims`, that table is
-insert-only, and `processed_at` is derived on read by joining it:
-
-```sql
--- markProcessed: claim what is still unclaimed, and claim nothing twice
-insert into event_claims (session_id, event_id, claimed_by_event_id, claimed_at)
-select distinct $1, e.id, null, $2
-  from events e
- where e.session_id = $1
-   and e.id = any($3::text[])
-   and e.type in ('user.message', 'user.interrupt')
-on conflict (event_id) do nothing
-returning event_id, claimed_at
-```
-
-`on conflict (event_id) do nothing` is the race: two callers insert, one commits and the other
-writes nothing — exactly what the old conditional write decided. The select is the filter: an
-id from another session, an event of another type, or one already claimed matches no row and
-is ignored, because `markProcessed` is a claim and not an assertion.
-
-An append whose `span.model_request_start` carries `consumes` claims in its own transaction,
-with `claimed_by_event_id` set to the span:
+insert-only, and `processed_at` is derived on read by joining it. An append whose event
+carries `consumes` claims in its own transaction, with `claimed_by_event_id` set to that event
+— a `span.model_request_start`, a `span.model_request_end` or a `session.status_idle` (P4):
 
 ```sql
 insert into event_claims (session_id, event_id, claimed_by_event_id, claimed_at)
@@ -245,20 +234,23 @@ on conflict (event_id) do nothing
 returning event_id
 ```
 
-This one is an assertion, not a claim: the span states what it answers, so an id the insert
-produces no row for — foreign, non-user, already claimed, or named twice in one batch — fails
-the store's check, the append throws `ClaimConflictError`, and the transaction rolls back
-with the events it had already written. The difference is deliberate: `markProcessed` is a
-caller taking whatever of a list is still there, while `consumes` is the log recording
-exactly what a request answered.
+The select is the filter and `on conflict (event_id) do nothing` is the race: an id from
+another session, an event of another type, or one already claimed matches no row, and two
+writers racing for the same event both insert while only one commits — exactly what the old
+conditional write decided. This is an assertion, not a best-effort claim: the event states
+what it answers, so an id the insert produces no row for — foreign, non-user, already claimed,
+or named twice in one batch — fails the store's check, the append throws `ClaimConflictError`,
+and the transaction rolls back with the events it had already written. (The pre-P4
+`markProcessed`, removed in this phase, was the weaker counterpart: a caller taking whatever
+of a list was still there, recording `claimed_by_event_id: null`. Its rows stay as they are.)
 
 **Reading `processed_at`.** Every read that can return a user event joins the claim:
 `listEvents` and the subscription fetch `left join event_claims`; `getPendingUserEvents` is
 the anti-join — `left join … where c.event_id is null` — which is what "queued" means now,
-still in `seq` order. The `events.processed_at` column is no longer written with a value for a
-user event and no longer read; `0008_event_claims_backfill.sql` copied every pre-D9 value into
-a claim row, so logs written before the change read exactly as they did, and P4 drops the
-column.
+still in `seq` order. The `events.processed_at` column is never written for a user event (P4)
+and not read for one; `0008_event_claims_backfill.sql` copied every pre-D9 value into a claim
+row, so logs written before the change read exactly as they did. The column stays for the
+other event types.
 
 ## Supersession and compaction
 
@@ -309,55 +301,16 @@ a compacted log. `src/postgres/no-updates.test.ts` scans this package's source f
 spellings a write back to `events` would use, so "written once, read forever" cannot break
 unnoticed.
 
-## The in-flight preview
+## The in-flight preview is gone (P4)
 
-A preview — the `event_start` and `event_delta`s announcing an `agent.message` that is still
-being streamed — is delivered to the subscribers attached when it is published, and to nobody
-else. `InMemorySessionStore` can keep the text in a `Map`, because there is one process; this
-store cannot, because the brain that published the deltas and the server that answers a
-reconnecting SSE connection may be different processes, and with `SCHEDULER=postgres` any
-instance can answer. So the accumulation is a row, and `getPreview` reads it:
-
-```sql
--- publishEphemeral, `event_start`: a new preview replaces the session's previous one
-insert into session_previews (session_id, event_id, text, updated_at)
-values ($1, $2, '', $3)
-on conflict (session_id) do update
-   set event_id = excluded.event_id, text = excluded.text, updated_at = excluded.updated_at;
-
--- publishEphemeral, `event_delta`: append, and only to the preview this delta names
-update session_previews
-   set text = text || $2, updated_at = $3
- where session_id = $1 and event_id = $2;
-```
-
-The `where` is what makes a delta for another event — one whose `event_start` this store never
-saw, or one that has already been cleared — a no-op rather than a preview of its own. Both
-statements run in the same transaction as the `pg_notify` that announces the event, so a store
-that hears a delta and immediately reads the preview sees at least that delta's text: the row
-is never behind the stream.
-
-**Clearing happens in the append transaction**, with the events themselves (see
-[`seq`](#seq-gap-free-in-order-under-concurrent-appends)):
-
-```sql
-delete from session_previews
- where session_id = $1
-   and (event_id = any($2::text[])                       -- the event it previewed is now stored
-        or $3::boolean)                                  -- or a span.model_request_end came in
-```
-
-One statement covers both endings, and running it inside that transaction is what makes the
-promise total: a reader can never find the log holding the event while the preview still claims
-it is in flight.
-
-`unlogged` is deliberate. A preview lives for one model request and is a display aid, not the
-record: losing it in a crash costs a client that reconnects afterwards the beginning of a reply
-it will see in full when the stored `agent.message` lands — which is what it costs today. The
-table is not replicated and a crash truncates it, which is exactly what this data is worth.
-
-`updated_at` comes from the injected clock, like every other timestamp here — the suite moves
-its clock, and a preview must not be the one row that reads `now()`.
+A reply's chunks are rows of `events` since D9, so this store never needed a second place to
+keep a preview: the `event_start` and `event_delta`s are delivered to a subscriber like any
+other event, and a connection that opens mid-reply replays them by `seq`. P4 removed the
+contract's `publishEphemeral`, `getPreview` and `SessionPreview`, and
+`0010_drop_session_previews.sql` drops the `unlogged` table that held the accumulation — the
+table whose `event_id` and `text` a late connection used to be told about. There is nothing
+left to read or write, and the `(session_id, seq)` log is the one source of an in-flight
+reply.
 
 ## Fencing and leases
 
@@ -417,23 +370,16 @@ name is a 63-byte identifier, so the session channel is a hash rather than the i
 Channel names are quoted in `LISTEN`/`UNLISTEN`, and `pg_notify()` takes them as values, so
 the two never disagree about case.
 
-**Payloads.** A stored notification is `{"seq": n}` — never the event, which is unbounded
-while a notification is not. A subscriber that sees it fetches `seq > lastSeen` in order,
-which is what makes coalesced, repeated or missed notifications harmless: the log is the
-record, the notification is a nudge. Ephemeral events have no row to fetch, so an `event_start`
-or `event_delta` travels in the payload directly; a payload with a `seq` is a stored
-notification and anything else is an ephemeral event (neither stream-only event type has a
-`seq` field). A payload that would exceed Postgres's 8000-byte limit is **dropped**: deltas are
-a preview and best effort, and a dropped one only costs a step of progressive rendering. A
-dropped delta is not accumulated into the preview either (`getPreview` is what a subscriber
-attached at that moment would have seen), and neither is a delta for an event the store never
-saw start.
+**Payloads.** A notification is `{"seq": n}` — never the event, which is unbounded while a
+notification is not. A subscriber that sees it fetches `seq > lastSeen` in order, which is
+what makes coalesced, repeated or missed notifications harmless: the log is the record, the
+notification is a nudge. (The pre-P4 store also announced ephemeral previews in the payload,
+and a payload shaped like one is ignored now; there is no preview to deliver.)
 
 **Order.** All notification handling goes through one queue, one notification at a time, and
-each subscription remembers the last `seq` each of its listeners was given. So stored events
-are delivered in `seq` order, once each, interleaved with ephemeral events where they were
-published — and a fetch that happens to bring back rows a listener has already seen skips
-them rather than repeating them.
+each subscription remembers the last `seq` each of its listeners was given. So events are
+delivered in `seq` order, once each — and a fetch that happens to bring back rows a listener
+has already seen skips them rather than repeating them.
 
 **Signals** travel on the partition's channel, so every instance listening for that partition
 hears one — not just the instance that sent it. A signal that nobody is listening for is
@@ -464,9 +410,9 @@ DATABASE_URL=postgres://postgres:postgres@localhost:5432/openharness yarn test
 ```
 
 The suite truncates every table before each test, so it is happy to share a database with
-anything else — but it will empty all seven of them — `agents`, `sessions`, `events`,
-`event_claims`, `event_supersessions`, `session_previews` and `partition_leases` — in whatever
-database `DATABASE_URL` points at. Point it at a scratch database.
+anything else — but it will empty all six of them — `agents`, `sessions`, `events`,
+`event_claims`, `event_supersessions` and `partition_leases` — in whatever database
+`DATABASE_URL` points at. Point it at a scratch database.
 
 ## Operational notes
 

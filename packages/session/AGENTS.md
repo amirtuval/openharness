@@ -74,11 +74,10 @@ docs/postgres.md        the Postgres store: schema, migrations, delivery, local 
 | `AppendableEvent`                                                                                                                               | an event a caller appends: a `StoredEvent` minus `seq` and `processed_at`, plus an optional `id` the caller supplies |
 | `CreateSessionOptions`, `ListAgentsOptions`, `ListSessionsOptions`, `ListEventsOptions`                                                         | the options objects of the list and create methods                                                                   |
 | `UpdateSessionRequest`                                                                                                                          | what `updateSession()` changes: the title, or nothing                                                                |
-| `AppendEventsOptions`, `MarkProcessedOptions`, `PartitionFence`                                                                                 | the optional fence a brain attaches to a write                                                                       |
+| `AppendEventsOptions`, `PartitionFence`                                                                                                         | the optional fence a brain attaches to a write                                                                       |
 | `CompactOptions`                                                                                                                                | what `compact()` takes: the retention cutoff (`olderThan: Date \| number`)                                           |
 | `PartitionLease`, `PartitionSignal`, `PartitionSignalInput`, `PartitionSignalKind`                                                              | leases over a partition, and the signals sent to its owner                                                           |
 | `TurnState`, `TurnStateKind`                                                                                                                    | what `getTurnState()` answers                                                                                        |
-| `SessionPreview`                                                                                                                                | what `getPreview()` answers: the id in flight, and the text so far                                                   |
 | `SessionEventListener`, `PartitionSignalListener`, `Unsubscribe`                                                                                | subscription plumbing                                                                                                |
 | `InMemorySessionStore`, `InMemorySessionStoreOptions`                                                                                           | the in-memory implementation and its `{ now, partitionCount }` options                                               |
 | `Clock`, `systemClock`, `timestampAt()`                                                                                                         | the injectable time source, and how an instant is written as a timestamp                                             |
@@ -88,13 +87,13 @@ docs/postgres.md        the Postgres store: schema, migrations, delivery, local 
 
 ### `@openharness/session/postgres`
 
-| export                                                                                                                                                         | what it is                                                                        |
-| -------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| `PostgresSessionStore`, `createPostgresSessionStore(config, options?)`                                                                                         | the durable implementation; `{ connectionString }` or `{ pool }`, plus options    |
-| `PostgresSessionStoreOptions`, `PostgresSessionStoreConfig`                                                                                                    | its options (`now`, `partitionCount`, `onError`) and the two ways to reach a DB   |
-| `migrate(db, options?)`                                                                                                                                        | applies `migrations/`, idempotently, in one locked transaction; returns the files |
-| `MigrateOptions`                                                                                                                                               | `{ migrationsDir? }`, for a migrations directory that is not this package's       |
-| `PostgresSchema`, `AgentsTable`, `SessionsTable`, `EventsTable`, `EventClaimsTable`, `EventSupersessionsTable`, `SessionPreviewsTable`, `PartitionLeasesTable` | the Kysely table types, for a caller that wants to query alongside the store      |
+| export                                                                                                                                 | what it is                                                                        |
+| -------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `PostgresSessionStore`, `createPostgresSessionStore(config, options?)`                                                                 | the durable implementation; `{ connectionString }` or `{ pool }`, plus options    |
+| `PostgresSessionStoreOptions`, `PostgresSessionStoreConfig`                                                                            | its options (`now`, `partitionCount`, `onError`) and the two ways to reach a DB   |
+| `migrate(db, options?)`                                                                                                                | applies `migrations/`, idempotently, in one locked transaction; returns the files |
+| `MigrateOptions`                                                                                                                       | `{ migrationsDir? }`, for a migrations directory that is not this package's       |
+| `PostgresSchema`, `AgentsTable`, `SessionsTable`, `EventsTable`, `EventClaimsTable`, `EventSupersessionsTable`, `PartitionLeasesTable` | the Kysely table types, for a caller that wants to query alongside the store      |
 
 This entry point is a separate subpath on purpose: it is the only module that depends on `pg`
 and `kysely`, and a consumer that only needs the contract, the fake or the suite must not load
@@ -126,7 +125,7 @@ later than the append that caused it. Read state; do not assume a listener has r
 **Ordering.** `seq` is the ordering key, not time: it starts at `1` and increases by one per
 event, per session, in append order. Timestamps are metadata. Reads return events in `seq`
 order (`asc` by default); a subscription delivers stored events in `seq` order, with no gaps
-and no duplicates, interleaved with ephemeral events at the point they were published.
+and no duplicates.
 
 **Assigned fields.** `appendEvents` assigns `seq` and an internal creation time in one
 transaction, and `id` too unless the event brought one. The events it returns, and every event
@@ -135,10 +134,11 @@ the protocol has none. `seq` is the resume position, `id` is the identity, and a
 is a faithful record.
 
 **Caller-supplied ids.** An `AppendableEvent` may carry an `id`, and the store then writes the
-event under exactly that id. This is what keeps a stored `agent.message` on the same `sevt_` id
-as the `event_start`/`event_delta` previews the brain published with `publishEphemeral` before
-it appended: a client replaces the preview with the stored event by id. Two rules come with it,
-and an append that breaks either is refused **whole** — nothing in that batch is stored:
+event under exactly that id. This is what keeps a reply's stored chunks and its `agent.message`
+on one `sevt_` id: the brain mints it, appends the `event_start`/`event_delta` chunks under it,
+and appends the finished message with the same id, so a client matches what it accumulated to
+what was stored. Two rules come with it, and an append that breaks either is refused **whole**
+— nothing in that batch is stored:
 
 - the id must be a valid `sevt_` id, or the append throws `RangeError`;
 - the id must be free, both in the log (an id identifies one event for the whole store, not one
@@ -148,30 +148,34 @@ and an append that breaks either is refused **whole** — nothing in that batch 
 where in the log it lands.
 
 **The log is immutable** (D9, issue #46). No stored event is ever modified: the contract has
-no method that edits one, the event types name what a store returns through the protocol's
-`Immutable*` aliases, and both stores deep-freeze the events they keep and hand out, so a
-mutation throws instead of forking a reader's copy from the log the store wrote. The one
-deletion is compaction, below. A brain reads what it needs and appends what it learns; nothing
-rewrites history.
+no method that edits one, the protocol's event types are deep-readonly (so a write is a
+compile error), and both stores deep-freeze the events they keep and hand out, so a mutation
+throws instead of forking a reader's copy from the log the store wrote. The one deletion is
+compaction, below. A brain reads what it needs and appends what it learns; nothing rewrites
+history.
 
 **`processed_at` is derived from a claim.** A user event is stored with `processed_at: null` —
-the stored event never changes — and the claim taken on it is a fact recorded beside it:
-`markProcessed` (still used by today's brain) or, from P3 on, the `consumes` list of the
-`span.model_request_start` that answers it. Every read — the events list, the pending list, a
-subscription payload — returns a user event's `processed_at` as the claim's `claimed_at`, or
-`null` while no claim has it. "Pending" means exactly "no claim"; `getPendingUserEvents` lists
-those in `seq` order. Claiming twice is a no-op and two callers racing for the same event
-cannot both win — claims are insert-only and the event id's primary key decides. A `consumes`
-claim that cannot be made refuses the whole append with `ClaimConflictError`, because a span
-may not say it answers something that is not waiting: a foreign id, a non-user event, an
-already-claimed event, or an id the batch names twice. Every event that is not a user event is
-stored with `processed_at` already set, and keeps it.
+the stored event never changes — and the claim taken on it is a fact recorded beside it: the
+`consumes` list of the event that answers it. Three event types carry the list (P4): a
+`span.model_request_start` claims the `user.message`s its request folds in, a
+`span.model_request_end` claims the `user.interrupt`s that cut its request short, and a
+`session.status_idle` claims the `user.interrupt`s a turn that had nothing running ended on.
+Every read — the events list, the pending list, a subscription payload — returns a user
+event's `processed_at` as the claim's `claimed_at`, or `null` while no claim has it.
+"Pending" means exactly "no claim"; `getPendingUserEvents` lists those in `seq` order.
+Claiming twice is a no-op and two callers racing for the same event cannot both win — claims
+are insert-only and the event id's primary key decides. A `consumes` claim that cannot be
+made refuses the whole append with `ClaimConflictError`, because an event may not say it
+answers something that is not waiting: a foreign id, a non-user event, an already-claimed
+event, or an id the batch names twice. Every event that is not a user event is stored with
+`processed_at` already set, and keeps it; the `events.processed_at` column is **never written
+for a user event** (P4) — the append leaves it out — and a user event's value comes from the
+claim alone. The column stays for the other event types, and for rows written before that.
 
 **Stored chunks.** Since D9 a streamed reply is stored as it streams: `event_start` and
-`event_delta` in their stored form are ordinary events — `seq`, `processed_at`, delivery and
-all — appended like anything else. The stored form is the stream-only preview of the same name
-plus the envelope; the protocol's `isStoredEvent()` tells the two apart by `seq`, and the
-chunks of a reply in flight are resumable by `seq` like every other event.
+`event_delta` are ordinary events — `seq`, `processed_at`, delivery and all — appended like
+anything else, and since P4 that is the only form they have. The chunks of a reply in flight
+are resumable by `seq` like every other event.
 
 **Supersession.** The event that finishes a reply — the stored `agent.message`, or the
 `span.model_request_end` when the request ended without one — carries `supersedes:
@@ -207,26 +211,13 @@ needs (the server derives a title from that message and calls this — see `apps
 title is stored as given — the protocol's `SESSION_TITLE_MAX_LENGTH` is the caller's business,
 like every other bound this package does not enforce.
 
-**The in-flight preview** (`publishEphemeral` and `getPreview`) is the other piece of state
-that is not the log — the pre-D9 way to serve a connection that arrives mid-reply. From P3 the
-brain stores its chunks instead (above), which is what makes a reply in flight resumable by
-`seq`, and P4 removes this mechanism along with `session_previews`. Until then it works as it
-always did: previews go only to the connections attached when they are published, so a client
-that connects mid-reply cannot see what was already sent, and the store keeps the answer:
-
-- an **`event_start`** begins a preview — `{ eventId, text: '' }` — replacing whatever the
-  session was previewing before, because there is **at most one preview per session**;
-- an **`event_delta`** appends its text to the preview of the id it names, and to no other: a
-  delta nothing started is delivered as it always was and changes nothing;
-- the preview **ends** — `getPreview` answers `null` — when the event it previews is _stored_
-  (an append carrying that id, which is how the `agent.message` takes its preview's place) or
-  when a `span.model_request_end` is appended for the session, whichever comes first.
-
-Deltas stay best-effort, and so does the preview: one an implementation had to drop (a Postgres
-store cannot `NOTIFY` a payload over 8 KB, so it drops the event) is not accumulated either —
-what `getPreview` returns is what a listener attached at publish time would have seen. The read
-is what the server's SSE handler uses to hand a late connection the text it missed as one
-`event_start` plus one accumulated `event_delta`; see `apps/server/AGENTS.md`.
+**The in-flight preview is gone** (P4). It was the pre-D9 way to serve a connection arriving
+mid-reply: `publishEphemeral` kept the deltas published so far in `session_previews`, and
+`getPreview` answered them so the SSE handler could hand a late connection an accumulated
+snapshot. Since D9 the brain stores its chunks as it streams (above), so a reply in flight is
+replayed from the log by `seq` alone, and `publishEphemeral`, `getPreview`, `SessionPreview`
+and the `session_previews` table were removed:
+`0010_drop_session_previews.sql` drops the table, and there is nothing left to read or write.
 
 **Turn state** (`getTurnState`) is derived from the log alone — no lease, no clock, no
 in-memory bookkeeping — so it means the same thing in every store, and a server that has just
@@ -280,8 +271,8 @@ the sessions with pending user events or an open turn, oldest first.
 
 **Errors.** `SessionNotFoundError` (every session-scoped method except `getSession` and
 `updateSession`, which answer `null`),
-`AgentNotFoundError` (`createSession` with an unknown agent), `FencedError` (`appendEvents`,
-`markProcessed`), `DuplicateEventIdError` (`appendEvents` carrying an id the log already
+`AgentNotFoundError` (`createSession` with an unknown agent), `FencedError` (`appendEvents`),
+`DuplicateEventIdError` (`appendEvents` carrying an id the log already
 holds, or the same id twice) and `ClaimConflictError` (`appendEvents` whose `consumes` names
 an event that is not a pending user event of the session). A `supersedes` range that does not
 fit before its own event is a `RangeError`, like the other argument checks — `page` cursors,
@@ -308,20 +299,22 @@ one exception, and only to be _stricter_: it rebuilds each appended event throug
 the whole suite against a real database. [docs/postgres.md](./docs/postgres.md) is the long
 version; this is the shape of it.
 
-**Schema.** Seven tables, all created by `migrations/`: `agents`, `sessions` (with the
+**Schema.** Six tables, all created by `migrations/`: `agents`, `sessions` (with the
 `partitionOf` partition and the `status` the log's last status event implies), `events` (`id`,
 `session_id`, `seq`, `type`, `payload jsonb`, `created_at`, `processed_at`, `unique
 (session_id, seq)`, an index on `(session_id, seq)` and a partial index for queued user
-events), `event_claims` (one row per claim of a user event: `event_id` primary key, the
-claiming span or `null`, `claimed_at` — the primary key is what makes double-claiming fail
-atomically), `event_supersessions` (one row per recorded `{ from_seq, to_seq }` range:
-`by_event_id` primary key, `by_seq`, and a `check (by_seq > to_seq)`), `session_previews` (an
+events), `event_claims` (one row per claim of a user event: `event_id` primary key, the event
+whose `consumes` claimed it or `null` on a pre-P4 `markProcessed` row, `claimed_at` — the
+primary key is what makes double-claiming fail atomically), `event_supersessions` (one row per
+recorded `{ from_seq, to_seq }` range: `by_event_id` primary key, `by_seq`, and a `check
+(by_seq > to_seq)`) and `partition_leases` (`partition`, `owner`, `epoch`, `expires_at`). Ids
+are `text collate "C"`, so SQL ordering is the byte order the protocol's keyset cursors use;
+every timestamp is `timestamptz` written from the injected clock, never from `now()`.
 
-**`unlogged`** table: one row per session whose `agent.message` is being previewed —
-`session_id` primary key, `event_id`, `text`, `updated_at`) and `partition_leases`
-(`partition`, `owner`, `epoch`, `expires_at`). Ids are `text collate "C"`, so SQL ordering is
-the byte order the protocol's keyset cursors use; every timestamp is `timestamptz` written
-from the injected clock, never from `now()`.
+`events.processed_at` is written for everything **except** a user event (P4): a user event is
+queued, its `processed_at` is derived from the claim on read, and the append leaves the column
+out for one — `undefined` in the insert type, `NULL` in the row. The column stays for the
+other event types, and for rows written before that.
 
 `event_claims` and `event_supersessions` deliberately carry **no foreign keys**. They are facts
 about events, not a second copy of the log, and the log's tables are emptied wholesale — every
@@ -339,21 +332,14 @@ event's `processed_at` is derived by joining `event_claims`, and the one delete 
 this package's source for the two spellings such a write would use and fails on either, so
 the rule cannot come back in a later change unnoticed.
 
-The preview row is what lets `getPreview` answer for a connection the streaming brain never
-talked to: `publishEphemeral` writes it — an `event_start` resetting the row, an `event_delta`
-appending to `text` with `||` while the id still matches — and the append transaction deletes
-it when it stores the previewed event or closes the model request, so a reader can never see a
-log that holds the event while its preview is still in flight. `unlogged` is deliberate: a
-preview is a display aid, and losing it to a crash costs a reconnecting client the beginning of
-a reply it will see in full when the stored message lands.
-
 **Migrations.** Plain SQL files in `migrations/`, applied in name order by `migrate(db)` — one
 transaction under an advisory lock, every statement `if not exists`, so it is idempotent and
 safe to run from two instances at once. There is no ledger: a file that has been applied
 anywhere must never be edited. `yarn migrate` runs the built bin. D9 added `0007_event_claims`,
 `0008_event_claims_backfill` (one-time: the pre-D9 `events.processed_at` of user events is
-copied into claim rows, so a log written before the change reads exactly as it did) and
-`0009_event_supersessions`.
+copied into claim rows, so a log written before the change reads exactly as it did),
+`0009_event_supersessions` and — in P4, the cleanup — `0010_drop_session_previews`, which drops
+the preview table the removed `publishEphemeral`/`getPreview` pair used.
 
 **Appending.** `seq` is assigned inside the append transaction, under `select … for update` on
 the session row, so concurrent appends — from any number of connections, stores or processes —
@@ -374,18 +360,18 @@ throws `FencedError` on a mismatch. `acquirePartition` is a single conditional u
 matches an unleased, self-owned or expired row, so testing and taking are atomic, and every
 successful take advances the epoch — the same owner included.
 
-**Titles and previews.** `updateSession` reads, patches and writes the session row in one
-transaction, like `updateAgent`. `publishEphemeral` writes the preview and `pg_notify`s in the
-same transaction, so a store that hears a delta reads a preview that already includes it.
+**Titles.** `updateSession` reads, patches and writes the session row in one transaction, like
+`updateAgent`.
 
 **Live delivery.** One dedicated `LISTEN` connection per store, `LISTEN`/`UNLISTEN` per session
-as its first and last listener come and go, and per partition for signals. A stored
-notification carries the `seq` (never the event — payloads are capped at 8 KB) and the
-subscriber fetches the range after the last `seq` it delivered, so coalesced or repeated
-notifications cannot duplicate or drop anything; ephemeral events travel in the payload, and
-one that would not fit is dropped. The connection reconnects with backoff and then catches up
-from the last delivered `seq`. Signal channels are per partition, so every instance listening
-for that partition hears a signal, not just the sender.
+as its first and last listener come and go, and per partition for signals. A notification
+carries the `seq` of the event that was appended (never the event itself — payloads are capped
+at 8 KB) and the subscriber fetches the range after the last `seq` it delivered, so coalesced
+or repeated notifications cannot duplicate or drop anything. (The pre-P4 store also announced
+ephemeral previews in the payload; a payload shaped like one is ignored now — there are none.)
+The connection reconnects with backoff and then catches up from the last delivered `seq`.
+Signal channels are per partition, so every instance listening for that partition hears a
+signal, not just the sender.
 
 **Time.** The store takes the same `Clock` and derives every `created_at`, `updated_at`,
 `processed_at`, lease `expires_at` and lease-expiry comparison from it. Nothing reads the
@@ -455,11 +441,11 @@ relative paths. `yarn check:deps` at the repo root enforces this.
   the durable store — and adds what only a shared store can be asked: concurrent appends from
   two stores, a supplied event id two of them try to take, fencing across stores, a burst that
   must be delivered exactly once, catching up after the listening connection is killed, a
-  dropped oversized ephemeral event (which is not accumulated into the preview either), the
-  in-flight preview a second store reads out of the table, idempotent migrations, `close()`
-  leaving a borrowed pool alone, and the append-only guarantee against the real SQL: a
-  snapshot of every `events` row is compared before and after claims, a supersession and a
-  compaction, and no surviving row may differ by a field.
+  chunk another store appended delivered to this store's subscriber, idempotent migrations,
+  `close()` leaving a borrowed pool alone, the raw `events.processed_at` column staying `NULL`
+  for a user event (a claim is a row of its own), and the append-only guarantee against the
+  real SQL: a snapshot of every `events` row is compared before and after claims, a
+  supersession and a compaction, and no surviving row may differ by a field.
 - `postgres/no-updates.test.ts` scans this package's source for the two spellings a write back
   to `events` would use and fails on either. It needs no database, so the append-only rule is
   guarded even where the Postgres suite is skipped.

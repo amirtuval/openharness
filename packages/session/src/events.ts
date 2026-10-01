@@ -1,4 +1,10 @@
-import { EVENT_TYPES, type Supersedes } from '@openharness/protocol'
+import {
+  EVENT_TYPES,
+  type ModelRequestEndEvent,
+  type ModelRequestStartEvent,
+  type SessionStatusIdleEvent,
+  type Supersedes,
+} from '@openharness/protocol'
 
 import type { CompactOptions } from './store'
 
@@ -17,6 +23,24 @@ import type { CompactOptions } from './store'
 /** Whether an event type is one the user writes; those are queued until a claim takes them. */
 export function isUserEventType(type: string): boolean {
   return type === EVENT_TYPES.userMessage || type === EVENT_TYPES.userInterrupt
+}
+
+/** The event types that can carry a claim on user events, and so change what is pending. */
+export type ClaimsEvent = ModelRequestStartEvent | ModelRequestEndEvent | SessionStatusIdleEvent
+
+/**
+ * Whether an event is one of the three types whose `consumes` claims user events (P4).
+ *
+ * The same three everywhere: a `span.model_request_start` claims the messages its request
+ * answers, a `span.model_request_end` claims the interrupts that cut its request short, and a
+ * `session.status_idle` claims the interrupts a turn that had nothing running ended on.
+ */
+export function carriesConsumes(event: { readonly type: string }): event is ClaimsEvent {
+  return (
+    event.type === EVENT_TYPES.modelRequestStart ||
+    event.type === EVENT_TYPES.modelRequestEnd ||
+    event.type === EVENT_TYPES.sessionStatusIdle
+  )
 }
 
 /** The event types whose stored events are stream chunks, the only kind a reply supersedes. */

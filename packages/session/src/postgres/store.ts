@@ -21,7 +21,6 @@ import {
   type SessionId,
   type SessionStatus,
   type StoredEvent,
-  type StreamOnlyEvent,
   type UpdateAgentRequest,
   type UserEvent,
 } from '@openharness/protocol'
@@ -29,6 +28,7 @@ import {
   Kysely,
   PostgresDialect,
   sql,
+  type Insertable,
   type RawBuilder,
   type SqlBool,
   type Transaction,
@@ -43,7 +43,13 @@ import {
   FencedError,
   SessionNotFoundError,
 } from '../errors'
-import { cutoffOf, isUserEventType, supersessionsOf, type SupersessionRecord } from '../events'
+import {
+  carriesConsumes,
+  cutoffOf,
+  isUserEventType,
+  supersessionsOf,
+  type SupersessionRecord,
+} from '../events'
 import { assertEventIds, assertTtl, decodeKeyPage, decodeSeqPage, pageSize } from '../inputs'
 import type {
   AppendableEvent,
@@ -53,14 +59,12 @@ import type {
   ListAgentsOptions,
   ListEventsOptions,
   ListSessionsOptions,
-  MarkProcessedOptions,
   PartitionFence,
   PartitionLease,
   PartitionSignal,
   PartitionSignalInput,
   PartitionSignalListener,
   SessionEventListener,
-  SessionPreview,
   SessionStore,
   TurnState,
   Unsubscribe,
@@ -70,19 +74,18 @@ import { ListenConnection } from './listen'
 import {
   instant,
   agentFromRow,
-  encodeEphemeralNotification,
   encodePartitionNotification,
   encodeStoredNotification,
   eventFromRow,
   isPartitionChannel,
   partitionChannel,
   decodePartitionNotification,
-  decodeSessionNotification,
+  decodeStoredNotification,
   sessionChannel,
   sessionFromRow,
   timestampOf,
   type AgentRow,
-  type EventRow,
+  type EventsTable,
   type EventWithClaimRow,
   type PartitionLeaseRow,
   type PostgresSchema,
@@ -100,8 +103,7 @@ import {
  *   (see `listen.ts`); appends notify on the session's channel inside the append
  *   transaction, so a subscriber hears about an event when it commits. Notifications carry
  *   the event's `seq`, not the event, and the subscriber fetches the range — which is what
- *   makes coalesced, repeated or missed notifications harmless. Ephemeral events have no row
- *   to fetch, so they travel in the payload itself (see `schema.ts`).
+ *   makes coalesced, repeated or missed notifications harmless.
  * - **Signals are process-wide.** A partition's signal is a notification on that partition's
  *   channel, so every server instance listening for that partition hears it, not just the one
  *   that sent it.
@@ -371,45 +373,6 @@ export class PostgresSessionStore implements SessionStore {
     }
   }
 
-  async markProcessed(
-    sessionId: SessionId,
-    eventIds: EventId[],
-    options: MarkProcessedOptions = {},
-  ): Promise<UserEvent[]> {
-    const now = this.#clock()
-    return this.#db.transaction().execute(async (trx) => {
-      if ((await readSession(trx, sessionId)) === undefined) {
-        throw new SessionNotFoundError(sessionId)
-      }
-      assertFence(await this.#leaseOf(trx, options.fence), options.fence, 'markProcessed', now)
-      if (eventIds.length === 0) {
-        return []
-      }
-      // The claim is the insert, and nothing about the events changes: rows that are already
-      // claimed, that belong to another session, or that are not user events do not match the
-      // select, and the primary key on `event_id` decides a race — two callers insert, one
-      // commits and the other's `on conflict do nothing` writes no row, so they cannot both
-      // win. `distinct` keeps an id the caller repeated from reaching the insert twice.
-      const claimed = await sql<EventWithClaimRow>`
-        with claimed as (
-          insert into event_claims (session_id, event_id, claimed_by_event_id, claimed_at)
-          select distinct ${sessionId}, e.id, null, ${instant(now)}::timestamptz
-            from events e
-           where e.session_id = ${sessionId}
-             and e.id = any(${eventIds}::text[])
-             and e.type in (${EVENT_TYPES.userMessage}, ${EVENT_TYPES.userInterrupt})
-          on conflict (event_id) do nothing
-          returning event_id, claimed_at
-        )
-        select e.*, claimed.claimed_at
-          from claimed
-          join events e on e.id = claimed.event_id
-         order by e.seq asc
-      `.execute(trx)
-      return claimed.rows.map(eventFromRow).filter(isUserEvent)
-    })
-  }
-
   async listEvents(
     sessionId: SessionId,
     options: ListEventsOptions = {},
@@ -570,46 +533,6 @@ export class PostgresSessionStore implements SessionStore {
         void this.#listen?.unlisten(current.channel).catch(() => undefined)
       }
     })
-  }
-
-  async publishEphemeral(sessionId: SessionId, event: StreamOnlyEvent): Promise<void> {
-    const payload = encodeEphemeralNotification(event)
-    const now = this.#clock()
-    await this.#db.transaction().execute(async (trx) => {
-      if ((await readSession(trx, sessionId)) === undefined) {
-        throw new SessionNotFoundError(sessionId)
-      }
-      if (payload === null) {
-        // Ephemeral events are best effort: one that cannot fit in a notification is dropped
-        // rather than allowed to fail the publish (or the append transaction that carried it).
-        // Nothing is accumulated for it either: the preview is what the subscribers of this
-        // store would have seen, and they were not shown it.
-        return
-      }
-      // The preview row and the notification are written in one transaction, so a store that
-      // hears a delta and reads the preview sees at least that delta's text — the row is never
-      // behind the stream. Nothing is announced before it is written, and neither is visible
-      // before the commit.
-      await this.#recordPreview(trx, sessionId, event, now)
-      await sql`select pg_notify(${sessionChannel(sessionId)}, ${payload})`.execute(trx)
-    })
-  }
-
-  async getPreview(sessionId: SessionId): Promise<SessionPreview | null> {
-    const row = await this.#db
-      .selectFrom('session_previews')
-      .select(['event_id', 'text'])
-      .where('session_id', '=', sessionId)
-      .executeTakeFirst()
-    if (row !== undefined) {
-      return { eventId: row.event_id as EventId, text: row.text }
-    }
-    // No preview — which an unknown session has too, so the existence check is what tells
-    // "nothing is in flight" apart from "there is no such session".
-    if ((await readSession(this.#db, sessionId)) === undefined) {
-      throw new SessionNotFoundError(sessionId)
-    }
-    return null
   }
 
   // -------------------------------------------------------- scheduler support
@@ -836,7 +759,7 @@ export class PostgresSessionStore implements SessionStore {
     assertEventIds(sessionId, events)
     const base = await this.#maxSeq(sessionId, trx)
     const at = instant(now)
-    const rows: EventRow[] = events.map((input, index) => {
+    const rows: Insertable<EventsTable>[] = events.map((input, index) => {
       // The id is a column, so a supplied one is written there and not repeated in the body:
       // `payload` is the event as the caller sent it, without the fields the store assigns.
       const { id, ...payload } = input
@@ -847,10 +770,11 @@ export class PostgresSessionStore implements SessionStore {
         type: input.type,
         payload,
         created_at: at,
-        // A user event is queued until a turn claims it; everything else happened now. The
-        // column is never written with a value for a user event any more — its `processed_at`
-        // is derived from the claim on read (P4 drops the column).
-        processed_at: isUserEventType(input.type) ? null : at,
+        // A user event is queued until a turn claims it, and its `processed_at` is derived
+        // from that claim on read; the column is *never written* for one (P4) — `undefined`
+        // leaves it out of the insert, so the row keeps the column's null. Everything else
+        // happened now, and reads its `processed_at` back from here.
+        processed_at: isUserEventType(input.type) ? undefined : at,
       }
     })
     // What the batch records beside its events, checked before anything commits. The events
@@ -874,17 +798,6 @@ export class PostgresSessionStore implements SessionStore {
       .set(status === null ? { updated_at: at } : { status, updated_at: at })
       .where('id', '=', sessionId)
       .execute()
-    // The preview of a message ends where the message is stored — the log is the authority
-    // now — and so does a preview whose model request ended without producing one. It goes in
-    // this transaction, so a reader can never find the log holding the event while the preview
-    // still claims it is in flight.
-    const written = rows.map((row) => row.id)
-    const endsRequest = events.some((event) => event.type === EVENT_TYPES.modelRequestEnd)
-    await sql`
-      delete from session_previews
-       where session_id = ${sessionId}
-         and (event_id = any(${written}::text[]) or ${endsRequest}::boolean)
-    `.execute(trx)
     // Inside the transaction on purpose: Postgres delivers the notification when it commits,
     // so a subscriber never reads a log an append has not finished writing.
     const channel = sessionChannel(sessionId)
@@ -894,7 +807,16 @@ export class PostgresSessionStore implements SessionStore {
     )
     // Nothing this batch wrote can be claimed yet — a `consumes` list names events already in
     // the log — so the returned events carry no claim, and a user event among them is queued.
-    return rows.map((row) => eventFromRow({ ...row, claimed_at: null }))
+    // `processed_at` is `null` on these rows either way: the insert left it out for a user
+    // event, and the in-memory row object never fetched it back.
+    return rows.map((row) =>
+      eventFromRow({
+        ...row,
+        payload: row.payload ?? null,
+        processed_at: row.processed_at ?? null,
+        claimed_at: null,
+      }),
+    )
   }
 
   /**
@@ -967,42 +889,6 @@ export class PostgresSessionStore implements SessionStore {
                ${supersessions.map((range) => range.byEventId)}::text[],
                ${supersessions.map((range) => range.bySeq)}::int[]
              ) as range (from_seq, to_seq, by_event_id, by_seq)
-    `.execute(trx)
-  }
-
-  /**
-   * Fold an ephemeral event into the session's in-flight preview, in the publish's
-   * transaction.
-   *
-   * An `event_start` resets the row — there is at most one preview per session, so a new one
-   * replaces whatever was being previewed before — and an `event_delta` appends its text to the
-   * row it names, and to no other: the `where` matches the current `event_id`, so a delta for
-   * another event changes nothing, and there being no row to update cannot start a preview of
-   * its own. `updated_at` is the injected clock's, like every other timestamp here.
-   */
-  async #recordPreview(
-    trx: Transaction<PostgresSchema>,
-    sessionId: SessionId,
-    event: StreamOnlyEvent,
-    now: number,
-  ): Promise<void> {
-    if (event.type === EVENT_TYPES.eventStart) {
-      await sql`
-        insert into session_previews (session_id, event_id, text, updated_at)
-        values (${sessionId}, ${event.event.id}, '', ${instant(now)})
-        on conflict (session_id) do update
-           set event_id = excluded.event_id,
-               text = excluded.text,
-               updated_at = excluded.updated_at
-      `.execute(trx)
-      return
-    }
-    await sql`
-      update session_previews
-         set text = text || ${event.delta.content.text},
-             updated_at = ${instant(now)}
-       where session_id = ${sessionId}
-         and event_id = ${event.event_id}
     `.execute(trx)
   }
 
@@ -1143,20 +1029,12 @@ export class PostgresSessionStore implements SessionStore {
     if (sessionId === undefined) {
       return
     }
-    const notification = decodeSessionNotification(payload)
-    if (notification === null) {
+    if (decodeStoredNotification(payload) === null) {
       return
     }
-    if (notification.kind === 'stored') {
-      // The payload named a `seq`, not an event: fetch everything this session's listeners
-      // have not seen. Repeated or coalesced notifications cost one empty query each.
-      await this.#flush(sessionId)
-      return
-    }
-    const subscription = this.#sessions.get(sessionId)
-    if (subscription !== undefined) {
-      deliverTo(subscription.listeners.keys(), notification.event)
-    }
+    // The payload named a `seq`, not an event: fetch everything this session's listeners have
+    // not seen. Repeated or coalesced notifications cost one empty query each.
+    await this.#flush(sessionId)
   }
 
   /**
@@ -1398,21 +1276,25 @@ function isUserEvent(event: StoredEvent): event is UserEvent {
   return isUserEventType(event.type)
 }
 
-/** A claim a batch wants to record: the consumed event, and the span start that consumes it. */
+/** A claim a batch wants to record: the consumed event, and the event that consumes it. */
 interface ConsumedClaim {
   readonly eventId: EventId
   readonly byEventId: EventId
 }
 
 /**
- * The claims a batch carries: for every `span.model_request_start` with a `consumes` list,
- * each id it names, paired with that span's id — read off the row, which is where the id the
+ * The claims a batch carries: for every event with a `consumes` list — a
+ * `span.model_request_start`, a `span.model_request_end` or a `session.status_idle` (P4) —
+ * each id it names, paired with that event's id, read off the row, which is where the id the
  * store assigned (or the caller supplied) lives.
  */
-function claimsOf(events: readonly AppendableEvent[], rows: readonly EventRow[]): ConsumedClaim[] {
+function claimsOf(
+  events: readonly AppendableEvent[],
+  rows: readonly Insertable<EventsTable>[],
+): ConsumedClaim[] {
   const claims: ConsumedClaim[] = []
   events.forEach((input, index) => {
-    if (input.type !== EVENT_TYPES.modelRequestStart || input.consumes === undefined) {
+    if (!carriesConsumes(input) || input.consumes === undefined) {
       return
     }
     const row = rows[index]
@@ -1432,7 +1314,7 @@ function claimsOf(events: readonly AppendableEvent[], rows: readonly EventRow[])
  */
 function appendedEvents(
   events: readonly AppendableEvent[],
-  rows: readonly EventRow[],
+  rows: readonly Insertable<EventsTable>[],
 ): (AppendableEvent & { readonly id: EventId; readonly seq: number })[] {
   return events.flatMap((input, index) => {
     const row = rows[index]

@@ -22,7 +22,6 @@ import {
   type SessionId,
   type StoredEvent,
   type StreamEvent,
-  type StreamOnlyEvent,
 } from '@openharness/protocol'
 import { describe, expect, it } from 'vitest'
 
@@ -78,14 +77,16 @@ import { type TestClock, createTestClock } from './clock'
  *   keeps or clears.
  * - **appending events** — `id`/`seq` assignment, `processed_at` per event kind, and the shape
  *   of what comes back.
- * - **caller-supplied event ids** — an id the caller brings is the stored event's id and stays
- *   the identity its previews carried, `seq` is still the store's, and a batch is refused whole
- *   when an id is taken, repeated in it, or not a valid event id.
- * - **the `processed_at` lifecycle** — pending events, marking, marking twice, and ids that are
- *   not pending user events.
- * - **claims** (D9, issue #46) — `processed_at` derived from the claim on every read, claiming
- *   through a `span.model_request_start`'s `consumes`, the `ClaimConflictError` a claim that
- *   cannot be made raises, and one event never being claimed twice.
+ * - **caller-supplied event ids** — an id the caller brings is the stored event's id and keeps
+ *   a reply's chunks and its message one identity, `seq` is still the store's, and a batch is
+ *   refused whole when an id is taken, repeated in it, or not a valid event id.
+ * - **the `processed_at` lifecycle** — pending events, the derived `processed_at` a claim
+ *   produces, claiming twice, and ids that are not pending user events.
+ * - **claims** (D9, issue #46) — `processed_at` derived from the claim on every read; claiming
+ *   through the `consumes` list of any of the three event types that carry one (a
+ *   `span.model_request_start`, a `span.model_request_end`, a `session.status_idle`); the
+ *   `ClaimConflictError` a claim that cannot be made raises; and one event never being claimed
+ *   twice.
  * - **stored chunks** — `event_start` / `event_delta` appended as stored events, with a `seq`,
  *   a `processed_at` and a delivery like any other event.
  * - **supersession and replay** — a recorded `supersedes` range skipped by reads but included
@@ -98,10 +99,8 @@ import { type TestClock, createTestClock } from './clock'
  *   turn.
  * - **turn state** — `idle`, `running` (with the open span) and `unfinished`, from the log.
  * - **reading the log** — order, `after_seq`, `types`, `seq` pagination and bad cursors.
- * - **subscriptions** — stored events in `seq` order, ephemeral events interleaved, isolation,
+ * - **subscriptions** — stored events in `seq` order, chunk delivery interleaved, isolation,
  *   unsubscribe.
- * - **the in-flight preview** — the `getPreview` read: start, accumulating deltas, what clears
- *   it (the stored event, a `span.model_request_end`), replacement, and per-session isolation.
  * - **partition signals** — delivery, fan-out to a partition's listeners, and dropping.
  * - **findSessionsNeedingWork** — pending events and open turns, scoped to partitions.
  * - **partition leases** — acquire, renew, expiry at `expires_at`, steal after expiry, release.
@@ -399,13 +398,10 @@ export function runSessionStoreConformance(
         (store: SessionStore, sessionId: SessionId) => Promise<unknown>
       > = {
         appendEvents: (store, sessionId) => store.appendEvents(sessionId, [userMessage('hi')]),
-        markProcessed: (store, sessionId) => store.markProcessed(sessionId, [unknownEventId()]),
         listEvents: (store, sessionId) => store.listEvents(sessionId),
         getPendingUserEvents: (store, sessionId) => store.getPendingUserEvents(sessionId),
         getTurnState: (store, sessionId) => store.getTurnState(sessionId),
         subscribe: (store, sessionId) => store.subscribe(sessionId, () => undefined),
-        publishEphemeral: (store, sessionId) =>
-          store.publishEphemeral(sessionId, eventStart(unknownEventId())),
       }
       for (const [method, call] of Object.entries(sessionCalls)) {
         it(`rejects ${method} for a session that does not exist`, async () => {
@@ -544,34 +540,24 @@ export function runSessionStoreConformance(
         expect(new Set(stored.map((event) => event.id)).size).toBe(3)
       })
 
-      it('keeps a stored event on the id its previews were published under', async () => {
+      it('keeps a reply’s chunks and its message on one id', async () => {
         const { store } = await setup()
         const { session } = await seed(store)
         const received: StreamEvent[] = []
         await store.subscribe(session.id, (event) => {
           received.push(event)
         })
-        // What the brain does for a streaming reply: mint an id, publish the previews under
-        // it, and append the final message with the same id, so a client can replace the
-        // preview with the stored event.
+        // What the brain does for a streaming reply: mint an id, append the chunks under it,
+        // and append the finished message with the same id, so a client matches what it
+        // accumulated to what was stored.
         const id = suppliedEventId()
-        await store.publishEphemeral(session.id, eventStart(id))
-        await store.publishEphemeral(session.id, eventDelta(id))
+        await append(store, session.id, [eventStart(id), eventDelta(id)])
         const [stored] = await append(store, session.id, [{ ...agentMessage('hello'), id }])
-        await waitFor(() => received.length === 3, 'the two previews and the stored event')
+        await waitFor(() => received.length === 3, 'the two chunks and the stored message')
 
-        const previewed: EventId[] = []
-        const storedIds: EventId[] = []
-        for (const event of received) {
-          if (isStoredEvent(event)) {
-            storedIds.push(event.id)
-          } else {
-            previewed.push(previewedId(event))
-          }
-        }
         expect(stored?.id).toBe(id)
-        expect(storedIds).toEqual([id])
-        expect(previewed).toEqual([id, id])
+        // Every chunk names the message it previews from the inside; the message is itself.
+        expect(received.map((event) => previewedId(event))).toEqual([id, id, id])
       })
 
       it('refuses an id the log already holds, and stores nothing of the batch', async () => {
@@ -662,7 +648,7 @@ export function runSessionStoreConformance(
     // ------------------------------------------------- processed_at lifecycle
 
     describe('the processed_at lifecycle', () => {
-      it('lists pending user events in seq order, and stops listing them once processed', async () => {
+      it('lists pending user events in seq order, and stops listing them once claimed', async () => {
         const { store } = await setup()
         const { session } = await seed(store)
         const first = await append(store, session.id, [userMessage('one')])
@@ -672,56 +658,84 @@ export function runSessionStoreConformance(
           first[0]?.id,
           second[0]?.id,
         ])
-        await store.markProcessed(session.id, [first[0]?.id ?? unknownEventId()])
+        await append(store, session.id, [spanStartFor([first[0]?.id ?? unknownEventId()])])
         expect((await store.getPendingUserEvents(session.id)).map((event) => event.id)).toEqual([
           second[0]?.id,
         ])
       })
 
-      it('stamps processed_at from the clock, and only claims what was still pending', async () => {
+      it('stamps processed_at from the clock of the claiming append, on every read', async () => {
         const { store, clock } = await setup()
         const { session } = await seed(store)
         const stored = await append(store, session.id, [userMessage('one'), userMessage('two')])
         const ids = stored.map((event) => event.id)
         clock.advance(7 * SECOND)
-        const marked = await store.markProcessed(session.id, ids)
-        expect(marked.map((event) => event.id)).toEqual(ids)
-        for (const event of marked) {
-          expect(event.processed_at).toBe(timestampAt(clock.currentMs))
+        const [span] = await append(store, session.id, [spanStartFor(ids)])
+        expect(span?.processed_at).toBe(timestampAt(clock.currentMs))
+
+        const reread = (await store.listEvents(session.id)).data.filter((event) =>
+          ids.includes(event.id),
+        )
+        expect(reread.map((event) => event.processed_at)).toEqual([
+          timestampAt(clock.currentMs),
+          timestampAt(clock.currentMs),
+        ])
+        for (const event of reread) {
           expectExact(StoredEventSchema, event, 'a stored event')
         }
-        clock.advance(SECOND)
-        expect(await store.markProcessed(session.id, ids)).toEqual([])
-        expect((await store.listEvents(session.id)).data).toEqual(marked)
+        // The log's own rows are untouched: what a read derives is the claim's instant.
+        expect(reread).toEqual(
+          stored.map((event) => ({ ...event, processed_at: timestampAt(clock.currentMs) })),
+        )
       })
 
-      it('ignores ids that are not pending user events', async () => {
+      it('refuses claims on ids that are not pending user events, and stores nothing', async () => {
         const { store } = await setup()
         const { session } = await seed(store)
         const [message] = await append(store, session.id, [userMessage('one')])
         const [running] = await append(store, session.id, [statusRunning()])
         const other = await store.createSession((await store.createAgent(agentInput())).id)
         const [elsewhere] = await append(store, other.id, [userMessage('other')])
-        const marked = await store.markProcessed(session.id, [
+        const before = (await store.listEvents(session.id)).data
+        for (const consumed of [
           running?.id ?? unknownEventId(),
           elsewhere?.id ?? unknownEventId(),
           unknownEventId(),
+        ]) {
+          const error = await thrownBy(() =>
+            store.appendEvents(session.id, [spanStartFor([consumed])]),
+          )
+          expectErrorIdentity(error, 'ClaimConflictError', CLAIM_CONFLICT_ERROR_CODE)
+        }
+        expect((await store.listEvents(session.id)).data).toEqual(before)
+        // The message is still queued, and the foreign event is untouched where it lives.
+        expect((await store.getPendingUserEvents(session.id)).map((event) => event.id)).toEqual([
+          message?.id,
         ])
-        expect(marked).toEqual([])
-        expect(await store.markProcessed(session.id, [])).toEqual([])
-        expect(message?.processed_at).toBeNull()
+        expect((await store.getPendingUserEvents(other.id)).map((event) => event.id)).toEqual([
+          elsewhere?.id,
+        ])
       })
 
-      it('claims an event once when two callers race for it', async () => {
+      it('claims an event once when two appends race for it', async () => {
         const { store } = await setup()
         const { session } = await seed(store)
         const [message] = await append(store, session.id, [userMessage('one')])
         const id = message?.id ?? unknownEventId()
-        const [firstCall, secondCall] = await Promise.all([
-          store.markProcessed(session.id, [id]),
-          store.markProcessed(session.id, [id]),
-        ])
-        expect([...firstCall, ...secondCall].map((event) => event.id)).toEqual([id])
+        // Async wrappers, because the in-memory store throws synchronously where Postgres
+        // rejects: both spellings have to settle as one fulfilled and one rejected attempt.
+        const attempt = async () => store.appendEvents(session.id, [spanStartFor([id])])
+        const race = await Promise.allSettled([attempt(), attempt()])
+        const fulfilled = race.filter((result) => result.status === 'fulfilled')
+        const rejected = race.filter((result) => result.status === 'rejected')
+        expect(fulfilled).toHaveLength(1)
+        expect(rejected).toHaveLength(1)
+        expectErrorIdentity(
+          rejected[0]?.status === 'rejected' ? rejected[0].reason : null,
+          'ClaimConflictError',
+          CLAIM_CONFLICT_ERROR_CODE,
+        )
+        expect(await store.getPendingUserEvents(session.id)).toEqual([])
       })
     })
 
@@ -828,25 +842,74 @@ export function runSessionStoreConformance(
         ])
       })
 
-      it('lets markProcessed and consumes race for an event, but never both win', async () => {
+      it('claims an interrupt on the span end that closes the request it stopped (P4)', async () => {
+        const { store, clock } = await setup()
+        const { session } = await seed(store)
+        const start = await openSpan(store, session.id)
+        const [interrupt] = await append(store, session.id, [userInterrupt()])
+        const id = interrupt?.id ?? unknownEventId()
+
+        clock.advance(2 * SECOND)
+        const [end] = await append(store, session.id, [spanEndFor(start, [id])])
+        expect(end?.type).toBe(EVENT_TYPES.modelRequestEnd)
+        expect(await store.getPendingUserEvents(session.id)).toEqual([])
+        const reread = (await store.listEvents(session.id)).data.find((event) => event.id === id)
+        expect(reread).toMatchObject({
+          type: EVENT_TYPES.userInterrupt,
+          processed_at: timestampAt(clock.currentMs),
+        })
+        expect(reread).toEqual({ ...interrupt, processed_at: timestampAt(clock.currentMs) })
+      })
+
+      it('claims an interrupt on the session.status_idle that ends an idle turn (P4)', async () => {
+        const { store, clock } = await setup()
+        const { session } = await seed(store)
+        const [interrupt] = await append(store, session.id, [userInterrupt()])
+        const id = interrupt?.id ?? unknownEventId()
+
+        clock.advance(3 * SECOND)
+        const [idle] = await append(store, session.id, [statusIdleFor([id])])
+        expect(idle?.type).toBe(EVENT_TYPES.sessionStatusIdle)
+        expect(idle).toMatchObject({ consumes: [id] })
+        expect(await store.getPendingUserEvents(session.id)).toEqual([])
+        const reread = (await store.listEvents(session.id)).data.find((event) => event.id === id)
+        expect(reread).toEqual({ ...interrupt, processed_at: timestampAt(clock.currentMs) })
+      })
+
+      it('refuses a span end or an idle that claims what is not pending, and stores nothing', async () => {
         const { store } = await setup()
         const { session } = await seed(store)
-        const [first] = await append(store, session.id, [userMessage('one')])
-        const [second] = await append(store, session.id, [userMessage('two')])
-        const firstId = first?.id ?? unknownEventId()
-        const secondId = second?.id ?? unknownEventId()
+        const [message] = await append(store, session.id, [userMessage('hi')])
+        const id = message?.id ?? unknownEventId()
+        const started = await append(store, session.id, [statusRunning(), spanStartFor([id])])
+        const start = started[1]
+        if (start?.type !== EVENT_TYPES.modelRequestStart) {
+          throw new Error('the store did not return the span start it was given')
+        }
+        const before = (await store.listEvents(session.id)).data
 
-        // `consumes` took the first, so `markProcessed` claims nothing of it...
-        await append(store, session.id, [spanStartFor([firstId])])
-        expect(await store.markProcessed(session.id, [firstId])).toEqual([])
+        // The message is already claimed by the span start above...
+        const batches: AppendableEvent[][] = [[spanEndFor(start, [id])], [statusIdleFor([id])]]
+        for (const batch of batches) {
+          const error = await thrownBy(() => store.appendEvents(session.id, batch))
+          expectErrorIdentity(error, 'ClaimConflictError', CLAIM_CONFLICT_ERROR_CODE)
+          expect(errorFields(error)).toMatchObject({ eventIds: [id] })
+        }
+        // ...and neither attempt stored anything of its batch.
+        expect((await store.listEvents(session.id)).data).toEqual(before)
+      })
 
-        // ...and `markProcessed` took the second, so a span may not consume it.
-        await store.markProcessed(session.id, [secondId])
-        const error = await thrownBy(() =>
-          store.appendEvents(session.id, [spanStartFor([secondId])]),
-        )
-        expectErrorIdentity(error, 'ClaimConflictError', CLAIM_CONFLICT_ERROR_CODE)
-        expect(await store.getPendingUserEvents(session.id)).toEqual([])
+      it('claims nothing for a span end or an idle with no list', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const start = await openSpan(store, session.id)
+        await append(store, session.id, [userInterrupt()])
+        await append(store, session.id, [spanEnd(start)])
+        await append(store, session.id, [statusIdle()])
+        // No `consumes` anywhere on the closing events, so the interrupt is still queued.
+        expect((await store.getPendingUserEvents(session.id)).map((event) => event.type)).toEqual([
+          EVENT_TYPES.userInterrupt,
+        ])
       })
     })
 
@@ -1109,11 +1172,13 @@ export function runSessionStoreConformance(
             throw new Error('the store did not return the event it was given')
           }
           expect(Object.isFrozen(event)).toBe(true)
+          // `Object.assign` writes by key at runtime; the event types are deep-readonly, so
+          // the equivalent direct assignment would already be a compile error (D9).
           expect(() => {
-            event.seq = 99
+            Object.assign(event, { seq: 99 })
           }).toThrow(TypeError)
           expect(() => {
-            event.processed_at = timestampAt(0)
+            Object.assign(event, { processed_at: timestampAt(0) })
           }).toThrow(TypeError)
         }
 
@@ -1123,12 +1188,11 @@ export function runSessionStoreConformance(
         }
         const [block] = message.content
         expect(() => {
-          message.content.push({ type: 'text', text: 'more' })
+          const blocks = message.content as unknown as { type: string; text: string }[]
+          blocks.push({ type: 'text', text: 'more' })
         }).toThrow(TypeError)
         expect(() => {
-          if (block?.type === 'text') {
-            block.text = 'changed'
-          }
+          Object.assign(block ?? {}, { text: 'changed' })
         }).toThrow(TypeError)
 
         // None of it reached the log.
@@ -1378,7 +1442,7 @@ export function runSessionStoreConformance(
         }
       })
 
-      it('interleaves ephemeral events at the point they were published', async () => {
+      it('delivers a reply’s chunks between the events around them, in seq order', async () => {
         const { store } = await setup()
         const { session } = await seed(store)
         const received: StreamEvent[] = []
@@ -1386,12 +1450,14 @@ export function runSessionStoreConformance(
           received.push(event)
         })
         const [message] = await append(store, session.id, [userMessage('hi')])
-        const previewId = message?.id ?? unknownEventId()
-        await store.publishEphemeral(session.id, eventStart(previewId))
-        await store.publishEphemeral(session.id, eventDelta(previewId))
-        await store.publishEphemeral(session.id, eventDelta(previewId))
-        await append(store, session.id, [agentMessage('hello')])
-        await waitFor(() => received.length === 5, 'the stored events and the previews')
+        const previewId = suppliedEventId()
+        await append(store, session.id, [
+          eventStart(previewId),
+          deltaOf(previewId, 'Hel'),
+          deltaOf(previewId, 'lo'),
+        ])
+        await append(store, session.id, [{ ...agentMessage('hello'), id: previewId }])
+        await waitFor(() => received.length === 5, 'the message and the chunks of its reply')
         expect(received.map((event) => event.type)).toEqual([
           EVENT_TYPES.userMessage,
           EVENT_TYPES.eventStart,
@@ -1399,6 +1465,8 @@ export function runSessionStoreConformance(
           EVENT_TYPES.eventDelta,
           EVENT_TYPES.agentMessage,
         ])
+        expect(received.map((event) => event.seq)).toEqual([1, 2, 3, 4, 5])
+        expect(message?.seq).toBe(1)
       })
 
       it('delivers nothing that was already in the log', async () => {
@@ -1463,110 +1531,6 @@ export function runSessionStoreConformance(
         await append(store, other.id, [userMessage('elsewhere')])
         await settle()
         expect(received).toEqual([])
-      })
-    })
-
-    // -------------------------------------------------------- in-flight preview
-
-    describe('the in-flight preview', () => {
-      it('is null until an event_start, and accumulates the deltas that follow it', async () => {
-        const { store } = await setup()
-        const { session } = await seed(store)
-        expect(await store.getPreview(session.id)).toBeNull()
-
-        const id = suppliedEventId()
-        await store.publishEphemeral(session.id, eventStart(id))
-        expect(await store.getPreview(session.id)).toEqual({ eventId: id, text: '' })
-
-        await store.publishEphemeral(session.id, deltaOf(id, 'Hel'))
-        await store.publishEphemeral(session.id, deltaOf(id, 'lo'))
-        expect(await store.getPreview(session.id)).toEqual({ eventId: id, text: 'Hello' })
-        // A delta extends the preview, not the log: the text is nowhere else yet.
-        expect(await store.listEvents(session.id)).toEqual({ data: [], next_page: null })
-      })
-
-      it('is cleared when the event it previews is stored', async () => {
-        const { store } = await setup()
-        const { session } = await seed(store)
-        const id = suppliedEventId()
-        await store.publishEphemeral(session.id, eventStart(id))
-        await store.publishEphemeral(session.id, deltaOf(id, 'Hello'))
-        const [stored] = await store.appendEvents(session.id, [agentMessageUnder(id, 'Hello')])
-        expect(stored?.id).toBe(id)
-        expect(await store.getPreview(session.id)).toBeNull()
-
-        // A delta that arrives afterwards does not resurrect it: the preview is over, and the
-        // log is what a reader sees now.
-        await store.publishEphemeral(session.id, deltaOf(id, ' and more'))
-        expect(await store.getPreview(session.id)).toBeNull()
-      })
-
-      it('is cleared by a span.model_request_end, and by nothing else', async () => {
-        const { store } = await setup()
-        const { session } = await seed(store)
-        const start = await openSpan(store, session.id)
-        const id = suppliedEventId()
-        await store.publishEphemeral(session.id, eventStart(id))
-        await store.publishEphemeral(session.id, deltaOf(id, 'Hello'))
-
-        // An unrelated append leaves the preview alone...
-        await append(store, session.id, [userMessage('another message')])
-        expect(await store.getPreview(session.id)).toEqual({ eventId: id, text: 'Hello' })
-
-        // ...and the end of the model request the preview belonged to ends it, whether or not
-        // that request produced a message.
-        await append(store, session.id, [spanEnd(start)])
-        expect(await store.getPreview(session.id)).toBeNull()
-      })
-
-      it('is replaced by a new event_start, which the old preview stops extending', async () => {
-        const { store } = await setup()
-        const { session } = await seed(store)
-        const first = suppliedEventId()
-        const second = suppliedEventId()
-        await store.publishEphemeral(session.id, eventStart(first))
-        await store.publishEphemeral(session.id, deltaOf(first, 'one'))
-        await store.publishEphemeral(session.id, eventStart(second))
-        expect(await store.getPreview(session.id)).toEqual({ eventId: second, text: '' })
-
-        // A delta for the preview that was replaced is delivered as always, and changes nothing:
-        // there is at most one preview per session.
-        await store.publishEphemeral(session.id, deltaOf(first, 'two'))
-        expect(await store.getPreview(session.id)).toEqual({ eventId: second, text: '' })
-        await store.publishEphemeral(session.id, deltaOf(second, 'three'))
-        expect(await store.getPreview(session.id)).toEqual({ eventId: second, text: 'three' })
-      })
-
-      it('is kept per session', async () => {
-        const { store } = await setup()
-        const agent = await store.createAgent(agentInput())
-        const one = await store.createSession(agent.id)
-        const other = await store.createSession(agent.id)
-        const oneId = suppliedEventId()
-        const otherId = suppliedEventId()
-        await store.publishEphemeral(one.id, eventStart(oneId))
-        await store.publishEphemeral(other.id, eventStart(otherId))
-        await store.publishEphemeral(one.id, deltaOf(oneId, 'mine'))
-        await store.publishEphemeral(other.id, deltaOf(otherId, 'theirs'))
-
-        expect(await store.getPreview(one.id)).toEqual({ eventId: oneId, text: 'mine' })
-        expect(await store.getPreview(other.id)).toEqual({ eventId: otherId, text: 'theirs' })
-        // Storing one session's message clears that session's preview, and no other's.
-        await store.appendEvents(one.id, [agentMessageUnder(oneId, 'mine')])
-        expect(await store.getPreview(one.id)).toBeNull()
-        expect(await store.getPreview(other.id)).toEqual({ eventId: otherId, text: 'theirs' })
-      })
-
-      it('ignores a delta nothing started, and answers for a session that does not exist', async () => {
-        const { store } = await setup()
-        const { session } = await seed(store)
-        // A delta whose `event_start` this store never saw cannot start a preview: a preview
-        // begins with an `event_start` and with nothing else.
-        await store.publishEphemeral(session.id, deltaOf(suppliedEventId(), 'nowhere'))
-        expect(await store.getPreview(session.id)).toBeNull()
-
-        const error = await thrownBy(() => store.getPreview(unknownSessionId()))
-        expectErrorIdentity(error, 'SessionNotFoundError', SESSION_NOT_FOUND_ERROR_CODE)
       })
     })
 
@@ -1659,7 +1623,7 @@ export function runSessionStoreConformance(
         clock.advance(SECOND)
         const handled = await store.createSession(agent.id)
         const [message] = await append(store, handled.id, [userMessage('hi')])
-        await store.markProcessed(handled.id, [message?.id ?? unknownEventId()])
+        await append(store, handled.id, [spanStartFor([message?.id ?? unknownEventId()])])
         const partitions = [partitionOf(idle.id), partitionOf(handled.id)]
         expect(await store.findSessionsNeedingWork(partitions)).toEqual([])
       })
@@ -1801,10 +1765,12 @@ export function runSessionStoreConformance(
         const fence = { partition: lease.partition, epoch: lease.epoch }
         const stored = await store.appendEvents(session.id, [userMessage('hi')], { fence })
         expect(stored).toHaveLength(1)
-        const marked = await store.markProcessed(session.id, [stored[0]?.id ?? unknownEventId()], {
-          fence,
-        })
-        expect(marked).toHaveLength(1)
+        const claimed = await store.appendEvents(
+          session.id,
+          [spanStartFor([stored[0]?.id ?? unknownEventId()])],
+          { fence },
+        )
+        expect(claimed).toHaveLength(1)
       })
 
       it('refuses a write from a tenure that was taken over, and stores nothing', async () => {
@@ -1866,19 +1832,19 @@ export function runSessionStoreConformance(
         expect(await store.appendEvents(session.id, [userMessage('unfenced')])).toHaveLength(1)
       })
 
-      it('refuses a fenced markProcessed, and leaves the events pending', async () => {
+      it('refuses a fenced claiming append, and leaves the events pending', async () => {
         const { store, clock } = await setup()
         const { session } = await seed(store)
         const lease = await leaseFor(store, session.id, 30 * SECOND)
         const [message] = await append(store, session.id, [userMessage('hi')])
         clock.advance(30 * SECOND)
         const error = await thrownBy(() =>
-          store.markProcessed(session.id, [message?.id ?? unknownEventId()], {
+          store.appendEvents(session.id, [spanStartFor([message?.id ?? unknownEventId()])], {
             fence: { partition: lease.partition, epoch: lease.epoch },
           }),
         )
         expect(isFencedError(error)).toBe(true)
-        expect(errorFields(error)).toMatchObject({ operation: 'markProcessed' })
+        expect(errorFields(error)).toMatchObject({ operation: 'appendEvents' })
         expect((await store.getPendingUserEvents(session.id)).map((event) => event.id)).toEqual([
           message?.id,
         ])
@@ -1966,9 +1932,9 @@ function agentMessage(text: string): AppendableEvent {
   return { type: EVENT_TYPES.agentMessage, content: [{ type: 'text', text }] }
 }
 
-/** An `agent.message` to append under the id `id`, as the brain appends one its previews announced. */
-function agentMessageUnder(id: EventId, text: string): AppendableEvent {
-  return { ...agentMessage(text), id }
+/** A `user.interrupt` to append. */
+function userInterrupt(): AppendableEvent {
+  return { type: EVENT_TYPES.userInterrupt }
 }
 
 /** A `session.status_running` to append. */
@@ -1979,6 +1945,11 @@ function statusRunning(): AppendableEvent {
 /** A `session.status_idle` to append; `end_turn` is the only stop reason v1 has. */
 function statusIdle(): AppendableEvent {
   return { type: EVENT_TYPES.sessionStatusIdle, stop_reason: { type: 'end_turn' } }
+}
+
+/** A `session.status_idle` claiming `consumes`, as the brain ends an idle turn on an interrupt (P4). */
+function statusIdleFor(consumes: EventId[]): AppendableEvent {
+  return { type: EVENT_TYPES.sessionStatusIdle, stop_reason: { type: 'end_turn' }, consumes }
 }
 
 /** A `session.status_rescheduled` to append. */
@@ -2019,7 +1990,7 @@ function supersedingMessage(from: number, to: number): AppendableEvent {
 
 /** A `span.model_request_end` that closes `start`. */
 function spanEnd(start: ModelRequestStartEvent): AppendableEvent {
-  return {
+  const end: AppendableEvent = {
     type: EVENT_TYPES.modelRequestEnd,
     model_request_start_id: start.id,
     model_usage: {
@@ -2030,25 +2001,52 @@ function spanEnd(start: ModelRequestStartEvent): AppendableEvent {
     },
     is_error: null,
   }
+  return end
 }
 
-/** An `event_start` previewing `id`. */
-function eventStart(id: EventId): StreamOnlyEvent {
+/** A `span.model_request_end` closing `start` and claiming `consumes` (P4). */
+function spanEndFor(start: ModelRequestStartEvent, consumes: EventId[]): AppendableEvent {
+  return {
+    type: EVENT_TYPES.modelRequestEnd,
+    model_request_start_id: start.id,
+    model_usage: {
+      input_tokens: 512,
+      output_tokens: 64,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+    },
+    is_error: true,
+    error: { type: 'interrupted' },
+    consumes,
+  }
+}
+
+/** An `event_start` chunk previewing `id`. */
+function eventStart(id: EventId): AppendableEvent {
   return { type: EVENT_TYPES.eventStart, event: { type: EVENT_TYPES.agentMessage, id } }
 }
 
-/** The id a stream-only event previews: an `event_start` names it, an `event_delta` points at it. */
-function previewedId(event: StreamOnlyEvent): EventId {
-  return event.type === EVENT_TYPES.eventStart ? event.event.id : event.event_id
+/**
+ * The id of the event a reply event carries from the inside: an `event_start` names it, an
+ * `event_delta` points at it, and the finished message is its own.
+ */
+function previewedId(event: StreamEvent): EventId {
+  if (event.type === EVENT_TYPES.eventStart) {
+    return event.event.id
+  }
+  if (event.type === EVENT_TYPES.eventDelta) {
+    return event.event_id
+  }
+  return event.id
 }
 
-/** An `event_delta` extending the preview of `id`. */
-function eventDelta(id: EventId): StreamOnlyEvent {
+/** An `event_delta` chunk extending the reply of `id`. */
+function eventDelta(id: EventId): AppendableEvent {
   return deltaOf(id, 'hel')
 }
 
-/** An `event_delta` carrying `text` for the preview of `id`. */
-function deltaOf(id: EventId, text: string): StreamOnlyEvent {
+/** An `event_delta` carrying `text` for the reply of `id`. */
+function deltaOf(id: EventId, text: string): AppendableEvent {
   return {
     type: EVENT_TYPES.eventDelta,
     event_id: id,

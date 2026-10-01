@@ -103,10 +103,11 @@ describe('InMemorySessionStore', () => {
       throw new Error('the event it just appended is gone')
     }
     // An event is not just a copy: it is deep-frozen, because the log is immutable (D9). A
-    // write to it throws rather than forking the caller's view from what the store holds.
+    // write to it throws rather than forking the caller's view from what the store holds —
+    // and the event types are deep-readonly, so the same write is a compile error too.
     expect(Object.isFrozen(event)).toBe(true)
     expect(() => {
-      event.seq = 99
+      Object.assign(event, { seq: 99 })
     }).toThrow(TypeError)
     expect((await store.listEvents(session.id)).data[0]?.seq).toBe(1)
 

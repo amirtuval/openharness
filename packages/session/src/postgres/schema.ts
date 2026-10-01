@@ -6,9 +6,9 @@ import type {
   Session,
   SessionStatus,
   StoredEvent,
-  StreamOnlyEvent,
   Timestamp,
 } from '@openharness/protocol'
+import type { ColumnType, Selectable } from 'kysely'
 
 import { timestampAt } from '../clock'
 import { isUserEventType } from '../events'
@@ -62,21 +62,33 @@ export interface EventsTable {
   /** The event body — an {@link AppendableEvent}, as the caller sent it. */
   payload: unknown
   created_at: Date
-  processed_at: Date | null
+  /**
+   * When the store wrote the event — for every event *except* a user event.
+   *
+   * A user event is queued, and its `processed_at` is derived on read from the claim that
+   * takes it (see {@link eventFromRow}); since P4 the column is **never written** for one —
+   * the append omits it, which the insert type below is what allows — and rows written before
+   * that keep whatever they carry, which is what `0008_event_claims_backfill.sql` copied into
+   * claim rows. A non-user event still reads its `processed_at` back from here.
+   *
+   * The update type is `never`: nothing updates this table after the insert.
+   */
+  processed_at: ColumnType<Date | null, Date | null | undefined, never>
 }
 
 /**
  * `event_claims`: which user events a turn has claimed, insert-only (D9, issue #46).
  *
- * A claim is a fact about a user event, never an edit of one: `markProcessed` and a
- * `span.model_request_start` carrying `consumes` both write a row here, and nothing ever
- * writes a claim twice or removes one. The primary key on `event_id` is what makes claiming a
- * claim: two writers racing for the same event both insert, one commits and one does nothing,
- * exactly as the old conditional write decided. `claimed_by_event_id` names the span that
- * claimed the event, and is `null` for a claim `markProcessed` recorded. `claimed_at` is the
- * injected clock's instant at the claim, and is what a reader sees as the event's
- * `processed_at` — the `events.processed_at` column is the pre-D9 spelling of the same fact
- * and is no longer read for user events (P4 drops it).
+ * A claim is a fact about a user event, never an edit of one: an event carrying `consumes`
+ * writes a row here — a `span.model_request_start`, a `span.model_request_end` or a
+ * `session.status_idle` (P4) — and nothing ever writes a claim twice or removes one. The
+ * primary key on `event_id` is what makes claiming a claim: two writers racing for the same
+ * event both insert, one commits and one does nothing. `claimed_by_event_id` names the event
+ * that claimed this one; it is nullable only because rows written by the pre-P4
+ * `markProcessed` carry `null`, and those are never rewritten. `claimed_at` is the injected
+ * clock's instant at the claim, and is what a reader sees as the event's `processed_at` — the
+ * `events.processed_at` column is the pre-D9 spelling of the same fact, is no longer read for
+ * user events, and is never written for one.
  *
  * It carries no foreign keys on purpose (see `0007_event_claims.sql`): the log's tables are
  * truncated wholesale by test harnesses, and Postgres refuses to truncate a table a foreign
@@ -86,7 +98,7 @@ export interface EventClaimsTable {
   session_id: string
   /** The claimed `user.message` / `user.interrupt`; primary key, so a claim is made once. */
   event_id: string
-  /** The `span.model_request_start` that claimed it, or `null` for `markProcessed`. */
+  /** The event whose `consumes` claimed this one; `null` only on pre-P4 `markProcessed` rows. */
   claimed_by_event_id: string | null
   claimed_at: Date
 }
@@ -116,23 +128,6 @@ export interface EventSupersessionsTable {
   created_at: Date
 }
 
-/**
- * `session_previews`: the preview in flight for a session's current `agent.message`.
- *
- * One row per session at most. An `event_start` resets it — `event_id` and an empty `text` —
- * and an `event_delta` appends to `text` while it carries that same `event_id`; the row goes
- * inside the append transaction that stores the previewed event, or one carrying a
- * `span.model_request_end`. See `SessionStore.getPreview`.
- */
-export interface SessionPreviewsTable {
-  session_id: string
-  /** The `sevt_` id the previewing `event_start` announced. */
-  event_id: string
-  /** Every delta text published for that id so far, concatenated in publish order. */
-  text: string
-  updated_at: Date
-}
-
 /** `partition_leases`: who holds a partition, at which epoch, until when. */
 export interface PartitionLeasesTable {
   partition: number
@@ -149,7 +144,6 @@ export interface PostgresSchema {
   events: EventsTable
   event_claims: EventClaimsTable
   event_supersessions: EventSupersessionsTable
-  session_previews: SessionPreviewsTable
   partition_leases: PartitionLeasesTable
 }
 
@@ -159,8 +153,8 @@ export type AgentRow = AgentsTable
 /** One row of `sessions`. */
 export type SessionRow = SessionsTable
 
-/** One row of `events`. */
-export type EventRow = EventsTable
+/** One row of `events`, as a read returns it — the insert-side `undefined` resolved away. */
+export type EventRow = Selectable<EventsTable>
 
 /** One row of `event_claims`. */
 export type EventClaimRow = EventClaimsTable
@@ -279,15 +273,6 @@ export function isPartitionChannel(channel: string): boolean {
 // ----------------------------------------------------------------- notifications
 
 /**
- * The largest `NOTIFY` payload Postgres accepts, with headroom.
- *
- * Postgres rejects a payload over 8000 bytes outright, which would abort the append
- * transaction that carried it, so the store checks the encoded size itself and drops what
- * would not fit (see {@link encodeEphemeralNotification}).
- */
-export const NOTIFY_MAX_PAYLOAD_BYTES = 8000
-
-/**
  * The payload announcing that a session's log has events up to `seq`.
  *
  * The event itself is not in the payload: a stored event is unbounded, a `NOTIFY` payload is
@@ -299,42 +284,23 @@ export function encodeStoredNotification(seq: number): string {
 }
 
 /**
- * The payload carrying an ephemeral event, or `null` when it does not fit in a notification.
+ * Read a session-channel notification; `null` means the payload is not something this store
+ * wrote, and is ignored.
  *
- * Ephemeral events are a preview of a stored event, not the record: they are delivered
- * best-effort, so one that exceeds {@link NOTIFY_MAX_PAYLOAD_BYTES} is dropped rather than
- * allowed to fail the publish. In practice only a `event_delta` carrying a very large chunk
- * can reach that size.
+ * A stored notification is `{"seq": n}`. Pre-P4 stores also announced ephemeral previews on
+ * this channel — an event object, told apart by having no `seq` — and a payload shaped like
+ * one is ignored rather than delivered, because the P4 store has no previews to deliver.
  */
-export function encodeEphemeralNotification(event: StreamOnlyEvent): string | null {
-  const payload = JSON.stringify(event)
-  return Buffer.byteLength(payload, 'utf8') <= NOTIFY_MAX_PAYLOAD_BYTES ? payload : null
-}
-
-/** What a notification on a session's channel announces. */
-export type SessionNotification =
-  /** The log has events up to `seq`: fetch everything after the last one delivered. */
-  | { readonly kind: 'stored'; readonly seq: number }
-  /** An ephemeral event to hand to the session's subscribers as it is. */
-  | { readonly kind: 'ephemeral'; readonly event: StreamOnlyEvent }
-
-/**
- * Read a session-channel notification.
- *
- * A stored notification is `{"seq": n}` and an ephemeral one is the event itself — the two
- * are told apart by the one field the stream-only events do not have. `null` means the
- * payload is not something this store wrote, and is ignored.
- */
-export function decodeSessionNotification(payload: string): SessionNotification | null {
+export function decodeStoredNotification(payload: string): { readonly seq: number } | null {
   const decoded = asRecord(parseJson(payload))
   if (decoded === null) {
     return null
   }
   const seq = decoded.seq
   if (typeof seq === 'number' && Number.isSafeInteger(seq) && seq > 0) {
-    return { kind: 'stored', seq }
+    return { seq }
   }
-  return { kind: 'ephemeral', event: decoded as StreamOnlyEvent }
+  return null
 }
 
 /** Read a partition-channel notification, or `null` when it is not a signal this store sent. */
