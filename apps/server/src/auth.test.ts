@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import { API_VERSION_PREFIX, ApiErrorBodySchema } from '@openharness/protocol'
 
-import { DEV_LOGIN_EMAIL, DEV_LOGIN_PASSWORD, OPENHARNESS_CLI_CLIENT_ID } from './auth'
+import {
+  DEV_LOGIN_EMAIL,
+  DEV_LOGIN_PASSWORD,
+  OPENHARNESS_CLI_CLIENT_ID,
+  deviceVerificationUri,
+  deviceVerificationUriComplete,
+} from './auth'
 import { createTestApp, type TestContext } from './test-support'
 
 /**
@@ -154,8 +160,12 @@ describe('the device flow (A6)', () => {
       interval: number
       expires_in: number
     }
-    expect(code.verification_uri).toBe('http://localhost:3000/device')
-    expect(code.verification_uri_complete).toContain(code.user_code)
+    // The web app's approval page is a hash route (agreed with #62): the query — the code —
+    // has to land inside the fragment, or the app never sees it.
+    expect(code.verification_uri).toBe('http://localhost:3000/#/device')
+    expect(code.verification_uri_complete).toBe(
+      `http://localhost:3000/#/device?user_code=${code.user_code}`,
+    )
     expect(code.expires_in).toBe(600)
     expect(code.interval).toBeGreaterThan(0)
 
@@ -235,6 +245,21 @@ describe('the device flow (A6)', () => {
     expect(poll.status).toBe(400)
     const body = (await poll.json()) as { error?: string }
     expect(body.error).toBe('authorization_pending')
+  })
+})
+
+describe('the device-flow verification URIs (A6)', () => {
+  it('keep the user code inside the fragment, encoded as the web app parses it', () => {
+    // A code with characters an alphanumeric generator would never produce, to pin the
+    // encoding contract: the web app reads the hash and parses it with `URLSearchParams`.
+    const complete = deviceVerificationUriComplete('http://localhost:3000/', 'AB CD&E')
+
+    expect(deviceVerificationUri('http://localhost:3000/')).toBe('http://localhost:3000/#/device')
+    expect(complete).toBe('http://localhost:3000/#/device?user_code=AB%20CD%26E')
+
+    const [path, search] = new URL(complete).hash.slice(1).split('?')
+    expect(path).toBe('/device')
+    expect(new URLSearchParams(search).get('user_code')).toBe('AB CD&E')
   })
 })
 

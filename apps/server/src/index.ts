@@ -46,6 +46,8 @@ export {
   SESSION_UPDATE_AGE_SECONDS,
   createAuth,
   createDevLoginUser,
+  deviceVerificationUri,
+  deviceVerificationUriComplete,
   refuseUnverifiedUser,
   rewriteDevLoginRequest,
   type Auth,

@@ -725,6 +725,23 @@ describe('static web assets', () => {
     await expect(response.text()).resolves.not.toContain('root:')
   })
 
+  it('redirects the plain /device path to the app’s hash route, query and all', async () => {
+    const test = setup({ webDir: await webDir() })
+
+    const response = await test.request('/device?user_code=WXYZ-1234')
+
+    expect(response.status).toBe(302)
+    expect(response.headers.get('location')).toBe('/#/device?user_code=WXYZ-1234')
+  })
+
+  it('does not serve /device when there is no web app to send the reader to', async () => {
+    const test = setup()
+
+    const response = await test.request('/device?user_code=WXYZ-1234')
+
+    expect(response.status).toBe(404)
+  })
+
   it('answers the envelope when no web directory is configured', async () => {
     const test = setup()
 

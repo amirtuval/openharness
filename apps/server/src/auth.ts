@@ -1,5 +1,6 @@
 import { memoryAdapter, type MemoryDB } from 'better-auth/adapters/memory'
 import { betterAuth, type BetterAuthOptions, type BetterAuthRateLimitStorage } from 'better-auth'
+import { createAuthMiddleware } from 'better-auth/api'
 import { bearer, deviceAuthorization } from 'better-auth/plugins'
 import type { Kysely } from 'kysely'
 import type { PostgresSchema } from '@openharness/session/postgres'
@@ -30,7 +31,8 @@ import type { Logger } from './types'
  * - **sessions** (A2): opaque tokens, 7-day expiry, sliding once a day, a fresh session
  *   (created within a day) for provider-credential writes, rate limiting on.
  * - **the device flow** (A6) accepts exactly `openharness-cli`, approves at
- *   `${BETTER_AUTH_URL}/device` (the web app's route), and its codes expire in ten minutes.
+ *   `${BETTER_AUTH_URL}/#/device` (the web app's hash route), and its codes expire in ten
+ *   minutes.
  * - **development login** (A7): email/password with one seeded user, only arranged for by
  *   `createDevLoginUser`, which the boot path calls when `OPENHARNESS_DEV_LOGIN=1` and the
  *   public URL is localhost.
@@ -79,6 +81,30 @@ export const DEVICE_CODE_EXPIRES_IN = '10m'
 
 /** How long a device code is polled for before it lapses, in milliseconds. */
 export const DEVICE_CODE_EXPIRES_IN_MS = 10 * 60 * 1000
+
+/**
+ * Where the device flow sends the reader: the web app's approval route, on the public URL.
+ *
+ * The web app routes on the URL hash (`#/device?user_code=…`; see its `src/lib/router.ts`
+ * and `docs/auth.md`), so the URL is `/` plus the fragment `#/device` — a plain `/device`
+ * path would load the app's home screen instead. A trailing slash on `BETTER_AUTH_URL` is
+ * dropped so the result is one well-formed URL either way.
+ */
+export function deviceVerificationUri(baseUrl: string): string {
+  return `${baseUrl.replace(/\/+$/, '')}/#/device`
+}
+
+/**
+ * The verification URI with the code filled in — the one `oh login` prints.
+ *
+ * The query has to live **inside the fragment**, where the web app's `parseRoute` looks for
+ * it. The code is `encodeURIComponent`ed, which is exactly what the web app's parser
+ * (`new URLSearchParams`) decodes; the codes Better Auth generates are alphanumeric, so this
+ * is insurance against a longer or custom alphabet, not a transformation today.
+ */
+export function deviceVerificationUriComplete(baseUrl: string, userCode: string): string {
+  return `${deviceVerificationUri(baseUrl)}?user_code=${encodeURIComponent(userCode)}`
+}
 
 /** Everything {@link createAuth} needs that comes from the environment. */
 export interface AuthConfig {
@@ -234,11 +260,37 @@ export function createAuth(config: AuthConfig, database: AuthDatabase, logger: L
       deviceAuthorization({
         validateClient: (clientId) => clientId === OPENHARNESS_CLI_CLIENT_ID,
         // The web app's approval route (agreed with #62), on the public URL.
-        verificationUri: `${config.baseUrl}/device`,
+        verificationUri: deviceVerificationUri(config.baseUrl),
         expiresIn: DEVICE_CODE_EXPIRES_IN,
       }),
       bearer(),
     ],
+    // Better Auth builds `verification_uri_complete` by `URL.searchParams.set`-ing
+    // `user_code` onto the configured URI (see `buildVerificationUris` in its
+    // `device-authorization` routes) — which writes the query into the URL's *search*
+    // component, **before** the `#`. The web app reads the route and its query from the
+    // hash, so the code would be invisible to it: this after-hook rewrites the field with
+    // the query inside the fragment, where `parseRoute` looks. Every other field is left
+    // exactly as Better Auth built it.
+    hooks: {
+      after: createAuthMiddleware((ctx) => {
+        const returned = ctx.path === '/device/code' ? ctx.context.returned : undefined
+        // An error response — a refused client id, a rate limit — or any other path has no
+        // `user_code`: only the code document is rewritten.
+        if (typeof returned === 'object' && returned !== null) {
+          const body = returned as Record<string, unknown>
+          if (typeof body.user_code === 'string') {
+            body.verification_uri_complete = deviceVerificationUriComplete(
+              config.baseUrl,
+              body.user_code,
+            )
+          }
+        }
+        // A middleware answers a promise; this one changes the returned object in place and
+        // has nothing of its own to return.
+        return Promise.resolve()
+      }),
+    },
     // Better Auth's log lines go through the server's logger, so a test can capture them —
     // and so a leaked credential would show up in the same stream everything else uses.
     logger: {

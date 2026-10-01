@@ -139,8 +139,12 @@ Better Auth's own schema check passes on the migrated database.
   implicit linking follows the same email with no trusted-provider shortcut.
 - **Sessions** are opaque tokens in the database: 7 days, sliding at most once a day, and
   **fresh** (created within a day) for credential writes. The device-authorization plugin
-  accepts the CLI's `openharness-cli` client id and approves at `<BETTER_AUTH_URL>/device`;
-  its codes live ten minutes. Rate limiting is on, with counters owned by each instance.
+  accepts the CLI's `openharness-cli` client id and approves at the web app's hash route
+  `<BETTER_AUTH_URL>/#/device` — `verification_uri` is exactly that, and
+  `verification_uri_complete` carries `?user_code=…` **inside the fragment**, where the app's
+  router reads it (`auth.ts` rewrites the field Better Auth built, whose query lands before
+  the `#`; see the after-hook there). Its codes live ten minutes. Rate limiting is on, with
+  counters owned by each instance.
 - **`/v1` needs a session** (cookie or bearer), else 401: `auth-guard.ts` resolves it through
   Better Auth and puts `user`/`session` on the request. A cookie-authenticated **write** also
   needs an `Origin` of `BETTER_AUTH_URL`'s origin — CSRF, because a browser attaches cookies to
@@ -421,8 +425,12 @@ regenerate semantics, and answering the same prompt again is the closest honest 
 
 With `OPENHARNESS_WEB_DIR` set, the server serves that directory at `/`: a request that names a
 file gets it, and any other GET outside `/v1` gets `index.html`, because the web app routes on
-the URL hash. Paths that climb out of the directory are refused. Without the variable there is
-no static serving at all, and `/` answers the API's 404.
+the URL hash. Paths that climb out of the directory are refused. The one exception is the
+plain device path: `GET /device?user_code=…` answers a `302` to `/#/device?user_code=…`, the
+hash route the device-approval page actually lives on (an older `verification_uri` shape, or
+someone retyping the URL, lands on the page the reader meant instead of the app's home
+screen). Without the variable there is no static serving at all, `/device` included: `/`
+answers the API's 404.
 
 ## CORS
 
@@ -458,6 +466,7 @@ drain.
 | `validateProviderApiKey`, `VALIDATABLE_PROVIDERS`                                                                    | the one cheap provider call a saved key is checked with                              |
 | `DEV_LOGIN_EMAIL`, `DEV_LOGIN_PASSWORD`, `DEV_LOGIN_STORED_EMAIL`                                                    | the documented dev user (A7)                                                         |
 | `OPENHARNESS_CLI_CLIENT_ID`, `DEVICE_CODE_EXPIRES_IN`                                                                | the device flow's client id and code lifetime (A6)                                   |
+| `deviceVerificationUri`, `deviceVerificationUriComplete`                                                             | the approval URL the device flow answers with: `#/device` and its `?user_code=` (A6) |
 | `SOCIAL_PROVIDERS`, `providerOptions`, `microsoftEmailVerified`, `githubVerifiedPrimaryEmail`, `googleEmailVerified` | the A3 identity rules                                                                |
 | `createDevLoginUser`, `rewriteDevLoginRequest`, `refuseUnverifiedUser`                                               | the dev-login seeding and shim, and the verified-email hook                          |
 | `createMockModelFactory()`                                                                                           | the deterministic test model, for a host that wires its own                          |

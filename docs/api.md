@@ -204,8 +204,10 @@ curl localhost:3000/v1/me -H "Authorization: Bearer $TOKEN"
 - **Sign-in is not part of this API.** Better Auth serves it under `/api/auth/*`: the social
   callbacks, `sign-in/email` (dev login only), `sign-out`, and the device-authorization
   endpoints the CLI uses (`/api/auth/device/code`, `/device/token`, with approval on the web
-  app's `/device` page). `oh login` drives that in the browser and stores the session token
-  with `0600` permissions. Only the session that comes out of it is visible here.
+  app's `#/device` page — the `verification_uri_complete` the code endpoint answers carries
+  the `user_code` inside that fragment, where the app's hash router reads it). `oh login`
+  drives that in the browser and stores the session token with `0600` permissions. Only the
+  session that comes out of it is visible here.
 - **A cookie-authenticated write must come from a trusted origin.** A browser sends its cookie
   on any request any page makes, so `POST`, `PUT` and `DELETE` calls that authenticate by
   cookie need an `Origin` header of the deployment's own URL (`BETTER_AUTH_URL`); a request

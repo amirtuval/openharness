@@ -72,7 +72,9 @@ export interface AppOptions {
    * A directory of built web assets to serve at `/`, e.g. `apps/web/dist`.
    *
    * A GET outside the API that names no file in it gets `index.html`: the web app routes on
-   * the URL hash, so the server only has to hand out the shell.
+   * the URL hash, so the server only has to hand out the shell. With a web app served, the
+   * plain `/device` path (the one an older link may carry) redirects to the hash route
+   * `/#/device`, keeping its query — see the route near `notFound`.
    */
   readonly webDir?: string
   /**
@@ -188,6 +190,16 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
     logger.error('unhandled error', error)
     return errorResponse(c, 'api_error', 'an unexpected error occurred')
   })
+
+  // The web app's device-approval page is a hash route (`#/device?user_code=…`). When the
+  // web app is served from this origin, a request for the plain path — an older link, or the
+  // URL someone typed from memory — is sent on to that route with its query, instead of
+  // quietly loading the shell on the home screen. Without a web app there is nothing at `/`
+  // to send the reader to, so `/device` is not served at all (it 404s like any other
+  // unknown path).
+  if (options.webDir !== undefined) {
+    app.get('/device', (c) => c.redirect(`/#/device${new URL(c.req.url).search}`, 302))
+  }
 
   app.notFound(async (c) => {
     if (options.webDir !== undefined && c.req.method === 'GET' && !isApiPath(c.req.path)) {
