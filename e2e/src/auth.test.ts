@@ -167,7 +167,12 @@ function signOut(
   } else {
     headers.authorization = `Bearer ${credential.token}`
   }
-  return fetch(`${server.baseUrl}/api/auth/sign-out`, { method: 'POST', headers })
+  // Better Auth reads a JSON body for the call (an empty object is what the web app sends).
+  return fetch(`${server.baseUrl}/api/auth/sign-out`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({}),
+  })
 }
 
 /** Fail when `stream` has not ended `ms` after this is called. */
