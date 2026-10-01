@@ -159,11 +159,14 @@ describe('clients that join a reply in flight (D9)', () => {
     const prompt = `${MOCK_SLOW_MARKER} take your time`
 
     // (1) The reference: connected before the turn started, so it sees every event live.
-    const reference = follow(client, session.id)
+    // `afterSeq: 0` is what makes "before the turn started" true by construction: the log is
+    // empty when this opens, and if the connection lands a moment later than the message
+    // below, the replay covers it — a live-only stream would race the turn's first append.
+    const reference = follow(client, session.id, { afterSeq: 0 })
     // (3) A second client, connected at the same time, which will lose its connection
     // mid-chunks and come back: real reconnects send both `last-event-id` and `after_seq`,
     // and this is that resume, continued into the same transcript.
-    const dropping = follow(client, session.id)
+    const dropping = follow(client, session.id, { afterSeq: 0 })
 
     await client.sendMessage(session.id, prompt)
     await waitForReply(reference)
@@ -222,7 +225,9 @@ describe('clients that join a reply in flight (D9)', () => {
     const session = await newSession(client)
     const prompt = `${MOCK_SLOW_MARKER} take your time`
 
-    const reference = follow(client, session.id)
+    // `afterSeq: 0` (as in the test above): the log is empty now, and the replay covers a
+    // connection that lands after the message below instead of racing it.
+    const reference = follow(client, session.id, { afterSeq: 0 })
     await client.sendMessage(session.id, prompt)
     await waitForReply(reference)
 
@@ -258,7 +263,9 @@ describe('clients that join a reply in flight (D9)', () => {
     const prompt = `${MOCK_SLOW_MARKER} take your time`
     const steering = 'actually, keep it short'
 
-    const live = follow(client, session.id)
+    // `afterSeq: 0`, as above: nothing is in the log yet, and a connection that opens a
+    // moment late replays the message rather than missing it.
+    const live = follow(client, session.id, { afterSeq: 0 })
     await client.sendMessage(session.id, prompt)
     await waitForReply(live)
 

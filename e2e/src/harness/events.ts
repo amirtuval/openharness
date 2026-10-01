@@ -3,9 +3,9 @@ import {
   EVENT_TYPES,
   isStoredEvent,
   type AgentMessageEvent,
-  type EventDelta,
   type ModelRequestEndEvent,
   type StoredEvent,
+  type StoredEventDelta,
   type StreamEvent,
   type UserMessageEvent,
 } from '@openharness/protocol'
@@ -150,12 +150,12 @@ export function isStoredIdle(event: StreamEvent): boolean {
   return isStoredEvent(event) && event.type === EVENT_TYPES.sessionStatusIdle
 }
 
-/** Whether a stream event is a preview delta of an agent message. */
+/** Whether a stream event is a chunk delta of an agent message. */
 export function isPreviewDelta(event: StreamEvent): boolean {
   return event.type === EVENT_TYPES.eventDelta
 }
 
-/** The id of the `agent.message` a stream's previews announce, if it announced one. */
+/** The id of the `agent.message` a stream's chunks announce, if it announced one. */
 export function previewedEventId(events: readonly StreamEvent[]): string | undefined {
   for (const event of events) {
     if (event.type === EVENT_TYPES.eventStart) {
@@ -165,11 +165,11 @@ export function previewedEventId(events: readonly StreamEvent[]): string | undef
   return undefined
 }
 
-/** The text a stream's `event_delta`s carried for one previewed event id. */
+/** The text a stream's `event_delta`s carried for one chunked event id. */
 export function deltaText(events: readonly StreamEvent[], eventId: string): string {
   return events
     .filter(
-      (event): event is EventDelta =>
+      (event): event is StoredEventDelta =>
         event.type === EVENT_TYPES.eventDelta && event.event_id === eventId,
     )
     .map((event) => event.delta.content.text)
@@ -277,13 +277,15 @@ export function describeEvents(events: readonly StreamEvent[]): string {
   }
   return events
     .map((event) => {
-      if (isStoredEvent(event)) {
-        return `${String(event.seq)} ${event.type}`
-      }
+      // Every stream event is a stored one since P4, so the `seq` is always there.
+      const label = `${String(event.seq)} ${event.type}`
       if (event.type === EVENT_TYPES.eventStart) {
-        return `${event.type} ${event.event.id}`
+        return `${label} ${event.event.id}`
       }
-      return `${event.type} ${event.event_id}`
+      if (event.type === EVENT_TYPES.eventDelta) {
+        return `${label} ${event.event_id}`
+      }
+      return label
     })
     .join('; ')
 }

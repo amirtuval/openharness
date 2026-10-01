@@ -5,7 +5,12 @@ import {
   selectStreamingMessage,
   type Client,
 } from '@openharness/client'
-import { EVENT_TYPES, type ModelRequestEndEvent, type Session } from '@openharness/protocol'
+import {
+  EVENT_TYPES,
+  newEventId,
+  type ModelRequestEndEvent,
+  type Session,
+} from '@openharness/protocol'
 import {
   MOCK_ECHO_CHUNKS,
   MOCK_MODEL_USAGE,
@@ -28,6 +33,7 @@ import {
   typesOf,
   userMessages,
   waitForTurnEnd,
+  withDatabaseClient,
 } from './harness'
 
 /**
@@ -182,7 +188,7 @@ describe('a full turn', () => {
     expect(userMessages(log).every((message) => message.processed_at !== null)).toBe(true)
   })
 
-  it('keeps the partial reply when a turn is interrupted', async () => {
+  it('keeps the partial reply and claims the interrupt on the span end it stopped', async () => {
     const server = await harness.server()
     const client = harness.client(server)
     const session = await newSession(client)
@@ -198,9 +204,9 @@ describe('a full turn', () => {
     await stream.stop()
 
     const log = await readLog(client, session.id)
-    // The interrupting brain writes two spans: the request it cut short, and a span of its own
-    // that claims the `user.interrupt` (the claim on a user event *is* the `consumes` of a
-    // span start, D9) and closes immediately — nothing was asked of the model for it.
+    // One span only: the model request the interrupt cut short. Since P4 an interrupt is
+    // claimed by the request's span end, not by a span of its own — no span exists without a
+    // model call behind it.
     expect(typesOf(log)).toEqual([
       EVENT_TYPES.userMessage,
       EVENT_TYPES.sessionStatusRunning,
@@ -208,23 +214,18 @@ describe('a full turn', () => {
       EVENT_TYPES.userInterrupt,
       EVENT_TYPES.agentMessage,
       EVENT_TYPES.modelRequestEnd,
-      EVENT_TYPES.modelRequestStart,
-      EVENT_TYPES.modelRequestEnd,
       EVENT_TYPES.sessionStatusIdle,
     ])
 
-    const spanEnds = log.filter(
+    const spanEnd = log.find(
       (event): event is ModelRequestEndEvent => event.type === EVENT_TYPES.modelRequestEnd,
     )
-    expect(spanEnds.map((end) => end.error?.type)).toEqual(['interrupted', 'interrupted'])
-    expect(spanEnds[0]?.is_error).toBe(true)
-    // The interrupt is claimed by the second span's `consumes`, so nothing is left queued.
-    expect(log[6]).toMatchObject({
-      type: EVENT_TYPES.modelRequestStart,
-      consumes: [log[3]?.id],
-    })
+    expect(spanEnd?.error?.type).toBe('interrupted')
+    expect(spanEnd?.is_error).toBe(true)
+    // The interrupt is claimed by the span end that stopped its request, so nothing is queued.
+    expect(spanEnd?.consumes).toEqual([log[3]?.id])
 
-    // The reply that was cut short is kept, under the id its previews announced, and it is a
+    // The reply that was cut short is kept, under the id its chunks announced, and it is a
     // strict prefix of what the model was streaming: proof the interrupt landed mid-flight.
     const reply = agentMessages(log)[0]
     expect(reply?.id).toBe(announced)
@@ -237,5 +238,173 @@ describe('a full turn', () => {
 
     expect(userMessages(log).every((message) => message.processed_at !== null)).toBe(true)
     expect(userMessages(log)).toHaveLength(1)
+  })
+
+  it('claims an interrupt that arrives with nothing running on the status idle', async () => {
+    const server = await harness.server()
+    const client = harness.client(server)
+    const session = await newSession(client)
+
+    // Nothing was running; the server still starts a turn for the queued interrupt, and the
+    // `session.status_idle` that ends it claims the interrupt — no model request is opened
+    // for an interrupt (P4).
+    const interrupt = await client.interrupt(session.id)
+    await waitForTurnEnd(client, session.id, { afterSeq: interrupt.seq })
+
+    const log = await readLog(client, session.id)
+    expect(typesOf(log)).toEqual([
+      EVENT_TYPES.userInterrupt,
+      EVENT_TYPES.sessionStatusRunning,
+      EVENT_TYPES.sessionStatusIdle,
+    ])
+    const idle = log.at(-1)
+    expect(idle?.type === EVENT_TYPES.sessionStatusIdle ? idle.consumes : undefined).toEqual([
+      interrupt.id,
+    ])
+    expect(agentMessages(log)).toHaveLength(0)
+    // The claim is the fact: the interrupt reads processed, and nothing is left queued.
+    expect(log[0]?.processed_at).not.toBeNull()
+    await expect(
+      client.sessions.events.list(session.id).then((page) => page.data),
+    ).resolves.toEqual(log)
+  })
+
+  it('reads a log stored before D9 correctly: no consumes, no supersedes, no chunks', async () => {
+    // Existing databases hold turns a pre-D9 writer stored, and they must keep reading right:
+    // a span start with no `consumes` means everything queued was picked up, and a reply with
+    // no `supersedes` has no chunk range to sort at. The only way to have such a log is to
+    // write one, so this test inserts the rows the old store would have.
+    const server = await harness.server()
+    const client = harness.client(server)
+    const session = await newSession(client)
+    const database = await harness.database()
+
+    const ids = {
+      running: newEventId(),
+      prompt: newEventId(),
+      start: newEventId(),
+      reply: newEventId(),
+      end: newEventId(),
+      idle: newEventId(),
+    }
+    const createdAt = new Date().toISOString()
+
+    /**
+     * One `events` row as the pre-D9 append wrote it: the envelope, the payload with its own
+     * `type` (the column duplicates it), and none of the D9 fields.
+     */
+    const insert = async (
+      db: Parameters<Parameters<typeof withDatabaseClient>[0]>[0],
+      row: {
+        id: string
+        seq: number
+        type: string
+        payload: unknown
+        processedAt: string | null
+      },
+    ): Promise<void> => {
+      await db.query(
+        'insert into events (id, session_id, seq, type, payload, created_at, processed_at) values ($1, $2, $3, $4, $5, $6, $7)',
+        [
+          row.id,
+          session.id,
+          row.seq,
+          row.type,
+          { type: row.type, ...(row.payload as object) },
+          createdAt,
+          row.processedAt,
+        ],
+      )
+    }
+
+    await withDatabaseClient(
+      async (db) => {
+        await insert(db, {
+          id: ids.running,
+          seq: 1,
+          type: EVENT_TYPES.sessionStatusRunning,
+          payload: {},
+          processedAt: createdAt,
+        })
+        // The old store wrote the claim into the event's own `processed_at` column (which
+        // `0008_event_claims_backfill.sql` later copied into a claim row, as below).
+        await insert(db, {
+          id: ids.prompt,
+          seq: 2,
+          type: EVENT_TYPES.userMessage,
+          payload: { content: [{ type: 'text', text: 'an old prompt' }] },
+          processedAt: createdAt,
+        })
+        await db.query(
+          'insert into event_claims (session_id, event_id, claimed_by_event_id, claimed_at) values ($1, $2, null, $3)',
+          [session.id, ids.prompt, createdAt],
+        )
+        // No `consumes`, no `model`: the pre-D9 span start.
+        await insert(db, {
+          id: ids.start,
+          seq: 3,
+          type: EVENT_TYPES.modelRequestStart,
+          payload: {},
+          processedAt: createdAt,
+        })
+        // No `supersedes`: the pre-D9 reply, whose chunks were never stored.
+        await insert(db, {
+          id: ids.reply,
+          seq: 4,
+          type: EVENT_TYPES.agentMessage,
+          payload: { content: [{ type: 'text', text: 'an old reply' }] },
+          processedAt: createdAt,
+        })
+        await insert(db, {
+          id: ids.end,
+          seq: 5,
+          type: EVENT_TYPES.modelRequestEnd,
+          payload: {
+            model_request_start_id: ids.start,
+            model_usage: {
+              input_tokens: 3,
+              output_tokens: 2,
+              cache_creation_input_tokens: 0,
+              cache_read_input_tokens: 0,
+            },
+            is_error: null,
+          },
+          processedAt: createdAt,
+        })
+        await insert(db, {
+          id: ids.idle,
+          seq: 6,
+          type: EVENT_TYPES.sessionStatusIdle,
+          payload: { stop_reason: { type: 'end_turn' } },
+          processedAt: createdAt,
+        })
+      },
+      { database: database.name },
+    )
+
+    // The log reads back through the API, and the transcript is the conversation it stored.
+    const stored = (await client.sessions.events.list(session.id)).data
+    expect(typesOf(stored)).toEqual([
+      EVENT_TYPES.sessionStatusRunning,
+      EVENT_TYPES.userMessage,
+      EVENT_TYPES.modelRequestStart,
+      EVENT_TYPES.agentMessage,
+      EVENT_TYPES.modelRequestEnd,
+      EVENT_TYPES.sessionStatusIdle,
+    ])
+    expect(stored[1]?.processed_at).not.toBeNull()
+
+    const transcript = createTranscript()
+    for await (const event of client.sessions.events.iterate(session.id)) {
+      transcript.apply(event)
+    }
+    expect(
+      selectMessages(transcript.getState()).map((message) => `${message.role}:${message.text}`),
+    ).toEqual(['user:an old prompt', 'agent:an old reply'])
+    // The pre-D9 reading cleared the pending flag at the span start, and the reply with no
+    // range sorts at its own `seq`.
+    expect(selectMessages(transcript.getState())[0]?.pending).toBe(false)
+    expect(selectMessages(transcript.getState())[1]?.position).toBe(4)
+    expect(transcript.getState().status).toBe('idle')
   })
 })
