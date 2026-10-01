@@ -24,6 +24,15 @@ describe('@openharness/protocol', () => {
       'KeyCursorSchema',
       'encodeSeqCursor',
       'encodeKeyCursor',
+      // The auth work (epic #65) a dependent builds against.
+      'UserSchema',
+      'GetMeResponseSchema',
+      'UserIdSchema',
+      'ProviderCredentialSchema',
+      'ProviderCredentialIdSchema',
+      'PutProviderCredentialRequestSchema',
+      'ListProviderCredentialsResponseSchema',
+      'newProviderCredentialId',
     ] as const) {
       expect(protocol[name], name).toBeDefined()
     }
@@ -31,6 +40,7 @@ describe('@openharness/protocol', () => {
 
   it('exports the constants shared by the server and the store', () => {
     expect(protocol.API_VERSION_PREFIX).toBe('/v1')
+    // Deprecated (epic #65, A8), kept only while the server and client still import it.
     expect(protocol.API_KEY_HEADER).toBe('x-api-key')
     expect(protocol.DEFAULT_PARTITION_COUNT).toBe(64)
     expect(protocol.partitionOf('sesn_01JQZ8R6X9M4V0W7Y2B3C5D6E7')).toBe(

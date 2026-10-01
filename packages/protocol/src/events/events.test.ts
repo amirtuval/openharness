@@ -11,6 +11,8 @@ import {
   STORED_EVENT_TYPES,
   SessionEventSchema,
   SessionErrorEventSchema,
+  SessionErrorSchema,
+  SessionErrorTypeSchema,
   SessionStatusIdleEventSchema,
   SessionStatusRescheduledEventSchema,
   SessionStatusRunningEventSchema,
@@ -252,6 +254,39 @@ describe('session.error', () => {
           true,
         )
       }
+    }
+  })
+
+  it('carries missing_provider_credential, never-retried', () => {
+    // The extension type (epic #65, A5): the owner has no credential for the model's
+    // provider, so no model request can be made and nothing is retried. The message names
+    // the provider; the retry status is pinned to `exhausted` by the schema.
+    const event = {
+      ...storedSamples['session.error'],
+      error: {
+        type: 'missing_provider_credential',
+        message: 'No anthropic credential is stored for this user. Add one in Settings.',
+        retry_status: { type: 'exhausted' },
+      },
+    }
+    expect(SessionErrorTypeSchema.safeParse('missing_provider_credential').success).toBe(true)
+    expect(SessionErrorEventSchema.safeParse(event).success).toBe(true)
+    expect(SessionErrorSchema.parse(event.error).type).toBe('missing_provider_credential')
+  })
+
+  it('refuses to retry missing_provider_credential', () => {
+    for (const retryStatus of ['retrying', 'terminal']) {
+      expect(
+        SessionErrorEventSchema.safeParse({
+          ...storedSamples['session.error'],
+          error: {
+            type: 'missing_provider_credential',
+            message: 'No anthropic credential is stored for this user.',
+            retry_status: { type: retryStatus },
+          },
+        }).success,
+        retryStatus,
+      ).toBe(false)
     }
   })
 

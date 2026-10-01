@@ -48,20 +48,26 @@ same way, in the same request.
 
 ## Routes
 
-| method | path                                      | what it does                                                         |
-| ------ | ----------------------------------------- | -------------------------------------------------------------------- |
-| `GET`  | `/health`                                 | liveness; the only route that never needs a key                      |
-| `POST` | `/v1/agents`                              | create an agent                                                      |
-| `GET`  | `/v1/agents`                              | list agents, oldest first                                            |
-| `GET`  | `/v1/agents/{agent_id}`                   | read one agent                                                       |
-| `POST` | `/v1/agents/{agent_id}`                   | update an agent; sessions already created keep their snapshot        |
-| `POST` | `/v1/sessions`                            | create a session that snapshots an agent                             |
-| `GET`  | `/v1/sessions`                            | list sessions, newest first (`agent_id` filters)                     |
-| `GET`  | `/v1/sessions/{session_id}`               | read one session                                                     |
-| `POST` | `/v1/sessions/{session_id}/events`        | append user events; the server owns every other event type           |
-| `GET`  | `/v1/sessions/{session_id}/events`        | read the log, with `types[]`, `after_seq`, `limit` and `page`        |
-| `GET`  | `/v1/sessions/{session_id}/events/stream` | follow it live over SSE; `event_deltas[]` opts into a reply's chunks |
-| `POST` | `/v1/sessions/{session_id}/ai-sdk/chat`   | AI SDK `useChat` compatibility — an extension, not the protocol      |
+| method   | path                                      | what it does                                                         |
+| -------- | ----------------------------------------- | -------------------------------------------------------------------- |
+| `GET`    | `/health`                                 | liveness; the only route that never needs a signed-in caller         |
+| `GET`    | `/v1/me`                                  | the signed-in user                                                   |
+| `POST`   | `/v1/agents`                              | create an agent                                                      |
+| `GET`    | `/v1/agents`                              | list agents, oldest first                                            |
+| `GET`    | `/v1/agents/{agent_id}`                   | read one agent                                                       |
+| `POST`   | `/v1/agents/{agent_id}`                   | update an agent; sessions already created keep their snapshot        |
+| `POST`   | `/v1/sessions`                            | create a session that snapshots an agent                             |
+| `GET`    | `/v1/sessions`                            | list sessions, newest first (`agent_id` filters)                     |
+| `GET`    | `/v1/sessions/{session_id}`               | read one session                                                     |
+| `POST`   | `/v1/sessions/{session_id}/events`        | append user events; the server owns every other event type           |
+| `GET`    | `/v1/sessions/{session_id}/events`        | read the log, with `types[]`, `after_seq`, `limit` and `page`        |
+| `GET`    | `/v1/sessions/{session_id}/events/stream` | follow it live over SSE; `event_deltas[]` opts into a reply's chunks |
+| `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`   | AI SDK `useChat` compatibility — an extension, not the protocol      |
+| `PUT`    | `/v1/provider-credentials/{provider}`     | add or replace the caller's credential for a provider (write-only)   |
+| `GET`    | `/v1/provider-credentials`                | list the caller's credential metadata; never the secrets             |
+| `DELETE` | `/v1/provider-credentials/{provider}`     | delete one; answers `204` with no body                               |
+
+Every `/v1` resource belongs to the caller and is scoped to them.
 
 List endpoints answer `{ data, next_page }`; `next_page` is an opaque cursor handed back as
 `page`, and `null` means there is nothing more.
@@ -72,19 +78,19 @@ The log is the source of truth, and `seq` is the order it happened in: `1`, `2`,
 session. It is also the SSE `id` and the resume position, so a client that reconnects with
 `last-event-id: 7` gets `8` next — never `7` twice, never a gap.
 
-| event                        | who writes it | what it means                                          |
-| ---------------------------- | ------------- | ------------------------------------------------------ |
-| `user.message`               | the client    | a message, until the brain claims it                   |
-| `user.interrupt`             | the client    | stop the turn in flight                                |
-| `agent.message`              | the brain     | a reply, under the `sevt_` id its chunks announced     |
-| `session.status_running`     | the brain     | a turn started (also after a retry)                    |
-| `session.status_idle`        | the brain     | the turn ended; the session is waiting for input       |
-| `session.status_rescheduled` | the brain     | a transient failure; it is retrying                    |
-| `session.error`              | the brain     | what went wrong, and whether it is retrying            |
-| `span.model_request_start`   | the brain     | a model request began, and the messages it claims      |
-| `span.model_request_end`     | the brain     | it finished — usage, any error, the interrupts it ends |
-| `event_start`                | the brain     | a reply started streaming — a stored chunk since D9    |
-| `event_delta`                | the brain     | a streamed fragment of it — a stored chunk since D9    |
+| event                        | who writes it | what it means                                                                        |
+| ---------------------------- | ------------- | ------------------------------------------------------------------------------------ |
+| `user.message`               | the client    | a message, until the brain claims it                                                 |
+| `user.interrupt`             | the client    | stop the turn in flight                                                              |
+| `agent.message`              | the brain     | a reply, under the `sevt_` id its chunks announced                                   |
+| `session.status_running`     | the brain     | a turn started (also after a retry)                                                  |
+| `session.status_idle`        | the brain     | the turn ended; the session is waiting for input                                     |
+| `session.status_rescheduled` | the brain     | a transient failure; it is retrying                                                  |
+| `session.error`              | the brain     | what went wrong, and whether it is retrying — `missing_provider_credential` never is |
+| `span.model_request_start`   | the brain     | a model request began, and the messages it claims                                    |
+| `span.model_request_end`     | the brain     | it finished — usage, any error, the interrupts it ends                               |
+| `event_start`                | the brain     | a reply started streaming — a stored chunk since D9                                  |
+| `event_delta`                | the brain     | a streamed fragment of it — a stored chunk since D9                                  |
 
 ### Claims, chunks and superseding (D9)
 
@@ -182,20 +188,91 @@ any more.
 
 ## Authentication
 
-With `OPENHARNESS_API_KEY` set, every `/v1/*` request needs it:
+Every `/v1/*` request must come from a signed-in user. The caller proves it with a
+server-side session, and there are two ways to carry one:
+
+| caller                  | proof                    | sent as                                      |
+| ----------------------- | ------------------------ | -------------------------------------------- |
+| the web app             | a Better Auth session    | an httpOnly, `Secure`, `SameSite=Lax` cookie |
+| the CLI (`oh`), scripts | the same kind of session | `Authorization: Bearer <token>`              |
 
 ```bash
-curl localhost:3000/v1/agents -H "x-api-key: $OPENHARNESS_API_KEY"
+curl localhost:3000/v1/me -H "Authorization: Bearer $TOKEN"
 ```
 
-`/health` never needs it. Without the variable the API is open, which is what a single-binary
-deployment behind its own front door wants.
+- **Sign-in is not part of this API.** Better Auth serves it under `/api/auth/*` (Google,
+  GitHub, Microsoft, and a device-code flow the CLI uses); `oh login` drives that in the
+  browser and stores the token with `0600` permissions. Only the session that comes out of it
+  is visible here.
+- Sessions live in the database with a 7-day sliding expiry: every request looks the token
+  up, and a revoked one stops working immediately. There are no JWTs and no refresh tokens.
+- **Sensitive actions require a fresh session**: `PUT` and `DELETE` on
+  `/v1/provider-credentials` refuse a session older than the freshness window.
+- Anything not signed in — or carrying an invalid or expired session or token — gets an
+  `authentication_error` with status `401`. `/health` is the only route that never asks.
+- **Everything belongs to the user who created it.** Agents and sessions carry a read-only
+  `owner_id`; a resource that belongs to another user answers **`404`**, not `403`, so its
+  existence never leaks. Nothing is shared and no request ever carries an owner.
+- The static `OPENHARNESS_API_KEY` / `x-api-key` scheme of v1 is gone; provider keys live in
+  encrypted settings, below.
+
+### The signed-in user
+
+`GET /v1/me` answers the user the request authenticated as — the identity every request is
+scoped to:
+
+```json
+{
+  "id": "Qm3xT7bR9kL2nV5wZ8yA4cD6fG1hJ0pS",
+  "email": "ada@example.com",
+  "name": "Ada Lovelace",
+  "image": "https://example.com/ada.png",
+  "created_at": "2026-03-15T10:00:00Z"
+}
+```
+
+`name` and `image` are absent when the identity provider gave none. A user is a
+provider-verified email: signing in with Google, GitHub or Microsoft proves the same address,
+and it is the same user.
+
+### Provider credentials
+
+The server has no model-provider keys of its own — each user stores their own, and the API is
+**write-only**. A credential goes up once, is stored encrypted, and only metadata ever comes
+back:
+
+```bash
+curl -X PUT localhost:3000/v1/provider-credentials/anthropic \
+  -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"type":"api_key","api_key":"sk-ant-…"}'
+# → 200 {"id":"pcred_01J…","type":"api_key","provider":"anthropic","last4":"…xYz9",
+#        "created_at":"…","updated_at":"…","validated_at":"…"}
+
+curl localhost:3000/v1/provider-credentials -H "Authorization: Bearer $TOKEN"
+# → {"data":[ …the same metadata… ]}
+
+curl -X DELETE localhost:3000/v1/provider-credentials/anthropic \
+  -H "Authorization: Bearer $TOKEN"
+# → 204
+```
+
+- **Write-only.** `api_key` is accepted on the `PUT` and never returned, logged, put in an
+  event or repeated in an error. `last4` exists so a settings screen can tell two keys apart.
+- **Validated on save** with one cheap provider call; a key the provider rejects is an
+  `invalid_provider_credential` with status `422`, and nothing is stored.
+- One credential per provider per user; `PUT` replaces it. Deletion is immediate.
+- `type` is a discriminated union that has only `api_key` today (Bedrock, Vertex and Azure
+  credentials come later); the provider is the Mastra router name (`anthropic`, `openai`, …).
+- A turn whose model's provider has no stored credential fails with a `session.error` whose
+  type is `missing_provider_credential` — non-retryable, the message names the provider. The
+  server never falls back to provider keys from the environment.
 
 ## Errors
 
-| status | type                    | when                                               |
-| ------ | ----------------------- | -------------------------------------------------- |
-| 400    | `invalid_request_error` | the request does not match the protocol's schemas  |
-| 401    | `authentication_error`  | missing or wrong `x-api-key`                       |
-| 404    | `not_found_error`       | the id names nothing, or the route does not exist  |
-| 500    | `api_error`             | an unexpected server failure — never a stack trace |
+| status | type                          | when                                                                                    |
+| ------ | ----------------------------- | --------------------------------------------------------------------------------------- |
+| 400    | `invalid_request_error`       | the request does not match the protocol's schemas                                       |
+| 401    | `authentication_error`        | not signed in, or the session or bearer token is invalid/expired                        |
+| 404    | `not_found_error`             | the id names nothing, the route does not exist, or the resource belongs to another user |
+| 422    | `invalid_provider_credential` | a provider credential failed validation on save                                         |
+| 500    | `api_error`                   | an unexpected server failure — never a stack trace                                      |

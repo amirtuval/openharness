@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { PageLimitSchema, TimestampSchema } from '../common'
 import { AgentIdSchema } from '../ids'
 import { NextPageSchema, PageCursorStringSchema } from '../pagination'
+import { UserIdSchema } from './user'
 
 /**
  * The `agent` resource and the endpoints that manage it:
@@ -40,6 +41,19 @@ export type ModelConfig = z.infer<typeof ModelConfigSchema>
 export const AgentSchema = z.object({
   id: AgentIdSchema,
   type: z.literal('agent'),
+  /**
+   * // extension: the user this agent belongs to (epic #65, A4).
+   *
+   * Read-only, set by the server from the authenticated caller: no request ever carries it —
+   * `POST /v1/agents` takes the owner from the session that made the call — and it never
+   * changes afterwards. Together with a `404` for anything another user owns, it is the whole
+   * of v1 isolation: nothing is shared.
+   *
+   * Optional only during the transition: while the server still serves pre-auth data
+   * (through #61) it may be absent. From #61 on the server sets it on every agent, and it is
+   * to become required.
+   */
+  owner_id: UserIdSchema.optional(),
   name: z.string().min(1).max(AGENT_NAME_MAX_LENGTH),
   description: z.string().max(AGENT_DESCRIPTION_MAX_LENGTH).nullable(),
   model: ModelConfigSchema,

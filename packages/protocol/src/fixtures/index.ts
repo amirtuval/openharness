@@ -1,5 +1,5 @@
 import type { EventId } from '../ids'
-import { newAgentId, newEventId, newSessionId } from '../ids'
+import { newAgentId, newEventId, newProviderCredentialId, newSessionId } from '../ids'
 import type {
   Agent,
   AgentMessageEvent,
@@ -7,6 +7,7 @@ import type {
   ModelRequestEndEvent,
   ModelRequestStartEvent,
   ModelUsage,
+  ProviderCredential,
   Session,
   SessionAgent,
   SessionError,
@@ -17,6 +18,7 @@ import type {
   StoredEvent,
   StoredEventDelta,
   StoredEventStart,
+  User,
   UserInterruptEvent,
   UserMessageEvent,
 } from '../index'
@@ -108,6 +110,46 @@ export function makeSession(overrides: Partial<Session> = {}): Session {
     updated_at: fixtureTimestamp(),
   }
   return { ...session, ...overrides }
+}
+
+/**
+ * A signed-in `user`, as `GET /v1/me` returns them.
+ *
+ * The id is a fixed opaque string, the shape Better Auth mints — not a `usr_`-prefixed ULID,
+ * because user ids are not this package's to format. `image` is left absent, the common case;
+ * pass it in the overrides when a test needs one.
+ *
+ * @param overrides fields to replace on the default user
+ */
+export function makeUser(overrides: Partial<User> = {}): User {
+  const user: User = {
+    id: 'Qm3xT7bR9kL2nV5wZ8yA4cD6fG1hJ0pS',
+    email: 'ada@example.com',
+    name: 'Ada Lovelace',
+    created_at: fixtureTimestamp(),
+  }
+  return { ...user, ...overrides }
+}
+
+/**
+ * A provider credential's metadata, as the API returns it: an `anthropic` `api_key` whose
+ * secret ends in `cdef`, validated when it was saved. Never carries the secret itself.
+ *
+ * @param overrides fields to replace on the default credential
+ */
+export function makeProviderCredential(
+  overrides: Partial<ProviderCredential> = {},
+): ProviderCredential {
+  const credential: ProviderCredential = {
+    id: newProviderCredentialId(),
+    type: 'api_key',
+    provider: 'anthropic',
+    last4: 'cdef',
+    created_at: fixtureTimestamp(),
+    updated_at: fixtureTimestamp(),
+    validated_at: fixtureTimestamp(),
+  }
+  return { ...credential, ...overrides }
 }
 
 // ---------------------------------------------------------------- user events
