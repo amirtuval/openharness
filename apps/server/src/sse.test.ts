@@ -13,7 +13,7 @@ import {
 } from '@openharness/protocol'
 import type { SessionStore } from '@openharness/session'
 
-import { PLACEHOLDER_OWNER_ID } from './placeholder-owner'
+import { TEST_OWNER_ID } from './test-support'
 import { SSE_HEADERS, createSessionEventStream } from './sse'
 import {
   HELD_REPLY_TEST_TIMEOUT_MS,
@@ -63,14 +63,19 @@ async function fixture(
   return { context: test, agent, session }
 }
 
-/** The URL of a session's stream, with optional query parameters. */
-function streamUrl(test: TestContext, sessionId: SessionId, query = ''): string {
-  return `${test.url}${API_VERSION_PREFIX}/sessions/${sessionId}/events/stream${query}`
+/**
+ * The path of a session's stream, with optional query parameters.
+ *
+ * The tests go through {@link TestContext.request}, which carries the caller's bearer token:
+ * `/v1` is authenticated now (A2), the SSE route included.
+ */
+function streamPath(sessionId: SessionId, query = ''): string {
+  return `${API_VERSION_PREFIX}/sessions/${sessionId}/events/stream${query}`
 }
 
-/** The URL of a session's events list, with optional query parameters. */
-function eventsUrl(test: TestContext, sessionId: SessionId, query = ''): string {
-  return `${test.url}${API_VERSION_PREFIX}/sessions/${sessionId}/events${query}`
+/** The path of a session's events list, with optional query parameters. */
+function eventsPath(sessionId: SessionId, query = ''): string {
+  return `${API_VERSION_PREFIX}/sessions/${sessionId}/events${query}`
 }
 
 /** Read until `done` says so, and answer with everything read. */
@@ -158,7 +163,7 @@ describe('a live-only stream', () => {
     const lastSeq = history[history.length - 1]?.seq ?? 0
 
     // No `after_seq`: the client asked for what happens next, not for the log.
-    const reader = openSse(await fetch(streamUrl(test, session.id)))
+    const reader = openSse(await test.request(streamPath(session.id)))
     try {
       await httpSendMessage(test, session.id, 'second')
       const live = await readUntil(reader, (messages) =>
@@ -179,7 +184,7 @@ describe('the stream response', () => {
   it('is an event stream with the request id on it', async () => {
     const { context: test, session } = await fixture()
 
-    const response = await fetch(streamUrl(test, session.id))
+    const response = await test.request(streamPath(session.id))
 
     expect(response.headers.get('content-type')).toContain('text/event-stream')
     expect(response.headers.get('request-id')).toMatch(/^req_/)
@@ -197,7 +202,7 @@ describe('a replaying stream', () => {
     await waitForIdle(test.store, session.id)
     const replay = await readHistory(test.store, session.id)
 
-    const reader = openSse(await fetch(streamUrl(test, session.id, '?after_seq=0')))
+    const reader = openSse(await test.request(streamPath(session.id, '?after_seq=0')))
     try {
       const replayed = await readUntil(reader, (messages) => messages.length >= replay.length)
       expect(seqsOf(replayed)).toEqual(seqsOfLog(replay))
@@ -240,7 +245,9 @@ describe('a replaying stream', () => {
 
     // A reconnect: the header carries the last `seq` this client saw.
     const reader = openSse(
-      await fetch(streamUrl(test, session.id), { headers: { 'last-event-id': String(resumeAt) } }),
+      await test.request(streamPath(session.id), {
+        headers: { 'last-event-id': String(resumeAt) },
+      }),
     )
     try {
       await httpSendMessage(test, session.id, 'second')
@@ -259,7 +266,7 @@ describe('a replaying stream', () => {
     const test = await startTestServer()
     context = test
 
-    const response = await fetch(streamUrl(test, 'sesn_01HZZZZZZZZZZZZZZZZZZZZZZZ' as SessionId))
+    const response = await test.request(streamPath('sesn_01HZZZZZZZZZZZZZZZZZZZZZZZ' as SessionId))
 
     expect(response.status).toBe(404)
     expect(ApiErrorBodySchema.parse(await response.json()).error.type).toBe('not_found_error')
@@ -268,7 +275,7 @@ describe('a replaying stream', () => {
   it('answers 400 for an event_deltas value the protocol does not know', async () => {
     const { context: test, session } = await fixture()
 
-    const response = await fetch(streamUrl(test, session.id, '?event_deltas[]=agent.thinking'))
+    const response = await test.request(streamPath(session.id, '?event_deltas[]=agent.thinking'))
 
     expect(response.status).toBe(400)
     expect(ApiErrorBodySchema.parse(await response.json()).error.type).toBe('invalid_request_error')
@@ -283,7 +290,7 @@ describe('the chunks of a reply (D9)', () => {
     const agent = await httpCreateAgent(test)
     const session = await httpCreateSession(test, agent.id)
 
-    const reader = openSse(await fetch(streamUrl(test, session.id, DELTAS)))
+    const reader = openSse(await test.request(streamPath(session.id, DELTAS)))
     try {
       await httpSendMessage(test, session.id, 'hello')
       const messages = await readUntil(reader, (read) =>
@@ -334,7 +341,7 @@ describe('the chunks of a reply (D9)', () => {
     const agent = await httpCreateAgent(test)
     const session = await httpCreateSession(test, agent.id)
 
-    const reader = openSse(await fetch(streamUrl(test, session.id, '?after_seq=0')))
+    const reader = openSse(await test.request(streamPath(session.id, '?after_seq=0')))
     try {
       await httpSendMessage(test, session.id, 'hello')
       const messages = await readUntil(reader, (read) =>
@@ -375,7 +382,7 @@ describe('the chunks of a reply (D9)', () => {
       const session = await httpCreateSession(test, agent.id)
 
       // The turn as it looked before the reload: the first chunks of the reply, on the wire.
-      const before = openSse(await fetch(streamUrl(test, session.id, DELTAS)))
+      const before = openSse(await test.request(streamPath(session.id, DELTAS)))
       const streamedBeforeReload = await (async () => {
         try {
           await httpSendMessage(test, session.id, 'tell me something long')
@@ -388,7 +395,7 @@ describe('the chunks of a reply (D9)', () => {
       expect(streamedBeforeReload.length).toBeGreaterThan(0)
 
       // The reload: a fresh connection, replaying the log from the start, still mid-reply.
-      const after = openSse(await fetch(streamUrl(test, session.id, `${DELTAS}&after_seq=0`)))
+      const after = openSse(await test.request(streamPath(session.id, `${DELTAS}&after_seq=0`)))
       try {
         const replayed = await readUntil(
           after,
@@ -447,7 +454,7 @@ describe('the chunks of a reply (D9)', () => {
       const agent = await httpCreateAgent(test)
       const session = await httpCreateSession(test, agent.id)
 
-      const before = openSse(await fetch(streamUrl(test, session.id, DELTAS)))
+      const before = openSse(await test.request(streamPath(session.id, DELTAS)))
       const resumeAt = await (async () => {
         try {
           await httpSendMessage(test, session.id, 'tell me something long')
@@ -462,7 +469,7 @@ describe('the chunks of a reply (D9)', () => {
       // A resume while the reply is still in flight: the chunks the client has not seen, then
       // the stored message when the turn ends.
       const resumed = openSse(
-        await fetch(streamUrl(test, session.id, DELTAS), {
+        await test.request(streamPath(session.id, DELTAS), {
           headers: { 'last-event-id': String(resumeAt) },
         }),
       )
@@ -501,7 +508,7 @@ describe('the chunks of a reply (D9)', () => {
       expect(raw.some(isChunk)).toBe(false)
 
       const afterCompaction = openSse(
-        await fetch(streamUrl(test, session.id, DELTAS), {
+        await test.request(streamPath(session.id, DELTAS), {
           headers: { 'last-event-id': String(resumeAt) },
         }),
       )
@@ -553,7 +560,7 @@ describe('GET …/events while a reply is streaming', () => {
         message: 'the chunks never reached the log',
       })
 
-      const midReplyBody: unknown = await (await fetch(eventsUrl(test, session.id))).json()
+      const midReplyBody: unknown = await (await test.request(eventsPath(session.id))).json()
       const midReply = midReplyBody as { data: StoredEvent[] }
       const chunks = midReply.data.filter(isChunk)
       expect(chunks.length).toBeGreaterThan(0)
@@ -566,7 +573,7 @@ describe('GET …/events while a reply is streaming', () => {
 
       // The stream from the last chunk continues where the list ended.
       const start = openSse(
-        await fetch(streamUrl(test, session.id, DELTAS), {
+        await test.request(streamPath(session.id, DELTAS), {
           headers: {
             'last-event-id': String(chunks[chunks.length - 1]?.seq ?? 0),
           },
@@ -592,7 +599,7 @@ describe('GET …/events while a reply is streaming', () => {
       await waitForIdle(store, session.id)
 
       // Once the turn is over, the same endpoint is the replay read: the message, no chunks.
-      const endedBody: unknown = await (await fetch(eventsUrl(test, session.id))).json()
+      const endedBody: unknown = await (await test.request(eventsPath(session.id))).json()
       const ended = endedBody as { data: StoredEvent[] }
       expect(ended.data.some(isChunk)).toBe(false)
       // The message is what replaced the chunks, and it says so: the range is what a client
@@ -611,7 +618,7 @@ describe('keepalive', () => {
     const agent = await httpCreateAgent(test)
     const session = await httpCreateSession(test, agent.id)
 
-    const response = await fetch(streamUrl(test, session.id))
+    const response = await test.request(streamPath(session.id))
     const reader = response.body?.getReader()
     expect(reader).toBeDefined()
     try {
@@ -640,7 +647,7 @@ describe('disconnecting', () => {
     const agent = await httpCreateAgent(test)
     const session = await httpCreateSession(test, agent.id)
 
-    const reader = openSse(await fetch(streamUrl(test, session.id, '?after_seq=0')))
+    const reader = openSse(await test.request(streamPath(session.id, '?after_seq=0')))
     await httpSendMessage(test, session.id, 'hello')
     await readUntil(reader, (messages) => messages.length > 0)
     await waitFor(() => store.subscriptions > 0)
@@ -663,10 +670,10 @@ describe('the stream filter', () => {
     const store: SessionStore = new ObservableStore()
     const agent = await store.createAgent(
       { name: 'Agent', model: { id: 'test/model' } },
-      PLACEHOLDER_OWNER_ID,
+      TEST_OWNER_ID,
     )
     const session = await store.createSession(agent.id, {
-      ownerId: PLACEHOLDER_OWNER_ID,
+      ownerId: TEST_OWNER_ID,
       initial_events: [
         { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: 'hello' }] },
       ],
@@ -695,9 +702,10 @@ describe('the stream filter', () => {
     store: SessionStore,
     sessionId: SessionId,
     deltas: boolean,
+    ownerId: string = TEST_OWNER_ID,
   ): Promise<SseMessage[]> {
     const reader = openSse(
-      new Response(createSessionEventStream({ store, sessionId, afterSeq: 0, deltas }), {
+      new Response(createSessionEventStream({ store, sessionId, ownerId, afterSeq: 0, deltas }), {
         headers: SSE_HEADERS,
       }),
     )

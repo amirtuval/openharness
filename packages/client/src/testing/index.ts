@@ -358,6 +358,8 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       const created = AgentSchema.parse({
         id: newAgentId(),
         type: 'agent',
+        // Required since #61 (A4): every agent belongs to the signed-in user.
+        owner_id: user.id,
         name: body.name,
         description: body.description ?? null,
         model: body.model,
@@ -463,6 +465,8 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       const session = SessionSchema.parse({
         id: newSessionId(),
         type: 'session',
+        // Required since #61 (A4); the same signed-in user the agent belongs to.
+        owner_id: user.id,
         status: 'idle',
         title: body.title ?? null,
         metadata: body.metadata ?? {},

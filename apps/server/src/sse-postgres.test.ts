@@ -1,5 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { API_VERSION_PREFIX, EVENT_TYPES, type StoredEvent } from '@openharness/protocol'
+import { Kysely, PostgresDialect } from 'kysely'
+import type { PostgresSchema } from '@openharness/session/postgres'
 
 import {
   HELD_REPLY_TEST_TIMEOUT_MS,
@@ -39,6 +41,11 @@ import {
  */
 
 const SOURCE = postgresSource()
+
+/** A Kysely handle over the fixture's pool, for Better Auth's tables. */
+function fixtureDb(fixture: PostgresFixture): Kysely<PostgresSchema> {
+  return new Kysely<PostgresSchema>({ dialect: new PostgresDialect({ pool: fixture.pool }) })
+}
 
 /**
  * Which chunk of a held reply the turn stops at.
@@ -90,6 +97,9 @@ if (SOURCE === null) {
         const held = defer()
         const test = await startTestServer({
           store,
+          // Sign-in runs on the same Postgres: the dev user's `user` row is what `owner_id`
+          // references.
+          authDatabase: { kind: 'postgres', db: fixtureDb(fixture) },
           replies: [
             {
               text: chunks,
@@ -100,10 +110,12 @@ if (SOURCE === null) {
         context = test
         const agent = await httpCreateAgent(test)
         const session = await httpCreateSession(test, agent.id)
-        const url = `${test.url}${API_VERSION_PREFIX}/sessions/${session.id}/events/stream`
+        // The stream is authenticated like every /v1 route now (A2), so the requests go
+        // through the context's request helper.
+        const url = `${API_VERSION_PREFIX}/sessions/${session.id}/events/stream`
 
         // Before the reload: the beginning of a reply that is still streaming, read live.
-        const before = openSse(await fetch(`${url}?event_deltas[]=agent.message`))
+        const before = openSse(await test.request(`${url}?event_deltas[]=agent.message`))
         const streamed = await (async () => {
           try {
             await httpSendMessage(test, session.id, 'tell me something long')
@@ -118,7 +130,7 @@ if (SOURCE === null) {
 
         // The reload, from the start of the log, still mid-reply. The chunks are rows another
         // connection wrote; this read finds them in the table, under the same id.
-        const after = openSse(await fetch(`${url}?event_deltas[]=agent.message&after_seq=0`))
+        const after = openSse(await test.request(`${url}?event_deltas[]=agent.message&after_seq=0`))
         try {
           const replayed = await readUntil(
             after,
@@ -159,7 +171,10 @@ if (SOURCE === null) {
     it('compacts superseded chunks away, leaving every reader the same answer', async () => {
       const fixture = requireFixture(db)
       const store = fixture.track(new ObservablePostgresStore({ pool: fixture.pool }))
-      const test = await startTestServer({ store })
+      const test = await startTestServer({
+        store,
+        authDatabase: { kind: 'postgres', db: fixtureDb(requireFixture(db)) },
+      })
       context = test
       const agent = await httpCreateAgent(test)
       const session = await httpCreateSession(test, agent.id)

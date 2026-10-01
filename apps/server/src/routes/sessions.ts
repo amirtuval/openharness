@@ -9,7 +9,6 @@ import type { CreateSessionOptions, ListSessionsOptions } from '@openharness/ses
 import type { AppEnv } from '../types'
 import { notFoundError } from '../http/errors'
 import { parseBody, parseQuery, sessionIdParam } from '../http/request'
-import { PLACEHOLDER_OWNER_ID } from '../placeholder-owner'
 import { nameSessionFromFirstMessage } from '../titles'
 import type { RouteDeps } from './deps'
 import { signalKinds } from './signals'
@@ -26,9 +25,10 @@ export function registerSessionRoutes(app: Hono<AppEnv>, deps: RouteDeps): void 
   app.post(sessions, async (c) => {
     const body = await parseBody(c, CreateSessionRequestSchema)
     const options: CreateSessionOptions = {
-      // Every session belongs to a user (epic #65, A4); until #61 authenticates callers, that
-      // user is the placeholder — and the agent it snapshots has to be the placeholder's too.
-      ownerId: PLACEHOLDER_OWNER_ID,
+      // Every session belongs to the caller (epic #65, A4), and the agent it snapshots has
+      // to be theirs too: `createSession` answers `AgentNotFoundError` — a 404 — for an
+      // agent somebody else owns.
+      ownerId: c.get('user').id,
       ...(body.title === undefined ? {} : { title: body.title }),
       ...(body.metadata === undefined ? {} : { metadata: body.metadata }),
       ...(body.initial_events === undefined ? {} : { initial_events: body.initial_events }),
@@ -42,6 +42,7 @@ export function registerSessionRoutes(app: Hono<AppEnv>, deps: RouteDeps): void 
       deps.store,
       session.id,
       body.initial_events ?? [],
+      options.ownerId,
     )
     // `initial_events` are the session's first queued events — the protocol says they are
     // stored "before it starts running" — so a session created with a message runs it, and one
@@ -56,6 +57,7 @@ export function registerSessionRoutes(app: Hono<AppEnv>, deps: RouteDeps): void 
     const query = parseQuery(c, ListSessionsQuerySchema)
     // The wire spells the filter `agent_id`; the store takes it as `agentId`.
     const options: ListSessionsOptions = {
+      ownerId: c.get('user').id,
       ...(query.limit === undefined ? {} : { limit: query.limit }),
       ...(query.page === undefined ? {} : { page: query.page }),
       ...(query.agent_id === undefined ? {} : { agentId: query.agent_id }),
@@ -65,7 +67,7 @@ export function registerSessionRoutes(app: Hono<AppEnv>, deps: RouteDeps): void 
 
   app.get(`${sessions}/:session_id`, async (c) => {
     const sessionId = sessionIdParam(c, 'session_id')
-    const session = await deps.store.getSession(sessionId)
+    const session = await deps.store.getSession(sessionId, { ownerId: c.get('user').id })
     if (session === null) {
       throw notFoundError(`no session with id ${sessionId}`)
     }

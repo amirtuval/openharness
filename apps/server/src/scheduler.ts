@@ -1,12 +1,8 @@
-import type {
-  ContextStrategy,
-  ModelFactory,
-  ResolveCredential,
-  RetryPolicy,
-} from '@openharness/brain'
+import type { ContextStrategy, ModelFactory, RetryPolicy } from '@openharness/brain'
 import { DEFAULT_PARTITION_COUNT, type SessionId } from '@openharness/protocol'
 import type { PartitionSignalKind, SessionStore } from '@openharness/session'
 
+import type { ResolveSessionCredential } from './credentials'
 import { DEFAULT_MAX_CONCURRENT_PASSES, PassQueue } from './pass-queue'
 import { DEFAULT_DRAIN_TIMEOUT_MS, SessionRunner } from './runner'
 
@@ -69,7 +65,7 @@ export interface LocalSchedulerOptions {
    * Where each model request's provider credential comes from (epic #65, A5); see
    * `SessionRunnerOptions.resolveCredential`.
    */
-  readonly resolveCredential: ResolveCredential
+  readonly resolveCredential: ResolveSessionCredential
   /**
    * The runner to run passes with. Omitted, one is built from `store`, `model` and
    * `resolveCredential`; #11 passes a runner it shares with its own partition logic.

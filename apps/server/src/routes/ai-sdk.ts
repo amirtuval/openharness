@@ -43,7 +43,7 @@ export function registerAiSdkRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
 
   app.post(chat, async (c) => {
     const sessionId = sessionIdParam(c, 'session_id')
-    const session = await deps.store.getSession(sessionId)
+    const session = await deps.store.getSession(sessionId, { ownerId: c.get('user').id })
     if (session === null) {
       throw notFoundError(`no session with id ${sessionId}`)
     }

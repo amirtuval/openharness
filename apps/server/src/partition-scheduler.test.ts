@@ -10,7 +10,7 @@ import {
 } from '@openharness/protocol'
 import { isFencedError, type SessionStore } from '@openharness/session'
 
-import { PLACEHOLDER_OWNER_ID } from './placeholder-owner'
+import { TEST_OWNER_ID } from './test-support'
 import { PostgresPartitionScheduler } from './partition-scheduler'
 import {
   POSTGRES_STARTUP_TIMEOUT_MS,
@@ -19,7 +19,7 @@ import {
   historyTypes,
   postgresSource,
   readHistory,
-  resolveTestCredential,
+  resolveTestSessionCredential,
   startPostgres,
   waitFor,
   waitForIdle,
@@ -127,7 +127,7 @@ if (SOURCE === null) {
     const scheduler = new PostgresPartitionScheduler({
       store,
       model: model.factory,
-      resolveCredential: resolveTestCredential,
+      resolveCredential: resolveTestSessionCredential,
       instanceId: name,
       partitions: PARTITIONS,
       ttlMs: options.ttlMs ?? TTL_MS,
@@ -149,10 +149,10 @@ if (SOURCE === null) {
   async function sessionIn(store: SessionStore, partition: number): Promise<Session> {
     const agent = await store.createAgent(
       { name: 'Agent', model: { id: 'openharness-test/x' } },
-      PLACEHOLDER_OWNER_ID,
+      TEST_OWNER_ID,
     )
     for (let attempt = 0; attempt < 200; attempt += 1) {
-      const session = await store.createSession(agent.id, { ownerId: PLACEHOLDER_OWNER_ID })
+      const session = await store.createSession(agent.id, { ownerId: TEST_OWNER_ID })
       if (partitionOf(session.id, PARTITIONS) === partition) {
         return session
       }
@@ -632,7 +632,7 @@ if (SOURCE === null) {
           new PostgresPartitionScheduler({
             store: db.store(),
             model: createScriptedModel().factory,
-            resolveCredential: resolveTestCredential,
+            resolveCredential: resolveTestSessionCredential,
             instanceId: 'bad',
             ttlMs: 100,
             heartbeatMs: 100,

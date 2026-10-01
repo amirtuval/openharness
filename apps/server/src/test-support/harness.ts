@@ -1,6 +1,5 @@
 import type { Hono } from 'hono'
 import {
-  API_KEY_HEADER,
   API_VERSION_PREFIX,
   DEFAULT_PARTITION_COUNT,
   type Agent,
@@ -8,10 +7,27 @@ import {
   type Session,
   type SessionId,
   type StoredEvent,
+  type UserId,
 } from '@openharness/protocol'
-import { InMemorySessionStore, type SessionStore } from '@openharness/session'
+import {
+  InMemoryCredentialStore,
+  InMemorySessionStore,
+  type CredentialStore,
+  type SessionStore,
+} from '@openharness/session'
+import { createVault, envKeyProvider, type Vault } from '@openharness/vault'
 
 import { createApp } from '../app'
+import {
+  DEV_LOGIN_EMAIL,
+  DEV_LOGIN_PASSWORD,
+  createAuth,
+  createDevLoginUser,
+  type Auth,
+  type AuthDatabase,
+  type AuthUser,
+  type BetterAuthInstance,
+} from '../auth'
 import { DEFAULT_DELTA_RETENTION_MS } from '../compaction'
 import type { SchedulerKind, ServerConfig } from '../config'
 import { startServer } from '../main'
@@ -20,44 +36,85 @@ import {
   DEFAULT_LEASE_TTL_MS,
   DEFAULT_SWEEP_MS,
 } from '../partition-scheduler'
+import type { ProviderCredentialValidator } from '../provider-validation'
 import { LocalScheduler, type SessionScheduler } from '../scheduler'
 import { type AppEnv, silentLogger } from '../types'
 import {
   type ScriptedModel,
   type ScriptedReply,
   createScriptedModel,
-  resolveTestCredential,
+  resolveTestSessionCredential,
 } from './model'
 
 /**
- * Starting a server for a test: a fresh in-memory store, a scheduler with a scripted model,
- * and either the Hono app called in-process or a real listener on an ephemeral port.
+ * Starting a server for a test: a fresh in-memory store, sign-in over Better Auth's memory
+ * adapter with the dev user seeded, a scheduler with a scripted model, and either the Hono
+ * app called in-process or a real listener on an ephemeral port.
  *
  * The in-memory store is the point — it is the reference implementation of the contract every
  * other package tests against, so a test here says something about a Postgres-backed server
  * as well. A test that needs a socket (SSE, the AI SDK transport) uses
  * {@link startTestServer}; everything else goes through {@link createTestApp}, which is a
  * plain function call.
+ *
+ * **Every request is authenticated by default** (epic #65, A2): the harness signs in as the
+ * seeded dev user on first use and attaches that session's bearer token, exactly as the CLI
+ * would. A test that wants to be anonymous uses {@link TestContext.anonymous}; one that wants
+ * a second, isolated user calls {@link TestContext.signIn} with another address.
  */
+
+/** The base URL tests pretend the server is deployed at; the CSRF origin that is trusted. */
+export const TEST_PUBLIC_URL = 'http://localhost:3000'
+
+/** The fixed vault key tests use. 32 bytes of base64; not a secret anyone should reuse. */
+export const TEST_SECRETS_KEY = 'b3Blbmhhcm5lc3MtdGVzdC1zZWNyZXRzLWtleS0zMmI='
 
 /** How a test talks to the server it built. */
 export interface TestContext {
   /** The store the app is running against: in-memory unless the test supplied another. */
   readonly store: SessionStore
+  /** Where the app's sealed provider credentials live. */
+  readonly credentials: CredentialStore
+  /** The vault the credential routes seal with. */
+  readonly vault: Vault
+  /** The Better Auth instance the app was built with. */
+  readonly auth: Auth
   /** The scripted model, for tests that script replies or assert on prompts. */
   readonly model: ScriptedModel
   /** The scheduler running the brains. */
   readonly scheduler: SessionScheduler
   /** The Hono app, called in-process. */
   readonly app: Hono<AppEnv>
-  /** Fire a request at the app or the listener, depending on how it was built. */
+  /**
+   * Fire an authenticated request at the app or the listener: the default caller's bearer
+   * token is attached unless `init` carries an `authorization` header of its own.
+   */
   request(path: string, init?: RequestInit): Promise<Response>
+  /**
+   * Fire a request exactly as given, with no default bearer token attached — what the 401
+   * tests use, and what a test that presents its own cookie or token uses.
+   */
+  anonymous(path: string, init?: RequestInit): Promise<Response>
+  /**
+   * Sign in (creating the user, with a credential account, when needed) and answer the
+   * session token. The dev user is the default caller; any address may be used for a second,
+   * isolated account.
+   */
+  signIn(email?: string, password?: string): Promise<SignedIn>
+  /** The default caller: the user every {@link TestContext.request} is made as. */
+  currentUser(): Promise<AuthUser>
   /** The base URL, when the context is a real listener; `null` in-process. */
   readonly url: string | null
   /** Stop the scheduler and the listener, if there is one. */
   close(): Promise<void>
-  /** Issue an API key, for a test that configured one. */
-  readonly apiKey: string | undefined
+}
+
+/** A signed-in test caller. */
+export interface SignedIn {
+  /** The session token; send it as `Authorization: Bearer`. */
+  readonly token: string
+  /** The user it belongs to. */
+  readonly user: AuthUser
 }
 
 /** Options shared by {@link createTestApp} and {@link startTestServer}. */
@@ -67,10 +124,39 @@ export interface TestOptions {
    * test that needs the durable half of the same behaviour.
    */
   readonly store?: SessionStore
-  /** Require this key on `/v1/*`. */
-  readonly apiKey?: string
+  /** Store sealed credentials here instead of the in-memory store. */
+  readonly credentials?: CredentialStore
+  /**
+   * Run Better Auth against this database instead of the in-memory one. A test whose store is
+   * Postgres passes the same database, so the dev user's `user` row exists where the
+   * ownership foreign keys look for it.
+   */
+  readonly authDatabase?: AuthDatabase
+  /** Use this vault instead of one built from {@link TEST_SECRETS_KEY}. */
+  readonly vault?: Vault
   /** Serve a built web app from this directory. */
   readonly webDir?: string
+  /** The public URL Better Auth is based at; {@link TEST_PUBLIC_URL} by default. */
+  readonly betterAuthUrl?: string
+  /** The trusted origins a cookie-authenticated write may come from. */
+  readonly trustedOrigins?: readonly string[]
+  /** Enable the dev login (default true) and seed its user. */
+  readonly devLogin?: boolean
+  /**
+   * Whether the auth endpoints are rate-limited (default **false** in tests).
+   *
+   * Better Auth's limiter store is process-wide, and a suite signs in far more often than a
+   * person; the one test that asserts the limiter works turns this on.
+   */
+  readonly rateLimit?: boolean
+  /** The validator a `PUT /v1/provider-credentials` uses; a fake, by default. */
+  readonly validateProviderCredential?: ProviderCredentialValidator
+  /** Social provider credentials, for tests of `/v1/auth-config`. */
+  readonly providers?: {
+    readonly google?: { clientId: string; clientSecret: string }
+    readonly github?: { clientId: string; clientSecret: string }
+    readonly microsoft?: { clientId: string; clientSecret: string; tenantId?: string }
+  }
   /** Replies the scripted model answers with, in order; the last one repeats. */
   readonly replies?: readonly ScriptedReply[]
   /** How many sessions may run at once. */
@@ -100,60 +186,238 @@ export interface TestOptions {
 /** Build an app, a store and a scheduler in-process; nothing listens. */
 export function createTestApp(options: TestOptions = {}): TestContext {
   const store = options.store ?? new InMemorySessionStore()
+  const credentials = options.credentials ?? new InMemoryCredentialStore()
+  const vault = options.vault ?? createVault(envKeyProvider(TEST_SECRETS_KEY))
   const model = createScriptedModel(...(options.replies ?? []))
   const scheduler = new LocalScheduler({
     store,
     model: model.factory,
-    resolveCredential: resolveTestCredential,
+    resolveCredential: resolveTestSessionCredential,
     ...(options.maxConcurrentSessions === undefined
       ? {}
       : { maxConcurrentSessions: options.maxConcurrentSessions }),
     ...(options.drainTimeoutMs === undefined ? {} : { drainTimeoutMs: options.drainTimeoutMs }),
     onError: () => {},
   })
+  const auth = buildTestAuth(options)
   const app = createApp({
     store,
     scheduler,
-    ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
+    auth: {
+      instance: auth.auth,
+      enabledProviders: auth.enabledProviders,
+      devLogin: auth.config.devLogin,
+      trustedOrigins: options.trustedOrigins ?? [
+        new URL(options.betterAuthUrl ?? TEST_PUBLIC_URL).origin,
+      ],
+    },
+    credentialRoutes: {
+      credentials,
+      vault,
+      validate: options.validateProviderCredential ?? acceptAnyCredential,
+    },
     ...(options.webDir === undefined ? {} : { webDir: options.webDir }),
     ...(options.sseKeepaliveMs === undefined ? {} : { sseKeepaliveMs: options.sseKeepaliveMs }),
     logger: silentLogger,
   })
-  return {
+  return context({
     store,
+    credentials,
+    vault,
+    auth,
     model,
     scheduler,
     app,
     url: null,
-    apiKey: options.apiKey,
-    request: async (path, init) => app.request(path, init),
-    close: () => scheduler.stop(),
-  }
+    options,
+    send: async (path, init) => app.request(path, init),
+  })
 }
 
 /** Start a real listening server on an ephemeral port. */
 export async function startTestServer(options: TestOptions = {}): Promise<TestContext> {
   const store = options.store ?? new InMemorySessionStore()
+  const credentials = options.credentials ?? new InMemoryCredentialStore()
+  const vault = options.vault ?? createVault(envKeyProvider(TEST_SECRETS_KEY))
   const model = createScriptedModel(...(options.replies ?? []))
   const started = await startServer({
     config: testConfig(options),
     store,
     model: model.factory,
-    resolveCredential: resolveTestCredential,
+    resolveCredential: resolveTestSessionCredential,
+    credentials,
+    vault,
+    ...(options.authDatabase === undefined ? {} : { authDatabase: options.authDatabase }),
+    validateProviderCredential: options.validateProviderCredential ?? acceptAnyCredential,
     logger: silentLogger,
     ...(options.sseKeepaliveMs === undefined ? {} : { sseKeepaliveMs: options.sseKeepaliveMs }),
   })
   const baseUrl = `http://127.0.0.1:${started.port}`
-  return {
+  return context({
     store,
+    credentials,
+    vault,
+    auth: started.auth,
     model,
     scheduler: started.scheduler,
     app: started.app,
     url: baseUrl,
-    apiKey: options.apiKey,
-    request: (path, init) => fetch(`${baseUrl}${path}`, init),
-    close: () => started.shutdown(),
+    options,
+    send: (path, init) => fetch(`${baseUrl}${path}`, init),
+  })
+}
+
+/** The default validator: every key is accepted. Nothing in a test reaches a provider. */
+const acceptAnyCredential: ProviderCredentialValidator = () => Promise.resolve()
+
+/** The auth a test app runs with: Better Auth's memory adapter, dev login on by default. */
+function buildTestAuth(options: TestOptions): Auth {
+  const devLogin = options.devLogin ?? true
+  const auth = createAuth(
+    {
+      secret: 'test-secret-that-is-at-least-32-characters-long',
+      baseUrl: options.betterAuthUrl ?? TEST_PUBLIC_URL,
+      devLogin,
+      rateLimit: options.rateLimit ?? false,
+      providers: {
+        ...(options.providers?.google === undefined ? {} : { google: options.providers.google }),
+        ...(options.providers?.github === undefined ? {} : { github: options.providers.github }),
+        ...(options.providers?.microsoft === undefined
+          ? {}
+          : {
+              microsoft: {
+                clientId: options.providers.microsoft.clientId,
+                clientSecret: options.providers.microsoft.clientSecret,
+                tenantId: options.providers.microsoft.tenantId ?? 'common',
+              },
+            }),
+      },
+    },
+    {
+      kind: 'memory',
+      db: { user: [], session: [], account: [], verification: [], deviceCode: [] },
+    },
+    silentLogger,
+  )
+  return auth
+}
+
+/** The shared {@link TestContext} behaviour, over either transport. */
+function context(base: {
+  store: SessionStore
+  credentials: CredentialStore
+  vault: Vault
+  auth: Auth
+  model: ScriptedModel
+  scheduler: SessionScheduler
+  app: Hono<AppEnv>
+  url: string | null
+  options: TestOptions
+  send: (path: string, init?: RequestInit) => Promise<Response>
+}): TestContext {
+  // The dev user is seeded as soon as a context exists — a test that signs anyone in needs
+  // it, and one that signed in explicitly would otherwise race the seed.
+  const seeded = (base.options.devLogin ?? true) ? createDevLoginUser(base.auth) : Promise.resolve()
+  let defaultCaller: Promise<SignedIn> | undefined
+
+  // Every request waits for the dev user to exist: a test that signs in through the app's
+  // own route would otherwise race the seed.
+  const rawRequest = async (path: string, init?: RequestInit): Promise<Response> => {
+    await seeded
+    return base.send(path, init)
   }
+
+  const authedRequest = async (path: string, init: RequestInit = {}): Promise<Response> => {
+    const token = (await defaultSignIn()).token
+    return rawRequest(path, withBearer(init, token))
+  }
+
+  const defaultSignIn = (): Promise<SignedIn> => {
+    defaultCaller ??= signInThrough(rawRequest, DEV_LOGIN_EMAIL, DEV_LOGIN_PASSWORD)
+    return defaultCaller
+  }
+
+  return {
+    store: base.store,
+    credentials: base.credentials,
+    vault: base.vault,
+    auth: base.auth,
+    model: base.model,
+    scheduler: base.scheduler,
+    app: base.app,
+    url: base.url,
+    request: authedRequest,
+    anonymous: (path, init) => rawRequest(path, init),
+    currentUser: async () => (await defaultSignIn()).user,
+    signIn: async (email = DEV_LOGIN_EMAIL, password = DEV_LOGIN_PASSWORD) => {
+      if (email !== DEV_LOGIN_EMAIL) {
+        await ensureUser(base.auth, email, password)
+      }
+      return signInThrough(rawRequest, email, password)
+    },
+    close: () => base.scheduler.stop(),
+  }
+}
+
+/** POST an email/password sign-in through the server itself, so the path is the real one. */
+async function signInThrough(
+  send: (path: string, init?: RequestInit) => Promise<Response>,
+  email: string,
+  password: string,
+): Promise<SignedIn> {
+  const response = await send('/api/auth/sign-in/email', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  })
+  if (!response.ok) {
+    throw new Error(`signing in as ${email} failed: ${response.status} ${await response.text()}`)
+  }
+  const body = (await response.json()) as { token?: string; user?: unknown }
+  if (typeof body.token !== 'string' || body.user === undefined) {
+    throw new Error('the sign-in response carried no token')
+  }
+  return { token: body.token, user: body.user as AuthUser }
+}
+
+/** Create a password user through Better Auth's internals, for tests that need a second one. */
+async function ensureUser(auth: Auth, email: string, password: string): Promise<void> {
+  const ctx = (await auth.auth.$context) as unknown as {
+    internalAdapter: {
+      findUserByEmail(value: string): Promise<{ user: AuthUser } | null>
+      createUser(input: Record<string, unknown>): Promise<AuthUser>
+      createAccount(input: Record<string, unknown>): Promise<unknown>
+    }
+    password: { hash(value: string): Promise<string> }
+  }
+  if ((await ctx.internalAdapter.findUserByEmail(email)) !== null) {
+    return
+  }
+  const now = new Date()
+  const user = await ctx.internalAdapter.createUser({
+    email,
+    name: email,
+    emailVerified: true,
+    createdAt: now,
+    updatedAt: now,
+  })
+  await ctx.internalAdapter.createAccount({
+    userId: user.id,
+    providerId: 'credential',
+    accountId: user.id,
+    password: await ctx.password.hash(password),
+    createdAt: now,
+    updatedAt: now,
+  })
+}
+
+/** A copy of `init` with the bearer token attached, unless it already picks one. */
+function withBearer(init: RequestInit, token: string): RequestInit {
+  const headers = new Headers(init.headers)
+  if (!headers.has('authorization')) {
+    headers.set('authorization', `Bearer ${token}`)
+  }
+  return { ...init, headers }
 }
 
 /**
@@ -184,7 +448,20 @@ export function testConfig(options: TestOptions = {}): ServerConfig {
     port: 0,
     databaseUrl: undefined,
     scheduler: options.scheduler ?? 'local',
-    apiKey: options.apiKey,
+    betterAuthSecret: 'test-secret-that-is-at-least-32-characters-long',
+    betterAuthUrl: options.betterAuthUrl ?? TEST_PUBLIC_URL,
+    secretsKey: TEST_SECRETS_KEY,
+    devLogin: options.devLogin ?? true,
+    google: options.providers?.google,
+    github: options.providers?.github,
+    microsoft:
+      options.providers?.microsoft === undefined
+        ? undefined
+        : {
+            clientId: options.providers.microsoft.clientId,
+            clientSecret: options.providers.microsoft.clientSecret,
+            tenantId: options.providers.microsoft.tenantId ?? 'common',
+          },
     testModel: undefined,
     webDir: options.webDir,
     corsOrigins: [],
@@ -213,31 +490,74 @@ export function postJson(
 ): Promise<Response> {
   return context.request(path, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', ...headersFor(context, init) },
+    headers: { 'content-type': 'application/json', ...headersOf(init) },
     body: JSON.stringify(body),
     ...init,
   })
 }
 
-/** The `x-api-key` header a context's key requires, when the test did not set one. */
-function headersFor(context: TestContext, init: RequestInit): Record<string, string> {
-  if (context.apiKey === undefined || headerOf(init.headers, API_KEY_HEADER) !== undefined) {
-    return {}
-  }
-  return { [API_KEY_HEADER]: context.apiKey }
+/**
+ * POST a JSON body with a specific caller's token.
+ *
+ * Tests that work with two users (isolation, credentials) build each request with this
+ * instead of the context's default caller.
+ */
+export function postJsonAs(
+  context: TestContext,
+  token: string,
+  path: string,
+  body: unknown,
+  init: RequestInit = {},
+): Promise<Response> {
+  return context.request(path, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${token}`,
+      ...headersOf(init),
+    },
+    body: JSON.stringify(body),
+    ...init,
+  })
 }
 
-function headerOf(headers: HeadersInit | undefined, name: string): string | undefined {
-  if (headers === undefined) {
-    return undefined
+/** A request as one specific caller. */
+export function asUser(token: string): { authorization: string } {
+  return { authorization: `Bearer ${token}` }
+}
+
+function headersOf(init: RequestInit): Record<string, string> {
+  if (init.headers === undefined) {
+    return {}
   }
-  const record = headers instanceof Headers ? Object.fromEntries(headers) : headers
-  for (const [key, value] of Object.entries(record)) {
-    if (key.toLowerCase() === name.toLowerCase() && typeof value === 'string') {
-      return value
-    }
+  return init.headers instanceof Headers
+    ? Object.fromEntries(init.headers)
+    : (init.headers as Record<string, string>)
+}
+
+/**
+ * Sign in over HTTP against a running server (the dev user by default) and answer the token.
+ *
+ * The counterpart of {@link TestContext.signIn} for tests that hold a `startServer` result —
+ * they talk to the listener directly, so they have to authenticate directly too.
+ */
+export async function signInAt(
+  baseUrl: string,
+  email: string = DEV_LOGIN_EMAIL,
+  password: string = DEV_LOGIN_PASSWORD,
+): Promise<SignedIn> {
+  return signInThrough((path, init) => fetch(`${baseUrl}${path}`, init), email, password)
+}
+
+/**
+ * A `fetch` that carries a bearer token — the shape `/v1` needs now (A2).
+ */
+export function authedFetch(token: string): (url: string, init?: RequestInit) => Promise<Response> {
+  return (url, init = {}) => {
+    const headers = new Headers(init.headers)
+    headers.set('authorization', `Bearer ${token}`)
+    return fetch(url, { ...init, headers })
   }
-  return undefined
 }
 
 /** Create an agent over HTTP and return it. */
@@ -317,7 +637,7 @@ export async function readHistory(
   const events: StoredEvent[] = []
   let afterSeq = 0
   for (;;) {
-    const page = await store.listEvents(sessionId, {
+    const page = await store.listEventsUnscoped(sessionId, {
       afterSeq,
       limit: 100,
       order: 'asc',
@@ -371,3 +691,9 @@ export async function waitForIdle(
     { timeoutMs, message: `session ${sessionId} did not go idle` },
   )
 }
+
+/** The user id a test-owned resource belongs to when the test does not sign anyone in. */
+export const TEST_OWNER_ID: UserId = 'user_test_owner'
+
+/** The `BetterAuthInstance` type, re-exported for tests that reach for the instance. */
+export type { BetterAuthInstance }

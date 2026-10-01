@@ -46,6 +46,22 @@ export function notFoundError(message: string): HttpError {
 }
 
 /**
+ * The caller is signed in but this action is not allowed — a stale session on a credential
+ * write, or a cookie-authenticated write from an untrusted origin: 403 `permission_error`.
+ */
+export function permissionError(message: string): HttpError {
+  return new HttpError('permission_error', message)
+}
+
+/**
+ * A provider key that did not validate against its provider (A5): 422
+ * `invalid_provider_credential`. The message names the provider, never the key.
+ */
+export function invalidProviderCredential(message: string): HttpError {
+  return new HttpError('invalid_provider_credential', message)
+}
+
+/**
  * One issue of a failed schema parse: the shape both zod and this module's helpers speak.
  *
  * Deliberately structural, so nothing here has to import `zod` to describe a failure the

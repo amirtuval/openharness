@@ -5,6 +5,7 @@ import {
   isStoredEvent,
   type SessionId,
   type StreamEvent,
+  type UserId,
 } from '@openharness/protocol'
 import type { SessionStore, Unsubscribe } from '@openharness/session'
 
@@ -87,6 +88,12 @@ export interface SessionEventStreamOptions {
   readonly store: SessionStore
   /** The session to follow. It must exist; the route checks that before it gets here. */
   readonly sessionId: SessionId
+  /**
+   * The session's owner: the route resolved it (a session that is not the caller's answered
+   * 404 before this stream was built), and the replay read carries it so the scope follows
+   * the connection rather than being forgotten by the page loop (A4).
+   */
+  readonly ownerId: UserId
   /**
    * Replay stored events with a greater `seq` before following live ones.
    *
@@ -198,6 +205,7 @@ export function createSessionEventStream(
       const replay = async (): Promise<void> => {
         while (replaying) {
           const page = await store.listEvents(sessionId, {
+            ownerId: options.ownerId,
             afterSeq: lastSeq,
             limit: MAX_PAGE_LIMIT,
             order: 'asc',

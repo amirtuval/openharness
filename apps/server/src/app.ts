@@ -1,23 +1,27 @@
-import { createHash, timingSafeEqual } from 'node:crypto'
 import { Hono } from 'hono'
-import type { Context, Next } from 'hono'
-import { cors } from 'hono/cors'
 import {
   ANTHROPIC_VERSION_HEADER,
-  API_KEY_HEADER,
   API_VERSION_PREFIX,
   LAST_EVENT_ID_HEADER,
   REQUEST_ID_HEADER,
   ulid,
 } from '@openharness/protocol'
+import { cors } from 'hono/cors'
 import { AgentNotFoundError, SessionNotFoundError, type SessionStore } from '@openharness/session'
 
 import { consoleLogger, type AppEnv, type Logger } from './types'
-import { authenticationError, errorResponse, httpErrorResponse, HttpError } from './http/errors'
+import { createAuthGuard } from './auth-guard'
+import { rewriteDevLoginRequest, type BetterAuthInstance } from './auth'
+import { errorResponse, httpErrorResponse, HttpError } from './http/errors'
 import { registerAgentRoutes } from './routes/agents'
 import { registerAiSdkRoutes } from './routes/ai-sdk'
-import type { RouteDeps } from './routes/deps'
+import type { AuthDeps, RouteDeps } from './routes/deps'
 import { registerEventRoutes } from './routes/events'
+import { registerMeRoutes } from './routes/me'
+import {
+  registerProviderCredentialRoutes,
+  type ProviderCredentialDeps,
+} from './routes/provider-credentials'
 import { registerSessionRoutes } from './routes/sessions'
 import type { SessionScheduler } from './scheduler'
 import { serveWebAsset } from './static'
@@ -25,16 +29,19 @@ import { serveWebAsset } from './static'
 /**
  * The openharness HTTP app.
  *
- * One Hono app, built from a store and a scheduler, with every route the protocol defines
- * (see `docs/api.md`). Nothing here is global state: `createApp` can be called as often as a
- * test wants, each time against a fresh `InMemorySessionStore`.
+ * One Hono app, built from a store, a scheduler and an auth instance, with every route the
+ * protocol defines (see `docs/api.md`). Nothing here is global state: `createApp` can be
+ * called as often as a test wants, each time against a fresh `InMemorySessionStore`.
  *
  * ## What the app guarantees
  *
  * - **Every response carries a `request-id`**, and an error body repeats it in `request_id`.
  * - **Every failure is the protocol's envelope** — `{ type: 'error', error: { type, message } }`
  *   with the status the error type maps to — and no stack trace ever leaves the process.
- * - **`/v1/*` requires the API key** when one is configured; `/health` never does.
+ * - **`/v1/*` requires a session** (epic #65, A2): a Better Auth cookie or a bearer token,
+ *   otherwise 401 `authentication_error`. `/v1/auth-config` is the one route ahead of the
+ *   guard, because the web app reads it before sign-in; `/api/auth/*` is Better Auth's own
+ *   surface and `/health` stays open.
  * - **Auth is the only thing checked before the route**; everything else is validated by the
  *   protocol's schemas, which is what turns a malformed request into a 400 and not a 500.
  */
@@ -44,24 +51,36 @@ export interface AppOptions {
   /** Who runs a brain when the API says a session needs one. */
   readonly scheduler: SessionScheduler
   /**
-   * The API key `/v1/*` requires, sent as `x-api-key`.
-   *
-   * Omitted (or empty) leaves the API open — which is what a single-binary deployment behind
-   * its own front door wants, and what local development gets.
+   * The Better Auth instance, mounted at `/api/auth/*`, and the guard that authenticates
+   * `/v1` with it.
    */
-  readonly apiKey?: string
+  readonly auth: {
+    readonly instance: BetterAuthInstance
+    /** The providers whose credentials are configured; `/v1/auth-config` lists them. */
+    readonly enabledProviders: AuthDeps['enabledProviders']
+    /** Whether dev login is on; `/v1/auth-config` reports it and the shim is installed. */
+    readonly devLogin: boolean
+    /**
+     * The origins a cookie-authenticated write may come from (CSRF, A2). `BETTER_AUTH_URL`'s
+     * origin is what the server passes.
+     */
+    readonly trustedOrigins: readonly string[]
+  }
+  /** Where sealed provider credentials live, and how a saved key is validated (A5). */
+  readonly credentialRoutes: ProviderCredentialDeps
   /**
    * A directory of built web assets to serve at `/`, e.g. `apps/web/dist`.
    *
-   * A GET outside `/v1` that names no file in it gets `index.html`: the web app routes on the
-   * URL hash, so the server only has to hand out the shell.
+   * A GET outside the API that names no file in it gets `index.html`: the web app routes on
+   * the URL hash, so the server only has to hand out the shell.
    */
   readonly webDir?: string
   /**
    * Origins allowed to call the API from a browser, from `OPENHARNESS_CORS_ORIGINS`.
    *
    * Empty or omitted means no CORS headers at all — the API is same-origin or server-side
-   * until someone says otherwise.
+   * until someone says otherwise. The web app signs in with a cookie, so when this is used
+   * the allowed origins are exactly the ones whose cookies the browser will send.
    */
   readonly corsOrigins?: readonly string[]
   /** The SSE keepalive interval in milliseconds; defaults to {@link SSE_KEEPALIVE_MS}. */
@@ -73,7 +92,8 @@ export interface AppOptions {
 /**
  * Build the app.
  *
- * @param options the store, the scheduler and the deployment's knobs; see {@link AppOptions}
+ * @param options the store, the scheduler, auth and the deployment's knobs; see
+ *   {@link AppOptions}
  */
 export function createApp(options: AppOptions): Hono<AppEnv> {
   const logger = options.logger ?? consoleLogger
@@ -94,11 +114,14 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
       '*',
       cors({
         origin: [...corsOrigins],
-        allowMethods: ['GET', 'POST', 'OPTIONS'],
+        // The web app's session cookie crosses origins when the API is on another one: the
+        // browser only sends (and stores) it when the server says so explicitly.
+        credentials: true,
+        allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
         allowHeaders: [
-          API_KEY_HEADER,
-          ANTHROPIC_VERSION_HEADER,
+          'authorization',
           'content-type',
+          ANTHROPIC_VERSION_HEADER,
           LAST_EVENT_ID_HEADER,
         ],
         exposeHeaders: [REQUEST_ID_HEADER],
@@ -109,28 +132,44 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
 
   app.get('/health', (c) => c.json({ status: 'ok' }))
 
-  const apiKey = options.apiKey
-  if (apiKey !== undefined && apiKey.length > 0) {
-    const authenticate = async (c: Context<AppEnv>, next: Next) => {
-      const provided = c.req.header(API_KEY_HEADER)
-      if (provided === undefined || !matchesApiKey(provided, apiKey)) {
-        throw authenticationError('a valid x-api-key header is required')
-      }
-      await next()
-    }
-    app.use(API_VERSION_PREFIX, authenticate)
-    app.use(`${API_VERSION_PREFIX}/*`, authenticate)
-  }
+  // Better Auth owns `/api/auth/*`: sign-in, sign-out, the device flow, and the session
+  // lookups the guard makes. The request passes through the dev-login shim, which maps the
+  // documented `dev@localhost` onto the seeded address when — and only when — dev login is
+  // on (see `auth.ts`).
+  app.all('/api/auth/*', async (c) =>
+    options.auth.instance.handler(await rewriteDevLoginRequest(c.req.raw, options.auth.devLogin)),
+  )
 
   const deps: RouteDeps = {
     store: options.store,
     scheduler: options.scheduler,
+    auth: { enabledProviders: options.auth.enabledProviders, devLogin: options.auth.devLogin },
+    credentialRoutes: options.credentialRoutes,
     ...(options.sseKeepaliveMs === undefined ? {} : { sseKeepaliveMs: options.sseKeepaliveMs }),
   }
+
+  // `/v1/auth-config` is registered before the guard, and is the only `/v1` route that is:
+  // the web app reads it before anyone signs in (#62). Registration order is dispatch order
+  // in Hono, so the guard below never runs for it.
+  app.get(`${API_VERSION_PREFIX}/auth-config`, (c) =>
+    c.json({ providers: deps.auth.enabledProviders, dev_login: deps.auth.devLogin }),
+  )
+
+  // A2: everything else under /v1 — the SSE stream and the AI SDK adapter included — needs a
+  // session, and a cookie-authenticated write needs a trusted Origin.
+  const guard = createAuthGuard({
+    auth: options.auth.instance,
+    trustedOrigins: options.auth.trustedOrigins,
+  })
+  app.use(API_VERSION_PREFIX, guard)
+  app.use(`${API_VERSION_PREFIX}/*`, guard)
+
+  registerMeRoutes(app, deps)
   registerAgentRoutes(app, deps)
   registerSessionRoutes(app, deps)
   registerEventRoutes(app, deps)
   registerAiSdkRoutes(app, deps)
+  registerProviderCredentialRoutes(app, deps)
 
   app.onError((error, c) => {
     if (error instanceof HttpError) {
@@ -163,19 +202,17 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
   return app
 }
 
-/** Whether a path is part of the API, and so never served the web app's shell. */
-export function isApiPath(path: string): boolean {
-  return path === API_VERSION_PREFIX || path.startsWith(`${API_VERSION_PREFIX}/`)
-}
-
 /**
- * Compare a presented key with the configured one without leaking it through timing.
+ * Whether a path belongs to the API, and so is never served the web app's shell.
  *
- * Both sides are hashed first: `timingSafeEqual` needs equal-length buffers, and comparing
- * lengths directly is the leak this is meant to avoid.
+ * `/v1` is the protocol and `/api/auth` is Better Auth's surface; both answer JSON (or a
+ * redirect) and neither has a page the shell could route to.
  */
-function matchesApiKey(provided: string, expected: string): boolean {
-  const presented = createHash('sha256').update(provided, 'utf8').digest()
-  const configured = createHash('sha256').update(expected, 'utf8').digest()
-  return timingSafeEqual(presented, configured)
+export function isApiPath(path: string): boolean {
+  return (
+    path === API_VERSION_PREFIX ||
+    path.startsWith(`${API_VERSION_PREFIX}/`) ||
+    path === '/api' ||
+    path.startsWith('/api/')
+  )
 }

@@ -1,5 +1,7 @@
 import type { LanguageModelV4StreamPart } from '@ai-sdk/provider'
 import type { ModelCredential, ModelFactory, ResolveCredential } from '@openharness/brain'
+
+import type { ResolveSessionCredential } from '../credentials'
 import { MockLanguageModelV4 } from 'ai/test'
 
 /**
@@ -54,6 +56,16 @@ export const TEST_CREDENTIAL: ModelCredential = { apiKey: 'oh-server-test-key' }
  * what it is handed, so a test passes this and the turn runs.
  */
 export const resolveTestCredential: ResolveCredential = () => Promise.resolve(TEST_CREDENTIAL)
+
+/**
+ * The same answer, in the session-bound form the server's runner hands the brain (A5).
+ *
+ * A scripted model ignores credentials entirely, so the session id earns nothing here — but
+ * the runner's resolver is session-bound, and passing this keeps every test on the same code
+ * path as a deployment.
+ */
+export const resolveTestSessionCredential: ResolveSessionCredential = (_sessionId, provider) =>
+  resolveTestCredential(provider)
 
 /** Build a {@link ScriptedModel} from the replies the first requests answer with. */
 export function createScriptedModel(...replies: ScriptedReply[]): ScriptedModel {

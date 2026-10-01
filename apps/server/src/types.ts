@@ -1,3 +1,5 @@
+import type { AuthSession, AuthUser } from './auth'
+
 /**
  * The small shared types the server is written against: the Hono environment, and the
  * logging seam.
@@ -8,10 +10,20 @@
  *
  * `requestId` is set once per request by the middleware in `app.ts` and read back by the
  * error handlers, so an error body and the `request-id` response header always agree.
+ *
+ * `user`, `session` and `authKind` are set by the `/v1` auth guard (`auth-guard.ts`) before
+ * any route runs: every route under `/v1` except `/v1/auth-config` reads its owner from
+ * `user.id`, and the credential routes use `session` for the freshness check.
  */
 export interface AppEnv {
   Variables: {
     requestId: string
+    /** The signed-in user; the id is what agents and sessions are owned by (A4). */
+    user: AuthUser
+    /** The Better Auth session row behind the request. */
+    session: AuthSession['session']
+    /** How the caller authenticated — the cookie path is the one CSRF applies to (A2). */
+    authKind: 'cookie' | 'bearer'
   }
 }
 

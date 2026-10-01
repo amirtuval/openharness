@@ -9,7 +9,6 @@ import {
 import type { AppEnv } from '../types'
 import { agentIdParam, parseBody, parseQuery } from '../http/request'
 import { notFoundError } from '../http/errors'
-import { PLACEHOLDER_OWNER_ID } from '../placeholder-owner'
 import type { RouteDeps } from './deps'
 
 /**
@@ -24,21 +23,22 @@ export function registerAgentRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
 
   app.post(agents, async (c) => {
     const body = await parseBody(c, CreateAgentRequestSchema)
-    // Every agent belongs to a user (epic #65, A4); until #61 authenticates callers, that
-    // user is the placeholder. The scoped reads land with the same issue: an unscoped read
-    // returns exactly what the placeholder's reads will return.
-    return c.json(await deps.store.createAgent(body, PLACEHOLDER_OWNER_ID), 201)
+    // Every agent belongs to the caller (epic #65, A4): the owner is the authenticated
+    // user's id, and no request body can say otherwise.
+    return c.json(await deps.store.createAgent(body, c.get('user').id), 201)
   })
 
   app.get(agents, async (c) => {
     const query = parseQuery(c, ListAgentsQuerySchema)
-    return c.json(await deps.store.listAgents(query))
+    return c.json(await deps.store.listAgents({ ownerId: c.get('user').id, ...query }))
   })
 
   app.get(`${agents}/:agent_id`, async (c) => {
     const agentId = agentIdParam(c, 'agent_id')
-    const agent = await deps.store.getAgent(agentId)
+    const agent = await deps.store.getAgent(agentId, { ownerId: c.get('user').id })
     if (agent === null) {
+      // Another user's agent answers exactly like an id nobody has: 404, never 403, so the
+      // answer does not leak that the agent exists (A4).
       throw notFoundError(`no agent with id ${agentId}`)
     }
     return c.json(agent)
@@ -47,6 +47,12 @@ export function registerAgentRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
   app.post(`${agents}/:agent_id`, async (c) => {
     const agentId = agentIdParam(c, 'agent_id')
     const body = await parseBody(c, UpdateAgentRequestSchema)
+    const ownerId = c.get('user').id
+    // The scoped read is the ownership check: `updateAgent` is not scoped because `owner_id`
+    // never changes, so a resource that passes this read cannot stop being the caller's.
+    if ((await deps.store.getAgent(agentId, { ownerId })) === null) {
+      throw notFoundError(`no agent with id ${agentId}`)
+    }
     const agent = await deps.store.updateAgent(agentId, body)
     if (agent === null) {
       throw notFoundError(`no agent with id ${agentId}`)

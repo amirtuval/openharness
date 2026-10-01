@@ -58,6 +58,9 @@ export function deriveSessionTitle(text: string): string | null {
  * A title the caller supplied at creation, and one an earlier message produced, are never
  * written over — this fills a hole, it does not rename.
  *
+ * The read is owner-scoped with the caller's id — the routes call this only after they have
+ * established that the session is the caller's, and the scope is what keeps it that way.
+ *
  * @returns the session as it is now when this named it, or `null` when it changed nothing: no
  *   message in `events`, a message with no text, or a session that already had a title
  */
@@ -65,6 +68,7 @@ export async function nameSessionFromFirstMessage(
   store: SessionStore,
   sessionId: SessionId,
   events: readonly UserEventInput[],
+  ownerId: string,
 ): Promise<Session | null> {
   const message = events.find((event) => event.type === EVENT_TYPES.userMessage)
   if (message === undefined) {
@@ -74,7 +78,7 @@ export async function nameSessionFromFirstMessage(
   if (title === null) {
     return null
   }
-  const session = await store.getSession(sessionId)
+  const session = await store.getSession(sessionId, { ownerId })
   if (session === null || session.title !== null) {
     return null
   }
