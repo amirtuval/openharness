@@ -30,11 +30,14 @@ export function statusRunning(): AppendableEvent {
 /**
  * The agent finished its turn. Closes one, whatever the reason.
  *
- * `consumes` claims the queued `user.interrupt` events the turn is ending on (P4): an
- * interrupt that arrived with no model request running — before the turn opened, between two
- * requests, or during a backoff — has no span start to claim it, so the `session.status_idle`
- * that ends the turn does. Omitted when the list is empty: a turn that ends on its own claims
- * nothing.
+ * `consumes` claims the queued user events the turn is ending on, when no other event did.
+ * That is the `user.interrupt` events (P4): an interrupt that arrived with no model request
+ * running — before the turn opened, between two requests, or during a backoff — has no span
+ * start to claim it, so the `session.status_idle` that ends the turn does. It is also the
+ * `user.message` events of a request that could not be made for lack of a provider credential
+ * (epic #65, A5): that turn opens no span, so this idle event claims them — left queued, the
+ * scheduler would run the same failing turn again. Omitted when the list is empty: a turn that
+ * ends on its own claims nothing.
  */
 export function statusIdle(consumes?: readonly EventId[]): AppendableEvent {
   return {
