@@ -38,11 +38,14 @@ describe('parseArgs', () => {
     const agent = commandOf(['--agent', 'Summarizer'])
     expect(agent).toMatchObject({ kind: 'chat', options: { agent: 'Summarizer' } })
 
-    const server = commandOf(['--server', 'http://example.test', '--api-key', 'oh_key'])
-    expect(server).toMatchObject({
-      kind: 'chat',
-      options: { server: 'http://example.test', apiKey: 'oh_key' },
-    })
+    const server = commandOf(['--server', 'http://example.test'])
+    expect(server).toMatchObject({ kind: 'chat', options: { server: 'http://example.test' } })
+  })
+
+  it('rejects the removed --api-key: `oh login` is the way in', () => {
+    const error = errorOf(['--api-key', 'oh_key'])
+    expect(error).toContain('--api-key')
+    expect(error).toContain('oh --help')
   })
 
   it('reads --session=<id> and -s<id> too', () => {
@@ -59,9 +62,34 @@ describe('parseArgs', () => {
   it('recognises the listings', () => {
     expect(commandOf(['sessions'])).toEqual({
       kind: 'sessions',
-      options: { debug: false, server: undefined, apiKey: undefined },
+      options: { debug: false, server: undefined },
     })
     expect(commandOf(['agents'])).toMatchObject({ kind: 'agents' })
+  })
+
+  it('recognises the auth commands', () => {
+    expect(commandOf(['login'])).toEqual({
+      kind: 'login',
+      options: { debug: false, server: undefined, noBrowser: false },
+    })
+    expect(commandOf(['login', '--no-browser'])).toMatchObject({
+      kind: 'login',
+      options: { noBrowser: true },
+    })
+    expect(commandOf(['logout'])).toMatchObject({ kind: 'logout' })
+    expect(commandOf(['whoami'])).toMatchObject({ kind: 'whoami' })
+  })
+
+  it('rejects --no-browser without `oh login`', () => {
+    expect(errorOf(['--no-browser'])).toContain('--no-browser only makes sense with `oh login`')
+    expect(errorOf(['sessions', '--no-browser'])).toContain('--no-browser')
+    expect(errorOf(['whoami', '--no-browser'])).toContain('--no-browser')
+  })
+
+  it('rejects chat flags on the auth commands', () => {
+    expect(errorOf(['login', '-c'])).toContain('--continue')
+    expect(errorOf(['logout', '-s', 'sesn_1'])).toContain('--session <id>')
+    expect(errorOf(['whoami', '--agent', 'Summarizer'])).toContain('--agent <id|name>')
   })
 
   it('recognises --version and --help, short too', () => {

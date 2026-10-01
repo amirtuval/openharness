@@ -1,4 +1,4 @@
-import { ApiError } from '@openharness/client'
+import { ApiError, AuthenticationError } from '@openharness/client'
 import { createFakeClient } from '@openharness/client/testing'
 import { makeAgent, makeSession } from '@openharness/protocol/fixtures'
 import { describe, expect, it } from 'vitest'
@@ -101,7 +101,7 @@ describe('runSessions', () => {
       ...fake,
       sessions: {
         ...fake.sessions,
-        list: () => Promise.reject(new ApiError(401, 'invalid api key')),
+        list: () => Promise.reject(new AuthenticationError('Not signed in.')),
       },
     }
     const { io, out, err } = recorder()
@@ -110,8 +110,20 @@ describe('runSessions', () => {
 
     expect(code).toBe(1)
     expect(out).toEqual([])
-    expect(err.join('\n')).toContain('401')
-    expect(err.join('\n')).toContain('--api-key')
+    expect(err.join('\n')).toContain('not signed in to http://localhost:3000')
+    expect(err.join('\n')).toContain('oh login')
+  })
+
+  it('reports a server failure on stderr and exits 1', async () => {
+    const fake = createFakeClient()
+    const client = {
+      ...fake,
+      sessions: { ...fake.sessions, list: () => Promise.reject(new ApiError(500, 'boom')) },
+    }
+    const { io, err } = recorder()
+
+    expect(await runSessions(client, io)).toBe(1)
+    expect(err.join('\n')).toContain('boom')
   })
 })
 
