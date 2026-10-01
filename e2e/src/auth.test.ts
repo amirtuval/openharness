@@ -5,11 +5,15 @@ import { describe, expect, it } from 'vitest'
 import {
   DEV_LOGIN_STORED_EMAIL,
   agentMessages,
+  clientFor,
+  collectStream,
   e2eHarness,
   readLog,
   signIn,
+  sleep,
   textOf,
   waitForTurnEnd,
+  withDatabaseClient,
 } from './harness'
 
 /**
@@ -127,7 +131,108 @@ describe('a server that authenticates', () => {
     expect(refused.type).toBe('authentication_error')
 
     // A fresh sign-in still works: only the session that signed out is gone.
-    const again = await harness.client(server)
+    const again = await harness.client(server, { fresh: true })
     expect((await again.me()).email).toBe(DEV_LOGIN_STORED_EMAIL)
   })
+
+  it('revokes immediately: every route, the stream included, refuses the old token', async () => {
+    const server = await harness.server()
+    const signedIn = await harness.user(server)
+    const client = clientFor(server, signedIn)
+
+    const agent = await client.agents.create({
+      name: 'Revoked agent',
+      model: { id: 'anthropic/claude-sonnet-5' },
+    })
+    const session = await client.sessions.create({ agent: agent.id })
+
+    await client.auth.signOut()
+
+    // Revocation is a row deletion (A2), so every request that carries the token is refused
+    // from the next one on — including the session the person was just using.
+    const refused = await errorOf(() => client.sessions.get(session.id))
+    expect(refused.status).toBe(401)
+
+    const stream = await fetch(`${server.baseUrl}/v1/sessions/${session.id}/events/stream`, {
+      headers: { authorization: `Bearer ${signedIn.token}` },
+    })
+    expect(stream.status).toBe(401)
+
+    // And the person is not locked out: signing in again works, on a new session.
+    const again = await harness.user(server, { fresh: true })
+    const returned = clientFor(server, again)
+    expect((await returned.sessions.get(session.id)).id).toBe(session.id)
+  })
+
+  it('refuses a session that has lapsed', async () => {
+    const server = await harness.server()
+    const database = await harness.database()
+    const signedIn = await harness.user(server)
+    const client = clientFor(server, signedIn)
+    expect((await client.me()).email).toBe(DEV_LOGIN_STORED_EMAIL)
+
+    // Seven days is not something a test waits out; the row is aged instead, which is the same
+    // state a laptop left closed over a week would be in (A2: sessions do not slide unless
+    // they are used).
+    await withDatabaseClient(
+      async (db) => {
+        await db.query(`update "session" set "expiresAt" = now() - interval '1 minute'`)
+      },
+      { database: database.name },
+    )
+
+    const refused = await errorOf(() => client.me())
+    expect(refused.status).toBe(401)
+    expect(refused.type).toBe('authentication_error')
+  })
+
+  it.fails(
+    'stops an open stream when the session behind it is revoked',
+    async () => {
+      // The epic's rule is that revocation is immediate (A2), and issue #64 asks for the open
+      // SSE stream to be included. It is not: the guard on `/v1` runs when a request arrives,
+      // and a stream is one long request — `createSessionEventStream` never asks again whose
+      // session it is following, so a sign-out stops new requests but leaves every open stream
+      // delivering the session's events (issue amirtuval/openharness#76).
+      //
+      // The test drives exactly that: a stream is opened and proven live by watching a turn
+      // arrive on it, the session is signed out, and one more turn runs (through a *fresh*
+      // session of the same person). A revoked stream must see none of it — and today it does.
+      const server = await harness.server()
+      const signedIn = await harness.user(server)
+      const client = clientFor(server, signedIn)
+
+      const agent = await client.agents.create({
+        name: 'Stream revocation agent',
+        model: { id: 'anthropic/claude-sonnet-5' },
+      })
+      const session = await client.sessions.create({ agent: agent.id })
+
+      const stream = collectStream(client, session.id)
+      const before = await client.sendMessage(session.id, 'before the sign-out')
+      await stream.waitFor(
+        (events) => events.some((event) => event.seq === before.seq),
+        'the stream to deliver a turn while the session is valid',
+      )
+      await waitForTurnEnd(client, session.id, { afterSeq: before.seq })
+
+      await client.auth.signOut()
+
+      // A fresh session of the same person keeps the session moving — the revoked stream is
+      // the only thing that must not hear about it.
+      const after = clientFor(server, await harness.user(server, { fresh: true }))
+      const leaked = await after.sendMessage(session.id, 'after the sign-out')
+
+      // Long enough for the turn to run and its events to reach any stream that is still
+      // listening; the revoked one must have been closed instead.
+      await sleep(3_000)
+      const heard = stream.stored.filter((event) => event.seq >= leaked.seq)
+      await stream.stop()
+      expect(
+        heard.map((event) => event.type),
+        'a revoked session’s stream delivered the events that followed the sign-out',
+      ).toEqual([])
+    },
+    30_000,
+  )
 })

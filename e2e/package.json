@@ -22,7 +22,10 @@
     "@openharness/client": "workspace:*",
     "@openharness/protocol": "workspace:*",
     "@openharness/server": "workspace:*",
+    "@openharness/session": "workspace:*",
+    "@openharness/vault": "workspace:*",
     "@openharness/web": "workspace:*",
+    "better-auth": "1.7.6",
     "pg": "8.23.0"
   },
   "devDependencies": {
