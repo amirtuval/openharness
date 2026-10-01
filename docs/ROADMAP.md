@@ -35,7 +35,11 @@ needs to know who owns what. The features that cost money or can act on the worl
 calls, tools) should land on a platform that already has users, environments and a trustworthy
 CI.
 
-## 2. Authentication (in progress: [epic #65](https://github.com/amirtuval/openharness/issues/65))
+## 2. Authentication (built: [epic #65](https://github.com/amirtuval/openharness/issues/65), awaiting the maintainer's check of real OAuth sign-in)
+
+**Status:** implemented and through a hands-on QA pass (#74) with no security defects; its
+three minor findings are fixed. What remains is checking real Google, GitHub and Microsoft
+sign-in with registered OAuth apps.
 
 **Decided** (details and the sub-issues are on the epic):
 
@@ -76,6 +80,9 @@ Today there is CI (lint, typecheck and tests with turbo `--affected`) and `docke
 - run the e2e and QA suites (`e2e/qa`) against staging;
 - health checks, logs, metrics and alerts at a basic level, and OpenTelemetry built from the
   spans already in the log;
+- **rate limiting behind a reverse proxy:** configure which forwarding headers to trust for
+  the client IP. Without it, Better Auth cannot tell users apart, so everyone shares one
+  rate-limit bucket and one user's failed attempts can block everyone (seen in #74);
 - **fix the flaky tests (#43) as part of this phase.** A flaky CI cannot gate deploys. The
   partition-lease test must be confirmed as timing-only, because it covers multi-instance
   safety.
