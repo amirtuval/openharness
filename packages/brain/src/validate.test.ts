@@ -5,6 +5,8 @@ import { describe, expect, it } from 'vitest'
 
 import {
   agentMessage,
+  eventDelta,
+  eventStart,
   sessionError,
   spanEnd,
   spanStart,
@@ -25,6 +27,9 @@ import { assertValidEvents, EventValidationError } from './validate'
 
 describe('assertValidEvents', () => {
   it('accepts every event the turn loop builds', () => {
+    const messageId = newEventId()
+    const range = { from_seq: 4, to_seq: 6 }
+
     expect(() => {
       assertValidEvents([
         statusRunning(),
@@ -35,12 +40,37 @@ describe('assertValidEvents', () => {
           message: 'Rate limited.',
           retry_status: { type: 'retrying' },
         }),
-        spanStart(),
+        spanStart([newEventId()], 'anthropic/claude-sonnet-5'),
+        spanStart([], 'anthropic/claude-sonnet-5', newEventId()),
         spanEnd(newEventId(), ZERO_MODEL_USAGE),
         spanEnd(newEventId(), ZERO_MODEL_USAGE, { type: 'interrupted', message: 'Interrupted.' }),
-        agentMessage(newEventId(), 'Hello'),
+        spanEnd(newEventId(), ZERO_MODEL_USAGE, { type: 'model_error' }, range),
+        spanEnd(newEventId(), ZERO_MODEL_USAGE, { type: 'brain_lost' }, range),
+        eventStart(messageId),
+        eventDelta(messageId, 'Hel'),
+        agentMessage(messageId, 'Hello', range),
       ])
     }).not.toThrow()
+  })
+
+  it('rejects a claim that names something that is not an event id', () => {
+    expect(() => {
+      assertValidEvents([spanStart(['not-an-id' as EventId], 'anthropic/claude-sonnet-5')])
+    }).toThrow(/span\.model_request_start.*consumes/m)
+  })
+
+  it('rejects a supersedes range that is not a pair of seqs', () => {
+    expect(() => {
+      assertValidEvents([agentMessage(newEventId(), 'Hello', { from_seq: 0, to_seq: 3 })])
+    }).toThrow(/agent\.message.*supersedes/m)
+  })
+
+  it('rejects a chunk delta that carries no text', () => {
+    // Not a block the protocol accepts: `TextBlockSchema` wants at least one character, and a
+    // frame a validating reader would stop at must never be stored.
+    expect(() => {
+      assertValidEvents([eventDelta(newEventId(), '')])
+    }).toThrow(/event_delta.*text/m)
   })
 
   it('accepts a queued user event, which is stored before it is processed', () => {
@@ -83,10 +113,20 @@ describe('assertValidEvents', () => {
   })
 
   it('rejects an event type the log does not hold', () => {
-    const preview = { type: EVENT_TYPES.eventDelta } as unknown as AppendableEvent
+    const unknown = { type: 'agent.thinking', text: 'why' } as unknown as AppendableEvent
 
     expect(() => {
-      assertValidEvents([preview])
+      assertValidEvents([unknown])
+    }).toThrow(EventValidationError)
+  })
+
+  it('still rejects a chunk that is missing the fields of its shape', () => {
+    // A stream-only preview has no envelope, but the brain appends chunks as stored events: an
+    // `event_delta` without its `delta` is not an event any reader could use, envelope or not.
+    const halfABlock = { type: EVENT_TYPES.eventDelta } as unknown as AppendableEvent
+
+    expect(() => {
+      assertValidEvents([halfABlock])
     }).toThrow(EventValidationError)
   })
 })

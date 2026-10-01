@@ -2,7 +2,8 @@ import type { ModelUsage } from '@openharness/protocol'
 import { ModelRouterLanguageModel } from '@mastra/core/llm'
 import type { LanguageModel, ModelMessage } from 'ai'
 import { streamText } from 'ai'
-import { isFencedError } from '@openharness/session'
+
+import { isOwnershipError } from './errors'
 
 /**
  * Making a model request, and the seam that keeps the brain testable.
@@ -108,7 +109,10 @@ export interface ModelRequestParams {
   readonly messages: readonly ModelMessage[]
   /** Aborting this ends the request early; the partial text is still in the result. */
   readonly signal?: AbortSignal
-  /** Called with each text chunk as it arrives, to publish the live preview. */
+  /**
+   * Called with each text chunk as it arrives, and awaited: the loop stores the chunk before
+   * the next one is pulled, so a store refusal surfaces here rather than being swallowed.
+   */
   readonly onTextDelta?: (text: string) => Promise<void> | void
 }
 
@@ -173,8 +177,10 @@ export async function streamModelRequest(params: ModelRequestParams): Promise<Mo
     }
   } catch (error) {
     // A write the store refused is not a model failure and must not be retried as one: it means
-    // another owner has taken the partition over, and the loop has to stop right here.
-    if (isFencedError(error)) {
+    // another owner has taken the partition over — or claimed the events this request answers —
+    // and the loop has to stop right here. Deltas are appended from `onTextDelta`, so a refusal
+    // inside the stream surfaces here.
+    if (isOwnershipError(error)) {
       throw error
     }
     failures.push(error)
@@ -185,7 +191,7 @@ export async function streamModelRequest(params: ModelRequestParams): Promise<Mo
   }
   const failure = failures[0]
   if (failure !== undefined) {
-    if (isFencedError(failure)) {
+    if (isOwnershipError(failure)) {
       throw failure
     }
     return { text, usage: ZERO_MODEL_USAGE, error: failure, aborted: false }

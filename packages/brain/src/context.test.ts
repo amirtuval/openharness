@@ -1,5 +1,5 @@
 import { newEventId } from '@openharness/protocol'
-import type { StoredEvent } from '@openharness/protocol'
+import type { EventId, StoredEvent } from '@openharness/protocol'
 import { describe, expect, it } from 'vitest'
 
 import {
@@ -39,6 +39,26 @@ function statusRunning(seq: number): StoredEvent {
     seq,
     processed_at: '2026-03-15T10:00:00.000Z',
   }
+}
+
+/** A stored chunk of a reply in flight: an `event_start` or an `event_delta` (D9). */
+function chunk(seq: number, of: EventId): StoredEvent {
+  return seq % 2 === 0
+    ? {
+        id: newEventId(),
+        type: 'event_delta',
+        seq,
+        processed_at: '2026-03-15T10:00:00.000Z',
+        event_id: of,
+        delta: { type: 'content_delta', index: 0, content: { type: 'text', text: 'half a rep' } },
+      }
+    : {
+        id: newEventId(),
+        type: 'event_start',
+        seq,
+        processed_at: '2026-03-15T10:00:00.000Z',
+        event: { type: 'agent.message', id: of },
+      }
 }
 
 const MODEL = { id: 'anthropic/claude-sonnet-5' }
@@ -85,6 +105,31 @@ describe('createContextStrategy', () => {
 
     expect(strategy([userMessage(1, 'Hi'), empty], { model: MODEL, system: null })).toEqual([
       { role: 'user', content: 'Hi' },
+    ])
+  })
+
+  it('ignores the stored chunks of a reply (D9)', () => {
+    // Since D9 a reply is stored twice while it streams: as its chunks, and as the message that
+    // supersedes them. The chunks are the stream's shape, not the conversation's — the model
+    // must see one reply, once, and the empty text of a chunk would otherwise read as a message
+    // the model did not send.
+    const strategy = createContextStrategy()
+    const reply = newEventId()
+
+    expect(
+      strategy(
+        [
+          userMessage(1, 'Hi'),
+          chunk(2, reply),
+          chunk(3, reply),
+          chunk(4, reply),
+          agentMessage(5, 'Hello there'),
+        ],
+        { model: MODEL, system: null },
+      ),
+    ).toEqual([
+      { role: 'user', content: 'Hi' },
+      { role: 'assistant', content: 'Hello there' },
     ])
   })
 

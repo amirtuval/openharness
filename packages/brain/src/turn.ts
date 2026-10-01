@@ -1,5 +1,11 @@
 import { EVENT_TYPES, newEventId } from '@openharness/protocol'
-import type { EventId, ModelConfig, SessionId, StoredEvent } from '@openharness/protocol'
+import type {
+  EventId,
+  ModelConfig,
+  SessionId,
+  StoredEvent,
+  Supersedes,
+} from '@openharness/protocol'
 import type { LanguageModel } from 'ai'
 import type { AppendableEvent, PartitionFence, SessionStore } from '@openharness/session'
 import { SessionNotFoundError } from '@openharness/session'
@@ -8,6 +14,8 @@ import type { ContextStrategy } from './context'
 import { DEFAULT_CONTEXT_STRATEGY } from './context'
 import {
   agentMessage,
+  eventDelta,
+  eventStart,
   sessionError,
   spanEnd,
   spanStart,
@@ -18,6 +26,7 @@ import {
 import { classifyModelError } from './errors'
 import { assertValidEvents, EventValidationError } from './validate'
 import {
+  chunkRangeAfter,
   contextView,
   isUserInterrupt,
   isUserMessage,
@@ -41,53 +50,67 @@ import { backoffDelay, resolveRetryPolicy } from './retry'
  *
  * ## Lifecycle
  *
+ * Since D9 (issue #46) the log is immutable, and three things follow from that. The claim on
+ * the user events a request answers *is* the append of its `span.model_request_start` (its
+ * `consumes` list), so a claim cannot be taken by two brains and nothing rewrites
+ * `processed_at`. The chunks of a streaming reply are stored events, appended as they arrive.
+ * And the event that finishes a reply carries `supersedes` over the chunks it replaces, so
+ * replay skips them and compaction can delete them later without changing what any reader sees.
+ *
  * ```
  * no turn to run, nothing queued ................................ return noop
  *
  * START (an inherited turn, `getTurnState` is not idle)
- *   open span .......................... span.model_request_end { error: brain_lost }
- *   last status was rescheduled ........ session.status_running
- *   last status was running ............ (nothing: that turn already opened)
+ *   an open span ................ span.model_request_end { error: brain_lost,
+ *                                 supersedes: that span's chunks } → then re-run
+ *   last status was rescheduled .. session.status_running
+ *   last status was running ...... (nothing: that turn already opened)
  * START (a fresh turn)
- *   ................................... session.status_running
+ *   .............................. session.status_running
  *
  * LOOP (per model request)
- *   1. an aborted signal, or a queued user.interrupt ......... INTERRUPT
- *   2. claim the queued user.message events (markProcessed)
- *   3. no unanswered message left ............................ session.status_idle, return idle
- *   4. ................................ span.model_request_start
- *   5. stream; publish event_start, then event_delta per chunk, under one sevt_ id
- *   6. text streamed .................. agent.message (that sevt_ id)
- *   7. ................................ span.model_request_end { model_usage }
+ *   1. an aborted signal, or a queued user.interrupt ....... INTERRUPT
+ *   2. claim the queued user.message events; the claim is the append of the span start below
+ *   3. no unanswered message left ........................... session.status_idle, return idle
+ *   4. ............. span.model_request_start { consumes, model }
+ *   5. stream ....... stored event_start (one sevt_ id), then one stored event_delta per chunk
+ *   6. text streamed ......... agent.message { supersedes: the chunk range }
+ *      no text ................................... (no message; the span end supersedes)
+ *   7. .............................. span.model_request_end { model_usage }
  *   8. another user.message arrived .......................... loop from 1
  *   9. otherwise ............................................. session.status_idle, return idle
  *
  * INTERRUPT (an aborted signal, or a queued user.interrupt)
- *   partial text streamed ............. agent.message (that sevt_ id)
- *   a span is open .................... span.model_request_end { error: interrupted }
- *   queued user.interrupt events ...... markProcessed
+ *   partial text streamed ............ agent.message { supersedes: the chunk range }
+ *   a span is open ......... span.model_request_end { error: interrupted }
+ *                            (with `supersedes` when no text was stored)
+ *   queued user.interrupt events ...... claimed by a span of their own: an append of
+ *                                       span.model_request_start { consumes } and its end,
+ *                                       so an interrupt is claimed like any other user event
  *   ................................... session.status_idle, return interrupted
  *
  * MODEL FAILURE (a retryable error, attempts left)
- *    .................................. span.model_request_end { error: model_error }
- *    .................................. session.error { retry_status: retrying }
- *    .................................. session.status_rescheduled
+ *    ............ span.model_request_end { error: model_error, supersedes: the chunks }
+ *    ................................... session.error { retry_status: retrying }
+ *    ................................... session.status_rescheduled
  *    backoff sleep, honoring the signal
- *    .................................. session.status_running, loop from 1
+ *    ................................... session.status_running, loop from 1 (new message id)
  *
  * MODEL FAILURE (terminal, or out of attempts)
- *   .................................. span.model_request_end { error: model_error }
- *   .................................. session.error { retry_status: exhausted | terminal }
- *   .................................. session.status_idle, return error
+ *   ............ span.model_request_end { error: model_error, supersedes: the chunks }
+ *   ................................... session.error { retry_status: exhausted | terminal }
+ *   ................................... session.status_idle, return error
  *
  * AN EVENT THE PROTOCOL DOES NOT ACCEPT (an event shaped by the model's report fails validation)
- *   the span closes ............... span.model_request_end { error: model_error, usage: 0 }
- *   .............................. session.error { type: unknown_error, retry_status: terminal }
- *   .............................. session.status_idle, return error
+ *   the span closes ...... span.model_request_end { error: model_error, usage: 0,
+ *                           supersedes: the chunks }
+ *   ................................... session.error { type: unknown_error, retry_status: terminal }
+ *   ................................... session.status_idle, return error
  * ```
  *
- * `FencedError` short-circuits all of it: another owner has taken the partition over, so the
- * turn stops at the first refused write and rethrows — see {@link runTurn}.
+ * `FencedError` and `ClaimConflictError` short-circuit all of it: the partition is somebody
+ * else's, or another owner claimed the user events this request was about to answer, so the
+ * turn stops at the refused write and rethrows — see {@link runTurn}.
  */
 
 /** What a turn did, for the scheduler that ran it. */
@@ -121,15 +144,27 @@ export interface RunTurnOptions {
   /**
    * The partition lease this turn writes under.
    *
-   * Passed on every `appendEvents` and `markProcessed`, so a brain whose lease has been taken
-   * over cannot write into the log its successor now owns. A refused write stops the turn
-   * immediately and rethrows the `FencedError`.
+   * Passed on every `appendEvents`, so a brain whose lease has been taken over cannot write
+   * into the log its successor now owns. A refused write stops the turn immediately and
+   * rethrows the `FencedError`.
    */
   readonly fence?: PartitionFence
   /** How the log becomes messages; defaults to `DEFAULT_CONTEXT_STRATEGY`. */
   readonly contextStrategy?: ContextStrategy
   /** How model failures are retried; see {@link RetryPolicy}. */
   readonly retry?: RetryPolicy
+}
+
+/** What the loop knows about a reply it has to finish storing. */
+interface PartialReply {
+  /** The id the chunks were stored under — the id the message will be stored under. */
+  readonly id: EventId
+  /** The text streamed so far. */
+  readonly text: string
+  /** The `span.model_request_start` the request's span end points at. */
+  readonly spanId: EventId
+  /** The chunk range the reply covers; see `SupersedesSchema` in the protocol. */
+  readonly range: Supersedes
 }
 
 /**
@@ -139,8 +174,9 @@ export interface RunTurnOptions {
  * Reads the whole log, answers whatever the user is waiting on, and appends events as it goes.
  * It never throws for a model failure: a failure is part of the turn's story, and the log
  * records it (`span.model_request_end`, `session.error`, `session.status_idle`). It does throw
- * for a `FencedError` from the store — the one failure the turn must not write anything about,
- * because the log is not the writer's any more — and for a `SessionNotFoundError`.
+ * for a `FencedError` — the one failure the turn must not write anything about, because the log
+ * is not the writer's any more — for a `ClaimConflictError`, which means another owner claimed
+ * the user events this request was about to answer, and for a `SessionNotFoundError`.
  *
  * @param sessionId the session to run; a `sesn_` id
  * @param options the store, the model factory, and the turn's knobs
@@ -164,12 +200,6 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     assertValidEvents(events)
     return store.appendEvents(sessionId, events, writeOptions)
   }
-  const markProcessed = async (eventIds: EventId[]): Promise<void> => {
-    if (eventIds.length === 0) {
-      return
-    }
-    await store.markProcessed(sessionId, eventIds, writeOptions)
-  }
 
   const session = await store.getSession(sessionId)
   if (session === null) {
@@ -188,12 +218,20 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
   } else {
     const inherited = await readLog(store, sessionId)
     if (turnState.openSpan !== null) {
-      // The span the dead brain left open. Its request will not report usage: nobody saw it end.
+      // The span the dead brain left open. Its request will not report usage — nobody saw it
+      // end — and the chunks it streamed are orphaned: nothing will ever store the message
+      // they previewed, so this span end supersedes them and replay skips them.
+      const range = chunkRangeAfter(inherited, turnState.openSpan.seq)
       await append([
-        spanEnd(turnState.openSpan.id, ZERO_MODEL_USAGE, {
-          type: 'brain_lost',
-          message: 'The brain that opened this model request is gone.',
-        }),
+        spanEnd(
+          turnState.openSpan.id,
+          ZERO_MODEL_USAGE,
+          {
+            type: 'brain_lost',
+            message: 'The brain that opened this model request is gone.',
+          },
+          range ?? undefined,
+        ),
       ])
     }
     if (lastStatusEventType(inherited) === EVENT_TYPES.sessionStatusRescheduled) {
@@ -202,25 +240,59 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     }
   }
 
-  /** End the turn the way an interrupt does, whatever it interrupted. */
-  const endInterrupted = async (partial?: {
-    readonly id: EventId
-    readonly text: string
-    readonly spanId: EventId
-  }): Promise<TurnOutcome> => {
-    if (partial !== undefined && partial.text.length > 0) {
-      await append([agentMessage(partial.id, partial.text)])
-    }
-    if (partial !== undefined) {
-      await append([
-        spanEnd(partial.spanId, ZERO_MODEL_USAGE, {
-          type: 'interrupted',
-          message: 'Interrupted by the user.',
-        }),
-      ])
-    }
+  /**
+   * Claim the queued `user.interrupt` events.
+   *
+   * The claim on a user event is the `consumes` list of the span that answers it, and an
+   * interrupt is answered by the turn ending — there is no model request for it. So it is
+   * claimed by a span of its own: the start that consumes it, and the end that closes that
+   * span immediately with `interrupted`. Nothing ran; what the pair records is that the
+   * interrupt has been reached and will not be reached again.
+   */
+  const claimInterrupts = async (): Promise<void> => {
     const interrupts = (await store.getPendingUserEvents(sessionId)).filter(isUserInterrupt)
-    await markProcessed(interrupts.map((event) => event.id))
+    if (interrupts.length === 0) {
+      return
+    }
+    const claimId = newEventId()
+    await append([
+      spanStart(
+        interrupts.map((event) => event.id),
+        agentModel.id,
+        claimId,
+      ),
+      spanEnd(claimId, ZERO_MODEL_USAGE, {
+        type: 'interrupted',
+        message: 'Interrupted by the user.',
+      }),
+    ])
+  }
+
+  /** End the turn the way an interrupt does, whatever it interrupted. */
+  const endInterrupted = async (partial?: PartialReply): Promise<TurnOutcome> => {
+    if (partial !== undefined) {
+      if (partial.text.length > 0) {
+        // The partial reply is kept, superseding the chunks it was streamed as.
+        await append([agentMessage(partial.id, partial.text, partial.range)])
+        await append([
+          spanEnd(partial.spanId, ZERO_MODEL_USAGE, {
+            type: 'interrupted',
+            message: 'Interrupted by the user.',
+          }),
+        ])
+      } else {
+        // Nothing was stored as a message, so the span end supersedes the chunks itself.
+        await append([
+          spanEnd(
+            partial.spanId,
+            ZERO_MODEL_USAGE,
+            { type: 'interrupted', message: 'Interrupted by the user.' },
+            partial.range,
+          ),
+        ])
+      }
+    }
+    await claimInterrupts()
     await append([statusIdle()])
     return { outcome: 'interrupted' }
   }
@@ -229,15 +301,17 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
    * End a turn whose own event was not the protocol's shape, instead of storing it.
    *
    * The error path is the terminal model failure's, one step earlier: the span closes (with no
-   * usage — there is none to trust), the reason goes into the log as a `session.error`, and the
-   * session goes idle. Nothing is retried: rebuilding the same event would fail the same way.
+   * usage — there is none to trust — and superseding the chunks, which will never become a
+   * stored message), the reason goes into the log as a `session.error`, and the session goes
+   * idle. Nothing is retried: rebuilding the same event would fail the same way.
    */
   const endInvalidEvent = async (
     error: EventValidationError,
     spanId: EventId,
+    range: Supersedes,
   ): Promise<TurnOutcome> => {
     await append([
-      spanEnd(spanId, ZERO_MODEL_USAGE, { type: 'model_error', message: error.message }),
+      spanEnd(spanId, ZERO_MODEL_USAGE, { type: 'model_error', message: error.message }, range),
     ])
     await append([
       sessionError({
@@ -261,57 +335,76 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       return await endInterrupted()
     }
     const pending = await store.getPendingUserEvents(sessionId)
-    const interrupts = pending.filter(isUserInterrupt)
-    if (interrupts.length > 0) {
+    if (pending.some(isUserInterrupt)) {
       return await endInterrupted()
     }
-    // Steering: claim the queued messages first, and answer the log as it stands after that
-    // claim. `contextView` is the other half of it — a message still queued afterwards was not
-    // claimed here and belongs to the next request, not this one — and claiming is what makes
-    // the events this call took part of what the view now includes.
-    await markProcessed(pending.filter(isUserMessage).map((event) => event.id))
-    const answered = contextView(await readLog(store, sessionId))
-    if (!needsModelRequest(answered)) {
-      // Recovery, with the reply already in the log: the request that produced it was answered
-      // before the brain died, and asking again would store a second reply.
-      await append([statusIdle()])
-      return { outcome: 'idle' }
+    // Steering: the queued messages are this request's to answer, and the append of the span
+    // start below claims them — in the same transaction, or not at all. A message that arrives
+    // after that append is not in its `consumes`, so it stays queued for the next request (and
+    // `contextView` leaves it out of what this one answers).
+    const claims = pending.filter(isUserMessage).map((event) => event.id)
+    if (claims.length === 0) {
+      const answered = contextView(await readLog(store, sessionId))
+      if (!needsModelRequest(answered)) {
+        // Recovery, with the reply already in the log: the request that produced it was answered
+        // before the brain died, and asking again would store a second reply.
+        await append([statusIdle()])
+        return { outcome: 'idle' }
+      }
     }
-    const messages = strategy(answered, { model: agentModel, system: session.agent.system })
-
-    const [start] = await append([spanStart()])
+    const [start] = await append([spanStart(claims, agentModel.id)])
     if (start === undefined) {
       throw new Error('the store did not return the span it was asked to append')
     }
+    // Read the log again: the claim just landed, and what this request answers is the log as it
+    // stands after it — the messages it consumes, in order, and nothing still queued.
+    const answered = contextView(await readLog(store, sessionId))
+    const messages = strategy(answered, { model: agentModel, system: session.agent.system })
+
+    // The reply's chunks are stored as they arrive, under one pre-minted id: the stored
+    // `event_start` announces the id the `agent.message` will be stored under, and every
+    // `event_delta` carries it, so a client matches what it accumulated to what was stored.
     const eventId = newEventId()
-    await store.publishEphemeral(sessionId, {
-      type: EVENT_TYPES.eventStart,
-      event: { type: EVENT_TYPES.agentMessage, id: eventId },
-    })
+    const [chunkOpen] = await append([eventStart(eventId)])
+    if (chunkOpen === undefined) {
+      throw new Error('the store did not return the event_start it was asked to append')
+    }
+    let lastChunkSeq = chunkOpen.seq
     const result = await streamModelRequest({
       model: requestModel(),
       messages,
       signal,
       onTextDelta: async (text) => {
-        await store.publishEphemeral(sessionId, {
-          type: EVENT_TYPES.eventDelta,
-          event_id: eventId,
-          delta: { type: 'content_delta', index: 0, content: { type: 'text', text } },
-        })
+        // One append per chunk, awaited: a chunk that could not be stored ends the request the
+        // way it used to end the stream — the reply is never stored half-way.
+        const [delta] = await append([eventDelta(eventId, text)])
+        if (delta !== undefined) {
+          lastChunkSeq = delta.seq
+        }
       },
     })
+    const range: Supersedes = { from_seq: chunkOpen.seq, to_seq: lastChunkSeq }
 
     if (result.aborted) {
-      return await endInterrupted({ id: eventId, text: result.text, spanId: start.id })
+      return await endInterrupted({
+        id: eventId,
+        text: result.text,
+        spanId: start.id,
+        range,
+      })
     }
 
     if (result.error !== undefined) {
       const classification = classifyModelError(result.error)
+      // Partial output is never stored, so the span end supersedes the chunks this attempt
+      // streamed. The retry below mints a new message id and its own `event_start`.
       await append([
-        spanEnd(start.id, ZERO_MODEL_USAGE, {
-          type: 'model_error',
-          message: classification.message,
-        }),
+        spanEnd(
+          start.id,
+          ZERO_MODEL_USAGE,
+          { type: 'model_error', message: classification.message },
+          range,
+        ),
       ])
       if (classification.retryable && retriesUsed < retry.maxRetries) {
         retriesUsed += 1
@@ -344,12 +437,15 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     }
 
     // A request that produced no text stores no message: an empty `agent.message` would be a
-    // reply the model did not make. The span and the status still record that it ran.
+    // reply the model did not make. The span still records that it ran, superseding the
+    // `event_start` so the orphaned chunk does not outlive the request.
     try {
       if (result.text.length > 0) {
-        await append([agentMessage(eventId, result.text)])
+        await append([agentMessage(eventId, result.text, range)])
+        await append([spanEnd(start.id, result.usage)])
+      } else {
+        await append([spanEnd(start.id, result.usage, undefined, range)])
       }
-      await append([spanEnd(start.id, result.usage)])
     } catch (error) {
       // The events a model's report shapes are the ones that can turn out not to be protocol
       // events — a usage the protocol refuses is the case issue #39 shipped. Ending the turn is
@@ -357,7 +453,7 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       if (!(error instanceof EventValidationError)) {
         throw error
       }
-      return await endInvalidEvent(error, start.id)
+      return await endInvalidEvent(error, start.id, range)
     }
     // A request that answered gets a fresh retry budget; the next one is a new question.
     retriesUsed = 0

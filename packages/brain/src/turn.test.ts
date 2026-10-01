@@ -6,19 +6,39 @@ import {
   makeStatusRunning,
   makeUserMessage,
 } from '@openharness/protocol/fixtures'
-import { EVENT_TYPES, newSessionId, partitionOf, StoredEventSchema } from '@openharness/protocol'
-import type { EventDelta, EventStart, StoredEvent, StreamEvent } from '@openharness/protocol'
-import { SessionNotFoundError, isFencedError } from '@openharness/session'
+import {
+  EVENT_TYPES,
+  newEventId,
+  newSessionId,
+  partitionOf,
+  StoredEventSchema,
+} from '@openharness/protocol'
+import type {
+  EventId,
+  ModelRequestEndEvent,
+  SessionId,
+  StoredEvent,
+  Supersedes,
+} from '@openharness/protocol'
+import { InMemorySessionStore, isFencedError } from '@openharness/session'
+import type { AppendableEvent, AppendEventsOptions, SessionStore } from '@openharness/session'
 import { describe, expect, it, vi } from 'vitest'
 
+import { eventDelta, eventStart, spanStart } from './events'
+import { isClaimConflictError } from './errors'
 import type { ModelFactory } from './model'
 import { misdeclaredSpec, mockModel, readPrompt, type MockModelScript } from './testing/mock-model'
 import {
+  TEST_MODEL_ID,
+  chunkDeltaOf,
+  chunksOf,
+  deltaTextOf,
   eventTypes,
   interrupt,
   logOf,
   message,
   newSession,
+  rawLogOf,
   settle,
   spanStartOf,
   textOf,
@@ -31,7 +51,10 @@ import { runTurn } from './turn'
  *
  * The order of the events is the contract — a client replays the log, so a status that lands
  * after the reply it closes, or a span that is never closed, is a bug the tests have to catch
- * rather than a detail a reader can infer.
+ * rather than a detail a reader can infer. Since D9 (issue #46) the tests assert three more
+ * things on every scenario: the claim a span start carries (`consumes`), the model that served
+ * the request, and that **replay holds no superseded chunk** — the log a client reads back is
+ * the log it would have followed live.
  */
 
 /** A retryable provider error, the shape a real SDK throws. */
@@ -44,6 +67,68 @@ function overloaded(): Error {
   return Object.assign(new Error('Overloaded.'), { statusCode: 503 })
 }
 
+/** Whether an appendable event opens a model-request span. */
+function isSpanStart(event: AppendableEvent): boolean {
+  return event.type === EVENT_TYPES.modelRequestStart
+}
+
+/** Every chunk of `raw` a recorded `supersedes` range covers. */
+function supersededChunks(raw: readonly StoredEvent[]): StoredEvent[] {
+  const ranges = raw.flatMap((event): Supersedes[] =>
+    'supersedes' in event && event.supersedes !== undefined ? [event.supersedes] : [],
+  )
+  return chunksOf(raw).filter((chunk) =>
+    ranges.some((range) => chunk.seq >= range.from_seq && chunk.seq <= range.to_seq),
+  )
+}
+
+/**
+ * The claim, the model and the replay of a log, asserted together.
+ *
+ * The three halves of D9 the loop owns: every span start claims what it answers and records the
+ * model that ran; every superseded chunk is gone from the replay read; and what the replay does
+ * hold is the exact protocol shape.
+ */
+async function expectClean(
+  store: SessionStore,
+  sessionId: Parameters<typeof logOf>[1],
+): Promise<void> {
+  const raw = await rawLogOf(store as InMemorySessionStore, sessionId)
+  const replayed = await logOf(store as InMemorySessionStore, sessionId)
+
+  // The replay read is what a client resumes from: it skips exactly the superseded chunks.
+  const superseded = new Set(supersededChunks(raw).map((chunk) => chunk.id))
+  expect(replayed.some((event) => superseded.has(event.id))).toBe(false)
+
+  for (const event of raw) {
+    expect(StoredEventSchema.safeParse(event).success, `${event.type} parses`).toBe(true)
+    if (event.type === EVENT_TYPES.modelRequestStart) {
+      expect(event.consumes, `${event.id} claims`).toBeDefined()
+      expect(event.model, `${event.id} records its model`).toBe(TEST_MODEL_ID)
+    }
+  }
+  // Every claim names a real user event of the log, and no event is claimed twice.
+  const claimed: EventId[] = []
+  for (const event of raw) {
+    if (event.type !== EVENT_TYPES.modelRequestStart) {
+      continue
+    }
+    for (const id of event.consumes ?? []) {
+      expect(raw.some((other) => other.id === id)).toBe(true)
+      expect(claimed).not.toContain(id)
+      claimed.push(id)
+    }
+  }
+}
+
+/** The `supersedes` range of the `n`-th `span.model_request_end` of a log. */
+function spanEndRange(log: readonly StoredEvent[], n: number): Supersedes | undefined {
+  const ends = log.filter(
+    (event): event is ModelRequestEndEvent => event.type === EVENT_TYPES.modelRequestEnd,
+  )
+  return ends[n]?.supersedes
+}
+
 describe('runTurn', () => {
   it('does nothing when there is no turn and nothing queued', async () => {
     const { store, sessionId } = await newSession()
@@ -52,29 +137,54 @@ describe('runTurn', () => {
     const outcome = await runTurn(sessionId, { store, model: factory })
 
     expect(outcome).toEqual({ outcome: 'noop' })
-    expect(await logOf(store, sessionId)).toEqual([])
+    expect(await rawLogOf(store, sessionId)).toEqual([])
     expect(calls).toHaveLength(0)
   })
 
-  it('runs a turn in the documented order', async () => {
+  it('runs a turn in the documented order, claims its prompt, and supersedes its chunks', async () => {
     const { store, sessionId } = await newSession([message('Hello')])
     const { factory } = mockModel({ text: ['Hi ', 'there'] })
 
     const outcome = await runTurn(sessionId, { store, model: factory })
 
     expect(outcome).toEqual({ outcome: 'idle' })
-    const log = await logOf(store, sessionId)
-    expect(eventTypes(log)).toEqual([
+    const raw = await rawLogOf(store, sessionId)
+    expect(eventTypes(raw)).toEqual([
       EVENT_TYPES.userMessage,
       EVENT_TYPES.sessionStatusRunning,
       EVENT_TYPES.modelRequestStart,
+      EVENT_TYPES.eventStart,
+      EVENT_TYPES.eventDelta,
+      EVENT_TYPES.eventDelta,
       EVENT_TYPES.agentMessage,
       EVENT_TYPES.modelRequestEnd,
       EVENT_TYPES.sessionStatusIdle,
     ])
-    const [user, running, start, reply, end, idle] = log
-    expect(user?.processed_at).not.toBeNull()
+    const [user, running, start, chunkStart, deltaOne, deltaTwo, reply, end, idle] = raw
     expect(running?.type).toBe(EVENT_TYPES.sessionStatusRunning)
+    expect(user?.processed_at).not.toBeNull()
+
+    // The claim: the span start lists the message it answers, and the model that served it.
+    expect(start).toMatchObject({
+      type: EVENT_TYPES.modelRequestStart,
+      consumes: [user?.id],
+      model: TEST_MODEL_ID,
+    })
+
+    // The chunks: stored events under the id the message will be stored under, in order.
+    expect(chunkStart).toMatchObject({
+      type: EVENT_TYPES.eventStart,
+      event: { type: EVENT_TYPES.agentMessage, id: reply?.id },
+    })
+    expect(chunksOf(raw).map((chunk) => chunk.seq)).toEqual([4, 5, 6])
+    expect(deltaTextOf(chunkDeltaOf(deltaOne))).toBe('Hi ')
+    expect(deltaTextOf(chunkDeltaOf(deltaTwo))).toBe('there')
+
+    // The message supersedes exactly the range its chunks cover.
+    expect(reply).toMatchObject({
+      type: EVENT_TYPES.agentMessage,
+      supersedes: { from_seq: 4, to_seq: 6 },
+    })
     expect(textOf(reply)).toBe('Hi there')
     expect(end).toMatchObject({
       type: EVENT_TYPES.modelRequestEnd,
@@ -86,6 +196,59 @@ describe('runTurn', () => {
       type: EVENT_TYPES.sessionStatusIdle,
       stop_reason: { type: 'end_turn' },
     })
+
+    // What a client reads back: no chunks, the message once, everything claimed.
+    const replayed = await logOf(store, sessionId)
+    expect(eventTypes(replayed)).toEqual([
+      EVENT_TYPES.userMessage,
+      EVENT_TYPES.sessionStatusRunning,
+      EVENT_TYPES.modelRequestStart,
+      EVENT_TYPES.agentMessage,
+      EVENT_TYPES.modelRequestEnd,
+      EVENT_TYPES.sessionStatusIdle,
+    ])
+    expect(replayed.every((event) => event.processed_at !== null)).toBe(true)
+    await expectClean(store, sessionId)
+  })
+
+  it('appends each chunk as it arrives, under the id its message is stored with', async () => {
+    const { store, sessionId } = await newSession([message('Hello')])
+    const { factory } = mockModel({ text: ['Hi ', 'there'] })
+    const delivered: StoredEvent[] = []
+    await store.subscribe(sessionId, (event) => {
+      if (event.type === EVENT_TYPES.eventStart || event.type === EVENT_TYPES.eventDelta) {
+        delivered.push(event as StoredEvent)
+      }
+    })
+
+    await runTurn(sessionId, { store, model: factory })
+    await settle()
+
+    // A chunk is a stored event: it reaches a live subscriber with its `id` and `seq`, and in
+    // the order the log holds — which is what makes a resume from mid-reply possible at all.
+    expect(delivered.map((event) => event.type)).toEqual([
+      EVENT_TYPES.eventStart,
+      EVENT_TYPES.eventDelta,
+      EVENT_TYPES.eventDelta,
+    ])
+    expect(delivered.map((event) => event.seq)).toEqual([4, 5, 6])
+
+    const raw = await rawLogOf(store, sessionId)
+    const reply = raw.find((event) => event.type === EVENT_TYPES.agentMessage)
+    const chunks = chunksOf(raw)
+    expect(chunks[0]).toMatchObject({
+      type: EVENT_TYPES.eventStart,
+      event: { type: EVENT_TYPES.agentMessage, id: reply?.id },
+    })
+    expect(
+      chunks.slice(1).map((chunk) => (chunk.type === EVENT_TYPES.eventDelta ? chunk.event_id : '')),
+    ).toEqual([reply?.id, reply?.id])
+    // The chunks spell the reply, which is the guarantee a client's accumulator relies on.
+    expect(
+      chunks
+        .flatMap((chunk) => (chunk.type === EVENT_TYPES.eventDelta ? [deltaTextOf(chunk)] : []))
+        .join(''),
+    ).toBe(textOf(reply))
   })
 
   it('stores the counts a mis-declared provider spec hides, as integers', async () => {
@@ -102,7 +265,7 @@ describe('runTurn', () => {
     const outcome = await runTurn(sessionId, { store, model })
 
     expect(outcome).toEqual({ outcome: 'idle' })
-    const log = await logOf(store, sessionId)
+    const log = await rawLogOf(store, sessionId)
     expect(log.find((event) => event.type === EVENT_TYPES.modelRequestEnd)).toMatchObject({
       type: EVENT_TYPES.modelRequestEnd,
       is_error: null,
@@ -113,60 +276,21 @@ describe('runTurn', () => {
         cache_creation_input_tokens: 0,
       },
     })
-    // The other half of it: every event in the log is the event the protocol documents, which is
-    // what `@openharness/client` validates before it will show a session at all.
-    for (const event of log) {
-      expect(StoredEventSchema.safeParse(event).success, `${event.type} is a protocol event`).toBe(
-        true,
-      )
-    }
-  })
-
-  it('publishes the live preview under one id, before the reply it previews', async () => {
-    const { store, sessionId } = await newSession([message('Hello')])
-    const { factory } = mockModel({ text: ['Hi ', 'there'] })
-    const previews: StreamEvent[] = []
-    await store.subscribe(sessionId, (event) => {
-      if (event.type === EVENT_TYPES.eventStart || event.type === EVENT_TYPES.eventDelta) {
-        previews.push(event)
-      }
-    })
-
-    await runTurn(sessionId, { store, model: factory })
-    await settle()
-
-    const start = previews[0]
-    const deltas = previews.filter(
-      (event): event is EventDelta => event.type === EVENT_TYPES.eventDelta,
-    )
-    const stored = (await logOf(store, sessionId)).find(
-      (event) => event.type === EVENT_TYPES.agentMessage,
-    )
-    expect(start).toMatchObject({
-      type: EVENT_TYPES.eventStart,
-      event: { type: EVENT_TYPES.agentMessage },
-    })
-    const previewId = (start as EventStart).event.id
-    expect(previewId).toEqual(expect.any(String))
-    expect(deltas.map((delta) => delta.event_id)).toEqual([previewId, previewId])
-    expect(deltas.map((delta) => delta.delta.content.text)).toEqual(['Hi ', 'there'])
-    expect(deltas.every((delta) => delta.delta.index === 0)).toBe(true)
-    // The preview is a prefix of the stored reply, which is what a client accumulates on.
-    expect(deltas.map((delta) => delta.delta.content.text).join('')).toBe(textOf(stored))
-    // The stored reply keeps the id its preview announced, so a client can swap one for the other.
-    expect(stored?.id).toBe(previewId)
+    await expectClean(store, sessionId)
   })
 
   it('picks up a message that arrives mid-stream in a second request', async () => {
     const { store, sessionId } = await newSession([message('First')])
+    let steeringId: EventId | undefined
     const { factory, calls } = mockModel(
       {
         text: ['Answering ', 'the first'],
         onChunk: async (_chunk, index) => {
           if (index === 0) {
-            await store.appendEvents(sessionId, [
+            const [steering] = await store.appendEvents(sessionId, [
               { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: 'Steering' }] },
             ])
+            steeringId = steering?.id
           }
         },
       },
@@ -176,20 +300,38 @@ describe('runTurn', () => {
     const outcome = await runTurn(sessionId, { store, model: factory })
 
     expect(outcome).toEqual({ outcome: 'idle' })
-    expect(eventTypes(await logOf(store, sessionId))).toEqual([
+    const raw = await rawLogOf(store, sessionId)
+    expect(eventTypes(raw)).toEqual([
       EVENT_TYPES.userMessage,
       EVENT_TYPES.sessionStatusRunning,
       EVENT_TYPES.modelRequestStart,
+      EVENT_TYPES.eventStart,
       // The steering message lands in the log while the first request is still streaming, ahead
       // of the reply to the message before it.
       EVENT_TYPES.userMessage,
+      EVENT_TYPES.eventDelta,
+      EVENT_TYPES.eventDelta,
       EVENT_TYPES.agentMessage,
       EVENT_TYPES.modelRequestEnd,
       EVENT_TYPES.modelRequestStart,
+      EVENT_TYPES.eventStart,
+      EVENT_TYPES.eventDelta,
       EVENT_TYPES.agentMessage,
       EVENT_TYPES.modelRequestEnd,
       EVENT_TYPES.sessionStatusIdle,
     ])
+
+    // The second request claims the steering message; the first one claims only the message it
+    // was started for.
+    const starts = raw.filter((event) => event.type === EVENT_TYPES.modelRequestStart)
+    expect(starts[0]).toMatchObject({ consumes: [raw[0]?.id] })
+    expect(starts[1]).toMatchObject({ consumes: [steeringId] })
+    // A message the request in flight did not answer is still claimed by the request it started.
+    expect((await rawLogOf(store, sessionId)).every((event) => event.processed_at !== null)).toBe(
+      true,
+    )
+    expect(await store.getPendingUserEvents(sessionId)).toEqual([])
+
     // The steering message was not answered by the request that was already in flight: it is
     // the second request's prompt that carries it.
     expect(calls).toHaveLength(2)
@@ -205,47 +347,99 @@ describe('runTurn', () => {
       { role: 'user', text: 'Steering' },
       { role: 'assistant', text: 'Answering the first' },
     ])
+    await expectClean(store, sessionId)
   })
 
   it('keeps the partial text and closes the span when the turn is aborted', async () => {
     const { store, sessionId } = await newSession([message('Hello')])
     const controller = new AbortController()
-    const previews: StreamEvent[] = []
     await store.subscribe(sessionId, (event) => {
       if (event.type === EVENT_TYPES.eventDelta) {
-        previews.push(event)
         controller.abort()
       }
     })
     const { factory } = mockModel({ text: ['Par', 'tial'] })
 
     const outcome = await runTurn(sessionId, { store, model: factory, signal: controller.signal })
-    await settle()
 
     expect(outcome).toEqual({ outcome: 'interrupted' })
-    const log = await logOf(store, sessionId)
-    expect(eventTypes(log)).toEqual([
-      EVENT_TYPES.userMessage,
-      EVENT_TYPES.sessionStatusRunning,
-      EVENT_TYPES.modelRequestStart,
-      EVENT_TYPES.agentMessage,
-      EVENT_TYPES.modelRequestEnd,
-      EVENT_TYPES.sessionStatusIdle,
-    ])
+    const raw = await rawLogOf(store, sessionId)
     // The abort lands while a chunk is in flight, so what was stored is a prefix of the reply.
-    expect(textOf(log[3])).not.toBe('')
-    expect('Partial'.startsWith(textOf(log[3]))).toBe(true)
-    expect(log[4]).toMatchObject({
-      type: EVENT_TYPES.modelRequestEnd,
+    const reply = raw.find((event) => event.type === EVENT_TYPES.agentMessage)
+    const partial = textOf(reply)
+    expect(partial).not.toBe('')
+    expect('Partial'.startsWith(partial)).toBe(true)
+
+    // The partial message supersedes the chunks it was streamed as; the span end closes the
+    // request without a range of its own, because the message carries it.
+    const storedChunks = chunksOf(raw)
+    expect(reply?.supersedes).toEqual({
+      from_seq: storedChunks[0]?.seq,
+      to_seq: storedChunks[storedChunks.length - 1]?.seq,
+    })
+    const end = raw.find((event) => event.type === EVENT_TYPES.modelRequestEnd)
+    expect(end).toMatchObject({
       is_error: true,
       error: { type: 'interrupted' },
       model_usage: { input_tokens: 0, output_tokens: 0 },
     })
-    // Whatever was published is a prefix of the reply the request would have produced, which is
-    // the guarantee a client's accumulator relies on.
-    const previewed = previews.map((event) => (event as EventDelta).delta.content.text).join('')
-    expect('Partial'.startsWith(previewed)).toBe(true)
-    expect(log[5]).toMatchObject({ type: EVENT_TYPES.sessionStatusIdle })
+    expect(end && 'supersedes' in end ? end.supersedes : undefined).toBeUndefined()
+    expect(raw[raw.length - 1]).toMatchObject({ type: EVENT_TYPES.sessionStatusIdle })
+    await expectClean(store, sessionId)
+  })
+
+  it('stores no message and supersedes the chunks when the interrupt precedes any text', async () => {
+    const { store, sessionId } = await newSession([message('Hello')])
+    const controller = new AbortController()
+    // Abort in the window between the reply's `event_start` and its first delta: the request is
+    // cut short with nothing to store, and the chunk it announced is orphaned.
+    await store.subscribe(sessionId, (event) => {
+      if (event.type === EVENT_TYPES.eventStart) {
+        controller.abort()
+      }
+    })
+    const { factory } = mockModel({ text: [] })
+
+    const outcome = await runTurn(sessionId, { store, model: factory, signal: controller.signal })
+
+    expect(outcome).toEqual({ outcome: 'interrupted' })
+    const raw = await rawLogOf(store, sessionId)
+    expect(eventTypes(raw)).toEqual([
+      EVENT_TYPES.userMessage,
+      EVENT_TYPES.sessionStatusRunning,
+      EVENT_TYPES.modelRequestStart,
+      EVENT_TYPES.eventStart,
+      EVENT_TYPES.modelRequestEnd,
+      EVENT_TYPES.sessionStatusIdle,
+    ])
+    // No message: an empty `agent.message` would be a reply the model did not make. The span
+    // end supersedes the chunk instead, so replay never sees it.
+    expect(raw.some((event) => event.type === EVENT_TYPES.agentMessage)).toBe(false)
+    expect(spanEndRange(raw, 0)).toEqual({ from_seq: 4, to_seq: 4 })
+    await expectClean(store, sessionId)
+  })
+
+  it('stores no message when the reply is empty, and the span end supersedes the event_start', async () => {
+    const { store, sessionId } = await newSession([message('Hello')])
+    const { factory, calls } = mockModel({ text: [] })
+
+    const outcome = await runTurn(sessionId, { store, model: factory })
+
+    expect(outcome).toEqual({ outcome: 'idle' })
+    expect(calls).toHaveLength(1)
+    const raw = await rawLogOf(store, sessionId)
+    expect(eventTypes(raw)).toEqual([
+      EVENT_TYPES.userMessage,
+      EVENT_TYPES.sessionStatusRunning,
+      EVENT_TYPES.modelRequestStart,
+      EVENT_TYPES.eventStart,
+      EVENT_TYPES.modelRequestEnd,
+      EVENT_TYPES.sessionStatusIdle,
+    ])
+    expect(raw.some((event) => event.type === EVENT_TYPES.agentMessage)).toBe(false)
+    expect(raw[4]).toMatchObject({ is_error: null, model_usage: FIXTURE_MODEL_USAGE })
+    expect(spanEndRange(raw, 0)).toEqual({ from_seq: 4, to_seq: 4 })
+    await expectClean(store, sessionId)
   })
 
   it('ends the turn when a user.interrupt is waiting before the first request', async () => {
@@ -255,18 +449,51 @@ describe('runTurn', () => {
     const outcome = await runTurn(sessionId, { store, model: factory })
 
     expect(outcome).toEqual({ outcome: 'interrupted' })
-    const log = await logOf(store, sessionId)
-    expect(eventTypes(log)).toEqual([
+    const raw = await rawLogOf(store, sessionId)
+    // The interrupt is claimed by a span of its own — the claim on a user event is the
+    // `consumes` of the span that answers it — and the span is closed immediately: the
+    // interrupt answered itself by ending the turn.
+    expect(eventTypes(raw)).toEqual([
       EVENT_TYPES.userInterrupt,
       EVENT_TYPES.userMessage,
       EVENT_TYPES.sessionStatusRunning,
+      EVENT_TYPES.modelRequestStart,
+      EVENT_TYPES.modelRequestEnd,
       EVENT_TYPES.sessionStatusIdle,
     ])
+    expect(raw[3]).toMatchObject({ consumes: [raw[0]?.id] })
+    expect(spanEndRange(raw, 0)).toBeUndefined()
     // The interrupt was claimed; the message it interrupted was not, so the next turn answers it.
-    expect(log[0]?.processed_at).not.toBeNull()
-    expect(log[1]?.processed_at).toBeNull()
+    expect(raw[0]?.processed_at).not.toBeNull()
+    expect(raw[1]?.processed_at).toBeNull()
     expect(calls).toHaveLength(0)
     expect(await store.getPendingUserEvents(sessionId)).toHaveLength(1)
+    await expectClean(store, sessionId)
+  })
+
+  it('claims a user.interrupt that arrives while the turn is streaming', async () => {
+    const { store, sessionId } = await newSession([message('Hello')])
+    let interruptId: EventId | undefined
+    const controller = new AbortController()
+    const { factory } = mockModel({
+      text: ['one', 'two'],
+      onChunk: async (_chunk, index) => {
+        if (index === 0) {
+          const [event] = await store.appendEvents(sessionId, [{ type: 'user.interrupt' }])
+          interruptId = event?.id
+          controller.abort()
+        }
+      },
+    })
+
+    const outcome = await runTurn(sessionId, { store, model: factory, signal: controller.signal })
+
+    expect(outcome).toEqual({ outcome: 'interrupted' })
+    const raw = await rawLogOf(store, sessionId)
+    const claim = raw.filter((event) => event.type === EVENT_TYPES.modelRequestStart).at(-1)
+    expect(claim).toMatchObject({ consumes: [interruptId] })
+    expect(await store.getPendingUserEvents(sessionId)).toEqual([])
+    await expectClean(store, sessionId)
   })
 
   it('ends the turn when the signal is already aborted', async () => {
@@ -278,7 +505,7 @@ describe('runTurn', () => {
     const outcome = await runTurn(sessionId, { store, model: factory, signal: controller.signal })
 
     expect(outcome).toEqual({ outcome: 'interrupted' })
-    expect(eventTypes(await logOf(store, sessionId))).toEqual([
+    expect(eventTypes(await rawLogOf(store, sessionId))).toEqual([
       EVENT_TYPES.userMessage,
       EVENT_TYPES.sessionStatusRunning,
       EVENT_TYPES.sessionStatusIdle,
@@ -298,26 +525,41 @@ describe('runTurn', () => {
     })
 
     expect(outcome).toEqual({ outcome: 'idle' })
-    expect(eventTypes(await logOf(store, sessionId))).toEqual([
+    const raw = await rawLogOf(store, sessionId)
+    expect(eventTypes(raw)).toEqual([
       EVENT_TYPES.userMessage,
       EVENT_TYPES.sessionStatusRunning,
       EVENT_TYPES.modelRequestStart,
+      EVENT_TYPES.eventStart,
       EVENT_TYPES.modelRequestEnd,
       EVENT_TYPES.sessionError,
       EVENT_TYPES.sessionStatusRescheduled,
       EVENT_TYPES.sessionStatusRunning,
       EVENT_TYPES.modelRequestStart,
+      EVENT_TYPES.eventStart,
+      EVENT_TYPES.eventDelta,
       EVENT_TYPES.agentMessage,
       EVENT_TYPES.modelRequestEnd,
       EVENT_TYPES.sessionStatusIdle,
     ])
-    const log = await logOf(store, sessionId)
-    expect(log[3]).toMatchObject({
+    // The failed attempt closes its span with the range of the chunks it announced — there is
+    // no message coming for them — and the retry opens a fresh span with a new message id.
+    expect(raw[4]).toMatchObject({
       is_error: true,
       error: { type: 'model_error' },
       model_usage: { input_tokens: 0, output_tokens: 0 },
+      supersedes: { from_seq: 4, to_seq: 4 },
     })
-    expect(log[4]).toMatchObject({
+    const firstChunks = chunksOf(raw.slice(0, 5))
+    const retryChunks = chunksOf(raw.slice(8))
+    expect(firstChunks).toHaveLength(1)
+    expect(chunksOf(raw).length).toBe(firstChunks.length + retryChunks.length)
+    expect(
+      retryChunks[0]?.type === EVENT_TYPES.eventStart ? retryChunks[0].event.id : undefined,
+    ).not.toBe(
+      firstChunks[0]?.type === EVENT_TYPES.eventStart ? firstChunks[0].event.id : undefined,
+    )
+    expect(raw[5]).toMatchObject({
       type: EVENT_TYPES.sessionError,
       error: {
         type: 'model_rate_limited_error',
@@ -327,9 +569,10 @@ describe('runTurn', () => {
     })
     expect(sleep).toHaveBeenCalledTimes(1)
     expect(calls).toHaveLength(2)
+    await expectClean(store, sessionId)
   })
 
-  it('classifies a 5xx as an overloaded model', async () => {
+  it('classifies a 5xx as an overloaded model, and never stores the partial output', async () => {
     const { store, sessionId } = await newSession([message('Hello')])
     const { factory, calls } = mockModel(
       { text: ['ok'], failAfterText: overloaded() },
@@ -344,13 +587,18 @@ describe('runTurn', () => {
 
     expect(outcome).toEqual({ outcome: 'idle' })
     expect(calls).toHaveLength(2)
-    const log = await logOf(store, sessionId)
-    expect(log[4]).toMatchObject({
+    const raw = await rawLogOf(store, sessionId)
+    expect(raw[6]).toMatchObject({
       type: EVENT_TYPES.sessionError,
       error: { type: 'model_overloaded_error', retry_status: { type: 'retrying' } },
     })
-    // Text streamed before the failure is not stored: the retried request answers in full.
-    expect(log.filter((event) => event.type === EVENT_TYPES.agentMessage)).toHaveLength(1)
+    // Text streamed before the failure is not stored: the retried request answers in full, and
+    // the chunks of the failed attempt are superseded by its span end.
+    const messages = raw.filter((event) => event.type === EVENT_TYPES.agentMessage)
+    expect(messages).toHaveLength(1)
+    expect(textOf(messages[0])).toBe('Recovered')
+    expect(spanEndRange(raw, 0)).toEqual({ from_seq: 4, to_seq: 5 })
+    await expectClean(store, sessionId)
   })
 
   it('gives up after the retries are exhausted', async () => {
@@ -362,36 +610,22 @@ describe('runTurn', () => {
 
     expect(outcome).toEqual({ outcome: 'error' })
     expect(calls).toHaveLength(4)
-    const log = await logOf(store, sessionId)
-    expect(eventTypes(log)).toEqual([
-      EVENT_TYPES.userMessage,
-      EVENT_TYPES.sessionStatusRunning,
-      EVENT_TYPES.modelRequestStart,
-      EVENT_TYPES.modelRequestEnd,
-      EVENT_TYPES.sessionError,
-      EVENT_TYPES.sessionStatusRescheduled,
-      EVENT_TYPES.sessionStatusRunning,
-      EVENT_TYPES.modelRequestStart,
-      EVENT_TYPES.modelRequestEnd,
-      EVENT_TYPES.sessionError,
-      EVENT_TYPES.sessionStatusRescheduled,
-      EVENT_TYPES.sessionStatusRunning,
-      EVENT_TYPES.modelRequestStart,
-      EVENT_TYPES.modelRequestEnd,
-      EVENT_TYPES.sessionError,
-      EVENT_TYPES.sessionStatusRescheduled,
-      EVENT_TYPES.sessionStatusRunning,
-      EVENT_TYPES.modelRequestStart,
-      EVENT_TYPES.modelRequestEnd,
-      EVENT_TYPES.sessionError,
-      EVENT_TYPES.sessionStatusIdle,
-    ])
-    expect(log[19]).toMatchObject({
-      type: EVENT_TYPES.sessionError,
+    const raw = await rawLogOf(store, sessionId)
+    const ends = raw.filter((event) => event.type === EVENT_TYPES.modelRequestEnd)
+    expect(ends).toHaveLength(4)
+    // Every attempt superseded the chunk it announced: no orphaned range is left behind.
+    expect(ends.map((end) => end.supersedes)).toEqual(
+      chunksOf(raw).map((chunk) => ({ from_seq: chunk.seq, to_seq: chunk.seq })),
+    )
+    for (const end of ends) {
+      expect(end).toMatchObject({ is_error: true })
+    }
+    expect(raw.filter((event) => event.type === EVENT_TYPES.sessionError).at(-1)).toMatchObject({
       error: { retry_status: { type: 'exhausted' } },
     })
     expect(sleep).toHaveBeenCalledTimes(3)
     expect(await store.getTurnState(sessionId)).toMatchObject({ state: 'idle' })
+    await expectClean(store, sessionId)
   })
 
   it('ends the turn without retrying a failure that is not retryable', async () => {
@@ -406,18 +640,20 @@ describe('runTurn', () => {
     expect(outcome).toEqual({ outcome: 'error' })
     expect(calls).toHaveLength(1)
     expect(sleep).not.toHaveBeenCalled()
-    expect(eventTypes(await logOf(store, sessionId))).toEqual([
+    const raw = await rawLogOf(store, sessionId)
+    expect(eventTypes(raw)).toEqual([
       EVENT_TYPES.userMessage,
       EVENT_TYPES.sessionStatusRunning,
       EVENT_TYPES.modelRequestStart,
+      EVENT_TYPES.eventStart,
       EVENT_TYPES.modelRequestEnd,
       EVENT_TYPES.sessionError,
       EVENT_TYPES.sessionStatusIdle,
     ])
-    const log = await logOf(store, sessionId)
-    expect(log[4]).toMatchObject({
+    expect(raw[5]).toMatchObject({
       error: { type: 'model_request_failed_error', retry_status: { type: 'terminal' } },
     })
+    await expectClean(store, sessionId)
   })
 
   it('ends the turn when the signal aborts during the backoff', async () => {
@@ -439,15 +675,17 @@ describe('runTurn', () => {
 
     expect(outcome).toEqual({ outcome: 'interrupted' })
     expect(calls).toHaveLength(1)
-    expect(eventTypes(await logOf(store, sessionId))).toEqual([
+    expect(eventTypes(await rawLogOf(store, sessionId))).toEqual([
       EVENT_TYPES.userMessage,
       EVENT_TYPES.sessionStatusRunning,
       EVENT_TYPES.modelRequestStart,
+      EVENT_TYPES.eventStart,
       EVENT_TYPES.modelRequestEnd,
       EVENT_TYPES.sessionError,
       EVENT_TYPES.sessionStatusRescheduled,
       EVENT_TYPES.sessionStatusIdle,
     ])
+    await expectClean(store, sessionId)
   })
 
   it('stops at a fenced write and writes nothing more', async () => {
@@ -471,63 +709,118 @@ describe('runTurn', () => {
       }),
     ).rejects.toSatisfy(isFencedError)
 
-    expect(eventTypes(await logOf(store, sessionId))).toEqual([
+    // The chunk the request had announced is where the write stopped: the delta could not be
+    // stored under a lost lease, and nothing was written after it.
+    expect(eventTypes(await rawLogOf(store, sessionId))).toEqual([
       EVENT_TYPES.userMessage,
       EVENT_TYPES.sessionStatusRunning,
       EVENT_TYPES.modelRequestStart,
+      EVENT_TYPES.eventStart,
     ])
   })
 
-  it('closes an inherited span and runs the request again', async () => {
+  it('stops when another owner claimed the events it was about to answer', async () => {
+    // The fencing loss of D9: the claim is the append of the span start, so a rival owner that
+    // takes the message in the moment between this brain's read and its append wins, and the
+    // brain stops where it stands instead of answering something that is not its to answer.
+    /** A store where a rival owner claims the message just before the span start lands. */
+    class RivalStore extends InMemorySessionStore {
+      /** The events the rival takes at the next span-start append. */
+      rivalTargets: EventId[] = []
+
+      override async appendEvents(
+        sessionId: SessionId,
+        events: AppendableEvent[],
+        options?: AppendEventsOptions,
+      ): Promise<StoredEvent[]> {
+        if (this.rivalTargets.length > 0 && events.some(isSpanStart)) {
+          await super.markProcessed(sessionId, this.rivalTargets)
+          this.rivalTargets = []
+        }
+        return super.appendEvents(sessionId, events, options)
+      }
+    }
+
+    const store = new RivalStore()
+    const agent = await store.createAgent({
+      name: 'Summarizer',
+      model: { id: TEST_MODEL_ID },
+      system: 'You are a concise technical assistant.',
+    })
+    const session = await store.createSession(agent.id, { initial_events: [message('Hello')] })
+    const [pending] = await store.getPendingUserEvents(session.id)
+    store.rivalTargets = [pending?.id ?? newEventId()]
+    const { factory, calls } = mockModel({ text: ['unused'] })
+
+    await expect(runTurn(session.id, { store, model: factory })).rejects.toSatisfy(
+      isClaimConflictError,
+    )
+
+    expect(calls).toHaveLength(0)
+    expect(eventTypes(await rawLogOf(store, session.id))).toEqual([
+      EVENT_TYPES.userMessage,
+      EVENT_TYPES.sessionStatusRunning,
+    ])
+    expect(await store.getPendingUserEvents(session.id)).toEqual([])
+  })
+
+  it('closes an inherited span and runs the request again, superseding its chunks', async () => {
     const { store, sessionId } = await newSession()
+    const replyId = newEventId()
     const stored = await store.appendEvents(sessionId, [
       makeUserMessage('Hello', { processed_at: null }),
       makeStatusRunning(),
-      makeModelRequestStart(),
+      spanStart([], TEST_MODEL_ID),
+      eventStart(replyId),
+      eventDelta(replyId, 'half a rep'),
+      eventDelta(replyId, 'ly'),
     ])
-    const interrupted = spanStartOf(stored[2])
+    const crashed = spanStartOf(stored[2])
     const { factory, calls } = mockModel({ text: ['Recovered'] })
 
     const outcome = await runTurn(sessionId, { store, model: factory })
 
     expect(outcome).toEqual({ outcome: 'idle' })
     expect(calls).toHaveLength(1)
-    expect(eventTypes(await logOf(store, sessionId))).toEqual([
-      EVENT_TYPES.userMessage,
-      EVENT_TYPES.sessionStatusRunning,
-      EVENT_TYPES.modelRequestStart,
-      EVENT_TYPES.modelRequestEnd,
-      EVENT_TYPES.modelRequestStart,
-      EVENT_TYPES.agentMessage,
-      EVENT_TYPES.modelRequestEnd,
-      EVENT_TYPES.sessionStatusIdle,
-    ])
-    const log = await logOf(store, sessionId)
-    expect(log[2]?.id).toBe(interrupted.id)
-    expect(log[3]).toMatchObject({
-      model_request_start_id: interrupted.id,
-      is_error: true,
-      error: { type: 'brain_lost' },
-      model_usage: { input_tokens: 0, output_tokens: 0 },
+    const raw = await rawLogOf(store, sessionId)
+    // The dead request's chunks are superseded by the span end that closes it, so replay never
+    // shows a reply nobody stored.
+    const lostEnd = raw.find(
+      (event) => event.type === EVENT_TYPES.modelRequestEnd && event.error?.type === 'brain_lost',
+    )
+    expect(lostEnd).toMatchObject({
+      model_request_start_id: crashed.id,
+      supersedes: { from_seq: stored[3]?.seq, to_seq: stored[5]?.seq },
     })
+    // The re-run uses a new message id and its own chunks.
+    const retryStart = raw.filter((event) => event.type === EVENT_TYPES.eventStart).at(-1)
+    expect(retryStart?.type === EVENT_TYPES.eventStart ? retryStart.event.id : undefined).not.toBe(
+      replyId,
+    )
+    const replayed = await logOf(store, sessionId)
+    expect(chunksOf(replayed)).toEqual([])
+    expect(replayed.filter((event) => event.type === EVENT_TYPES.agentMessage)).toHaveLength(1)
+    await expectClean(store, sessionId)
   })
 
   it('does not repeat a reply the log already holds', async () => {
     const { store, sessionId } = await newSession()
+    const [queued] = await store.appendEvents(sessionId, [makeUserMessage('Hello')])
     const stored = await store.appendEvents(sessionId, [
-      makeUserMessage('Hello', { processed_at: '2026-03-15T10:00:00.000Z' }),
       makeStatusRunning(),
-      makeModelRequestStart(),
+      // The claim this turn inherited: the message is the dead brain's already, and so is the
+      // reply below — this brain must not ask for a second one.
+      spanStart([queued?.id ?? newEventId()], TEST_MODEL_ID),
       { type: EVENT_TYPES.agentMessage, content: [{ type: 'text', text: 'Hi there' }] },
     ])
-    const start = spanStartOf(stored[2])
+    const start = spanStartOf(stored[1])
     const { factory, calls } = mockModel({ text: ['a second reply'] })
 
     const outcome = await runTurn(sessionId, { store, model: factory })
 
     expect(outcome).toEqual({ outcome: 'idle' })
     expect(calls).toHaveLength(0)
-    expect(eventTypes(await logOf(store, sessionId))).toEqual([
+    expect(eventTypes(await rawLogOf(store, sessionId))).toEqual([
       EVENT_TYPES.userMessage,
       EVENT_TYPES.sessionStatusRunning,
       EVENT_TYPES.modelRequestStart,
@@ -535,7 +828,7 @@ describe('runTurn', () => {
       EVENT_TYPES.modelRequestEnd,
       EVENT_TYPES.sessionStatusIdle,
     ])
-    const log = await logOf(store, sessionId)
+    const log = await rawLogOf(store, sessionId)
     expect(log[4]).toMatchObject({
       model_request_start_id: start.id,
       is_error: true,
@@ -545,12 +838,12 @@ describe('runTurn', () => {
 
   it('ends a turn whose reply was stored before the brain died', async () => {
     const { store, sessionId } = await newSession()
+    const [queued] = await store.appendEvents(sessionId, [makeUserMessage('Hello')])
     const stored = await store.appendEvents(sessionId, [
-      makeUserMessage('Hello', { processed_at: '2026-03-15T10:00:00.000Z' }),
       makeStatusRunning(),
-      makeModelRequestStart(),
+      spanStart([queued?.id ?? newEventId()], TEST_MODEL_ID),
     ])
-    const start = spanStartOf(stored[2])
+    const start = spanStartOf(stored[1])
     await store.appendEvents(sessionId, [
       { type: EVENT_TYPES.agentMessage, content: [{ type: 'text', text: 'Hi there' }] },
       makeModelRequestEnd(start),
@@ -563,7 +856,7 @@ describe('runTurn', () => {
     // asking the model the same question again.
     expect(outcome).toEqual({ outcome: 'idle' })
     expect(calls).toHaveLength(0)
-    expect(eventTypes(await logOf(store, sessionId))).toEqual([
+    expect(eventTypes(await rawLogOf(store, sessionId))).toEqual([
       EVENT_TYPES.userMessage,
       EVENT_TYPES.sessionStatusRunning,
       EVENT_TYPES.modelRequestStart,
@@ -571,7 +864,7 @@ describe('runTurn', () => {
       EVENT_TYPES.modelRequestEnd,
       EVENT_TYPES.sessionStatusIdle,
     ])
-    expect((await logOf(store, sessionId))[0]?.id).toBe(stored[0]?.id)
+    expect((await rawLogOf(store, sessionId))[0]?.id).toBe(queued?.id)
   })
 
   it('resumes a turn that was rescheduled', async () => {
@@ -635,15 +928,20 @@ describe('runTurn', () => {
       EVENT_TYPES.modelRequestEnd,
       EVENT_TYPES.sessionStatusIdle,
     ])
-    expect((await logOf(store, sessionId))[0]?.processed_at).not.toBeNull()
+    expect((await rawLogOf(store, sessionId))[0]?.processed_at).not.toBeNull()
+    await expectClean(store, sessionId)
   })
 
   it('runs a request for a claimed message an unfinished turn never answered', async () => {
     const { store, sessionId } = await newSession()
-    // The crash window between claiming the message and opening a span: nothing is in flight,
-    // and the message is the brain's already.
+    // The crash window between claiming the message and answering it: the claim is in the log,
+    // nothing is in flight, and the message is the brain's already.
+    const [queued] = await store.appendEvents(sessionId, [makeUserMessage('Hello')])
+    const [claim] = await store.appendEvents(sessionId, [
+      spanStart([queued?.id ?? newEventId()], TEST_MODEL_ID),
+    ])
     await store.appendEvents(sessionId, [
-      makeUserMessage('Hello', { processed_at: '2026-03-15T10:00:00.000Z' }),
+      makeModelRequestEnd(spanStartOf(claim)),
       makeStatusRunning(),
     ])
     const { factory, calls } = mockModel({ text: ['Recovered'] })
@@ -652,45 +950,78 @@ describe('runTurn', () => {
 
     expect(outcome).toEqual({ outcome: 'idle' })
     expect(calls).toHaveLength(1)
-    expect(eventTypes(await logOf(store, sessionId))).toEqual([
+    const raw = await rawLogOf(store, sessionId)
+    expect(eventTypes(raw)).toEqual([
       EVENT_TYPES.userMessage,
+      // The inherited claim, closed before the crash.
+      EVENT_TYPES.modelRequestStart,
+      EVENT_TYPES.modelRequestEnd,
       EVENT_TYPES.sessionStatusRunning,
       EVENT_TYPES.modelRequestStart,
+      EVENT_TYPES.eventStart,
+      EVENT_TYPES.eventDelta,
       EVENT_TYPES.agentMessage,
       EVENT_TYPES.modelRequestEnd,
       EVENT_TYPES.sessionStatusIdle,
     ])
+    // There is nothing left to claim — the message was claimed before the crash — so the new
+    // request consumes nothing and answers from the log it has.
+    expect(raw[4]).toMatchObject({ consumes: [], model: TEST_MODEL_ID })
+    await expectClean(store, sessionId)
   })
 
   it('refuses a session that does not exist', async () => {
     const { store } = await newSession()
     const { factory, calls } = mockModel({ text: ['unused'] })
 
-    await expect(runTurn(newSessionId(), { store, model: factory })).rejects.toBeInstanceOf(
-      SessionNotFoundError,
-    )
+    await expect(runTurn(newSessionId(), { store, model: factory })).rejects.toMatchObject({
+      name: 'SessionNotFoundError',
+    })
     expect(calls).toHaveLength(0)
   })
 
-  it('carries the fence on every write it makes', async () => {
-    const { store, sessionId } = await newSession([message('Hello')])
+  it('carries the fence on every write it makes, and claims without markProcessed', async () => {
+    const { store, sessionId } = await newSession([interrupt(), message('Hello')])
     const partition = partitionOf(sessionId)
     const lease = await store.acquirePartition(partition, 'owner-1', 30_000)
     const { factory } = mockModel({ text: ['Hi there'] })
     const append = vi.spyOn(store, 'appendEvents')
     const markProcessed = vi.spyOn(store, 'markProcessed')
+    const publishEphemeral = vi.spyOn(store, 'publishEphemeral')
     const fence = { partition, epoch: lease!.epoch }
 
     await runTurn(sessionId, { store, model: factory, fence })
 
     expect(append.mock.calls.length).toBeGreaterThan(0)
-    expect(markProcessed.mock.calls.length).toBeGreaterThan(0)
     for (const [, , options] of append.mock.calls) {
       expect(options).toMatchObject({ fence })
     }
-    for (const [, , options] of markProcessed.mock.calls) {
-      expect(options).toMatchObject({ fence })
-    }
+    // The D9 rule, asserted: a claim is an append, and nothing rewrites the log.
+    expect(markProcessed).not.toHaveBeenCalled()
+    expect(publishEphemeral).not.toHaveBeenCalled()
+  })
+
+  it('never calls markProcessed or publishEphemeral', async () => {
+    const { store, sessionId } = await newSession([message('Hello')])
+    const markProcessed = vi.spyOn(store, 'markProcessed')
+    const publishEphemeral = vi.spyOn(store, 'publishEphemeral')
+    const { factory } = mockModel(
+      { text: ['steer me'], onChunk: async () => {} },
+      { text: ['the second reply'] },
+    )
+
+    await runTurn(sessionId, { store, model: factory })
+    expect(markProcessed).not.toHaveBeenCalled()
+    expect(publishEphemeral).not.toHaveBeenCalled()
+
+    // The interrupt path too, where the old brain marked the interrupt itself.
+    const interrupted = await newSession([interrupt()])
+    const interruptMark = vi.spyOn(interrupted.store, 'markProcessed')
+    await runTurn(interrupted.sessionId, {
+      store: interrupted.store,
+      model: mockModel({ text: ['unused'] }).factory,
+    })
+    expect(interruptMark).not.toHaveBeenCalled()
   })
 
   it('streams the context the strategy builds', async () => {
@@ -713,8 +1044,8 @@ describe('runTurn', () => {
     })
 
     expect(readPrompt(calls[0]!)).toEqual([{ role: 'user', text: 'messages: 1' }])
-    const log = await logOf(store, sessionId)
-    expect(log[4]).toMatchObject({
+    const log = await rawLogOf(store, sessionId)
+    expect(log.find((event) => event.type === EVENT_TYPES.modelRequestEnd)).toMatchObject({
       model_usage: {
         input_tokens: 7,
         output_tokens: 3,
@@ -738,7 +1069,7 @@ describe('runTurn', () => {
     expect(outcome).toEqual({ outcome: 'error' })
     expect(calls).toHaveLength(2)
     expect(sleep).toHaveBeenCalledTimes(1)
-    const log = await logOf(store, sessionId)
+    const log = await rawLogOf(store, sessionId)
     expect((log[log.length - 1] as StoredEvent).type).toBe(EVENT_TYPES.sessionStatusIdle)
   })
 })
