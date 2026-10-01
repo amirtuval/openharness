@@ -5,8 +5,11 @@ import { pathToFileURL } from 'node:url'
 
 import { App, type ExitPayload } from './app'
 import { parseArgs, type ChatOptions } from './args'
+import { openBrowser } from './browser'
+import { runLogin, runLogout, runWhoami, type AuthIo } from './commands/auth'
 import { runAgents, runSessions } from './commands/list'
 import { resolveConfig, type ResolvedConfig } from './config'
+import { openCredentials, type CredentialStore } from './credentials'
 import { createDevClient, FAKE_BANNER, isFakeMode } from './dev/fake'
 import { describeError, type ErrorContext } from './errors'
 import { HELP_TEXT } from './help'
@@ -20,7 +23,7 @@ export const PACKAGE_NAME = '@openharness/cli'
 export { App } from './app'
 export type { AppProps, ExitPayload } from './app'
 export { parseArgs } from './args'
-export type { ChatOptions, CliCommand, GlobalOptions, ParseOutcome } from './args'
+export type { ChatOptions, CliCommand, GlobalOptions, LoginOptions, ParseOutcome } from './args'
 export { createChatSession } from './chat/session'
 export type { ChatSession, ChatViewState, Notice } from './chat/session'
 export { resolveConfig } from './config'
@@ -43,10 +46,14 @@ export interface RunOptions {
  *
  * The codes, and who returns them:
  *
- * - `0` — the command did what it was asked, including a chat the user ended;
- * - `1` — the server, the config or the network said no;
- * - `2` — the command line itself was wrong, so nothing was attempted;
- * - `130` / `143` — the process was signalled (`SIGINT` outside raw mode, `SIGTERM`).
+ * - `0` — the command did what it was asked, including a chat the user ended and a `logout`
+ *   whose server-side revoke could not be reached (the token is still gone locally);
+ * - `1` — the server, the network or the sign-in state said no: a 401 is the "not signed in
+ *   to <server>. Run `oh login`." case;
+ * - `2` — the command line itself was wrong, so nothing was attempted — or the config or
+ *   credentials file could not be used, and the message names it;
+ * - `130` / `143` — the process was signalled (`SIGINT` outside raw mode, `SIGTERM`), which
+ *   also cancels a running `oh login`.
  *
  * @param argv the arguments after `oh`
  */
@@ -79,12 +86,15 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
     return 0
   }
 
-  const resolved = resolveConfig({
-    flags: { server: command.options.server, apiKey: command.options.apiKey },
-    env,
-  })
+  const resolved = resolveConfig({ flags: { server: command.options.server }, env })
   if (!resolved.ok) {
     err(`oh: ${resolved.error}`)
+    return 2
+  }
+
+  const credentials = openCredentials({ env })
+  if (!credentials.ok) {
+    err(`oh: ${credentials.error}`)
     return 2
   }
 
@@ -95,7 +105,7 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
   }
 
   try {
-    const connected = await connect(config, env)
+    const connected = await connect(config, env, credentials.store)
 
     switch (command.kind) {
       case 'sessions':
@@ -104,6 +114,33 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
         return await runAgents(connected.client, { stdout: out, stderr: err, context })
       case 'chat':
         return await runChat(connected, command.options, context, { stdin, stdout, stderr })
+      case 'login': {
+        // Ctrl+C during the poll is a cancellation, not a crash: abort the poll with the exit
+        // code the signal deserves, and let the handler leave the process alone otherwise.
+        const controller = new AbortController()
+        const stopSignals = installSignals(process, {
+          onInterrupt: () => {
+            controller.abort(130)
+          },
+          onTerminate: () => {
+            controller.abort(143)
+          },
+        })
+        try {
+          return await runLogin({
+            ...authIo(connected, config, credentials.store, out, err, context),
+            noBrowser: command.options.noBrowser,
+            openBrowser: (url) => openBrowser(url, { env }),
+            signal: controller.signal,
+          })
+        } finally {
+          stopSignals()
+        }
+      }
+      case 'logout':
+        return await runLogout(authIo(connected, config, credentials.store, out, err, context))
+      case 'whoami':
+        return await runWhoami(authIo(connected, config, credentials.store, out, err, context))
     }
   } catch (error) {
     report(err, error, context)
@@ -113,19 +150,53 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
 
 /** A client, and what the status line should say about where it came from. */
 interface Connected {
+  /** The client for the selected server, carrying the stored token when there is one. */
   readonly client: Client
+  /** A client carrying `token` (or none): the log-in flow needs both sides of that. */
+  readonly clientFor: (token: string | undefined) => Client
   readonly banner?: string | undefined
 }
 
-/** Build the client the rest of the run uses: the fake in dev mode, the real one otherwise. */
+/**
+ * Build the clients the rest of the run uses: the fake in dev mode, real ones otherwise.
+ *
+ * The real client is built per call and reads the credentials file through the caller: a
+ * stored token is sent as `Authorization: Bearer`, and no token means the request simply has
+ * no session — the server's 401 is what becomes "not signed in".
+ */
 async function connect(
   config: ResolvedConfig,
   env: Record<string, string | undefined>,
+  store: CredentialStore,
 ): Promise<Connected> {
   if (isFakeMode(env)) {
-    return { client: await createDevClient(), banner: FAKE_BANNER }
+    // The fake ignores the token entirely — it answers for its seeded user — and its device
+    // flow is scripted, so `login`, `logout` and `whoami` run against it like against a server.
+    const fake = await createDevClient()
+    return { client: fake, clientFor: () => fake, banner: FAKE_BANNER }
   }
-  return { client: createClient({ baseUrl: config.server }) }
+  const clientFor = (token: string | undefined): Client =>
+    createClient({ baseUrl: config.server, token })
+  return { client: clientFor(store.tokenFor(config.server)), clientFor }
+}
+
+/** The shared half of the three auth commands' inputs. */
+function authIo(
+  connected: Connected,
+  config: ResolvedConfig,
+  store: CredentialStore,
+  stdout: (line: string) => void,
+  stderr: (line: string) => void,
+  context: ErrorContext,
+): AuthIo {
+  return {
+    stdout,
+    stderr,
+    context,
+    server: config.server,
+    store,
+    createApiClient: connected.clientFor,
+  }
 }
 
 /** The streams the chat renders into. */
@@ -237,8 +308,7 @@ function toExitPayload(result: unknown): ExitPayload | undefined {
 
 /** The `--debug` line: the settings that were resolved, and where each came from. */
 function describeConfig(config: ResolvedConfig): string {
-  const key = config.apiKey === undefined ? 'no api key' : `api key from ${config.sources.apiKey}`
-  return `server ${config.server} (${config.sources.server}), ${key}`
+  return `server ${config.server} (${config.sources.server})`
 }
 
 /** Print a failure: the message, the hints worth acting on, and the stack under `--debug`. */

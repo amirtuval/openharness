@@ -1,20 +1,27 @@
-import { ApiError, ResponseValidationError } from '@openharness/client'
+import { ApiError, AuthenticationError, ResponseValidationError } from '@openharness/client'
 import { describe, expect, it } from 'vitest'
 
-import { describeError } from './errors'
+import { describeError, notSignedInMessage } from './errors'
 
 const SERVER = 'http://localhost:3000'
 
 describe('describeError', () => {
-  it('points a 401 at the API key', () => {
-    const report = describeError(
-      new ApiError(401, 'invalid api key', { type: 'authentication_error' }),
-      { server: SERVER },
-    )
+  it('turns a 401 into the not-signed-in line, whichever error carries it', () => {
+    for (const error of [
+      new AuthenticationError('Not signed in.'),
+      new ApiError(401, 'no session', { type: 'authentication_error' }),
+    ]) {
+      const report = describeError(error, { server: SERVER })
 
-    expect(report.message).toContain('401')
-    expect(report.hints.join(' ')).toContain('--api-key')
-    expect(report.hints.join(' ')).toContain('OPENHARNESS_API_KEY')
+      expect(report.message).toBe(`not signed in to ${SERVER}. Run \`oh login\`.`)
+      expect(report.hints).toEqual([])
+    }
+  })
+
+  it('falls back to "the server" when the caller does not know which one', () => {
+    expect(describeError(new AuthenticationError('Not signed in.')).message).toBe(
+      notSignedInMessage(undefined),
+    )
   })
 
   it('points a 404 at the id', () => {

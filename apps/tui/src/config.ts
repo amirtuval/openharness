@@ -8,9 +8,6 @@ export const DEFAULT_SERVER_URL = 'http://localhost:3000'
 /** The environment variable holding the server root. */
 export const ENV_SERVER_URL = 'OPENHARNESS_URL'
 
-/** The environment variable holding the API key. */
-export const ENV_API_KEY = 'OPENHARNESS_API_KEY'
-
 /** Where each setting came from, for `--debug`. */
 export type ConfigSource = 'flag' | 'env' | 'file' | 'default' | 'unset'
 
@@ -18,20 +15,16 @@ export type ConfigSource = 'flag' | 'env' | 'file' | 'default' | 'unset'
 export interface ResolvedConfig {
   /** Server root, without a trailing slash. */
   readonly server: string
-  /** API key, or `undefined` when the server needs no auth. */
-  readonly apiKey: string | undefined
-  /** One line per setting, for `--debug`. */
+  /** Which source the server URL came from, for `--debug`. */
   readonly sources: {
     readonly server: ConfigSource
-    readonly apiKey: ConfigSource
   }
 }
 
 /** Everything {@link resolveConfig} reads, with the seams tests need. */
 export interface ConfigInputs {
-  /** The parsed `--server` / `--api-key` flags. */
-  readonly flags?:
-    { readonly server?: string | undefined; readonly apiKey?: string | undefined } | undefined
+  /** The parsed `--server` flag. */
+  readonly flags?: { readonly server?: string | undefined } | undefined
   /** The process environment; defaults to `process.env`. */
   readonly env?: Record<string, string | undefined> | undefined
   /** Read the config file, or return `undefined` when there is none. */
@@ -46,24 +39,30 @@ export type ConfigOutcome =
   | { readonly ok: false; readonly error: string }
 
 /**
- * Where the config file lives: `$XDG_CONFIG_HOME/openharness/config.json`, falling back to
- * `~/.config/openharness/config.json`.
+ * The openharness directory under the XDG config home: `$XDG_CONFIG_HOME/openharness`,
+ * falling back to `~/.config/openharness`.
  *
  * An `XDG_CONFIG_HOME` that is not absolute is ignored the way the XDG spec asks, so a
- * relative value cannot quietly put the config in the working directory.
+ * relative value cannot quietly put the CLI's files in the working directory.
  */
-export function configFilePath(env: Record<string, string | undefined> = process.env): string {
+export function configDirPath(env: Record<string, string | undefined> = process.env): string {
   const xdg = env['XDG_CONFIG_HOME']?.trim()
   const base = xdg !== undefined && xdg !== '' && isAbsolute(xdg) ? xdg : join(homedir(), '.config')
-  return join(base, 'openharness', 'config.json')
+  return join(base, 'openharness')
+}
+
+/** Where the config file lives: {@link configDirPath} + `config.json`. */
+export function configFilePath(env: Record<string, string | undefined> = process.env): string {
+  return join(configDirPath(env), 'config.json')
 }
 
 /**
- * The precedence, highest first: flags, then `OPENHARNESS_URL` / `OPENHARNESS_API_KEY`, then
- * the config file, then the default `http://localhost:3000`. The API key has no default.
+ * The precedence, highest first: `--server`, then `OPENHARNESS_URL`, then the config file,
+ * then the default `http://localhost:3000`.
  *
  * A missing config file is fine — the CLI runs against a local server out of the box — but a
- * file that exists and cannot be used is an error, reported with its path.
+ * file that exists and cannot be used is an error, reported with its path. The static API
+ * key is gone (epic #65, A8): `oh login` is the only way in.
  */
 export function resolveConfig(inputs: ConfigInputs = {}): ConfigOutcome {
   const env = inputs.env ?? process.env
@@ -78,11 +77,6 @@ export function resolveConfig(inputs: ConfigInputs = {}): ConfigOutcome {
     ['file', file.value.server],
     ['default', DEFAULT_SERVER_URL],
   ])
-  const apiKey = firstDefined([
-    ['flag', inputs.flags?.apiKey],
-    ['env', env[ENV_API_KEY]],
-    ['file', file.value.apiKey],
-  ])
 
   const normalized = normalizeServerUrl(server.value, server.source)
   if (!normalized.ok) return normalized
@@ -91,8 +85,7 @@ export function resolveConfig(inputs: ConfigInputs = {}): ConfigOutcome {
     ok: true,
     config: {
       server: normalized.value,
-      apiKey: apiKey.value,
-      sources: { server: server.source, apiKey: apiKey.source },
+      sources: { server: server.source },
     },
   }
 }
@@ -100,10 +93,9 @@ export function resolveConfig(inputs: ConfigInputs = {}): ConfigOutcome {
 /** The settings the config file may hold. */
 interface FileConfig {
   readonly server?: string | undefined
-  readonly apiKey?: string | undefined
 }
 
-const FILE_KEYS = ['server', 'apiKey'] as const
+const FILE_KEYS = ['server'] as const
 
 type ReadResult =
   { readonly ok: true; readonly value: FileConfig } | { readonly ok: false; readonly error: string }
@@ -158,7 +150,7 @@ function readConfigFile(path: string, read: (path: string) => string | undefined
     }
   }
 
-  const value: { server?: string; apiKey?: string } = {}
+  const value: { server?: string } = {}
   for (const key of FILE_KEYS) {
     const entry = record[key]
     if (entry === undefined) continue

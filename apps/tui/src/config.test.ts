@@ -38,69 +38,63 @@ describe('configFilePath', () => {
 })
 
 describe('resolveConfig', () => {
-  it('defaults to a local server and no key', () => {
+  it('defaults to a local server', () => {
     const config = configOf({ env: {}, readFile: () => undefined })
 
     expect(config.server).toBe(DEFAULT_SERVER_URL)
-    expect(config.apiKey).toBeUndefined()
-    expect(config.sources).toEqual({ server: 'default', apiKey: 'unset' })
+    expect(config.sources).toEqual({ server: 'default' })
   })
 
   it('reads the environment', () => {
     const config = configOf({
-      env: { OPENHARNESS_URL: 'http://env.test', OPENHARNESS_API_KEY: 'oh_env' },
+      env: { OPENHARNESS_URL: 'http://env.test' },
       readFile: () => undefined,
     })
 
     expect(config.server).toBe('http://env.test')
-    expect(config.apiKey).toBe('oh_env')
-    expect(config.sources).toEqual({ server: 'env', apiKey: 'env' })
+    expect(config.sources).toEqual({ server: 'env' })
   })
 
   it('reads the config file', () => {
-    const config = withFile('{"server": "http://file.test", "apiKey": "oh_file"}')
+    const config = withFile('{"server": "http://file.test"}')
 
     expect(config).toMatchObject({
       ok: true,
       config: {
         server: 'http://file.test',
-        apiKey: 'oh_file',
-        sources: { server: 'file', apiKey: 'file' },
+        sources: { server: 'file' },
       },
     })
   })
 
   it('prefers a flag to the environment and the file', () => {
     const config = configOf({
-      flags: { server: 'http://flag.test', apiKey: 'oh_flag' },
-      env: { OPENHARNESS_URL: 'http://env.test', OPENHARNESS_API_KEY: 'oh_env' },
-      readFile: () => '{"server": "http://file.test", "apiKey": "oh_file"}',
+      flags: { server: 'http://flag.test' },
+      env: { OPENHARNESS_URL: 'http://env.test' },
+      readFile: () => '{"server": "http://file.test"}',
     })
 
     expect(config.server).toBe('http://flag.test')
-    expect(config.apiKey).toBe('oh_flag')
-    expect(config.sources).toEqual({ server: 'flag', apiKey: 'flag' })
+    expect(config.sources).toEqual({ server: 'flag' })
   })
 
   it('prefers the environment to the file', () => {
     const config = configOf({
       env: { OPENHARNESS_URL: 'http://env.test' },
-      readFile: () => '{"server": "http://file.test", "apiKey": "oh_file"}',
+      readFile: () => '{"server": "http://file.test"}',
     })
 
     expect(config.server).toBe('http://env.test')
-    expect(config.apiKey).toBe('oh_file')
-    expect(config.sources).toEqual({ server: 'env', apiKey: 'file' })
+    expect(config.sources).toEqual({ server: 'env' })
   })
 
   it('treats an empty environment variable as unset', () => {
     const config = configOf({
-      env: { OPENHARNESS_URL: '  ', OPENHARNESS_API_KEY: '' },
+      env: { OPENHARNESS_URL: '  ' },
       readFile: () => '{"server": "http://file.test"}',
     })
 
     expect(config.server).toBe('http://file.test')
-    expect(config.apiKey).toBeUndefined()
   })
 
   it('drops a trailing slash from the server URL', () => {
@@ -150,6 +144,13 @@ describe('resolveConfig', () => {
     expect(error).toContain("'server'")
   })
 
+  it('rejects the removed apiKey setting, naming it (epic #65, A8)', () => {
+    const error = errorOf({ env: {}, readFile: () => '{"server": "http://x.test", "apiKey": "k"}' })
+
+    expect(error).toContain("'apiKey'")
+    expect(error).toContain('unknown key')
+  })
+
   it('rejects a value of the wrong type', () => {
     expect(errorOf({ env: {}, readFile: () => '{"server": 3000}' })).toContain(
       "'server' must be a string",
@@ -157,7 +158,7 @@ describe('resolveConfig', () => {
   })
 
   it('rejects an empty value', () => {
-    expect(errorOf({ env: {}, readFile: () => '{"apiKey": "  "}' })).toContain("'apiKey' is empty")
+    expect(errorOf({ env: {}, readFile: () => '{"server": "  "}' })).toContain("'server' is empty")
   })
 
   it('reports a config file it cannot read', () => {

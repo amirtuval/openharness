@@ -7,6 +7,9 @@ Usage:
   oh -c                        resume the most recent session
   oh sessions                  list sessions
   oh agents                    list agents
+  oh login                     sign in through the browser (the device flow)
+  oh logout                    end the session and forget the token
+  oh whoami                    print the signed-in user
   oh --version | -v            print the version
   oh --help | -h               print this message
 
@@ -15,16 +18,22 @@ Options:
   -c, --continue               resume the most recent session
       --agent <id|name>        the agent to chat with when several exist
       --server <url>           server root (default http://localhost:3000)
-      --api-key <key>          API key, sent as \`x-api-key\`
+      --no-browser             with \`oh login\`: print the URL and code instead of
+                               opening a browser
       --debug                  show stack traces and the resolved configuration
 
 Environment:
   OPENHARNESS_URL              server root, if --server is not given
-  OPENHARNESS_API_KEY          API key, if --api-key is not given
 
 Config:
   ~/.config/openharness/config.json (or $XDG_CONFIG_HOME/openharness/config.json):
-    { "server": "http://localhost:3000", "apiKey": "oh_..." }
+    { "server": "http://localhost:3000" }
+
+Signing in:
+  oh login runs the device flow: it prints the sign-in URL and a code, opens the
+  browser at that URL, and polls until you approve. The session token is stored per
+  server in ~/.config/openharness/credentials.json (0600) and sent as
+  \`Authorization: Bearer\` by every other command. oh logout revokes it.
 
 In the chat:
   Enter                        send (works while the agent is replying — steering)
