@@ -225,7 +225,8 @@ await client.auth.signOut() // revokes the session the client's token stands for
   `expired_token`, `access_denied` and the rest. A transport failure or a non-device status
   throws an `ApiError` — the caller decides whether to retry.
 - The success body's `access_token` (a session token) is what `pollDeviceLogin` resolves
-  with; `signOut` is `POST /api/auth/sign-out` with the bearer token.
+  with; `signOut` is `POST /api/auth/sign-out` with the bearer token and an empty JSON body
+  (Better Auth's endpoints require a JSON content type, and a bodyless POST has none).
 
 ### Unknown events
 

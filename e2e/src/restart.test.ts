@@ -47,7 +47,7 @@ async function newSession(client: Client): Promise<Session> {
 describe('a server that dies mid-turn', () => {
   it('is recovered by the next process: brain_lost, a re-run, then idle', async () => {
     const first = await harness.server()
-    const client = harness.client(first)
+    const client = await harness.client(first)
     const session = await newSession(client)
     const prompt = `${MOCK_SLOW_MARKER} survive a SIGKILL`
 
@@ -67,7 +67,7 @@ describe('a server that dies mid-turn', () => {
     // A new process against the same database. Nothing tells it what happened; it finds the
     // open turn in the log on startup.
     const second = await harness.server()
-    const resumed = harness.client(second)
+    const resumed = await harness.client(second)
     expect(second.port).not.toBe(first.port)
 
     // The re-run streams the slow reply again, so this waits out a whole turn — the recovery

@@ -1,11 +1,15 @@
 # @openharness/server
 
 The runnable openharness server: the HTTP API the protocol describes, the SSE stream over a
-session's event log, and the scheduler that runs brains against it. Hono app served by
-`@hono/node-server`; the store is Postgres when there is a `DATABASE_URL` and in-memory when
-there is not.
+session's event log, sign-in (Better Auth), and the scheduler that runs brains against it.
+Hono app served by `@hono/node-server`; the store is Postgres when there is a `DATABASE_URL`
+and in-memory when there is not.
 
 ```bash
+# Three variables are required: see "Authentication" below and `.env.example` at the root.
+BETTER_AUTH_SECRET=$(openssl rand -base64 32) \
+OPENHARNESS_SECRETS_KEY=$(openssl rand -base64 32) \
+BETTER_AUTH_URL=http://localhost:3000 OPENHARNESS_DEV_LOGIN=1 \
 DATABASE_URL=postgres://localhost/openharness yarn dev   # http://localhost:3000
 ```
 
@@ -36,7 +40,9 @@ protocol's schemas, so the shapes are not repeated here — see
 
 | method | path                                      | body / query                             | answers                                             |
 | ------ | ----------------------------------------- | ---------------------------------------- | --------------------------------------------------- |
-| `GET`  | `/health`                                 | —                                        | `{ status: 'ok' }`; never needs a key               |
+| `GET`  | `/health`                                 | —                                        | `{ status: 'ok' }`; never needs a session           |
+| `GET`  | `/v1/auth-config`                         | —                                        | `{ providers, dev_login }`; never needs a session   |
+| `GET`  | `/v1/me`                                  | —                                        | the signed-in `User`                                |
 | `POST` | `/v1/agents`                              | `CreateAgentRequestSchema`               | 201, the `Agent`                                    |
 | `GET`  | `/v1/agents`                              | `ListAgentsQuerySchema`                  | `{ data, next_page }`                               |
 | `GET`  | `/v1/agents/{agent_id}`                   | —                                        | the `Agent`, or 404                                 |
@@ -48,9 +54,14 @@ protocol's schemas, so the shapes are not repeated here — see
 | `GET`  | `/v1/sessions/{session_id}/events`        | `ListEventsQuerySchema`                  | `{ data, next_page }`                               |
 | `GET`  | `/v1/sessions/{session_id}/events/stream` | `StreamEventsQuerySchema`                | the SSE stream; 404 for an unknown session          |
 | `POST` | `/v1/sessions/{session_id}/ai-sdk/chat`   | the AI SDK `useChat` request (see below) | an AI SDK UI message stream — an **extension**      |
+| `PUT`  | `/v1/provider-credentials/{provider}`     | `PutProviderCredentialRequestSchema`     | the credential's metadata; 422 if the key is refused |
+| `GET`  | `/v1/provider-credentials`                | —                                        | `{ data: ProviderCredential[] }`, metadata only      |
+| `DELETE` | `/v1/provider-credentials/{provider}`   | —                                        | 204; never an error for one that is not there        |
 
-There is no `GET /v1/models`: it is out of scope for v1 (the epic tracks it separately).
-Anything else answers 404 in the protocol's error envelope.
+Every `/v1` route except `auth-config` requires a session (see "Authentication"), and every
+resource is scoped to its owner. `/api/auth/*` is Better Auth's own surface: sign-in, sign-out,
+the device flow, `/api/auth/error`. There is no `GET /v1/models`: it is out of scope for v1
+(the epic tracks it separately). Anything else answers 404 in the protocol's error envelope.
 
 `POST …/events` is the only way user input enters the system, and it does two things in a
 fixed order: it **stores** the events (`processed_at: null`, which is what makes them queued)
@@ -69,7 +80,14 @@ a `user.interrupt` signals `interrupt` — exactly what the same events would do
 | ------------------------------------- | ------------------------------ | ------------------------------------------------------------------ |
 | `DATABASE_URL`                        | —                              | run on Postgres, migrating on boot; unset means in-memory          |
 | `SCHEDULER`                           | `local`                        | `local`, or `postgres` for the multi-instance scheduler            |
-| `OPENHARNESS_API_KEY`                 | —                              | require `x-api-key` on `/v1/*`; unset leaves the API open          |
+| `BETTER_AUTH_SECRET`                  | — (**required**)               | signs sessions and cookies                                         |
+| `BETTER_AUTH_URL`                     | — (**required**)               | the public URL: Better Auth's base, the one trusted origin (CSRF)  |
+| `OPENHARNESS_SECRETS_KEY`             | — (**required**)               | base64 32-byte master key the vault seals credentials with         |
+| `OPENHARNESS_DEV_LOGIN`               | off                            | `1` enables the local dev login; localhost URLs only (A7)          |
+| `GOOGLE_CLIENT_ID`/`_SECRET`          | —                              | enable Google sign-in (both, or neither)                           |
+| `GITHUB_CLIENT_ID`/`_SECRET`          | —                              | enable GitHub sign-in                                              |
+| `MICROSOFT_CLIENT_ID`/`_SECRET`       | —                              | enable Microsoft sign-in                                           |
+| `MICROSOFT_TENANT_ID`                 | `common`                       | the Entra tenant the Microsoft provider authenticates against      |
 | `PORT`                                | `3000`                         | the port to listen on                                              |
 | `OPENHARNESS_TEST_MODEL`              | —                              | `mock` swaps in the deterministic test model                       |
 | `OPENHARNESS_WEB_DIR`                 | —                              | a built web app to serve at `/`                                    |
@@ -84,14 +102,12 @@ a `user.interrupt` signals `interrupt` — exactly what the same events would do
 | `OPENHARNESS_DELTA_RETENTION_MS`      | `3600000`                      | how long superseded chunks are kept before compaction deletes them |
 | `OPENHARNESS_COMPACT_INTERVAL_MS`     | `300000`                       | how often the compaction job runs; `0` disables it                 |
 
-Provider credentials (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) are not read here, and the
-server keeps none of its own (epic #65, A5): every model request is made with a credential the
-brain's `resolveCredential` answered. `resolveModelFactory` hands the router kind
-`noStoredCredential`, which answers "none" — so a router turn ends with the brain's
-`missing_provider_credential` `session.error` rather than falling back to the environment —
-until #61 replaces it with the session owner's stored credential. The mock kind resolves a
-placeholder the deterministic model ignores. #61 completes this; the wiring is already here so
-this package compiles and its tests run unchanged.
+Provider credentials (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) are **not read at all**
+(epic #65, A5), and the server keeps none of its own: every model request is made with the
+credential the session-bound resolver answered — the owner's stored, sealed key, opened per
+request (`credentials.ts`). A session whose owner has no key for the model's provider ends the
+turn with the brain's `missing_provider_credential` `session.error`; the environment is never
+a fallback. The mock kind resolves a placeholder the deterministic model ignores.
 
 A variable that is set but empty counts as unset. A value that cannot be what it claims — a
 `PORT` that is not a port, an `OPENHARNESS_TEST_MODEL` that is not `mock` — fails the boot
@@ -101,6 +117,52 @@ with a message naming the variable, rather than coming up in a state nobody aske
 two instances starting together are safe) and hands the pool to `createPostgresSessionStore`.
 Without it, the server runs on `InMemorySessionStore` and says so loudly at startup: that mode
 is for local development and quick trials, and nothing survives a restart.
+
+## Authentication and ownership (epic #65)
+
+**Better Auth** (1.7.7) is mounted at `/api/auth/*` in this app (`app.ts`), configured in
+`auth.ts` and run against the same database the log uses — the Kysely handle `main.ts` already
+built for the migrations, or Better Auth's in-memory adapter when there is no `DATABASE_URL`.
+Its own migrator is never called: the tables (`user`, `session`, `account`, `verification`,
+`deviceCode`) are created by `@openharness/session`'s migrations 0011–0013, generated from
+exactly this plugin list — core + `google`/`github`/`microsoft` + `device-authorization` +
+`bearer` — so the configuration and the schema have to keep matching; a Postgres test asserts
+Better Auth's own schema check passes on the migrated database.
+
+- **Providers** are enabled only when their `*_CLIENT_ID`/`*_SECRET` are set; `/v1/auth-config`
+  reports the list (the interface agreed with the web app, #62).
+- **Identity is the verified email** (A3), enforced by `auth-profile.ts`: Google's
+  `email_verified`, GitHub's *primary verified* address, and Microsoft's claims (personal
+  accounts, `xms_edov`, the verified lists) — the nOAuth guard. A provider that cannot prove
+  the address refuses the sign-in (`email_not_verified`, 403) before a user or a link is
+  created; `databaseHooks.user.create.before` (`refuseUnverifiedUser`) is the last gate, and
+  implicit linking follows the same email with no trusted-provider shortcut.
+- **Sessions** are opaque tokens in the database: 7 days, sliding at most once a day, and
+  **fresh** (created within a day) for credential writes. The device-authorization plugin
+  accepts the CLI's `openharness-cli` client id and approves at `<BETTER_AUTH_URL>/device`;
+  its codes live ten minutes. Rate limiting is on, with counters owned by each instance.
+- **`/v1` needs a session** (cookie or bearer), else 401: `auth-guard.ts` resolves it through
+  Better Auth and puts `user`/`session` on the request. A cookie-authenticated **write** also
+  needs an `Origin` of `BETTER_AUTH_URL`'s origin — CSRF, because a browser attaches cookies to
+  any page's request; bearer requests are exempt, since a page cannot set that header
+  cross-origin. `/v1/auth-config` is registered ahead of the guard; `/api/auth/*` is Better
+  Auth's own.
+- **Ownership** (A4): routes create with `c.get('user').id` and read through the store's
+  **required** owner scope (`getAgent(…, { ownerId })`, `listAgents({ ownerId })`, …); another
+  user's resource is a 404. The brain and the scheduler use the explicitly unscoped methods.
+  `apps/server/src/isolation.test.ts` sweeps every `/v1` route with a second user.
+- **Provider credentials** (A5) live in `credentials.ts`: a `PUT` validates the key with one
+  cheap provider call (`provider-validation.ts`, injectable so tests never hit a network),
+  seals `{ type: 'api_key', api_key }` with `@openharness/vault` under AAD `userId|provider`,
+  and stores it through `CredentialStore`. `createSessionCredentialResolver` — the resolver the
+  runner hands the brain, bound to the session — looks up the session's owner (unscoped read:
+  a turn acts for a session), opens the sealed row for the one request, and answers the
+  brain's `(provider) => …` question. Nothing caches a plaintext; nothing echoes one.
+- **Dev login** (A7): `OPENHARNESS_DEV_LOGIN=1` seeds `dev@localhost` / `dev`
+  (`DEV_LOGIN_EMAIL`). Better Auth's email validation refuses a dotless domain, so the row is
+  stored as `dev@localhost.localdomain` and a dev-login-only shim (`rewriteDevLoginRequest`)
+  maps the documented spelling onto it; sign-up stays disabled, so those are the only password
+  credentials that exist. The boot refuses the flag unless `BETTER_AUTH_URL` is localhost.
 
 ## Errors
 
@@ -112,7 +174,9 @@ the status `API_ERROR_STATUS_BY_TYPE` gives that type — and every response car
 | ------------------------------------------------------ | ----------------------- | ------ |
 | a body, query or path id that does not match a schema  | `invalid_request_error` | 400    |
 | a store cursor that is valid but not for this endpoint | `invalid_request_error` | 400    |
-| a missing or wrong `x-api-key`                         | `authentication_error`  | 401    |
+| no session, or an invalid, expired or revoked one      | `authentication_error`  | 401    |
+| a cookie-authenticated write from an untrusted origin  | `permission_error`      | 403    |
+| a provider key the provider refused on save (A5)       | `invalid_provider_credential` | 422 |
 | an id that names no agent or session                   | `not_found_error`       | 404    |
 | a route that does not exist                            | `not_found_error`       | 404    |
 | anything else                                          | `api_error`             | 500    |
@@ -320,9 +384,10 @@ the exact numbers a `span.model_request_end` carries. The retry marker counts at
 prompt, which is what lets it fail once and succeed on the retry inside one turn.
 
 The mock needs no credential and ignores whatever it is handed, but the brain asks for one
-before every request, so `resolveModelFactory` pairs the mock factory with a placeholder
-resolver — without it the mock's turns would end with `missing_provider_credential` like any
-other credential-less turn.
+before every request, so the mock path runs with `resolveMockCredential`, which answers a
+placeholder for every session — without it the mock's turns would end with
+`missing_provider_credential` like any other credential-less turn. The router path gets the
+real session-bound resolver (`createSessionCredentialResolver`) instead.
 
 The startup log says which model the process is running with, and the in-memory store warns
 just as loudly: a server quietly answering with fixed text would be a bad surprise.
@@ -377,7 +442,7 @@ drain.
 
 | `@openharness/server`                                       | what it is                                                                      |
 | ----------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| `createApp(options)`                                        | the Hono app: routes, auth, errors, static assets — against any store/scheduler |
+| `createApp(options)`                                        | the Hono app: routes, auth, errors, static assets — against any store/scheduler/auth |
 | `startServer(options)`                                      | store, migrations, model, scheduler, listener and a `shutdown()`                |
 | `main(env, options)`                                        | `startServer` from the environment, plus the signal handlers                    |
 | `DeltaCompactor`                                            | the periodic compaction of superseded chunks (D9)                               |
@@ -386,6 +451,15 @@ drain.
 | `PostgresPartitionScheduler`                                | the multi-instance `SessionScheduler`: partition leases, epochs, recovery (#11) |
 | `PassQueue`                                                 | the pass queue and concurrency limit both schedulers share                      |
 | `SessionRunner`                                             | the per-session turn loop, reusable: what both schedulers run passes with       |
+| `createAuth(config, database, logger)`                      | Better Auth configured for this server (A1/A2/A3/A7), plus `Auth`, `AuthConfig` |
+| `createSessionCredentialResolver(deps)`                     | the session owner's sealed key, opened per model request (A5)                   |
+| `sealApiKey` / `openApiKey` / `credentialAad` / `credentialUpsert` | the credential sealing helpers (A5)                                      |
+| `createAuthGuard(options)`                                  | the `/v1` session + CSRF middleware (A2)                                        |
+| `validateProviderApiKey`, `VALIDATABLE_PROVIDERS`           | the one cheap provider call a saved key is checked with                         |
+| `DEV_LOGIN_EMAIL`, `DEV_LOGIN_PASSWORD`, `DEV_LOGIN_STORED_EMAIL` | the documented dev user (A7)                                              |
+| `OPENHARNESS_CLI_CLIENT_ID`, `DEVICE_CODE_EXPIRES_IN`       | the device flow's client id and code lifetime (A6)                              |
+| `SOCIAL_PROVIDERS`, `providerOptions`, `microsoftEmailVerified`, `githubVerifiedPrimaryEmail`, `googleEmailVerified` | the A3 identity rules                    |
+| `createDevLoginUser`, `rewriteDevLoginRequest`, `refuseUnverifiedUser` | the dev-login seeding and shim, and the verified-email hook         |
 | `createMockModelFactory()`                                  | the deterministic test model, for a host that wires its own                     |
 | `defaultInstanceId()`                                       | hostname + pid + random suffix: the id a server leases partitions under         |
 | `readServerConfig(env)`, `ServerConfig`, `ENV_VARS`         | the environment, parsed                                                         |
@@ -398,10 +472,15 @@ drain.
 ```
 src/
   index.ts              the barrel; `node dist/index.js` starts the server
-  main.ts               env → store (migrations) → model and credentials → scheduler → listener → shutdown
-  app.ts                createApp: middleware, routes, error mapping, static fallback
+  main.ts               env → store (migrations) → auth → credentials → model → scheduler → listener → shutdown
+  app.ts                createApp: middleware, the /api/auth mount, routes, error mapping, static fallback
+  auth.ts               createAuth: Better Auth for this server (providers, plugins, sessions, dev login)
+  auth-profile.ts       the A3 identity rules, and the provider options that enforce them
+  auth-guard.ts         the /v1 session + CSRF middleware
+  credentials.ts        sealing, opening and the session-bound credential resolver (A5)
+  provider-validation.ts the one cheap provider call a saved key is checked with
   config.ts             the environment, parsed and checked
-  model.ts              which model factory and credential resolver the process runs (router, or the mock)
+  model.ts              which model factory the process runs (the router, or the mock)
   mock-model.ts         the deterministic test model and its markers
   runner.ts             SessionRunner: one turn per session, re-run while there is work
   compaction.ts         DeltaCompactor: the periodic deletion of superseded chunks (D9)
@@ -415,7 +494,7 @@ src/
   http/
     errors.ts           HttpError and the protocol's error envelope
     request.ts          body/query/path reading, through the protocol's schemas
-  routes/               agents.ts, sessions.ts, events.ts, ai-sdk.ts
+  routes/               agents.ts, sessions.ts, events.ts, ai-sdk.ts, me.ts, provider-credentials.ts
   test-support/         test-only: scripted model, SSE reader, the server harness, Postgres
 docs/scheduling.md      the multi-instance scheduler: partitions, leases, epochs, recovery
 ```
@@ -428,6 +507,7 @@ Only these (see the table in `docs/architecture.md`):
 - `@openharness/session`
 - `@openharness/brain`
 - `@openharness/hands`
+- `@openharness/vault`
 
 `@openharness/config` is additionally allowed as a **devDependency**.
 
@@ -476,8 +556,20 @@ delete each other's sessions. Packages still run in parallel with each other.
 - `ai-sdk.test.ts` — the adapter through `DefaultChatTransport` and `readUIMessageStream`.
 - `mock-model.test.ts` — the echo, `__slow__`, both failure markers, fixed usage, and that the
   hook cannot activate without the variable.
-- `config.test.ts`, `main.test.ts` — the environment, startup, recovery and shutdown, and
-  `SCHEDULER=postgres` wiring the partitioned scheduler.
+- `auth.test.ts` — the front door: the 401 sweep over every route, cookie and bearer, the
+  CSRf rule, the device flow end to end (code, approve, token, bearer request), sign-out
+  revoking, the dev login and its guard, and the rate limiter refusing the fourth sign-in.
+- `auth-profile.test.ts` — the A3 rules with mocked profiles: Microsoft's nOAuth claims,
+  GitHub's primary-verified email, Google's `email_verified`, and the 403 each refusal is.
+- `isolation.test.ts` — two users, every `/v1` route walked as the second one: 404 for a
+  by-id read, empty lists, no credentials of the other's, `/v1/me` answering the caller.
+- `credentials.test.ts` — the write-only round trip, the 422 a refused key gets, the fresh
+  session rule, the vault's AAD binding, "never in a response or a log", and the env-key test:
+  with `OPENAI_API_KEY` set and no stored credential, a turn ends with
+  `missing_provider_credential` and no request is made.
+- `config.test.ts`, `main.test.ts` — the environment (including the three required variables
+  and the dev-login guard), startup, recovery and shutdown, and `SCHEDULER=postgres` wiring
+  the partitioned scheduler.
 
 ## Rules
 

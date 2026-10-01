@@ -37,7 +37,7 @@ async function newSession(client: Client): Promise<Session> {
 describe('resuming a session stream', () => {
   it('picks up after a disconnect where the client left off, without gaps or duplicates', async () => {
     const server = await harness.server()
-    const client = harness.client(server)
+    const client = await harness.client(server)
     const session = await newSession(client)
 
     // A client that follows the session from the beginning.
@@ -79,7 +79,7 @@ describe('resuming a session stream', () => {
 
   it('keeps one stream alive across a restart of the server it is reading', async () => {
     const first = await harness.server()
-    const client = harness.client(first)
+    const client = await harness.client(first)
     const session = await newSession(client)
     const prompt = `${MOCK_SLOW_MARKER} keep streaming through this`
 
@@ -95,7 +95,7 @@ describe('resuming a session stream', () => {
     // A different process, the same address: the client's own reconnect logic has no idea
     // anything happened, and its `last-event-id` is what makes the new process continue.
     const second = await harness.server({ port: first.port })
-    const resumedClient = harness.client(second)
+    const resumedClient = await harness.client(second)
     await waitForTurnEnd(resumedClient, session.id, { timeoutMs: 45_000 })
 
     const log = await readLog(resumedClient, session.id)

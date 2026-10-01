@@ -36,9 +36,10 @@ import {
   DEFAULT_LEASE_TTL_MS,
   DEFAULT_SWEEP_MS,
 } from '../partition-scheduler'
+import type { ResolveSessionCredential } from '../credentials'
 import type { ProviderCredentialValidator } from '../provider-validation'
 import { LocalScheduler, type SessionScheduler } from '../scheduler'
-import { type AppEnv, silentLogger } from '../types'
+import { type AppEnv, type Logger, silentLogger } from '../types'
 import {
   type ScriptedModel,
   type ScriptedReply,
@@ -151,6 +152,17 @@ export interface TestOptions {
   readonly rateLimit?: boolean
   /** The validator a `PUT /v1/provider-credentials` uses; a fake, by default. */
   readonly validateProviderCredential?: ProviderCredentialValidator
+  /**
+   * Where the app and Better Auth log. Silent by default; a test that asserts on a log line —
+   * or on the absence of one — passes a logger that keeps them.
+   */
+  readonly logger?: Logger
+  /**
+   * The credential resolver the scheduler runs with. Defaults to the placeholder a scripted
+   * model is happy with; a test that exercises the real lookup passes
+   * `createSessionCredentialResolver` over its own store, credentials and vault.
+   */
+  readonly resolveCredential?: ResolveSessionCredential
   /** Social provider credentials, for tests of `/v1/auth-config`. */
   readonly providers?: {
     readonly google?: { clientId: string; clientSecret: string }
@@ -185,6 +197,7 @@ export interface TestOptions {
 
 /** Build an app, a store and a scheduler in-process; nothing listens. */
 export function createTestApp(options: TestOptions = {}): TestContext {
+  const logger = options.logger ?? silentLogger
   const store = options.store ?? new InMemorySessionStore()
   const credentials = options.credentials ?? new InMemoryCredentialStore()
   const vault = options.vault ?? createVault(envKeyProvider(TEST_SECRETS_KEY))
@@ -192,14 +205,14 @@ export function createTestApp(options: TestOptions = {}): TestContext {
   const scheduler = new LocalScheduler({
     store,
     model: model.factory,
-    resolveCredential: resolveTestSessionCredential,
+    resolveCredential: options.resolveCredential ?? resolveTestSessionCredential,
     ...(options.maxConcurrentSessions === undefined
       ? {}
       : { maxConcurrentSessions: options.maxConcurrentSessions }),
     ...(options.drainTimeoutMs === undefined ? {} : { drainTimeoutMs: options.drainTimeoutMs }),
     onError: () => {},
   })
-  const auth = buildTestAuth(options)
+  const auth = buildTestAuth(options, logger)
   const app = createApp({
     store,
     scheduler,
@@ -218,7 +231,7 @@ export function createTestApp(options: TestOptions = {}): TestContext {
     },
     ...(options.webDir === undefined ? {} : { webDir: options.webDir }),
     ...(options.sseKeepaliveMs === undefined ? {} : { sseKeepaliveMs: options.sseKeepaliveMs }),
-    logger: silentLogger,
+    logger,
   })
   return context({
     store,
@@ -271,7 +284,7 @@ export async function startTestServer(options: TestOptions = {}): Promise<TestCo
 const acceptAnyCredential: ProviderCredentialValidator = () => Promise.resolve()
 
 /** The auth a test app runs with: Better Auth's memory adapter, dev login on by default. */
-function buildTestAuth(options: TestOptions): Auth {
+function buildTestAuth(options: TestOptions, logger: Logger): Auth {
   const devLogin = options.devLogin ?? true
   const auth = createAuth(
     {
@@ -297,7 +310,7 @@ function buildTestAuth(options: TestOptions): Auth {
       kind: 'memory',
       db: { user: [], session: [], account: [], verification: [], deviceCode: [] },
     },
-    silentLogger,
+    logger,
   )
   return auth
 }

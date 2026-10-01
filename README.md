@@ -40,21 +40,41 @@ interrupting it, automatic retries, and sessions that survive a server restart. 
 
 ## Quick start
 
-Requirements: **Docker** and a model provider key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …).
+Requirements: **Docker** — nothing else. The stack starts with the development login on, so
+the first run needs no OAuth app and no provider key.
 
 ```bash
-cp .env.example .env      # put your provider key in it
-docker compose up --build # then open http://localhost:3000
+cp .env.example .env
+echo "BETTER_AUTH_SECRET=$(openssl rand -base64 32)"       >> .env
+echo "OPENHARNESS_SECRETS_KEY=$(openssl rand -base64 32)"  >> .env
+docker compose up --build   # then open http://localhost:3000
 ```
 
-1. Open <http://localhost:3000>.
-2. **Agents → New agent**: give it a name and pick a model. An agent is the configuration a
+The two secrets are required — the server refuses to boot without them — and are the only
+setup. `BETTER_AUTH_SECRET` signs sessions; `OPENHARNESS_SECRETS_KEY` is the master key your
+provider credentials are sealed with, so keep it: a lost key means the stored credentials
+cannot be read again.
+
+1. Open <http://localhost:3000> and **sign in as the dev user**: `dev@localhost` / `dev`.
+   (That login exists only while `OPENHARNESS_DEV_LOGIN=1` and the public URL is localhost —
+   the server refuses to start otherwise. It is for local use, e2e and QA.)
+2. **Settings → Model providers**: add a key for the provider you want to use (OpenAI,
+   Anthropic, Google AI Studio, OpenRouter, Groq, DeepSeek, Fireworks). It is validated with
+   one call to the provider, sealed with `OPENHARNESS_SECRETS_KEY`, and never shown again —
+   only its last four characters are. **Each user brings their own key**; the server reads no
+   provider keys from the environment, not even as a fallback.
+3. **Agents → New agent**: give it a name and pick a model. An agent is the configuration a
    session runs with — a model and, if you want one, a system prompt.
-3. **New chat**: pick the agent and send a message. The reply streams in as it is written, and
+4. **New chat**: pick the agent and send a message. The reply streams in as it is written, and
    pressing Enter while it streams steers it instead of waiting for it to finish.
 
-No provider key? Run the server with the deterministic test model instead — it echoes your
-message back, so the whole app works with no key and no network:
+To sign in with Google, GitHub or Microsoft instead, create an OAuth app for the provider,
+register `<BETTER_AUTH_URL>/api/auth/callback/<provider>` as its redirect URI, and set the two
+`<PROVIDER>_CLIENT_ID`/`_SECRET` variables from `.env.example`. Each provider appears on the
+sign-in screen as soon as its credentials are set.
+
+No provider key yet? Run the server with the deterministic test model — it echoes your message
+back, so the whole app works with no key and no network:
 
 ```bash
 OPENHARNESS_TEST_MODEL=mock docker compose up --build
@@ -62,8 +82,9 @@ OPENHARNESS_TEST_MODEL=mock docker compose up --build
 
 `docker compose` starts two containers: `postgres` (a named volume, and the server waits for it
 to be healthy) and `server`, which applies the database migrations on boot, serves the API
-under `/v1` and serves the built web app at `/`. `.env.example` documents every variable the
-compose file passes through (the API key, CORS, the concurrency limit, …).
+under `/v1`, all of Better Auth at `/api/auth/*`, and serves the built web app at `/`.
+`.env.example` documents every variable the compose file passes through (the secrets, the
+providers, CORS, the concurrency limit, …).
 
 ## Running it from source
 

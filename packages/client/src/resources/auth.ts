@@ -219,6 +219,10 @@ export function createAuthResource(transport: Transport): AuthResource {
       return transport.noContent({
         method: 'POST',
         path: `${AUTH_PATH_PREFIX}/sign-out`,
+        // Better Auth's endpoints require a JSON content type, and a bodyless POST has none:
+        // an empty object is the body that says "nothing to send". Sent with the bearer token
+        // it revokes exactly that session (the server answers `{ success: true }`, or 204).
+        body: {},
         signal: options?.signal,
       })
     },

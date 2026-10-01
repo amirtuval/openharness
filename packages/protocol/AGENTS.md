@@ -152,17 +152,15 @@ save. It is the one API error type that does not end in `_error`.
 | `PAGE_CURSOR_PREFIX`, `PageCursorSchema` / `PageCursor`, `SeqCursorSchema` / `SeqCursor`, `KeyCursorSchema` / `KeyCursor`, `PageCursorStringSchema`, `NextPageSchema`                           | opaque pagination cursors: `seq` and keyset `key` positions     |
 | `encodeSeqCursor()`, `encodeKeyCursor()`, `KeyCursorPosition`, `decodePageCursor()`, `tryDecodePageCursor()`, `isPageCursor()`                                                                  | writing a cursor, and reading one back                          |
 | `API_VERSION_PREFIX`, `ANTHROPIC_VERSION_HEADER`, `ANTHROPIC_BETA_HEADER`, `API_VERSION_DATE`, `LAST_EVENT_ID_HEADER`, `REQUEST_ID_HEADER`, `JSON_CONTENT_TYPE`, `SSE_CONTENT_TYPE`             | the wire constants                                              |
-| `API_KEY_HEADER`                                                                                                                                                                                | **deprecated** dead weight (see below); not part of the API     |
+
 | `DEFAULT_PARTITION_COUNT`, `partitionOf()`                                                                                                                                                      | session → partition ownership hash                              |
 | `TimestampSchema`, `MetadataSchema`, `PageLimitSchema`, `ListOrderSchema`, `DEFAULT_PAGE_LIMIT`, `MAX_PAGE_LIMIT`, `METADATA_MAX_PAIRS`, `METADATA_MAX_KEY_LENGTH`, `METADATA_MAX_VALUE_LENGTH` | shared scalars and limits                                       |
 | `PACKAGE_NAME`                                                                                                                                                                                  | the package name; lets a dependent prove the import resolved    |
 
-`API_KEY_HEADER` (`x-api-key`) is **deprecated**. It is v1's static-key header — D5 of epic
-#2, superseded by the auth epic (#65, A8): nothing authenticates with it any more, and the
-authentication headers that do exist (a Better Auth session cookie for the web app, a bearer
-token for the CLI) are the server's business, not this package's. The constant is still
-exported only because today's `apps/server` and `packages/client` import it; it is removed
-once they stop (#60, #61). Nothing new should use it.
+There is **no static-key header** any more: `API_KEY_HEADER` (`x-api-key`) was deleted in
+#61, once its last importers were gone (epic #65, A8). Sign-in is Better Auth's, and the
+headers that carry a session (a cookie for the web app, a bearer token for the CLI) are the
+server's business, not this package's.
 
 ### `@openharness/protocol/fixtures`
 
@@ -196,12 +194,12 @@ part of this protocol, and no schema here names a cookie, a token or an auth hea
   — unwrapped. The web app authenticates with a Better Auth session cookie, the CLI with
   `Authorization: Bearer`; both resolve to this same user (A2). A request that is not signed
   in, or whose session or token is invalid or expired, is a 401 `authentication_error`.
-- **Ownership:** `AgentSchema` and `SessionSchema` carry `owner_id` — read-only, set by the
-  server from the caller; no request carries it, and an unknown `owner_id` in a request body
+- **Ownership:** `AgentSchema` and `SessionSchema` carry a **required** `owner_id` — read-only,
+  set by the server from the caller; no request carries it, and an unknown `owner_id` in a body
   is stripped like any unknown field. Another user's resource is answered **404**, never 403,
-  so its existence does not leak (A4). During the transition (through #61) `owner_id` is
-  optional in the schema, because a pre-auth server serves resources that have none; from
-  #61 on the server always sets it.
+  so its existence does not leak (A4). Required since #61: the server sets it on every agent
+  and session it creates, so a response without one fails these schemas rather than passing as
+  unowned.
 - **Provider credentials:** write-only. `PUT /v1/provider-credentials/{provider}` takes
   `PutProviderCredentialRequestSchema` — a discriminated union on `type` with the single
   member `api_key` today, so `aws`, `gcp_service_account` and `azure` land later as new
@@ -298,7 +296,7 @@ column points at the definition in code; the same list appears in the TSDoc ther
 | `supersedes` on `agent.message` and `span.model_request_end`           | `events/common.ts`, `events/agent.ts`, `events/span.ts` | The `{ from_seq, to_seq }` chunk range the event replaces (D9): replay skips the range and a compaction job deletes it later. No Anthropic equivalent — Anthropic never stores the chunks.                                                                                                                                             |
 | stored `event_start` / `event_delta`                                   | `events/stream.ts`                                      | Anthropic only streams the previews. openharness stores each chunk as a normal event (same `type` strings, plus `id`/`seq`/`processed_at`), which is what makes a reply in flight resumable by `seq`; `supersedes` compacts them away. Since P4 this is the only form.                                                                 |
 | `user` resource and `GET /v1/me`                                       | `resources/user.ts`                                     | Anthropic has no user resource: its API is account-scoped by the key that calls it. openharness has real users (epic #65), and everything a caller does is scoped to the one `/v1/me` names.                                                                                                                                           |
-| `owner_id` on `agent` and `session`                                    | `resources/agent.ts`, `resources/session.ts`            | Every agent and session belongs to exactly one user (A4): nothing is shared, another user's resource is a 404, and no request carries the field. Optional in the schema only while pre-auth data is still served (through #61).                                                                                                        |
+| `owner_id` on `agent` and `session`                                    | `resources/agent.ts`, `resources/session.ts`            | Every agent and session belongs to exactly one user (A4): nothing is shared, another user's resource is a 404, and no request carries the field. **Required** since #61: the server sets it on everything it creates.                                                                                                                    |
 | provider credentials (`pcred_`, the `/v1/provider-credentials` routes) | `resources/provider-credential.ts`, `ids.ts`            | Anthropic holds the model-provider keys; openharness users bring their own (A5). The API is write-only: the secret goes up, metadata comes back, and the credential store's other forms (`aws`, …) become new members of the request union.                                                                                            |
 | `invalid_provider_credential` (422)                                    | `errors.ts`                                             | The one API error type without the `_error` suffix: a credential that failed validation on save (A5).                                                                                                                                                                                                                                  |
 | `missing_provider_credential` session error                            | `events/session.ts`                                     | The owner has no stored credential for the model's provider, so the turn cannot make a model request. Non-retryable — the schema pins `retry_status` to `exhausted` — and the message names the provider.                                                                                                                              |

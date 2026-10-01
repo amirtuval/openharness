@@ -168,6 +168,29 @@ if (SOURCE === null) {
       HELD_REPLY_TEST_TIMEOUT_MS,
     )
 
+    it(
+      'runs Better Auth on exactly the tables the migrations created (A1)',
+      async () => {
+        const fixture = requireFixture(db)
+        const test = await startTestServer({
+          store: fixture.store(),
+          authDatabase: { kind: 'postgres', db: fixtureDb(fixture) },
+        })
+        context = test
+        // Better Auth validates the schema it is configured against on every request; this
+        // asks it directly, so a migration that drifts from what 1.7.7 expects fails here by
+        // name rather than as a strange sign-in failure later.
+        const ctx = (await test.auth.auth.$context) as unknown as {
+          checkSchema?: () => Promise<unknown> | undefined
+        }
+        expect(ctx.checkSchema).toBeTypeOf('function')
+        await expect(ctx.checkSchema?.()).resolves.toBeUndefined()
+        // And a sign-in really works on it — the same dev user the other suites use.
+        await expect(test.signIn()).resolves.toMatchObject({ user: { id: expect.any(String) } })
+      },
+      POSTGRES_STARTUP_TIMEOUT_MS,
+    )
+
     it('compacts superseded chunks away, leaving every reader the same answer', async () => {
       const fixture = requireFixture(db)
       const store = fixture.track(new ObservablePostgresStore({ pool: fixture.pool }))

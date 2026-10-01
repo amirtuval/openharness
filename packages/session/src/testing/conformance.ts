@@ -78,8 +78,9 @@ import { type TestClock, createTestClock } from './clock'
  *   keeps or clears.
  * - **ownership** (epic #65, A4) — the owner a created resource carries, the scoped reads
  *   (a second user gets `null` or an empty list for the first user's agents and sessions,
- *   and `SessionNotFoundError` for their events), and the refusal to create a session from
- *   somebody else's agent.
+ *   and `SessionNotFoundError` for their events), the explicitly named unscoped methods that
+ *   read any owner's session and log (`getSessionUnscoped`, `listEventsUnscoped`), and the
+ *   refusal to create a session from somebody else's agent.
  * - **appending events** — `id`/`seq` assignment, `processed_at` per event kind, and the shape
  *   of what comes back.
  * - **caller-supplied event ids** — an id the caller brings is the stored event's id and keeps

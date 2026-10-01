@@ -22,6 +22,21 @@ import { sleep } from './wait'
  * before this package's tests run.
  */
 
+/**
+ * The signing secret the e2e servers boot with. Fixed, because it has to survive a restart
+ * (the failover suite kills servers and starts new ones mid-scenario) and be shared between
+ * them; not a secret anyone should reuse: this is a test process's environment.
+ */
+export const E2E_BETTER_AUTH_SECRET = 'e2e-better-auth-secret-that-is-long-enough'
+
+/** The vault key the e2e servers seal provider credentials with (32 bytes, base64). */
+export const E2E_SECRETS_KEY = 'b3Blbmhhcm5lc3MtdGVzdC1zZWNyZXRzLWtleS0zMmI='
+
+/** The base URL a server on `port` answers on. */
+export function baseUrlFor(port: number): string {
+  return `http://127.0.0.1:${port}`
+}
+
 /** How long to wait for a server to answer `/health` before giving up on it. */
 const DEFAULT_READY_TIMEOUT_MS = 30_000
 
@@ -43,8 +58,14 @@ export interface ProcessExit {
 export interface ServerProcessOptions {
   /** The Postgres database to run against. The server migrates it on boot. */
   readonly databaseUrl: string
-  /** Require this key on `/v1/*`. */
-  readonly apiKey?: string
+  /**
+   * The public URL Better Auth is based at. `http://127.0.0.1:<port>` by default — the
+   * listener's own address, which is what a browser would see and what the dev login is
+   * allowed on (A7).
+   */
+  readonly publicUrl?: string
+  /** Turn the dev login on (default) and seed its user (A7). */
+  readonly devLogin?: boolean
   /** Serve a built web app from this directory at `/`. */
   readonly webDir?: string
   /** The port to listen on; a free one is picked when this is omitted. */
@@ -143,18 +164,26 @@ function serverEnvironment(options: ServerProcessOptions, port: number): NodeJS.
     // Everything the harness decides itself is dropped first, so a variable left over in the
     // developer's shell cannot change what a test runs. Provider credentials (`ANTHROPIC_…`)
     // are not `OPENHARNESS_*` and pass through, which is what the smoke test needs.
-    if (name.startsWith('OPENHARNESS_') || name === ENV_VARS.databaseUrl || name === 'PORT') {
+    if (
+      name.startsWith('OPENHARNESS_') ||
+      name.startsWith('BETTER_AUTH_') ||
+      name === ENV_VARS.databaseUrl ||
+      name === 'PORT'
+    ) {
       continue
     }
     env[name] = value
   }
   env[ENV_VARS.databaseUrl] = options.databaseUrl
   env[ENV_VARS.port] = String(port)
+  env[ENV_VARS.betterAuthUrl] = options.publicUrl ?? baseUrlFor(port)
+  env[ENV_VARS.betterAuthSecret] = E2E_BETTER_AUTH_SECRET
+  env[ENV_VARS.secretsKey] = E2E_SECRETS_KEY
+  if (options.devLogin !== false) {
+    env[ENV_VARS.devLogin] = '1'
+  }
   if (options.mockModel !== false) {
     env[ENV_VARS.testModel] = MOCK_MODEL_ENV_VALUE
-  }
-  if (options.apiKey !== undefined) {
-    env[ENV_VARS.apiKey] = options.apiKey
   }
   if (options.webDir !== undefined) {
     env[ENV_VARS.webDir] = options.webDir
