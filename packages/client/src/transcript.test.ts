@@ -1,20 +1,17 @@
 import { EVENT_TYPES, isStoredEvent, newEventId } from '@openharness/protocol'
 import {
   makeAgentMessage,
-  makeEventDelta,
-  makeEventStart,
+  makeStoredEventDelta,
+  makeStoredEventStart,
   makeModelRequestEnd,
   makeModelRequestStart,
   makeSessionError,
   makeStatusIdle,
   makeStatusRescheduled,
   makeStatusRunning,
-  makeStoredEventDelta,
-  makeStoredEventStart,
   makeUserInterrupt,
   makeUserMessage,
   sampleSessionHistory,
-  sampleStreamPreview,
   fixtureTimestamp,
 } from '@openharness/protocol/fixtures'
 import type { StreamEvent } from '@openharness/protocol'
@@ -122,10 +119,10 @@ describe('reduceTranscript', () => {
   it('accumulates preview deltas into the streaming message', () => {
     const messageId = idA
     const state = reduceEvents([
-      makeEventStart(messageId),
-      makeEventDelta(messageId, 'Hel'),
-      makeEventDelta(messageId, 'lo, '),
-      makeEventDelta(messageId, 'world'),
+      makeStoredEventStart(messageId),
+      makeStoredEventDelta(messageId, 'Hel'),
+      makeStoredEventDelta(messageId, 'lo, '),
+      makeStoredEventDelta(messageId, 'world'),
     ])
 
     expect(state.messages).toHaveLength(1)
@@ -142,14 +139,14 @@ describe('reduceTranscript', () => {
   it('accumulates deltas per content block', () => {
     const messageId = idA
     const state = reduceEvents([
-      makeEventStart(messageId),
-      makeEventDelta(messageId, 'first ', {
+      makeStoredEventStart(messageId),
+      makeStoredEventDelta(messageId, 'first ', {
         delta: { type: 'content_delta', index: 0, content: { type: 'text', text: 'first ' } },
       }),
-      makeEventDelta(messageId, 'second', {
+      makeStoredEventDelta(messageId, 'second', {
         delta: { type: 'content_delta', index: 1, content: { type: 'text', text: 'second' } },
       }),
-      makeEventDelta(messageId, 'block', {
+      makeStoredEventDelta(messageId, 'block', {
         delta: { type: 'content_delta', index: 0, content: { type: 'text', text: 'block' } },
       }),
     ])
@@ -161,9 +158,9 @@ describe('reduceTranscript', () => {
   it('replaces the preview with the stored message that carries the same id', () => {
     const stored = makeAgentMessage('Hello, world', { seq: 4, id: idA })
     const preview = [
-      makeEventStart(stored.id),
-      makeEventDelta(stored.id, 'Hello, '),
-      makeEventDelta(stored.id, 'world'),
+      makeStoredEventStart(stored.id, { seq: 1 }),
+      makeStoredEventDelta(stored.id, 'Hello, ', { seq: 2 }),
+      makeStoredEventDelta(stored.id, 'world', { seq: 3 }),
     ]
 
     const state = reduceEvents([...preview, stored])
@@ -179,12 +176,12 @@ describe('reduceTranscript', () => {
     const interrupt = {
       id: idC,
       type: 'user.interrupt' as const,
-      seq: 3,
-      processed_at: fixtureTimestamp(3),
+      seq: 6,
+      processed_at: fixtureTimestamp(6),
     }
-    const partial = makeAgentMessage('Events in a log,', { seq: 4, id: messageId })
+    const partial = makeAgentMessage('Events in a log,', { seq: 7, id: messageId })
     const end = makeModelRequestEnd(start, {
-      seq: 5,
+      seq: 8,
       id: idD,
       is_error: true,
       error: { type: 'interrupted', message: 'Interrupted by the user.' },
@@ -193,13 +190,13 @@ describe('reduceTranscript', () => {
     const state = reduceEvents([
       makeStatusRunning({ seq: 1 }),
       start,
-      makeEventStart(messageId),
-      makeEventDelta(messageId, 'Events in '),
-      makeEventDelta(messageId, 'a log,'),
+      makeStoredEventStart(messageId, { seq: 3 }),
+      makeStoredEventDelta(messageId, 'Events in ', { seq: 4 }),
+      makeStoredEventDelta(messageId, 'a log,', { seq: 5 }),
       interrupt,
       partial,
       end,
-      makeStatusIdle({ seq: 6, id: idE }),
+      makeStatusIdle({ seq: 9, id: idE }),
     ])
 
     expect(asPairs(state)).toEqual(['agent:Events in a log,'])
@@ -209,9 +206,9 @@ describe('reduceTranscript', () => {
 
   it('drops a preview whose model request ended without storing it', () => {
     const start = makeModelRequestStart({ seq: 2 })
-    const preview = makeEventStart(idA)
+    const preview = makeStoredEventStart(idA, { seq: 3 })
     const end = makeModelRequestEnd(start, {
-      seq: 3,
+      seq: 4,
       is_error: true,
       error: { type: 'brain_lost', message: 'The brain died.' },
     })
@@ -228,8 +225,8 @@ describe('reduceTranscript', () => {
     // (`events/stream.ts`), which is what a real provider's span usage did to every turn. The
     // idle is then the only evidence that the turn is over, and the bubble must not outlive it.
     const start = makeModelRequestStart({ seq: 2 })
-    const preview = makeEventStart(idA)
-    const idle = makeStatusIdle({ seq: 3 })
+    const preview = makeStoredEventStart(idA, { seq: 3 })
+    const idle = makeStatusIdle({ seq: 4 })
 
     const state = reduceEvents([makeStatusRunning({ seq: 1 }), start, preview, idle])
 
@@ -245,9 +242,9 @@ describe('reduceTranscript', () => {
     const state = reduceEvents([
       makeStatusRunning({ seq: 1 }),
       start,
-      makeEventStart(idA),
-      makeEventDelta(idA, 'half a repl'),
-      makeStatusIdle({ seq: 3 }),
+      makeStoredEventStart(idA, { seq: 3 }),
+      makeStoredEventDelta(idA, 'half a repl', { seq: 4 }),
+      makeStatusIdle({ seq: 5 }),
     ])
 
     expect(state.messages).toEqual([])
@@ -258,8 +255,8 @@ describe('reduceTranscript', () => {
     const stored = makeAgentMessage('the reply', { seq: 2 })
     const state = reduceEvents([
       stored,
-      makeEventStart(stored.id),
-      makeEventDelta(stored.id, 'garbage'),
+      makeStoredEventStart(stored.id, { seq: 3 }),
+      makeStoredEventDelta(stored.id, 'garbage', { seq: 4 }),
     ])
 
     expect(asPairs(state)).toEqual(['agent:the reply'])
@@ -381,17 +378,42 @@ describe('reduceTranscript', () => {
     expect(next.lastSeq).toBe(3)
   })
 
-  it('reconciles the sample preview with the sample history', () => {
-    const withPreview = reduceTranscriptAll(
-      reduceEvents(sampleSessionHistory.slice(0, 3)),
-      sampleStreamPreview,
-    )
+  it('reconciles the sample history with itself: loading it twice changes nothing', () => {
+    const once = reduceEvents(sampleSessionHistory)
+    const twice = reduceTranscriptAll(once, sampleSessionHistory)
 
-    expect(withPreview.messages).toHaveLength(2)
-    expect(withPreview.messages[1]).toMatchObject({
-      text: 'openharness is an open-source implementation of Managed Agents.',
-      streaming: false,
+    expect(twice).toBe(once)
+    expect(asPairs(twice)).toHaveLength(9)
+  })
+
+  it('reads a log stored before D9: no consumes, no supersedes, no stored chunks', () => {
+    // A database that predates D9 still holds events like these, and they have to read
+    // correctly: a span start with no `consumes` means everything queued was picked up, a
+    // reply with no `supersedes` keeps the position its preview opened at (here: its own
+    // `seq`, since it never had one), and an interrupt simply cuts a reply short.
+    const first = makeUserMessage('stored before the claims', {
+      seq: 1,
+      processed_at: fixtureTimestamp(1),
     })
+    const start = makeModelRequestStart({ seq: 2 })
+    const reply = makeAgentMessage('an old-style reply', { seq: 3, id: idA })
+    const end = makeModelRequestEnd(start, { seq: 4 })
+    const queued = makeUserMessage('sent but not yet read', { seq: 5, processed_at: null })
+    const interrupt = makeUserInterrupt({ seq: 6, processed_at: null })
+
+    const state = reduceEvents([first, start, reply, end, queued, interrupt])
+
+    expect(asPairs(state)).toEqual([
+      'user:stored before the claims',
+      'agent:an old-style reply',
+      'user:sent but not yet read',
+    ])
+    // The span start cleared the first message's pending flag; the ones after it are queued.
+    expect(messageById(state, first.id).pending).toBe(false)
+    expect(messageById(state, queued.id).pending).toBe(true)
+    // A reply with no `supersedes` keeps its own `seq` and is final.
+    expect(messageById(state, reply.id)).toMatchObject({ pending: false, position: 3 })
+    expect(state.lastSeq).toBe(6)
   })
 })
 
@@ -476,25 +498,67 @@ describe('stored chunks (D9)', () => {
 
     expect(messageById(state, queued.id).pending).toBe(true)
   })
+
+  it('clears pending on the consumes of a span end and of a status idle (P4)', () => {
+    // The other two claim sites: an interrupt that cut a request short is claimed by the
+    // request's span end, and one that arrived with nothing running by the turn's idle event.
+    const interrupted = makeUserMessage('stop this', { seq: 1, processed_at: null, id: idA })
+    const start = makeModelRequestStart({ seq: 2, id: idB, consumes: [interrupted.id] })
+    const end = makeModelRequestEnd(start, {
+      seq: 3,
+      id: idC,
+      is_error: true,
+      error: { type: 'interrupted', message: 'Interrupted by the user.' },
+      consumes: [interrupted.id],
+    })
+
+    expect(messageById(reduceEvents([interrupted, start, end]), interrupted.id).pending).toBe(false)
+
+    const queued = makeUserMessage('one more', { seq: 1, processed_at: null, id: idD })
+    const idle = makeStatusIdle({ seq: 2, id: idE, consumes: [queued.id] })
+    expect(messageById(reduceEvents([queued, idle]), queued.id).pending).toBe(false)
+  })
+
+  it('leaves pending alone when a span end or an idle carries no list: a pre-P4 log', () => {
+    // A log written before P4: the closing events carry no `consumes`, which must not be read
+    // as a claim. The span start here has no list either — a pre-D9 writer — so it keeps the
+    // older reading and clears everything pending when it starts.
+    const queued = makeUserMessage('queued', { seq: 1, processed_at: null, id: idA })
+    const start = makeModelRequestStart({ seq: 2 })
+    const end = makeModelRequestEnd(start, { seq: 3 })
+    const idle = makeStatusIdle({ seq: 4 })
+
+    const state = reduceEvents([queued, start, end, idle])
+
+    expect(messageById(state, queued.id).pending).toBe(false)
+
+    const late = makeUserMessage('sent after the log', { seq: 5, processed_at: null, id: idB })
+    const withLate = reduceTranscript(state, late)
+
+    // The late message is pending, and nothing that followed it re-opened or cleared it.
+    expect(messageById(withLate, late.id).pending).toBe(true)
+    expect(withLate.messages).toHaveLength(2)
+  })
 })
 
 describe('positions (D9)', () => {
-  it('places a stream-only preview after everything stored so far, and keeps it there', () => {
-    // Today's server: no `seq` on the chunks. The bubble opens after the stored events, and
-    // the stored message that replaces it does not move it.
+  it('keeps a reply without a supersedes range where its chunks opened', () => {
+    // A log stored before D9: the chunks carry a `seq` (they are stored events since phase
+    // P3), but the reply that replaces them carries no `supersedes` range — so it keeps the
+    // position the bubble opened at, where the client accumulated it.
     const state = reduceEvents([
       makeUserMessage('hello', { seq: 1, processed_at: fixtureTimestamp(1) }),
       makeStatusRunning({ seq: 2 }),
-      makeEventStart(idA),
-      makeEventDelta(idA, 'the reply'),
+      makeStoredEventStart(idA, { seq: 3 }),
+      makeStoredEventDelta(idA, 'the reply', { seq: 4 }),
     ])
 
-    expect(messageById(state, idA).position).toBe(2.5)
+    expect(messageById(state, idA).position).toBe(3)
 
-    const stored = reduceTranscript(state, makeAgentMessage('the reply', { seq: 3, id: idA }))
+    const stored = reduceTranscript(state, makeAgentMessage('the reply', { seq: 5, id: idA }))
 
     expect(asPairs(stored)).toEqual(['user:hello', 'agent:the reply'])
-    expect(messageById(stored, idA).position).toBe(2.5)
+    expect(messageById(stored, idA).position).toBe(3)
   })
 
   it('moves a reply back to where it started when its message supersedes its chunks', () => {
@@ -637,14 +701,14 @@ describe('one reply, five clients (D9 convergence)', () => {
   it('folds deep-frozen events without writing to them', () => {
     const { events, messageId } = scriptedTurn()
     const frozen = events.map((event) => deepFreeze(event))
-    const preview = deepFreeze([makeEventStart(idE), makeEventDelta(idE, 'a preview')])
     const before = JSON.stringify(frozen)
 
-    const state = reduceTranscriptAll(reduceEvents(preview), frozen)
+    const state = reduceTranscriptAll(initialTranscriptState(), frozen)
 
     expect(messageById(state, messageId).text).toBe(REPLY)
     expect(messageById(state, messageId).streaming).toBe(false)
     expect(selectStreamingMessage(state)).toBeNull()
+    // Nothing in the fold wrote to an event: a reducer that did would throw on the freeze.
     expect(JSON.stringify(frozen)).toBe(before)
   })
 })

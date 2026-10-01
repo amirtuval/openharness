@@ -389,7 +389,11 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
     async interrupt(sessionId, requestOptions): Promise<UserInterruptEvent> {
       throwIfAborted(requestOptions)
       const brain = await requireBrain(sessionId)
-      return brain.appendUserEvent({ type: 'user.interrupt' }) as UserInterruptEvent
+      const stored = brain.appendUserEvent({ type: 'user.interrupt' }) as UserInterruptEvent
+      // The server starts a turn for an interrupt even when none is running — a queued
+      // `user.interrupt` still has to be claimed, and the turn that ends on it does that (P4).
+      brain.startTurn()
+      return stored
     },
 
     respondWith(text, replyOptions = {}) {

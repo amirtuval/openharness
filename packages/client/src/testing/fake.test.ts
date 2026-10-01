@@ -45,13 +45,25 @@ describe('the fake client', () => {
       EVENT_TYPES.sessionStatusIdle,
     ])
 
-    const stored = events.filter(isStoredEvent)
-    expect(stored.map((event) => event.seq)).toEqual([1, 2, 3, 4, 5, 6])
-    expect(stored[3]).toMatchObject({
+    // Every event is stored (P4): the chunks carry a `seq` like the rest, which is what makes
+    // a reply in flight resumable by position.
+    expect(events.every(isStoredEvent)).toBe(true)
+    expect(events.map((event) => event.seq)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    const message = events.find((event) => event.type === EVENT_TYPES.agentMessage)
+    expect(message).toMatchObject({
       type: EVENT_TYPES.agentMessage,
       content: [{ type: 'text', text: 'Hello from the fake!' }],
+      // The reply supersedes the chunk range it was streamed as.
+      supersedes: { from_seq: 4, to_seq: 7 },
     })
-    expect(stored[4]).toMatchObject({ type: EVENT_TYPES.modelRequestEnd, is_error: null })
+    expect(events.find((event) => event.type === EVENT_TYPES.modelRequestEnd)).toMatchObject({
+      type: EVENT_TYPES.modelRequestEnd,
+      is_error: null,
+    })
+    // The request claimed the message it answered.
+    expect(events.find((event) => event.type === EVENT_TYPES.modelRequestStart)).toMatchObject({
+      consumes: [events[0]?.id],
+    })
 
     for (const event of events) {
       const schema = isStoredEvent(event) ? StoredEventSchema : StreamEventSchema
@@ -107,7 +119,7 @@ describe('the fake client', () => {
     expect(logged?.type === EVENT_TYPES.userMessage ? logged.processed_at : null).not.toBeNull()
   })
 
-  it('reconciles its preview with the stored message', async () => {
+  it('reconciles the accumulated chunks with the stored message', async () => {
     const fake = createFakeClient()
     fake.respondWith('A reply in pieces', { chunks: 4 })
 
@@ -122,13 +134,26 @@ describe('the fake client', () => {
     })
     expect(transcript.status).toBe('idle')
     expect(transcript.lastError).toBeNull()
-    expect(events.filter((event) => !isStoredEvent(event)).map((event) => event.type)).toEqual([
-      EVENT_TYPES.eventStart,
-      EVENT_TYPES.eventDelta,
-      EVENT_TYPES.eventDelta,
-      EVENT_TYPES.eventDelta,
-      EVENT_TYPES.eventDelta,
-    ])
+    // The chunks are stored events under the id of the reply they announce (P4).
+    const chunks = events.filter(
+      (event) => event.type === EVENT_TYPES.eventStart || event.type === EVENT_TYPES.eventDelta,
+    )
+    const message = events.find((event) => event.type === EVENT_TYPES.agentMessage)
+    expect(chunks.every((chunk) => chunk.seq > 0 && isStoredEvent(chunk))).toBe(true)
+    for (const chunk of chunks) {
+      expect(chunk.type === EVENT_TYPES.eventStart ? chunk.event.id : chunk.event_id).toBe(
+        message?.id,
+      )
+    }
+    // What the client accumulated equals what was stored.
+    const accumulated = chunks
+      .flatMap((chunk) => (chunk.type === EVENT_TYPES.eventDelta ? [chunk.delta.content.text] : []))
+      .join('')
+    expect(
+      message?.type === EVENT_TYPES.agentMessage
+        ? message.content.map((block) => block.text).join('')
+        : '',
+    ).toBe(accumulated)
   })
 
   it('fails once and then succeeds when the error is retryable', async () => {
@@ -142,11 +167,15 @@ describe('the fake client', () => {
       EVENT_TYPES.userMessage,
       EVENT_TYPES.sessionStatusRunning,
       EVENT_TYPES.modelRequestStart,
+      // The failed attempt streams nothing: its span closes with an error...
       EVENT_TYPES.modelRequestEnd,
       EVENT_TYPES.sessionError,
       EVENT_TYPES.sessionStatusRescheduled,
       EVENT_TYPES.sessionStatusRunning,
       EVENT_TYPES.modelRequestStart,
+      // ...and the retry streams its own chunks under a fresh message id (P4).
+      EVENT_TYPES.eventStart,
+      EVENT_TYPES.eventDelta,
       EVENT_TYPES.agentMessage,
       EVENT_TYPES.modelRequestEnd,
       EVENT_TYPES.sessionStatusIdle,
@@ -219,19 +248,36 @@ describe('the fake client', () => {
 
     expect(deltas).toBeLessThan(6)
     expect(storedMessage).toMatchObject({ content: [{ type: 'text', text: partial }] })
-    expect(drained.map((event) => event.type)).toEqual([
+    // The chunks that were streamed before the abort are stored events, so they are in the
+    // log (and in `drained`); the ones the interrupt cut off never were, and the interrupt is
+    // appended among the fragments the loop was still finishing.
+    const types = drained.map((event) => event.type)
+    expect(types.slice(0, 4)).toEqual([
       EVENT_TYPES.userMessage,
       EVENT_TYPES.sessionStatusRunning,
       EVENT_TYPES.modelRequestStart,
-      EVENT_TYPES.userInterrupt,
+      EVENT_TYPES.eventStart,
+    ])
+    expect(types.slice(-3)).toEqual([
       EVENT_TYPES.agentMessage,
       EVENT_TYPES.modelRequestEnd,
       EVENT_TYPES.sessionStatusIdle,
     ])
-    expect(drained.find((event) => event.type === EVENT_TYPES.modelRequestEnd)).toMatchObject({
+    const middle = types.slice(4, -3)
+    expect(middle.filter((type) => type !== EVENT_TYPES.eventDelta)).toEqual([
+      EVENT_TYPES.userInterrupt,
+    ])
+    expect(middle.filter((type) => type === EVENT_TYPES.eventDelta)).toHaveLength(deltas)
+    const end = drained.find((event) => event.type === EVENT_TYPES.modelRequestEnd)
+    expect(end).toMatchObject({
       is_error: true,
       error: { type: 'interrupted' },
     })
+    // The interrupt that cut the request short is claimed by its span end (P4).
+    const interrupt = drained.find((event) => event.type === EVENT_TYPES.userInterrupt)
+    expect(end?.type === EVENT_TYPES.modelRequestEnd ? end.consumes : undefined).toEqual([
+      interrupt?.id,
+    ])
 
     const transcript = reduceTranscriptAll(initialTranscriptState(), events)
     expect(transcript.messages.at(-1)?.text).toBe(partial)
@@ -239,12 +285,22 @@ describe('the fake client', () => {
     expect(transcript.status).toBe('idle')
   })
 
-  it('is unimpressed by an interrupt when nothing is running', async () => {
+  it('claims an interrupt that arrives with nothing running, in an idle turn', async () => {
     const fake = createFakeClient()
 
     await fake.interrupt(fake.session.id)
+    await fake.waitForIdle()
 
-    expect(fake.history().map((event) => event.type)).toEqual([EVENT_TYPES.userInterrupt])
+    // The interrupt has no request to stop, so the turn's idle event claims it (P4): the
+    // server starts a turn for a queued interrupt even when none was running.
+    const history = fake.history()
+    expect(history.map((event) => event.type)).toEqual([
+      EVENT_TYPES.userInterrupt,
+      EVENT_TYPES.sessionStatusRunning,
+      EVENT_TYPES.sessionStatusIdle,
+    ])
+    const [stored] = history
+    expect(stored?.type === EVENT_TYPES.userInterrupt ? stored.processed_at : null).not.toBeNull()
     expect(fake.session.status).toBe('idle')
   })
 
@@ -271,8 +327,8 @@ describe('the fake client', () => {
     await iterating
     const transcript = reduceTranscriptAll(initialTranscriptState(), events)
 
-    // The reply's bubble was opened when its preview started — before the steering message
-    // was sent — and it stays where it appeared when the stored event replaces the preview.
+    // The first reply sorts where its chunks started — before the steering message arrived —
+    // because its `supersedes` range says so, the same view a reloaded client gets.
     expect(transcript.messages.map((message) => `${message.role}:${message.text}`)).toEqual([
       'user:one',
       'agent:first reply',
@@ -295,7 +351,7 @@ describe('the fake client', () => {
 })
 
 describe('the fake stream', () => {
-  it('holds previews back unless deltas were asked for', async () => {
+  it('holds the chunks back unless deltas were asked for', async () => {
     const fake = createFakeClient()
     fake.respondWith('no previews here')
 
@@ -552,7 +608,6 @@ async function runTurn(
   return { events, transcript: reduceTranscriptAll(initialTranscriptState(), events) }
 }
 
-/** Read the fake's stream from `afterSeq` until it goes idle. */
 /** Read the fake's stream from `afterSeq`, send `text` when given, and stop at idle. */
 async function collect(
   fake: FakeClient,
@@ -562,6 +617,9 @@ async function collect(
   const events: StreamEvent[] = []
   const iterating = (async () => {
     for await (const event of fake.sessions.events.stream(fake.session.id, {
+      // Chunks are stored events now (P4), so a replay-with-deltas connection gets the whole
+      // log — the same thing a reader of `history()` sees.
+      deltas: true,
       afterSeq: options.afterSeq,
       signal: controller.signal,
     })) {

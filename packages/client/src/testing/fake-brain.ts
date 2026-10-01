@@ -3,16 +3,13 @@ import {
   EVENT_TYPES,
   MAX_PAGE_LIMIT,
   encodeSeqCursor,
-  isStoredEvent,
   newEventId,
   tryDecodePageCursor,
 } from '@openharness/protocol'
 import type {
   AgentMessageEvent,
-  EventDelta,
-  EventId,
-  EventStart,
   ContentBlock,
+  EventId,
   ListEventsQuery,
   ListEventsResponse,
   ModelRequestEndEvent,
@@ -22,9 +19,13 @@ import type {
   SessionError,
   SessionErrorType,
   StoredEvent,
+  StoredEventDelta,
+  StoredEventStart,
   StreamEvent,
+  Supersedes,
   UserEvent,
   UserEventInput,
+  UserInterruptEvent,
   UserMessageEvent,
 } from '@openharness/protocol'
 
@@ -36,20 +37,22 @@ import { deepFreeze } from './freeze'
  * The in-memory brain behind one fake session: its log, its script and its turn loop.
  *
  * Everything here mirrors what the server does, in the order the epic describes it. A turn is
- * `session.status_running`, then per model request `span.model_request_start` → the preview
- * (`event_start` and deltas) → the stored `agent.message` → `span.model_request_end`, and
- * finally `session.status_idle`. A retryable failure inserts `session.error` and
- * `session.status_rescheduled` before the next request; a terminal one ends the turn.
+ * `session.status_running`, then per model request `span.model_request_start` → the chunks
+ * (`event_start` and deltas, stored as they stream) → the stored `agent.message` →
+ * `span.model_request_end`, and finally `session.status_idle`. A retryable failure inserts
+ * `session.error` and `session.status_rescheduled` before the next request; a terminal one
+ * ends the turn.
  *
  * Two D9 properties hold here too:
  *
  * - **The log is append-only.** Every event is deep-frozen before it is stored or delivered,
  *   and nothing rewrites one. The brain's "I have picked this message up" note lives beside
  *   the log ({@link FakeBrain} keeps it private) and reads derive `processed_at` from it.
- * - **It speaks today's server.** A preview is stream-only (`event_start` / `event_delta`
- *   with no `seq`), and a span start carries no `consumes` — the shapes phase P3's server
- *   will replace. The client takes both formats, so a component tested against this fake
- *   keeps working when it does.
+ * - **It speaks the server's dialect (P4).** Streamed chunks are stored events with a `seq`,
+ *   a span start claims the messages its request answers in `consumes`, the event that ends a
+ *   request or a turn claims the interrupts it ends on, and the event that finishes a reply
+ *   supersedes its chunk range. A component tested against this fake is a test against what
+ *   the real server writes.
  */
 
 /** A reply the fake's brain produces for the next model request. */
@@ -106,37 +109,34 @@ class Subscriber {
   }
 
   /**
-   * Hand an event to this subscriber, unless it is a preview it did not ask for or one it has
+   * Hand an event to this subscriber, unless it is a chunk it did not ask for or one it has
    * already seen.
    *
-   * The `lastSeq` check is the server-side half of the resume rule — the client drops stored
-   * events at or below its own position, and the fake never sends one below the subscriber's.
+   * A reply's chunks are stored events, but the stream still gates them on the connection's
+   * `deltas` opt-in — the same filter the server applies in both halves of its stream. The
+   * `lastSeq` check is the server-side half of the resume rule — the client drops events at or
+   * below its own position, and the fake never sends one below the subscriber's.
    */
   deliver(event: StreamEvent): void {
-    if (isPreview(event)) {
-      if (!this.wantsDeltas) {
-        return
-      }
-    } else {
-      if (event.seq <= this.#lastSeq) {
-        return
-      }
-      this.#lastSeq = event.seq
+    if (isChunk(event) && !this.wantsDeltas) {
+      return
     }
+    if (event.seq <= this.#lastSeq) {
+      return
+    }
+    this.#lastSeq = event.seq
     this.queue.push(event)
   }
 }
 
 /**
- * Whether an event exists only on a stream; `false` narrows the event to a stored one.
+ * Whether an event is one of a reply's chunks — an `event_start` or an `event_delta`.
  *
- * `seq` is the test, not the event type: since D9 a stored `event_start` / `event_delta`
- * carries the same `type` as its stream-only preview. The fake emits the stream-only form, but
- * a subscriber has to gate on the form: a stored chunk is a log event like any other, and only
- * a preview is something a connection opts into with `deltas`.
+ * Chunks are stored events like any other (D9), but they are the kind a connection opts into
+ * with `deltas`: the server sends them only to a connection that asked.
  */
-export function isPreview(event: StreamEvent): event is EventStart | EventDelta {
-  return !isStoredEvent(event)
+export function isChunk(event: StreamEvent): event is StoredEventStart | StoredEventDelta {
+  return event.type === EVENT_TYPES.eventStart || event.type === EVENT_TYPES.eventDelta
 }
 
 /** The in-memory brain of one fake session. */
@@ -294,21 +294,21 @@ export class FakeBrain {
     let retry = false
 
     for (;;) {
+      // An interrupt with nothing running — before the first request, or during a backoff —
+      // has no request to end, so the turn's idle event claims it (P4), exactly as the real
+      // brain's does.
+      const interrupts = this.#queuedInterrupts()
+      if (interrupts.length > 0) {
+        this.#emit(this.#statusIdle(interrupts.map((event) => event.id)))
+        return
+      }
       const queued = this.#queuedUserMessages()
       if (queued.length === 0 && !retry) {
         break
       }
-      // The brain folds the queued messages into the request it is about to make, so from
-      // here on they are processed. The note is kept beside the log — a later `events.list`,
-      // or a reload, derives `processed_at` from it — because the log's own event is frozen
-      // and never rewritten.
-      const processedAt = this.#timestamp()
-      for (const message of queued) {
-        this.#processedAt.set(message.id, processedAt)
-      }
       retry = false
 
-      const start = this.#modelRequestStart()
+      const start = this.#modelRequestStart(queued.map((message) => message.id))
       const script = this.#scripts.shift() ?? {
         kind: 'reply',
         reply: defaultReply(queued),
@@ -333,18 +333,14 @@ export class FakeBrain {
     this.#emit(this.#statusIdle())
   }
 
-  /** Emit a reply: the preview, then the stored event; `true` when an interrupt cut it short. */
+  /** Emit a reply: the chunks as they stream, then the stored event; `true` when interrupted. */
   async #streamReply(start: ModelRequestStartEvent, reply: FakeReply): Promise<boolean> {
     const messageId = newEventId()
     const fragments = chunkText(reply.text, reply.chunks)
     const delay = reply.delayMs ?? this.#delayMs
 
-    this.#broadcast(
-      deepFreeze({
-        type: EVENT_TYPES.eventStart,
-        event: { type: EVENT_TYPES.agentMessage, id: messageId },
-      }),
-    )
+    const chunkStart = this.#emit(this.#chunkStart(messageId))
+    let lastChunkSeq = chunkStart.seq
     let partial = ''
     for (const fragment of fragments) {
       if (this.#interruptRequested) {
@@ -352,26 +348,46 @@ export class FakeBrain {
       }
       await sleep(delay)
       partial += fragment
-      this.#broadcast(
-        deepFreeze({
-          type: EVENT_TYPES.eventDelta,
-          event_id: messageId,
-          delta: { type: 'content_delta', index: 0, content: { type: 'text', text: fragment } },
-        }),
-      )
+      lastChunkSeq = this.#emit(this.#chunkDelta(messageId, fragment)).seq
     }
+    const range: Supersedes = { from_seq: chunkStart.seq, to_seq: lastChunkSeq }
 
     const interrupted = this.#interruptRequested
+    // An interrupt that cut an open request short is claimed by that request's span end (P4).
+    const claim = interrupted ? this.#queuedInterrupts().map((event) => event.id) : []
+    const text = interrupted ? partial : reply.text
+    if (text === '') {
+      // No message: an empty `agent.message` would be a reply the model did not make, and an
+      // interrupted request with nothing streamed has none to keep. The span end supersedes
+      // the orphaned chunk instead, exactly as the real brain's does.
+      this.#emit(
+        this.#modelRequestEnd(start, {
+          is_error: interrupted ? true : null,
+          ...(interrupted
+            ? {
+                error: { type: 'interrupted', message: 'Interrupted by the user.' },
+                consumes: claim,
+              }
+            : {}),
+          supersedes: range,
+        }),
+      )
+      return interrupted
+    }
     // Whatever the model produced before the interrupt is still a message; the span says why
     // the request ended.
-    this.#emit(this.#agentMessage(messageId, interrupted ? partial : reply.text))
+    this.#emit(this.#agentMessage(messageId, text, range))
     this.#emit(
-      interrupted
-        ? this.#modelRequestEnd(start, {
-            is_error: true,
-            error: { type: 'interrupted', message: 'Interrupted by the user.' },
-          })
-        : this.#modelRequestEnd(start, { is_error: null }),
+      this.#modelRequestEnd(
+        start,
+        interrupted
+          ? {
+              is_error: true,
+              error: { type: 'interrupted', message: 'Interrupted by the user.' },
+              consumes: claim,
+            }
+          : { is_error: null },
+      ),
     )
     return interrupted
   }
@@ -407,6 +423,14 @@ export class FakeBrain {
     )
   }
 
+  /** User interrupts nothing has claimed yet. */
+  #queuedInterrupts(): UserInterruptEvent[] {
+    return this.#log.filter(
+      (event): event is UserInterruptEvent =>
+        event.type === EVENT_TYPES.userInterrupt && !this.#processedAt.has(event.id),
+    )
+  }
+
   /**
    * The event as a read of the log shows it: the stored value, with the user events'
    * `processed_at` derived from the brain's notes. The log's own object is left alone.
@@ -425,10 +449,18 @@ export class FakeBrain {
   }
 
   /** Write a stored event to the log, move the session header along, and deliver it live. */
-  #emit(event: StoredEvent): void {
+  #emit<T extends StoredEvent>(event: T): T {
     // The log is append-only (D9): every event is frozen before anything can hold it.
     deepFreeze(event)
     this.#log.push(event)
+    // The claim is the append (P4): an event's `consumes` list is what takes the user events
+    // it names, recorded beside the log the way the real store's `event_claims` table is.
+    // Only a server-produced event carries `consumes`, and its `processed_at` is never null.
+    if (event.processed_at !== null) {
+      for (const claimed of consumesOf(event)) {
+        this.#processedAt.set(claimed, event.processed_at)
+      }
+    }
     if (event.type === EVENT_TYPES.sessionStatusRunning) {
       this.session.status = 'running'
     } else if (event.type === EVENT_TYPES.sessionStatusIdle) {
@@ -436,6 +468,7 @@ export class FakeBrain {
     }
     this.session.updated_at = this.#timestamp()
     this.#broadcast(event)
+    return event
   }
 
   /** Hand an event to every subscriber; each decides whether it wants it. */
@@ -454,13 +487,14 @@ export class FakeBrain {
     }
   }
 
-  #statusIdle(): StoredEvent {
+  #statusIdle(consumes: readonly EventId[] = []): StoredEvent {
     return {
       id: newEventId(),
       type: EVENT_TYPES.sessionStatusIdle,
       seq: this.#nextSeq(),
       processed_at: this.#timestamp(),
       stop_reason: { type: 'end_turn' },
+      ...(consumes.length === 0 ? {} : { consumes: [...consumes] }),
     }
   }
 
@@ -473,12 +507,14 @@ export class FakeBrain {
     }
   }
 
-  #modelRequestStart(): ModelRequestStartEvent {
+  #modelRequestStart(consumes: readonly EventId[]): ModelRequestStartEvent {
     const event: ModelRequestStartEvent = {
       id: newEventId(),
       type: EVENT_TYPES.modelRequestStart,
       seq: this.#nextSeq(),
       processed_at: this.#timestamp(),
+      consumes: [...consumes],
+      model: this.session.agent.model.id,
     }
     this.#emit(event)
     return event
@@ -486,7 +522,12 @@ export class FakeBrain {
 
   #modelRequestEnd(
     start: ModelRequestStartEvent,
-    outcome: { is_error: boolean | null; error?: ModelRequestEndEvent['error'] },
+    outcome: {
+      is_error: boolean | null
+      error?: ModelRequestEndEvent['error']
+      supersedes?: Supersedes
+      consumes?: readonly EventId[]
+    },
   ): ModelRequestEndEvent {
     return {
       id: newEventId(),
@@ -497,12 +538,39 @@ export class FakeBrain {
       model_usage: { ...FAKE_MODEL_USAGE },
       is_error: outcome.is_error,
       ...(outcome.error === undefined ? {} : { error: outcome.error }),
+      ...(outcome.supersedes === undefined ? {} : { supersedes: outcome.supersedes }),
+      ...(outcome.consumes === undefined || outcome.consumes.length === 0
+        ? {}
+        : { consumes: [...outcome.consumes] }),
     }
   }
 
-  #agentMessage(id: EventId, text: string): AgentMessageEvent {
-    // A reply that produced no text is an empty `content` array, not an empty text block:
-    // the protocol's text blocks are non-empty.
+  /** A reply's opening chunk, stored as the real brain stores one. */
+  #chunkStart(messageId: EventId): StoredEventStart {
+    return {
+      id: newEventId(),
+      type: EVENT_TYPES.eventStart,
+      seq: this.#nextSeq(),
+      processed_at: this.#timestamp(),
+      event: { type: EVENT_TYPES.agentMessage, id: messageId },
+    }
+  }
+
+  /** One streamed fragment, stored under the id of the message it belongs to. */
+  #chunkDelta(messageId: EventId, text: string): StoredEventDelta {
+    return {
+      id: newEventId(),
+      type: EVENT_TYPES.eventDelta,
+      seq: this.#nextSeq(),
+      processed_at: this.#timestamp(),
+      event_id: messageId,
+      delta: { type: 'content_delta', index: 0, content: { type: 'text', text } },
+    }
+  }
+
+  #agentMessage(id: EventId, text: string, supersedes: Supersedes): AgentMessageEvent {
+    // The protocol's text blocks are non-empty, so an empty reply is never stored as a
+    // message at all — `#streamReply` supersedes the chunks on the span end instead.
     const content: ContentBlock[] = text === '' ? [] : [{ type: 'text', text }]
     return {
       id,
@@ -510,6 +578,7 @@ export class FakeBrain {
       seq: this.#nextSeq(),
       processed_at: this.#timestamp(),
       content,
+      supersedes,
     }
   }
 
@@ -521,6 +590,22 @@ export class FakeBrain {
   #timestamp(): string {
     return this.#now().toISOString()
   }
+}
+
+/**
+ * The ids an event claims: the `consumes` list of a `span.model_request_start`, a
+ * `span.model_request_end` or a `session.status_idle` (P4), or none for anything else.
+ */
+function consumesOf(event: StoredEvent): readonly EventId[] {
+  if (
+    (event.type === EVENT_TYPES.modelRequestStart ||
+      event.type === EVENT_TYPES.modelRequestEnd ||
+      event.type === EVENT_TYPES.sessionStatusIdle) &&
+    event.consumes !== undefined
+  ) {
+    return event.consumes
+  }
+  return []
 }
 
 /** The reply the brain produces when nothing has been scripted. */
