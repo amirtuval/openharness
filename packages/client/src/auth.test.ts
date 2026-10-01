@@ -221,6 +221,9 @@ describe('signOut', () => {
     expect(mock.urlOf(0)).toBe(`${BASE_URL}/api/auth/sign-out`)
     expect(mock.requests[0]?.headers.get('authorization')).toBe('Bearer oh_token')
     expect(mock.requests[0]?.init?.credentials).toBe('include')
+    // Better Auth refuses a POST without a JSON content type; the empty body is what carries it.
+    expect(mock.requests[0]?.headers.get('content-type')).toContain('application/json')
+    expect(mock.requests[0]?.init?.body).toBe('{}')
   })
 
   it('accepts a 200 with a success body, which needs no parsing', async () => {

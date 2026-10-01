@@ -32,7 +32,9 @@ export async function readLog(store: SessionStore, sessionId: SessionId): Promis
   const events: StoredEvent[] = []
   let afterSeq = 0
   for (;;) {
-    const page = await store.listEvents(sessionId, {
+    // The brain's replay read, deliberately unscoped: a turn acts for a session, not for a
+    // user (epic #65, A4). The named method is what keeps a route from reaching it.
+    const page = await store.listEventsUnscoped(sessionId, {
       order: 'asc',
       afterSeq,
       limit: MAX_PAGE_LIMIT,

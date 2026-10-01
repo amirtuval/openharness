@@ -59,7 +59,7 @@ async function newSession(client: Client): Promise<Session> {
 describe('a full turn', () => {
   it('streams previews under the id of the reply they announce', async () => {
     const server = await harness.server()
-    const client = harness.client(server)
+    const client = await harness.client(server)
     const session = await newSession(client)
     const prompt = 'hello from the end-to-end suite'
 
@@ -113,7 +113,7 @@ describe('a full turn', () => {
 
   it('writes the log in the documented order, with usage and no gaps', async () => {
     const server = await harness.server()
-    const client = harness.client(server)
+    const client = await harness.client(server)
     const session = await newSession(client)
     const prompt = 'another turn, please'
 
@@ -163,7 +163,7 @@ describe('a full turn', () => {
 
   it('answers a steering message in a second request', async () => {
     const server = await harness.server()
-    const client = harness.client(server)
+    const client = await harness.client(server)
     const session = await newSession(client)
     const prompt = `${MOCK_SLOW_MARKER} take your time`
     const steering = 'actually, keep it short'
@@ -190,7 +190,7 @@ describe('a full turn', () => {
 
   it('keeps the partial reply and claims the interrupt on the span end it stopped', async () => {
     const server = await harness.server()
-    const client = harness.client(server)
+    const client = await harness.client(server)
     const session = await newSession(client)
     const prompt = `${MOCK_SLOW_MARKER} interrupt this one`
 
@@ -242,7 +242,7 @@ describe('a full turn', () => {
 
   it('claims an interrupt that arrives with nothing running on the status idle', async () => {
     const server = await harness.server()
-    const client = harness.client(server)
+    const client = await harness.client(server)
     const session = await newSession(client)
 
     // Nothing was running; the server still starts a turn for the queued interrupt, and the
@@ -275,7 +275,7 @@ describe('a full turn', () => {
     // no `supersedes` has no chunk range to sort at. The only way to have such a log is to
     // write one, so this test inserts the rows the old store would have.
     const server = await harness.server()
-    const client = harness.client(server)
+    const client = await harness.client(server)
     const session = await newSession(client)
     const database = await harness.database()
 

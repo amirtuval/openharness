@@ -81,26 +81,27 @@ docs/postgres.md        the Postgres stores: schema, migrations, delivery, local
 
 ### `@openharness/session`
 
-| export                                                                                                                                          | what it is                                                                                                           |
-| ----------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `SessionStore`                                                                                                                                  | the storage and signaling contract; every method is async, and documented below                                      |
-| `AppendableEvent`                                                                                                                               | an event a caller appends: a `StoredEvent` minus `seq` and `processed_at`, plus an optional `id` the caller supplies |
-| `CreateSessionOptions`, `ListAgentsOptions`, `ListSessionsOptions`, `ListEventsOptions`                                                         | the options objects of the list and create methods                                                                   |
-| `OwnerScopeOptions`                                                                                                                             | `{ ownerId? }`: how a read is scoped to one owner (A4); see [the contract](#the-contract)                            |
-| `CredentialStore`                                                                                                                               | the sealed-blob credential contract; see [The CredentialStore](#the-credentialstore-epic-65-a5)                      |
-| `SealedSecret`, `CredentialKey`, `UpsertCredentialInput`, `ListCredentialsOptions`, `SealedProviderCredential`                                  | the credential contract's vocabulary: the sealed form, the key, what `upsert` writes, and what `get` returns         |
-| `UpdateSessionRequest`                                                                                                                          | what `updateSession()` changes: the title, or nothing                                                                |
-| `AppendEventsOptions`, `PartitionFence`                                                                                                         | the optional fence a brain attaches to a write                                                                       |
-| `CompactOptions`                                                                                                                                | what `compact()` takes: the retention cutoff (`olderThan: Date \| number`)                                           |
-| `PartitionLease`, `PartitionSignal`, `PartitionSignalInput`, `PartitionSignalKind`                                                              | leases over a partition, and the signals sent to its owner                                                           |
-| `TurnState`, `TurnStateKind`                                                                                                                    | what `getTurnState()` answers                                                                                        |
-| `SessionEventListener`, `PartitionSignalListener`, `Unsubscribe`                                                                                | subscription plumbing                                                                                                |
-| `InMemorySessionStore`, `InMemorySessionStoreOptions`                                                                                           | the in-memory implementation and its `{ now, partitionCount }` options                                               |
-| `InMemoryCredentialStore`, `InMemoryCredentialStoreOptions`                                                                                     | the in-memory credential store and its `{ now }` option                                                              |
-| `Clock`, `systemClock`, `timestampAt()`                                                                                                         | the injectable time source, and how an instant is written as a timestamp                                             |
-| `FencedError`, `SessionNotFoundError`, `AgentNotFoundError`, `DuplicateEventIdError`, `ClaimConflictError`, `isFencedError()`                   | the typed failures a store raises                                                                                    |
-| `FENCED_ERROR_CODE`, `SESSION_NOT_FOUND_ERROR_CODE`, `AGENT_NOT_FOUND_ERROR_CODE`, `DUPLICATE_EVENT_ID_ERROR_CODE`, `CLAIM_CONFLICT_ERROR_CODE` | the stable `code` of each error, for detection across bundles                                                        |
-| `PACKAGE_NAME`                                                                                                                                  | this package's name; lets a dependent prove the import resolved                                                      |
+| export                                                                                                                                          | what it is                                                                                                                               |
+| ----------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `SessionStore`                                                                                                                                  | the storage and signaling contract; every method is async, and documented below                                                          |
+| `AppendableEvent`                                                                                                                               | an event a caller appends: a `StoredEvent` minus `seq` and `processed_at`, plus an optional `id` the caller supplies                     |
+| `CreateSessionOptions`, `ListAgentsOptions`, `ListSessionsOptions`, `ListEventsOptions`                                                         | the options objects of the list and create methods                                                                                       |
+| `OwnerScope`                                                                                                                                    | `{ ownerId }`: how a read is scoped to one owner (A4) — required, so forgetting it is a compile error; see [the contract](#the-contract) |
+| `UnscopedListEventsOptions`                                                                                                                     | the filters of `listEventsUnscoped`, the brain's replay                                                                                  |
+| `CredentialStore`                                                                                                                               | the sealed-blob credential contract; see [The CredentialStore](#the-credentialstore-epic-65-a5)                                          |
+| `SealedSecret`, `CredentialKey`, `UpsertCredentialInput`, `ListCredentialsOptions`, `SealedProviderCredential`                                  | the credential contract's vocabulary: the sealed form, the key, what `upsert` writes, and what `get` returns                             |
+| `UpdateSessionRequest`                                                                                                                          | what `updateSession()` changes: the title, or nothing                                                                                    |
+| `AppendEventsOptions`, `PartitionFence`                                                                                                         | the optional fence a brain attaches to a write                                                                                           |
+| `CompactOptions`                                                                                                                                | what `compact()` takes: the retention cutoff (`olderThan: Date \| number`)                                                               |
+| `PartitionLease`, `PartitionSignal`, `PartitionSignalInput`, `PartitionSignalKind`                                                              | leases over a partition, and the signals sent to its owner                                                                               |
+| `TurnState`, `TurnStateKind`                                                                                                                    | what `getTurnState()` answers                                                                                                            |
+| `SessionEventListener`, `PartitionSignalListener`, `Unsubscribe`                                                                                | subscription plumbing                                                                                                                    |
+| `InMemorySessionStore`, `InMemorySessionStoreOptions`                                                                                           | the in-memory implementation and its `{ now, partitionCount }` options                                                                   |
+| `InMemoryCredentialStore`, `InMemoryCredentialStoreOptions`                                                                                     | the in-memory credential store and its `{ now }` option                                                                                  |
+| `Clock`, `systemClock`, `timestampAt()`                                                                                                         | the injectable time source, and how an instant is written as a timestamp                                                                 |
+| `FencedError`, `SessionNotFoundError`, `AgentNotFoundError`, `DuplicateEventIdError`, `ClaimConflictError`, `isFencedError()`                   | the typed failures a store raises                                                                                                        |
+| `FENCED_ERROR_CODE`, `SESSION_NOT_FOUND_ERROR_CODE`, `AGENT_NOT_FOUND_ERROR_CODE`, `DUPLICATE_EVENT_ID_ERROR_CODE`, `CLAIM_CONFLICT_ERROR_CODE` | the stable `code` of each error, for detection across bundles                                                                            |
+| `PACKAGE_NAME`                                                                                                                                  | this package's name; lets a dependent prove the import resolved                                                                          |
 
 ### `@openharness/session/postgres`
 
@@ -150,32 +151,34 @@ later than the append that caused it. Read state; do not assume a listener has r
 **Ownership** (epic #65, A4). Every agent and session belongs to exactly one user:
 `createAgent(input, ownerId)` and `createSession(agentId, { ownerId, … })` take the owner's
 Better Auth `user.id`, the stored resource carries it as `owner_id`, and it never changes.
-Which methods are **owner-scoped** — they take an `OwnerScopeOptions` `{ ownerId }`, and a
-resource belonging to somebody else is answered as if it did not exist, because a 404 must not
-leak that it does:
+The reads a user-facing route makes take an **`OwnerScope` `{ ownerId }` that is required** —
+forgetting the owner is a compile error, not a silent unscoped read (#61's security fix) — and
+a resource belonging to somebody else is answered as if it did not exist, because a 404 must
+not leak that it does:
 
-| method                            | scoped form                                                                                                                                            |
-| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `getAgent(agentId, options?)`     | `null` for another owner's agent                                                                                                                       |
-| `listAgents(options?)`            | `data: []` for another owner; `[]`, never somebody else's                                                                                              |
-| `getSession(sessionId, options?)` | `null` for another owner's session                                                                                                                     |
-| `listSessions(options?)`          | only the owner's sessions; the `agentId` filter narrows inside them                                                                                    |
-| `listEvents(sessionId, options?)` | `SessionNotFoundError` for another owner's session — the user-facing events route's 404                                                                |
-| `createSession(agentId, options)` | `ownerId` is **required**, and the agent must belong to that owner or it is an `AgentNotFoundError` — a session may not snapshot somebody else's agent |
+| method                                  | scoped form                                                                                                                                            |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `getAgent(agentId, { ownerId })`        | `null` for another owner's agent                                                                                                                       |
+| `listAgents({ ownerId, … })`            | `data: []` for another owner; `[]`, never somebody else's                                                                                              |
+| `getSession(sessionId, { ownerId })`    | `null` for another owner's session                                                                                                                     |
+| `listSessions({ ownerId, … })`          | only the owner's sessions; the `agentId` filter narrows inside them                                                                                    |
+| `listEvents(sessionId, { ownerId, … })` | `SessionNotFoundError` for another owner's session — the user-facing events route's 404                                                                |
+| `createSession(agentId, options)`       | `ownerId` is **required**, and the agent must belong to that owner or it is an `AgentNotFoundError` — a session may not snapshot somebody else's agent |
 
 Everything else is **unscoped**, and deliberately so:
 
 - `createAgent` takes its owner as an argument rather than an option: a resource cannot be
   created without one.
-- the brain's and scheduler's paths — `appendEvents`, `listEvents` without `ownerId`,
-  `getPendingUserEvents`, `getTurnState`, `compact`, `subscribe`, `signalPartition`,
-  `onPartitionSignal`, `findSessionsNeedingWork`, the leases — act _for a session_, never for a
-  user, and must not be narrowed by one.
+- the brain's and scheduler's paths — `appendEvents`, `getSessionUnscoped`,
+  `listEventsUnscoped`, `getPendingUserEvents`, `getTurnState`, `compact`, `subscribe`,
+  `signalPartition`, `onPartitionSignal`, `findSessionsNeedingWork`, the leases — act _for a
+  session_, never for a user, and must not be narrowed by one. The two reads that need an
+  arbitrary owner's session are **separate, explicitly named methods** (`getSessionUnscoped`,
+  `listEventsUnscoped`) rather than an optional argument, so a route cannot reach them by
+  forgetting a field; they still refuse an id nothing has.
 - `updateAgent` and `updateSession` are not reads and take no scope: a user-facing route calls
   the scoped read first and answers 404 for a `null`. Nothing can go stale between the two
   calls, because no method writes `owner_id` after creation.
-- `getSession` and `getAgent` without `ownerId` see any owner's resource; that is for server
-  internals that already resolved the caller, like the brain recovering a turn.
 
 **Ordering.** `seq` is the ordering key, not time: it starts at `1` and increases by one per
 event, per session, in append order. Timestamps are metadata. Reads return events in `seq`
@@ -442,12 +445,13 @@ and `0013_provider_credentials`:
   `account`, `verification` and the device-authorization plugin's `deviceCode`, for a config
   with the core library, the `google`, `github` and `microsoft` social providers and the
   `device-authorization` and `bearer` plugins. The SQL is **generated, not hand-written**: it
-  came out of **Better Auth 1.7.7**'s CLI (`npx @better-auth/cli generate`, with the
+  came out of **Better Auth 1.7.6**'s CLI (`npx @better-auth/cli generate`, with the
   Postgres/Kysely adapter) in a scratch directory, and is committed verbatim but for
   whitespace and the `if not exists` the migrator needs. The server sub-issue (#61) mounts
   Better Auth against these tables with its own migrator disabled, so if the Better Auth
   version moves, regenerate and diff: **they have to match exactly.** The file's header
-  records the same provenance.
+  records the same provenance — and records that the 1.7.6 regeneration was diffed against
+  the file and matched (only whitespace, statement order and the `if not exists` differ).
 - **`0012_ownership.sql` — delete the v1 data, then ownership** (decision A4): v1 is
   unreleased, so there is no backfill — all rows of `events`, `event_claims`,
   `event_supersessions`, `sessions` and `agents` are deleted, and `agents` and `sessions` gain

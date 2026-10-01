@@ -20,15 +20,33 @@ import {
  * configuration mistake should stop the process at boot rather than surprise a user later.
  */
 
+/** The three variables every boot needs (A2/A5), so a test's own variables stand out. */
+const REQUIRED = {
+  BETTER_AUTH_SECRET: 'a-test-secret-that-is-long-enough-for-better-auth',
+  BETTER_AUTH_URL: 'http://localhost:3000',
+  OPENHARNESS_SECRETS_KEY: 'b3Blbmhhcm5lc3MtdGVzdC1zZWNyZXRzLWtleS0zMmI=',
+}
+
+/** {@link REQUIRED} plus whatever the test is about. */
+function env(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  return { ...REQUIRED, ...extra }
+}
+
 describe('readServerConfig', () => {
-  it('fills in the defaults for an empty environment', () => {
-    const config = readServerConfig({})
+  it('fills in the defaults for an environment that only carries the required variables', () => {
+    const config = readServerConfig(env())
 
     expect(config).toEqual({
       port: DEFAULT_PORT,
       databaseUrl: undefined,
       scheduler: DEFAULT_SCHEDULER,
-      apiKey: undefined,
+      betterAuthSecret: REQUIRED.BETTER_AUTH_SECRET,
+      betterAuthUrl: REQUIRED.BETTER_AUTH_URL,
+      secretsKey: REQUIRED.OPENHARNESS_SECRETS_KEY,
+      devLogin: false,
+      google: undefined,
+      github: undefined,
+      microsoft: undefined,
       testModel: undefined,
       webDir: undefined,
       corsOrigins: [],
@@ -48,34 +66,48 @@ describe('readServerConfig', () => {
   })
 
   it('generates a different instance id for every read', () => {
-    expect(readServerConfig({}).instanceId).not.toBe(defaultInstanceId())
+    expect(readServerConfig(env()).instanceId).not.toBe(defaultInstanceId())
   })
 
   it('reads every variable', () => {
-    const config = readServerConfig({
-      PORT: '8080',
-      DATABASE_URL: 'postgres://localhost/openharness',
-      OPENHARNESS_API_KEY: 'oh_key',
-      OPENHARNESS_TEST_MODEL: 'mock',
-      OPENHARNESS_WEB_DIR: '/srv/web',
-      OPENHARNESS_CORS_ORIGINS: 'http://a.test, http://b.test',
-      OPENHARNESS_MAX_CONCURRENT_SESSIONS: '12',
-      OPENHARNESS_DRAIN_TIMEOUT_MS: '250',
-      SCHEDULER: 'postgres',
-      OPENHARNESS_INSTANCE_ID: 'instance-a',
-      OPENHARNESS_PARTITIONS: '8',
-      OPENHARNESS_LEASE_TTL_MS: '900',
-      OPENHARNESS_HEARTBEAT_MS: '300',
-      OPENHARNESS_SWEEP_MS: '450',
-      OPENHARNESS_DELTA_RETENTION_MS: '120000',
-      OPENHARNESS_COMPACT_INTERVAL_MS: '60000',
-    })
+    const config = readServerConfig(
+      env({
+        PORT: '8080',
+        DATABASE_URL: 'postgres://localhost/openharness',
+        OPENHARNESS_TEST_MODEL: 'mock',
+        GOOGLE_CLIENT_ID: 'g-id',
+        GOOGLE_CLIENT_SECRET: 'g-secret',
+        GITHUB_CLIENT_ID: 'gh-id',
+        GITHUB_CLIENT_SECRET: 'gh-secret',
+        MICROSOFT_CLIENT_ID: 'ms-id',
+        MICROSOFT_CLIENT_SECRET: 'ms-secret',
+        MICROSOFT_TENANT_ID: 'contoso',
+        OPENHARNESS_WEB_DIR: '/srv/web',
+        OPENHARNESS_CORS_ORIGINS: 'http://a.test, http://b.test',
+        OPENHARNESS_MAX_CONCURRENT_SESSIONS: '12',
+        OPENHARNESS_DRAIN_TIMEOUT_MS: '250',
+        SCHEDULER: 'postgres',
+        OPENHARNESS_INSTANCE_ID: 'instance-a',
+        OPENHARNESS_PARTITIONS: '8',
+        OPENHARNESS_LEASE_TTL_MS: '900',
+        OPENHARNESS_HEARTBEAT_MS: '300',
+        OPENHARNESS_SWEEP_MS: '450',
+        OPENHARNESS_DELTA_RETENTION_MS: '120000',
+        OPENHARNESS_COMPACT_INTERVAL_MS: '60000',
+      }),
+    )
 
     expect(config).toEqual({
       port: 8080,
       databaseUrl: 'postgres://localhost/openharness',
       scheduler: 'postgres',
-      apiKey: 'oh_key',
+      betterAuthSecret: REQUIRED.BETTER_AUTH_SECRET,
+      betterAuthUrl: REQUIRED.BETTER_AUTH_URL,
+      secretsKey: REQUIRED.OPENHARNESS_SECRETS_KEY,
+      devLogin: false,
+      google: { clientId: 'g-id', clientSecret: 'g-secret' },
+      github: { clientId: 'gh-id', clientSecret: 'gh-secret' },
+      microsoft: { clientId: 'ms-id', clientSecret: 'ms-secret', tenantId: 'contoso' },
       testModel: 'mock',
       webDir: '/srv/web',
       corsOrigins: ['http://a.test', 'http://b.test'],
@@ -93,121 +125,199 @@ describe('readServerConfig', () => {
   })
 
   it('allows a retention window of zero and an interval that disables compaction', () => {
-    const config = readServerConfig({
-      OPENHARNESS_DELTA_RETENTION_MS: '0',
-      OPENHARNESS_COMPACT_INTERVAL_MS: '0',
-    })
+    const config = readServerConfig(
+      env({
+        OPENHARNESS_DELTA_RETENTION_MS: '0',
+        OPENHARNESS_COMPACT_INTERVAL_MS: '0',
+      }),
+    )
 
     expect(config.deltaRetentionMs).toBe(0)
     expect(config.compactIntervalMs).toBe(0)
   })
 
   it('refuses a retention window that is not a count of milliseconds', () => {
-    expect(() => readServerConfig({ OPENHARNESS_DELTA_RETENTION_MS: '-1' })).toThrow(
+    expect(() => readServerConfig(env({ OPENHARNESS_DELTA_RETENTION_MS: '-1' }))).toThrow(
       /OPENHARNESS_DELTA_RETENTION_MS/,
     )
-    expect(() => readServerConfig({ OPENHARNESS_COMPACT_INTERVAL_MS: 'soon' })).toThrow(
+    expect(() => readServerConfig(env({ OPENHARNESS_COMPACT_INTERVAL_MS: 'soon' }))).toThrow(
       /OPENHARNESS_COMPACT_INTERVAL_MS/,
     )
   })
 
   it('refuses a scheduler it does not have', () => {
-    expect(() => readServerConfig({ SCHEDULER: 'postgresql' })).toThrow(/SCHEDULER/)
+    expect(() => readServerConfig(env({ SCHEDULER: 'postgresql' }))).toThrow(/SCHEDULER/)
   })
 
   it('refuses the postgres scheduler without a database to lease partitions in', () => {
     // Partition leases live in the database, so this is a configuration nobody can mean:
     // the process does not come up rather than running turns nobody owns.
-    expect(() => readServerConfig({ SCHEDULER: 'postgres' })).toThrow(/DATABASE_URL/)
+    expect(() => readServerConfig(env({ SCHEDULER: 'postgres' }))).toThrow(/DATABASE_URL/)
     expect(
-      readServerConfig({
-        SCHEDULER: 'postgres',
-        DATABASE_URL: 'postgres://localhost/openharness',
-      }).scheduler,
+      readServerConfig(
+        env({ SCHEDULER: 'postgres', DATABASE_URL: 'postgres://localhost/openharness' }),
+      ).scheduler,
     ).toBe('postgres')
   })
 
   it('refuses a heartbeat that would outlive the lease it renews', () => {
-    const env = { OPENHARNESS_LEASE_TTL_MS: '1000', OPENHARNESS_HEARTBEAT_MS: '1000' }
-    expect(() => readServerConfig(env)).toThrow(/OPENHARNESS_HEARTBEAT_MS/)
+    const conflict = env({ OPENHARNESS_LEASE_TTL_MS: '1000', OPENHARNESS_HEARTBEAT_MS: '1000' })
+    expect(() => readServerConfig(conflict)).toThrow(/OPENHARNESS_HEARTBEAT_MS/)
     expect(() =>
-      readServerConfig({ OPENHARNESS_LEASE_TTL_MS: '1000', OPENHARNESS_HEARTBEAT_MS: '2500' }),
+      readServerConfig(env({ OPENHARNESS_LEASE_TTL_MS: '1000', OPENHARNESS_HEARTBEAT_MS: '2500' })),
     ).toThrow(/OPENHARNESS_HEARTBEAT_MS/)
     expect(
-      readServerConfig({ OPENHARNESS_LEASE_TTL_MS: '1000', OPENHARNESS_HEARTBEAT_MS: '999' })
+      readServerConfig(env({ OPENHARNESS_LEASE_TTL_MS: '1000', OPENHARNESS_HEARTBEAT_MS: '999' }))
         .heartbeatMs,
     ).toBe(999)
   })
 
   it('refuses a partition count below one', () => {
-    expect(() => readServerConfig({ OPENHARNESS_PARTITIONS: '0' })).toThrow(
+    expect(() => readServerConfig(env({ OPENHARNESS_PARTITIONS: '0' }))).toThrow(
       /OPENHARNESS_PARTITIONS/,
     )
   })
 
   it('treats an empty variable as unset', () => {
-    const config = readServerConfig({ PORT: '', DATABASE_URL: '  ', OPENHARNESS_API_KEY: '' })
+    const config = readServerConfig(
+      env({ PORT: '', DATABASE_URL: '  ', OPENHARNESS_DEV_LOGIN: '' }),
+    )
 
     expect(config.port).toBe(DEFAULT_PORT)
     expect(config.databaseUrl).toBeUndefined()
-    expect(config.apiKey).toBeUndefined()
+    expect(config.devLogin).toBe(false)
   })
 
   it('allows port 0, so a test can ask for an ephemeral one', () => {
-    expect(readServerConfig({ PORT: '0' }).port).toBe(0)
+    expect(readServerConfig(env({ PORT: '0' })).port).toBe(0)
   })
 
   it('refuses a port that is not a port', () => {
-    expect(() => readServerConfig({ PORT: 'http' })).toThrow(/PORT/)
-    expect(() => readServerConfig({ PORT: '70000' })).toThrow(/PORT/)
-    expect(() => readServerConfig({ PORT: '-1' })).toThrow(/PORT/)
+    expect(() => readServerConfig(env({ PORT: 'http' }))).toThrow(/PORT/)
+    expect(() => readServerConfig(env({ PORT: '70000' }))).toThrow(/PORT/)
+    expect(() => readServerConfig(env({ PORT: '-1' }))).toThrow(/PORT/)
   })
 
   it('refuses a concurrency limit below one', () => {
-    expect(() => readServerConfig({ OPENHARNESS_MAX_CONCURRENT_SESSIONS: '0' })).toThrow(
+    expect(() => readServerConfig(env({ OPENHARNESS_MAX_CONCURRENT_SESSIONS: '0' }))).toThrow(
       /OPENHARNESS_MAX_CONCURRENT_SESSIONS/,
     )
   })
 
   it('drops empty entries from the CORS list', () => {
-    expect(readServerConfig({ OPENHARNESS_CORS_ORIGINS: 'http://a.test,,' }).corsOrigins).toEqual([
-      'http://a.test',
-    ])
+    expect(
+      readServerConfig(env({ OPENHARNESS_CORS_ORIGINS: 'http://a.test,,' })).corsOrigins,
+    ).toEqual(['http://a.test'])
+  })
+
+  it('requires the signing secret, the public URL and the vault key', () => {
+    // A2/A5: without the first two nobody could sign in, without the third no credential
+    // could be stored. The boot fails and names the variable.
+    expect(() => readServerConfig({})).toThrow(/BETTER_AUTH_SECRET/)
+    expect(() => readServerConfig({ BETTER_AUTH_SECRET: 'x'.repeat(32) })).toThrow(
+      /BETTER_AUTH_URL/,
+    )
+    expect(() =>
+      readServerConfig({ BETTER_AUTH_SECRET: 'x'.repeat(32), BETTER_AUTH_URL: 'http://x.test' }),
+    ).toThrow(/OPENHARNESS_SECRETS_KEY/)
+    expect(() => readServerConfig(env({ OPENHARNESS_SECRETS_KEY: 'not-base64!!' }))).toThrow(
+      /OPENHARNESS_SECRETS_KEY/,
+    )
+    expect(() =>
+      readServerConfig(env({ OPENHARNESS_SECRETS_KEY: Buffer.from('short').toString('base64') })),
+    ).toThrow(/OPENHARNESS_SECRETS_KEY/)
+  })
+
+  it('enables the dev login only on a localhost public URL', () => {
+    // A7: a fixed password on a well-known address is for a laptop.
+    for (const url of [
+      'http://localhost:3000',
+      'http://localhost',
+      'http://127.0.0.1:8080',
+      'http://[::1]:3000',
+      'https://localhost:51234',
+    ]) {
+      expect(
+        readServerConfig(env({ OPENHARNESS_DEV_LOGIN: '1', BETTER_AUTH_URL: url })).devLogin,
+      ).toBe(true)
+    }
+    for (const url of [
+      'https://openharness.example',
+      'http://10.0.0.5:3000',
+      'http://localhost.evil.test',
+    ]) {
+      expect(() =>
+        readServerConfig(env({ OPENHARNESS_DEV_LOGIN: '1', BETTER_AUTH_URL: url })),
+      ).toThrow(/OPENHARNESS_DEV_LOGIN/)
+    }
+    // Off is always allowed, wherever the deployment lives.
+    expect(readServerConfig(env({ BETTER_AUTH_URL: 'https://openharness.example' })).devLogin).toBe(
+      false,
+    )
+  })
+
+  it('refuses a dev-login flag that is not a flag', () => {
+    expect(() => readServerConfig(env({ OPENHARNESS_DEV_LOGIN: 'yes' }))).toThrow(
+      /OPENHARNESS_DEV_LOGIN/,
+    )
+    expect(readServerConfig(env({ OPENHARNESS_DEV_LOGIN: 'true' })).devLogin).toBe(true)
+  })
+
+  it('enables a provider only when both of its variables are set', () => {
+    expect(() => readServerConfig(env({ GOOGLE_CLIENT_ID: 'id' }))).toThrow(/GOOGLE_CLIENT_SECRET/)
+    expect(() => readServerConfig(env({ GITHUB_CLIENT_SECRET: 'secret' }))).toThrow(
+      /GITHUB_CLIENT_ID/,
+    )
+    const config = readServerConfig(
+      env({ MICROSOFT_CLIENT_ID: 'id', MICROSOFT_CLIENT_SECRET: 's' }),
+    )
+    expect(config.microsoft).toEqual({ clientId: 'id', clientSecret: 's', tenantId: 'common' })
   })
 })
 
 describe('describeConfig', () => {
-  it('says which store, model and auth the server will run with', () => {
-    const lines = describeConfig(readServerConfig({ OPENHARNESS_TEST_MODEL: 'mock' }))
+  it('says which store, model and sign-in the server will run with', () => {
+    const lines = describeConfig(readServerConfig(env({ OPENHARNESS_TEST_MODEL: 'mock' })))
 
     expect(lines.join('\n')).toContain('store: in-memory')
     expect(lines.join('\n')).toContain('model: TEST MODEL')
-    expect(lines.join('\n')).toContain('auth: open')
+    expect(lines.join('\n')).toContain('sign-in: no social providers configured')
+    expect(lines.join('\n')).toContain('dev login: off')
   })
 
-  it('names postgres and the key when both are configured', () => {
+  it('names postgres, the providers and the dev login when they are configured', () => {
     const lines = describeConfig(
-      readServerConfig({ DATABASE_URL: 'postgres://localhost/x', OPENHARNESS_API_KEY: 'k' }),
-    )
+      readServerConfig(
+        env({
+          DATABASE_URL: 'postgres://localhost/x',
+          GOOGLE_CLIENT_ID: 'g',
+          GOOGLE_CLIENT_SECRET: 'gs',
+          OPENHARNESS_DEV_LOGIN: '1',
+        }),
+      ),
+    ).join('\n')
 
-    expect(lines.join('\n')).toContain('store: postgres')
-    expect(lines.join('\n')).toContain('auth: x-api-key')
+    expect(lines).toContain('store: postgres')
+    expect(lines).toContain('sign-in: google')
+    expect(lines).toContain('dev login: ENABLED')
   })
 
   it('says which scheduler and which partition space the server runs', () => {
-    const local = describeConfig(readServerConfig({}))
+    const local = describeConfig(readServerConfig(env()))
     expect(local.join('\n')).toContain('scheduler: local')
 
     const partitioned = describeConfig(
-      readServerConfig({
-        SCHEDULER: 'postgres',
-        DATABASE_URL: 'postgres://localhost/x',
-        OPENHARNESS_INSTANCE_ID: 'instance-a',
-        OPENHARNESS_PARTITIONS: '8',
-        OPENHARNESS_LEASE_TTL_MS: '900',
-        OPENHARNESS_HEARTBEAT_MS: '300',
-        OPENHARNESS_SWEEP_MS: '450',
-      }),
+      readServerConfig(
+        env({
+          SCHEDULER: 'postgres',
+          DATABASE_URL: 'postgres://localhost/x',
+          OPENHARNESS_INSTANCE_ID: 'instance-a',
+          OPENHARNESS_PARTITIONS: '8',
+          OPENHARNESS_LEASE_TTL_MS: '900',
+          OPENHARNESS_HEARTBEAT_MS: '300',
+          OPENHARNESS_SWEEP_MS: '450',
+        }),
+      ),
     )
     const line = partitioned.join('\n')
     expect(line).toContain('scheduler: postgres')
@@ -220,16 +330,18 @@ describe('describeConfig', () => {
 
   it('says how often superseded chunks are compacted, and when that is off', () => {
     const retaining = describeConfig(
-      readServerConfig({
-        OPENHARNESS_DELTA_RETENTION_MS: '60000',
-        OPENHARNESS_COMPACT_INTERVAL_MS: '5000',
-      }),
+      readServerConfig(
+        env({
+          OPENHARNESS_DELTA_RETENTION_MS: '60000',
+          OPENHARNESS_COMPACT_INTERVAL_MS: '5000',
+        }),
+      ),
     ).join('\n')
     expect(retaining).toContain('compaction: every 5000ms')
     expect(retaining).toContain('retaining superseded chunks 60000ms')
 
     expect(
-      describeConfig(readServerConfig({ OPENHARNESS_COMPACT_INTERVAL_MS: '0' })).join('\n'),
+      describeConfig(readServerConfig(env({ OPENHARNESS_COMPACT_INTERVAL_MS: '0' }))).join('\n'),
     ).toContain('compaction: disabled')
   })
 })

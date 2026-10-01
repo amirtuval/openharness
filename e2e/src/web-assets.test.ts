@@ -42,10 +42,13 @@ describe('a server serving the built web app', () => {
     expect(deepLink.status).toBe(200)
     expect(await deepLink.text()).toBe(html)
 
-    // The API is still the API: `/v1` is not a file and not a fallback.
-    const agents = await fetch(`${server.baseUrl}/v1/agents`)
-    expect(agents.status).toBe(200)
-    expect(agents.headers.get('content-type')).toContain('application/json')
-    expect(await agents.json()).toEqual({ data: [], next_page: null })
+    // The API is still the API: `/v1` is not a file and not a fallback — it is JSON, and it
+    // is authenticated (A2), which the app shell must never be served for.
+    const anonymous = await fetch(`${server.baseUrl}/v1/agents`)
+    expect(anonymous.status).toBe(401)
+    expect(anonymous.headers.get('content-type')).toContain('application/json')
+
+    const client = await harness.client(server)
+    await expect(client.agents.list()).resolves.toEqual({ data: [], next_page: null })
   })
 })

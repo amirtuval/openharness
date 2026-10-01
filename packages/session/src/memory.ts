@@ -65,7 +65,8 @@ import type {
   ListAgentsOptions,
   ListEventsOptions,
   ListSessionsOptions,
-  OwnerScopeOptions,
+  OwnerScope,
+  UnscopedListEventsOptions,
   PartitionFence,
   PartitionLease,
   PartitionSignal,
@@ -165,7 +166,7 @@ export class InMemorySessionStore implements SessionStore {
     return resolved(clone(agent))
   }
 
-  getAgent(agentId: AgentId, options: OwnerScopeOptions = {}): Promise<Agent | null> {
+  getAgent(agentId: AgentId, options: OwnerScope): Promise<Agent | null> {
     const agent = this.#agents.get(agentId)
     if (agent === undefined || !matchesOwner(agent, options)) {
       return resolved(null)
@@ -173,7 +174,7 @@ export class InMemorySessionStore implements SessionStore {
     return resolved(clone(agent))
   }
 
-  listAgents(options: ListAgentsOptions = {}): Promise<ListAgentsResponse> {
+  listAgents(options: ListAgentsOptions): Promise<ListAgentsResponse> {
     const cursor = options.page === undefined ? null : decodeKeyPage(options.page)
     const agents = [...this.#agents.values()]
       .filter((agent) => matchesOwner(agent, options))
@@ -234,7 +235,7 @@ export class InMemorySessionStore implements SessionStore {
     return resolved(clone(session))
   }
 
-  getSession(sessionId: SessionId, options: OwnerScopeOptions = {}): Promise<Session | null> {
+  getSession(sessionId: SessionId, options: OwnerScope): Promise<Session | null> {
     const record = this.#sessions.get(sessionId)
     if (record === undefined || !matchesOwner(record.session, options)) {
       return resolved(null)
@@ -242,7 +243,12 @@ export class InMemorySessionStore implements SessionStore {
     return resolved(clone(record.session))
   }
 
-  listSessions(options: ListSessionsOptions = {}): Promise<ListSessionsResponse> {
+  getSessionUnscoped(sessionId: SessionId): Promise<Session | null> {
+    const record = this.#sessions.get(sessionId)
+    return resolved(record === undefined ? null : clone(record.session))
+  }
+
+  listSessions(options: ListSessionsOptions): Promise<ListSessionsResponse> {
     const cursor = options.page === undefined ? null : decodeKeyPage(options.page)
     const wanted = options.agentId
     const sessions = [...this.#sessions.values()]
@@ -284,8 +290,21 @@ export class InMemorySessionStore implements SessionStore {
     return resolved(stored.map((event) => this.#share(event)))
   }
 
-  listEvents(sessionId: SessionId, options: ListEventsOptions = {}): Promise<ListEventsResponse> {
+  listEvents(sessionId: SessionId, options: ListEventsOptions): Promise<ListEventsResponse> {
     const record = this.#requireSession(sessionId, options)
+    return resolved(this.#readEvents(record, options))
+  }
+
+  listEventsUnscoped(
+    sessionId: SessionId,
+    options: UnscopedListEventsOptions = {},
+  ): Promise<ListEventsResponse> {
+    const record = this.#requireSession(sessionId)
+    return resolved(this.#readEvents(record, options))
+  }
+
+  #readEvents(record: SessionRecord, options: UnscopedListEventsOptions): ListEventsResponse {
+    const sessionId = record.session.id
     const order = options.order ?? DEFAULT_EVENT_ORDER
     const cursor = options.page === undefined ? null : decodeSeqPage(options.page)
     const afterSeq = options.afterSeq
@@ -312,7 +331,7 @@ export class InMemorySessionStore implements SessionStore {
     const limit = pageSize(options.limit)
     const data = events.slice(0, limit)
     const next_page = events.length > limit ? encodeSeqCursor(lastOf(data).seq) : null
-    return resolved({ data: data.map((event) => this.#share(event)), next_page })
+    return { data: data.map((event) => this.#share(event)), next_page }
   }
 
   getPendingUserEvents(sessionId: SessionId): Promise<UserEvent[]> {
@@ -478,9 +497,9 @@ export class InMemorySessionStore implements SessionStore {
    * for one that belongs to another owner than a scoped read named: both are the same answer,
    * so a user-facing 404 leaks nothing (epic #65, A4).
    */
-  #requireSession(sessionId: SessionId, options: OwnerScopeOptions = {}): SessionRecord {
+  #requireSession(sessionId: SessionId, options: OwnerScope | null = null): SessionRecord {
     const record = this.#sessions.get(sessionId)
-    if (record === undefined || !matchesOwner(record.session, options)) {
+    if (record === undefined || (options !== null && !matchesOwner(record.session, options))) {
       throw new SessionNotFoundError(sessionId)
     }
     return record
@@ -859,11 +878,8 @@ function clone<T>(value: T): T {
  * form, and they act for a session rather than for a user. A scoped read matches only the
  * owner's own resources (epic #65, A4).
  */
-function matchesOwner(
-  resource: { readonly owner_id?: UserId },
-  options: OwnerScopeOptions,
-): boolean {
-  return options.ownerId === undefined || resource.owner_id === options.ownerId
+function matchesOwner(resource: { readonly owner_id?: UserId }, options: OwnerScope): boolean {
+  return resource.owner_id === options.ownerId
 }
 
 /**

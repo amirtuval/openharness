@@ -2,26 +2,37 @@ import { serve } from '@hono/node-server'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool } from 'pg'
 import type { Hono } from 'hono'
-import type { ModelFactory, ResolveCredential } from '@openharness/brain'
+import type { MemoryDB } from 'better-auth/adapters/memory'
+import type { ModelFactory } from '@openharness/brain'
 import type { SessionId } from '@openharness/protocol'
-import { InMemorySessionStore, type SessionStore } from '@openharness/session'
+import {
+  InMemoryCredentialStore,
+  InMemorySessionStore,
+  type CredentialStore,
+  type SessionStore,
+} from '@openharness/session'
 import {
   type PostgresSchema,
+  createPostgresCredentialStore,
   createPostgresSessionStore,
   migrate,
 } from '@openharness/session/postgres'
+import { createVault, envKeyProvider, type Vault } from '@openharness/vault'
 
 import { type AppEnv, type Logger, consoleLogger } from './types'
 import { createApp } from './app'
+import { createAuth, createDevLoginUser, type Auth, type AuthDatabase } from './auth'
 import { DeltaCompactor } from './compaction'
 import { ENV_VARS, type ServerConfig, describeConfig, readServerConfig } from './config'
-import { resolveModelFactory } from './model'
+import { createSessionCredentialResolver, type ResolveSessionCredential } from './credentials'
+import { resolveMockCredential, resolveModelFactory } from './model'
 import { PostgresPartitionScheduler } from './partition-scheduler'
-import { ensurePlaceholderUser } from './placeholder-owner'
+import { validateProviderApiKey, type ProviderCredentialValidator } from './provider-validation'
 import { LocalScheduler, type SessionScheduler } from './scheduler'
 
 /**
- * Starting the server: the environment, the store, the scheduler, the app, and the shutdown.
+ * Starting the server: the environment, the store, sign-in, the scheduler, the app, and the
+ * shutdown.
  *
  * `node dist/index.js` runs {@link main}; everything it does is available as
  * {@link startServer} for a test that wants a real listening server on an ephemeral port.
@@ -37,6 +48,10 @@ export interface StartedServer {
   readonly scheduler: SessionScheduler
   /** The periodic compaction of superseded chunks; runs in every scheduler mode. */
   readonly compactor: DeltaCompactor
+  /** The Better Auth instance: `/api/auth/*`, and the sessions `/v1` is guarded with. */
+  readonly auth: Auth
+  /** The vault that seals and opens provider credentials. */
+  readonly vault: Vault
   /** The port the server is listening on; a real one even when `PORT=0`. */
   readonly port: number
   /** Stop the server: no new requests, no new turns, no open store. Idempotent. */
@@ -56,7 +71,24 @@ export interface StartServerOptions {
    * test that swaps in a model factory almost always swaps this too: a scripted model ignores
    * credentials, but the brain still asks for one before every request.
    */
-  readonly resolveCredential?: ResolveCredential
+  readonly resolveCredential?: ResolveSessionCredential
+  /** Store sealed credentials here instead of in the store the config built. */
+  readonly credentials?: CredentialStore
+  /**
+   * Run Better Auth against this database instead of the one the config built.
+   *
+   * A host that supplies its own `store` — a test with a Postgres store, say — points sign-in
+   * at the same database, so the `user` rows the ownership foreign keys reference are the
+   * ones Better Auth writes.
+   */
+  readonly authDatabase?: AuthDatabase
+  /** Use this vault instead of one built from `OPENHARNESS_SECRETS_KEY`. */
+  readonly vault?: Vault
+  /**
+   * How a saved provider key is validated. Defaults to {@link validateProviderApiKey}, the
+   * real one cheap provider call; tests inject a fake so nothing reaches a provider.
+   */
+  readonly validateProviderCredential?: ProviderCredentialValidator
   /** Where to log; defaults to the console. */
   readonly logger?: Logger
   /** The SSE keepalive interval, for a test that wants to see a `: ping` quickly. */
@@ -67,15 +99,47 @@ export interface StartServerOptions {
  * Start an HTTP server.
  *
  * The store is built first and, on Postgres, migrated: a server that comes up against a
- * schema it has not applied yet would fail on the first request instead of at boot.
+ * schema it has not applied yet would fail on the first request instead of at boot. Then
+ * sign-in — Better Auth over the same database (the memory adapter when there is no
+ * Postgres), the dev user seeded when `OPENHARNESS_DEV_LOGIN=1` — and only then the
+ * scheduler, so no turn can run before the credentials it needs can be read.
  */
 export async function startServer(options: StartServerOptions = {}): Promise<StartedServer> {
   const logger = options.logger ?? consoleLogger
   const config = options.config ?? readServerConfig()
   const opened = await openStore(config, options, logger)
+  const credentials = options.credentials ?? opened.credentials
+  const vault = options.vault ?? createVault(envKeyProvider(config.secretsKey))
+  const auth = createAuth(
+    {
+      secret: config.betterAuthSecret,
+      baseUrl: config.betterAuthUrl,
+      devLogin: config.devLogin,
+      providers: {
+        ...(config.google === undefined ? {} : { google: config.google }),
+        ...(config.github === undefined ? {} : { github: config.github }),
+        ...(config.microsoft === undefined ? {} : { microsoft: config.microsoft }),
+      },
+    },
+    opened.authDatabase,
+    logger,
+  )
+  if (config.devLogin) {
+    await createDevLoginUser(auth)
+    logger.info('dev login is enabled: sign in with the documented dev user (localhost only)')
+  }
   const resolvedModel = resolveModelFactory(config)
   const model = options.model ?? resolvedModel.factory
-  const resolveCredential = options.resolveCredential ?? resolvedModel.resolveCredential
+  const resolveCredential =
+    options.resolveCredential ??
+    (resolvedModel.kind === 'mock'
+      ? resolveMockCredential
+      : createSessionCredentialResolver({
+          store: opened.store,
+          credentials,
+          vault,
+          logger,
+        }))
 
   const scheduler = createScheduler(config, opened.store, model, resolveCredential, logger)
   // Compaction is the store's, not a scheduler's: it deletes superseded chunks whoever ran the
@@ -90,7 +154,18 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   const app = createApp({
     store: opened.store,
     scheduler,
-    ...(config.apiKey === undefined ? {} : { apiKey: config.apiKey }),
+    auth: {
+      instance: auth.auth,
+      enabledProviders: auth.enabledProviders,
+      devLogin: auth.config.devLogin,
+      // The public URL is the one origin a cookie-authenticated write may come from (A2).
+      trustedOrigins: [config.betterAuthUrl],
+    },
+    credentialRoutes: {
+      credentials,
+      vault,
+      validate: options.validateProviderCredential ?? validateProviderApiKey,
+    },
     ...(config.webDir === undefined ? {} : { webDir: config.webDir }),
     ...(config.corsOrigins.length === 0 ? {} : { corsOrigins: config.corsOrigins }),
     ...(options.sseKeepaliveMs === undefined ? {} : { sseKeepaliveMs: options.sseKeepaliveMs }),
@@ -122,6 +197,8 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     store: opened.store,
     scheduler,
     compactor,
+    auth,
+    vault,
     port,
     shutdown: () => {
       stopping ??= stop(server, scheduler, compactor, opened.close, config, logger)
@@ -203,7 +280,7 @@ function createScheduler(
   config: ServerConfig,
   store: SessionStore,
   model: ModelFactory,
-  resolveCredential: ResolveCredential,
+  resolveCredential: ResolveSessionCredential,
   logger: Logger,
 ): SessionScheduler {
   const onError = (error: unknown, sessionId: SessionId | undefined): void => {
@@ -244,27 +321,44 @@ function createScheduler(
 /**
  * The store the server runs on, and the way it is released again.
  *
- * `DATABASE_URL` means Postgres: one pool, migrated here, owned by this function. Without it
- * the in-memory store is used — the same one every other package tests against — with a
- * warning that says out loud what it costs: nothing survives a restart.
+ * `DATABASE_URL` means Postgres: one pool, migrated here, owned by this function — the
+ * session log, Better Auth's tables and the sealed credentials all live in it, so Better Auth
+ * is handed the same Kysely handle. Without it the in-memory stores are used — the same ones
+ * every other package tests against, including a memory adapter for Better Auth's tables —
+ * with a warning that says out loud what it costs: nothing survives a restart.
  */
 async function openStore(
   config: ServerConfig,
   options: StartServerOptions,
   logger: Logger,
-): Promise<{ store: SessionStore; close: () => Promise<void> }> {
+): Promise<{
+  store: SessionStore
+  credentials: CredentialStore
+  authDatabase: AuthDatabase
+  close: () => Promise<void>
+}> {
   if (options.store !== undefined) {
-    return { store: options.store, close: () => Promise.resolve() }
+    return {
+      store: options.store,
+      credentials: new InMemoryCredentialStore(),
+      // A caller that supplies its own store is a test: sign-in runs on the memory adapter
+      // unless the caller says otherwise (`authDatabase`), which is what a test against a
+      // Postgres store has to do — its `user` rows are the foreign keys `owner_id` needs.
+      authDatabase: options.authDatabase ?? { kind: 'memory', db: emptyAuthTables() },
+      close: () => Promise.resolve(),
+    }
   }
   const connectionString = config.databaseUrl
   if (connectionString === undefined) {
     logger.warn(
       `${ENV_VARS.databaseUrl} is not set: using the IN-MEMORY store. ` +
-        'Nothing is persisted — every session, agent and event is lost when this process exits. ' +
-        'Set DATABASE_URL to run against Postgres.',
+        'Nothing is persisted — every session, agent, event and signed-in user is lost when ' +
+        'this process exits. Set DATABASE_URL to run against Postgres.',
     )
     return {
       store: new InMemorySessionStore({ partitionCount: config.partitions }),
+      credentials: new InMemoryCredentialStore(),
+      authDatabase: { kind: 'memory', db: emptyAuthTables() },
       close: () => Promise.resolve(),
     }
   }
@@ -273,22 +367,27 @@ async function openStore(
   const db = new Kysely<PostgresSchema>({ dialect: new PostgresDialect({ pool }) })
   const applied = await migrate(db)
   logger.info(`applied ${applied.length} migration file(s)`)
-  // Transition glue (#58 until #61): the routes own what they create to a placeholder user
-  // (A4), and `owner_id` is a foreign key into Better Auth's `"user"` table, so the row has
-  // to exist before the first agent is created. Better Auth will insert real users here.
-  await ensurePlaceholderUser(db)
   // The store's partition count is what a session's `partition` column holds, and it has to be
   // the scheduler's: `findSessionsNeedingWork` and a signal's channel both name partitions.
   const store = createPostgresSessionStore({ pool }, { partitionCount: config.partitions })
+  const credentials = createPostgresCredentialStore({ pool })
   return {
     store,
+    credentials,
+    authDatabase: { kind: 'postgres', db },
     close: async () => {
-      // The pool is ours — `{ pool }` means the store does not end it — so both are closed,
-      // in that order: the store first, so its listening connection goes before the pool does.
+      // The pool is ours — `{ pool }` means the stores do not end it — so everything is
+      // closed, in order: the stores first, so their connections go before the pool does.
       await store.close()
+      await credentials.close()
       await db.destroy()
     },
   }
+}
+
+/** The empty tables Better Auth's memory adapter starts from. */
+function emptyAuthTables(): MemoryDB {
+  return { user: [], session: [], account: [], verification: [], deviceCode: [] }
 }
 
 /** Resolve when the server is accepting connections, or reject when it cannot. */

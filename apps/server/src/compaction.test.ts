@@ -2,10 +2,9 @@ import { EVENT_TYPES, newEventId, type SessionId } from '@openharness/protocol'
 import { InMemorySessionStore, type CompactOptions, type SessionStore } from '@openharness/session'
 import { describe, expect, it } from 'vitest'
 
-import { PLACEHOLDER_OWNER_ID } from './placeholder-owner'
 import { DeltaCompactor } from './compaction'
 import type { Logger } from './types'
-import { waitFor } from './test-support'
+import { TEST_OWNER_ID, waitFor } from './test-support'
 
 /**
  * The compaction job: what it deletes, when, and that it never takes the process with it.
@@ -45,9 +44,9 @@ async function seedSupersededReply(
 ): Promise<{ sessionId: SessionId; chunkSeqs: number[] }> {
   const agent = await store.createAgent(
     { name: 'Agent', model: { id: 'test/model' } },
-    PLACEHOLDER_OWNER_ID,
+    TEST_OWNER_ID,
   )
-  const session = await store.createSession(agent.id, { ownerId: PLACEHOLDER_OWNER_ID })
+  const session = await store.createSession(agent.id, { ownerId: TEST_OWNER_ID })
   const messageId = newEventId()
   const chunks = await store.appendEvents(session.id, [
     { type: EVENT_TYPES.eventStart, event: { type: EVENT_TYPES.agentMessage, id: messageId } },
@@ -71,7 +70,7 @@ async function seedSupersededReply(
 
 /** Whether the session's log still physically holds any chunk. */
 async function holdsChunks(store: SessionStore, sessionId: SessionId): Promise<boolean> {
-  const page = await store.listEvents(sessionId, { includeSuperseded: true, limit: 100 })
+  const page = await store.listEventsUnscoped(sessionId, { includeSuperseded: true, limit: 100 })
   return page.data.some(
     (event) => event.type === EVENT_TYPES.eventStart || event.type === EVENT_TYPES.eventDelta,
   )
@@ -92,7 +91,7 @@ describe('DeltaCompactor', () => {
     clock.advance(60_001)
     expect(await compactor.run()).toBe(2)
     expect(await holdsChunks(store, sessionId)).toBe(false)
-    const raw = await store.listEvents(sessionId, { includeSuperseded: true, limit: 100 })
+    const raw = await store.listEventsUnscoped(sessionId, { includeSuperseded: true, limit: 100 })
     expect(raw.data.some((event) => event.type === EVENT_TYPES.agentMessage)).toBe(true)
 
     // Idempotent: nothing left to delete, and no error for trying.
@@ -104,9 +103,9 @@ describe('DeltaCompactor', () => {
     const store = new InMemorySessionStore({ now: clock.now })
     const agent = await store.createAgent(
       { name: 'Agent', model: { id: 'test/model' } },
-      PLACEHOLDER_OWNER_ID,
+      TEST_OWNER_ID,
     )
-    const session = await store.createSession(agent.id, { ownerId: PLACEHOLDER_OWNER_ID })
+    const session = await store.createSession(agent.id, { ownerId: TEST_OWNER_ID })
     const messageId = newEventId()
     await store.appendEvents(session.id, [
       { type: EVENT_TYPES.eventStart, event: { type: EVENT_TYPES.agentMessage, id: messageId } },

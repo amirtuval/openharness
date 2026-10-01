@@ -38,7 +38,7 @@ function sessionErrors(log: readonly StoredEvent[]): SessionErrorEvent[] {
 describe('a model request that fails', () => {
   it('retries a retryable failure and answers on the next attempt', async () => {
     const server = await harness.server()
-    const client = harness.client(server)
+    const client = await harness.client(server)
     const session = await newSession(client)
     const prompt = `${MOCK_RETRYABLE_MARKER} please recover`
 
@@ -82,7 +82,7 @@ describe('a model request that fails', () => {
 
   it('ends the turn, without a reply, when the failure is terminal', async () => {
     const server = await harness.server()
-    const client = harness.client(server)
+    const client = await harness.client(server)
     const session = await newSession(client)
     const prompt = `${MOCK_TERMINAL_MARKER} do not retry this`
 

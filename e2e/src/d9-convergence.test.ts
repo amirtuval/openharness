@@ -154,7 +154,7 @@ async function countStoredChunks(): Promise<number> {
 describe('clients that join a reply in flight (D9)', () => {
   it('converge on the transcript of a client that was live throughout', async () => {
     const server = await harness.server()
-    const client = harness.client(server)
+    const client = await harness.client(server)
     const session = await newSession(client)
     const prompt = `${MOCK_SLOW_MARKER} take your time`
 
@@ -221,7 +221,7 @@ describe('clients that join a reply in flight (D9)', () => {
         OPENHARNESS_COMPACT_INTERVAL_MS: '100',
       },
     })
-    const client = harness.client(server)
+    const client = await harness.client(server)
     const session = await newSession(client)
     const prompt = `${MOCK_SLOW_MARKER} take your time`
 
@@ -258,7 +258,7 @@ describe('clients that join a reply in flight (D9)', () => {
 
   it('orders a steered reply the same live and after a reload', async () => {
     const server = await harness.server()
-    const client = harness.client(server)
+    const client = await harness.client(server)
     const session = await newSession(client)
     const prompt = `${MOCK_SLOW_MARKER} take your time`
     const steering = 'actually, keep it short'

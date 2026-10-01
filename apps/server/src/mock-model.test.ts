@@ -10,7 +10,6 @@ import {
 import { InMemorySessionStore } from '@openharness/session'
 import type { RetryPolicy } from '@openharness/brain'
 
-import { PLACEHOLDER_OWNER_ID } from './placeholder-owner'
 import { LocalScheduler } from './scheduler'
 import {
   MOCK_ECHO_CHUNKS,
@@ -27,7 +26,13 @@ import {
   slowReplyText,
 } from './mock-model'
 import { resolveModelFactory } from './model'
-import { testConfig, readHistory, resolveTestCredential, waitForIdle } from './test-support'
+import {
+  TEST_OWNER_ID,
+  readHistory,
+  resolveTestSessionCredential,
+  testConfig,
+  waitForIdle,
+} from './test-support'
 
 /**
  * The deterministic test model: what it answers, how it fails, and the fact that it cannot
@@ -43,16 +48,16 @@ async function runTurn(
   const scheduler = new LocalScheduler({
     store,
     model: createMockModelFactory(),
-    resolveCredential: resolveTestCredential,
+    resolveCredential: resolveTestSessionCredential,
     onError: () => {},
     ...(options.retry === undefined ? {} : { retry: options.retry }),
   })
   await scheduler.start()
   const agent = await store.createAgent(
     { name: 'Agent', model: { id: 'openharness-test/x' } },
-    PLACEHOLDER_OWNER_ID,
+    TEST_OWNER_ID,
   )
-  const session = await store.createSession(agent.id, { ownerId: PLACEHOLDER_OWNER_ID })
+  const session = await store.createSession(agent.id, { ownerId: TEST_OWNER_ID })
   const previews: StreamEvent[] = []
   await store.subscribe(session.id, (event) => {
     previews.push(event)

@@ -2,6 +2,7 @@ import type { Context, Hono } from 'hono'
 import {
   API_VERSION_PREFIX,
   EVENT_TYPES,
+  type SessionId,
   LAST_EVENT_ID_HEADER,
   ListEventsQuerySchema,
   SendEventsRequestSchema,
@@ -40,13 +41,17 @@ export function registerEventRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
 
   app.post(events, async (c) => {
     const sessionId = sessionIdParam(c, 'session_id')
+    const ownerId = c.get('user').id
+    // Another user's session is answered 404 before anything is appended: the scoped read is
+    // the ownership check (A4).
+    await requireOwnedSession(deps, c, sessionId)
     const body = await parseBody(c, SendEventsRequestSchema)
     // The store writes `processed_at: null` on every user event, which is what makes it
     // queued work rather than history: the brain claims it at the start of a turn.
     const stored = await deps.store.appendEvents(sessionId, body.events)
     // A session is named after the first thing said in it — once, and never over a title the
     // caller supplied at creation. This is the only writer of `title` in the system.
-    await nameSessionFromFirstMessage(deps.store, sessionId, body.events)
+    await nameSessionFromFirstMessage(deps.store, sessionId, body.events, ownerId)
     const response: SendEventsResponse = { data: stored.filter(isUserEvent) }
     // Only now — after the append is committed — does anything get asked to run. An interrupt
     // goes first: cutting the turn in flight short is what lets the message queued behind it
@@ -61,6 +66,7 @@ export function registerEventRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
     const sessionId = sessionIdParam(c, 'session_id')
     const query = parseQuery(c, ListEventsQuerySchema, ['types'])
     const options: ListEventsOptions = {
+      ownerId: c.get('user').id,
       ...(query.limit === undefined ? {} : { limit: query.limit }),
       ...(query.order === undefined ? {} : { order: query.order }),
       ...(query.page === undefined ? {} : { page: query.page }),
@@ -73,7 +79,7 @@ export function registerEventRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
   app.get(`${events}/stream`, async (c) => {
     const sessionId = sessionIdParam(c, 'session_id')
     const query = parseQuery(c, StreamEventsQuerySchema, [EVENT_DELTAS_PARAM])
-    const session = await deps.store.getSession(sessionId)
+    const session = await deps.store.getSession(sessionId, { ownerId: c.get('user').id })
     if (session === null) {
       throw notFoundError(`no session with id ${sessionId}`)
     }
@@ -81,6 +87,7 @@ export function registerEventRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
     const stream = createSessionEventStream({
       store: deps.store,
       sessionId,
+      ownerId: c.get('user').id,
       deltas: wantsDeltas(query),
       ...(afterSeq === undefined ? {} : { afterSeq }),
       ...(deps.sseKeepaliveMs === undefined ? {} : { keepaliveMs: deps.sseKeepaliveMs }),
@@ -88,6 +95,22 @@ export function registerEventRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
     })
     return new Response(stream, { status: 200, headers: SSE_HEADERS })
   })
+}
+
+/**
+ * The session if it is the caller's, or the 404 another user's session always gets (A4).
+ *
+ * `appendEvents` is not owner-scoped — the brain's writes must not be — so the read here is
+ * what refuses a foreign session before anything is stored.
+ */
+async function requireOwnedSession(
+  deps: RouteDeps,
+  c: Context<AppEnv>,
+  sessionId: SessionId,
+): Promise<void> {
+  if ((await deps.store.getSession(sessionId, { ownerId: c.get('user').id })) === null) {
+    throw notFoundError(`no session with id ${sessionId}`)
+  }
 }
 
 /** Whether this connection asked for `event_start` / `event_delta` previews. */

@@ -1,9 +1,4 @@
-import type {
-  ContextStrategy,
-  ModelFactory,
-  ResolveCredential,
-  RetryPolicy,
-} from '@openharness/brain'
+import type { ContextStrategy, ModelFactory, RetryPolicy } from '@openharness/brain'
 import { DEFAULT_PARTITION_COUNT, partitionOf, type SessionId } from '@openharness/protocol'
 import {
   isFencedError,
@@ -14,6 +9,7 @@ import {
   type Unsubscribe,
 } from '@openharness/session'
 
+import type { ResolveSessionCredential } from './credentials'
 import { PassQueue, type PassContext } from './pass-queue'
 import { DEFAULT_DRAIN_TIMEOUT_MS, SessionRunner } from './runner'
 import type { SessionScheduler, StopSchedulerOptions } from './scheduler'
@@ -106,7 +102,7 @@ export interface PostgresPartitionSchedulerOptions {
    * Where each model request's provider credential comes from (epic #65, A5); see
    * `SessionRunnerOptions.resolveCredential`.
    */
-  readonly resolveCredential: ResolveCredential
+  readonly resolveCredential: ResolveSessionCredential
   /**
    * This instance's id, stable for its lifetime — what the lease table records as the owner.
    * Two live instances sharing one id would fence each other's writes, so it must be unique.

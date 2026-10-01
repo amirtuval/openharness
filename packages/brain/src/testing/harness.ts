@@ -121,7 +121,7 @@ async function readLogWith(
   const events: StoredEvent[] = []
   let afterSeq = 0
   for (;;) {
-    const page = await store.listEvents(sessionId, {
+    const page = await store.listEventsUnscoped(sessionId, {
       order: 'asc',
       afterSeq,
       limit: 100,

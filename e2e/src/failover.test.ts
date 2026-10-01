@@ -156,7 +156,7 @@ describe('two instances sharing a database', () => {
     const second = await harness.server({
       env: { ...PARTITION_ENV, OPENHARNESS_INSTANCE_ID: 'failover-second' },
     })
-    const client = harness.client(first)
+    const client = await harness.client(first)
     const session = await newSession(client)
     const prompt = `${MOCK_SLOW_MARKER} outlive the instance that started me`
 
@@ -174,7 +174,7 @@ describe('two instances sharing a database', () => {
     await doomed.kill('SIGKILL')
 
     // The survivor has to notice on its own: a lease TTL plus a whole `__slow__` reply.
-    const survivor = harness.client(survivorServer)
+    const survivor = await harness.client(survivorServer)
     await waitForTurnEnd(survivor, session.id, { timeoutMs: 45_000 })
 
     const log = await readLog(survivor, session.id)

@@ -1,12 +1,12 @@
 import {
   type ContextStrategy,
   type ModelFactory,
-  type ResolveCredential,
   type RetryPolicy,
   type TurnOutcome,
   runTurn,
 } from '@openharness/brain'
 import type { SessionId } from '@openharness/protocol'
+import type { ResolveSessionCredential } from './credentials'
 import type { PartitionFence, SessionStore } from '@openharness/session'
 
 /**
@@ -39,12 +39,14 @@ export interface SessionRunnerOptions {
   /**
    * Where each model request's provider credential comes from (epic #65, A5).
    *
-   * The server holds no provider key of its own and the brain never reads one from the
-   * environment: a turn made without a credential this resolver answered ends with
-   * `missing_provider_credential` instead. The mock model ignores what it is handed, so the
-   * test paths resolve a placeholder.
+   * Session-bound: the brain asks `(provider) => …` once per request, and the runner is what
+   * knows which session the request belongs to — so it reads the session's owner's stored
+   * key, which is what this resolver looks up. The server holds no provider key of its own
+   * and the brain never reads one from the environment: a turn made without a credential
+   * this resolver answered ends with `missing_provider_credential` instead. The mock model
+   * ignores what it is handed, so the test paths resolve a placeholder.
    */
-  readonly resolveCredential: ResolveCredential
+  readonly resolveCredential: ResolveSessionCredential
   /** How model failures are retried; `runTurn`'s own default when omitted. */
   readonly retry?: RetryPolicy
   /** How the log becomes model messages; `runTurn`'s own default when omitted. */
@@ -112,7 +114,7 @@ export class SessionRunner {
 
   readonly #model: ModelFactory
 
-  readonly #resolveCredential: ResolveCredential
+  readonly #resolveCredential: ResolveSessionCredential
 
   readonly #retry: RetryPolicy | undefined
 
@@ -286,7 +288,9 @@ export class SessionRunner {
         outcome = await runTurn(sessionId, {
           store: this.#store,
           model: this.#model,
-          resolveCredential: this.#resolveCredential,
+          // The brain's resolver is provider-only; the session is bound here, where it is
+          // known, so the credential lookup is the owner's own key for this session (A5).
+          resolveCredential: (provider) => this.#resolveCredential(sessionId, provider),
           signal: abortSignalFor(handle),
           ...(handle.fence === undefined ? {} : { fence: handle.fence }),
           ...(this.#retry === undefined ? {} : { retry: this.#retry }),

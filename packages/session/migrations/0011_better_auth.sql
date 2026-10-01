@@ -7,11 +7,17 @@
 -- Auth expects **exactly**: table names, column names (camelCase — Better Auth's own
 -- spelling, unlike the log's snake_case) and types are the generator's, not ours.
 --
--- Provenance: generated once with Better Auth 1.7.7's CLI, in a scratch directory, from a
--- config with the core library, the `google`, `github` and `microsoft` social providers and
--- the `device-authorization` and `bearer` plugins, on the Postgres/Kysely adapter:
+-- Provenance: generated with Better Auth 1.7.6's CLI (the version the repo pins), in a
+-- scratch directory, from a config with the core library, the `google`, `github` and
+-- `microsoft` social providers and the `device-authorization` and `bearer` plugins, on the
+-- Postgres/Kysely adapter:
 --
 --   npx @better-auth/cli generate --config ./auth.ts --output ./generated.sql
+--
+-- Regenerated with 1.7.6 and diffed against this file when the server moved from 1.7.7 to
+-- 1.7.6 (#61 review): identical — only whitespace, statement order and the `if not exists`
+-- below differ. 1.7.7's generator produced the same SQL, so the pinned version and this
+-- migration agree either way.
 --
 -- The generated SQL is reproduced here verbatim but for two things: the statements are
 -- formatted one column per line, and every `create table`/`create index` carries

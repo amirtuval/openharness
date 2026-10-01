@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { EVENT_TYPES, SESSION_TITLE_MAX_LENGTH } from '@openharness/protocol'
 import { InMemorySessionStore } from '@openharness/session'
 
-import { PLACEHOLDER_OWNER_ID } from './placeholder-owner'
+import { TEST_OWNER_ID } from './test-support'
 import { deriveSessionTitle, nameSessionFromFirstMessage } from './titles'
 
 /**
@@ -23,9 +23,9 @@ async function storeWithSession() {
   const store = new InMemorySessionStore()
   const agent = await store.createAgent(
     { name: 'Agent', model: { id: 'test/model' } },
-    PLACEHOLDER_OWNER_ID,
+    TEST_OWNER_ID,
   )
-  const session = await store.createSession(agent.id, { ownerId: PLACEHOLDER_OWNER_ID })
+  const session = await store.createSession(agent.id, { ownerId: TEST_OWNER_ID })
   return { store, session }
 }
 
@@ -79,34 +79,48 @@ describe('nameSessionFromFirstMessage', () => {
   it('names a session after the first message of a batch', async () => {
     const { store, session } = await storeWithSession()
 
-    const named = await nameSessionFromFirstMessage(store, session.id, [
-      { type: EVENT_TYPES.userInterrupt },
-      userMessage('Tell me about the session log'),
-    ])
+    const named = await nameSessionFromFirstMessage(
+      store,
+      session.id,
+      [{ type: EVENT_TYPES.userInterrupt }, userMessage('Tell me about the session log')],
+      TEST_OWNER_ID,
+    )
 
     expect(named?.title).toBe('Tell me about the session log')
-    expect((await store.getSession(session.id))?.title).toBe('Tell me about the session log')
+    expect((await store.getSession(session.id, { ownerId: TEST_OWNER_ID }))?.title).toBe(
+      'Tell me about the session log',
+    )
   })
 
   it('leaves a title that already exists alone', async () => {
     const { store, session } = await storeWithSession()
     await store.updateSession(session.id, { title: 'Chosen already' })
 
-    const named = await nameSessionFromFirstMessage(store, session.id, [
-      userMessage('a message that would have named it otherwise'),
-    ])
+    const named = await nameSessionFromFirstMessage(
+      store,
+      session.id,
+      [userMessage('a message that would have named it otherwise')],
+      TEST_OWNER_ID,
+    )
 
     expect(named).toBeNull()
-    expect((await store.getSession(session.id))?.title).toBe('Chosen already')
+    expect((await store.getSession(session.id, { ownerId: TEST_OWNER_ID }))?.title).toBe(
+      'Chosen already',
+    )
   })
 
   it('changes nothing when there is no message to name it after', async () => {
     const { store, session } = await storeWithSession()
 
     expect(
-      await nameSessionFromFirstMessage(store, session.id, [{ type: EVENT_TYPES.userInterrupt }]),
+      await nameSessionFromFirstMessage(
+        store,
+        session.id,
+        [{ type: EVENT_TYPES.userInterrupt }],
+        TEST_OWNER_ID,
+      ),
     ).toBeNull()
-    expect(await nameSessionFromFirstMessage(store, session.id, [])).toBeNull()
-    expect((await store.getSession(session.id))?.title).toBeNull()
+    expect(await nameSessionFromFirstMessage(store, session.id, [], TEST_OWNER_ID)).toBeNull()
+    expect((await store.getSession(session.id, { ownerId: TEST_OWNER_ID }))?.title).toBeNull()
   })
 })

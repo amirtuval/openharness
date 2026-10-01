@@ -68,6 +68,7 @@ export function makeAgent(overrides: Partial<Agent> = {}): Agent {
   const agent: Agent = {
     id: newAgentId(),
     type: 'agent',
+    owner_id: makeUser().id,
     name: 'Summarizer',
     description: 'Summarizes a repository for a chat user.',
     model: { id: 'anthropic/claude-sonnet-5' },
@@ -102,6 +103,7 @@ export function makeSession(overrides: Partial<Session> = {}): Session {
   const session: Session = {
     id: newSessionId(),
     type: 'session',
+    owner_id: makeUser().id,
     status: 'idle',
     title: null,
     metadata: {},

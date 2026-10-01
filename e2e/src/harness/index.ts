@@ -1,6 +1,8 @@
 import { afterAll } from 'vitest'
 
-import { createClient, type Client, type FetchLike } from '@openharness/client'
+import { createClient, type Client } from '@openharness/client'
+
+import { DEV_LOGIN_EMAIL, DEV_LOGIN_PASSWORD } from '@openharness/server'
 
 import { createE2eDatabase, type E2eDatabase } from './database'
 import {
@@ -29,14 +31,68 @@ import {
  * hold its port and its Postgres connections until the job ends.
  */
 
+/** How a test asks for a client: whose session it should carry. */
+export interface ClientOptions {
+  /** The account to sign in as; the dev user when omitted. */
+  readonly email?: string
+  /** The account's password; the documented dev password when omitted. */
+  readonly password?: string
+}
+
+/** A signed-in caller: the session token and who it belongs to. */
+export interface SignedIn {
+  /** The session token; a bearer request sends it as `Authorization: Bearer <token>`. */
+  readonly token: string
+  /** The signed-in user, as Better Auth answers it. */
+  readonly user: { readonly id: string; readonly email: string }
+}
+
+/**
+ * Sign in over the dev login (A7), the way `oh login` would end up: a session token.
+ *
+ * Every server the harness starts is seeded with the same dev user, so a token minted by one
+ * of them keeps working after the failover suite kills it and starts another on the same
+ * database — the sessions live in Postgres, not in the process.
+ */
+export async function signIn(
+  server: ServerProcess,
+  options: ClientOptions = {},
+): Promise<SignedIn> {
+  const response = await fetch(`${server.baseUrl}/api/auth/sign-in/email`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      email: options.email ?? DEV_LOGIN_EMAIL,
+      password: options.password ?? DEV_LOGIN_PASSWORD,
+    }),
+  })
+  const body = (await response.json()) as { token?: string; user?: SignedIn['user'] }
+  if (!response.ok || typeof body.token !== 'string' || body.user === undefined) {
+    throw new Error(
+      `signing in at ${server.baseUrl} failed: ${response.status} ${JSON.stringify(body)}`,
+    )
+  }
+  return { token: body.token, user: body.user }
+}
+
+// The documented dev credentials (A7), taken from the server itself so the harness and the
+// seed cannot drift apart.
+export { DEV_LOGIN_EMAIL, DEV_LOGIN_PASSWORD, DEV_LOGIN_STORED_EMAIL } from '@openharness/server'
+
 /** A test file's view of the world: one database, its servers, its clients. */
 export interface E2eHarness {
   /** The database this file owns: created on first use, dropped by {@link dispose}. */
   database(): Promise<E2eDatabase>
   /** Start a server against this file's database; it is killed by {@link dispose}. */
   server(options?: Omit<ServerProcessOptions, 'databaseUrl'>): Promise<ServerProcess>
-  /** A client for a server this harness started, with the key it was started with. */
-  client(server: ServerProcess, options?: { readonly apiKey?: string }): Client
+  /**
+   * A client for a server this harness started, signed in over the dev login.
+   *
+   * `oh`'s shape: the harness POSTs the documented dev user to `/api/auth/sign-in/email` and
+   * builds the client with the session token as its bearer (A2). The token is remembered per
+   * server, so several clients for one server share one session.
+   */
+  client(server: ServerProcess, options?: ClientOptions): Promise<Client>
   /** Every server this harness started and has not killed. */
   readonly servers: readonly ServerProcess[]
   /** Kill the servers and drop the database. Idempotent; also runs in `afterAll`. */
@@ -64,20 +120,9 @@ export function e2eHarness(label: string): E2eHarness {
       started.push(server)
       return server
     },
-    client: (server, options = {}) => {
-      if (options.apiKey === undefined) {
-        return createClient({ baseUrl: server.baseUrl })
-      }
-      // The SDK's static `x-api-key` option is gone (epic #65, A8), but the v1 server still
-      // asks for that key — it goes with #61, which rewrites this suite's expectations with
-      // #64. Until then the harness presents the key itself, the way the removed option did.
-      const apiKey = options.apiKey
-      const withApiKey: FetchLike = (input, init) => {
-        const headers = new Headers(init?.headers)
-        headers.set('x-api-key', apiKey)
-        return globalThis.fetch(input, { ...init, headers })
-      }
-      return createClient({ baseUrl: server.baseUrl, fetch: withApiKey })
+    client: async (server, options = {}) => {
+      const signedIn = await signIn(server, options)
+      return createClient({ baseUrl: server.baseUrl, token: signedIn.token })
     },
     get servers(): readonly ServerProcess[] {
       return started

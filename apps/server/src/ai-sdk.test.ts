@@ -45,8 +45,12 @@ async function chat(
   sessionId: SessionId,
   messages: UIMessage[],
 ): Promise<{ text: string; chunks: UIMessageChunk[] }> {
+  // The route is behind the /v1 guard, so the transport carries the caller's bearer token —
+  // exactly what a `useChat` app configured with the CLI's token would do.
+  const { token } = await test.signIn()
   const transport = new DefaultChatTransport({
     api: `${test.url}${API_VERSION_PREFIX}/sessions/${sessionId}/ai-sdk/chat`,
+    headers: { authorization: `Bearer ${token}` },
   })
   const stream = await transport.sendMessages({
     trigger: 'submit-message',

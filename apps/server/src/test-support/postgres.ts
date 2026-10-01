@@ -12,9 +12,9 @@ import {
 } from '@openharness/session/postgres'
 import type { PostgresSchema } from '@openharness/session/postgres'
 import type { AppendableEvent, AppendEventsOptions, PartitionFence } from '@openharness/session'
-import type { SessionId, StoredEvent } from '@openharness/protocol'
+import type { SessionId, StoredEvent, UserId } from '@openharness/protocol'
 
-import { ensurePlaceholderUser } from '../placeholder-owner'
+import { TEST_OWNER_ID } from './harness'
 
 /**
  * A real Postgres for the tests that need one, which is every test of the partitioned
@@ -101,8 +101,8 @@ export async function startPostgres(
   const db = new Kysely<PostgresSchema>({ dialect: new PostgresDialect({ pool }) })
   await migrate(db)
   // `owner_id` references Better Auth's `"user"` row, so the owner the tests create as has to
-  // exist before the first agent does — exactly what the server does on boot until #61.
-  await ensurePlaceholderUser(db)
+  // exist before the first agent does — exactly what Better Auth's sign-in does in production.
+  await ensureTestUser(db, TEST_OWNER_ID)
   const stores: PostgresSessionStore[] = []
   const fixture: PostgresFixture = {
     pool,
@@ -127,6 +127,21 @@ export async function startPostgres(
     },
   }
   return fixture
+}
+
+/**
+ * Seed a Better Auth `"user"` row — the foreign key `owner_id` needs.
+ *
+ * Tests that create agents and sessions directly against the store (without going through
+ * sign-in) must seed the owner they use; production never does this, because Better Auth's
+ * sign-in writes the row itself.
+ */
+export async function ensureTestUser(db: Kysely<PostgresSchema>, userId: UserId): Promise<void> {
+  await sql`
+    insert into "user" ("id", "name", "email", "emailVerified")
+    values (${userId}, 'Test owner', ${`${userId}@openharness.test`}, true)
+    on conflict ("id") do nothing
+  `.execute(db)
 }
 
 /** Empty every table the store uses; `session_previews` was dropped in P4 (issue #46). */

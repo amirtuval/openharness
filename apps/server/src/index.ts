@@ -10,24 +10,77 @@ import { main } from './main'
  * everything (see `AGENTS.md` for the variables and `docs/api.md` for the routes).
  *
  * ```ts
- * import { createApp } from '@openharness/server'
+ * import { createApp, createAuth, createSessionCredentialResolver } from '@openharness/server'
  *
- * const app = createApp({ store, scheduler, apiKey: 'oh_…' })
+ * const auth = createAuth(authConfig, database, logger)
+ * const app = createApp({ store, scheduler, auth: { instance: auth.auth, … }, credentialRoutes })
  * ```
  *
- * The three pieces a host wires together:
+ * The pieces a host wires together:
  *
- * - **{@link createApp}** — the routes, against any `SessionStore` and `SessionScheduler`.
+ * - **{@link createApp}** — the routes, against any `SessionStore`, `SessionScheduler` and
+ *   Better Auth instance.
+ * - **{@link createAuth}** — Better Auth configured for this server (A1/A2/A3/A7).
+ * - **{@link createSessionCredentialResolver}** — the session owner's stored key, opened per
+ *   request (A5).
  * - **{@link LocalScheduler}** — the single-process scheduler, on top of {@link SessionRunner},
  *   which owns the per-session turn loop.
- * - **{@link startServer}** (and {@link main}) — the whole thing: store, migrations, model,
- *   scheduler, listener and a graceful shutdown.
+ * - **{@link startServer}** (and {@link main}) — the whole thing: store, migrations, sign-in,
+ *   model, credentials, scheduler, listener and a graceful shutdown.
  */
 
 /** This package's name; a cheap way for a dependent to prove the import resolved. */
 export const PACKAGE_NAME = '@openharness/server'
 
 export { createApp, isApiPath, type AppOptions } from './app'
+export {
+  DEVICE_CODE_EXPIRES_IN,
+  DEVICE_CODE_EXPIRES_IN_MS,
+  DEV_LOGIN_EMAIL,
+  DEV_LOGIN_NAME,
+  DEV_LOGIN_PASSWORD,
+  DEV_LOGIN_STORED_EMAIL,
+  OPENHARNESS_CLI_CLIENT_ID,
+  SESSION_EXPIRES_IN_SECONDS,
+  SESSION_FRESH_AGE_SECONDS,
+  SESSION_UPDATE_AGE_SECONDS,
+  createAuth,
+  createDevLoginUser,
+  deviceVerificationUri,
+  deviceVerificationUriComplete,
+  refuseUnverifiedUser,
+  rewriteDevLoginRequest,
+  type Auth,
+  type AuthConfig,
+  type AuthDatabase,
+  type BetterAuthInstance,
+} from './auth'
+export { createAuthGuard, type AuthGuardOptions } from './auth-guard'
+export {
+  SOCIAL_PROVIDERS,
+  githubVerifiedPrimaryEmail,
+  googleEmailVerified,
+  microsoftEmailVerified,
+  providerOptions,
+  refusedEmailError,
+  type GoogleClaims,
+  type GithubEmail,
+  type GithubProfile,
+  type MicrosoftClaims,
+  type SocialProviderCredentials,
+  type SocialProviderName,
+} from './auth-profile'
+export {
+  apiKeyPayload,
+  createSessionCredentialResolver,
+  credentialAad,
+  credentialUpsert,
+  lastFour,
+  openApiKey,
+  sealApiKey,
+  type CredentialResolverDeps,
+  type ResolveSessionCredential,
+} from './credentials'
 export {
   DEFAULT_COMPACT_INTERVAL_MS,
   DEFAULT_DELTA_RETENTION_MS,
@@ -45,7 +98,14 @@ export {
   type SchedulerKind,
   type ServerConfig,
 } from './config'
-export { HttpError, invalidRequest, notFoundError } from './http/errors'
+export {
+  HttpError,
+  authenticationError,
+  invalidProviderCredential,
+  invalidRequest,
+  notFoundError,
+  permissionError,
+} from './http/errors'
 export { main, startServer, type StartServerOptions, type StartedServer } from './main'
 export {
   createMockModelFactory,
@@ -59,7 +119,12 @@ export {
   MOCK_TERMINAL_MARKER,
   planFor,
 } from './mock-model'
-export { resolveModelFactory, type ResolvedModel } from './model'
+export {
+  MOCK_CREDENTIAL,
+  resolveMockCredential,
+  resolveModelFactory,
+  type ResolvedModel,
+} from './model'
 export {
   DEFAULT_HEARTBEAT_MS,
   DEFAULT_LEASE_TTL_MS,
@@ -78,6 +143,12 @@ export {
   type SessionScheduler,
   type StopSchedulerOptions,
 } from './scheduler'
+export {
+  VALIDATABLE_PROVIDERS,
+  validateProviderApiKey,
+  type ProviderCredentialValidator,
+  type ValidatableProvider,
+} from './provider-validation'
 export { SSE_KEEPALIVE, SSE_KEEPALIVE_MS, createSessionEventStream } from './sse'
 export { consoleLogger, silentLogger, type AppEnv, type Logger } from './types'
 

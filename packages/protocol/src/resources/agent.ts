@@ -49,11 +49,11 @@ export const AgentSchema = z.object({
    * changes afterwards. Together with a `404` for anything another user owns, it is the whole
    * of v1 isolation: nothing is shared.
    *
-   * Optional only during the transition: while the server still serves pre-auth data
-   * (through #61) it may be absent. From #61 on the server sets it on every agent, and it is
-   * to become required.
+   * Required since #61: the server sets it on every agent it creates, so an agent without one
+   * cannot exist — and a response that omits it fails this schema rather than passing as
+   * unowned.
    */
-  owner_id: UserIdSchema.optional(),
+  owner_id: UserIdSchema,
   name: z.string().min(1).max(AGENT_NAME_MAX_LENGTH),
   description: z.string().max(AGENT_DESCRIPTION_MAX_LENGTH).nullable(),
   model: ModelConfigSchema,

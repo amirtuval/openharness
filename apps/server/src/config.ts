@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { hostname } from 'node:os'
 
 import { DEFAULT_PARTITION_COUNT } from '@openharness/protocol'
+import { envKeyProvider } from '@openharness/vault'
 
 import { DEFAULT_COMPACT_INTERVAL_MS, DEFAULT_DELTA_RETENTION_MS } from './compaction'
 import { MOCK_MODEL_ENV_VALUE } from './mock-model'
@@ -21,7 +22,14 @@ import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
  * | ----------------------------------- | --------------------------------------------------------------- |
  * | `DATABASE_URL`                      | Postgres to run on, migrated on boot; unset means in-memory      |
  * | `SCHEDULER`                         | `local` (default) or `postgres`, the multi-instance scheduler    |
- * | `OPENHARNESS_API_KEY`               | require `x-api-key` on `/v1/*`; unset leaves the API open        |
+ * | `BETTER_AUTH_SECRET`                | **required**: signs sessions and cookies (epic #65, A2)          |
+ * | `BETTER_AUTH_URL`                   | **required**: the public URL; Better Auth's base and the only trusted origin |
+ * | `OPENHARNESS_SECRETS_KEY`           | **required**: the base64 32-byte vault key for provider credentials (A5) |
+ * | `OPENHARNESS_DEV_LOGIN`             | `1` enables the local dev login; localhost public URLs only (A7) |
+ * | `GOOGLE_CLIENT_ID`/`_SECRET`        | enable Google sign-in (A1)                                       |
+ * | `GITHUB_CLIENT_ID`/`_SECRET`        | enable GitHub sign-in (A1)                                       |
+ * | `MICROSOFT_CLIENT_ID`/`_SECRET`     | enable Microsoft sign-in (A1)                                    |
+ * | `MICROSOFT_TENANT_ID`               | the Entra tenant; `common` (multi-tenant) by default             |
  * | `PORT`                              | the port to listen on; `3000` by default                         |
  * | `OPENHARNESS_TEST_MODEL`            | `mock` swaps in the deterministic test model (see `mock-model.ts`) |
  * | `OPENHARNESS_WEB_DIR`               | a built web app to serve at `/`                                  |
@@ -36,16 +44,26 @@ import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
  * | `OPENHARNESS_DELTA_RETENTION_MS`    | how long superseded chunks are kept before compaction deletes them; `3600000` |
  * | `OPENHARNESS_COMPACT_INTERVAL_MS`   | how often compaction runs; `300000` by default, `0` disables it  |
  *
- * Provider credentials (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) are not read here: the
- * default model factory is Mastra's router, which reads whatever the provider it routes to
- * needs from the environment itself.
+ * There are **no provider credentials in the environment** any more (epic #65, A5): every
+ * model request is made with the session owner's own stored key, and `OPENAI_API_KEY` and
+ * friends are not read by anything this server runs.
  */
 
 /** The environment variable names this package reads. */
 export const ENV_VARS = {
   databaseUrl: 'DATABASE_URL',
   scheduler: 'SCHEDULER',
-  apiKey: 'OPENHARNESS_API_KEY',
+  betterAuthSecret: 'BETTER_AUTH_SECRET',
+  betterAuthUrl: 'BETTER_AUTH_URL',
+  secretsKey: 'OPENHARNESS_SECRETS_KEY',
+  devLogin: 'OPENHARNESS_DEV_LOGIN',
+  googleClientId: 'GOOGLE_CLIENT_ID',
+  googleClientSecret: 'GOOGLE_CLIENT_SECRET',
+  githubClientId: 'GITHUB_CLIENT_ID',
+  githubClientSecret: 'GITHUB_CLIENT_SECRET',
+  microsoftClientId: 'MICROSOFT_CLIENT_ID',
+  microsoftClientSecret: 'MICROSOFT_CLIENT_SECRET',
+  microsoftTenantId: 'MICROSOFT_TENANT_ID',
   port: 'PORT',
   testModel: 'OPENHARNESS_TEST_MODEL',
   webDir: 'OPENHARNESS_WEB_DIR',
@@ -61,6 +79,12 @@ export const ENV_VARS = {
   compactIntervalMs: 'OPENHARNESS_COMPACT_INTERVAL_MS',
 } as const
 
+/** A social provider's configured OAuth client. */
+export interface ProviderCredentialsConfig {
+  readonly clientId: string
+  readonly clientSecret: string
+}
+
 /** Everything the server reads from the environment, parsed and checked. */
 export interface ServerConfig {
   /** The port to listen on. */
@@ -69,8 +93,25 @@ export interface ServerConfig {
   readonly databaseUrl: string | undefined
   /** Which scheduler runs the brains: this process alone, or partition leases. */
   readonly scheduler: SchedulerKind
-  /** The API key `/v1/*` requires, or `undefined` for an open API. */
-  readonly apiKey: string | undefined
+  /** `BETTER_AUTH_SECRET`: required, signs cookies and session tokens. */
+  readonly betterAuthSecret: string
+  /** `BETTER_AUTH_URL`: required, the public URL Better Auth is based at. */
+  readonly betterAuthUrl: string
+  /** `OPENHARNESS_SECRETS_KEY`: required, the base64 32-byte vault master key. */
+  readonly secretsKey: string
+  /** `OPENHARNESS_DEV_LOGIN`: the local email/password login, localhost only (A7). */
+  readonly devLogin: boolean
+  /** Google sign-in, when `GOOGLE_CLIENT_ID` and `_SECRET` are set. */
+  readonly google: ProviderCredentialsConfig | undefined
+  /** GitHub sign-in, when `GITHUB_CLIENT_ID` and `_SECRET` are set. */
+  readonly github: ProviderCredentialsConfig | undefined
+  /** Microsoft sign-in, when `MICROSOFT_CLIENT_ID` and `_SECRET` are set. */
+  readonly microsoft:
+    | (ProviderCredentialsConfig & {
+        /** The Entra tenant id; `common` when `MICROSOFT_TENANT_ID` does not say. */
+        readonly tenantId: string
+      })
+    | undefined
   /** The value of `OPENHARNESS_TEST_MODEL`, if any. */
   readonly testModel: string | undefined
   /** A directory of built web assets to serve at `/`. */
@@ -106,6 +147,9 @@ export const DEFAULT_PORT = 3000
 /** The scheduler a server runs when `SCHEDULER` does not say. */
 export const DEFAULT_SCHEDULER: SchedulerKind = 'local'
 
+/** The Entra tenant a Microsoft sign-in uses when `MICROSOFT_TENANT_ID` does not say. */
+export const DEFAULT_MICROSOFT_TENANT_ID = 'common'
+
 /**
  * An instance id nobody else is using: this host, this process, and a random suffix.
  *
@@ -123,9 +167,15 @@ export function defaultInstanceId(): string {
  * A variable that is set but empty counts as unset: `PORT=` in a shell or a compose file is a
  * variable someone meant to leave alone, not a request to listen on port zero.
  *
+ * `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL` and `OPENHARNESS_SECRETS_KEY` are **required**
+ * (epic #65, A2/A5): without the first two there is no way to sign anyone in, and without the
+ * third no provider credential could ever be stored. A missing one is a boot failure with a
+ * message naming the variable, not a server that comes up half-configured.
+ *
  * @param env the environment; defaults to `process.env`
- * @throws Error when a variable is set to something it cannot be — a boot failure is much
- *   easier to read than a server that came up listening on `NaN`
+ * @throws Error when a required variable is missing, when a variable is set to something it
+ *   cannot be — a boot failure is much easier to read than a server that came up listening on
+ *   `NaN` — or when dev login is asked for on a public URL
  */
 export function readServerConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const databaseUrl = readString(env, ENV_VARS.databaseUrl)
@@ -148,11 +198,31 @@ export function readServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
         `${ENV_VARS.leaseTtlMs} (${leaseTtlMs})`,
     )
   }
+  const betterAuthSecret = requireString(env, ENV_VARS.betterAuthSecret)
+  const betterAuthUrl = requireString(env, ENV_VARS.betterAuthUrl)
+  const secretsKey = requireString(env, ENV_VARS.secretsKey)
+  // Checked here, at boot, so a bad key fails immediately with the vault's own message —
+  // naming the variable and the decoded length, never the value.
+  envKeyProvider(secretsKey)
+  const devLogin = readFlag(env, ENV_VARS.devLogin)
+  if (devLogin && !isLocalUrl(betterAuthUrl)) {
+    // A7: the dev login is a fixed password on a well-known address. It is for a laptop.
+    throw new Error(
+      `${ENV_VARS.devLogin} is only allowed when ${ENV_VARS.betterAuthUrl} is a localhost ` +
+        `URL (http://localhost… or http://127.0.0.1…), got ${JSON.stringify(betterAuthUrl)}`,
+    )
+  }
   return {
     port: readInteger(env, ENV_VARS.port, DEFAULT_PORT, { min: 0, max: 65535 }),
     databaseUrl,
     scheduler,
-    apiKey: readString(env, ENV_VARS.apiKey),
+    betterAuthSecret,
+    betterAuthUrl,
+    secretsKey,
+    devLogin,
+    google: readProvider(env, ENV_VARS.googleClientId, ENV_VARS.googleClientSecret),
+    github: readProvider(env, ENV_VARS.githubClientId, ENV_VARS.githubClientSecret),
+    microsoft: readMicrosoft(env),
     testModel: readString(env, ENV_VARS.testModel),
     webDir: readString(env, ENV_VARS.webDir),
     corsOrigins: readOrigins(env),
@@ -185,7 +255,9 @@ export function readServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
  * One line per setting that is not obvious, for the startup log.
  *
  * The mock model is called out here rather than in the model factory, because that is where
- * someone sees it: a server that answers with fixed text is a surprise worth explaining.
+ * someone sees it: a server that answers with fixed text is a surprise worth explaining. The
+ * sign-in lines say which providers are on and whether the dev login is — the two things a
+ * person checking a deployment wants to know.
  */
 export function describeConfig(config: ServerConfig): string[] {
   const lines = [`port: ${config.port}`]
@@ -201,8 +273,21 @@ export function describeConfig(config: ServerConfig): string[] {
           `heartbeat ${config.heartbeatMs}ms, sweep ${config.sweepMs}ms)`
       : 'scheduler: local (this process owns every session)',
   )
+  lines.push(`public URL: ${config.betterAuthUrl}`)
+  const providers = [
+    ...(config.google === undefined ? [] : ['google']),
+    ...(config.github === undefined ? [] : ['github']),
+    ...(config.microsoft === undefined ? [] : [`microsoft (tenant ${config.microsoft.tenantId})`]),
+  ]
   lines.push(
-    config.apiKey === undefined ? 'auth: open (no OPENHARNESS_API_KEY)' : 'auth: x-api-key',
+    providers.length === 0
+      ? 'sign-in: no social providers configured'
+      : `sign-in: ${providers.join(', ')}`,
+  )
+  lines.push(
+    config.devLogin
+      ? `dev login: ENABLED (${ENV_VARS.devLogin}=1; localhost only)`
+      : 'dev login: off',
   )
   lines.push(
     config.testModel === undefined
@@ -228,7 +313,18 @@ function readString(env: NodeJS.ProcessEnv, name: string): string | undefined {
   return value === undefined || value === '' ? undefined : value
 }
 
-/** A variable's value as an integer, or `fallback` when it is unset. */
+/** A variable that has to be set: its value, or a boot failure naming it. */
+function requireString(env: NodeJS.ProcessEnv, name: string): string {
+  const value = readString(env, name)
+  if (value === undefined) {
+    throw new Error(`${name} is required: the server cannot start without it. See .env.example.`)
+  }
+  return value
+}
+
+/**
+ * A variable's value as an integer, or `fallback` when it is unset.
+ */
 function readInteger(
   env: NodeJS.ProcessEnv,
   name: string,
@@ -269,6 +365,56 @@ function readChoice<T extends string>(
   return value as T
 }
 
+/** A boolean flag: unset or empty is off, `1`/`true` is on, anything else is a boot failure. */
+function readFlag(env: NodeJS.ProcessEnv, name: string): boolean {
+  const value = readString(env, name)
+  if (value === undefined) {
+    return false
+  }
+  if (value === '1' || value.toLowerCase() === 'true') {
+    return true
+  }
+  throw new Error(`${name} must be 1 or true when it is set, got ${JSON.stringify(value)}`)
+}
+
+/**
+ * A provider's client id and secret: both, or neither.
+ *
+ * A provider with only one of the two is a misconfiguration that would otherwise surface as
+ * a half-enabled sign-in button, so it fails the boot instead.
+ */
+function readProvider(
+  env: NodeJS.ProcessEnv,
+  clientIdVar: string,
+  clientSecretVar: string,
+): ProviderCredentialsConfig | undefined {
+  const clientId = readString(env, clientIdVar)
+  const clientSecret = readString(env, clientSecretVar)
+  if (clientId === undefined && clientSecret === undefined) {
+    return undefined
+  }
+  if (clientId === undefined || clientSecret === undefined) {
+    throw new Error(
+      `set both ${clientIdVar} and ${clientSecretVar} to enable the provider, or neither`,
+    )
+  }
+  return { clientId, clientSecret }
+}
+
+/** The Microsoft client, which additionally carries the Entra tenant. */
+function readMicrosoft(
+  env: NodeJS.ProcessEnv,
+): (ProviderCredentialsConfig & { readonly tenantId: string }) | undefined {
+  const client = readProvider(env, ENV_VARS.microsoftClientId, ENV_VARS.microsoftClientSecret)
+  if (client === undefined) {
+    return undefined
+  }
+  return {
+    ...client,
+    tenantId: readString(env, ENV_VARS.microsoftTenantId) ?? DEFAULT_MICROSOFT_TENANT_ID,
+  }
+}
+
 /**
  * `OPENHARNESS_CORS_ORIGINS` as a list of origins, comma-separated.
  *
@@ -284,6 +430,22 @@ function readOrigins(env: NodeJS.ProcessEnv): string[] {
     .split(',')
     .map((origin) => origin.trim())
     .filter((origin) => origin.length > 0)
+}
+
+/**
+ * Whether a public URL is local — what the dev login is allowed on (A7).
+ *
+ * `http://localhost…` and `http://127.0.0.1…` are the documented spellings; `https` on the
+ * same hosts counts too, because a local reverse proxy is still local, and `[::1]` is the
+ * same machine under its IPv6 spelling.
+ */
+export function isLocalUrl(value: string): boolean {
+  try {
+    const url = new URL(value)
+    return url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]'
+  } catch {
+    return false
+  }
 }
 
 /** Whether the environment asks for the deterministic test model. */

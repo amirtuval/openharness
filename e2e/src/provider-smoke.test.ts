@@ -17,6 +17,13 @@ import {
  * provider and a real network, so that "the server works" is not only true of a model that
  * lives in the same process.
  *
+ * Since A5 the key is not the server's: the test stores the environment's key as the
+ * **dev user's provider credential** — the same `PUT /v1/provider-credentials` a person
+ * uses — and the turn runs on the vault-opened copy. That is the whole v2 path: validate,
+ * seal, store, resolve per request. The key in the environment is only this *test's* way of
+ * having one; the server under test would ignore it (`OPENAI_API_KEY` is not read, tested in
+ * `apps/server`).
+ *
  * It is skipped silently when neither `ANTHROPIC_API_KEY` nor `OPENAI_API_KEY` is set — the
  * usual state of a laptop and of CI — and it is deliberately *coarse*: a provider is not
  * deterministic, so it asserts that a reply arrived and that the request did not fail, never
@@ -26,12 +33,15 @@ import {
 const harness = e2eHarness('provider-smoke')
 
 /** The provider the environment offers, if any. */
-function smokeFromEnvironment(): { readonly model: string } | undefined {
-  if ((process.env.ANTHROPIC_API_KEY ?? '') !== '') {
-    return { model: 'anthropic/claude-sonnet-5' }
+function smokeFromEnvironment():
+  { readonly provider: string; readonly model: string; readonly apiKey: string } | undefined {
+  const anthropic = (process.env.ANTHROPIC_API_KEY ?? '').trim()
+  if (anthropic !== '') {
+    return { provider: 'anthropic', model: 'anthropic/claude-sonnet-5', apiKey: anthropic }
   }
-  if ((process.env.OPENAI_API_KEY ?? '') !== '') {
-    return { model: 'openai/gpt-5.1' }
+  const openai = (process.env.OPENAI_API_KEY ?? '').trim()
+  if (openai !== '') {
+    return { provider: 'openai', model: 'openai/gpt-5.1', apiKey: openai }
   }
   return undefined
 }
@@ -49,7 +59,16 @@ describe.skipIf(smoke === undefined)('a real model provider', () => {
     const server = await harness.server({ mockModel: false })
     expect(server.output()).toMatch(/model: mastra router/)
 
-    const client = harness.client(server)
+    const client = await harness.client(server)
+    // Store the key the way a person does: it is validated against the provider, sealed, and
+    // stored — and from here on the server reads it from there, never from the environment.
+    const credential = await client.providerCredentials.put(smoke.provider, {
+      type: 'api_key',
+      api_key: smoke.apiKey,
+    })
+    expect(credential.provider).toBe(smoke.provider)
+    expect(JSON.stringify(credential)).not.toContain(smoke.apiKey)
+
     const agent = await client.agents.create({
       name: 'Smoke agent',
       model: { id: smoke.model },
@@ -63,6 +82,7 @@ describe.skipIf(smoke === undefined)('a real model provider', () => {
     const log = await readLog(client, session.id)
     expect(modelRequestEnds(log).every((event) => event.is_error === null)).toBe(true)
     const reply = agentMessages(log)[0]
+    expect(reply).toBeDefined()
     expect(textOf(reply!).trim().length).toBeGreaterThan(0)
   }, 120_000) // A real provider, over a real network, with its own queueing.
 })

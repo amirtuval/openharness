@@ -50,7 +50,8 @@ same way, in the same request.
 
 | method   | path                                      | what it does                                                         |
 | -------- | ----------------------------------------- | -------------------------------------------------------------------- |
-| `GET`    | `/health`                                 | liveness; the only route that never needs a signed-in caller         |
+| `GET`    | `/health`                                 | liveness; open, like `/v1/auth-config` below                         |
+| `GET`    | `/v1/auth-config`                         | unauthenticated: which providers are on, and whether dev login is    |
 | `GET`    | `/v1/me`                                  | the signed-in user                                                   |
 | `POST`   | `/v1/agents`                              | create an agent                                                      |
 | `GET`    | `/v1/agents`                              | list agents, oldest first                                            |
@@ -200,14 +201,36 @@ server-side session, and there are two ways to carry one:
 curl localhost:3000/v1/me -H "Authorization: Bearer $TOKEN"
 ```
 
-- **Sign-in is not part of this API.** Better Auth serves it under `/api/auth/*` (Google,
-  GitHub, Microsoft, and a device-code flow the CLI uses); `oh login` drives that in the
-  browser and stores the token with `0600` permissions. Only the session that comes out of it
-  is visible here.
+- **Sign-in is not part of this API.** Better Auth serves it under `/api/auth/*`: the social
+  callbacks, `sign-in/email` (dev login only), `sign-out`, and the device-authorization
+  endpoints the CLI uses (`/api/auth/device/code`, `/device/token`, with approval on the web
+  app's `#/device` page — the `verification_uri_complete` the code endpoint answers carries
+  the `user_code` inside that fragment, where the app's hash router reads it). `oh login`
+  drives that in the browser and stores the session token with `0600` permissions. Only the
+  session that comes out of it is visible here.
+- **A cookie-authenticated write must come from a trusted origin.** A browser sends its cookie
+  on any request any page makes, so `POST`, `PUT` and `DELETE` calls that authenticate by
+  cookie need an `Origin` header of the deployment's own URL (`BETTER_AUTH_URL`); a request
+  from anywhere else is refused with `403 permission_error`. Bearer tokens (the CLI) do not
+  need it — a page cannot attach that header cross-origin.
+- **What sign-in is available** is `GET /v1/auth-config`, the one `/v1` route that needs no
+  session (the web app reads it before showing the sign-in screen):
+
+  ```bash
+  curl localhost:3000/v1/auth-config
+  # → {"providers":["github","google"],"dev_login":false}
+  ```
+
+  `providers` lists only the providers whose client id and secret are configured, in the order
+  `google`, `github`, `microsoft`; `dev_login` says whether the local email/password login is
+  on (it is off unless `OPENHARNESS_DEV_LOGIN=1`, and only ever on a localhost URL).
+
 - Sessions live in the database with a 7-day sliding expiry: every request looks the token
   up, and a revoked one stops working immediately. There are no JWTs and no refresh tokens.
 - **Sensitive actions require a fresh session**: `PUT` and `DELETE` on
-  `/v1/provider-credentials` refuse a session older than the freshness window.
+  `/v1/provider-credentials` refuse a session older than the freshness window (one day after
+  it was created) — with the same `401 authentication_error` as no session at all, which is
+  what tells a client to sign the user in again. Reads are not sensitive.
 - Anything not signed in — or carrying an invalid or expired session or token — gets an
   `authentication_error` with status `401`. `/health` is the only route that never asks.
 - **Everything belongs to the user who created it.** Agents and sessions carry a read-only

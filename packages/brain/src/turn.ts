@@ -238,7 +238,9 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     return store.appendEvents(sessionId, events, writeOptions)
   }
 
-  const session = await store.getSession(sessionId)
+  // Unscoped on purpose: a turn runs for a session, not for a user, and the store's named
+  // unscoped read is what makes that explicit (epic #65, A4).
+  const session = await store.getSessionUnscoped(sessionId)
   if (session === null) {
     throw new SessionNotFoundError(sessionId)
   }

@@ -56,7 +56,7 @@ and the harness they share (`src/harness/`), which is internal.
 const harness = e2eHarness('my-scenario') // registers the teardown itself
 
 const server = await harness.server() // a built server, on a free port
-const client = harness.client(server) // @openharness/client, pointed at it
+const client = await harness.client(server) // signs in (dev login) and points a client at it
 ```
 
 | module        | what it is                                                                             |
@@ -78,10 +78,13 @@ Four decisions worth knowing before reading the tests:
   channels and the partition leases.
 - **One real process per server.** `startServerProcess` spawns `node <built server>` — resolved
   through `@openharness/server`'s `exports`, never through a path into another package — on a
-  free port, with `OPENHARNESS_TEST_MODEL=mock`. The child's environment starts from the test
-  process's, minus every `OPENHARNESS_*` variable and `PORT`/`DATABASE_URL`: a leftover variable
-  in a developer's shell must not change what a test runs. Provider credentials pass through
-  deliberately, which is what the smoke test needs. The process is detached (its own group) and
+  free port, with `OPENHARNESS_TEST_MODEL=mock`, the dev login on (`OPENHARNESS_DEV_LOGIN=1`,
+  so `harness.client(server)` can sign in as the documented dev user) and fixed
+  `BETTER_AUTH_SECRET`/`OPENHARNESS_SECRETS_KEY` values. The child's environment starts from the
+  test process's, minus every `OPENHARNESS_*`/`BETTER_AUTH_*` variable and
+  `PORT`/`DATABASE_URL`: a leftover variable in a developer's shell must not change what a test
+  runs. Provider keys pass through deliberately — the smoke test is what needs them, and it
+  stores the key as a credential rather than expecting the server to read it (A5). The process is detached (its own group) and
   killed with `SIGKILL` by default, so nothing it spawned outlives it.
 - **Nothing leaks.** Servers are registered as they start and killed in the file's `afterAll`
   (with a process-wide sweep behind that), and the database is dropped last. A test that fails
@@ -103,10 +106,10 @@ Four decisions worth knowing before reading the tests:
 | `restart.test.ts`        | `kill -9` mid-`__slow__`, a new process against the same database: the orphaned chunks superseded by a `brain_lost` span end, the turn re-run, idle, no ghost previews                                                                                                                                                                                                                                      |
 | `stream-resume.test.ts`  | a stream aborted mid-turn, more turns while nobody listens, a resume from `afterSeq` with no gaps or duplicates; and one stream iteration across a server restart                                                                                                                                                                                                                                           |
 | `d9-convergence.test.ts` | D9 (issue #46): a client that followed a reply live, one that joined mid-reply and one that dropped mid-chunks and resumed from there all end deep-equal — before compaction and after the job deleted the chunks; a steered reply in the same order live and after a reload                                                                                                                                |
-| `auth.test.ts`           | `OPENHARNESS_API_KEY`: `/health` open, the envelope on `/v1`, the client's `ApiError`, a turn with the key, the stream guarded                                                                                                                                                                                                                                                                              |
+| `auth.test.ts`           | real authentication (A2/A7): `/health` and `/v1/auth-config` open, the 401 envelope on `/v1`, the dev-login sign-in, a turn as a bearer session, the stream guarded, sign-out revoking                                                                                                                                                                                                                      |
 | `web-assets.test.ts`     | `OPENHARNESS_WEB_DIR`: the built web app at `/`, its hashed assets, deep links, and the API still under `/v1`                                                                                                                                                                                                                                                                                               |
 | `failover.test.ts`       | two instances with `SCHEDULER=postgres`, one killed mid-turn, the other finishing it — see below                                                                                                                                                                                                                                                                                                            |
-| `provider-smoke.test.ts` | one turn through a real provider, when a provider key is in the environment                                                                                                                                                                                                                                                                                                                                 |
+| `provider-smoke.test.ts` | one turn through a real provider, when a provider key is in the environment — the key is stored as the dev user's credential first (A5: the server reads no environment keys)                                                                                                                                                                                                                               |
 
 ### The failover test, and how it decides to skip
 

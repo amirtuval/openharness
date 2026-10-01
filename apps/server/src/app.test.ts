@@ -4,7 +4,6 @@ import { join } from 'node:path'
 
 import { afterEach, describe, expect, it } from 'vitest'
 import {
-  API_KEY_HEADER,
   API_VERSION_PREFIX,
   AgentSchema,
   ApiErrorBodySchema,
@@ -20,8 +19,10 @@ import {
 } from '@openharness/protocol'
 
 import { createApp } from './app'
+import { DEV_LOGIN_EMAIL, DEV_LOGIN_PASSWORD } from './auth'
 import {
   createTestApp,
+  TEST_PUBLIC_URL,
   httpCreateAgent,
   httpCreateSession,
   httpSendMessage,
@@ -49,7 +50,7 @@ function setup(options: Parameters<typeof createTestApp>[0] = {}): TestContext {
 
 /** Read one session over HTTP, checked against the protocol's schema. */
 async function readSession(test: TestContext, sessionId: SessionId): Promise<Session> {
-  const response = await test.app.request(`${API_VERSION_PREFIX}/sessions/${sessionId}`)
+  const response = await test.request(`${API_VERSION_PREFIX}/sessions/${sessionId}`)
   return SessionSchema.parse(await response.json())
 }
 
@@ -59,7 +60,7 @@ async function postEvents(
   sessionId: SessionId,
   events: readonly unknown[],
 ): Promise<Response> {
-  return test.app.request(`${API_VERSION_PREFIX}/sessions/${sessionId}/events`, {
+  return test.request(`${API_VERSION_PREFIX}/sessions/${sessionId}/events`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ events }),
@@ -67,8 +68,8 @@ async function postEvents(
 }
 
 describe('GET /health', () => {
-  it('answers with the health payload and needs no key', async () => {
-    const app = setup({ apiKey: 'oh_secret' }).app
+  it('answers with the health payload and needs no session', async () => {
+    const app = setup().app
 
     const response = await app.request('/health')
 
@@ -79,13 +80,13 @@ describe('GET /health', () => {
 
 describe('request ids', () => {
   it('puts a request-id on a successful response', async () => {
-    const response = await setup().app.request('/health')
+    const response = await setup().request('/health')
 
     expect(response.headers.get(REQUEST_ID_HEADER)).toMatch(/^req_/)
   })
 
   it('repeats the request id in an error body', async () => {
-    const response = await setup().app.request(`${API_VERSION_PREFIX}/agents/agent_nope`)
+    const response = await setup().request(`${API_VERSION_PREFIX}/agents/agent_nope`)
 
     const body = ApiErrorBodySchema.parse(await response.json())
     expect(body.request_id).toBe(response.headers.get(REQUEST_ID_HEADER) ?? undefined)
@@ -94,7 +95,7 @@ describe('request ids', () => {
 
 describe('the agents API', () => {
   it('creates an agent and returns it in the protocol shape', async () => {
-    const response = await setup().app.request(`${API_VERSION_PREFIX}/agents`, {
+    const response = await setup().request(`${API_VERSION_PREFIX}/agents`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ name: 'Summarizer', model: { id: 'anthropic/claude-sonnet-5' } }),
@@ -111,7 +112,7 @@ describe('the agents API', () => {
     const test = setup()
     const agent = await httpCreateAgent(test)
 
-    const response = await test.app.request(`${API_VERSION_PREFIX}/agents/${agent.id}`)
+    const response = await test.request(`${API_VERSION_PREFIX}/agents/${agent.id}`)
 
     expect(response.status).toBe(200)
     expect(AgentSchema.parse(await response.json())).toEqual(agent)
@@ -122,7 +123,7 @@ describe('the agents API', () => {
     const first = await httpCreateAgent(test, { name: 'First' })
     const second = await httpCreateAgent(test, { name: 'Second' })
 
-    const response = await test.app.request(`${API_VERSION_PREFIX}/agents`)
+    const response = await test.request(`${API_VERSION_PREFIX}/agents`)
 
     const page = ListAgentsResponseSchema.parse(await response.json())
     expect(page.data.map((agent) => agent.id)).toEqual([first.id, second.id])
@@ -133,7 +134,7 @@ describe('the agents API', () => {
     const test = setup()
     const agent = await httpCreateAgent(test, { name: 'Before' })
 
-    const response = await test.app.request(`${API_VERSION_PREFIX}/agents/${agent.id}`, {
+    const response = await test.request(`${API_VERSION_PREFIX}/agents/${agent.id}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ name: 'After' }),
@@ -146,7 +147,7 @@ describe('the agents API', () => {
   })
 
   it('answers 404 for an agent that does not exist', async () => {
-    const response = await setup().app.request(
+    const response = await setup().request(
       `${API_VERSION_PREFIX}/agents/agent_01HZZZZZZZZZZZZZZZZZZZZZZZ`,
     )
 
@@ -156,7 +157,7 @@ describe('the agents API', () => {
   })
 
   it('answers 404 for an unknown agent on update', async () => {
-    const response = await setup().app.request(
+    const response = await setup().request(
       `${API_VERSION_PREFIX}/agents/agent_01HZZZZZZZZZZZZZZZZZZZZZZZ`,
       {
         method: 'POST',
@@ -169,7 +170,7 @@ describe('the agents API', () => {
   })
 
   it('answers 400 for a path id that is not an agent id', async () => {
-    const response = await setup().app.request(`${API_VERSION_PREFIX}/agents/not-an-id`)
+    const response = await setup().request(`${API_VERSION_PREFIX}/agents/not-an-id`)
 
     expect(response.status).toBe(400)
     const body = ApiErrorBodySchema.parse(await response.json())
@@ -177,7 +178,7 @@ describe('the agents API', () => {
   })
 
   it('answers 400 for a body that does not match the schema', async () => {
-    const response = await setup().app.request(`${API_VERSION_PREFIX}/agents`, {
+    const response = await setup().request(`${API_VERSION_PREFIX}/agents`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ name: '' }),
@@ -190,7 +191,7 @@ describe('the agents API', () => {
   })
 
   it('answers 400 for a body that is not JSON', async () => {
-    const response = await setup().app.request(`${API_VERSION_PREFIX}/agents`, {
+    const response = await setup().request(`${API_VERSION_PREFIX}/agents`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: 'not json',
@@ -206,7 +207,7 @@ describe('the sessions API', () => {
     const test = setup()
     const agent = await httpCreateAgent(test, { system: 'Be brief.' })
 
-    const response = await test.app.request(`${API_VERSION_PREFIX}/sessions`, {
+    const response = await test.request(`${API_VERSION_PREFIX}/sessions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ agent: agent.id, title: 'A chat' }),
@@ -225,7 +226,7 @@ describe('the sessions API', () => {
   })
 
   it('answers 404 when the agent does not exist', async () => {
-    const response = await setup().app.request(`${API_VERSION_PREFIX}/sessions`, {
+    const response = await setup().request(`${API_VERSION_PREFIX}/sessions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ agent: 'agent_01HZZZZZZZZZZZZZZZZZZZZZZZ' }),
@@ -240,11 +241,11 @@ describe('the sessions API', () => {
     const agent = await httpCreateAgent(test)
     const session = await httpCreateSession(test, agent.id)
 
-    const one = await test.app.request(`${API_VERSION_PREFIX}/sessions/${session.id}`)
+    const one = await test.request(`${API_VERSION_PREFIX}/sessions/${session.id}`)
     expect(one.status).toBe(200)
     expect(SessionSchema.parse(await one.json())).toEqual(session)
 
-    const list = await test.app.request(`${API_VERSION_PREFIX}/sessions?agent_id=${agent.id}`)
+    const list = await test.request(`${API_VERSION_PREFIX}/sessions?agent_id=${agent.id}`)
     const page = ListSessionsResponseSchema.parse(await list.json())
     expect(page.data.map((entry) => entry.id)).toEqual([session.id])
   })
@@ -255,13 +256,13 @@ describe('the sessions API', () => {
     const other = await httpCreateAgent(test, { name: 'Other' })
     await httpCreateSession(test, agent.id)
 
-    const list = await test.app.request(`${API_VERSION_PREFIX}/sessions?agent_id=${other.id}`)
+    const list = await test.request(`${API_VERSION_PREFIX}/sessions?agent_id=${other.id}`)
 
     expect(ListSessionsResponseSchema.parse(await list.json()).data).toEqual([])
   })
 
   it('answers 404 for a session that does not exist', async () => {
-    const response = await setup().app.request(
+    const response = await setup().request(
       `${API_VERSION_PREFIX}/sessions/sesn_01HZZZZZZZZZZZZZZZZZZZZZZZ`,
     )
 
@@ -295,7 +296,7 @@ describe('the sessions API', () => {
   })
 
   it('answers 400 for a malformed session id', async () => {
-    const response = await setup().app.request(`${API_VERSION_PREFIX}/sessions/nope`)
+    const response = await setup().request(`${API_VERSION_PREFIX}/sessions/nope`)
 
     expect(response.status).toBe(400)
   })
@@ -307,7 +308,7 @@ describe('the events API', () => {
     const agent = await httpCreateAgent(test)
     const session = await httpCreateSession(test, agent.id)
 
-    const response = await test.app.request(`${API_VERSION_PREFIX}/sessions/${session.id}/events`, {
+    const response = await test.request(`${API_VERSION_PREFIX}/sessions/${session.id}/events`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -331,7 +332,7 @@ describe('the events API', () => {
     const agent = await httpCreateAgent(test)
     const session = await httpCreateSession(test, agent.id)
 
-    const response = await test.app.request(`${API_VERSION_PREFIX}/sessions/${session.id}/events`, {
+    const response = await test.request(`${API_VERSION_PREFIX}/sessions/${session.id}/events`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ events: [] }),
@@ -345,7 +346,7 @@ describe('the events API', () => {
     const agent = await httpCreateAgent(test)
     const session = await httpCreateSession(test, agent.id)
 
-    const response = await test.app.request(`${API_VERSION_PREFIX}/sessions/${session.id}/events`, {
+    const response = await test.request(`${API_VERSION_PREFIX}/sessions/${session.id}/events`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ events: [{ type: 'agent.message', content: [] }] }),
@@ -356,17 +357,17 @@ describe('the events API', () => {
   })
 
   it('answers 404 for an unknown session on append and on read', async () => {
-    const app = setup().app
+    const test = setup()
     const missing = 'sesn_01HZZZZZZZZZZZZZZZZZZZZZZZ'
 
-    const appended = await app.request(`${API_VERSION_PREFIX}/sessions/${missing}/events`, {
+    const appended = await test.request(`${API_VERSION_PREFIX}/sessions/${missing}/events`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         events: [{ type: 'user.message', content: [{ type: 'text', text: 'x' }] }],
       }),
     })
-    const read = await app.request(`${API_VERSION_PREFIX}/sessions/${missing}/events`)
+    const read = await test.request(`${API_VERSION_PREFIX}/sessions/${missing}/events`)
 
     expect(appended.status).toBe(404)
     expect(read.status).toBe(404)
@@ -376,7 +377,7 @@ describe('the events API', () => {
     const test = setup({ replies: [{ text: ['Answer'] }] })
     const agent = await httpCreateAgent(test)
     const session = await httpCreateSession(test, agent.id)
-    await test.app.request(`${API_VERSION_PREFIX}/sessions/${session.id}/events`, {
+    await test.request(`${API_VERSION_PREFIX}/sessions/${session.id}/events`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -386,13 +387,13 @@ describe('the events API', () => {
     await test.model.waitForRequests(1)
     await waitForIdle(test.store, session.id)
 
-    const filtered = await test.app.request(
+    const filtered = await test.request(
       `${API_VERSION_PREFIX}/sessions/${session.id}/events?types[]=agent.message`,
     )
     const page = ListEventsResponseSchema.parse(await filtered.json())
     expect(page.data.map((event) => event.type)).toEqual(['agent.message'])
 
-    const afterFirst = await test.app.request(
+    const afterFirst = await test.request(
       `${API_VERSION_PREFIX}/sessions/${session.id}/events?after_seq=1`,
     )
     const rest = ListEventsResponseSchema.parse(await afterFirst.json())
@@ -411,7 +412,7 @@ describe('the events API', () => {
       .toString('base64url')
       .replace(/=+$/, '')
 
-    const response = await test.app.request(
+    const response = await test.request(
       `${API_VERSION_PREFIX}/sessions/${session.id}/events?page=page_${keyCursor}`,
     )
 
@@ -491,7 +492,7 @@ describe('session titles', () => {
 
 describe('unknown routes', () => {
   it('answer 404 in the protocol envelope', async () => {
-    const response = await setup().app.request(`${API_VERSION_PREFIX}/models`)
+    const response = await setup().request(`${API_VERSION_PREFIX}/models`)
 
     expect(response.status).toBe(404)
     const body = ApiErrorBodySchema.parse(await response.json())
@@ -500,7 +501,7 @@ describe('unknown routes', () => {
   })
 
   it('answer 404 outside the API too', async () => {
-    const response = await setup().app.request('/nothing-here')
+    const response = await setup().request('/nothing-here')
 
     expect(response.status).toBe(404)
     expect(ApiErrorBodySchema.parse(await response.json()).error.type).toBe('not_found_error')
@@ -508,54 +509,126 @@ describe('unknown routes', () => {
 })
 
 describe('auth', () => {
-  const key = 'oh_test_key'
+  it('rejects a request with no session at all', async () => {
+    const test = setup()
 
-  it('rejects a request with no key', async () => {
-    const test = setup({ apiKey: key })
-
-    const response = await test.app.request(`${API_VERSION_PREFIX}/agents`)
+    const response = await test.anonymous(`${API_VERSION_PREFIX}/agents`)
 
     expect(response.status).toBe(401)
     expect(ApiErrorBodySchema.parse(await response.json()).error.type).toBe('authentication_error')
   })
 
-  it('rejects a wrong key', async () => {
-    const test = setup({ apiKey: key })
+  it('rejects a bearer token that is not a session', async () => {
+    const test = setup()
 
-    const response = await test.app.request(`${API_VERSION_PREFIX}/agents`, {
-      headers: { [API_KEY_HEADER]: 'oh_wrong' },
+    const response = await test.anonymous(`${API_VERSION_PREFIX}/agents`, {
+      headers: { authorization: 'Bearer not-a-real-token' },
     })
 
     expect(response.status).toBe(401)
   })
 
-  it('accepts the right key', async () => {
-    const test = setup({ apiKey: key })
+  it('accepts the signed-in caller and scopes the listing to them', async () => {
+    const test = setup()
 
-    const response = await test.app.request(`${API_VERSION_PREFIX}/agents`, {
-      headers: { [API_KEY_HEADER]: key },
-    })
+    const response = await test.request(`${API_VERSION_PREFIX}/agents`)
 
     expect(response.status).toBe(200)
     expect(ListAgentsResponseSchema.parse(await response.json()).data).toEqual([])
   })
 
-  it('leaves /health open', async () => {
-    const test = setup({ apiKey: key })
+  it('accepts a bearer token (the CLI’s form) as well as the cookie', async () => {
+    const test = setup()
+    const { token } = await test.signIn()
 
-    expect((await test.app.request('/health')).status).toBe(200)
+    // No cookie, no default caller: exactly what `oh` sends.
+    const response = await test.request(`${API_VERSION_PREFIX}/me`, {
+      headers: { authorization: `Bearer ${token}` },
+    })
+
+    expect(response.status).toBe(200)
+  })
+
+  it('leaves /health open', async () => {
+    const test = setup()
+
+    expect((await test.anonymous('/health')).status).toBe(200)
+  })
+
+  it('leaves /v1/auth-config open, and reports the deployment’s sign-in', async () => {
+    const test = setup({
+      providers: { github: { clientId: 'gh-id', clientSecret: 'gh-secret' } },
+    })
+
+    const response = await test.anonymous(`${API_VERSION_PREFIX}/auth-config`)
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toEqual({
+      providers: ['github'],
+      dev_login: true,
+    })
   })
 
   it('protects unknown /v1 routes too', async () => {
-    const test = setup({ apiKey: key })
+    const test = setup()
 
-    expect((await test.app.request(`${API_VERSION_PREFIX}/models`)).status).toBe(401)
+    expect((await test.anonymous(`${API_VERSION_PREFIX}/models`)).status).toBe(401)
+  })
+
+  it('rejects a cookie-authenticated write from an untrusted origin (CSRF)', async () => {
+    const test = setup()
+    const cookie = await signInCookie(test)
+
+    const refused = await test.anonymous(`${API_VERSION_PREFIX}/agents`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie, origin: 'http://evil.test' },
+      body: JSON.stringify({ name: 'A', model: { id: 'x/y' } }),
+    })
+    expect(refused.status).toBe(403)
+    expect(ApiErrorBodySchema.parse(await refused.json()).error.type).toBe('permission_error')
+
+    const allowed = await test.anonymous(`${API_VERSION_PREFIX}/agents`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie,
+        origin: TEST_PUBLIC_URL,
+      },
+      body: JSON.stringify({ name: 'A', model: { id: 'x/y' } }),
+    })
+    expect(allowed.status).toBe(201)
+  })
+
+  it('does not demand an origin from a bearer-authenticated write', async () => {
+    const test = setup()
+
+    const response = await test.request(`${API_VERSION_PREFIX}/agents`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'A', model: { id: 'x/y' } }),
+    })
+
+    expect(response.status).toBe(201)
   })
 })
 
+/** Sign in over the dev login and answer the session cookie a browser would hold. */
+async function signInCookie(test: TestContext): Promise<string> {
+  const response = await test.anonymous('/api/auth/sign-in/email', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email: DEV_LOGIN_EMAIL, password: DEV_LOGIN_PASSWORD }),
+  })
+  const setCookie = response.headers.get('set-cookie')
+  if (setCookie === null) {
+    throw new Error('the sign-in answered no cookie')
+  }
+  return setCookie.split(';')[0] ?? ''
+}
+
 describe('CORS', () => {
   it('is off by default', async () => {
-    const response = await setup().app.request('/health', {
+    const response = await setup().request('/health', {
       headers: { origin: 'http://localhost:5173' },
     })
 
@@ -567,6 +640,17 @@ describe('CORS', () => {
     const app = createApp({
       store: test.store,
       scheduler: test.scheduler,
+      auth: {
+        instance: test.auth.auth,
+        enabledProviders: test.auth.enabledProviders,
+        devLogin: test.auth.config.devLogin,
+        trustedOrigins: [TEST_PUBLIC_URL],
+      },
+      credentialRoutes: {
+        credentials: test.credentials,
+        vault: test.vault,
+        validate: () => Promise.resolve(),
+      },
       corsOrigins: ['http://localhost:5173'],
     })
 
@@ -598,7 +682,7 @@ describe('static web assets', () => {
   it('serves index.html at /', async () => {
     const test = setup({ webDir: await webDir() })
 
-    const response = await test.app.request('/')
+    const response = await test.request('/')
 
     expect(response.status).toBe(200)
     expect(response.headers.get('content-type')).toContain('text/html')
@@ -608,7 +692,7 @@ describe('static web assets', () => {
   it('serves a real file with its content type', async () => {
     const test = setup({ webDir: await webDir() })
 
-    const response = await test.app.request('/app.js')
+    const response = await test.request('/app.js')
 
     expect(response.status).toBe(200)
     expect(response.headers.get('content-type')).toContain('text/javascript')
@@ -617,7 +701,7 @@ describe('static web assets', () => {
   it('falls back to index.html for a path inside the app', async () => {
     const test = setup({ webDir: await webDir() })
 
-    const response = await test.app.request('/sessions/abc')
+    const response = await test.request('/sessions/abc')
 
     expect(response.status).toBe(200)
     await expect(response.text()).resolves.toContain('the app')
@@ -626,7 +710,7 @@ describe('static web assets', () => {
   it('never serves the app for /v1', async () => {
     const test = setup({ webDir: await webDir() })
 
-    const response = await test.app.request(`${API_VERSION_PREFIX}/nope`)
+    const response = await test.request(`${API_VERSION_PREFIX}/nope`)
 
     expect(response.status).toBe(404)
     expect(ApiErrorBodySchema.parse(await response.json()).error.type).toBe('not_found_error')
@@ -635,16 +719,33 @@ describe('static web assets', () => {
   it('refuses to climb out of the directory', async () => {
     const test = setup({ webDir: await webDir() })
 
-    const response = await test.app.request('/..%2f..%2fetc%2fpasswd')
+    const response = await test.request('/..%2f..%2fetc%2fpasswd')
 
     // Whatever happens, it is not the file: the app's shell, not the system's.
     await expect(response.text()).resolves.not.toContain('root:')
   })
 
+  it('redirects the plain /device path to the app’s hash route, query and all', async () => {
+    const test = setup({ webDir: await webDir() })
+
+    const response = await test.request('/device?user_code=WXYZ-1234')
+
+    expect(response.status).toBe(302)
+    expect(response.headers.get('location')).toBe('/#/device?user_code=WXYZ-1234')
+  })
+
+  it('does not serve /device when there is no web app to send the reader to', async () => {
+    const test = setup()
+
+    const response = await test.request('/device?user_code=WXYZ-1234')
+
+    expect(response.status).toBe(404)
+  })
+
   it('answers the envelope when no web directory is configured', async () => {
     const test = setup()
 
-    const response = await test.app.request('/')
+    const response = await test.request('/')
 
     expect(response.status).toBe(404)
   })
@@ -656,7 +757,7 @@ describe('the app is built from its parts', () => {
     const second = createTestApp()
     try {
       const agent = await httpCreateAgent(first)
-      const list = await second.app.request(`${API_VERSION_PREFIX}/agents`)
+      const list = await second.request(`${API_VERSION_PREFIX}/agents`)
       expect(ListAgentsResponseSchema.parse(await list.json()).data).toEqual([])
       expect(agent.id).toMatch(/^agent_/)
     } finally {

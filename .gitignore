@@ -21,6 +21,11 @@ coverage/
 /test-results/
 e2e/test-results/
 
+# local configuration and secrets: `.env.example` is the committed template
+.env
+.env.*
+!.env.example
+
 # misc
 .DS_Store
 *.log

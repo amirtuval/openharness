@@ -2,14 +2,18 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { API_VERSION_PREFIX, EVENT_TYPES } from '@openharness/protocol'
 import { InMemorySessionStore } from '@openharness/session'
 
-import { PLACEHOLDER_OWNER_ID } from './placeholder-owner'
 import { main, startServer } from './main'
 import { PostgresPartitionScheduler } from './partition-scheduler'
 import type { Logger } from './types'
 import {
+  TEST_OWNER_ID,
+  TEST_PUBLIC_URL,
+  TEST_SECRETS_KEY,
+  authedFetch,
   createScriptedModel,
   readHistory,
-  resolveTestCredential,
+  resolveTestSessionCredential,
+  signInAt,
   testConfig,
   waitFor,
   waitForIdle,
@@ -46,7 +50,7 @@ describe('startServer', () => {
       config: testConfig(),
       store: new InMemorySessionStore(),
       model: createScriptedModel().factory,
-      resolveCredential: resolveTestCredential,
+      resolveCredential: resolveTestSessionCredential,
       logger: recordingLogger(),
     })
     started.push(server)
@@ -62,7 +66,7 @@ describe('startServer', () => {
     const server = await startServer({
       config: testConfig(),
       model: createScriptedModel().factory,
-      resolveCredential: resolveTestCredential,
+      resolveCredential: resolveTestSessionCredential,
       logger,
     })
     started.push(server)
@@ -77,9 +81,9 @@ describe('startServer', () => {
     const store = new InMemorySessionStore()
     const agent = await store.createAgent(
       { name: 'Agent', model: { id: 'test/model' } },
-      PLACEHOLDER_OWNER_ID,
+      TEST_OWNER_ID,
     )
-    const session = await store.createSession(agent.id, { ownerId: PLACEHOLDER_OWNER_ID })
+    const session = await store.createSession(agent.id, { ownerId: TEST_OWNER_ID })
     await store.appendEvents(session.id, [
       { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: 'before the crash' }] },
       { type: EVENT_TYPES.sessionStatusRunning },
@@ -90,7 +94,7 @@ describe('startServer', () => {
       config: testConfig(),
       store,
       model: createScriptedModel({ text: ['recovered after restart'] }).factory,
-      resolveCredential: resolveTestCredential,
+      resolveCredential: resolveTestSessionCredential,
       logger: recordingLogger(),
     })
     started.push(server)
@@ -110,16 +114,16 @@ describe('startServer', () => {
       config: testConfig(),
       store: new InMemorySessionStore(),
       model: createScriptedModel().factory,
-      resolveCredential: resolveTestCredential,
+      resolveCredential: resolveTestSessionCredential,
       logger: recordingLogger(),
     })
     started.push(first)
     const store = new InMemorySessionStore()
     const agent = await store.createAgent(
       { name: 'Agent', model: { id: 'test/model' } },
-      PLACEHOLDER_OWNER_ID,
+      TEST_OWNER_ID,
     )
-    const session = await store.createSession(agent.id, { ownerId: PLACEHOLDER_OWNER_ID })
+    const session = await store.createSession(agent.id, { ownerId: TEST_OWNER_ID })
     await store.appendEvents(session.id, [
       { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: 'left over' }] },
       { type: EVENT_TYPES.sessionStatusRunning },
@@ -132,7 +136,7 @@ describe('startServer', () => {
         config: { ...testConfig(), port: first.port },
         store,
         model: model.factory,
-        resolveCredential: resolveTestCredential,
+        resolveCredential: resolveTestSessionCredential,
         logger: recordingLogger(),
       }),
     ).rejects.toThrow(/EADDRINUSE/)
@@ -149,26 +153,21 @@ describe('startServer', () => {
       config: testConfig({ drainTimeoutMs: 3000 }),
       store,
       model: createScriptedModel({ text: ['one ', 'two ', 'three'], delayMs: 20 }).factory,
-      resolveCredential: resolveTestCredential,
+      resolveCredential: resolveTestSessionCredential,
       logger: recordingLogger(),
     })
     started.push(server)
-    const agent = await store.createAgent(
-      { name: 'Agent', model: { id: 'test/model' } },
-      PLACEHOLDER_OWNER_ID,
-    )
-    const session = await store.createSession(agent.id, { ownerId: PLACEHOLDER_OWNER_ID })
-
-    await fetch(
-      `http://127.0.0.1:${server.port}${API_VERSION_PREFIX}/sessions/${session.id}/events`,
-      {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          events: [{ type: 'user.message', content: [{ type: 'text', text: 'hi' }] }],
-        }),
-      },
-    )
+    const baseUrl = `http://127.0.0.1:${server.port}`
+    const { token, user } = await signInAt(baseUrl)
+    const agent = await store.createAgent({ name: 'Agent', model: { id: 'test/model' } }, user.id)
+    const session = await store.createSession(agent.id, { ownerId: user.id })
+    await authedFetch(token)(`${baseUrl}${API_VERSION_PREFIX}/sessions/${session.id}/events`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        events: [{ type: 'user.message', content: [{ type: 'text', text: 'hi' }] }],
+      }),
+    })
     await waitFor(async () => (await store.getTurnState(session.id)).state !== 'idle')
 
     await server.shutdown()
@@ -190,19 +189,17 @@ describe('startServer', () => {
       }),
       store,
       model: createScriptedModel({ text: ['answered under a lease'] }).factory,
-      resolveCredential: resolveTestCredential,
+      resolveCredential: resolveTestSessionCredential,
       logger: recordingLogger(),
     })
     started.push(server)
     expect(server.scheduler).toBeInstanceOf(PostgresPartitionScheduler)
     const scheduler = server.scheduler as PostgresPartitionScheduler
 
-    const agent = await store.createAgent(
-      { name: 'Agent', model: { id: 'test/model' } },
-      PLACEHOLDER_OWNER_ID,
-    )
-    const session = await store.createSession(agent.id, { ownerId: PLACEHOLDER_OWNER_ID })
-    await fetch(
+    const { token, user } = await signInAt(`http://127.0.0.1:${server.port}`)
+    const agent = await store.createAgent({ name: 'Agent', model: { id: 'test/model' } }, user.id)
+    const session = await store.createSession(agent.id, { ownerId: user.id })
+    await authedFetch(token)(
       `http://127.0.0.1:${server.port}${API_VERSION_PREFIX}/sessions/${session.id}/events`,
       {
         method: 'POST',
@@ -233,19 +230,17 @@ describe('startServer', () => {
       config: testConfig({ deltaRetentionMs: 0, compactIntervalMs: 25 }),
       store,
       model: createScriptedModel({ text: ['hi'] }).factory,
-      resolveCredential: resolveTestCredential,
+      resolveCredential: resolveTestSessionCredential,
       logger,
     })
     started.push(server)
     expect(server.compactor.running).toBe(true)
 
     // A turn over HTTP, so the message reaches the scheduler the way a client's would.
-    const agent = await store.createAgent(
-      { name: 'Agent', model: { id: 'test/model' } },
-      PLACEHOLDER_OWNER_ID,
-    )
-    const session = await store.createSession(agent.id, { ownerId: PLACEHOLDER_OWNER_ID })
-    const response = await fetch(
+    const { token, user } = await signInAt(`http://127.0.0.1:${server.port}`)
+    const agent = await store.createAgent({ name: 'Agent', model: { id: 'test/model' } }, user.id)
+    const session = await store.createSession(agent.id, { ownerId: user.id })
+    const response = await authedFetch(token)(
       `http://127.0.0.1:${server.port}${API_VERSION_PREFIX}/sessions/${session.id}/events`,
       {
         method: 'POST',
@@ -279,7 +274,7 @@ describe('startServer', () => {
       config: testConfig({ compactIntervalMs: 0 }),
       store: new InMemorySessionStore(),
       model: createScriptedModel().factory,
-      resolveCredential: resolveTestCredential,
+      resolveCredential: resolveTestSessionCredential,
       logger: recordingLogger(),
     })
     started.push(server)
@@ -292,7 +287,7 @@ describe('startServer', () => {
       config: testConfig(),
       store: new InMemorySessionStore(),
       model: createScriptedModel().factory,
-      resolveCredential: resolveTestCredential,
+      resolveCredential: resolveTestSessionCredential,
       logger: recordingLogger(),
     })
     const url = `http://127.0.0.1:${server.port}/health`
@@ -314,7 +309,7 @@ describe('startServer', () => {
         config: testConfig({ webDir }),
         store: new InMemorySessionStore(),
         model: createScriptedModel().factory,
-        resolveCredential: resolveTestCredential,
+        resolveCredential: resolveTestSessionCredential,
         logger: recordingLogger(),
       })
       started.push(server)
@@ -331,9 +326,23 @@ describe('startServer', () => {
 })
 
 describe('main', () => {
+  /**
+   * The environment every boot needs (A2/A5). A test that cares about one of these — or
+   * about a provider key it is *not* setting — spells out the rest around it.
+   */
+  function bootEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+    return {
+      PORT: '0',
+      BETTER_AUTH_SECRET: 'a-test-secret-that-is-long-enough-for-better-auth',
+      BETTER_AUTH_URL: TEST_PUBLIC_URL,
+      OPENHARNESS_SECRETS_KEY: TEST_SECRETS_KEY,
+      ...extra,
+    }
+  }
+
   it('reads the environment and starts a server from it', async () => {
     const logger = recordingLogger()
-    const server = await main({ PORT: '0', OPENHARNESS_TEST_MODEL: 'mock' }, { logger })
+    const server = await main(bootEnv({ OPENHARNESS_TEST_MODEL: 'mock' }), { logger })
     started.push(server)
 
     expect(server.port).toBeGreaterThan(0)
@@ -341,11 +350,41 @@ describe('main', () => {
     expect(response.status).toBe(200)
     expect(logger.lines.join('\n')).toContain('model: TEST MODEL')
     expect(logger.lines.join('\n')).toContain('store: in-memory')
+    expect(logger.lines.join('\n')).toContain(`public URL: ${TEST_PUBLIC_URL}`)
   })
 
   it('refuses a test-model value it does not know', async () => {
     await expect(
-      main({ PORT: '0', OPENHARNESS_TEST_MODEL: 'maybe' }, { logger: recordingLogger() }),
+      main(bootEnv({ OPENHARNESS_TEST_MODEL: 'maybe' }), { logger: recordingLogger() }),
     ).rejects.toThrow(/OPENHARNESS_TEST_MODEL/)
+  })
+
+  it('refuses to boot without the signing secret, the public URL or the vault key', async () => {
+    // A2/A5: half a configuration is worse than none.
+    const base = bootEnv()
+    delete base['BETTER_AUTH_SECRET']
+    await expect(main(base, { logger: recordingLogger() })).rejects.toThrow(/BETTER_AUTH_SECRET/)
+
+    const noUrl = bootEnv()
+    delete noUrl['BETTER_AUTH_URL']
+    await expect(main(noUrl, { logger: recordingLogger() })).rejects.toThrow(/BETTER_AUTH_URL/)
+
+    const noKey = bootEnv()
+    delete noKey['OPENHARNESS_SECRETS_KEY']
+    await expect(main(noKey, { logger: recordingLogger() })).rejects.toThrow(
+      /OPENHARNESS_SECRETS_KEY/,
+    )
+  })
+
+  it('refuses a dev login on a public URL (A7)', async () => {
+    await expect(
+      main(
+        bootEnv({
+          OPENHARNESS_DEV_LOGIN: '1',
+          BETTER_AUTH_URL: 'https://openharness.example',
+        }),
+        { logger: recordingLogger() },
+      ),
+    ).rejects.toThrow(/OPENHARNESS_DEV_LOGIN/)
   })
 })
