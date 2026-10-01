@@ -94,7 +94,12 @@ Today there is CI (lint, typecheck and tests with turbo `--affected`) and `docke
 - provider API keys **per user or organization**, stored encrypted and **write-only** (set,
   never read back). This is the start of the secret store that MCP and tools will need;
 - a **model catalog**: the models each configured provider offers, with their context windows;
-- choosing the model per agent, per session, and **switching mid-session**;
+- **modes** (an idea from Amp): a named preset that bundles a model, a reasoning effort, a
+  system prompt addition and a tool set behind a stable name such as `smart`, `fast` or
+  `deep`. Users and agents pick a mode instead of a raw `provider/model` id, and an operator can
+  change what a mode maps to without touching every agent. A raw model id stays available for
+  those who want it;
+- choosing the mode or model per agent, per session, and **switching mid-session**;
 - usage and cost per user or organization, from the token counts the spans already store, and
   possibly budgets that stop a session at a limit, with usage events so clients can show
   spending live (as Managed Agents' `session.usage` does).
@@ -105,6 +110,8 @@ Today there is CI (lint, typecheck and tests with turbo `--affected`) and `docke
   session, so a mid-session model switch trims correctly on the next request. Each request
   records its model on `span.model_request_start` (#46). The fixed 32,768-token default becomes
   the fallback for unknown models.
+- **Modes are part of this phase.** Each request records the mode it ran under alongside the
+  resolved model, so the log stays accurate when a mode's mapping changes later.
 
 ## 5. Tools
 
@@ -124,10 +131,14 @@ own.
    - credentials go in the write-only secret store from phase 4, never in the agent config
      returned by the API.
 3. **Pausing for the user** (`session.status_idle {stop_reason: requires_action}`), which
-   covers two features with one mechanism:
+   covers three features with one mechanism:
    - client-run tools (`agent.custom_tool_use` → `user.custom_tool_result`);
    - approvals: a per-tool policy of allow, ask or deny, and `user.tool_confirmation`, with UI in
-     the web app and `oh`.
+     the web app and `oh`;
+   - **`ask_user`**: a built-in tool the model calls to ask the user a structured question in
+     the middle of a task (a question with optional choices, or free text), as Claude Code's
+     `AskUserQuestion` and Gemini CLI's `ask_user` do. The turn pauses until the answer
+     arrives, and the web app and `oh` render the question and collect the answer.
 4. **Sandboxed tools** (`bash`, files) behind the same `hands` interface. The sandbox
    technology, and whether hands run in-process or as a separate worker, are decided then.
 
@@ -162,3 +173,28 @@ own.
   - merge streamed deltas (e.g. every ~50 ms) to cut writes, when performance matters;
   - a tab watching a session started in another tab may not show the new title until reload;
   - the web app's model suggestions lean towards Anthropic models.
+
+## Ideas from other harnesses (low priority)
+
+Worth knowing when the phase they touch comes up; none of them is planned yet. From the
+[harness survey](./research/harness-features.md) and a broader first pass; not re-verified
+against each tool's docs.
+
+- **ACP permission rules** (for tools step 3): approval choices of `allow_once`,
+  `allow_always`, `reject_once` and `reject_always`, and "an unknown outcome must not be treated
+  as approval": a timeout or an unrecognized reply counts as a denial.
+- **Gemini CLI's policy engine** (tools step 3): layered rules (admin > project > user) that can
+  match tool arguments by pattern; a reference for the shape of per-tool policies.
+- **An ACP adapter** (clients): the Agent Client Protocol is the cheapest route to IDE clients
+  (Zed, JetBrains, Neovim). Goose serves it over HTTP+SSE, and its replay rules (an inclusive
+  cursor, reusing message ids, never re-executing commands) match what #46 built.
+- **Shadow-git checkpoints** (tools step 4, from Gemini CLI): snapshot file changes in a hidden
+  git repo so a rewind can restore the code and the conversation independently.
+- **Environment snapshots** (tools step 4, from Cursor): save a prepared environment and reuse
+  it, so a session does not start from a blank container.
+- **A repo map** (tools step 4, from Aider): a token-budgeted, ranked map of a codebase's
+  symbols, for coding agents.
+- **Different models per role** (model selection, from Aider's architect/editor mode): one
+  model plans and a cheaper one applies the edits.
+- **Recipes** (later, from Goose): saved, parameterized tasks with success checks, retries,
+  failure-recovery steps and scheduling; close to outcomes and scheduled runs.
