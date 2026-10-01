@@ -116,6 +116,39 @@ describe('the AI SDK chat endpoint', () => {
     expect(reply).toMatchObject({ type: EVENT_TYPES.agentMessage })
   })
 
+  it('streams the stored chunks of a reply as they arrive (D9)', async () => {
+    // Since D9 the brain stores every chunk it streams. This adapter reads the session's live
+    // events, so what it translates is the stored `event_start` / `event_delta` — under the
+    // `sevt_` id the stored `agent.message` will have, exactly as the stream-only previews
+    // used to be.
+    const test = await startTestServer({ replies: [{ text: ['One ', 'two'] }] })
+    context = test
+    const agent = await httpCreateAgent(test)
+    const session = await httpCreateSession(test, agent.id)
+
+    const { text, chunks } = await chat(test, session.id, [userMessage('Hi')])
+    await waitForIdle(test.store, session.id)
+
+    expect(text).toBe('One two')
+    const start = chunks.find((chunk) => chunk.type === 'text-start')
+    const deltas = chunks.filter((chunk) => chunk.type === 'text-delta')
+    expect(start?.type === 'text-start' && start.id).toMatch(/^sevt_/)
+    expect(deltas.map((delta) => (delta.type === 'text-delta' ? delta.delta : '')).join('')).toBe(
+      'One two',
+    )
+    expect(chunks.some((chunk) => chunk.type === 'text-end')).toBe(true)
+
+    // The id the block streamed under is the id the stored message has: a client that saw the
+    // live text can replace it with the record it reads back from the log.
+    const raw = await readHistory(test.store, session.id, { includeSuperseded: true })
+    const chunkStart = raw.find((event) => event.type === EVENT_TYPES.eventStart)
+    expect(chunkStart?.type === 'event_start' && chunkStart.event.id).toBe(
+      start?.type === 'text-start' ? start.id : '',
+    )
+    const stored = raw.find((event) => event.type === EVENT_TYPES.agentMessage)
+    expect(stored?.id).toBe(start?.type === 'text-start' ? start.id : '')
+  })
+
   it('carries a session.error to the client as an error chunk', async () => {
     const test = await startTestServer({
       replies: [{ failWith: Object.assign(new Error('the model said no'), { statusCode: 400 }) }],

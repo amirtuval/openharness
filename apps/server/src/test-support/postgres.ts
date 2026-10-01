@@ -11,13 +11,8 @@ import {
   migrate,
 } from '@openharness/session/postgres'
 import type { PostgresSchema } from '@openharness/session/postgres'
-import type {
-  AppendableEvent,
-  AppendEventsOptions,
-  MarkProcessedOptions,
-  PartitionFence,
-} from '@openharness/session'
-import type { EventId, SessionId, StoredEvent, UserEvent } from '@openharness/protocol'
+import type { AppendableEvent, AppendEventsOptions, PartitionFence } from '@openharness/session'
+import type { SessionId, StoredEvent } from '@openharness/protocol'
 
 /**
  * A real Postgres for the tests that need one, which is every test of the partitioned
@@ -150,7 +145,13 @@ export interface RecordedWrite {
  * listening connection, is the real implementation's.
  */
 export class RecordingStore extends PostgresSessionStore {
-  /** Every `appendEvents` and `markProcessed` this store has been asked to make, in order. */
+  /**
+   * Every `appendEvents` this store has been asked to make, in order.
+   *
+   * One entry per append, because since D9 (issue #46) an append is the only write a turn
+   * makes: the claim on a user event rides on the span start, and there is no `markProcessed`
+   * call left to record.
+   */
   readonly writes: RecordedWrite[] = []
 
   override async appendEvents(
@@ -160,15 +161,6 @@ export class RecordingStore extends PostgresSessionStore {
   ): Promise<StoredEvent[]> {
     this.writes.push(options ?? {})
     return super.appendEvents(sessionId, events, options)
-  }
-
-  override async markProcessed(
-    sessionId: SessionId,
-    eventIds: EventId[],
-    options?: MarkProcessedOptions,
-  ): Promise<UserEvent[]> {
-    this.writes.push(options ?? {})
-    return super.markProcessed(sessionId, eventIds, options)
   }
 }
 

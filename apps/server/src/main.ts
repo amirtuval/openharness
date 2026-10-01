@@ -13,6 +13,7 @@ import {
 
 import { type AppEnv, type Logger, consoleLogger } from './types'
 import { createApp } from './app'
+import { DeltaCompactor } from './compaction'
 import { ENV_VARS, type ServerConfig, describeConfig, readServerConfig } from './config'
 import { resolveModelFactory } from './model'
 import { PostgresPartitionScheduler } from './partition-scheduler'
@@ -33,6 +34,8 @@ export interface StartedServer {
   readonly store: SessionStore
   /** The scheduler running the brains. */
   readonly scheduler: SessionScheduler
+  /** The periodic compaction of superseded chunks; runs in every scheduler mode. */
+  readonly compactor: DeltaCompactor
   /** The port the server is listening on; a real one even when `PORT=0`. */
   readonly port: number
   /** Stop the server: no new requests, no new turns, no open store. Idempotent. */
@@ -66,6 +69,14 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   const model = options.model ?? resolveModelFactory(config).factory
 
   const scheduler = createScheduler(config, opened.store, model, logger)
+  // Compaction is the store's, not a scheduler's: it deletes superseded chunks whoever ran the
+  // turn that superseded them, so every instance runs it in either scheduler mode.
+  const compactor = new DeltaCompactor({
+    store: opened.store,
+    retentionMs: config.deltaRetentionMs,
+    intervalMs: config.compactIntervalMs,
+    logger,
+  })
 
   const app = createApp({
     store: opened.store,
@@ -84,7 +95,9 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     // the first request arrives is what a client's first read depends on.
     await listening(server)
     await scheduler.start()
+    compactor.start()
   } catch (error) {
+    await compactor.stop()
     await scheduler.stop()
     server.close()
     await opened.close()
@@ -99,9 +112,10 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     app,
     store: opened.store,
     scheduler,
+    compactor,
     port,
     shutdown: () => {
-      stopping ??= stop(server, scheduler, opened.close, config, logger)
+      stopping ??= stop(server, scheduler, compactor, opened.close, config, logger)
       return stopping
     },
   }
@@ -279,14 +293,16 @@ async function listening(server: ReturnType<typeof serve>): Promise<void> {
  * Shut down: stop accepting requests, let the turns in flight finish writing, drop the rest,
  * and release the store.
  *
- * The order matters. Closing the listener first stops new work arriving; the scheduler is
- * then drained (its turns are aborted, and given a timeout to write their last events); only
- * then are the remaining connections — the SSE streams, which would otherwise never end — cut
- * off. The store is closed last, because everything above it may still be writing to it.
+ * The order matters. Closing the listener first stops new work arriving; the compaction job is
+ * then stopped — it deletes, so it must not outlive the store — and the scheduler drained (its
+ * turns are aborted, and given a timeout to write their last events); only then are the
+ * remaining connections — the SSE streams, which would otherwise never end — cut off. The
+ * store is closed last, because everything above it may still be writing to it.
  */
 async function stop(
   server: ReturnType<typeof serve>,
   scheduler: SessionScheduler,
+  compactor: DeltaCompactor,
   closeStore: () => Promise<void>,
   config: ServerConfig,
   logger: Logger,
@@ -296,6 +312,7 @@ async function stop(
       resolve()
     })
   })
+  await compactor.stop()
   await scheduler.stop({ drainTimeoutMs: config.drainTimeoutMs })
   if ('closeAllConnections' in server) {
     // The SSE streams are connections that never end on their own; without this the listener

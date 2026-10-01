@@ -3,6 +3,7 @@ import { hostname } from 'node:os'
 
 import { DEFAULT_PARTITION_COUNT } from '@openharness/protocol'
 
+import { DEFAULT_COMPACT_INTERVAL_MS, DEFAULT_DELTA_RETENTION_MS } from './compaction'
 import { MOCK_MODEL_ENV_VALUE } from './mock-model'
 import { DEFAULT_HEARTBEAT_MS, DEFAULT_LEASE_TTL_MS, DEFAULT_SWEEP_MS } from './partition-scheduler'
 import { DEFAULT_DRAIN_TIMEOUT_MS } from './runner'
@@ -32,6 +33,8 @@ import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
  * | `OPENHARNESS_LEASE_TTL_MS`          | how long a partition lease lasts; `30000` by default             |
  * | `OPENHARNESS_HEARTBEAT_MS`          | how often leases are renewed; `10000` by default                 |
  * | `OPENHARNESS_SWEEP_MS`              | how often owned partitions are re-scanned; `60000` by default    |
+ * | `OPENHARNESS_DELTA_RETENTION_MS`    | how long superseded chunks are kept before compaction deletes them; `3600000` |
+ * | `OPENHARNESS_COMPACT_INTERVAL_MS`   | how often compaction runs; `300000` by default, `0` disables it  |
  *
  * Provider credentials (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) are not read here: the
  * default model factory is Mastra's router, which reads whatever the provider it routes to
@@ -54,6 +57,8 @@ export const ENV_VARS = {
   leaseTtlMs: 'OPENHARNESS_LEASE_TTL_MS',
   heartbeatMs: 'OPENHARNESS_HEARTBEAT_MS',
   sweepMs: 'OPENHARNESS_SWEEP_MS',
+  deltaRetentionMs: 'OPENHARNESS_DELTA_RETENTION_MS',
+  compactIntervalMs: 'OPENHARNESS_COMPACT_INTERVAL_MS',
 } as const
 
 /** Everything the server reads from the environment, parsed and checked. */
@@ -86,6 +91,10 @@ export interface ServerConfig {
   readonly heartbeatMs: number
   /** How often owned partitions are re-scanned for work a signal may have missed. */
   readonly sweepMs: number
+  /** How long superseded chunks are kept before compaction deletes them. */
+  readonly deltaRetentionMs: number
+  /** How often the compaction job runs; `0` disables it. */
+  readonly compactIntervalMs: number
 }
 
 /** Which {@link SessionScheduler} the server runs. */
@@ -161,6 +170,14 @@ export function readServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
     leaseTtlMs,
     heartbeatMs,
     sweepMs: readInteger(env, ENV_VARS.sweepMs, DEFAULT_SWEEP_MS, { min: 1 }),
+    // Zero is meaningful for both: no retention window at all (delete as soon as the range is
+    // superseded), and no compaction job at all.
+    deltaRetentionMs: readInteger(env, ENV_VARS.deltaRetentionMs, DEFAULT_DELTA_RETENTION_MS, {
+      min: 0,
+    }),
+    compactIntervalMs: readInteger(env, ENV_VARS.compactIntervalMs, DEFAULT_COMPACT_INTERVAL_MS, {
+      min: 0,
+    }),
   }
 }
 
@@ -191,6 +208,12 @@ export function describeConfig(config: ServerConfig): string[] {
     config.testModel === undefined
       ? 'model: mastra router'
       : `model: TEST MODEL (${ENV_VARS.testModel}=${config.testModel})`,
+  )
+  lines.push(
+    config.compactIntervalMs === 0
+      ? 'compaction: disabled'
+      : `compaction: every ${config.compactIntervalMs}ms, ` +
+          `retaining superseded chunks ${config.deltaRetentionMs}ms`,
   )
   lines.push(config.webDir === undefined ? 'web assets: none' : `web assets: ${config.webDir}`)
   if (config.corsOrigins.length > 0) {

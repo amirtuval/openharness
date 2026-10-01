@@ -29,6 +29,12 @@ export const PACKAGE_NAME = '@openharness/server'
 
 export { createApp, isApiPath, type AppOptions } from './app'
 export {
+  DEFAULT_COMPACT_INTERVAL_MS,
+  DEFAULT_DELTA_RETENTION_MS,
+  DeltaCompactor,
+  type DeltaCompactorOptions,
+} from './compaction'
+export {
   ENV_VARS,
   DEFAULT_PORT,
   DEFAULT_SCHEDULER,

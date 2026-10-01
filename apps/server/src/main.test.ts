@@ -25,6 +25,7 @@ function recordingLogger(): Logger & { readonly lines: string[] } {
   const lines: string[] = []
   return {
     lines,
+    debug: (message) => lines.push(`debug ${message}`),
     info: (message) => lines.push(`info ${message}`),
     warn: (message) => lines.push(`warn ${message}`),
     error: (message) => lines.push(`error ${message}`),
@@ -196,6 +197,62 @@ describe('startServer', () => {
     // The shutdown released the leases, so another instance can take over at once.
     const lease = await store.acquirePartition(scheduler.heldPartitions()[0] ?? 0, 'other', 1_000)
     expect(lease).not.toBeNull()
+  })
+
+  it('runs the compaction job on its own timer, deleting superseded chunks', async () => {
+    const store = new InMemorySessionStore()
+    const logger = recordingLogger()
+    const server = await startServer({
+      config: testConfig({ deltaRetentionMs: 0, compactIntervalMs: 25 }),
+      store,
+      model: createScriptedModel({ text: ['hi'] }).factory,
+      logger,
+    })
+    started.push(server)
+    expect(server.compactor.running).toBe(true)
+
+    // A turn over HTTP, so the message reaches the scheduler the way a client's would.
+    const agent = await store.createAgent({ name: 'Agent', model: { id: 'test/model' } })
+    const session = await store.createSession(agent.id)
+    const response = await fetch(
+      `http://127.0.0.1:${server.port}${API_VERSION_PREFIX}/sessions/${session.id}/events`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          events: [{ type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: 'hi' }] }],
+        }),
+      },
+    )
+    expect(response.status).toBe(200)
+    await waitForIdle(store, session.id)
+
+    // The reply's chunks were superseded by its message, and the job — retention zero — takes
+    // them away without changing what a reader sees.
+    await waitFor(
+      async () => {
+        const raw = await readHistory(store, session.id, { includeSuperseded: true })
+        return raw.every(
+          (event) => event.type !== EVENT_TYPES.eventStart && event.type !== EVENT_TYPES.eventDelta,
+        )
+      },
+      { message: 'compaction never deleted the superseded chunks' },
+    )
+    const replayed = await readHistory(store, session.id)
+    expect(replayed.some((event) => event.type === EVENT_TYPES.agentMessage)).toBe(true)
+    expect(logger.lines.join('\n')).toMatch(/debug compaction deleted [1-9]\d* superseded chunk/)
+  })
+
+  it('leaves compaction off when the interval is zero', async () => {
+    const server = await startServer({
+      config: testConfig({ compactIntervalMs: 0 }),
+      store: new InMemorySessionStore(),
+      model: createScriptedModel().factory,
+      logger: recordingLogger(),
+    })
+    started.push(server)
+
+    expect(server.compactor.running).toBe(false)
   })
 
   it('stops listening after shutdown', async () => {

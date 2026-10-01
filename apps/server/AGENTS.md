@@ -65,22 +65,24 @@ a `user.interrupt` signals `interrupt` — exactly what the same events would do
 
 ## Environment variables
 
-| variable                              | default                        | what it does                                                  |
-| ------------------------------------- | ------------------------------ | ------------------------------------------------------------- |
-| `DATABASE_URL`                        | —                              | run on Postgres, migrating on boot; unset means in-memory     |
-| `SCHEDULER`                           | `local`                        | `local`, or `postgres` for the multi-instance scheduler       |
-| `OPENHARNESS_API_KEY`                 | —                              | require `x-api-key` on `/v1/*`; unset leaves the API open     |
-| `PORT`                                | `3000`                         | the port to listen on                                         |
-| `OPENHARNESS_TEST_MODEL`              | —                              | `mock` swaps in the deterministic test model                  |
-| `OPENHARNESS_WEB_DIR`                 | —                              | a built web app to serve at `/`                               |
-| `OPENHARNESS_CORS_ORIGINS`            | —                              | comma-separated origins to allow; unset means no CORS headers |
-| `OPENHARNESS_MAX_CONCURRENT_SESSIONS` | `4`                            | how many sessions may be running at once                      |
-| `OPENHARNESS_DRAIN_TIMEOUT_MS`        | `5000`                         | how long shutdown waits for a turn in flight                  |
-| `OPENHARNESS_INSTANCE_ID`             | hostname + pid + random suffix | this instance's id in the lease table                         |
-| `OPENHARNESS_PARTITIONS`              | `64` (the protocol's)          | how many partitions the session space has                     |
-| `OPENHARNESS_LEASE_TTL_MS`            | `30000`                        | how long a partition lease lasts before it must be renewed    |
-| `OPENHARNESS_HEARTBEAT_MS`            | `10000`                        | how often leases are renewed and free partitions taken        |
-| `OPENHARNESS_SWEEP_MS`                | `60000`                        | how often owned partitions are re-scanned for missed work     |
+| variable                              | default                        | what it does                                                       |
+| ------------------------------------- | ------------------------------ | ------------------------------------------------------------------ |
+| `DATABASE_URL`                        | —                              | run on Postgres, migrating on boot; unset means in-memory          |
+| `SCHEDULER`                           | `local`                        | `local`, or `postgres` for the multi-instance scheduler            |
+| `OPENHARNESS_API_KEY`                 | —                              | require `x-api-key` on `/v1/*`; unset leaves the API open          |
+| `PORT`                                | `3000`                         | the port to listen on                                              |
+| `OPENHARNESS_TEST_MODEL`              | —                              | `mock` swaps in the deterministic test model                       |
+| `OPENHARNESS_WEB_DIR`                 | —                              | a built web app to serve at `/`                                    |
+| `OPENHARNESS_CORS_ORIGINS`            | —                              | comma-separated origins to allow; unset means no CORS headers      |
+| `OPENHARNESS_MAX_CONCURRENT_SESSIONS` | `4`                            | how many sessions may be running at once                           |
+| `OPENHARNESS_DRAIN_TIMEOUT_MS`        | `5000`                         | how long shutdown waits for a turn in flight                       |
+| `OPENHARNESS_INSTANCE_ID`             | hostname + pid + random suffix | this instance's id in the lease table                              |
+| `OPENHARNESS_PARTITIONS`              | `64` (the protocol's)          | how many partitions the session space has                          |
+| `OPENHARNESS_LEASE_TTL_MS`            | `30000`                        | how long a partition lease lasts before it must be renewed         |
+| `OPENHARNESS_HEARTBEAT_MS`            | `10000`                        | how often leases are renewed and free partitions taken             |
+| `OPENHARNESS_SWEEP_MS`                | `60000`                        | how often owned partitions are re-scanned for missed work          |
+| `OPENHARNESS_DELTA_RETENTION_MS`      | `3600000`                      | how long superseded chunks are kept before compaction deletes them |
+| `OPENHARNESS_COMPACT_INTERVAL_MS`     | `300000`                       | how often the compaction job runs; `0` disables it                 |
 
 Provider credentials (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) are not read by this package:
 the default model factory is the brain's `routerModelFactory`, and Mastra's router reads
@@ -119,8 +121,8 @@ stack trace is never part of a response.
 `GET …/events/stream` is the live half of the log, in the format `packages/client` reads:
 
 - one message per event, `data: <the JSON StreamEvent>`;
-- stored events also carry `id: <seq>` — the resume position — and stream-only previews
-  (`event_start` / `event_delta`) carry none;
+- stored events carry `id: <seq>` — the resume position; a stream-only preview, from a writer
+  that still publishes rather than stores them, carries none;
 - `: ping` comments every 15 seconds when nothing else is happening.
 
 The replay position comes from `after_seq` if the query carries it, otherwise from the
@@ -131,50 +133,46 @@ this server handed out (a `sevt_` id, say) is ignored rather than refused.
 Replay and live delivery are stitched together so a client cannot tell where one ended:
 
 1. **subscribe first** — the store starts buffering everything that happens from here;
-2. **replay** the log after the resume position, page by page;
-3. **snapshot the preview in flight** — see below — on a connection that asked for previews;
-4. **flush the buffer**, dropping any stored event at or below the last `seq` the replay
-   delivered, which is exactly the overlap.
+2. **replay** the log after the resume position, page by page — `listEvents`, the replay read,
+   which skips superseded chunks;
+3. **flush the buffer**, dropping anything at or below the last `seq` the replay covered,
+   which is exactly the overlap — whether the replay wrote an event or filtered it out.
 
-`event_start` / `event_delta` are delivered only to a connection that asked for them with
-`event_deltas[]=agent.message`. Disconnecting cancels the body stream, and that is what ends
-the store subscription and the keepalive timer — there is nothing left running for a client
-that has gone away.
+`event_start` / `event_delta` — a reply's chunks, whether stored or stream-only — go only to a
+connection that asked for them with `event_deltas[]=agent.message`, in **both** halves: a
+connection that did not opt in never sees a chunk in a replay either. Disconnecting cancels the
+body stream, and that is what ends the store subscription and the keepalive timer — there is
+nothing left running for a client that has gone away.
 
-### The preview snapshot (#27)
+### Mid-reply connections (D9)
 
-Previews are delivered to the connections attached when they are published, and to nobody
-else. A client that connects while a reply is streaming — a reloaded page, a second tab —
-would therefore start rendering it at whichever delta it happened to catch, and show a reply
-that begins mid-word until the stored `agent.message` replaces the preview at the end of the
-turn. The log cannot answer that, because the message is not in it yet; the store keeps the
-text that was sent (`SessionStore.getPreview`), and this is where it is handed over.
+Since D9 (issue #46) the brain stores each chunk as it streams, so a reply in flight **is** the
+log: a connection that opens mid-reply — a reloaded page, a second tab — replays the chunks
+already written under `seq` like any other event, and the stored `agent.message` supersedes
+them at the end of the turn. There is no preview snapshot to keep: the text that used to live
+in `session_previews`, and the text-overlap de-duplication it needed, went with it (P3). A
+client resuming from inside a reply's chunks gets the remaining chunks and then the message;
+after compaction has deleted the chunks it gets the message alone, which is the same
+conversation (the message's position is where its range started).
 
-After the replay, a connection that asked for `agent.message` previews gets the reply in
-flight as exactly the frames it already knows how to read: `event_start` for the `sevt_` id the
-brain announced, then **one** `event_delta` carrying the whole accumulated text at index `0`.
-It is skipped when there is nothing in flight or when the stored message it previews was in the
-replay. The live deltas that follow continue from there, and the stored `agent.message` ends
-the preview as usual — under the same id.
+`GET …/events` — the list the clients load history with — is the same replay read: it skips
+superseded chunks and returns the chunks of a reply still in flight, which is exactly what a
+client that opens mid-reply needs before it continues on the stream.
 
-The `event_delta` is only sent when the preview has text, the `event_start` always is. A
-connection can land in the window between the brain's `event_start` and its first delta — one
-store round trip long, and easy to hit on a loaded machine — and a preview in that window has
-accumulated nothing: `text: ''` is not a block the protocol accepts (`TextBlockSchema` wants at
-least one character), so the accumulated delta for it would be a frame a validating client
-stops at, while there is nothing for the client to be missing. The announcement still goes out,
-and is what the live deltas that follow are read under.
+### Compaction
 
-**The race.** Deltas can be published while the snapshot is being read, so they are already in
-the snapshot's text _and_ waiting in the buffer to be written out live; applied twice, the
-reply would double in the middle. Ephemeral events carry no position to compare with, so the
-buffer is filtered by text: the deltas the snapshot covers are the ones published before it was
-read, so their text is what its text **ends** with — and, in the buffer, they are the first
-deltas for the id, because everything published before the connection subscribed is in neither
-place. `dropCovered` in `sse.ts` therefore drops the longest run of buffered deltas, from the
-first, that still ends the snapshot's text; everything after it is new content and goes out
-live. Buffered `event_start`s for the snapshot's id go too — a second one would make a client
-start its accumulator over, throwing the snapshot away.
+The other half of D9's superseding is physical: `DeltaCompactor` (`compaction.ts`) calls
+`store.compact({ olderThan: now − OPENHARNESS_DELTA_RETENTION_MS })` every
+`OPENHARNESS_COMPACT_INTERVAL_MS` and logs what it deleted at debug. It runs in **every
+scheduler mode** and on every instance — compaction is idempotent and safe from several
+instances at once, so there is nothing to coordinate — and its timer is `unref`'d, so a job
+that only deletes old rows never keeps a process alive. `stop()` clears the timer and waits for
+a run in flight, which is what makes shutdown safe to close the store right after. A failing
+run is logged and retried next tick; it never takes the server down. An interval of `0`
+disables the job.
+
+Deleting changes no reader's answer — replay already skips superseded chunks — so nothing in
+the API depends on the window, and a client never needs to know whether compaction has run.
 
 ### Session titles (#29)
 
@@ -366,19 +364,21 @@ drain.
 
 ## Public API
 
-| `@openharness/server`                               | what it is                                                                      |
-| --------------------------------------------------- | ------------------------------------------------------------------------------- |
-| `createApp(options)`                                | the Hono app: routes, auth, errors, static assets — against any store/scheduler |
-| `startServer(options)`                              | store, migrations, model, scheduler, listener and a `shutdown()`                |
-| `main(env, options)`                                | `startServer` from the environment, plus the signal handlers                    |
-| `LocalScheduler`                                    | the single-process `SessionScheduler`                                           |
-| `PostgresPartitionScheduler`                        | the multi-instance `SessionScheduler`: partition leases, epochs, recovery (#11) |
-| `PassQueue`                                         | the pass queue and concurrency limit both schedulers share                      |
-| `SessionRunner`                                     | the per-session turn loop, reusable: what both schedulers run passes with       |
-| `createMockModelFactory()`                          | the deterministic test model, for a host that wires its own                     |
-| `defaultInstanceId()`                               | hostname + pid + random suffix: the id a server leases partitions under         |
-| `readServerConfig(env)`, `ServerConfig`, `ENV_VARS` | the environment, parsed                                                         |
-| `HttpError`, `PACKAGE_NAME`, `Logger`               | the error type, the package name and the logging seam                           |
+| `@openharness/server`                                       | what it is                                                                      |
+| ----------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `createApp(options)`                                        | the Hono app: routes, auth, errors, static assets — against any store/scheduler |
+| `startServer(options)`                                      | store, migrations, model, scheduler, listener and a `shutdown()`                |
+| `main(env, options)`                                        | `startServer` from the environment, plus the signal handlers                    |
+| `DeltaCompactor`                                            | the periodic compaction of superseded chunks (D9)                               |
+| `DEFAULT_DELTA_RETENTION_MS`, `DEFAULT_COMPACT_INTERVAL_MS` | `3600000`, `300000` — the compaction defaults                                   |
+| `LocalScheduler`                                            | the single-process `SessionScheduler`                                           |
+| `PostgresPartitionScheduler`                                | the multi-instance `SessionScheduler`: partition leases, epochs, recovery (#11) |
+| `PassQueue`                                                 | the pass queue and concurrency limit both schedulers share                      |
+| `SessionRunner`                                             | the per-session turn loop, reusable: what both schedulers run passes with       |
+| `createMockModelFactory()`                                  | the deterministic test model, for a host that wires its own                     |
+| `defaultInstanceId()`                                       | hostname + pid + random suffix: the id a server leases partitions under         |
+| `readServerConfig(env)`, `ServerConfig`, `ENV_VARS`         | the environment, parsed                                                         |
+| `HttpError`, `PACKAGE_NAME`, `Logger`                       | the error type, the package name and the logging seam                           |
 
 `node dist/index.js` runs `main()`, which reads the environment and starts the server.
 
@@ -393,10 +393,11 @@ src/
   model.ts              which model factory the process runs (router, or the mock)
   mock-model.ts         the deterministic test model and its markers
   runner.ts             SessionRunner: one turn per session, re-run while there is work
+  compaction.ts         DeltaCompactor: the periodic deletion of superseded chunks (D9)
   scheduler.ts          SessionScheduler, LocalScheduler, partition helpers
   pass-queue.ts         PassQueue: the queue and the concurrency limit, shared by both
   partition-scheduler.ts PostgresPartitionScheduler: leases, epochs, signals, recovery (#11)
-  sse.ts                the SSE body of a stream request, and the preview snapshot (#27)
+  sse.ts                the SSE body of a stream request
   titles.ts             naming a session after its first message (#29)
   static.ts             serving a built web app from OPENHARNESS_WEB_DIR
   types.ts              AppEnv (the Hono environment) and the Logger seam
@@ -436,14 +437,20 @@ delete each other's sessions. Packages still run in parallel with each other.
 
 - `app.test.ts` — every route, the error envelopes, auth, CORS, static assets, and the title a
   session gets from its first message.
-- `sse.test.ts` — replay and live with no gaps or duplicates, `last-event-id` resume, previews
-  opt-in, keepalive, disconnect cleanup, and the preview snapshot a connection that opens
-  mid-reply is given (#27) — including the delta that lands while the snapshot is read, and a
-  preview whose `event_start` has been published but whose text has not started. The replies
-  those tests reload into are held by the test (`defer`), not paced by a clock.
-- `sse-postgres.test.ts` — the same reload mid-reply over a real Postgres store, where the
-  preview is a row another instance can read. Same database rule as
-  `partition-scheduler.test.ts`: `DATABASE_URL`, otherwise a container, otherwise skipped.
+- `sse.test.ts` — replay and live with no gaps or duplicates, `last-event-id` resume, the
+  chunk opt-in (live and replay), keepalive, disconnect cleanup, and the D9 paths: a connection
+  that opens mid-reply replaying the chunks in flight, a resume from inside a reply's chunks
+  that gets the rest and then the message, and the same resume position being answered by the
+  message alone once the chunks have been compacted away. The replies those tests hold open are
+  held by the test (`defer`), not paced by a clock.
+- `sse-postgres.test.ts` — the same mid-reply replay over a real Postgres store, where the
+  chunks are rows another instance can read, plus compaction against the real SQL. Same
+  database rule as `partition-scheduler.test.ts`: `DATABASE_URL`, otherwise a container,
+  otherwise skipped.
+- `compaction.test.ts` — the job around `store.compact`: the retention window (nothing goes
+  inside it, the superseded chunks go past it, idempotent), a reply still in flight staying
+  put, the interval starting and stopping cleanly, `0` disabling it, a failing run that is
+  logged rather than thrown, and `stop()` waiting for a run in flight.
 - `titles.test.ts` — the derivation: first non-empty line, whitespace, truncation with an
   ellipsis, and the write path that never replaces a title that exists.
 - `scheduler.test.ts` — one turn per session, steering, interrupts (running and idle), a

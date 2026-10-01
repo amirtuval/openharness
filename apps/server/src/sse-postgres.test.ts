@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
-import { API_VERSION_PREFIX, EVENT_TYPES } from '@openharness/protocol'
+import { API_VERSION_PREFIX, EVENT_TYPES, type StoredEvent } from '@openharness/protocol'
 
 import {
   HELD_REPLY_TEST_TIMEOUT_MS,
@@ -14,7 +14,7 @@ import {
   readHistory,
   startPostgres,
   startTestServer,
-  waitFor,
+  waitForIdle,
   type PostgresFixture,
   type SseMessage,
   type SseReader,
@@ -22,14 +22,14 @@ import {
 } from './test-support'
 
 /**
- * The preview snapshot against Postgres: the same stream the in-memory suite covers, over the
- * store a real deployment runs, where the preview lives in a table rather than in one process's
- * memory.
+ * The stream against Postgres: the same behaviour the in-memory suite covers, over the store a
+ * real deployment runs.
  *
- * That is the difference worth testing here. A connection that opens mid-reply is served by
- * whatever instance answers it, and the deltas were published — and their text accumulated — by
- * whichever instance is running the brain; `getPreview` is what puts the two together, and only
- * a real database proves it does.
+ * What is worth testing here is what only a database changes. Since D9 (issue #46) a reply in
+ * flight is part of the log — its chunks are rows with a `seq` — so a connection that opens
+ * mid-reply is served by whatever instance answers it, reading the chunks the *other*
+ * instance's brain is writing. And compaction is SQL: the deletion of superseded chunks, after
+ * a retention window, is the one thing no in-memory test can prove.
  *
  * ## Where the database comes from
  *
@@ -49,7 +49,7 @@ const SOURCE = postgresSource()
 const HELD_AT = 3
 
 if (SOURCE === null) {
-  describe.skip('the preview snapshot on Postgres (skipped: no DATABASE_URL, no Docker)', () => {
+  describe.skip('the reply in flight on Postgres (skipped: no DATABASE_URL, no Docker)', () => {
     it('would run against a real database', () => {
       expect.unreachable('unreachable: the suite is skipped')
     })
@@ -73,16 +73,16 @@ if (SOURCE === null) {
     db = undefined
   })
 
-  describe('the preview snapshot on Postgres', () => {
+  describe('a reply in flight on Postgres', () => {
     /**
      * The reply is held where the test wants it — three chunks in, by {@link defer} — rather
-     * than paced by a clock. Through a container, the store round trips the snapshot makes
-     * are slow enough that a paced reply can finish before the reload opens, which is a race
-     * the test would lose on a loaded machine; held, the turn cannot move until the test
-     * says so, and the frames are the test's to predict.
+     * than paced by a clock. Through a container, the store round trips are slow enough that a
+     * paced reply can finish before the reload opens, which is a race the test would lose on a
+     * loaded machine; held, the turn cannot move until the test says so, and the frames are
+     * the test's to predict.
      */
     it(
-      'hands a connection opened mid-reply the text that was already streamed',
+      'replays the chunks another connection can read out of the log',
       async () => {
         const fixture = requireFixture(db)
         const store = fixture.track(new ObservablePostgresStore({ pool: fixture.pool }))
@@ -102,43 +102,32 @@ if (SOURCE === null) {
         const session = await httpCreateSession(test, agent.id)
         const url = `${test.url}${API_VERSION_PREFIX}/sessions/${session.id}/events/stream`
 
-        // Before the reload: the first deltas of a reply that is still streaming. The
-        // connection follows the session *before* the reply starts — a preview is delivered
-        // only to the connections attached when it is published — so what it reads is the
-        // whole beginning of the reply and not whichever delta it happened to catch.
+        // Before the reload: the beginning of a reply that is still streaming, read live.
         const before = openSse(await fetch(`${url}?event_deltas[]=agent.message`))
-        await waitFor(() => store.subscriptions >= 1, {
-          message: 'the connection never subscribed to the session',
-        })
-        let streamed: { previewId: string; text: string }
-        try {
-          await httpSendMessage(test, session.id, 'tell me something long')
-          streamed = await readPreview(before)
-        } finally {
-          before.close()
-        }
-        const { previewId } = streamed
-        expect(previewId).toMatch(/^sevt_/)
+        const streamed = await (async () => {
+          try {
+            await httpSendMessage(test, session.id, 'tell me something long')
+            const seen = await readUntil(before, (read) => deltasOf(read).length >= 2, 10_000)
+            return { text: deltasOf(seen).map(deltaText).join(''), id: previewIdOf(seen) }
+          } finally {
+            before.close()
+          }
+        })()
         expect(streamed.text.length).toBeGreaterThan(0)
+        expect(streamed.id).toMatch(/^sevt_/)
 
-        // The reload, from the start of the log, still mid-reply.
+        // The reload, from the start of the log, still mid-reply. The chunks are rows another
+        // connection wrote; this read finds them in the table, under the same id.
         const after = openSse(await fetch(`${url}?event_deltas[]=agent.message&after_seq=0`))
         try {
-          // Up to the snapshot, and no further: the turn is held, so the replay and the preview
-          // are all this read can be. A delta arriving at all is the condition.
-          const replayed = await readUntil(after, (read) =>
-            read.some((message) => message.event.type === EVENT_TYPES.eventDelta),
+          const replayed = await readUntil(
+            after,
+            (read) => deltasOf(read).map(deltaText).join('').length >= streamed.text.length,
           )
-          const firstPreview = replayed.findIndex(
-            (message) => message.event.type === EVENT_TYPES.eventStart,
-          )
-          expect(firstPreview).toBeGreaterThan(-1)
-          // The preview the snapshot is for is the one the brain announced — the same `sevt_` id,
-          // read out of the table by a request the streaming brain never touched.
-          expect(previewIdOf(replayed)).toBe(previewId)
-          expect(replayed[firstPreview + 1]?.event.type).toBe(EVENT_TYPES.eventDelta)
-          expect(deltaText(replayed[firstPreview + 1]!).startsWith(streamed.text)).toBe(true)
-          expect(chunks.join('').startsWith(deltaText(replayed[firstPreview + 1]!))).toBe(true)
+          expect(previewIdOf(replayed)).toBe(streamed.id)
+          const replayedText = deltasOf(replayed).map(deltaText).join('')
+          expect(replayedText.startsWith(streamed.text)).toBe(true)
+          expect(chunks.join('').startsWith(replayedText)).toBe(true)
 
           // Let the rest of the reply through, and follow it to the end of the turn.
           held.release()
@@ -152,8 +141,8 @@ if (SOURCE === null) {
             )),
           ]
 
-          // And the accumulated preview is exactly the stored message: nothing missing, nothing
-          // counted twice.
+          // The chunks the connection accumulated are exactly the stored message — read back
+          // by the *same* connection after the turn, from the same database.
           const accumulated = deltasOf(messages).map(deltaText).join('')
           const stored = (await readHistory(test.store, session.id)).find(
             (event) => event.type === EVENT_TYPES.agentMessage,
@@ -166,6 +155,38 @@ if (SOURCE === null) {
       },
       HELD_REPLY_TEST_TIMEOUT_MS,
     )
+
+    it('compacts superseded chunks away, leaving every reader the same answer', async () => {
+      const fixture = requireFixture(db)
+      const store = fixture.track(new ObservablePostgresStore({ pool: fixture.pool }))
+      const test = await startTestServer({ store })
+      context = test
+      const agent = await httpCreateAgent(test)
+      const session = await httpCreateSession(test, agent.id)
+      await httpSendMessage(test, session.id, 'hello')
+      await waitForIdle(store, session.id)
+
+      // A turn whose reply streamed: the chunks are in the table, superseded by the message.
+      const before = await readHistory(store, session.id, { includeSuperseded: true })
+      const chunks = before.filter(
+        (event) => event.type === EVENT_TYPES.eventStart || event.type === EVENT_TYPES.eventDelta,
+      )
+      expect(chunks.length).toBeGreaterThan(0)
+
+      // Inside the window nothing goes; past it, exactly the superseded chunks do.
+      expect(await store.compact({ olderThan: new Date(0) })).toBe(0)
+      const removed = await store.compact({ olderThan: Date.now() + 60_000 })
+      expect(removed).toBe(chunks.length)
+
+      const after = await readHistory(store, session.id, { includeSuperseded: true })
+      expect(
+        after.some(
+          (event) => event.type === EVENT_TYPES.eventStart || event.type === EVENT_TYPES.eventDelta,
+        ),
+      ).toBe(false)
+      // The replay read is what a client folds in, and it was already what it is now.
+      expect(await readHistory(store, session.id)).toEqual(before.filter(isNotChunk))
+    })
   })
 }
 
@@ -177,14 +198,9 @@ function requireFixture(fixture: PostgresFixture | undefined): PostgresFixture {
   return fixture
 }
 
-/** Read a stream until it has shown the start of a preview and a couple of its deltas. */
-async function readPreview(reader: SseReader): Promise<{ previewId: string; text: string }> {
-  const messages = await readUntil(
-    reader,
-    (read) => previewIdOf(read) !== '' && deltasOf(read).length >= 2,
-    10_000,
-  )
-  return { previewId: previewIdOf(messages), text: deltasOf(messages).map(deltaText).join('') }
+/** Whether a stored event is a reply chunk. */
+function isNotChunk(event: StoredEvent): boolean {
+  return event.type !== EVENT_TYPES.eventStart && event.type !== EVENT_TYPES.eventDelta
 }
 
 /** Read until `done` says so, and answer with everything read. */
@@ -209,7 +225,7 @@ function deltasOf(messages: readonly SseMessage[]): SseMessage[] {
   return messages.filter((message) => message.event.type === EVENT_TYPES.eventDelta)
 }
 
-/** The id the previews of a read are under: what its `event_start` announced. */
+/** The id the chunks of a read are under: what its `event_start` announced. */
 function previewIdOf(messages: readonly SseMessage[]): string {
   const start = messages.find((message) => message.event.type === EVENT_TYPES.eventStart)
   return start?.event.type === EVENT_TYPES.eventStart ? start.event.event.id : ''

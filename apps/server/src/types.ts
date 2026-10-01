@@ -22,6 +22,8 @@ export interface AppEnv {
  * host can route the server's output wherever it wants. The default is {@link consoleLogger}.
  */
 export interface Logger {
+  /** The job's own detail: what a periodic task did, line by line. */
+  debug(message: string, detail?: unknown): void
   info(message: string, detail?: unknown): void
   warn(message: string, detail?: unknown): void
   error(message: string, detail?: unknown): void
@@ -29,6 +31,9 @@ export interface Logger {
 
 /** The default {@link Logger}: `console`, one line per call. */
 export const consoleLogger: Logger = {
+  debug: (message, detail) => {
+    write(console.debug, message, detail)
+  },
   info: (message, detail) => {
     write(console.log, message, detail)
   },
@@ -62,6 +67,7 @@ function format(detail: unknown): string {
 
 /** A {@link Logger} that throws every call away; the default in tests. */
 export const silentLogger: Logger = {
+  debug: () => {},
   info: () => {},
   warn: () => {},
   error: () => {},
