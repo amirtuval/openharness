@@ -222,6 +222,7 @@ curl localhost:3000/v1/me -H "Authorization: Bearer $TOKEN"
   `providers` lists only the providers whose client id and secret are configured, in the order
   `google`, `github`, `microsoft`; `dev_login` says whether the local email/password login is
   on (it is off unless `OPENHARNESS_DEV_LOGIN=1`, and only ever on a localhost URL).
+
 - Sessions live in the database with a 7-day sliding expiry: every request looks the token
   up, and a revoked one stops working immediately. There are no JWTs and no refresh tokens.
 - **Sensitive actions require a fresh session**: `PUT` and `DELETE` on

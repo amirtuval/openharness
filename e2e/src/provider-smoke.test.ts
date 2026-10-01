@@ -34,8 +34,7 @@ const harness = e2eHarness('provider-smoke')
 
 /** The provider the environment offers, if any. */
 function smokeFromEnvironment():
-  | { readonly provider: string; readonly model: string; readonly apiKey: string }
-  | undefined {
+  { readonly provider: string; readonly model: string; readonly apiKey: string } | undefined {
   const anthropic = (process.env.ANTHROPIC_API_KEY ?? '').trim()
   if (anthropic !== '') {
     return { provider: 'anthropic', model: 'anthropic/claude-sonnet-5', apiKey: anthropic }

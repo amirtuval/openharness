@@ -95,14 +95,22 @@ describe('user isolation (A4)', () => {
       ['GET', `${API_VERSION_PREFIX}/agents/${a.agent.id}`],
       ['POST', `${API_VERSION_PREFIX}/agents/${a.agent.id}`, { name: 'renamed by B' }],
       ['GET', `${API_VERSION_PREFIX}/sessions/${a.session.id}`],
-      ['POST', `${API_VERSION_PREFIX}/sessions/${a.session.id}/events`, {
-        events: [{ type: 'user.message', content: [{ type: 'text', text: 'B was here' }] }],
-      }],
+      [
+        'POST',
+        `${API_VERSION_PREFIX}/sessions/${a.session.id}/events`,
+        {
+          events: [{ type: 'user.message', content: [{ type: 'text', text: 'B was here' }] }],
+        },
+      ],
       ['GET', `${API_VERSION_PREFIX}/sessions/${a.session.id}/events`],
       ['GET', `${API_VERSION_PREFIX}/sessions/${a.session.id}/events/stream`],
-      ['POST', `${API_VERSION_PREFIX}/sessions/${a.session.id}/ai-sdk/chat`, {
-        messages: [{ role: 'user', parts: [{ type: 'text', text: 'hello' }] }],
-      }],
+      [
+        'POST',
+        `${API_VERSION_PREFIX}/sessions/${a.session.id}/ai-sdk/chat`,
+        {
+          messages: [{ role: 'user', parts: [{ type: 'text', text: 'hello' }] }],
+        },
+      ],
     ]
 
     for (const [method, path, request] of routes) {
@@ -189,7 +197,12 @@ describe('user isolation (A4)', () => {
     expect(forA.data[0]?.id).not.toBe(forBAfter.data[0]?.id)
 
     // B deleting “anthropic” deletes only B's row.
-    const deleted = await call(test, b.token, 'DELETE', `${API_VERSION_PREFIX}/provider-credentials/anthropic`)
+    const deleted = await call(
+      test,
+      b.token,
+      'DELETE',
+      `${API_VERSION_PREFIX}/provider-credentials/anthropic`,
+    )
     expect(deleted.status).toBe(204)
     const forAAfter = (await (
       await call(test, a.token, 'GET', `${API_VERSION_PREFIX}/provider-credentials`)

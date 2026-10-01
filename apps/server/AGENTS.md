@@ -38,25 +38,25 @@ Everything under `API_VERSION_PREFIX` (`/v1`). Bodies and queries are validated 
 protocol's schemas, so the shapes are not repeated here — see
 [`packages/protocol/AGENTS.md`](../../packages/protocol/AGENTS.md).
 
-| method | path                                      | body / query                             | answers                                             |
-| ------ | ----------------------------------------- | ---------------------------------------- | --------------------------------------------------- |
-| `GET`  | `/health`                                 | —                                        | `{ status: 'ok' }`; never needs a session           |
-| `GET`  | `/v1/auth-config`                         | —                                        | `{ providers, dev_login }`; never needs a session   |
-| `GET`  | `/v1/me`                                  | —                                        | the signed-in `User`                                |
-| `POST` | `/v1/agents`                              | `CreateAgentRequestSchema`               | 201, the `Agent`                                    |
-| `GET`  | `/v1/agents`                              | `ListAgentsQuerySchema`                  | `{ data, next_page }`                               |
-| `GET`  | `/v1/agents/{agent_id}`                   | —                                        | the `Agent`, or 404                                 |
-| `POST` | `/v1/agents/{agent_id}`                   | `UpdateAgentRequestSchema`               | the updated `Agent`, or 404                         |
-| `POST` | `/v1/sessions`                            | `CreateSessionRequestSchema`             | 201, the `Session`; 404 for an unknown agent        |
-| `GET`  | `/v1/sessions`                            | `ListSessionsQuerySchema`                | `{ data, next_page }`                               |
-| `GET`  | `/v1/sessions/{session_id}`               | —                                        | the `Session`, or 404                               |
-| `POST` | `/v1/sessions/{session_id}/events`        | `SendEventsRequestSchema`                | `{ data: user event[] }`; then signals, and a title |
-| `GET`  | `/v1/sessions/{session_id}/events`        | `ListEventsQuerySchema`                  | `{ data, next_page }`                               |
-| `GET`  | `/v1/sessions/{session_id}/events/stream` | `StreamEventsQuerySchema`                | the SSE stream; 404 for an unknown session          |
-| `POST` | `/v1/sessions/{session_id}/ai-sdk/chat`   | the AI SDK `useChat` request (see below) | an AI SDK UI message stream — an **extension**      |
-| `PUT`  | `/v1/provider-credentials/{provider}`     | `PutProviderCredentialRequestSchema`     | the credential's metadata; 422 if the key is refused |
-| `GET`  | `/v1/provider-credentials`                | —                                        | `{ data: ProviderCredential[] }`, metadata only      |
-| `DELETE` | `/v1/provider-credentials/{provider}`   | —                                        | 204; never an error for one that is not there        |
+| method   | path                                      | body / query                             | answers                                              |
+| -------- | ----------------------------------------- | ---------------------------------------- | ---------------------------------------------------- |
+| `GET`    | `/health`                                 | —                                        | `{ status: 'ok' }`; never needs a session            |
+| `GET`    | `/v1/auth-config`                         | —                                        | `{ providers, dev_login }`; never needs a session    |
+| `GET`    | `/v1/me`                                  | —                                        | the signed-in `User`                                 |
+| `POST`   | `/v1/agents`                              | `CreateAgentRequestSchema`               | 201, the `Agent`                                     |
+| `GET`    | `/v1/agents`                              | `ListAgentsQuerySchema`                  | `{ data, next_page }`                                |
+| `GET`    | `/v1/agents/{agent_id}`                   | —                                        | the `Agent`, or 404                                  |
+| `POST`   | `/v1/agents/{agent_id}`                   | `UpdateAgentRequestSchema`               | the updated `Agent`, or 404                          |
+| `POST`   | `/v1/sessions`                            | `CreateSessionRequestSchema`             | 201, the `Session`; 404 for an unknown agent         |
+| `GET`    | `/v1/sessions`                            | `ListSessionsQuerySchema`                | `{ data, next_page }`                                |
+| `GET`    | `/v1/sessions/{session_id}`               | —                                        | the `Session`, or 404                                |
+| `POST`   | `/v1/sessions/{session_id}/events`        | `SendEventsRequestSchema`                | `{ data: user event[] }`; then signals, and a title  |
+| `GET`    | `/v1/sessions/{session_id}/events`        | `ListEventsQuerySchema`                  | `{ data, next_page }`                                |
+| `GET`    | `/v1/sessions/{session_id}/events/stream` | `StreamEventsQuerySchema`                | the SSE stream; 404 for an unknown session           |
+| `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`   | the AI SDK `useChat` request (see below) | an AI SDK UI message stream — an **extension**       |
+| `PUT`    | `/v1/provider-credentials/{provider}`     | `PutProviderCredentialRequestSchema`     | the credential's metadata; 422 if the key is refused |
+| `GET`    | `/v1/provider-credentials`                | —                                        | `{ data: ProviderCredential[] }`, metadata only      |
+| `DELETE` | `/v1/provider-credentials/{provider}`     | —                                        | 204; never an error for one that is not there        |
 
 Every `/v1` route except `auth-config` requires a session (see "Authentication"), and every
 resource is scoped to its owner. `/api/auth/*` is Better Auth's own surface: sign-in, sign-out,
@@ -132,7 +132,7 @@ Better Auth's own schema check passes on the migrated database.
 - **Providers** are enabled only when their `*_CLIENT_ID`/`*_SECRET` are set; `/v1/auth-config`
   reports the list (the interface agreed with the web app, #62).
 - **Identity is the verified email** (A3), enforced by `auth-profile.ts`: Google's
-  `email_verified`, GitHub's *primary verified* address, and Microsoft's claims (personal
+  `email_verified`, GitHub's _primary verified_ address, and Microsoft's claims (personal
   accounts, `xms_edov`, the verified lists) — the nOAuth guard. A provider that cannot prove
   the address refuses the sign-in (`email_not_verified`, 403) before a user or a link is
   created; `databaseHooks.user.create.before` (`refuseUnverifiedUser`) is the last gate, and
@@ -170,16 +170,16 @@ Every failure is the protocol's envelope — `{ type: 'error', error: { type, me
 the status `API_ERROR_STATUS_BY_TYPE` gives that type — and every response carries a
 `request-id` header the body repeats as `request_id`.
 
-| what happened                                          | type                    | status |
-| ------------------------------------------------------ | ----------------------- | ------ |
-| a body, query or path id that does not match a schema  | `invalid_request_error` | 400    |
-| a store cursor that is valid but not for this endpoint | `invalid_request_error` | 400    |
-| no session, or an invalid, expired or revoked one      | `authentication_error`  | 401    |
-| a cookie-authenticated write from an untrusted origin  | `permission_error`      | 403    |
-| a provider key the provider refused on save (A5)       | `invalid_provider_credential` | 422 |
-| an id that names no agent or session                   | `not_found_error`       | 404    |
-| a route that does not exist                            | `not_found_error`       | 404    |
-| anything else                                          | `api_error`             | 500    |
+| what happened                                          | type                          | status |
+| ------------------------------------------------------ | ----------------------------- | ------ |
+| a body, query or path id that does not match a schema  | `invalid_request_error`       | 400    |
+| a store cursor that is valid but not for this endpoint | `invalid_request_error`       | 400    |
+| no session, or an invalid, expired or revoked one      | `authentication_error`        | 401    |
+| a cookie-authenticated write from an untrusted origin  | `permission_error`            | 403    |
+| a provider key the provider refused on save (A5)       | `invalid_provider_credential` | 422    |
+| an id that names no agent or session                   | `not_found_error`             | 404    |
+| a route that does not exist                            | `not_found_error`             | 404    |
+| anything else                                          | `api_error`                   | 500    |
 
 A malformed path id is a 400 rather than a 404: it could not name a resource even if one
 existed. Anything unrecognised is logged server-side and answered with a fixed message — a
@@ -440,30 +440,30 @@ drain.
 
 ## Public API
 
-| `@openharness/server`                                       | what it is                                                                      |
-| ----------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| `createApp(options)`                                        | the Hono app: routes, auth, errors, static assets — against any store/scheduler/auth |
-| `startServer(options)`                                      | store, migrations, model, scheduler, listener and a `shutdown()`                |
-| `main(env, options)`                                        | `startServer` from the environment, plus the signal handlers                    |
-| `DeltaCompactor`                                            | the periodic compaction of superseded chunks (D9)                               |
-| `DEFAULT_DELTA_RETENTION_MS`, `DEFAULT_COMPACT_INTERVAL_MS` | `3600000`, `300000` — the compaction defaults                                   |
-| `LocalScheduler`                                            | the single-process `SessionScheduler`                                           |
-| `PostgresPartitionScheduler`                                | the multi-instance `SessionScheduler`: partition leases, epochs, recovery (#11) |
-| `PassQueue`                                                 | the pass queue and concurrency limit both schedulers share                      |
-| `SessionRunner`                                             | the per-session turn loop, reusable: what both schedulers run passes with       |
-| `createAuth(config, database, logger)`                      | Better Auth configured for this server (A1/A2/A3/A7), plus `Auth`, `AuthConfig` |
-| `createSessionCredentialResolver(deps)`                     | the session owner's sealed key, opened per model request (A5)                   |
-| `sealApiKey` / `openApiKey` / `credentialAad` / `credentialUpsert` | the credential sealing helpers (A5)                                      |
-| `createAuthGuard(options)`                                  | the `/v1` session + CSRF middleware (A2)                                        |
-| `validateProviderApiKey`, `VALIDATABLE_PROVIDERS`           | the one cheap provider call a saved key is checked with                         |
-| `DEV_LOGIN_EMAIL`, `DEV_LOGIN_PASSWORD`, `DEV_LOGIN_STORED_EMAIL` | the documented dev user (A7)                                              |
-| `OPENHARNESS_CLI_CLIENT_ID`, `DEVICE_CODE_EXPIRES_IN`       | the device flow's client id and code lifetime (A6)                              |
-| `SOCIAL_PROVIDERS`, `providerOptions`, `microsoftEmailVerified`, `githubVerifiedPrimaryEmail`, `googleEmailVerified` | the A3 identity rules                    |
-| `createDevLoginUser`, `rewriteDevLoginRequest`, `refuseUnverifiedUser` | the dev-login seeding and shim, and the verified-email hook         |
-| `createMockModelFactory()`                                  | the deterministic test model, for a host that wires its own                     |
-| `defaultInstanceId()`                                       | hostname + pid + random suffix: the id a server leases partitions under         |
-| `readServerConfig(env)`, `ServerConfig`, `ENV_VARS`         | the environment, parsed                                                         |
-| `HttpError`, `PACKAGE_NAME`, `Logger`                       | the error type, the package name and the logging seam                           |
+| `@openharness/server`                                                                                                | what it is                                                                           |
+| -------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `createApp(options)`                                                                                                 | the Hono app: routes, auth, errors, static assets — against any store/scheduler/auth |
+| `startServer(options)`                                                                                               | store, migrations, model, scheduler, listener and a `shutdown()`                     |
+| `main(env, options)`                                                                                                 | `startServer` from the environment, plus the signal handlers                         |
+| `DeltaCompactor`                                                                                                     | the periodic compaction of superseded chunks (D9)                                    |
+| `DEFAULT_DELTA_RETENTION_MS`, `DEFAULT_COMPACT_INTERVAL_MS`                                                          | `3600000`, `300000` — the compaction defaults                                        |
+| `LocalScheduler`                                                                                                     | the single-process `SessionScheduler`                                                |
+| `PostgresPartitionScheduler`                                                                                         | the multi-instance `SessionScheduler`: partition leases, epochs, recovery (#11)      |
+| `PassQueue`                                                                                                          | the pass queue and concurrency limit both schedulers share                           |
+| `SessionRunner`                                                                                                      | the per-session turn loop, reusable: what both schedulers run passes with            |
+| `createAuth(config, database, logger)`                                                                               | Better Auth configured for this server (A1/A2/A3/A7), plus `Auth`, `AuthConfig`      |
+| `createSessionCredentialResolver(deps)`                                                                              | the session owner's sealed key, opened per model request (A5)                        |
+| `sealApiKey` / `openApiKey` / `credentialAad` / `credentialUpsert`                                                   | the credential sealing helpers (A5)                                                  |
+| `createAuthGuard(options)`                                                                                           | the `/v1` session + CSRF middleware (A2)                                             |
+| `validateProviderApiKey`, `VALIDATABLE_PROVIDERS`                                                                    | the one cheap provider call a saved key is checked with                              |
+| `DEV_LOGIN_EMAIL`, `DEV_LOGIN_PASSWORD`, `DEV_LOGIN_STORED_EMAIL`                                                    | the documented dev user (A7)                                                         |
+| `OPENHARNESS_CLI_CLIENT_ID`, `DEVICE_CODE_EXPIRES_IN`                                                                | the device flow's client id and code lifetime (A6)                                   |
+| `SOCIAL_PROVIDERS`, `providerOptions`, `microsoftEmailVerified`, `githubVerifiedPrimaryEmail`, `googleEmailVerified` | the A3 identity rules                                                                |
+| `createDevLoginUser`, `rewriteDevLoginRequest`, `refuseUnverifiedUser`                                               | the dev-login seeding and shim, and the verified-email hook                          |
+| `createMockModelFactory()`                                                                                           | the deterministic test model, for a host that wires its own                          |
+| `defaultInstanceId()`                                                                                                | hostname + pid + random suffix: the id a server leases partitions under              |
+| `readServerConfig(env)`, `ServerConfig`, `ENV_VARS`                                                                  | the environment, parsed                                                              |
+| `HttpError`, `PACKAGE_NAME`, `Logger`                                                                                | the error type, the package name and the logging seam                                |
 
 `node dist/index.js` runs `main()`, which reads the environment and starts the server.
 

@@ -28,9 +28,7 @@ function idToken(claims: Record<string, unknown>): string {
 
 describe('the Microsoft rule (the nOAuth guard)', () => {
   it('accepts an email Microsoft asserts as verified', () => {
-    expect(
-      microsoftEmailVerified({ email: 'ada@example.com', email_verified: true }),
-    ).toBe(true)
+    expect(microsoftEmailVerified({ email: 'ada@example.com', email_verified: true })).toBe(true)
     // Personal accounts assert ownership through the verified lists.
     expect(
       microsoftEmailVerified({
@@ -59,9 +57,9 @@ describe('the Microsoft rule (the nOAuth guard)', () => {
 
   it('refuses an email nothing asserts as verified', () => {
     expect(microsoftEmailVerified({ email: 'victim@example.com' })).toBe(false)
-    expect(
-      microsoftEmailVerified({ email: 'victim@example.com', email_verified: false }),
-    ).toBe(false)
+    expect(microsoftEmailVerified({ email: 'victim@example.com', email_verified: false })).toBe(
+      false,
+    )
     expect(
       microsoftEmailVerified({
         email: 'victim@example.com',
@@ -149,7 +147,7 @@ describe('providerOptions', () => {
       microsoft.getUserInfo?.({
         idToken: idToken({ oid: 'oid-1', email: 'victim@example.com', name: 'Victim' }),
         accessToken: undefined,
-      } as never),
+      }),
     ).rejects.toMatchObject({
       body: { code: 'email_not_verified' },
     })
@@ -162,7 +160,7 @@ describe('providerOptions', () => {
         name: 'Ada',
       }),
       accessToken: undefined,
-    } as never)
+    })
     expect(accepted?.user.email).toBe('ada@example.com')
     expect(accepted?.user.emailVerified).toBe(true)
   })
@@ -178,7 +176,7 @@ describe('providerOptions', () => {
         verified_primary_email: ['ada@outlook.com'],
       }),
       accessToken: undefined,
-    } as never)
+    })
 
     expect(accepted?.user.email).toBe('ada@outlook.com')
   })
@@ -190,12 +188,12 @@ describe('providerOptions', () => {
     await expect(
       google.getUserInfo?.({
         idToken: idToken({ email: 'victim@example.com', email_verified: false }),
-      } as never),
+      }),
     ).rejects.toMatchObject({ body: { code: 'email_not_verified' } })
 
     const accepted = await google.getUserInfo?.({
       idToken: idToken({ email: 'ada@example.com', email_verified: true }),
-    } as never)
+    })
     expect(accepted?.user.emailVerified).toBe(true)
   })
 
@@ -222,12 +220,12 @@ describe('providerOptions', () => {
       { email: 'ada@example.com', primary: true, verified: true },
       { email: 'old@example.com', primary: false, verified: true },
     ])
-    const accepted = await github.getUserInfo?.({ accessToken: 'token' } as never)
+    const accepted = await github.getUserInfo?.({ accessToken: 'token' })
     expect(accepted?.user.email).toBe('ada@example.com')
     expect(accepted?.user.emailVerified).toBe(true)
 
     stub([{ email: 'victim@example.com', primary: true, verified: false }])
-    await expect(github.getUserInfo?.({ accessToken: 'token' } as never)).rejects.toMatchObject({
+    await expect(github.getUserInfo?.({ accessToken: 'token' })).rejects.toMatchObject({
       body: { code: 'email_not_verified' },
     })
   })

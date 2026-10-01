@@ -38,6 +38,7 @@ COPY packages/config/package.json packages/config/
 COPY packages/hands/package.json packages/hands/
 COPY packages/protocol/package.json packages/protocol/
 COPY packages/session/package.json packages/session/
+COPY packages/vault/package.json packages/vault/
 
 # --- build: the workspace dependencies of the server and the web app, then their builds -------
 FROM manifests AS build
@@ -59,6 +60,7 @@ COPY --from=build /app/packages/brain/dist packages/brain/dist
 COPY --from=build /app/packages/hands/dist packages/hands/dist
 COPY --from=build /app/packages/protocol/dist packages/protocol/dist
 COPY --from=build /app/packages/session/dist packages/session/dist
+COPY --from=build /app/packages/vault/dist packages/vault/dist
 # The store finds its `.sql` files by walking up from its own built module — `dist/` then the
 # package folder — so they have to sit beside `dist`, not only inside it.
 COPY --from=build /app/packages/session/migrations packages/session/migrations

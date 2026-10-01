@@ -180,13 +180,15 @@ if (SOURCE === null) {
         // Better Auth validates the schema it is configured against on every request; this
         // asks it directly, so a migration that drifts from what 1.7.7 expects fails here by
         // name rather than as a strange sign-in failure later.
-        const ctx = (await test.auth.auth.$context) as unknown as {
-          checkSchema?: () => Promise<unknown> | undefined
-        }
-        expect(ctx.checkSchema).toBeTypeOf('function')
-        await expect(ctx.checkSchema?.()).resolves.toBeUndefined()
+        const authContext = await test.auth.auth.$context
+        const checkSchema: unknown = (authContext as { checkSchema?: unknown }).checkSchema
+        expect(typeof checkSchema).toBe('function')
+        await expect(
+          (checkSchema as () => Promise<unknown> | undefined).call(authContext),
+        ).resolves.toBeUndefined()
         // And a sign-in really works on it — the same dev user the other suites use.
-        await expect(test.signIn()).resolves.toMatchObject({ user: { id: expect.any(String) } })
+        const signedIn = await test.signIn()
+        expect(signedIn.user.id.length).toBeGreaterThan(0)
       },
       POSTGRES_STARTUP_TIMEOUT_MS,
     )

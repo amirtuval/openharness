@@ -56,12 +56,15 @@ async function listCredentials(test: TestContext): Promise<ListProviderCredentia
 /** A logger that keeps every line, for the "never in the logs" assertions. */
 function recordingLogger(): Logger & { readonly lines: string[] } {
   const lines: string[] = []
+  const write = (level: string, message: string, detail?: unknown): void => {
+    lines.push(`${level} ${message} ${detail === undefined ? '' : (JSON.stringify(detail) ?? '')}`)
+  }
   return {
     lines,
-    debug: (message, detail) => lines.push(`debug ${message} ${String(detail ?? '')}`),
-    info: (message, detail) => lines.push(`info ${message} ${String(detail ?? '')}`),
-    warn: (message, detail) => lines.push(`warn ${message} ${String(detail ?? '')}`),
-    error: (message, detail) => lines.push(`error ${message} ${String(detail ?? '')}`),
+    debug: (message, detail) => write('debug', message, detail),
+    info: (message, detail) => write('info', message, detail),
+    warn: (message, detail) => write('warn', message, detail),
+    error: (message, detail) => write('error', message, detail),
   }
 }
 
@@ -120,9 +123,9 @@ describe('the provider-credential API', () => {
     // The vault opens it with the same AAD, and only that one: another user or another
     // provider cannot decrypt the row.
     const sealed = stored?.sealed as never
-    await expect(openApiKey(test.vault, { userId: user.id, provider: 'openai', sealed })).resolves.toBe(
-      SECRET,
-    )
+    await expect(
+      openApiKey(test.vault, { userId: user.id, provider: 'openai', sealed }),
+    ).resolves.toBe(SECRET)
     await expect(
       openApiKey(test.vault, { userId: 'somebody-else', provider: 'openai', sealed }),
     ).resolves.toBeNull()
@@ -134,11 +137,14 @@ describe('the provider-credential API', () => {
   it('validates the key with one provider call, and answers 422 when it is refused', async () => {
     const calls: { provider: string; apiKey: string }[] = []
     const test = createTestApp({
-      validateProviderCredential: async (provider, apiKey) => {
+      validateProviderCredential: (provider, apiKey) => {
         calls.push({ provider, apiKey })
         if (apiKey !== SECRET) {
-          throw new Error('openai answered 401 for the validating request; the key was rejected')
+          return Promise.reject(
+            new Error('openai answered 401 for the validating request; the key was rejected'),
+          )
         }
+        return Promise.resolve()
       },
     })
 
@@ -298,8 +304,6 @@ describe('the environment is not a credential source (A5)', () => {
     await expect(resolver(session.id, 'openai')).resolves.toEqual({ apiKey: SECRET })
     // A provider the user has no key for, and a session that does not exist, both answer none.
     await expect(resolver(session.id, 'anthropic')).resolves.toBeNull()
-    await expect(
-      resolver('sesn_01HZZZZZZZZZZZZZZZZZZZZZZZ' as never, 'openai'),
-    ).resolves.toBeNull()
+    await expect(resolver('sesn_01HZZZZZZZZZZZZZZZZZZZZZZZ' as never, 'openai')).resolves.toBeNull()
   })
 })
