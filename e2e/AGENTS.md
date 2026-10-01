@@ -57,18 +57,25 @@ const harness = e2eHarness('my-scenario') // registers the teardown itself
 
 const server = await harness.server() // a built server, on a free port
 const client = await harness.client(server) // signs in (dev login) and points a client at it
+
+// A second person, for isolation and ownership tests:
+const a = personFor(server, await harness.user(server, { email: 'a@example.com', password: '…' }))
+const b = personFor(server, await harness.user(server, { email: 'b@example.com', password: '…' }))
 ```
 
-| module        | what it is                                                                             |
-| ------------- | -------------------------------------------------------------------------------------- |
-| `index.ts`    | `e2eHarness(label)`: the file's database, its servers, its clients, its teardown       |
-| `database.ts` | `createE2eDatabase(label)`: one Postgres database per test file, dropped in `afterAll` |
-| `server.ts`   | `startServerProcess(options)`: the built server as a child process, `/health`-ready    |
-| `events.ts`   | reading a session: `readLog`, `collectStream`, `waitForTurnEnd`, the event filters     |
-| `wait.ts`     | `waitFor`, `sleep` — polling that fails with what it was waiting for                   |
-| `mock.ts`     | `expectedSlowReply()`: the mock model's `__slow__` reply, for exact assertions         |
+| module          | what it is                                                                             |
+| --------------- | -------------------------------------------------------------------------------------- |
+| `index.ts`      | `e2eHarness(label)`: the file's database, its servers, its sessions, its teardown      |
+| `database.ts`   | `createE2eDatabase(label)`: one Postgres database per test file, dropped in `afterAll` |
+| `server.ts`     | `startServerProcess(options)`: the built server as a child process, `/health`-ready    |
+| `users.ts`      | `ensureUser(database, email, password)`: the second account A7 does not seed           |
+| `credentials.ts`| `seedProviderCredential(...)`: a stored key, written the way the `PUT` route writes it |
+| `errors.ts`     | `errorOf(work)`: the `ApiError` a call threw, for the tests that are about refusals    |
+| `events.ts`     | reading a session: `readLog`, `collectStream`, `waitForTurnEnd`, the event filters     |
+| `wait.ts`       | `waitFor`, `sleep` — polling that fails with what it was waiting for                   |
+| `mock.ts`       | `expectedSlowReply()`: the mock model's `__slow__` reply, for exact assertions         |
 
-Four decisions worth knowing before reading the tests:
+Five decisions worth knowing before reading the tests:
 
 - **One database per test file.** `createE2eDatabase` creates `openharness_e2e_<label>_<random>`
   on the server `DATABASE_URL` names and drops it in teardown (`with (force)`, so a failed run
@@ -96,6 +103,21 @@ Four decisions worth knowing before reading the tests:
   which turn it means can return before that turn started. `afterSeq` (the `seq` of the message
   the test just sent) makes it "the turn after that message ended" — and with no `afterSeq` it
   is "the session has no open turn", which is what a test needs after a restart.
+- **One account per person per server, and second people are made the way Better Auth makes
+  them.** Every `/v1` call carries a session (A2), so `harness.client(server)` signs in as the
+  dev user (A7) and keeps that session for the file — sign-in is rate-limited to three per ten
+  seconds, and a file that signed in per request would trip its own limit. Tests that need
+  more than the one seeded user call `harness.user(server, { email, password })`: the address
+  is created in the file's database with Better Auth's own id generator and password hasher
+  (`users.ts`), because sign-up is disabled and the dev login seeds exactly one person. That is
+  the only seam — the server is a real process, and A7 is the point.
+
+  `seedProviderCredential` is the same idea for credentials: `PUT /v1/provider-credentials` is
+  a real provider call to validate, and no seam crosses the process boundary, so the harness
+  writes **the row the route writes** — the server's own `sealApiKey`/`credentialUpsert`, the
+  same vault key, through a `CredentialStore` — while the route itself is exercised by
+  `provider-smoke.test.ts` when the environment has a real key (`credentials.ts` documents
+  this).
 
 ## Scenarios
 
@@ -106,7 +128,11 @@ Four decisions worth knowing before reading the tests:
 | `restart.test.ts`        | `kill -9` mid-`__slow__`, a new process against the same database: the orphaned chunks superseded by a `brain_lost` span end, the turn re-run, idle, no ghost previews                                                                                                                                                                                                                                      |
 | `stream-resume.test.ts`  | a stream aborted mid-turn, more turns while nobody listens, a resume from `afterSeq` with no gaps or duplicates; and one stream iteration across a server restart                                                                                                                                                                                                                                           |
 | `d9-convergence.test.ts` | D9 (issue #46): a client that followed a reply live, one that joined mid-reply and one that dropped mid-chunks and resumed from there all end deep-equal — before compaction and after the job deleted the chunks; a steered reply in the same order live and after a reload                                                                                                                                |
-| `auth.test.ts`           | real authentication (A2/A7): `/health` and `/v1/auth-config` open, the 401 envelope on `/v1`, the dev-login sign-in, a turn as a bearer session, the stream guarded, sign-out revoking                                                                                                                                                                                                                      |
+| `auth.test.ts`           | real authentication (A2/A7): `/health` and `/v1/auth-config` open, the 401 envelope on `/v1`, the dev-login sign-in, a turn as a bearer session, sign-out revoking immediately for new requests, a lapsed session refused; and one `it.fails` for the bug #76 — a revoked session's **open** stream keeps delivering, which the stream handler does not re-check                                                                                                                                                                  |
+| `isolation.test.ts`      | two people on one server (A4): B gets 404 — never 403 — for A's agent (get/update), session, events list, `POST …/events` and the AI SDK adapter; the SSE stream refuses instead of connecting; B's lists are B's; a stored credential is A's alone; and every `/v1` route answers the 401 envelope without a session (a forged bearer included)                                                                                                              |
+| `device-flow.test.ts`    | `oh login` end to end (A6): the code document (`verification_uri_complete` carries the code **inside the fragment**), approve through the API as a signed-in person, poll, use the bearer token; a code redeemed once; deny → `access_denied`; pending → `authorization_pending`; an expired code (`expiresAt` moved into the past) → `expired_token`, and the row is deleted; an unknown code; a code only the person who claimed it may approve                                                          |
+| `credentials.test.ts`    | provider credentials (A5): never in any response, event, stream or server log line; sealed at rest (no column holds the plaintext, and a whole-database dump greps clean — `last4` is the deliberate exception); a turn with no key ends `missing_provider_credential` (retry status `exhausted`, the message naming the provider, no model request made); a decoy `OPENAI_API_KEY` in the server's environment changes nothing; a key the provider refuses is refused on save (422) and never stored; deleting one makes the next turn a missing-credential turn                                                                  |
+| `dev-login-guard.test.ts`| the boot refuses `OPENHARNESS_DEV_LOGIN=1` on a non-localhost `BETTER_AUTH_URL` (A7), and with the flag off nothing about the dev credentials works                                                                                                        |
 | `web-assets.test.ts`     | `OPENHARNESS_WEB_DIR`: the built web app at `/`, its hashed assets, deep links, and the API still under `/v1`                                                                                                                                                                                                                                                                                               |
 | `failover.test.ts`       | two instances with `SCHEDULER=postgres`, one killed mid-turn, the other finishing it — see below                                                                                                                                                                                                                                                                                                            |
 | `provider-smoke.test.ts` | one turn through a real provider, when a provider key is in the environment — the key is stored as the dev user's credential first (A5: the server reads no environment keys)                                                                                                                                                                                                                               |
@@ -158,6 +184,64 @@ and they spend their time waiting rather than computing.
 - Screenshots go to `e2e/qa-output/` (gitignored; override with `QA_SHOT_DIR`).
 - Results of each pass are reported as a comment on the QA issue, not committed.
 - A spec marked `test.fail` documents a known bug; remove the marker once the bug is fixed.
+
+### Signing in
+
+Since epic #65 the server is not open, and every spec runs signed in. The stack must have the
+dev login on — `OPENHARNESS_DEV_LOGIN=1` and a localhost `BETTER_AUTH_URL`, which
+`docker-compose.yml` defaults to and the server refuses otherwise (A7) — and the fixtures sign
+in **once per worker** as `dev@localhost` / `dev` (`QA_DEV_EMAIL` / `QA_DEV_PASSWORD` override
+the pair):
+
+- the bearer token of that session becomes the `request` fixture's `authorization` header, so
+  every API call a spec makes is authenticated (`authHeaders` and `QA_API_KEY` are gone with
+  the `x-api-key` scheme, A8);
+- the session's cookie is put on the browser context, so the page is signed in before the
+  first `goto` and the app never shows its sign-in page to a scenario that is not about it.
+
+One sign-in, not one per test, because `/api/auth/sign-in/email` is rate-limited to three per
+ten seconds (A2). The specs that are *about* signing in open a context of their own
+(`w15-sign-in.spec.ts`, `w16-sign-out.spec.ts`) and use `signInWithDevForm`, which waits out
+the limit the way a person would if it is hit.
+
+### Signing the CLI in
+
+`oh` needs a token too, and stores it in `$XDG_CONFIG_HOME/openharness/credentials.json`. The
+CLI specs give it a config directory of the run's own (`CLI_CONFIG_HOME`, default
+`qa-output/oh-config`, override with `QA_OH_CONFIG_HOME`) — never the developer's — and
+`ensureCliSignedIn(page)` runs a real `oh login` through the device flow if there is no token
+there yet, approving it in the browser like a person would. C12–C14 verify the flow itself:
+the printed URL and code, the approval page, `oh whoami`, `oh logout` revoking the session,
+and the "not signed in" errors (with no token, and with a token the server refuses).
+
+### What the pass needs on the stack
+
+| variable                            | what it enables                                                                     |
+| ----------------------------------- | ----------------------------------------------------------------------------------- |
+| `QA_BASE_URL`                       | where the system under test lives (`http://localhost:3000`)                         |
+| `QA_DEV_EMAIL` / `QA_DEV_PASSWORD`  | the dev user's credentials, when a stack configures them differently                |
+| `QA_WITH_CLI=1`                     | the `oh` specs (needs `tmux` and a built `apps/tui`)                                |
+| `QA_ALLOW_SERVER_RESTART=1`         | the scenarios that recreate the server container (W11f, W14)                        |
+| `QA_PROVIDER` / `QA_PROVIDER_KEY`   | a key the pass may store for real (W11f, W17b); `QA_PROVIDER_KEY_2` for replace     |
+| `QA_MISSING_MODEL`                  | the model whose provider the pass has no key for — W11e (default `groq/llama-3.3-70b-versatile`) |
+| `QA_MODEL=openai/gpt-4.1-mini`      | a real-model pass; without it the stack runs the mock                               |
+| `QA_SHOT_DIR` / `QA_OH_CONFIG_HOME` | where screenshots and the CLI's credentials go                                      |
+| `QA_COMPOSE_ARGS`                   | extra `docker compose` arguments, for a stack that is not plain `docker-compose.yml` |
+
+The sign-in page's provider buttons only exist when the server has OAuth clients configured
+(A1), so W15 skips that half unless the stack was started with them — dummy values are enough,
+nothing signs in with them:
+
+```bash
+GOOGLE_CLIENT_ID=dummy GOOGLE_CLIENT_SECRET=dummy \
+  GITHUB_CLIENT_ID=dummy GITHUB_CLIENT_SECRET=dummy \
+  MICROSOFT_CLIENT_ID=dummy MICROSOFT_CLIENT_SECRET=dummy \
+  OPENHARNESS_TEST_MODEL=mock docker compose up --build -d
+
+cd e2e
+yarn qa:web qa/w*.spec.ts          # the web pass
+QA_WITH_CLI=1 yarn qa:web qa/cli.spec.ts   # the CLI pass
+```
 
 ### The model the scenarios run
 

@@ -1,4 +1,6 @@
 import { execFileSync } from 'node:child_process'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import path from 'node:path'
 
 import type { APIRequestContext } from '@playwright/test'
 
@@ -15,12 +17,19 @@ import {
 } from './support'
 import {
   AGENT_LINE,
-  CLI_COMMAND,
-  CLI_SERVER,
+  CLI_CONFIG_HOME,
   CLI_CWD,
+  CLI_LOGIN_HINT,
+  CLI_SERVER,
   Terminal,
+  cliCredentialsMode,
+  ensureCliSignedIn,
   expectNoErrorNotice,
+  forgetCliCredentials,
+  loggedInAs,
+  loginCli,
   occurrences,
+  ohCommand,
   replyHasText,
   sendAndAwaitAnswer,
 } from './tmux'
@@ -48,11 +57,17 @@ async function quit(terminal: Terminal): Promise<string> {
  * write their output and exit, so this reads them straight from a pipe. The interactive
  * screens go through {@link Terminal} instead.
  */
-function oh(...args: string[]): { stdout: string; status: number } {
+function oh(
+  args: readonly string[],
+  options: { readonly configHome?: string } = {},
+): { stdout: string; status: number } {
   try {
     const stdout = execFileSync('node', ['apps/tui/dist/index.js', ...args], {
       cwd: CLI_CWD,
       encoding: 'utf8',
+      // The QA run's own config directory, so the developer's stored tokens are never read
+      // or written by a scenario.
+      env: { ...process.env, XDG_CONFIG_HOME: options.configHome ?? CLI_CONFIG_HOME },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     return { stdout, status: 0 }
@@ -63,6 +78,28 @@ function oh(...args: string[]): { stdout: string; status: number } {
       status: failure.status ?? -1,
     }
   }
+}
+
+/**
+ * A config directory for `oh` that holds nothing: the state a machine that never signed in is
+ * in, without touching the session the other scenarios share.
+ */
+function scratchConfigHome(label: string): string {
+  const home = path.join(CLI_CONFIG_HOME, `scratch-${label}`)
+  rmSync(home, { recursive: true, force: true })
+  return home
+}
+
+/** A config directory holding a token the server will not accept — the 401 path. */
+function staleConfigHome(): string {
+  const home = scratchConfigHome('stale')
+  const directory = path.join(home, 'openharness')
+  mkdirSync(directory, { recursive: true })
+  writeFileSync(
+    path.join(directory, 'credentials.json'),
+    JSON.stringify({ servers: { [CLI_SERVER]: 'not-a-real-session-token' } }),
+  )
+  return home
 }
 
 /** Every agent the server has, oldest first — the list `oh agents` is supposed to print. */
@@ -105,10 +142,11 @@ test.describe('cli scenarios', () => {
   test('C1 new chat: pick an agent, send, stream, prompt back', async ({ context }) => {
     const terminal = new Terminal('oh-qa-c1')
     const shot = await context.newPage()
+    await ensureCliSignedIn(shot)
     terminal.start()
 
     try {
-      terminal.run(`${CLI_COMMAND} --server ${CLI_SERVER}`)
+      terminal.run(ohCommand())
       await terminal.waitFor(/Which agent\?/)
       await terminal.screenshot(shot, 'c1-01-agent-picker')
 
@@ -141,10 +179,11 @@ test.describe('cli scenarios', () => {
   test('C2 a long reply at 80x24 and at 200x50', async ({ context }) => {
     const terminal = new Terminal('oh-qa-c2', 80, 24)
     const shot = await context.newPage()
+    await ensureCliSignedIn(shot)
     terminal.start()
 
     try {
-      terminal.run(`${CLI_COMMAND} --server ${CLI_SERVER}`)
+      terminal.run(ohCommand())
       await terminal.waitFor(/Which agent\?/)
       terminal.send('Enter')
       await terminal.waitForIdle()
@@ -196,10 +235,11 @@ test.describe('cli scenarios', () => {
   test('C3 resume: the printed hint, and -c', async ({ context }) => {
     const terminal = new Terminal('oh-qa-c3', 100, 30)
     const shot = await context.newPage()
+    await ensureCliSignedIn(shot)
     terminal.start()
 
     try {
-      terminal.run(`${CLI_COMMAND} --server ${CLI_SERVER}`)
+      terminal.run(ohCommand())
       await terminal.waitFor(/Which agent\?/)
       terminal.send('Enter')
       await terminal.waitForIdle()
@@ -213,7 +253,7 @@ test.describe('cli scenarios', () => {
       await terminal.screenshot(shot, 'c3-01-resume-hint')
 
       // The hint, followed literally: the history comes back.
-      terminal.run(`${CLI_COMMAND} --server ${CLI_SERVER} -s ${sessionId}`)
+      terminal.run(ohCommand('-s', sessionId))
       await terminal.waitFor(/a message worth resuming/)
       await terminal.waitForIdle()
       expect(terminal.capture()).toContain('a message worth resuming')
@@ -223,7 +263,7 @@ test.describe('cli scenarios', () => {
       await quit(terminal)
 
       // -c: the most recent session, which is the one just resumed.
-      terminal.run(`${CLI_COMMAND} --server ${CLI_SERVER} -c`)
+      terminal.run(ohCommand('-c'))
       // The history that comes back holds both sides; which line is asserted depends on
       // whether the reply's words are known.
       await terminal.waitFor(
@@ -243,10 +283,11 @@ test.describe('cli scenarios', () => {
   test('C4 a message sent while a reply streams is queued and answered', async ({ context }) => {
     const terminal = new Terminal('oh-qa-c4', 100, 30)
     const shot = await context.newPage()
+    await ensureCliSignedIn(shot)
     terminal.start()
 
     try {
-      terminal.run(`${CLI_COMMAND} --server ${CLI_SERVER}`)
+      terminal.run(ohCommand())
       await terminal.waitFor(/Which agent\?/)
       terminal.send('Enter')
       await terminal.waitForIdle()
@@ -281,10 +322,11 @@ test.describe('cli scenarios', () => {
     // "part 3/40" would satisfy the wait below before this turn had started.
     const terminal = new Terminal('oh-qa-c5', 100, 30)
     const shot = await context.newPage()
+    await ensureCliSignedIn(shot)
     terminal.start()
 
     try {
-      terminal.run(`${CLI_COMMAND} --server ${CLI_SERVER}`)
+      terminal.run(ohCommand())
       await terminal.waitFor(/Which agent\?/)
       terminal.send('Enter')
       await terminal.waitForIdle()
@@ -346,10 +388,11 @@ test.describe('cli scenarios', () => {
   test('C6 Ctrl+J and Alt+Enter insert a newline', async ({ context }) => {
     const terminal = new Terminal('oh-qa-c6', 100, 30)
     const shot = await context.newPage()
+    await ensureCliSignedIn(shot)
     terminal.start()
 
     try {
-      terminal.run(`${CLI_COMMAND} --server ${CLI_SERVER}`)
+      terminal.run(ohCommand())
       await terminal.waitFor(/Which agent\?/)
       terminal.send('Enter')
       await terminal.waitForIdle()
@@ -385,39 +428,40 @@ test.describe('cli scenarios', () => {
     }
   })
 
-  test('C7 commands and bad arguments', async () => {
+  test('C7 commands and bad arguments', async ({ page }) => {
+    await ensureCliSignedIn(page)
     await test.step('--version and --help', () => {
-      const version = oh('--version')
+      const version = oh(['--version'])
       expect(version.status).toBe(0)
       expect(version.stdout.trim()).toMatch(/^\d+\.\d+\.\d+$/)
 
-      const help = oh('--help')
+      const help = oh(['--help'])
       expect(help.status).toBe(0)
       expect(help.stdout).toContain('Usage:')
       expect(help.stdout).toContain('oh sessions')
     })
 
     await test.step('bad arguments explain themselves and exit 2', () => {
-      const flag = oh('--nope')
+      const flag = oh(['--nope'])
       expect(flag.status).toBe(2)
       expect(flag.stdout).toContain("Unknown option '--nope'")
 
-      const command = oh('frobnicate')
+      const command = oh(['frobnicate'])
       expect(command.status).toBe(2)
       expect(command.stdout).toContain("unknown command 'frobnicate'")
 
-      const missing = oh('-s')
+      const missing = oh(['-s'])
       expect(missing.status).toBe(2)
       expect(missing.stdout).toContain('argument missing')
     })
 
     await test.step('oh agents and oh sessions are readable', () => {
-      const agents = oh('agents', '--server', CLI_SERVER)
+      const agents = oh(['agents', '--server', CLI_SERVER])
       expect(agents.status).toBe(0)
       const firstAgentLine = agents.stdout.split('\n').filter((line) => line.trim() !== '')[0] ?? ''
       expect(firstAgentLine).toMatch(/^agent_\S+\s+.*\S+\/\S+/)
 
-      const sessions = oh('sessions', '--server', CLI_SERVER)
+      const sessions = oh(['sessions', '--server', CLI_SERVER])
       expect(sessions.status).toBe(0)
       const firstSessionLine =
         sessions.stdout.split('\n').filter((line) => line.trim() !== '')[0] ?? ''
@@ -455,7 +499,7 @@ test.describe('cli scenarios', () => {
     })
 
     await test.step('oh agents lists all of them', () => {
-      const listed = oh('agents', '--server', CLI_SERVER)
+      const listed = oh(['agents', '--server', CLI_SERVER])
       expect(listed.status).toBe(0)
       const rows = listed.stdout.split('\n').filter((line) => line.trim() !== '')
       expect(rows.length, 'a row per agent, not one page of them').toBeGreaterThan(PAGE)
@@ -466,9 +510,10 @@ test.describe('cli scenarios', () => {
     await test.step('oh --agent <name> finds the newest one', async () => {
       const terminal = new Terminal('oh-qa-c7b', 80, 24)
       const shot = await context.newPage()
+      await ensureCliSignedIn(shot)
       terminal.start()
       try {
-        terminal.run(`${CLI_COMMAND} --server ${CLI_SERVER} --agent '${newest.name}'`)
+        terminal.run(ohCommand('--agent', `'${newest.name}'`))
         // Either the chat comes up on a session, or the error this scenario is about appears.
         await terminal.waitFor(/sesn_[A-Z0-9]+|no agent matches/, 30_000)
         expect(terminal.capture(), 'the agent was resolved').not.toContain('no agent matches')
@@ -493,6 +538,7 @@ test.describe('cli scenarios', () => {
 
     const terminal = new Terminal('oh-qa-c11', 100, 30)
     const shot = await context.newPage()
+    await ensureCliSignedIn(shot)
     terminal.start()
 
     try {
@@ -502,7 +548,7 @@ test.describe('cli scenarios', () => {
         system: 'Answer briefly.',
       })
 
-      terminal.run(`${CLI_COMMAND} --server ${CLI_SERVER} --agent '${agent.name}'`)
+      terminal.run(ohCommand('--agent', `'${agent.name}'`))
       const sessionId = (await terminal.waitFor(/sesn_[A-Z0-9]+/, 30_000))[0]
       await terminal.waitForIdle()
 
@@ -541,17 +587,107 @@ test.describe('cli scenarios', () => {
     }
   })
 
-  test('C9 a server that is not there, and a bad key', () => {
-    const down = oh('agents', '--server', 'http://localhost:3999')
+  test('C9 a server that is not there, and a token a server no longer accepts', () => {
+    const down = oh(['agents', '--server', 'http://localhost:3999'])
     expect(down.status).toBe(1)
     expect(down.stdout).toContain('could not reach the server at http://localhost:3999')
     expect(down.stdout, 'no stack trace').not.toMatch(/\n\s+at /)
 
-    if (process.env.QA_API_KEY !== undefined && process.env.QA_API_KEY !== '') {
-      const wrong = oh('agents', '--server', CLI_SERVER, '--api-key', 'not-the-key')
-      expect(wrong.status).toBe(1)
-      expect(wrong.stdout).toMatch(/401/)
-      expect(wrong.stdout).toContain('check the API key')
+    // With no token at all, the commands that need one say how to get one. A config directory
+    // of its own, so this does not touch the session the other scenarios share.
+    const none = oh(['agents', '--server', CLI_SERVER], { configHome: scratchConfigHome('none') })
+    expect(none.status).toBe(1)
+    expect(none.stdout).toContain(`not signed in to ${CLI_SERVER}. Run \`oh login\`.`)
+    expect(none.stdout, 'no stack trace').not.toMatch(/\n\s+at /)
+
+    // A token the server does not accept — revoked, expired, or another server's — is the 401
+    // path, and `oh` answers it with the same sentence (the `x-api-key` scheme this scenario
+    // used to exercise is gone, A8).
+    const stale = oh(['agents', '--server', CLI_SERVER], { configHome: staleConfigHome() })
+    expect(stale.status).toBe(1)
+    expect(stale.stdout).toContain(`not signed in to ${CLI_SERVER}. Run \`oh login\`.`)
+    expect(stale.stdout, 'no stack trace').not.toMatch(/\n\s+at /)
+  })
+
+  // --- signing in, and out, from the terminal (A6) ------------------------------------------
+
+  // The device flow `oh login` runs, with the approval made in a real browser — the half a
+  // unit test's fake replaces. The scenarios below it share whatever this leaves behind, so
+  // they run after it; C14 signs out at the end and puts a session back.
+  test('C12 oh login --no-browser: the code, the browser approval, the stored token', async ({
+    context,
+    page,
+  }) => {
+    forgetCliCredentials()
+    expect(cliCredentialsMode(), 'a clean slate').toBeNull()
+
+    const terminal = new Terminal('oh-qa-c12', 100, 30)
+    const shot = await context.newPage()
+    terminal.start()
+    try {
+      terminal.run(ohCommand('login', '--no-browser'))
+      const hint = await terminal.waitFor(CLI_LOGIN_HINT, 30_000)
+      const url = hint[1] ?? ''
+      const userCode = hint[2] ?? ''
+      // The URL is the web app's approval route with the code in the fragment, and the code on
+      // the screen is the one the page shows (A6: compare them before approving).
+      expect(url).toBe(`${CLI_SERVER}/#/device?user_code=${userCode}`)
+      await terminal.screenshot(shot, 'c12-01-login-code')
+
+      await page.goto(url)
+      await expect(page.getByRole('heading', { name: 'Approve a CLI login' })).toBeVisible()
+      await expect(page.locator('[data-slot="device-user-code"]')).toHaveText(userCode)
+      await page.getByRole('button', { name: 'Approve' }).click()
+      await expect(page.getByText('Approved')).toBeVisible()
+
+      // The CLI was polling; it signs itself in and says who it is.
+      const email = await loggedInAs(terminal)
+      expect(email.length).toBeGreaterThan(0)
+      await terminal.waitForShellPrompt()
+
+      // The token is stored per server, readable only by its owner — 0600, as A2 promises.
+      expect(cliCredentialsMode()).toBe(0o600)
+    } finally {
+      terminal.kill()
+      await shot.close()
+    }
+  })
+
+  test('C13 oh whoami', async ({ page }) => {
+    await ensureCliSignedIn(page)
+    const whoami = oh(['whoami', '--server', CLI_SERVER])
+    expect(whoami.status).toBe(0)
+    expect(whoami.stdout).toMatch(/^Logged in as \S+ on http:\/\/localhost:3000/)
+  })
+
+  test('C14 oh logout revokes the token, and the next command says so', async ({ page }) => {
+    await ensureCliSignedIn(page)
+
+    const before = oh(['whoami', '--server', CLI_SERVER])
+    expect(before.status).toBe(0)
+
+    const logout = oh(['logout', '--server', CLI_SERVER])
+    expect(logout.status).toBe(0)
+    expect(logout.stdout).toContain(`Logged out of ${CLI_SERVER}.`)
+
+    // The token is gone from disk, and the commands that needed it say how to get one back.
+    const after = oh(['whoami', '--server', CLI_SERVER])
+    expect(after.status).toBe(1)
+    expect(after.stdout).toContain(`not signed in to ${CLI_SERVER}. Run \`oh login\`.`)
+
+    const chat = oh(['agents', '--server', CLI_SERVER])
+    expect(chat.status).toBe(1)
+    expect(chat.stdout).toContain('Run `oh login`.')
+
+    // Signing in again works — and leaves a session behind for anything that runs after this
+    // scenario (they call `ensureCliSignedIn`, which finds it).
+    const terminal = new Terminal('oh-qa-c14', 100, 30)
+    terminal.start()
+    try {
+      const again = await loginCli(terminal, page)
+      expect(again.userCode.length).toBeGreaterThan(0)
+    } finally {
+      terminal.kill()
     }
   })
 })

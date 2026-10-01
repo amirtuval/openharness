@@ -47,7 +47,7 @@ test.describe('W1 first run', () => {
       await expect(page.getByRole('heading', { name: 'Agents' })).toBeVisible()
 
       await page.getByLabel('Name').fill(agentName)
-      await page.getByLabel('Model').fill(QA_MODEL)
+      await page.getByLabel('Model', { exact: true }).fill(QA_MODEL)
       await page.getByLabel('System prompt').fill('You are a concise QA test agent.')
       await page.getByRole('button', { name: 'Create agent' }).click()
 

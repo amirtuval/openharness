@@ -1,12 +1,44 @@
 import { execFileSync } from 'node:child_process'
 import path from 'node:path'
 
-import { expect, test as base, type APIRequestContext, type Page } from '@playwright/test'
+import {
+  expect,
+  test as base,
+  type APIRequestContext,
+  type Cookie,
+  type Page,
+} from '@playwright/test'
+
+/**
+ * What the `playwright` fixture is, structurally: the one thing this file calls on it.
+ *
+ * Typed here rather than by name because `@playwright/test` re-exports the value without a
+ * name for its type; the shape is the fixture's, and the compiler checks the assignment.
+ */
+interface PlaywrightApi {
+  readonly request: {
+    newContext(options: { readonly baseURL: string }): Promise<APIRequestContext>
+  }
+}
 
 /**
  * Shared helpers for the #14 QA pass: the base URL, the console-error collector, screenshots
  * and a thin wrapper over the HTTP API for setup and for assertions that are about the log
  * rather than the pixels.
+ *
+ * ## Signing in
+ *
+ * Since epic #65 the server is not open: every `/v1` call needs a session, and the app shows
+ * its sign-in page until it has one. The QA stack runs with `OPENHARNESS_DEV_LOGIN=1` on
+ * localhost (A7), whose one user the specs sign in as **once per worker**: the session's
+ * bearer token becomes the `request` fixture's default `authorization` header, and its cookie
+ * is put on the browser context, so a spec starts signed in on both sides and says nothing
+ * about it. (One sign-in, not one per test: `/api/auth/sign-in/email` is rate-limited to three
+ * per ten seconds — A2 — and a suite that signs in per test would trip its own limit.)
+ *
+ * The three specs that are *about* signing in do it their own way: `w15-sign-in.spec.ts` and
+ * `w16-sign-out.spec.ts` open a context with no session at all, and `cli.spec.ts`'s login
+ * scenarios run the device flow for real.
  */
 
 /** Where the app under test lives. Same default as `playwright.config.ts`. */
@@ -15,8 +47,14 @@ export const BASE_URL = process.env.QA_BASE_URL ?? 'http://localhost:3000'
 /** Where screenshots land. Relative paths resolve against the `e2e` package folder. */
 const SHOT_DIR = process.env.QA_SHOT_DIR ?? 'qa-output'
 
-/** The API key the server under test expects, when it was started with one. */
-export const API_KEY = process.env.QA_API_KEY ?? ''
+/**
+ * The dev user the QA stack is signed in as (A7).
+ *
+ * The documented pair; override with `QA_DEV_EMAIL`/`QA_DEV_PASSWORD` for a stack whose dev
+ * login is configured differently.
+ */
+export const DEV_LOGIN_EMAIL = process.env.QA_DEV_EMAIL ?? 'dev@localhost'
+export const DEV_LOGIN_PASSWORD = process.env.QA_DEV_PASSWORD ?? 'dev'
 
 /** A name that no earlier run can collide with. */
 export function uniqueName(prefix: string): string {
@@ -94,9 +132,65 @@ export const RELOAD_REPLY_COUNT = 300
 /** A prompt a real provider answers at length, for the mid-reload scenario. */
 export const RELOAD_REPLY_PROMPT = `Count from 1 to ${String(RELOAD_REPLY_COUNT)}, one number per line. Nothing else.`
 
-/** The `x-api-key` header the server under test needs, or nothing when it is open. */
-export function authHeaders(): Record<string, string> {
-  return API_KEY === '' ? {} : { 'x-api-key': API_KEY }
+// --- the signed-in session every spec starts from -------------------------------------------
+
+/** One dev-login session: the bearer token for the API, and the cookie for the browser. */
+export interface DevSession {
+  /** The session token, sent as `Authorization: Bearer` — what `oh` stores for the CLI. */
+  readonly token: string
+  /** The same session as the app's cookie, for the browser context. */
+  readonly cookies: readonly Cookie[]
+}
+
+let devSessionPromise: Promise<DevSession> | undefined
+
+/**
+ * Sign in as the dev user, once per worker, and share it with every spec.
+ *
+ * The sign-in goes through the real endpoint (`POST /api/auth/sign-in/email`), so the specs
+ * run against the same authentication a person does; caching it is what keeps the suite inside
+ * Better Auth's rate limit (three sign-ins per ten seconds, A2). A spec that needs a session
+ * of its own — or none at all — opens its own browser context and signs in through the UI
+ * instead of asking for this one.
+ */
+export function devSession(playwright: PlaywrightApi, baseURL: string): Promise<DevSession> {
+  devSessionPromise ??= signInOverDev(playwright, baseURL)
+  return devSessionPromise
+}
+
+async function signInOverDev(playwright: PlaywrightApi, baseURL: string): Promise<DevSession> {
+  const context = await playwright.request.newContext({ baseURL })
+  try {
+    // Sign-in allows three attempts per ten seconds (A2). The specs share one sign-in, so this
+    // only bites when a previous *run* left the counter warm; waiting out the window is what a
+    // person would do, and it keeps a fresh suite from failing on a timing accident.
+    let response = await signInRequest(context)
+    if (response.status() === 429) {
+      await new Promise((resolve) => setTimeout(resolve, 11_000))
+      response = await signInRequest(context)
+    }
+    if (!response.ok()) {
+      throw new Error(
+        `the dev login failed (${String(response.status())}): ${await response.text()}\n` +
+          'Is the stack running with OPENHARNESS_DEV_LOGIN=1 on localhost (A7)?',
+      )
+    }
+    const body = (await response.json()) as { token?: string }
+    if (typeof body.token !== 'string') {
+      throw new Error('the sign-in answer carried no token')
+    }
+    const { cookies } = await context.storageState()
+    return { token: body.token, cookies }
+  } finally {
+    await context.dispose()
+  }
+}
+
+/** One `POST /api/auth/sign-in/email` as the dev user. */
+function signInRequest(context: APIRequestContext) {
+  return context.post('/api/auth/sign-in/email', {
+    data: { email: DEV_LOGIN_EMAIL, password: DEV_LOGIN_PASSWORD },
+  })
 }
 
 // --- the stack itself, for the scenarios that stop and start it -------------------------------------
@@ -146,6 +240,40 @@ export async function waitForHealth(timeoutMs = 90_000): Promise<void> {
 }
 
 /**
+ * Sign in through the page's dev form, waiting out the rate limit if it is hit.
+ *
+ * `/api/auth/sign-in/email` allows three attempts per ten seconds per address (A2), and the
+ * scenarios that sign in through the page — W15 and W16 — run next to each other. A person
+ * who typed too fast would see "Too many requests. Please try again later."; this does what
+ * they would do, and retries once the window has passed. Any other refusal is thrown at once.
+ */
+export async function signInWithDevForm(
+  page: Page,
+  credentials: { readonly email?: string; readonly password?: string } = {},
+): Promise<void> {
+  const deadline = Date.now() + 30_000
+  for (;;) {
+    await page.getByLabel('Username').fill(credentials.email ?? DEV_LOGIN_EMAIL)
+    await page.getByLabel('Password').fill(credentials.password ?? DEV_LOGIN_PASSWORD)
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+
+    const failed = page.getByRole('alert').filter({ hasText: 'Sign-in failed' })
+    const refused = page.getByRole('alert').filter({ hasText: /Too many requests/ })
+    await expect(failed.or(page.getByRole('button', { name: 'Sign out' }))).toBeVisible({
+      timeout: 15_000,
+    })
+    if (!(await refused.isVisible().catch(() => false))) {
+      return
+    }
+    if (Date.now() > deadline) {
+      throw new Error('the dev sign-in stayed rate-limited')
+    }
+    // The limit's window is ten seconds; wait it out and try again, as a person would.
+    await page.waitForTimeout(11_000)
+  }
+}
+
+/**
  * Console errors, collected for the whole test.
  *
  * The browser console is one of the things this pass exists to look at, so every scenario
@@ -164,6 +292,29 @@ export const test = base.extend<{ consoleErrors: string[] }>({
       errors.push(`pageerror: ${error.message}`)
     })
     await use(errors)
+  },
+  /**
+   * The browser context, signed in: the dev session's cookie is put on it before the first
+   * `goto`, so the app never shows its sign-in page to a scenario that is not about it.
+   */
+  context: async ({ context, playwright, baseURL }, use) => {
+    const session = await devSession(playwright, baseURL ?? BASE_URL)
+    await context.addCookies([...session.cookies])
+    await use(context)
+  },
+  /**
+   * The HTTP API, signed in: every `request.get`/`request.post` a spec makes carries the dev
+   * session's bearer token. A spec that wants to call the API anonymously (the sign-in
+   * scenarios) builds its own context with `playwright.request.newContext()`.
+   */
+  request: async ({ playwright, baseURL }, use) => {
+    const session = await devSession(playwright, baseURL ?? BASE_URL)
+    const api = await playwright.request.newContext({
+      baseURL,
+      extraHTTPHeaders: { authorization: `Bearer ${session.token}` },
+    })
+    await use(api)
+    await api.dispose()
   },
 })
 
@@ -224,7 +375,7 @@ const BANNER_SETTLE_MS = 500
  * {@link BANNER_SETTLE_MS} is what makes "and it did not appear just after" part of the
  * assertion rather than a race with the render.
  *
- * Scenarios that provoke an error on purpose — W11, W12, C9, C11 — are the ones where a banner
+ * Scenarios that provoke an error on purpose — W11, W15, W16, W17, C9, C11 — are the ones where a banner
  * is the expected reading, and they do not call this.
  */
 export async function expectNoErrorBanner(page: Page, settleMs = BANNER_SETTLE_MS): Promise<void> {
@@ -250,7 +401,6 @@ export async function createAgent(
   values: { name: string; model: string; system: string },
 ): Promise<{ id: string; name: string }> {
   const response = await request.post('/v1/agents', {
-    headers: authHeaders(),
     data: { name: values.name, model: { id: values.model }, system: values.system },
   })
   expect(response.status(), await response.text()).toBe(201)
@@ -263,7 +413,6 @@ export async function createSession(
   agentId: string,
 ): Promise<{ id: string }> {
   const response = await request.post('/v1/sessions', {
-    headers: authHeaders(),
     data: { agent: agentId },
   })
   expect(response.status(), await response.text()).toBe(201)
@@ -285,7 +434,6 @@ export async function listAllAgents(
   let page = ''
   for (;;) {
     const response = await request.get('/v1/agents', {
-      headers: authHeaders(),
       params: { limit: 100, ...(page === '' ? {} : { page }) },
     })
     expect(response.status(), await response.text()).toBe(200)
@@ -306,7 +454,7 @@ export async function getSession(
   request: APIRequestContext,
   sessionId: string,
 ): Promise<Record<string, unknown>> {
-  const response = await request.get(`/v1/sessions/${sessionId}`, { headers: authHeaders() })
+  const response = await request.get(`/v1/sessions/${sessionId}`)
   expect(response.status(), await response.text()).toBe(200)
   return (await response.json()) as Record<string, unknown>
 }
@@ -318,7 +466,6 @@ export async function sendMessage(
   text: string,
 ): Promise<number> {
   const response = await request.post(`/v1/sessions/${sessionId}/events`, {
-    headers: authHeaders(),
     data: { events: [{ type: 'user.message', content: [{ type: 'text', text }] }] },
   })
   expect(response.status(), await response.text()).toBe(200)
@@ -335,7 +482,6 @@ export async function readEvents(
   let page = ''
   do {
     const response = await request.get(`/v1/sessions/${sessionId}/events`, {
-      headers: authHeaders(),
       params: { limit: 100, ...(page === '' ? {} : { page }) },
     })
     expect(response.status(), await response.text()).toBe(200)
