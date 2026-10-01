@@ -3,13 +3,15 @@ import {
   fixtureTimestamp,
   makeAgent,
   makeAgentMessage,
+  makeProviderCredential,
   makeSession,
+  makeUser,
   makeUserMessage,
 } from '@openharness/protocol/fixtures'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createClient } from './client'
-import { ApiError, ResponseValidationError } from './errors'
+import { ApiError, AuthenticationError, ResponseValidationError } from './errors'
 import { createMockFetch, errorResponse, jsonResponse } from './test-support/mock-fetch'
 
 const BASE_URL = 'https://api.test'
@@ -17,10 +19,10 @@ const BASE_URL = 'https://api.test'
 /** A client whose `fetch` answers from the script the test gives it. */
 function clientWith(
   handler: Parameters<typeof createMockFetch>[0],
-  options: { apiKey?: string | undefined } = { apiKey: 'oh_test_key' },
+  options: { token?: string | undefined } = { token: 'oh_test_token' },
 ) {
   const mock = createMockFetch(handler)
-  const client = createClient({ baseUrl: BASE_URL, apiKey: options.apiKey, fetch: mock.fetch })
+  const client = createClient({ baseUrl: BASE_URL, token: options.token, fetch: mock.fetch })
   return { client, mock }
 }
 
@@ -45,13 +47,23 @@ describe('request building', () => {
     const request = mock.requests[0]
     expect(request?.url).toBe(`${BASE_URL}/v1/agents`)
     expect(request?.init?.method).toBe('POST')
-    expect(request?.headers.get('x-api-key')).toBe('oh_test_key')
+    expect(request?.headers.get('authorization')).toBe('Bearer oh_test_token')
     expect(request?.headers.get('content-type')).toBe('application/json')
     expect(request?.headers.get('accept')).toBe('application/json')
     expect(bodyOf(request?.init)).toEqual({
       name: 'Summarizer',
       model: { id: 'anthropic/claude-sonnet-5' },
     })
+  })
+
+  it('asks every request to carry the session cookie', async () => {
+    const { client, mock } = clientWith(() => jsonResponse(makeSession()))
+
+    await client.sessions.get('sesn_01HZZZZZZZZZZZZZZZZZZZZZZZ')
+
+    // The web app's way in (epic #65, A2): the cookie is sent on every request, and the
+    // bearer header this client also carries does not replace it.
+    expect(mock.requests[0]?.init?.credentials).toBe('include')
   })
 
   it('ignores a trailing slash on the base URL', async () => {
@@ -63,12 +75,13 @@ describe('request building', () => {
     expect(mock.urlOf(0)).toBe(`${BASE_URL}/v1/agents/agent_01HZZZZZZZZZZZZZZZZZZZZZZZ`)
   })
 
-  it('sends no api key header when there is no key', async () => {
-    const { client, mock } = clientWith(() => jsonResponse(makeSession()), { apiKey: undefined })
+  it('sends no authorization header when there is no token', async () => {
+    const { client, mock } = clientWith(() => jsonResponse(makeSession()), { token: undefined })
 
     await client.sessions.get('sesn_01HZZZZZZZZZZZZZZZZZZZZZZZ')
 
-    expect(mock.requests[0]?.headers.get('x-api-key')).toBeNull()
+    expect(mock.requests[0]?.headers.get('authorization')).toBeNull()
+    expect(mock.requests[0]?.init?.credentials).toBe('include')
   })
 
   it('passes a page cursor through untouched', async () => {
@@ -216,6 +229,106 @@ describe('errors', () => {
     })
 
     await expect(client.agents.list()).rejects.toBe(boom)
+  })
+
+  it('turns a 401 into an AuthenticationError', async () => {
+    const { client } = clientWith(() =>
+      errorResponse(401, 'authentication_error', 'Not signed in.'),
+    )
+
+    const failure = client.sessions.list()
+    await expect(failure).rejects.toBeInstanceOf(AuthenticationError)
+    await expect(failure).rejects.toMatchObject({
+      name: 'AuthenticationError',
+      status: 401,
+      type: 'authentication_error',
+      message: 'Not signed in.',
+      retryable: false,
+    })
+  })
+
+  it('still makes it an AuthenticationError when the 401 body is not the envelope', async () => {
+    const { client } = clientWith(
+      () => new Response('unauthorized', { status: 401, statusText: 'Unauthorized' }),
+    )
+
+    const failure = client.sessions.list()
+    await expect(failure).rejects.toBeInstanceOf(AuthenticationError)
+    await expect(failure).rejects.toBeInstanceOf(ApiError)
+    await expect(failure).rejects.toMatchObject({
+      status: 401,
+      type: 'authentication_error',
+      message: 'The request failed with HTTP status 401 Unauthorized.',
+    })
+  })
+})
+
+describe('the signed-in user', () => {
+  it('me reads GET /v1/me and parses the user', async () => {
+    const user = makeUser()
+    const { client, mock } = clientWith(() => jsonResponse(user))
+
+    const me = await client.me()
+
+    expect(me).toEqual(user)
+    expect(mock.requests[0]?.init?.method).toBe('GET')
+    expect(mock.urlOf(0)).toBe(`${BASE_URL}/v1/me`)
+  })
+
+  it('propagates the 401 as an AuthenticationError', async () => {
+    const { client } = clientWith(() => errorResponse(401, 'authentication_error', 'Expired.'))
+
+    await expect(client.me()).rejects.toBeInstanceOf(AuthenticationError)
+  })
+})
+
+describe('provider credentials', () => {
+  it('lists metadata only, from GET /v1/provider-credentials', async () => {
+    const credential = makeProviderCredential()
+    const { client, mock } = clientWith(() => jsonResponse({ data: [credential] }))
+
+    const response = await client.providerCredentials.list()
+
+    expect(response).toEqual({ data: [credential] })
+    expect(mock.requests[0]?.init?.method).toBe('GET')
+    expect(mock.urlOf(0)).toBe(`${BASE_URL}/v1/provider-credentials`)
+  })
+
+  it('puts one credential and reads back its metadata, never the key', async () => {
+    const credential = makeProviderCredential({ provider: 'anthropic', last4: 'k9Z2' })
+    const { client, mock } = clientWith(() => jsonResponse(credential))
+
+    const stored = await client.providerCredentials.put('anthropic', {
+      type: 'api_key',
+      api_key: 'sk-ant-secret-k9Z2',
+    })
+
+    expect(stored).toEqual(credential)
+    expect(JSON.stringify(stored)).not.toContain('sk-ant-secret')
+    expect(mock.requests[0]?.init?.method).toBe('PUT')
+    expect(mock.urlOf(0)).toBe(`${BASE_URL}/v1/provider-credentials/anthropic`)
+    expect(bodyOf(mock.requests[0]?.init)).toEqual({
+      type: 'api_key',
+      api_key: 'sk-ant-secret-k9Z2',
+    })
+  })
+
+  it('deletes one credential and resolves without a body', async () => {
+    const { client, mock } = clientWith(() => new Response(null, { status: 204 }))
+
+    await expect(client.providerCredentials.delete('anthropic')).resolves.toBeUndefined()
+    expect(mock.requests[0]?.init?.method).toBe('DELETE')
+    expect(mock.urlOf(0)).toBe(`${BASE_URL}/v1/provider-credentials/anthropic`)
+  })
+
+  it('propagates a rejected credential as an invalid_provider_credential ApiError', async () => {
+    const { client } = clientWith(() =>
+      errorResponse(422, 'invalid_provider_credential', 'The anthropic key was rejected.'),
+    )
+
+    await expect(
+      client.providerCredentials.put('anthropic', { type: 'api_key', api_key: 'wrong' }),
+    ).rejects.toMatchObject({ status: 422, type: 'invalid_provider_credential' })
   })
 })
 

@@ -9,10 +9,10 @@ import type { StoredEvent, StreamEvent } from '@openharness/protocol'
 import { describe, expect, it } from 'vitest'
 
 import { createClient } from '../client'
-import { ApiError } from '../errors'
+import { ApiError, AuthenticationError } from '../errors'
 import { initialTranscriptState, reduceTranscriptAll, type TranscriptState } from '../transcript'
 import { createMockFetch, sseLines, sseResponse } from '../test-support/mock-fetch'
-import { createFakeClient, type FakeClient } from './index'
+import { FAKE_SESSION_TOKEN, createFakeClient, type FakeClient } from './index'
 
 describe('the fake client', () => {
   it('implements the client interface', () => {
@@ -20,10 +20,14 @@ describe('the fake client', () => {
 
     expect(typeof fake.sendMessage).toBe('function')
     expect(typeof fake.interrupt).toBe('function')
+    expect(typeof fake.me).toBe('function')
     expect(typeof fake.agents.create).toBe('function')
     expect(typeof fake.sessions.events.stream).toBe('function')
+    expect(typeof fake.providerCredentials.put).toBe('function')
+    expect(typeof fake.auth.startDeviceLogin).toBe('function')
     expect(fake.session.type).toBe('session')
     expect(fake.agent.type).toBe('agent')
+    expect(fake.user.email).toBe('ada@example.com')
   })
 
   it('emits a realistic, schema-valid turn', async () => {
@@ -527,6 +531,119 @@ describe('the fake resources', () => {
     })
 
     expect(page.data.map((event) => event.type)).toEqual([EVENT_TYPES.agentMessage])
+  })
+})
+
+describe("the fake's authentication", () => {
+  it('signs in by default and answers me with its user', async () => {
+    const fake = createFakeClient()
+
+    await expect(fake.me()).resolves.toEqual(fake.user)
+    expect(fake.user.email).toBe('ada@example.com')
+  })
+
+  it('answers every wire method with an AuthenticationError when signed out', async () => {
+    const fake = createFakeClient({ authenticated: false })
+
+    await expect(fake.me()).rejects.toBeInstanceOf(AuthenticationError)
+    await expect(fake.agents.list()).rejects.toBeInstanceOf(AuthenticationError)
+    await expect(fake.sessions.get(fake.session.id)).rejects.toBeInstanceOf(AuthenticationError)
+    await expect(fake.sendMessage(fake.session.id, 'hi')).rejects.toBeInstanceOf(
+      AuthenticationError,
+    )
+    await expect(fake.providerCredentials.list()).rejects.toBeInstanceOf(AuthenticationError)
+    await expect(fake.auth.signOut()).rejects.toBeInstanceOf(AuthenticationError)
+
+    const streaming = (async () => {
+      for await (const _event of fake.sessions.events.stream(fake.session.id)) {
+        // Nothing arrives: the stream fails on its first `next()`.
+      }
+    })()
+    await expect(streaming).rejects.toBeInstanceOf(AuthenticationError)
+  })
+
+  it('runs the device flow while signed out and signs in on approval', async () => {
+    const fake = createFakeClient({ authenticated: false })
+    fake.scriptDeviceLogin({ pendingPolls: 2, outcome: 'approved' })
+
+    const start = await fake.auth.startDeviceLogin()
+    expect(start).toEqual({
+      deviceCode: 'fake_device_code',
+      userCode: 'FAKE-CODE',
+      verificationUri: 'http://localhost:3000/device',
+      verificationUriComplete: 'http://localhost:3000/device?user_code=FAKE-CODE',
+      interval: 0,
+      expiresIn: 600,
+    })
+
+    const token = await fake.auth.pollDeviceLogin(start.deviceCode)
+    expect(token).toBe(FAKE_SESSION_TOKEN)
+    await expect(fake.me()).resolves.toEqual(fake.user)
+  })
+
+  it('rejects the poll with access_denied or expired_token when scripted so', async () => {
+    const denied = createFakeClient({ authenticated: false })
+    denied.scriptDeviceLogin({ outcome: 'denied' })
+    const expired = createFakeClient({ authenticated: false })
+    expired.scriptDeviceLogin({ outcome: 'expired' })
+
+    await expect(denied.auth.pollDeviceLogin('fake_device_code')).rejects.toMatchObject({
+      name: 'DeviceLoginError',
+      code: 'access_denied',
+    })
+    await expect(expired.auth.pollDeviceLogin('fake_device_code')).rejects.toMatchObject({
+      code: 'expired_token',
+    })
+    await expect(denied.me()).rejects.toBeInstanceOf(AuthenticationError)
+  })
+
+  it('rejects a poll for a code no flow started', async () => {
+    const fake = createFakeClient({ authenticated: false })
+
+    await expect(fake.auth.pollDeviceLogin('some_other_code')).rejects.toMatchObject({
+      code: 'invalid_grant',
+    })
+  })
+
+  it('signs out and refuses the next request', async () => {
+    const fake = createFakeClient()
+
+    await fake.auth.signOut()
+
+    await expect(fake.me()).rejects.toBeInstanceOf(AuthenticationError)
+  })
+
+  it('stores credentials as metadata, replaces them, and never returns the key', async () => {
+    const fake = createFakeClient()
+
+    const stored = await fake.providerCredentials.put('anthropic', {
+      type: 'api_key',
+      api_key: 'sk-ant-secret-k9Z2',
+    })
+    expect(stored).toMatchObject({ provider: 'anthropic', type: 'api_key', last4: 'k9Z2' })
+    expect(JSON.stringify(stored)).not.toContain('sk-ant-secret')
+
+    const replaced = await fake.providerCredentials.put('anthropic', {
+      type: 'api_key',
+      api_key: 'sk-ant-other-1111',
+    })
+    expect(replaced.id).toBe(stored.id)
+    expect(replaced.created_at).toBe(stored.created_at)
+    expect(replaced.last4).toBe('1111')
+
+    const listed = await fake.providerCredentials.list()
+    expect(listed.data).toEqual([replaced])
+
+    await fake.providerCredentials.delete('anthropic')
+    await expect(fake.providerCredentials.list()).resolves.toEqual({ data: [] })
+  })
+
+  it('rejects an empty key the way a provider rejection is answered', async () => {
+    const fake = createFakeClient()
+
+    await expect(
+      fake.providerCredentials.put('anthropic', { type: 'api_key', api_key: '  ' }),
+    ).rejects.toMatchObject({ status: 422, type: 'invalid_provider_credential' })
   })
 })
 

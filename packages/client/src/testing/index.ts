@@ -1,35 +1,51 @@
 import {
   AgentSchema,
+  ProviderCredentialSchema,
   SessionSchema,
   encodeKeyCursor,
   newAgentId,
+  newProviderCredentialId,
   newSessionId,
   tryDecodePageCursor,
 } from '@openharness/protocol'
-import { makeAgent, makeSession } from '@openharness/protocol/fixtures'
+import { makeAgent, makeSession, makeUser } from '@openharness/protocol/fixtures'
 import type {
   Agent,
   ListAgentsResponse,
   ListEventsResponse,
+  ListProviderCredentialsResponse,
   ListSessionsResponse,
+  ProviderCredential,
   SendEventsResponse,
   Session,
   SessionErrorType,
   StoredEvent,
   StreamEvent,
+  User,
   UserEvent,
   UserEventInput,
   UserInterruptEvent,
   UserMessageEvent,
 } from '@openharness/protocol'
 
-import { ApiError } from '../errors'
+import { ApiError, AuthenticationError } from '../errors'
 import type { Client, RequestOptions } from '../client'
 import type { StreamOptions } from '../events/stream'
+import { sleep } from '../internal/async'
+import { DeviceLoginError } from '../resources/auth'
+import type { DeviceLoginStart, PollDeviceLoginOptions } from '../resources/auth'
 import { FakeBrain, clampLimit, type FakeScript } from './fake-brain'
 
 export { FAKE_MODEL_USAGE } from './fake-brain'
 export type { FakeFailure, FakeReply, FakeScript } from './fake-brain'
+
+/**
+ * The session token the fake's device flow hands out on approval.
+ *
+ * Returned by {@link AuthResource.pollDeviceLogin} exactly the way the server returns a real
+ * one, so a CLI test can assert on what it stored.
+ */
+export const FAKE_SESSION_TOKEN = 'fake_session_token'
 
 /**
  * Subpath export `@openharness/client/testing`: an in-memory server for tests.
@@ -56,6 +72,12 @@ export type { FakeFailure, FakeReply, FakeScript } from './fake-brain'
  * against the fake therefore works against the real API, which is what lets the web app and
  * the TUI test their components without a server.
  *
+ * Authentication is simulated too (epic #65): the fake is signed in unless
+ * {@link FakeClientOptions.authenticated} says otherwise, an unauthenticated one answers
+ * every wire method with {@link AuthenticationError} the way a 401 answers, and
+ * {@link FakeClient.scriptDeviceLogin} scripts the device flow `oh login` runs — pending
+ * polls first, then approval, denial or expiry.
+ *
  * What it does not do is simulate the network: a request never fails for transport reasons,
  * and `signal` aborts are honored at once rather than mid-flight.
  */
@@ -66,6 +88,17 @@ export interface FakeClientOptions {
   agent?: Agent
   /** The one session the fake starts with; a default session on {@link agent} when omitted. */
   session?: Session
+  /** The signed-in user the fake answers {@link Client.me} with; a default user when omitted. */
+  user?: User
+  /**
+   * Whether the fake starts signed in; `true` by default.
+   *
+   * `false` puts every `/v1` method — the streams included — behind a 401: each rejects
+   * with {@link AuthenticationError}, exactly as the server answers a request with no
+   * session. The device flow is not one of those methods, so `oh login` can run against an
+   * unauthenticated fake; approval signs it in.
+   */
+  authenticated?: boolean
   /**
    * Milliseconds between streamed events: 0 (the default) is as fast as the event loop
    * allows, a larger value makes a stream slow enough to interrupt or to render mid-flight.
@@ -77,6 +110,32 @@ export interface FakeClientOptions {
    * Pass a counter to make a test's timestamps deterministic.
    */
   now?: () => Date
+}
+
+/** A device flow, as {@link FakeClient.scriptDeviceLogin} takes it. */
+export interface FakeDeviceFlowOptions {
+  /**
+   * What the user does at the verification page once the pending polls are over; defaults to
+   * `'approved'`.
+   *
+   * `'approved'` resolves the poll with {@link FAKE_SESSION_TOKEN} and signs the fake in;
+   * `'denied'` and `'expired'` reject it with a `DeviceLoginError` carrying that code.
+   */
+  outcome?: 'approved' | 'denied' | 'expired'
+  /** How many polls answer `authorization_pending` before the outcome; defaults to 1. */
+  pendingPolls?: number
+  /**
+   * The interval the flow reports and polls at, in seconds; defaults to 0, so tests never
+   * wait. The fake sleeps between polls the way the real client does.
+   */
+  interval?: number
+  /** The codes the fake reports; deterministic defaults when omitted. */
+  deviceCode?: string
+  userCode?: string
+  verificationUri?: string
+  verificationUriComplete?: string
+  /** How long the codes stay valid, in seconds; defaults to 600 (Better Auth's ten minutes). */
+  expiresIn?: number
 }
 
 /** A reply, as {@link FakeClient.respondWith} takes it. */
@@ -133,6 +192,33 @@ export interface FakeClient extends Client {
   readonly session: Session
 
   /**
+   * The user the fake signs in as — the one {@link Client.me} answers once authenticated.
+   *
+   * A test can assert on exactly what the CLI would print, e.g. `fake.user.email`.
+   */
+  readonly user: User
+
+  /**
+   * Script the device flow `oh login` runs.
+   *
+   * The next {@link Client.auth} login answers the script; the codes it reports are
+   * deterministic, and the interval defaults to 0 so no poll ever waits. Pending polls come
+   * first, the outcome after:
+   *
+   * ```ts
+   * const fake = createFakeClient({ authenticated: false })
+   * fake.scriptDeviceLogin({ pendingPolls: 2, outcome: 'approved' })
+   *
+   * const start = await fake.auth.startDeviceLogin()
+   * const token = await fake.auth.pollDeviceLogin(start.deviceCode) // FAKE_SESSION_TOKEN
+   * // fake is signed in now: `await fake.me()` answers `fake.user`
+   * ```
+   *
+   * @param options the outcome, how long the user takes, and the codes to report
+   */
+  scriptDeviceLogin(options?: FakeDeviceFlowOptions): FakeClient
+
+  /**
    * Script a reply for the next model request.
    *
    * Calls queue up: the first reply answers the first request, the second the next one. With
@@ -184,6 +270,32 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
 
   const agents = new Map<string, Agent>()
   const brains = new Map<string, FakeBrain>()
+  const credentials = new Map<string, ProviderCredential>()
+  const user = options.user ?? makeUser()
+  let authenticated = options.authenticated ?? true
+  let deviceFlow: FakeDeviceFlow | undefined
+
+  /**
+   * Refuse the way the server's 401 does.
+   *
+   * Every `/v1` method answers with this while the fake is signed out; the device flow and
+   * the fake's own scripting do not, because the server's do not either.
+   */
+  const unauthenticated = (): Promise<never> =>
+    Promise.reject(new AuthenticationError('Not signed in.'))
+
+  /** The same refusal, for the synchronous call sites (the stream's first `next()`). */
+  const requireAuthentication = (): void => {
+    if (!authenticated) {
+      throw new AuthenticationError('Not signed in.')
+    }
+  }
+
+  /** The scripted device flow, or a default one: one pending poll, then approval. */
+  const ensureDeviceFlow = (): FakeDeviceFlow => {
+    deviceFlow ??= makeDeviceFlow({})
+    return deviceFlow
+  }
 
   const seedAgent = options.agent ?? makeAgent()
   agents.set(seedAgent.id, seedAgent)
@@ -239,6 +351,9 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
   const agentsResource: Client['agents'] = {
     create(body, requestOptions): Promise<Agent> {
       throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
       const timestamp = now().toISOString()
       const created = AgentSchema.parse({
         id: newAgentId(),
@@ -256,17 +371,26 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
 
     get(agentId, requestOptions): Promise<Agent> {
       throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
       return requireAgent(agentId)
     },
 
     list(params, requestOptions): Promise<ListAgentsResponse> {
       throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
       const all = [...agents.values()].sort(byCreatedAtThenId)
       return Promise.resolve(pageByKey(all, params?.limit, params?.page, 'asc'))
     },
 
     async update(agentId, body, requestOptions): Promise<Agent> {
       throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
       const existing = await requireAgent(agentId)
       const updated: Agent = {
         ...existing,
@@ -284,6 +408,9 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
   const eventsResource: Client['sessions']['events'] = {
     async send(sessionId, events, requestOptions): Promise<SendEventsResponse> {
       throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
       const brain = await requireBrain(sessionId)
       const inputs = isEventList(events) ? events : [events]
       const stored: UserEvent[] = inputs.map((input) => brain.appendUserEvent(input))
@@ -293,6 +420,9 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
 
     async list(sessionId, params, requestOptions): Promise<ListEventsResponse> {
       throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
       const brain = await requireBrain(sessionId)
       return brain.pageEvents(params ?? {})
     },
@@ -311,17 +441,23 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
     },
 
     stream(sessionId, streamOptions): AsyncIterable<StreamEvent> {
-      // The lookup happens inside the generator, on the first `next()`: an unknown session
-      // then fails the iteration rather than `stream()` itself, the way a refused request
-      // does. It is also the moment the subscription is made, so no event between the call
-      // and the first `next()` is missed.
-      return streamFromBrain(() => brainFor(sessionId), streamOptions ?? {})
+      // The lookup happens inside the generator, on the first `next()`: an unknown session —
+      // or a signed-out caller — then fails the iteration rather than `stream()` itself, the
+      // way a refused request does. It is also the moment the subscription is made, so no
+      // event between the call and the first `next()` is missed.
+      return streamFromBrain(() => {
+        requireAuthentication()
+        return brainFor(sessionId)
+      }, streamOptions ?? {})
     },
   }
 
   const sessionsResource: Client['sessions'] = {
     async create(body, requestOptions): Promise<Session> {
       throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
       const agentSnapshot = await requireAgent(body.agent)
       const timestamp = now().toISOString()
       const session = SessionSchema.parse({
@@ -353,12 +489,18 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
 
     async get(sessionId, requestOptions): Promise<Session> {
       throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
       const brain = await requireBrain(sessionId)
       return brain.session
     },
 
     list(params, requestOptions): Promise<ListSessionsResponse> {
       throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
       const all = [...brains.values()]
         .map((candidate) => candidate.session)
         .filter((session) => params?.agent_id === undefined || session.agent.id === params.agent_id)
@@ -369,14 +511,122 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
     events: eventsResource,
   }
 
+  const providerCredentialsResource: Client['providerCredentials'] = {
+    async list(requestOptions): Promise<ListProviderCredentialsResponse> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      const all = [...credentials.values()].sort(byCreatedAtThenId)
+      return Promise.resolve({ data: all })
+    },
+
+    async put(provider, body, requestOptions): Promise<ProviderCredential> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      // The server validates a new key with one cheap provider call and answers 422 when the
+      // provider refuses it; a key with no characters in it fails that call every time, which
+      // is the one rejection a test can spell without a provider.
+      if (body.api_key.trim() === '') {
+        throw new ApiError(422, `The ${provider} credential was rejected by the provider.`, {
+          type: 'invalid_provider_credential',
+        })
+      }
+      const existing = credentials.get(provider)
+      const timestamp = now().toISOString()
+      const stored = ProviderCredentialSchema.parse({
+        id: existing?.id ?? newProviderCredentialId(),
+        type: body.type,
+        provider,
+        last4: body.api_key.slice(-4),
+        created_at: existing?.created_at ?? timestamp,
+        updated_at: timestamp,
+        validated_at: timestamp,
+      })
+      credentials.set(provider, stored)
+      return stored
+    },
+
+    async delete(provider, requestOptions): Promise<void> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      // Idempotent, like the server's 204: deleting what is not there is not an error.
+      credentials.delete(provider)
+    },
+  }
+
+  const authResource: Client['auth'] = {
+    startDeviceLogin(requestOptions): Promise<DeviceLoginStart> {
+      throwIfAborted(requestOptions)
+      const flow = ensureDeviceFlow()
+      return Promise.resolve({
+        deviceCode: flow.deviceCode,
+        userCode: flow.userCode,
+        verificationUri: flow.verificationUri,
+        verificationUriComplete: flow.verificationUriComplete,
+        interval: flow.interval,
+        expiresIn: flow.expiresIn,
+      })
+    },
+
+    async pollDeviceLogin(deviceCode, pollOptions?: PollDeviceLoginOptions): Promise<string> {
+      const flow = deviceFlow
+      if (flow === undefined || deviceCode !== flow.deviceCode) {
+        throw new DeviceLoginError('invalid_grant', 'There is no such device login.')
+      }
+      for (;;) {
+        await sleep((pollOptions?.interval ?? flow.interval) * 1000, pollOptions?.signal)
+        pollOptions?.signal?.throwIfAborted()
+        flow.polls += 1
+        if (flow.polls <= flow.pendingPolls) {
+          continue
+        }
+        if (flow.outcome === 'denied') {
+          throw new DeviceLoginError('access_denied', 'The user denied the login.')
+        }
+        if (flow.outcome === 'expired') {
+          throw new DeviceLoginError('expired_token', 'The device code has expired.')
+        }
+        authenticated = true
+        return FAKE_SESSION_TOKEN
+      }
+    },
+
+    async signOut(requestOptions): Promise<void> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      authenticated = false
+    },
+  }
+
   const fake: FakeClient = {
     agent: seedAgent,
     session: seedSession,
+    user,
     agents: agentsResource,
     sessions: sessionsResource,
+    providerCredentials: providerCredentialsResource,
+    auth: authResource,
+
+    me(requestOptions): Promise<User> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      return Promise.resolve(user)
+    },
 
     async sendMessage(sessionId, text, requestOptions): Promise<UserMessageEvent> {
       throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
       const brain = await requireBrain(sessionId)
       const stored = brain.appendUserEvent({
         type: 'user.message',
@@ -388,6 +638,9 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
 
     async interrupt(sessionId, requestOptions): Promise<UserInterruptEvent> {
       throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
       const brain = await requireBrain(sessionId)
       const stored = brain.appendUserEvent({ type: 'user.interrupt' }) as UserInterruptEvent
       // The server starts a turn for an interrupt even when none is running — a queued
@@ -416,6 +669,11 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       })
     },
 
+    scriptDeviceLogin(flowOptions = {}) {
+      deviceFlow = makeDeviceFlow(flowOptions)
+      return fake
+    },
+
     waitForIdle(sessionId) {
       return brainFor(sessionId ?? fake.session.id).waitForIdle()
     },
@@ -426,6 +684,38 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
   }
 
   return fake
+}
+
+/** The fake's device flow: the script, and how far the polls have come. */
+interface FakeDeviceFlow {
+  readonly deviceCode: string
+  readonly userCode: string
+  readonly verificationUri: string
+  readonly verificationUriComplete: string
+  readonly interval: number
+  readonly expiresIn: number
+  readonly outcome: 'approved' | 'denied' | 'expired'
+  readonly pendingPolls: number
+  /** How many polls have happened; the first {@link pendingPolls} answer `authorization_pending`. */
+  polls: number
+}
+
+/** Build a device flow from a script, filling in deterministic defaults. */
+function makeDeviceFlow(options: FakeDeviceFlowOptions): FakeDeviceFlow {
+  const userCode = options.userCode ?? 'FAKE-CODE'
+  const verificationUri = options.verificationUri ?? 'http://localhost:3000/device'
+  return {
+    deviceCode: options.deviceCode ?? 'fake_device_code',
+    userCode,
+    verificationUri,
+    verificationUriComplete:
+      options.verificationUriComplete ?? `${verificationUri}?user_code=${userCode}`,
+    interval: options.interval ?? 0,
+    expiresIn: options.expiresIn ?? 600,
+    outcome: options.outcome ?? 'approved',
+    pendingPolls: options.pendingPolls ?? 1,
+    polls: 0,
+  }
 }
 
 /**

@@ -1,9 +1,19 @@
-import { EVENT_TYPES, SendEventsResponseSchema } from '@openharness/protocol'
-import type { UserEvent, UserInterruptEvent, UserMessageEvent } from '@openharness/protocol'
+import {
+  API_VERSION_PREFIX,
+  EVENT_TYPES,
+  GetMeResponseSchema,
+  SendEventsResponseSchema,
+} from '@openharness/protocol'
+import type { User, UserEvent, UserInterruptEvent, UserMessageEvent } from '@openharness/protocol'
 
 import type { DebugHook, FetchLike, ResponseSchema } from './http'
 import { createTransport } from './http'
 import { createAgentsResource, type AgentsResource } from './resources/agents'
+import { createAuthResource, type AuthResource } from './resources/auth'
+import {
+  createProviderCredentialsResource,
+  type ProviderCredentialsResource,
+} from './resources/provider-credentials'
 import {
   createSessionsResource,
   sessionEventsPath,
@@ -14,7 +24,8 @@ import {
  * The openharness client: typed access to the API, in a browser or in Node.
  *
  * ```ts
- * const client = createClient({ baseUrl: 'http://localhost:8787', apiKey: 'oh_...' })
+ * const client = createClient({ baseUrl: 'http://localhost:8787' }) // the web app: cookie auth
+ * const cli = createClient({ baseUrl: 'http://localhost:8787', token }) // the CLI: bearer auth
  *
  * const agent = await client.agents.create({
  *   name: 'Summarizer',
@@ -26,8 +37,13 @@ import {
  *
  * The client holds no state of its own — the session log is the state — so one instance can
  * serve a whole app. Everything it returns is parsed against `@openharness/protocol`, and the
- * only errors it throws for an answer from the server are {@link ApiError} and
- * {@link ResponseValidationError}.
+ * only errors it throws for an answer from the server are {@link ApiError},
+ * {@link AuthenticationError} (the 401 case of it) and {@link ResponseValidationError}.
+ *
+ * There are two ways to authenticate (epic #65, A2), and they are properties of *where* the
+ * client runs, not of the calls it makes: a browser carries the web app's session cookie
+ * automatically (`credentials: 'include'` on every request and on the SSE stream), and a
+ * client given a `token` — the CLI — sends it as `Authorization: Bearer <token>`.
  */
 
 /** What every method takes for cancellation. */
@@ -43,7 +59,7 @@ export interface RequestOptions {
  * ```ts
  * const client = createClient({
  *   baseUrl: 'https://api.example.com',
- *   apiKey: 'oh_...',
+ *   token: 'oh_session_...', // the CLI; omit it in a browser, where the cookie authenticates
  *   fetch: myFetch,          // optional: defaults to the global fetch
  *   onDebug: (message) => console.debug(message),
  * })
@@ -52,8 +68,12 @@ export interface RequestOptions {
 export interface ClientOptions {
   /** Server root, e.g. `https://api.example.com`; a trailing slash is ignored. */
   baseUrl: string
-  /** Value of the `x-api-key` header; omitted when the server needs no auth. */
-  apiKey?: string | undefined
+  /**
+   * Session token, sent as `Authorization: Bearer <token>` on every request, the SSE stream
+   * included. This is the CLI's way in; a browser omits it and rides the session cookie that
+   * every request carries (`credentials: 'include'`).
+   */
+  token?: string | undefined
   /**
    * The `fetch` to use; defaults to the global one.
    *
@@ -80,6 +100,23 @@ export interface Client {
 
   /** The session endpoints, including the session's event log. */
   readonly sessions: SessionsResource
+
+  /** The caller's model-provider credentials (epic #65, A5); write-only. */
+  readonly providerCredentials: ProviderCredentialsResource
+
+  /** Signing in (the CLI's device flow) and signing out (epic #65, A6). */
+  readonly auth: AuthResource
+
+  /**
+   * The signed-in user: `GET /v1/me`.
+   *
+   * The identity every request is scoped to, and the proof the CLI has a usable token —
+   * `oh whoami` and `oh login` (print `Logged in as <email>`) both end here.
+   *
+   * @param options request options (cancellation)
+   * @throws AuthenticationError when the caller has no valid session
+   */
+  me(options?: RequestOptions): Promise<User>
 
   /**
    * Send a user message to a session and return it as stored.
@@ -115,7 +152,7 @@ export interface Client {
 export function createClient(options: ClientOptions): Client {
   const transport = createTransport({
     baseUrl: options.baseUrl,
-    apiKey: options.apiKey,
+    token: options.token,
     fetch: options.fetch,
     debug: options.onDebug,
   })
@@ -123,6 +160,16 @@ export function createClient(options: ClientOptions): Client {
   return {
     agents: createAgentsResource(transport),
     sessions: createSessionsResource(transport),
+    providerCredentials: createProviderCredentialsResource(transport),
+    auth: createAuthResource(transport),
+
+    me(requestOptions) {
+      return transport.json(GetMeResponseSchema, {
+        method: 'GET',
+        path: `${API_VERSION_PREFIX}/me`,
+        signal: requestOptions?.signal,
+      })
+    },
 
     sendMessage(sessionId, text, requestOptions) {
       return transport.json(storedUserEventParser<UserMessageEvent>(EVENT_TYPES.userMessage), {
