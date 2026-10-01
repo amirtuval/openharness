@@ -4,7 +4,7 @@ import { FIXTURE_MODEL_USAGE } from '@openharness/protocol/fixtures'
 import type { LanguageModel } from 'ai'
 import { MockLanguageModelV4 } from 'ai/test'
 
-import type { ModelFactory } from '../model'
+import type { ModelCredential, ModelFactory, ResolveCredential } from '../model'
 
 /**
  * The models the brain's tests stream from: AI SDK mock models, scripted per request.
@@ -39,6 +39,21 @@ export interface MockModel {
 
 /** The text block the mock streams under; a real provider picks its own ids. */
 const TEXT_ID = 'mock-text-1'
+
+/** The key a mock request is made with. The mock ignores it — a request still needs one. */
+export const TEST_API_KEY = 'oh-test-api-key-0000'
+
+/** {@link TEST_API_KEY} as one request's credential. */
+export const TEST_CREDENTIAL: ModelCredential = { apiKey: TEST_API_KEY }
+
+/**
+ * The credential resolver a test hands `runTurn`: every provider has {@link TEST_CREDENTIAL}.
+ *
+ * `runTurn` asks for the credential before it makes a request, so a turn without one ends with
+ * `missing_provider_credential` — a test that wants a turn to run passes this (or its own
+ * resolver). The mock model ignores what it is given; only the loop sees the answer.
+ */
+export const resolveTestCredential: ResolveCredential = () => Promise.resolve(TEST_CREDENTIAL)
 
 /**
  * Build a {@link MockModel} from one script per model request.

@@ -1,6 +1,7 @@
 import {
   type ContextStrategy,
   type ModelFactory,
+  type ResolveCredential,
   type RetryPolicy,
   type TurnOutcome,
   runTurn,
@@ -19,7 +20,7 @@ import type { PartitionFence, SessionStore } from '@openharness/session'
  * ownership a partition lease gives it.
  *
  * ```ts
- * const runner = new SessionRunner({ store, model })
+ * const runner = new SessionRunner({ store, model, resolveCredential })
  * await runner.run(sessionId)                       // LocalScheduler: every session is ours
  * await runner.run(sessionId, { fence })            // #11: only while we hold the partition
  * ```
@@ -35,6 +36,15 @@ export interface SessionRunnerOptions {
   readonly store: SessionStore
   /** How a session's `agent.model.id` becomes a model to stream from. */
   readonly model: ModelFactory
+  /**
+   * Where each model request's provider credential comes from (epic #65, A5).
+   *
+   * The server holds no provider key of its own and the brain never reads one from the
+   * environment: a turn made without a credential this resolver answered ends with
+   * `missing_provider_credential` instead. The mock model ignores what it is handed, so the
+   * test paths resolve a placeholder.
+   */
+  readonly resolveCredential: ResolveCredential
   /** How model failures are retried; `runTurn`'s own default when omitted. */
   readonly retry?: RetryPolicy
   /** How the log becomes model messages; `runTurn`'s own default when omitted. */
@@ -102,6 +112,8 @@ export class SessionRunner {
 
   readonly #model: ModelFactory
 
+  readonly #resolveCredential: ResolveCredential
+
   readonly #retry: RetryPolicy | undefined
 
   readonly #contextStrategy: ContextStrategy | undefined
@@ -113,6 +125,7 @@ export class SessionRunner {
   constructor(options: SessionRunnerOptions) {
     this.#store = options.store
     this.#model = options.model
+    this.#resolveCredential = options.resolveCredential
     this.#retry = options.retry
     this.#contextStrategy = options.contextStrategy
   }
@@ -273,6 +286,7 @@ export class SessionRunner {
         outcome = await runTurn(sessionId, {
           store: this.#store,
           model: this.#model,
+          resolveCredential: this.#resolveCredential,
           signal: abortSignalFor(handle),
           ...(handle.fence === undefined ? {} : { fence: handle.fence }),
           ...(this.#retry === undefined ? {} : { retry: this.#retry }),

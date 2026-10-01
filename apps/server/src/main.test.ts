@@ -5,7 +5,14 @@ import { InMemorySessionStore } from '@openharness/session'
 import { main, startServer } from './main'
 import { PostgresPartitionScheduler } from './partition-scheduler'
 import type { Logger } from './types'
-import { createScriptedModel, readHistory, testConfig, waitFor, waitForIdle } from './test-support'
+import {
+  createScriptedModel,
+  readHistory,
+  resolveTestCredential,
+  testConfig,
+  waitFor,
+  waitForIdle,
+} from './test-support'
 
 /**
  * Starting and stopping the server for real: an ephemeral port, the store it runs against,
@@ -38,6 +45,7 @@ describe('startServer', () => {
       config: testConfig(),
       store: new InMemorySessionStore(),
       model: createScriptedModel().factory,
+      resolveCredential: resolveTestCredential,
       logger: recordingLogger(),
     })
     started.push(server)
@@ -53,6 +61,7 @@ describe('startServer', () => {
     const server = await startServer({
       config: testConfig(),
       model: createScriptedModel().factory,
+      resolveCredential: resolveTestCredential,
       logger,
     })
     started.push(server)
@@ -77,6 +86,7 @@ describe('startServer', () => {
       config: testConfig(),
       store,
       model: createScriptedModel({ text: ['recovered after restart'] }).factory,
+      resolveCredential: resolveTestCredential,
       logger: recordingLogger(),
     })
     started.push(server)
@@ -96,6 +106,7 @@ describe('startServer', () => {
       config: testConfig(),
       store: new InMemorySessionStore(),
       model: createScriptedModel().factory,
+      resolveCredential: resolveTestCredential,
       logger: recordingLogger(),
     })
     started.push(first)
@@ -114,6 +125,7 @@ describe('startServer', () => {
         config: { ...testConfig(), port: first.port },
         store,
         model: model.factory,
+        resolveCredential: resolveTestCredential,
         logger: recordingLogger(),
       }),
     ).rejects.toThrow(/EADDRINUSE/)
@@ -130,6 +142,7 @@ describe('startServer', () => {
       config: testConfig({ drainTimeoutMs: 3000 }),
       store,
       model: createScriptedModel({ text: ['one ', 'two ', 'three'], delayMs: 20 }).factory,
+      resolveCredential: resolveTestCredential,
       logger: recordingLogger(),
     })
     started.push(server)
@@ -167,6 +180,7 @@ describe('startServer', () => {
       }),
       store,
       model: createScriptedModel({ text: ['answered under a lease'] }).factory,
+      resolveCredential: resolveTestCredential,
       logger: recordingLogger(),
     })
     started.push(server)
@@ -206,6 +220,7 @@ describe('startServer', () => {
       config: testConfig({ deltaRetentionMs: 0, compactIntervalMs: 25 }),
       store,
       model: createScriptedModel({ text: ['hi'] }).factory,
+      resolveCredential: resolveTestCredential,
       logger,
     })
     started.push(server)
@@ -248,6 +263,7 @@ describe('startServer', () => {
       config: testConfig({ compactIntervalMs: 0 }),
       store: new InMemorySessionStore(),
       model: createScriptedModel().factory,
+      resolveCredential: resolveTestCredential,
       logger: recordingLogger(),
     })
     started.push(server)
@@ -260,6 +276,7 @@ describe('startServer', () => {
       config: testConfig(),
       store: new InMemorySessionStore(),
       model: createScriptedModel().factory,
+      resolveCredential: resolveTestCredential,
       logger: recordingLogger(),
     })
     const url = `http://127.0.0.1:${server.port}/health`
@@ -281,6 +298,7 @@ describe('startServer', () => {
         config: testConfig({ webDir }),
         store: new InMemorySessionStore(),
         model: createScriptedModel().factory,
+        resolveCredential: resolveTestCredential,
         logger: recordingLogger(),
       })
       started.push(server)

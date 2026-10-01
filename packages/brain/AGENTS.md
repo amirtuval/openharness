@@ -5,9 +5,12 @@ The stateless brain: the harness loop that drives a session.
 A turn is one call to `runTurn`. It reads the session log, streams a reply from the model, and
 appends what happened — user events claimed, a span around every model request, the chunks of
 the reply as they arrive, the reply itself, the status transitions and any error. It remembers nothing between turns and knows nothing about
-scheduling, ownership, HTTP or Postgres: it is handed a `SessionStore`, a model factory and an
-abort signal. The log is the state, which is what lets a crashed turn be resumed by another
-process — and why a brain that holds a partition lease writes under its fence.
+scheduling, ownership, HTTP or Postgres: it is handed a `SessionStore`, a model factory, a
+credential resolver and an abort signal. Every model request is made with a credential the
+resolver answered — the session owner's own provider key, never one from the environment (epic
+#65, A5) — and a request the owner has no key for ends the turn before it is attempted. The log
+is the state, which is what lets a crashed turn be resumed by another process — and why a brain
+that holds a partition lease writes under its fence.
 
 ## Commands
 
@@ -36,7 +39,8 @@ src/
   turn.ts               runTurn: the loop, and the lifecycle it writes
   log.ts                reading the log, and the questions the loop asks of it
   context.ts            ContextStrategy: the log as model messages, trimmed
-  model.ts              ModelFactory, and streaming one request through the AI SDK
+  model.ts              ModelFactory, credentials, and streaming one request through the AI SDK
+  redact.ts             redactSecret: scrubbing a provider key out of error text
   errors.ts             classifyModelError: retryable or terminal, and which session.error
   retry.ts              RetryPolicy, backoff, and the injectable sleep
   events.ts             the events the loop appends, built in one place
@@ -53,27 +57,33 @@ emits what that reaches.
 
 ### `@openharness/brain`
 
-| export                                                                        | what it is                                                              |
-| ----------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| `runTurn(sessionId, options)`                                                 | run one turn; resolves to a `TurnOutcome`                               |
-| `RunTurnOptions`                                                              | `{ store, model, signal?, fence?, contextStrategy?, retry? }`           |
-| `TurnOutcome`, `TurnOutcomeKind`                                              | `{ outcome: 'idle' \| 'noop' \| 'interrupted' \| 'error' }`             |
-| `ContextStrategy`, `ContextStrategyOptions`                                   | `(events, { model, system }) => ModelMessage[]`                         |
-| `createContextStrategy(config?)`, `ContextStrategyConfig`                     | the default strategy: the conversation, trimmed to a token budget       |
-| `DEFAULT_CONTEXT_STRATEGY`, `DEFAULT_CONTEXT_TOKEN_BUDGET`, `CHARS_PER_TOKEN` | its defaults                                                            |
-| `estimateTokens(text)`                                                        | the chars/4 estimate the budget is measured in                          |
-| `ModelFactory`                                                                | `(modelId) => LanguageModel` — how a `provider/model` becomes a model   |
-| `routerModelFactory`                                                          | the default factory: Mastra's model router                              |
-| `streamModelRequest(params)`, `ModelRequestParams`, `ModelRequestResult`      | one model request, as text, usage, error and abort                      |
-| `toModelUsage(usage)`, `ZERO_MODEL_USAGE`                                     | what a request reported → the protocol's four counters, always integers |
-| `classifyModelError(error)`, `ModelErrorClassification`                       | retryable or not, and the `session.error` type that says so             |
-| `isRetryableModelError(error)`                                                | the same answer, when only the boolean is wanted                        |
-| `isClaimConflictError(error)`                                                 | whether the store refused a claim another owner had taken               |
-| `isOwnershipError(error)`                                                     | a fenced write or a claim conflict: the log is somebody else's (D9)     |
-| `RetryPolicy`, `ResolvedRetryPolicy`, `resolveRetryPolicy(policy?)`           | how failures are retried                                                |
-| `backoffDelay(attempt, policy)`, `abortableSleep`, `Sleep`                    | the delay, and the sleep that honors an abort                           |
-| `DEFAULT_MAX_RETRIES`, `DEFAULT_BASE_DELAY_MS`, `DEFAULT_MAX_DELAY_MS`        | `3`, `500`, `8000`                                                      |
-| `PACKAGE_NAME`, `DEPENDENCIES`                                                | the package name, and the edges that must resolve through built output  |
+| export                                                                        | what it is                                                                        |
+| ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `runTurn(sessionId, options)`                                                 | run one turn; resolves to a `TurnOutcome`                                         |
+| `RunTurnOptions`                                                              | `{ store, model, resolveCredential, signal?, fence?, contextStrategy?, retry? }`  |
+| `TurnOutcome`, `TurnOutcomeKind`                                              | `{ outcome: 'idle' \| 'noop' \| 'interrupted' \| 'error' }`                       |
+| `ContextStrategy`, `ContextStrategyOptions`                                   | `(events, { model, system }) => ModelMessage[]`                                   |
+| `createContextStrategy(config?)`, `ContextStrategyConfig`                     | the default strategy: the conversation, trimmed to a token budget                 |
+| `DEFAULT_CONTEXT_STRATEGY`, `DEFAULT_CONTEXT_TOKEN_BUDGET`, `CHARS_PER_TOKEN` | its defaults                                                                      |
+| `estimateTokens(text)`                                                        | the chars/4 estimate the budget is measured in                                    |
+| `ModelCredential`                                                             | `{ apiKey }` — the credential one model request is made with                      |
+| `ResolveCredential`                                                           | `(provider) => Promise<ModelCredential \| null>` — where it comes from            |
+| `ModelFactory`                                                                | `(modelId, credential) => LanguageModel` — how a `provider/model` becomes a model |
+| `routerModelFactory`                                                          | the default factory: Mastra's model router, with the key passed explicitly        |
+| `providerOf(modelId)`                                                         | the provider of a `provider/model` id: the part before the first slash            |
+| `isUsableCredential(credential)`                                              | whether a resolved credential is a key at all (a blank one is not)                |
+| `missingCredentialMessage(provider)`                                          | the `session.error` sentence for a provider with no key                           |
+| `redactSecret(text, secret)`, `REDACTED_PLACEHOLDER`                          | the credential scrubbed out of provider error text                                |
+| `streamModelRequest(params)`, `ModelRequestParams`, `ModelRequestResult`      | one model request, as text, usage, error and abort                                |
+| `toModelUsage(usage)`, `ZERO_MODEL_USAGE`                                     | what a request reported → the protocol's four counters, always integers           |
+| `classifyModelError(error)`, `ModelErrorClassification`                       | retryable or not, and the `session.error` type that says so                       |
+| `isRetryableModelError(error)`                                                | the same answer, when only the boolean is wanted                                  |
+| `isClaimConflictError(error)`                                                 | whether the store refused a claim another owner had taken                         |
+| `isOwnershipError(error)`                                                     | a fenced write or a claim conflict: the log is somebody else's (D9)               |
+| `RetryPolicy`, `ResolvedRetryPolicy`, `resolveRetryPolicy(policy?)`           | how failures are retried                                                          |
+| `backoffDelay(attempt, policy)`, `abortableSleep`, `Sleep`                    | the delay, and the sleep that honors an abort                                     |
+| `DEFAULT_MAX_RETRIES`, `DEFAULT_BASE_DELAY_MS`, `DEFAULT_MAX_DELAY_MS`        | `3`, `500`, `8000`                                                                |
+| `PACKAGE_NAME`, `DEPENDENCIES`                                                | the package name, and the edges that must resolve through built output            |
 
 `log.ts`, `events.ts` and `validate.ts` are internal: they are how the loop is written, not what
 a host talks to.
@@ -98,20 +108,36 @@ START — a fresh turn (idle, with something queued)
 LOOP — once per model request
   1. the signal aborted, or a queued user.interrupt ....... INTERRUPT
   2. nothing left to answer ............................... session.status_idle, return idle
-  3. ................ span.model_request_start { consumes: the queued user.message ids,
-                                                  model: the provider/model of the request }
+  3. no credential for the model's provider ............... MISSING CREDENTIAL (below)
+  4. ... span.model_request_start { consumes: the queued user.message ids,
+                                    model: the provider/model of the request }
      (the append IS the claim: atomic, fenced, refused whole with ClaimConflictError)
-  4. stream ............................................... stored event_start under a fresh
+  5. stream ............................................... stored event_start under a fresh
                                                              sevt_ id, then one stored
                                                              event_delta per text chunk
-  5. text arrived ......................................... agent.message { same sevt_ id,
+  6. text arrived ......................................... agent.message { same sevt_ id,
                                                              supersedes: the chunk range }
      no text .............................................. (no message: the span end below
                                                              carries the range)
-  6. ...................................................... span.model_request_end
+  7. ...................................................... span.model_request_end
                                                              { model_usage, is_error: null }
-  7. another user.message arrived ......................... loop, from 1
-  8. otherwise ............................................ session.status_idle, return idle
+  8. another user.message arrived ......................... loop, from 1
+  9. otherwise ............................................ session.status_idle, return idle
+
+MISSING CREDENTIAL — the owner has no stored key for the model's provider (epic #65, A5)
+  ........................................... session.error
+                                               { type: missing_provider_credential,
+                                                 retry_status: exhausted }
+  ........................................... session.status_idle
+                                               { consumes: the queued user.message ids }
+  ........................................... return error
+
+  The credential is resolved before the span start, so a request that has no key to make it
+  opens no span — every span start is a real model request — and streams nothing, which is why
+  there is no chunk range to supersede. The messages the request would have answered are
+  claimed by the idle event that ends the turn, the way an interrupt's are (P4): left queued,
+  the session's own scheduler would find them and run the same failing turn again. Nothing is
+  retried: adding the key and sending the message again is what works.
 
 INTERRUPT — an aborted signal, or a queued user.interrupt, at any point above
   text was streamed ......................... agent.message { supersedes: the chunk range }
@@ -199,18 +225,21 @@ Notes on the corners:
 
 ## Extension points
 
-| what                         | how                                                                                          |
-| ---------------------------- | -------------------------------------------------------------------------------------------- |
-| how the log becomes messages | `contextStrategy` on `runTurn`; the default trims to a token budget, per model               |
-| which model a session runs   | `model` on `runTurn`: a `ModelFactory`, defaulting to `routerModelFactory` (Mastra's router) |
-| how failures are retried     | `retry` on `runTurn`: attempts, base delay, ceiling, and the `sleep` itself                  |
+| what                         | how                                                                                              |
+| ---------------------------- | ------------------------------------------------------------------------------------------------ |
+| how the log becomes messages | `contextStrategy` on `runTurn`; the default trims to a token budget, per model                   |
+| which model a session runs   | `model` on `runTurn`: a `ModelFactory`, defaulting to `routerModelFactory` (Mastra's router)     |
+| where the key comes from     | `resolveCredential` on `runTurn`: the owner's credential per provider, resolved per request (A5) |
+| how failures are retried     | `retry` on `runTurn`: attempts, base delay, ceiling, and the `sleep` itself                      |
 
 `ContextStrategy` is called once per model request, with the log as that request sees it and the
 session's `{ model, system }`; it must be pure — the loop owns the store, and a strategy that
 wrote to it would put the transcript out of step with the request that produced it.
 
 `ModelFactory` is what keeps the package testable without a key: tests return one of the AI SDK's
-mock models, and nothing else in the loop knows the difference.
+mock models, and nothing else in the loop knows the difference — a mock ignores the credential
+it is handed, but the loop still asks for one, which is what the tests' `resolveTestCredential`
+is for.
 
 ## The model seam
 
@@ -227,6 +256,35 @@ after trying Mastra's `Agent` first. `Agent.stream()` swallows what this loop ne
 `streamText` gives all three cleanly: an `error` part plus `onError` with the original error
 (including its status), an `abort` part, and a `usage` report. `streamRetries: 0` keeps the SDK
 from retrying underneath the loop.
+
+### The credential of one request
+
+Each model request is made with an explicit credential, and only with one (epic #65, A5). The
+loop asks `runTurn`'s `resolveCredential` for the model's provider — the part of
+`agent.model.id` before the first slash, `providerOf`'s reading — and hands the answer to the
+`ModelFactory`, which builds the model for that one request. Nothing is held between requests:
+a retry resolves again, so a key the owner just added is picked up. `isUsableCredential` treats
+`null` **and a blank key** as "no credential": a blank one is not merely useless, it is
+dangerous (below), so both end the turn with `missing_provider_credential` before any span is
+opened.
+
+`routerModelFactory` passes the key into the router's config —
+`new ModelRouterLanguageModel({ id: modelId, apiKey })` — which is the whole of "no environment
+fallback". Mastra's `resolveAuth()` (`@mastra/core@1.71.0`, its `router.ts`) returns a
+config-supplied `apiKey` verbatim, tagged `source: 'explicit'`, **without** asking the gateway
+whose `getApiKey()` is what reads `OPENAI_API_KEY` and friends; it only consults that gateway
+when `config.apiKey` is falsy. So an explicit key cannot be overridden, and the environment is
+never read — and a falsy key would silently restore the fallback, which is exactly why the loop
+never constructs the router without one. `model.test.ts` pins both halves of that contract: the
+explicit key wins with `OPENAI_API_KEY` set to a decoy, and a turn with no credential reaches
+no provider (`fetch` is stubbed and must not be called) even with the variables set.
+
+The credential is also scrubbed on the way into the log: a provider that rejects a key
+sometimes quotes it in the error text, and `redactSecret` replaces the key — the whole value,
+minus its first four characters, and minus its last four — with `[REDACTED]` before the
+`span.model_request_end` error and the `session.error` are built. The message is otherwise kept
+whole, so the log still says what the provider said. The brain itself never logs; the tests
+capture the console anyway, because the libraries on this path could.
 
 ### Usage, and the provider spec Mastra gets wrong
 
@@ -282,9 +340,16 @@ timers: retries run on an injected `sleep`, and the clock is a `TestClock`.
   declares the wrong provider spec, and, on every scenario, that a replay of the log holds no
   superseded chunk, that no span start exists without a model request behind it, and that the
   brain writes only through `appendEvents`.
-- `context.test.ts`, `errors.test.ts`, `retry.test.ts`, `log.test.ts`, `model.test.ts` and
-  `validate.test.ts` cover the pieces on their own, including the branches the loop cannot
-  reach.
+- The credential paths live in `turn.test.ts` too: a turn that ends with
+  `missing_provider_credential` (no span, the queued message claimed by the idle event, no
+  model call), the same with `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` set to decoys and `fetch`
+  stubbed (the environment is never a fallback), a resolver asked once per request, and a
+  whole scenario — a normal turn, a 401, a retryable failure — whose provider errors quote a
+  distinctive fake key, asserting neither the key nor a four-character-trimmed piece of it
+  appears in the stored events or in captured console output.
+- `context.test.ts`, `errors.test.ts`, `retry.test.ts`, `log.test.ts`, `model.test.ts`,
+  `redact.test.ts` and `validate.test.ts` cover the pieces on their own, including the
+  branches the loop cannot reach.
 - `src/testing/harness.ts` builds the session and reads the log back; `src/testing/mock-model.ts`
   scripts what each model request answers with, records the prompts, and can act mid-stream
   (abort, append a steering message) between two chunks. Its `misdeclaredSpec` is the one model

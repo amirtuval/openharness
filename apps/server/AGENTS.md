@@ -84,9 +84,14 @@ a `user.interrupt` signals `interrupt` — exactly what the same events would do
 | `OPENHARNESS_DELTA_RETENTION_MS`      | `3600000`                      | how long superseded chunks are kept before compaction deletes them |
 | `OPENHARNESS_COMPACT_INTERVAL_MS`     | `300000`                       | how often the compaction job runs; `0` disables it                 |
 
-Provider credentials (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) are not read by this package:
-the default model factory is the brain's `routerModelFactory`, and Mastra's router reads
-whatever the provider it resolves needs from the environment itself.
+Provider credentials (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) are not read here, and the
+server keeps none of its own (epic #65, A5): every model request is made with a credential the
+brain's `resolveCredential` answered. `resolveModelFactory` hands the router kind
+`noStoredCredential`, which answers "none" — so a router turn ends with the brain's
+`missing_provider_credential` `session.error` rather than falling back to the environment —
+until #61 replaces it with the session owner's stored credential. The mock kind resolves a
+placeholder the deterministic model ignores. #61 completes this; the wiring is already here so
+this package compiles and its tests run unchanged.
 
 A variable that is set but empty counts as unset. A value that cannot be what it claims — a
 `PORT` that is not a port, an `OPENHARNESS_TEST_MODEL` that is not `mock` — fails the boot
@@ -314,6 +319,11 @@ slowly. Usage is fixed (`MOCK_MODEL_USAGE`: 42 input, 17 output, no cache) so a 
 the exact numbers a `span.model_request_end` carries. The retry marker counts attempts per
 prompt, which is what lets it fail once and succeed on the retry inside one turn.
 
+The mock needs no credential and ignores whatever it is handed, but the brain asks for one
+before every request, so `resolveModelFactory` pairs the mock factory with a placeholder
+resolver — without it the mock's turns would end with `missing_provider_credential` like any
+other credential-less turn.
+
 The startup log says which model the process is running with, and the in-memory store warns
 just as loudly: a server quietly answering with fixed text would be a bad surprise.
 
@@ -388,10 +398,10 @@ drain.
 ```
 src/
   index.ts              the barrel; `node dist/index.js` starts the server
-  main.ts               env → store (migrations) → model → scheduler → listener → shutdown
+  main.ts               env → store (migrations) → model and credentials → scheduler → listener → shutdown
   app.ts                createApp: middleware, routes, error mapping, static fallback
   config.ts             the environment, parsed and checked
-  model.ts              which model factory the process runs (router, or the mock)
+  model.ts              which model factory and credential resolver the process runs (router, or the mock)
   mock-model.ts         the deterministic test model and its markers
   runner.ts             SessionRunner: one turn per session, re-run while there is work
   compaction.ts         DeltaCompactor: the periodic deletion of superseded chunks (D9)

@@ -8,35 +8,131 @@ import { isOwnershipError } from './errors'
 /**
  * Making a model request, and the seam that keeps the brain testable.
  *
- * The brain never constructs a provider client. It asks a {@link ModelFactory} for a model by
- * the id the session carries (`provider/model`, what the protocol calls a Mastra model-router
- * string), and streams through {@link streamModelRequest}. A test injects a factory that hands
- * back one of the AI SDK's mock models, so the whole turn loop runs with no API keys and no
- * network.
+ * The brain never constructs a provider client, and it never reads a provider credential from
+ * the environment: the credential is handed to it per request (see {@link ResolveCredential},
+ * epic #65 A5), and it passes it to a {@link ModelFactory} together with the id the session
+ * carries (`provider/model`, what the protocol calls a Mastra model-router string). Streaming
+ * happens through {@link streamModelRequest}. A test injects a factory that hands back one of
+ * the AI SDK's mock models, so the whole turn loop runs with no API keys and no network.
  */
 
 /**
- * The model for a session's `agent.model.id`, from the id alone.
+ * The credential one model request is made with — the session owner's own provider key.
+ *
+ * Today a model authenticates with a single API key, which is all {@link routerModelFactory}
+ * forwards to Mastra's router. It is held for exactly one request: the turn resolves it before
+ * the request, builds the model with it, and lets it go when the request ends.
+ */
+export interface ModelCredential {
+  /** The provider's API key. Passed to the provider explicitly; never read from the environment. */
+  readonly apiKey: string
+}
+
+/**
+ * Where the credential for one model request comes from.
+ *
+ * Called once per model request with the provider — the part of the session's
+ * `agent.model.id` before the slash, as {@link providerOf} reads it — and awaited before the
+ * request is made. A host supplies it (the server decodes the session owner's stored
+ * credential; #61); `null` means the owner has none for that provider, and the request is then
+ * never attempted: the turn ends with a non-retryable `missing_provider_credential` error
+ * instead of falling back to a key of its own.
+ */
+export type ResolveCredential = (provider: string) => Promise<ModelCredential | null>
+
+/**
+ * The model for a session's `agent.model.id`, made with the credential the request runs under.
  *
  * The default is {@link routerModelFactory}, which resolves the router string the protocol
  * stores. A host that wants its own provider setup — a different gateway, a fixed model, a
- * fake in a test — passes its own factory instead.
+ * fake in a test — passes its own factory instead; a factory that needs no credential (a mock
+ * model) ignores the second argument.
  */
-export type ModelFactory = (modelId: string) => LanguageModel
+export type ModelFactory = (modelId: string, credential: ModelCredential) => LanguageModel
 
 /**
  * The default {@link ModelFactory}: Mastra's model router.
  *
  * `provider/model` is what the protocol documents for `agent.model.id`, and Mastra's router is
- * the thing that turns that string into a language model — including the provider-specific
- * authentication a model needs. The cast is because the router's `doGenerate` is declared with
- * Mastra's wrapped signature while its `doStream` is the AI SDK's; this package only streams,
- * which is the shape `streamText` consumes as declared.
+ * the thing that turns that string into a language model. The API key is passed **explicitly**
+ * in the router's config, and that is the whole of A5's "no environment fallback": Mastra's
+ * `resolveAuth()` returns a config-supplied key as-is (`source: 'explicit'`) without ever
+ * consulting the gateway that would read `OPENAI_API_KEY` and friends, so an explicit key
+ * cannot be overridden and the environment is not read. The key must be non-blank — the router
+ * treats a falsy `apiKey` as "none given" and falls back to that gateway — which is why
+ * `runTurn` checks it with {@link isUsableCredential} before it ever gets here.
+ *
+ * The cast is because the router's `doGenerate` is declared with Mastra's wrapped signature
+ * while its `doStream` is the AI SDK's; this package only streams, which is the shape
+ * `streamText` consumes as declared.
  *
  * @param modelId a router string, `provider/model`
+ * @param credential the key this one request authenticates with
  */
-export const routerModelFactory: ModelFactory = (modelId) =>
-  new ModelRouterLanguageModel(modelId) as unknown as LanguageModel
+export const routerModelFactory: ModelFactory = (modelId, credential) =>
+  new ModelRouterLanguageModel({
+    // The protocol documents `provider/model`, which is what the router's `id` is; the cast
+    // is the template-literal type it spells that with.
+    id: modelId as `${string}/${string}`,
+    apiKey: credential.apiKey,
+  }) as unknown as LanguageModel
+
+/**
+ * The provider of a `provider/model` id: the part before the first slash.
+ *
+ * This is the key {@link ResolveCredential} is asked for — the same provider id Mastra's
+ * router uses. An id with no slash is its own provider, so a stray config cannot silently
+ * resolve somebody else's credential.
+ *
+ * @param modelId the session's `agent.model.id`
+ */
+export function providerOf(modelId: string): string {
+  const slash = modelId.indexOf('/')
+  return slash === -1 ? modelId : modelId.slice(0, slash)
+}
+
+/**
+ * Whether a resolved credential can authenticate a request.
+ *
+ * `null` means the owner has no credential for the provider. A blank key counts as none as
+ * well: it must never reach {@link routerModelFactory}, because Mastra's router reads a falsy
+ * `apiKey` as "no key given" and falls back to the environment — the fallback epic #65 (A5)
+ * forbids. So everything that is not a usable key ends the request the same way.
+ *
+ * @param credential what {@link ResolveCredential} answered
+ */
+export function isUsableCredential(
+  credential: ModelCredential | null,
+): credential is ModelCredential {
+  return credential !== null && credential.apiKey.trim().length > 0
+}
+
+/** How a provider id is spelled for a person: the ones we know, by their own capitalisation. */
+const PROVIDER_DISPLAY_NAMES: Readonly<Record<string, string>> = {
+  anthropic: 'Anthropic',
+  deepseek: 'DeepSeek',
+  fireworks: 'Fireworks',
+  google: 'Google',
+  groq: 'Groq',
+  openai: 'OpenAI',
+  openrouter: 'OpenRouter',
+}
+
+/**
+ * What the log says when a request had no credential to make: a sentence for the user, naming
+ * the provider so a client can point at the right Settings entry (epic #65, A5).
+ *
+ * @param provider the provider id, as {@link providerOf} read it
+ */
+export function missingCredentialMessage(provider: string): string {
+  const name = PROVIDER_DISPLAY_NAMES[provider] ?? capitalize(provider)
+  return `No ${name} key is set. Add one in Settings → Model providers.`
+}
+
+/** A provider id as a name: `mistral` → `Mistral`. */
+function capitalize(value: string): string {
+  return value.length === 0 ? value : value.charAt(0).toUpperCase() + value.slice(1)
+}
 
 /** Token counts for a request that never produced any: the AI SDK reports nothing to map. */
 export const ZERO_MODEL_USAGE: ModelUsage = {
