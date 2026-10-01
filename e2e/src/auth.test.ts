@@ -80,21 +80,28 @@ function followSse(response: Response): FollowedSse {
   let buffer = ''
   let done = false
   const ended = (async () => {
-    for (;;) {
-      const { done: finished, value } = await reader.read()
-      if (finished) {
-        done = true
-        return
-      }
-      buffer += decoder.decode(value, { stream: true })
+    try {
       for (;;) {
-        const end = buffer.indexOf('\n\n')
-        if (end === -1) {
-          break
+        const { done: finished, value } = await reader.read()
+        if (finished) {
+          return
         }
-        frames.push(buffer.slice(0, end))
-        buffer = buffer.slice(end + 2)
+        buffer += decoder.decode(value, { stream: true })
+        for (;;) {
+          const end = buffer.indexOf('\n\n')
+          if (end === -1) {
+            break
+          }
+          frames.push(buffer.slice(0, end))
+          buffer = buffer.slice(end + 2)
+        }
       }
+    } catch {
+      // The connection was torn down with the stream still open — the server was killed at
+      // teardown, which is what a test that leaves someone's stream open invites. That is an
+      // end too, and not a failure of anything the test is about.
+    } finally {
+      done = true
     }
   })()
   return {
