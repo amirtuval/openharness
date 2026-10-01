@@ -10,7 +10,9 @@ import {
   SendEventsResponseSchema,
   SessionEventSchema,
   SessionSchema,
+  StoredEventDeltaSchema,
   StoredEventSchema,
+  StoredEventStartSchema,
   StreamEventSchema,
   UserEventSchema,
   UserMessageEventSchema,
@@ -31,6 +33,8 @@ import {
   makeStatusIdle,
   makeStatusRescheduled,
   makeStatusRunning,
+  makeStoredEventDelta,
+  makeStoredEventStart,
   makeUserInterrupt,
   makeUserMessage,
   sampleAgent,
@@ -50,6 +54,7 @@ describe('fixture builders', () => {
 
   it('build every stored event type so that it parses against its schema', () => {
     const start = makeModelRequestStart()
+    const previewed = makeUserMessage('hi').id
     const built = [
       makeUserMessage('hi'),
       makeUserInterrupt(),
@@ -60,12 +65,14 @@ describe('fixture builders', () => {
       makeSessionError(),
       start,
       makeModelRequestEnd(start),
+      makeStoredEventStart(previewed),
+      makeStoredEventDelta(previewed, 'fragment'),
     ]
     for (const event of built) {
       expect(StoredEventSchema.safeParse(event).success, event.type).toBe(true)
       expect(StreamEventSchema.safeParse(event).success, event.type).toBe(true)
     }
-    expect(built).toHaveLength(9)
+    expect(built).toHaveLength(11)
   })
 
   it('build stream-only events that parse', () => {
@@ -74,6 +81,42 @@ describe('fixture builders', () => {
     expect(EventDeltaSchema.safeParse(makeEventDelta(id, 'fragment')).success).toBe(true)
     expect(makeEventDelta(id, 'fragment').delta.content.text).toBe('fragment')
     expect(makeContentDelta('fragment', { index: 2 }).index).toBe(2)
+  })
+
+  it('build stored chunks that parse, previewing the same id as the stream-only ones', () => {
+    const previewed = makeUserMessage('hi').id
+    const start = makeStoredEventStart(previewed)
+    const delta = makeStoredEventDelta(previewed, 'fragment')
+
+    expect(StoredEventStartSchema.safeParse(start).success).toBe(true)
+    expect(StoredEventDeltaSchema.safeParse(delta).success).toBe(true)
+    // The envelope id is the chunk's own; `event.id` / `event_id` is the previewed message.
+    expect(start.id).not.toBe(previewed)
+    expect(start.event.id).toBe(previewed)
+    expect(delta.event_id).toBe(previewed)
+    // The stored chunk is the preview plus the envelope: dropping the envelope parses it as
+    // the stream-only form of the same event.
+    expect(EventStartSchema.safeParse(start).success).toBe(true)
+    expect(EventDeltaSchema.safeParse(delta).success).toBe(true)
+    expect(delta.delta.content.text).toBe('fragment')
+  })
+
+  it('carries the D9 fields on the events they belong to', () => {
+    const consumed = makeUserMessage('hi').id
+    const start = makeModelRequestStart({
+      consumes: [consumed],
+      model: 'anthropic/claude-sonnet-5',
+    })
+    expect(start.consumes).toEqual([consumed])
+    expect(start.model).toBe('anthropic/claude-sonnet-5')
+
+    const message = makeAgentMessage('hi', { supersedes: { from_seq: 10, to_seq: 14 } })
+    expect(message.supersedes).toEqual({ from_seq: 10, to_seq: 14 })
+
+    const end = makeModelRequestEnd(makeModelRequestStart(), {
+      supersedes: { from_seq: 10, to_seq: 14 },
+    })
+    expect(end.supersedes).toEqual({ from_seq: 10, to_seq: 14 })
   })
 
   it('assigns increasing seq numbers to events built in order', () => {

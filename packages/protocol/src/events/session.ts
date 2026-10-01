@@ -1,6 +1,7 @@
 import { z } from 'zod'
 
 import { EventIdSchema } from '../ids'
+import type { DeepReadonly } from '../readonly'
 import { EVENT_TYPES, EventSeqSchema, ProcessedAtSchema } from './common'
 
 /**
@@ -34,6 +35,9 @@ export const SessionStatusRunningEventSchema = z.object({
 
 export type SessionStatusRunningEvent = z.infer<typeof SessionStatusRunningEventSchema>
 
+/** {@link SessionStatusRunningEvent}, deep-readonly: the shape a store returns (D9). */
+export type ImmutableSessionStatusRunningEvent = DeepReadonly<SessionStatusRunningEvent>
+
 /** The agent finished its turn and is waiting for input. Closes every turn. */
 export const SessionStatusIdleEventSchema = z.object({
   id: EventIdSchema,
@@ -44,6 +48,9 @@ export const SessionStatusIdleEventSchema = z.object({
 })
 
 export type SessionStatusIdleEvent = z.infer<typeof SessionStatusIdleEventSchema>
+
+/** {@link SessionStatusIdleEvent}, deep-readonly: the shape a store returns (D9). */
+export type ImmutableSessionStatusIdleEvent = DeepReadonly<SessionStatusIdleEvent>
 
 /**
  * A transient error occurred and the session is retrying automatically.
@@ -58,6 +65,9 @@ export const SessionStatusRescheduledEventSchema = z.object({
 })
 
 export type SessionStatusRescheduledEvent = z.infer<typeof SessionStatusRescheduledEventSchema>
+
+/** {@link SessionStatusRescheduledEvent}, deep-readonly: the shape a store returns (D9). */
+export type ImmutableSessionStatusRescheduledEvent = DeepReadonly<SessionStatusRescheduledEvent>
 
 /**
  * What a client should do about a `session.error`, from Anthropic's
@@ -128,6 +138,9 @@ export const SessionErrorEventSchema = z.object({
 })
 
 export type SessionErrorEvent = z.infer<typeof SessionErrorEventSchema>
+
+/** {@link SessionErrorEvent}, deep-readonly: the shape a store returns (D9). */
+export type ImmutableSessionErrorEvent = DeepReadonly<SessionErrorEvent>
 
 /** Any stored session event. */
 export const SessionEventSchema = z.discriminatedUnion('type', [

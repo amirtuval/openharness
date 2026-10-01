@@ -88,8 +88,15 @@ describe('ListEventsQuerySchema', () => {
   it('rejects an unknown event type in the filter', () => {
     // `agent.tool_use` is a real Anthropic event type; v1 does not store it.
     expect(ListEventsQuerySchema.safeParse({ types: ['agent.tool_use'] }).success).toBe(false)
-    expect(ListEventsQuerySchema.safeParse({ types: ['event_start'] }).success).toBe(false)
     expect(ListEventsQuerySchema.safeParse({ types: [] }).success).toBe(true)
+  })
+
+  it('accepts the chunk types since D9: they are stored event types now', () => {
+    // A streamed reply's `event_start` / `event_delta` are stored events since D9, so a
+    // reader may filter the log by them. They are the same type strings the stream-only
+    // previews use — one spelling, two forms, told apart by `seq`.
+    expect(ListEventsQuerySchema.safeParse({ types: ['event_start'] }).success).toBe(true)
+    expect(ListEventsQuerySchema.safeParse({ types: ['event_delta'] }).success).toBe(true)
   })
 
   it('rejects an unknown order, a bad limit and a plain-string page', () => {

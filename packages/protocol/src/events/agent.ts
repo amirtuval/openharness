@@ -2,7 +2,8 @@ import { z } from 'zod'
 
 import { ContentBlocksSchema } from '../content'
 import { EventIdSchema } from '../ids'
-import { EVENT_TYPES, EventSeqSchema, ProcessedAtSchema } from './common'
+import type { DeepReadonly } from '../readonly'
+import { EVENT_TYPES, EventSeqSchema, ProcessedAtSchema, SupersedesSchema } from './common'
 
 /**
  * Events the agent produces.
@@ -25,9 +26,25 @@ export const AgentMessageEventSchema = z.object({
   seq: EventSeqSchema,
   processed_at: ProcessedAtSchema,
   content: ContentBlocksSchema,
+  /**
+   * // extension: the chunk range this message replaces (D9, issue #46).
+   *
+   * Since D9 the streamed chunks are stored events, and the finished message supersedes them:
+   * the range runs from its own `event_start` to its last `event_delta`. Replay skips the
+   * chunks in the range; a reader that saw them live does not need to — it reconciles them by
+   * id, as it always has. See {@link SupersedesSchema}.
+   *
+   * Optional only for the transition: a reply whose chunks were never stored (anything the
+   * brain wrote before D9) has no range to carry, and so does a message stored after an
+   * interrupt *before* phase P3 starts storing chunks. From P3 on it is always present.
+   */
+  supersedes: SupersedesSchema.optional(),
 })
 
 export type AgentMessageEvent = z.infer<typeof AgentMessageEventSchema>
+
+/** {@link AgentMessageEvent}, deep-readonly: the shape a store returns (D9). */
+export type ImmutableAgentMessageEvent = DeepReadonly<AgentMessageEvent>
 
 /** Any stored agent event. */
 export const AgentEventSchema = z.discriminatedUnion('type', [AgentMessageEventSchema])

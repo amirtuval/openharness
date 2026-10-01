@@ -6,8 +6,8 @@ import { TimestampSchema } from '../common'
  * The event vocabulary, and the fields every stored event carries.
  *
  * Event type strings follow Anthropic's `{domain}.{action}` convention — `user.message`,
- * `span.model_request_end` — with one exception, the stream-only preview events
- * `event_start` and `event_delta`.
+ * `span.model_request_end` — with one exception, the preview events `event_start` and
+ * `event_delta`, whose names are Anthropic's verbatim.
  *
  * See `AGENTS.md` for how to add a new event type.
  */
@@ -32,9 +32,9 @@ export const EVENT_TYPES = {
   modelRequestStart: 'span.model_request_start',
   /** A model request finished, with its token usage. */
   modelRequestEnd: 'span.model_request_end',
-  /** Stream-only: a previewed event started generating. */
+  /** A previewed event started generating. Stored since D9; stream-only before it. */
   eventStart: 'event_start',
-  /** Stream-only: incremental content for a previewed event. */
+  /** Incremental content for a previewed event. Stored since D9; stream-only before it. */
   eventDelta: 'event_delta',
 } as const
 
@@ -52,12 +52,24 @@ export const STORED_EVENT_TYPES = [
   EVENT_TYPES.sessionError,
   EVENT_TYPES.modelRequestStart,
   EVENT_TYPES.modelRequestEnd,
+  EVENT_TYPES.eventStart,
+  EVENT_TYPES.eventDelta,
 ] as const
 
 /** A persisted event type. */
 export type StoredEventType = (typeof STORED_EVENT_TYPES)[number]
 
-/** Event types that exist only on a live stream, and are never written to the log. */
+/**
+ * Event types whose stream-only form still exists: `event_start` and `event_delta`.
+ *
+ * Since D9 (issue #46) these *are* stored events — they are in {@link STORED_EVENT_TYPES} too,
+ * and a stored one carries an `id`, a `seq` and a `processed_at` like any other event. What
+ * this list still names is the envelope-less form: the preview a live connection receives
+ * while the brain streams a reply on servers that publish previews rather than storing chunks
+ * (the brain stores chunks from phase P3 on). A reader tells the two forms apart by `seq` —
+ * the stored one has it, the preview does not — which is what {@link isStoredEvent} checks;
+ * `StreamOnlyEventSchema` and this list go away in phase P4, when there are no previews left.
+ */
 export const STREAM_ONLY_EVENT_TYPES = [EVENT_TYPES.eventStart, EVENT_TYPES.eventDelta] as const
 
 /** A stream-only event type. */
@@ -100,3 +112,36 @@ export const QueuedProcessedAtSchema = TimestampSchema.nullable()
  * These are written when they happen, so their timestamp is never null.
  */
 export const ProcessedAtSchema = TimestampSchema
+
+/**
+ * // extension: the range of stored events a later event replaces (D9, issue #46).
+ *
+ * A streamed reply is stored twice over: once as the chunks it arrived in — the stored
+ * `event_start` and `event_delta` events — and once as the finished `agent.message`. The
+ * finished event carries `supersedes` over the chunks it replaces: `from_seq` is its own
+ * `event_start` and `to_seq` its last `event_delta`, inclusive on both ends. An interrupt
+ * stores the partial `agent.message` the same way, and a request that ends without one — a
+ * crash the recovering brain closes with `span.model_request_end { brain_lost }`, or a message
+ * that streamed no text at all — carries the range on that span end instead.
+ *
+ * Readers use it for one thing: replay (and the client's transcript) **skips superseded
+ * chunks**, so a client that resumes by `seq` sees the reply once, whole, however far into the
+ * stream it was when it disconnected. A later background job deletes the range physically,
+ * after the retention window, without changing what any reader sees.
+ *
+ * `from_seq <= to_seq`, and both are positive `seq` values of the same session — this is a
+ * position in the log, not an `EventId`, which is why the fields are `seq`-shaped rather than
+ * ids.
+ */
+export const SupersedesSchema = z
+  .object({
+    /** The `seq` of the first replaced event: the reply's `event_start`. */
+    from_seq: EventSeqSchema,
+    /** The `seq` of the last replaced event: the reply's final `event_delta`. */
+    to_seq: EventSeqSchema,
+  })
+  .refine((range) => range.from_seq <= range.to_seq, {
+    error: 'from_seq must not be greater than to_seq',
+  })
+
+export type Supersedes = z.infer<typeof SupersedesSchema>

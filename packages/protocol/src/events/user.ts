@@ -2,6 +2,7 @@ import { z } from 'zod'
 
 import { ContentBlocksSchema } from '../content'
 import { EventIdSchema } from '../ids'
+import type { DeepReadonly } from '../readonly'
 import { EVENT_TYPES, EventSeqSchema, QueuedProcessedAtSchema } from './common'
 
 /**
@@ -25,6 +26,9 @@ export const UserMessageEventSchema = z.object({
 
 export type UserMessageEvent = z.infer<typeof UserMessageEventSchema>
 
+/** {@link UserMessageEvent}, deep-readonly: the shape a store returns (D9). */
+export type ImmutableUserMessageEvent = DeepReadonly<UserMessageEvent>
+
 /**
  * Stop the agent mid-execution.
  *
@@ -41,6 +45,9 @@ export const UserInterruptEventSchema = z.object({
 })
 
 export type UserInterruptEvent = z.infer<typeof UserInterruptEventSchema>
+
+/** {@link UserInterruptEvent}, deep-readonly: the shape a store returns (D9). */
+export type ImmutableUserInterruptEvent = DeepReadonly<UserInterruptEvent>
 
 /** Any stored user event. */
 export const UserEventSchema = z.discriminatedUnion('type', [

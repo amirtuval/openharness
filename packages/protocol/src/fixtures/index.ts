@@ -17,6 +17,8 @@ import type {
   SessionStatusRescheduledEvent,
   SessionStatusRunningEvent,
   StoredEvent,
+  StoredEventDelta,
+  StoredEventStart,
   StreamEvent,
   UserInterruptEvent,
   UserMessageEvent,
@@ -343,6 +345,55 @@ export function makeEventDelta(
 ): EventDelta {
   const event: EventDelta = {
     type: 'event_delta',
+    event_id: eventId,
+    delta: makeContentDelta(text),
+  }
+  return { ...event, ...overrides }
+}
+
+// -------------------------------------------------------- stored chunks (D9)
+
+/**
+ * A stored `event_start`: the preview {@link makeEventStart} builds, plus the stored envelope.
+ *
+ * Its own `id` — the one the store assigns this event — is fresh; `event.id` is the id of the
+ * `agent.message` being previewed, which is what the deltas and the stored message carry too
+ * (pass the same `previewedId` to all three to build one consistent reply).
+ *
+ * @param previewedId the `sevt_` id of the event being previewed
+ * @param overrides fields to replace on the event
+ */
+export function makeStoredEventStart(
+  previewedId: EventId,
+  overrides: Partial<StoredEventStart> = {},
+): StoredEventStart {
+  const event: StoredEventStart = {
+    id: newEventId(),
+    type: 'event_start',
+    seq: takeSeq(),
+    processed_at: fixtureTimestamp(),
+    event: { type: 'agent.message', id: previewedId },
+  }
+  return { ...event, ...overrides }
+}
+
+/**
+ * A stored `event_delta`: the preview {@link makeEventDelta} builds, plus the stored envelope.
+ *
+ * @param eventId the `sevt_` id of the event being previewed
+ * @param text the fragment of text to carry
+ * @param overrides fields to replace on the event
+ */
+export function makeStoredEventDelta(
+  eventId: EventId,
+  text: string,
+  overrides: Partial<StoredEventDelta> = {},
+): StoredEventDelta {
+  const event: StoredEventDelta = {
+    id: newEventId(),
+    type: 'event_delta',
+    seq: takeSeq(),
+    processed_at: fixtureTimestamp(),
     event_id: eventId,
     delta: makeContentDelta(text),
   }
