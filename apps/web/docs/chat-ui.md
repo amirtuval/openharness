@@ -174,7 +174,14 @@ Practical notes for whoever adds the next test:
 
 ## Bundle
 
-`yarn build` emits one JS chunk (~167 kB gzip at the time of writing) plus ~6 kB of CSS.
+`yarn build` emits one JS chunk (~187 kB gzip at the time of writing) plus ~6 kB of CSS.
 Nothing unexpected is in it: React and React DOM (about a third), the markdown stack, `zod`
-(via the client's response parsing), `tailwind-merge`, and the app. The fake client and the
-AI SDK are not: the first is dev-only by construction, the second was never added.
+(via the client's response parsing), the Better Auth browser client, `tailwind-merge`, and the
+app. The fake client and the AI SDK are not: the first is dev-only by construction, the second
+was never added.
+
+There is no size budget to check against — the numbers above are a note, so a jump is noticed
+in review, not a gate. Better Auth is the one dependency that was added for something other
+than rendering (epic #65, A1): its client is what signs a browser in, and it costs about
+20 kB gzip. The fake stays out of the build the same way it always did (a dev-only dynamic
+import); nothing about the auth work changed that.

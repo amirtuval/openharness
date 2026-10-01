@@ -5,6 +5,11 @@
  * host can serve, and a hash route needs no rewrite rule and no history fallback. The trade —
  * no server-side rendering of a route — costs nothing here.
  *
+ * The device-approval page is the one route with a query
+ * (`#/device?user_code=WXYZ-1234`): that is the URL `oh login` opens and the shape the
+ * server's `verification_uri_complete` should take, so it has to survive a paste, a reload
+ * and the sign-in round trip.
+ *
  * Framework-free, like `settings.ts`: {@link parseRoute} is a pure function, the hook next to
  * it is the React binding.
  */
@@ -16,11 +21,15 @@ export type Route =
   | { readonly name: 'chat'; readonly sessionId: string }
   | { readonly name: 'agents' }
   | { readonly name: 'settings' }
+  | { readonly name: 'signin'; readonly next: string | null }
+  | { readonly name: 'device'; readonly userCode: string | null }
 
 /** The route for a `location.hash`; anything unrecognized is the home screen. */
 export function parseRoute(hash: string): Route {
   const path = hash.startsWith('#') ? hash.slice(1) : hash
-  const [first = '', second = ''] = path.split('/').filter((segment) => segment !== '')
+  const [pathname = '', search = ''] = path.split('?')
+  const [first = '', second = ''] = pathname.split('/').filter((segment) => segment !== '')
+  const query = new URLSearchParams(search)
 
   switch (first) {
     case '':
@@ -31,6 +40,10 @@ export function parseRoute(hash: string): Route {
       return { name: 'agents' }
     case 'settings':
       return { name: 'settings' }
+    case 'signin':
+      return { name: 'signin', next: emptyToNull(query.get('next')) }
+    case 'device':
+      return { name: 'device', userCode: emptyToNull(query.get('user_code')) }
     case 's':
       return second === '' ? { name: 'home' } : { name: 'chat', sessionId: decodeSegment(second) }
     default:
@@ -49,14 +62,44 @@ export function routeToHash(route: Route): string {
       return '#/agents'
     case 'settings':
       return '#/settings'
+    case 'signin':
+      return route.next === null ? '#/signin' : signInHash(route.next)
+    case 'device':
+      return deviceHash(route.userCode)
     case 'chat':
-      return `#/s/${encodeURIComponent(route.sessionId)}`
+      return chatHash(route.sessionId)
   }
 }
 
 /** The chat route's hash, for links and for `navigate`. */
 export function chatHash(sessionId: string): string {
-  return routeToHash({ name: 'chat', sessionId })
+  return `#/s/${encodeURIComponent(sessionId)}`
+}
+
+/** The settings route's hash, for links from the credential prompts. */
+export function settingsHash(): string {
+  return '#/settings'
+}
+
+/**
+ * The sign-in route's hash, carrying where to go back to.
+ *
+ * Used by the prompts that ask for a fresh sign-in (the Model providers card, the missing-key
+ * message in a chat): by the time the reader gets back, the route they were on is the one the
+ * query names.
+ */
+export function signInHash(next: string): string {
+  return `#/signin?next=${encodeURIComponent(next)}`
+}
+
+/**
+ * The device-approval route's hash.
+ *
+ * The shape `oh login`'s verification URI takes: the server fills in `user_code`, and this
+ * page hands the same string back to Better Auth's verify/approve/deny calls.
+ */
+export function deviceHash(userCode: string | null): string {
+  return userCode === null ? '#/device' : `#/device?user_code=${encodeURIComponent(userCode)}`
 }
 
 /** Go somewhere. Assigning the hash pushes a history entry, so Back works. */
@@ -97,4 +140,9 @@ function decodeSegment(segment: string): string {
   } catch {
     return segment
   }
+}
+
+/** A query value that is absent or empty, as `null`. */
+function emptyToNull(value: string | null): string | null {
+  return value === null || value === '' ? null : value
 }

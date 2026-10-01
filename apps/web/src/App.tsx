@@ -1,19 +1,26 @@
 import { createClient, type Client } from '@openharness/client'
+import type { User } from '@openharness/protocol'
 import { Menu } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 
+import { AuthProvider, useBrowserAuth } from './components/auth-provider'
 import { ChatView } from './components/chat/chat-view'
 import { ClientProvider, useClient } from './components/client-provider'
 import { SIDEBAR_ID, Sidebar } from './components/sidebar'
 import { Button } from './components/ui/button'
+import { useAuthState } from './hooks/use-auth'
 import { useRoute } from './hooks/use-route'
 import { useSessions } from './hooks/use-sessions'
 import { useSettings } from './hooks/use-settings'
-import type { Route } from './lib/router'
+import { createBrowserAuthClient } from './lib/auth-client'
+import { beginSessionCheck, signOutSession } from './lib/auth-store'
+import { navigate, routeToHash, type Route } from './lib/router'
 import { AgentsScreen } from './screens/agents-screen'
+import { DeviceScreen } from './screens/device-screen'
 import { HomeScreen } from './screens/home-screen'
 import { NewChatScreen } from './screens/new-chat-screen'
 import { SettingsScreen } from './screens/settings-screen'
+import { SignInScreen } from './screens/sign-in-screen'
 
 /** What the root takes. `client` is the seam every test uses. */
 export interface AppProps {
@@ -27,11 +34,13 @@ export interface AppProps {
 }
 
 /**
- * The app: one client, one route, a sidebar and a screen.
+ * The app: one client, one auth client, one route, a sidebar and a screen.
  *
  * The client is built here, from the saved settings — which is also why saving the settings
  * screen changes the server immediately: the settings store notifies, this component
  * re-renders, and the client is rebuilt. An empty server URL means the page's own origin.
+ * The Better Auth client is built from the same setting, because sign-in and the API have to
+ * be the same server.
  */
 export function App({ client: providedClient, fakeClient = false }: AppProps = {}) {
   const settings = useSettings()
@@ -39,25 +48,100 @@ export function App({ client: providedClient, fakeClient = false }: AppProps = {
     () => providedClient ?? createClient({ baseUrl: settings.serverUrl }),
     [providedClient, settings.serverUrl],
   )
+  const auth = useMemo(() => createBrowserAuthClient(settings.serverUrl), [settings.serverUrl])
 
   const route = useRoute()
 
   return (
     <ClientProvider client={client}>
-      <AppShell route={route} fakeClient={fakeClient} />
+      <AuthProvider auth={auth}>
+        <AppShell route={route} fakeClient={fakeClient} />
+      </AuthProvider>
     </ClientProvider>
   )
 }
 
 /**
- * The frame around every screen: the sidebar, and the routed screen.
+ * The authentication gate, and then the app.
  *
- * One sidebar, two layouts. From `md` up it is the static column it has always been; below
- * `md` the same panel is an overlay drawer, opened from the top bar that only exists at that
- * size. A phone-width chat therefore gets the whole viewport, and the list is one tap away
- * instead of occupying two thirds of the screen.
+ * The session is a cookie the app cannot read (epic #65, A2), so the first thing that happens
+ * is `client.me()` — and until it answers there is nothing to show. A 401, from that read or
+ * from any later call (which is what `noteAuthenticationError` is for), puts the sign-in page
+ * in place of everything else, and signing in puts the reader back on the route they were on,
+ * which never moved.
+ *
+ * Nothing behind the gate is even mounted while it is shut: a signed-out browser has no
+ * sidebar and no lists to load, because every one of them would answer 401. The device
+ * approval page is the one route that is *reached* without a session, and the sign-in page is
+ * what it renders — verifying a device code claims it for the signed-in session (A6), so
+ * there is no approving anything before signing in.
  */
 function AppShell({ route, fakeClient }: { route: Route; fakeClient: boolean }) {
+  const client = useClient()
+  const auth = useBrowserAuth()
+  const authState = useAuthState(client)
+
+  // Who the app is signed in as: the one read per client, and the reason a 401 from anywhere
+  // lands on the sign-in page.
+  useEffect(() => {
+    void beginSessionCheck(client)
+  }, [client])
+
+  // Signed in *and* on the sign-in page — the reader followed a `#/signin` link, or the
+  // server sent them back there after a social sign-in. Where they meant to go is in the
+  // route; without one, home.
+  useEffect(() => {
+    if (authState.status === 'signed-in' && route.name === 'signin') {
+      navigate(route.next ?? '#/')
+    }
+  }, [authState.status, route])
+
+  if (authState.status === 'checking') {
+    return (
+      <CenteredScreen>
+        <p role="status" className="text-sm text-muted-foreground">
+          Checking your session…
+        </p>
+      </CenteredScreen>
+    )
+  }
+
+  if (authState.status === 'signed-out') {
+    // The screen centres itself; there is nothing beside it.
+    return <SignInScreen returnHash={signInReturnHash(route)} />
+  }
+
+  return (
+    <AppFrame
+      route={route}
+      fakeClient={fakeClient}
+      user={authState.user}
+      onSignOut={(): void => {
+        void signOutSession(client, auth)
+      }}
+    />
+  )
+}
+
+/**
+ * The signed-in frame: one sidebar, two layouts.
+ *
+ * From `md` up it is the static column it has always been; below `md` the same panel is an
+ * overlay drawer, opened from the top bar that only exists at that size. A phone-width chat
+ * therefore gets the whole viewport, and the list is one tap away instead of occupying two
+ * thirds of the screen.
+ */
+function AppFrame({
+  route,
+  fakeClient,
+  user,
+  onSignOut,
+}: {
+  route: Route
+  fakeClient: boolean
+  user: User
+  onSignOut: () => void
+}) {
   const client = useClient()
   const { sessions, loading, error, truncated, create } = useSessions(client)
 
@@ -74,7 +158,7 @@ function AppShell({ route, fakeClient }: { route: Route; fakeClient: boolean }) 
   // over the screen it just opened hides that screen on the size where it matters most.
   useEffect(() => {
     closeDrawer()
-  }, [route])
+  }, [route, closeDrawer])
 
   // Escape closes it, as it does for any overlay.
   useEffect(() => {
@@ -90,7 +174,7 @@ function AppShell({ route, fakeClient }: { route: Route; fakeClient: boolean }) 
     return () => {
       document.removeEventListener('keydown', onKeyDown)
     }
-  }, [drawerOpen])
+  }, [drawerOpen, closeDrawer])
 
   // Focus follows the drawer: into the panel when it opens, back to the button that opened it
   // when it closes — but never on the first render, which would steal focus from the page.
@@ -121,6 +205,8 @@ function AppShell({ route, fakeClient }: { route: Route; fakeClient: boolean }) 
           error={error}
           truncated={truncated}
           activeSessionId={route.name === 'chat' ? route.sessionId : undefined}
+          user={user}
+          onSignOut={onSignOut}
           fakeClient={fakeClient}
           open={drawerOpen}
           onNavigate={closeDrawer}
@@ -155,6 +241,12 @@ function AppShell({ route, fakeClient }: { route: Route; fakeClient: boolean }) 
             <AgentsScreen />
           ) : route.name === 'settings' ? (
             <SettingsScreen />
+          ) : route.name === 'device' ? (
+            <DeviceScreen userCode={route.userCode} />
+          ) : route.name === 'signin' ? (
+            // Signed in: the effect above is already moving the hash on; this is what the
+            // screen shows for the frame or two that takes.
+            <SignInScreen returnHash={signInReturnHash(route)} />
           ) : (
             <HomeScreen />
           )}
@@ -162,4 +254,24 @@ function AppShell({ route, fakeClient }: { route: Route; fakeClient: boolean }) 
       </div>
     </>
   )
+}
+
+/** A screen with nothing else around it: the sign-in page, and the session check before it. */
+function CenteredScreen({ children }: { children: ReactNode }) {
+  return <div className="flex h-full min-h-0 items-center justify-center px-6">{children}</div>
+}
+
+/**
+ * Where signing in should return to.
+ *
+ * A `#/signin` route may carry one (`?next=`); anywhere else, the route the reader is on *is*
+ * the place to come back to — and for a social sign-in that travels to the provider, the hash
+ * is what the browser returns to (the page is a SPA, so the URL is the state).
+ */
+function signInReturnHash(route: Route): string {
+  if (route.name === 'signin') {
+    return route.next ?? '#/'
+  }
+  const hash = window.location.hash
+  return hash === '' ? routeToHash(route) : hash
 }

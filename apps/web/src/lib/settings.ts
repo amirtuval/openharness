@@ -1,28 +1,36 @@
 /**
- * The app's settings: where the server is and how to authenticate to it.
+ * The app's settings: where the server is. That is all it is.
  *
- * Two strings in `localStorage`, and a tiny store around them so React can read them with
+ * One string in `localStorage`, and a tiny store around it so React can read it with
  * `useSyncExternalStore`. Framework-free on purpose: the settings screen and the app root
  * both need to see a save, and neither owns the other.
  *
  * An **empty server URL means "same origin"**: the client is built with a relative base URL,
  * so the page's own origin serves `/v1`. That is the right default behind the Vite dev proxy
  * and for a static build served next to the API.
+ *
+ * There used to be a second field — the static `x-api-key` — and it is gone (epic #65, A8):
+ * authentication is the session cookie now (a browser) or a bearer token (the CLI), and no
+ * browser-side key exists to store. A blob left by an older version is dropped the first time
+ * the settings are read, so nothing keeps carrying it around.
  */
 
 /** What the settings screen edits and the client is built from. */
 export interface Settings {
   /** Server root, e.g. `http://localhost:3000`. Empty means same origin. */
   serverUrl: string
-  /** Value of the `x-api-key` header. Empty means the server needs no auth. */
-  apiKey: string
 }
 
 /** The `localStorage` key. Namespaced, and the only one this app writes. */
 export const SETTINGS_STORAGE_KEY = 'openharness:settings'
 
 /** Settings for a browser that has never saved any. */
-export const DEFAULT_SETTINGS: Settings = { serverUrl: '', apiKey: '' }
+export const DEFAULT_SETTINGS: Settings = { serverUrl: '' }
+
+/** Settings as an older version of this app stored them — read, then dropped. */
+interface LegacySettings {
+  apiKey?: unknown
+}
 
 const listeners = new Set<() => void>()
 let cachedRaw: string | null | undefined
@@ -44,8 +52,9 @@ export function getSettings(): Settings {
     return snapshot
   }
   if (raw !== cachedRaw) {
-    cachedRaw = raw
-    snapshot = parseSettings(raw)
+    const parsed = parseSettings(raw)
+    cachedRaw = parsed.migratedRaw ?? raw
+    snapshot = parsed.settings
   }
   return snapshot
 }
@@ -94,25 +103,42 @@ function readRaw(): string | null | undefined {
   }
 }
 
-/** Parse a stored value, with anything unreadable falling back to the defaults. */
-function parseSettings(raw: string | null): Settings {
+/**
+ * Parse a stored value, with anything unreadable falling back to the defaults.
+ *
+ * A value that still carries the removed `apiKey` field comes back with `migratedRaw` set:
+ * the caller keeps the cleaned string as what it has read, and writes it back so the key is
+ * not left sitting in the browser (A8).
+ */
+function parseSettings(raw: string | null): { settings: Settings; migratedRaw?: string } {
+  const fallback = { settings: DEFAULT_SETTINGS }
   if (raw === null) {
-    return DEFAULT_SETTINGS
+    return fallback
   }
+  let parsed: unknown
   try {
-    const parsed: unknown = JSON.parse(raw)
-    if (typeof parsed !== 'object' || parsed === null) {
-      return DEFAULT_SETTINGS
-    }
-    const record = parsed as Record<string, unknown>
-    return {
-      serverUrl: typeof record.serverUrl === 'string' ? record.serverUrl : '',
-      apiKey: typeof record.apiKey === 'string' ? record.apiKey : '',
-    }
+    parsed = JSON.parse(raw)
   } catch {
     // A corrupted value: defaults beat a broken app.
-    return DEFAULT_SETTINGS
+    return fallback
   }
+  if (typeof parsed !== 'object' || parsed === null) {
+    return fallback
+  }
+  const record = parsed as Record<string, unknown> & LegacySettings
+  const settings: Settings = {
+    serverUrl: typeof record.serverUrl === 'string' ? record.serverUrl : '',
+  }
+  if (record.apiKey === undefined) {
+    return { settings }
+  }
+  const cleaned = JSON.stringify(settings)
+  try {
+    localStorage.setItem(SETTINGS_STORAGE_KEY, cleaned)
+  } catch {
+    // Storage that refuses the cleanup still gets the clean settings in memory.
+  }
+  return { settings, migratedRaw: cleaned }
 }
 
 /** Another tab changed the settings; let the store re-read them on the next render. */
