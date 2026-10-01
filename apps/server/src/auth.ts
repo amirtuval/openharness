@@ -123,6 +123,19 @@ export interface AuthConfig {
    * person's and share one process-wide limiter store with every other test.
    */
   readonly rateLimit?: boolean
+  /**
+   * Force Better Auth's origin check (CSRF) **on**, whatever the environment says. Set only
+   * by tests; production never needs it.
+   *
+   * Better Auth turns the whole origin check off when `NODE_ENV=test` (`isTest()`), which is
+   * exactly what a vitest process is — so without this, a test that is *about* the check
+   * would run with the rule switched off and the configuration under it unknown, and pass
+   * whatever `trustedOrigins` said. `true` reaches Better Auth as an explicit
+   * `disableOriginCheck: false` (its only spelling for "do not auto-skip"); left unset, an
+   * unset environment is still the check on. There is deliberately no spelling for turning
+   * the check **off**: that would be the CSRF hole the check exists to close (#79).
+   */
+  readonly enforceOriginCheck?: boolean
   /** Which social providers have credentials configured. */
   readonly providers: SocialProviderCredentials
   /**
@@ -287,6 +300,11 @@ export function createAuth(config: AuthConfig, database: AuthDatabase, logger: L
     // The public URL is the only origin Better Auth trusts. The web app is served from it
     // (or talks to it through `OPENHARNESS_CORS_ORIGINS`, which is the /v1 CORS knob).
     trustedOrigins: [config.baseUrl],
+    // `enforceOriginCheck` is the tests' hole in `isTest()`, and nothing else: unset (what a
+    // deployment runs) leaves Better Auth's default, which is the check **on** outside a test
+    // process, and `true` spells "do not auto-skip" explicitly. Nothing sets
+    // `disableOriginCheck: true` — see {@link AuthConfig.enforceOriginCheck}.
+    ...(config.enforceOriginCheck === true ? { advanced: { disableOriginCheck: false } } : {}),
     // The plugin list the session migrations were generated from — see
     // `packages/session/migrations/0011_better_auth.sql`. A plugin added here without
     // regenerating that migration is a schema mismatch Better Auth will notice.

@@ -8,7 +8,7 @@ import {
   deviceVerificationUri,
   deviceVerificationUriComplete,
 } from './auth'
-import { createTestApp, type TestContext } from './test-support'
+import { TEST_PUBLIC_URL, createTestApp, type TestContext } from './test-support'
 
 /**
  * The authentication surface (epic #65, A1/A2/A6/A7): what `/v1` accepts, what Better Auth
@@ -304,6 +304,59 @@ describe('dev login (A7)', () => {
     expect(response.status).toBe(400)
     const body = (await response.json()) as { code?: string }
     expect(body.code).toBe('EMAIL_PASSWORD_SIGN_UP_DISABLED')
+  })
+})
+
+describe('Better Auth’s origin check (the CSRF a deployment enforces, #79)', () => {
+  // Vitest runs with `NODE_ENV=test`, and Better Auth skips its entire origin check there
+  // (`isTest()`) — so an ordinary test app exercises no origin rule, which is how the e2e
+  // suite stayed blind to the check a deployment runs (#79). These tests ask for it
+  // explicitly (`enforceOriginCheck`); the `/v1` CSRF rule is the guard's, covered above,
+  // and independent of this one.
+  const signIn = (test: TestContext, headers: Record<string, string>): Promise<Response> =>
+    test.anonymous('/api/auth/sign-in/email', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...headers },
+      body: JSON.stringify({ email: DEV_LOGIN_EMAIL, password: DEV_LOGIN_PASSWORD }),
+    })
+
+  it('refuses a sign-in from an untrusted origin, and accepts the trusted one', async () => {
+    const test = createTestApp({ enforceOriginCheck: true })
+
+    const foreign = await signIn(test, { origin: 'https://evil.example' })
+    expect(foreign.status).toBe(403)
+    expect(((await foreign.json()) as { code?: string }).code).toBe('INVALID_ORIGIN')
+
+    // `TEST_PUBLIC_URL` is the base URL every test app is configured with — the one entry
+    // in `trustedOrigins`, the value of `BETTER_AUTH_URL` in a deployment.
+    const trusted = await signIn(test, { origin: TEST_PUBLIC_URL })
+    expect(trusted.status).toBe(200)
+    expect(typeof ((await trusted.json()) as { token?: string }).token).toBe('string')
+  })
+
+  it('refuses a cookieless sign-in with Fetch-Metadata headers and no Origin', async () => {
+    // Node's `fetch` sends `sec-fetch-mode: cors` on every request, so this is what a
+    // cookieless sign-in looks like from a script on a real deployment: Better Auth forces
+    // origin validation and, with no `Origin` present, refuses — `MISSING_OR_NULL_ORIGIN`
+    // (403). Correct CSRF behaviour (#79); such clients send `Origin`, as documented in
+    // `docs/api.md` and done by the e2e harness.
+    const test = createTestApp({ enforceOriginCheck: true })
+
+    const refused = await signIn(test, { 'sec-fetch-mode': 'cors' })
+
+    expect(refused.status).toBe(403)
+    expect(((await refused.json()) as { code?: string }).code).toBe('MISSING_OR_NULL_ORIGIN')
+  })
+
+  it('is off in the default test app — the blind spot #79 was about', async () => {
+    // Without `enforceOriginCheck`, `NODE_ENV=test` wins and the same foreign-origin sign-in
+    // succeeds. Kept as an explicit record of why the flag exists: a test that is about the
+    // check must ask for it, or it asserts nothing.
+    const test = createTestApp()
+
+    const response = await signIn(test, { origin: 'https://evil.example' })
+
+    expect(response.status).toBe(200)
   })
 })
 

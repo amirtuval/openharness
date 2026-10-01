@@ -150,6 +150,19 @@ export interface TestOptions {
    * person; the one test that asserts the limiter works turns this on.
    */
   readonly rateLimit?: boolean
+  /**
+   * Enforce Better Auth's origin check even though vitest runs with `NODE_ENV=test`, where
+   * Better Auth skips it (`isTest()`) unless the configuration says otherwise (#79).
+   *
+   * Off by default so that an ordinary suite's sign-ins — which carry no `Origin` — keep
+   * working; the tests that are *about* the check turn it on, and are then subject to the
+   * same rule a deployment enforces against the configured base URL (`betterAuthUrl`, the
+   * `trustedOrigins` every test app is built with). See `AuthConfig.enforceOriginCheck`.
+   *
+   * The in-process app (`createTestApp`) only: `startTestServer` runs the real `startServer`
+   * path, which builds its auth from the config alone.
+   */
+  readonly enforceOriginCheck?: boolean
   /** The validator a `PUT /v1/provider-credentials` uses; a fake, by default. */
   readonly validateProviderCredential?: ProviderCredentialValidator
   /**
@@ -300,6 +313,7 @@ function buildTestAuth(options: TestOptions, store: SessionStore, logger: Logger
       baseUrl: options.betterAuthUrl ?? TEST_PUBLIC_URL,
       devLogin,
       rateLimit: options.rateLimit ?? false,
+      enforceOriginCheck: options.enforceOriginCheck ?? false,
       // The same wiring `startServer` does: a deleted session is announced on the store's
       // revocation channel, which is what closes its open streams (#76).
       onSessionRevoked: (authSessionId) => {

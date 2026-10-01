@@ -44,7 +44,10 @@ describe('the dev-login boot guard (A7)', () => {
 
     const attempt = await fetch(`${server.baseUrl}/api/auth/sign-in/email`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      // The trusted origin, so the refusal is about the flag and not the CSRF check: the
+      // server runs in production mode (#79), where a sign-in without it is refused before
+      // the password path is even reached.
+      headers: { 'content-type': 'application/json', origin: server.baseUrl },
       body: JSON.stringify({ email: 'dev@localhost', password: 'dev' }),
     })
     expect(attempt.ok).toBe(false)
