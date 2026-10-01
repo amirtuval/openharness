@@ -27,9 +27,21 @@ export function statusRunning(): AppendableEvent {
   return { type: EVENT_TYPES.sessionStatusRunning }
 }
 
-/** The agent finished its turn. Closes one, whatever the reason. */
-export function statusIdle(): AppendableEvent {
-  return { type: EVENT_TYPES.sessionStatusIdle, stop_reason: { type: 'end_turn' } }
+/**
+ * The agent finished its turn. Closes one, whatever the reason.
+ *
+ * `consumes` claims the queued `user.interrupt` events the turn is ending on (P4): an
+ * interrupt that arrived with no model request running — before the turn opened, between two
+ * requests, or during a backoff — has no span start to claim it, so the `session.status_idle`
+ * that ends the turn does. Omitted when the list is empty: a turn that ends on its own claims
+ * nothing.
+ */
+export function statusIdle(consumes?: readonly EventId[]): AppendableEvent {
+  return {
+    type: EVENT_TYPES.sessionStatusIdle,
+    stop_reason: { type: 'end_turn' },
+    ...(consumes === undefined || consumes.length === 0 ? {} : { consumes: [...consumes] }),
+  }
 }
 
 /** The turn hit a transient error and is waiting to be resumed. */
@@ -52,41 +64,54 @@ export function sessionError(error: SessionError): AppendableEvent {
  * serves the request, recorded per request so a session that changes models keeps, for every
  * request, the model that actually ran.
  *
- * The `id` is the caller's only for a span that exists purely to claim events (an interrupt
- * that arrived outside a request): an ordinary span start lets the store assign one.
+ * Every span start is a real model request: since P4 an interrupt is never claimed by a span of
+ * its own, so there is no such thing as a span start without a request behind it.
  *
  * @param consumes the ids of the pending user events this request answers; `[]` claims nothing
  * @param model the `provider/model` the request is made with, a Mastra router string
- * @param id the event's id, when the span is appended together with its end in one batch
  */
-export function spanStart(
-  consumes: readonly EventId[],
-  model: string,
-  id?: EventId,
-): AppendableEvent {
+export function spanStart(consumes: readonly EventId[], model: string): AppendableEvent {
   return {
     type: EVENT_TYPES.modelRequestStart,
     consumes: [...consumes],
     model,
-    ...(id === undefined ? {} : { id }),
   }
+}
+
+/** What {@link spanEnd} carries beyond the request it closes. */
+export interface SpanEndOptions {
+  /**
+   * Why the request ended without a reply. Written with `is_error: true`; omitted for a
+   * request that completed normally.
+   */
+  readonly error?: SpanError
+  /**
+   * The chunk range this span end replaces, when the request left stored chunks behind that
+   * no `agent.message` will replace — an interrupt before any text was stored, a failure
+   * mid-stream, a crash a recovering brain is closing. Replay skips the orphaned range (see
+   * {@link agentMessage}).
+   */
+  readonly supersedes?: Supersedes
+  /**
+   * The `user.interrupt` events this span end claims (P4): an interrupt that cut the request
+   * short is answered by the request's end — no model was called for it — so its ids are
+   * claimed here rather than by a span of their own. Omitted (or empty) claims nothing.
+   */
+  readonly consumes?: readonly EventId[]
 }
 
 /**
  * A model request finished — always written, whatever happened to the request.
  *
- * An `error` closes the span without a reply, and `is_error` is written together with it; a
- * request that completed normally has neither. `supersedes` is written when the request left
- * stored chunks behind that no `agent.message` will replace — an interrupt before any text was
- * stored, a failure mid-stream, a crash a recovering brain is closing — so that replay skips
- * the orphaned range (see {@link agentMessage}).
+ * See {@link SpanEndOptions} for what the call can carry beyond the usage: the error that
+ * closed the span, the chunk range it supersedes, and the interrupts it claims.
  */
 export function spanEnd(
   modelRequestStartId: EventId,
   modelUsage: ModelUsage,
-  error?: SpanError,
-  supersedes?: Supersedes,
+  options: SpanEndOptions = {},
 ): AppendableEvent {
+  const { error, supersedes, consumes } = options
   return {
     type: EVENT_TYPES.modelRequestEnd,
     model_request_start_id: modelRequestStartId,
@@ -94,6 +119,7 @@ export function spanEnd(
     is_error: error === undefined ? null : true,
     ...(error === undefined ? {} : { error }),
     ...(supersedes === undefined ? {} : { supersedes }),
+    ...(consumes === undefined || consumes.length === 0 ? {} : { consumes: [...consumes] }),
   }
 }
 
