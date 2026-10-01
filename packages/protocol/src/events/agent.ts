@@ -34,19 +34,21 @@ export const AgentMessageEventSchema = z.object({
    * chunks in the range; a reader that saw them live does not need to — it reconciles them by
    * id, as it always has. See {@link SupersedesSchema}.
    *
-   * Optional only for the transition: a reply whose chunks were never stored (anything the
-   * brain wrote before D9) has no range to carry, and so does a message stored after an
-   * interrupt *before* phase P3 starts storing chunks. From P3 on it is always present.
+   * Optional only so a log stored before D9 (issue #46) keeps validating: a reply whose chunks
+   * were never stored has no range to carry. Every reply the brain stores from phase P3 on has
+   * one; a reader without one falls back to the position of the preview it replaces.
    */
   supersedes: SupersedesSchema.optional(),
 })
 
-export type AgentMessageEvent = z.infer<typeof AgentMessageEventSchema>
+/** A stored `agent.message`, deep-readonly (D9, issue #46). */
+export type AgentMessageEvent = DeepReadonly<z.infer<typeof AgentMessageEventSchema>>
 
-/** {@link AgentMessageEvent}, deep-readonly: the shape a store returns (D9). */
-export type ImmutableAgentMessageEvent = DeepReadonly<AgentMessageEvent>
+/** @deprecated The plain name is deep-readonly now (D9, issue #46); use {@link AgentMessageEvent}. */
+export type ImmutableAgentMessageEvent = AgentMessageEvent
 
 /** Any stored agent event. */
 export const AgentEventSchema = z.discriminatedUnion('type', [AgentMessageEventSchema])
 
-export type AgentEvent = z.infer<typeof AgentEventSchema>
+/** Any stored agent event, deep-readonly (D9, issue #46). */
+export type AgentEvent = DeepReadonly<z.infer<typeof AgentEventSchema>>

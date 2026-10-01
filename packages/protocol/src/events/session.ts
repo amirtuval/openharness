@@ -33,10 +33,13 @@ export const SessionStatusRunningEventSchema = z.object({
   processed_at: ProcessedAtSchema,
 })
 
-export type SessionStatusRunningEvent = z.infer<typeof SessionStatusRunningEventSchema>
+/** A stored `session.status_running`, deep-readonly (D9, issue #46). */
+export type SessionStatusRunningEvent = DeepReadonly<
+  z.infer<typeof SessionStatusRunningEventSchema>
+>
 
-/** {@link SessionStatusRunningEvent}, deep-readonly: the shape a store returns (D9). */
-export type ImmutableSessionStatusRunningEvent = DeepReadonly<SessionStatusRunningEvent>
+/** @deprecated The plain name is deep-readonly now (D9, issue #46); use {@link SessionStatusRunningEvent}. */
+export type ImmutableSessionStatusRunningEvent = SessionStatusRunningEvent
 
 /** The agent finished its turn and is waiting for input. Closes every turn. */
 export const SessionStatusIdleEventSchema = z.object({
@@ -45,12 +48,25 @@ export const SessionStatusIdleEventSchema = z.object({
   seq: EventSeqSchema,
   processed_at: ProcessedAtSchema,
   stop_reason: StopReasonSchema,
+  /**
+   * // extension: the user events this turn end claims (P4).
+   *
+   * A `user.interrupt` that arrived with no model request running — no brain had started a
+   * turn, or the interrupt landed between requests — is answered by the turn ending: the
+   * `session.status_idle` that closes the turn claims its ids, so it reads processed and is
+   * not reached again. The claim rules are {@link ModelRequestStartEventSchema}'s `consumes`
+   * (atomic, insert-only, refused whole on a conflict). The brain writes the list when it
+   * ended the turn on an interrupt; a turn that ends on its own carries none. Optional so a
+   * log stored before P4 keeps validating.
+   */
+  consumes: z.array(EventIdSchema).optional(),
 })
 
-export type SessionStatusIdleEvent = z.infer<typeof SessionStatusIdleEventSchema>
+/** A stored `session.status_idle`, deep-readonly (D9, issue #46). */
+export type SessionStatusIdleEvent = DeepReadonly<z.infer<typeof SessionStatusIdleEventSchema>>
 
-/** {@link SessionStatusIdleEvent}, deep-readonly: the shape a store returns (D9). */
-export type ImmutableSessionStatusIdleEvent = DeepReadonly<SessionStatusIdleEvent>
+/** @deprecated The plain name is deep-readonly now (D9, issue #46); use {@link SessionStatusIdleEvent}. */
+export type ImmutableSessionStatusIdleEvent = SessionStatusIdleEvent
 
 /**
  * A transient error occurred and the session is retrying automatically.
@@ -64,10 +80,13 @@ export const SessionStatusRescheduledEventSchema = z.object({
   processed_at: ProcessedAtSchema,
 })
 
-export type SessionStatusRescheduledEvent = z.infer<typeof SessionStatusRescheduledEventSchema>
+/** A stored `session.status_rescheduled`, deep-readonly (D9, issue #46). */
+export type SessionStatusRescheduledEvent = DeepReadonly<
+  z.infer<typeof SessionStatusRescheduledEventSchema>
+>
 
-/** {@link SessionStatusRescheduledEvent}, deep-readonly: the shape a store returns (D9). */
-export type ImmutableSessionStatusRescheduledEvent = DeepReadonly<SessionStatusRescheduledEvent>
+/** @deprecated The plain name is deep-readonly now (D9, issue #46); use {@link SessionStatusRescheduledEvent}. */
+export type ImmutableSessionStatusRescheduledEvent = SessionStatusRescheduledEvent
 
 /**
  * What a client should do about a `session.error`, from Anthropic's
@@ -137,10 +156,11 @@ export const SessionErrorEventSchema = z.object({
   error: SessionErrorSchema,
 })
 
-export type SessionErrorEvent = z.infer<typeof SessionErrorEventSchema>
+/** A stored `session.error`, deep-readonly (D9, issue #46). */
+export type SessionErrorEvent = DeepReadonly<z.infer<typeof SessionErrorEventSchema>>
 
-/** {@link SessionErrorEvent}, deep-readonly: the shape a store returns (D9). */
-export type ImmutableSessionErrorEvent = DeepReadonly<SessionErrorEvent>
+/** @deprecated The plain name is deep-readonly now (D9, issue #46); use {@link SessionErrorEvent}. */
+export type ImmutableSessionErrorEvent = SessionErrorEvent
 
 /** Any stored session event. */
 export const SessionEventSchema = z.discriminatedUnion('type', [
@@ -150,4 +170,5 @@ export const SessionEventSchema = z.discriminatedUnion('type', [
   SessionErrorEventSchema,
 ])
 
-export type SessionEvent = z.infer<typeof SessionEventSchema>
+/** Any stored session event, deep-readonly (D9, issue #46). */
+export type SessionEvent = DeepReadonly<z.infer<typeof SessionEventSchema>>

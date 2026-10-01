@@ -4,8 +4,6 @@ import type {
   Agent,
   AgentMessageEvent,
   ContentDelta,
-  EventDelta,
-  EventStart,
   ModelRequestEndEvent,
   ModelRequestStartEvent,
   ModelUsage,
@@ -19,7 +17,6 @@ import type {
   StoredEvent,
   StoredEventDelta,
   StoredEventStart,
-  StreamEvent,
   UserInterruptEvent,
   UserMessageEvent,
 } from '../index'
@@ -297,21 +294,7 @@ export function makeModelRequestEnd(
   return { ...event, ...overrides }
 }
 
-// ------------------------------------------------------- stream-only previews
-
-/**
- * An `event_start` previewing `id` as an `agent.message`.
- *
- * @param id the `sevt_` id of the event being previewed
- * @param overrides fields to replace on the event
- */
-export function makeEventStart(id: EventId, overrides: Partial<EventStart> = {}): EventStart {
-  const event: EventStart = {
-    type: 'event_start',
-    event: { type: 'agent.message', id },
-  }
-  return { ...event, ...overrides }
-}
+// ---------------------------------------------------------- stored chunks (D9)
 
 /**
  * A `content_delta` payload.
@@ -332,29 +315,7 @@ export function makeContentDelta(
 }
 
 /**
- * An `event_delta` extending the preview of `eventId`.
- *
- * @param eventId the `sevt_` id of the event being previewed
- * @param text the fragment of text to carry
- * @param overrides fields to replace on the event
- */
-export function makeEventDelta(
-  eventId: EventId,
-  text: string,
-  overrides: Partial<EventDelta> = {},
-): EventDelta {
-  const event: EventDelta = {
-    type: 'event_delta',
-    event_id: eventId,
-    delta: makeContentDelta(text),
-  }
-  return { ...event, ...overrides }
-}
-
-// -------------------------------------------------------- stored chunks (D9)
-
-/**
- * A stored `event_start`: the preview {@link makeEventStart} builds, plus the stored envelope.
+ * A stored `event_start`: the chunk that opens the range an `agent.message` will supersede.
  *
  * Its own `id` — the one the store assigns this event — is fresh; `event.id` is the id of the
  * `agent.message` being previewed, which is what the deltas and the stored message carry too
@@ -378,7 +339,7 @@ export function makeStoredEventStart(
 }
 
 /**
- * A stored `event_delta`: the preview {@link makeEventDelta} builds, plus the stored envelope.
+ * A stored `event_delta`: one streamed fragment of the reply `eventId` is being written under.
  *
  * @param eventId the `sevt_` id of the event being previewed
  * @param text the fragment of text to carry
@@ -439,6 +400,12 @@ export const sampleSession: Session = makeSession({
  * It ends mid-turn: a last `user.message` sits at `processed_at: null`, the state a client
  * sees between sending a message and the brain reaching it. `seq` starts at 1 and increases
  * by one per event, the way the store assigns it.
+ *
+ * Every user event is claimed the way the brain claims one since P4: the `user.message` a
+ * request answers is listed in that request's `span.model_request_start.consumes`, and the
+ * interrupt that cut turn 3 short is listed in the `span.model_request_end.consumes` that
+ * closed the request it stopped. The last message carries no claim, which is what leaves it
+ * pending.
  */
 export const sampleSessionHistory: StoredEvent[] = buildSampleSessionHistory()
 
@@ -455,13 +422,12 @@ function buildSampleSessionHistory(): StoredEvent[] {
   // Turn 1: a complete turn, start to finish.
   const running1 = makeStatusRunning({ ...at(1) })
   push(running1)
-  push(
-    makeUserMessage('Summarize the repo README in one sentence.', {
-      ...at(2),
-      processed_at: fixtureTimestamp(2),
-    }),
-  )
-  const start1 = makeModelRequestStart({ ...at(3) })
+  const message2 = makeUserMessage('Summarize the repo README in one sentence.', {
+    ...at(2),
+    processed_at: fixtureTimestamp(2),
+  })
+  push(message2)
+  const start1 = makeModelRequestStart({ ...at(3), consumes: [message2.id] })
   push(start1)
   push(
     makeAgentMessage('openharness is an open-source implementation of Managed Agents.', {
@@ -478,13 +444,12 @@ function buildSampleSessionHistory(): StoredEvent[] {
 
   // Turn 2: the user steers mid-turn; the queued message is picked up by the running turn.
   push(makeStatusRunning({ ...at(7) }))
-  push(
-    makeUserMessage('Actually, mention the session log.', {
-      ...at(8),
-      processed_at: fixtureTimestamp(8),
-    }),
-  )
-  const start2 = makeModelRequestStart({ ...at(9) })
+  const message8 = makeUserMessage('Actually, mention the session log.', {
+    ...at(8),
+    processed_at: fixtureTimestamp(8),
+  })
+  push(message8)
+  const start2 = makeModelRequestStart({ ...at(9), consumes: [message8.id] })
   push(start2)
   push(
     makeAgentMessage(
@@ -504,15 +469,15 @@ function buildSampleSessionHistory(): StoredEvent[] {
 
   // Turn 3: the user interrupts; the partial reply is kept and the span closes with an error.
   push(makeStatusRunning({ ...at(13) }))
-  push(
-    makeUserMessage('Now write a haiku about it.', {
-      ...at(14),
-      processed_at: fixtureTimestamp(14),
-    }),
-  )
-  const start3 = makeModelRequestStart({ ...at(15) })
+  const message14 = makeUserMessage('Now write a haiku about it.', {
+    ...at(14),
+    processed_at: fixtureTimestamp(14),
+  })
+  push(message14)
+  const start3 = makeModelRequestStart({ ...at(15), consumes: [message14.id] })
   push(start3)
-  push(makeUserInterrupt({ ...at(16) }))
+  const interrupt16 = makeUserInterrupt({ ...at(16) })
+  push(interrupt16)
   push(makeAgentMessage('Events in a log,', { ...at(17) }))
   push(
     makeModelRequestEnd(start3, {
@@ -520,14 +485,19 @@ function buildSampleSessionHistory(): StoredEvent[] {
       model_usage: { ...FIXTURE_MODEL_USAGE, input_tokens: 720, output_tokens: 6 },
       is_error: true,
       error: { type: 'interrupted', message: 'Interrupted by the user.' },
+      consumes: [interrupt16.id],
     }),
   )
   push(makeStatusIdle({ ...at(19) }))
 
   // Turn 4: the model request fails, the session retries, and the retry succeeds.
   push(makeStatusRunning({ ...at(20) }))
-  push(makeUserMessage('And the license?', { ...at(21), processed_at: fixtureTimestamp(21) }))
-  const failedStart = makeModelRequestStart({ ...at(22) })
+  const message21 = makeUserMessage('And the license?', {
+    ...at(21),
+    processed_at: fixtureTimestamp(21),
+  })
+  push(message21)
+  const failedStart = makeModelRequestStart({ ...at(22), consumes: [message21.id] })
   push(failedStart)
   push(
     makeModelRequestEnd(failedStart, {
@@ -540,7 +510,8 @@ function buildSampleSessionHistory(): StoredEvent[] {
   push(makeSessionError({ ...at(24) }))
   push(makeStatusRescheduled({ ...at(25) }))
   push(makeStatusRunning({ ...at(26) }))
-  const retryStart = makeModelRequestStart({ ...at(27) })
+  // The retry answers the same message: it is already claimed, so the fresh span claims nothing.
+  const retryStart = makeModelRequestStart({ ...at(27), consumes: [] })
   push(retryStart)
   push(makeAgentMessage('MIT.', { ...at(28) }))
   push(
@@ -556,34 +527,4 @@ function buildSampleSessionHistory(): StoredEvent[] {
   push(makeUserMessage('One more thing: who maintains it?', { ...at(32), processed_at: null }))
 
   return events
-}
-
-/**
- * The live view of the first `agent.message` in {@link sampleSessionHistory}: the
- * `event_start` and `event_delta` previews, followed by the stored event itself.
- *
- * This is the same event the history carries — same `sevt_` id, same `seq` — so a client can
- * accumulate the preview, then match the stored message by id and discard what it
- * accumulated. Concatenating the deltas gives a prefix of the stored message's text (here,
- * the whole of it), which is exactly the guarantee the accumulator may rely on.
- */
-export const sampleStreamPreview: StreamEvent[] = buildSampleStreamPreview()
-
-function buildSampleStreamPreview(): StreamEvent[] {
-  const message = sampleSessionHistory.find(
-    (event): event is AgentMessageEvent => event.type === 'agent.message',
-  )
-  if (message === undefined) {
-    throw new Error('sampleSessionHistory must contain an agent.message')
-  }
-  const text = message.content.map((block) => block.text).join('')
-  const third = Math.ceil(text.length / 3)
-  const fragments = [text.slice(0, third), text.slice(third, 2 * third), text.slice(2 * third)]
-  return [
-    makeEventStart(message.id),
-    ...fragments
-      .filter((fragment) => fragment.length > 0)
-      .map((fragment) => makeEventDelta(message.id, fragment)),
-    message,
-  ]
 }

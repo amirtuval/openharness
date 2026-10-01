@@ -32,9 +32,9 @@ export const EVENT_TYPES = {
   modelRequestStart: 'span.model_request_start',
   /** A model request finished, with its token usage. */
   modelRequestEnd: 'span.model_request_end',
-  /** A previewed event started generating. Stored since D9; stream-only before it. */
+  /** A previewed event started generating. A stored chunk since D9; stream-only before it. */
   eventStart: 'event_start',
-  /** Incremental content for a previewed event. Stored since D9; stream-only before it. */
+  /** Incremental content for a previewed event. A stored chunk since D9; stream-only before it. */
   eventDelta: 'event_delta',
 } as const
 
@@ -60,29 +60,14 @@ export const STORED_EVENT_TYPES = [
 export type StoredEventType = (typeof STORED_EVENT_TYPES)[number]
 
 /**
- * Event types whose stream-only form still exists: `event_start` and `event_delta`.
- *
- * Since D9 (issue #46) these *are* stored events — they are in {@link STORED_EVENT_TYPES} too,
- * and a stored one carries an `id`, a `seq` and a `processed_at` like any other event. What
- * this list still names is the envelope-less form: the preview a live connection receives
- * while the brain streams a reply on servers that publish previews rather than storing chunks
- * (the brain stores chunks from phase P3 on). A reader tells the two forms apart by `seq` —
- * the stored one has it, the preview does not — which is what {@link isStoredEvent} checks;
- * `StreamOnlyEventSchema` and this list go away in phase P4, when there are no previews left.
- */
-export const STREAM_ONLY_EVENT_TYPES = [EVENT_TYPES.eventStart, EVENT_TYPES.eventDelta] as const
-
-/** A stream-only event type. */
-export type StreamOnlyEventType = (typeof STREAM_ONLY_EVENT_TYPES)[number]
-
-/**
  * // extension: the per-session running number of a stored event.
  *
  * Anthropic orders the event log by `processed_at`; timestamps collide at millisecond
  * resolution, and they are not monotonic across a crash, so openharness also stamps each
  * stored event with `seq`. It starts at `1` for the first event of a session and increases by
  * exactly one per event, making it the ordering key, the pagination cursor and the SSE
- * `last-event-id` resume position all at once. Stream-only events have no `seq`.
+ * `last-event-id` resume position all at once. Every event in the log has one; the stream-only
+ * previews that had none were removed in phase P4.
  */
 export const EventSeqSchema = z.number().int().positive()
 

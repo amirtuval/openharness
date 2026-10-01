@@ -5,8 +5,7 @@ import { newEventId } from '../ids'
 import {
   AgentEventSchema,
   AgentMessageEventSchema,
-  EventDeltaSchema,
-  EventStartSchema,
+  ContentDeltaSchema,
   ModelRequestEndEventSchema,
   ModelRequestStartEventSchema,
   STORED_EVENT_TYPES,
@@ -20,7 +19,6 @@ import {
   StoredEventSchema,
   StoredEventStartSchema,
   StreamEventSchema,
-  StreamOnlyEventSchema,
   SupersedesSchema,
   UserEventInputSchema,
   UserEventSchema,
@@ -30,9 +28,13 @@ import {
   isStoredEvent,
 } from './index'
 import type {
-  ImmutableAgentMessageEvent,
-  ImmutableStoredEvent,
-  ImmutableUserMessageEvent,
+  AgentMessageEvent,
+  ModelRequestEndEvent,
+  SessionStatusIdleEvent,
+  StoredEvent,
+  StoredEventStart,
+  UserEvent,
+  UserMessageEvent,
 } from './index'
 
 const eventId = (): string => newEventId()
@@ -341,102 +343,63 @@ describe('span.model_request_end', () => {
   })
 })
 
-describe('stream-only events', () => {
-  const id = newEventId()
-
-  it('matches the documented preview shapes', () => {
-    expect(
-      EventStartSchema.parse({ type: 'event_start', event: { type: 'agent.message', id } }),
-    ).toEqual({ type: 'event_start', event: { type: 'agent.message', id } })
-    expect(
-      EventDeltaSchema.parse({
-        type: 'event_delta',
-        event_id: id,
-        delta: { type: 'content_delta', index: 0, content: { type: 'text', text: 'Here' } },
-      }),
-    ).toMatchObject({ delta: { type: 'content_delta', index: 0 } })
-  })
-
-  it('carries no id, seq or processed_at of their own', () => {
-    const start = StreamOnlyEventSchema.parse({
-      type: 'event_start',
-      event: { type: 'agent.message', id },
-    })
-    expect(start).not.toHaveProperty('id')
-    expect(start).not.toHaveProperty('seq')
-    expect(StreamOnlyEventSchema.safeParse({ ...storedSamples['agent.message'] }).success).toBe(
-      false,
-    )
-  })
-
+describe('content deltas', () => {
   it('rejects a delta for an event type that cannot be previewed', () => {
     expect(
-      EventStartSchema.safeParse({ type: 'event_start', event: { type: 'agent.thinking', id } })
-        .success,
-    ).toBe(false)
-    expect(
-      EventDeltaSchema.safeParse({
-        type: 'event_delta',
-        event_id: id,
+      StoredEventDeltaSchema.safeParse({
+        ...storedSamples.event_delta,
         delta: { type: 'content_block_delta', index: 0, content: { type: 'text', text: 'x' } },
       }).success,
     ).toBe(false)
   })
 
+  it('defaults its content-block index the way Anthropic’s accumulator does', () => {
+    const parsed = ContentDeltaSchema.parse({
+      type: 'content_delta',
+      content: { type: 'text', text: 'x' },
+    })
+    expect(parsed.index).toBe(0)
+  })
+
   it('rejects a negative or fractional block index', () => {
     for (const index of [-1, 0.5]) {
       expect(
-        EventDeltaSchema.safeParse({
-          type: 'event_delta',
-          event_id: id,
-          delta: { type: 'content_delta', index, content: { type: 'text', text: 'x' } },
+        ContentDeltaSchema.safeParse({
+          type: 'content_delta',
+          index,
+          content: { type: 'text', text: 'x' },
         }).success,
+        String(index),
       ).toBe(false)
     }
-  })
-
-  it('reads a missing block index as 0, the way Anthropic’s accumulator does', () => {
-    const parsed = EventDeltaSchema.parse({
-      type: 'event_delta',
-      event_id: id,
-      delta: { type: 'content_delta', content: { type: 'text', text: 'x' } },
-    })
-    expect(parsed.delta.index).toBe(0)
   })
 })
 
 describe('StreamEventSchema', () => {
-  const id = newEventId()
-
-  it('accepts every stored event and every stream-only event', () => {
+  it('accepts every stored event: since P4 the stream carries the log and nothing else', () => {
     for (const sample of Object.values(storedSamples)) {
-      expect(StreamEventSchema.safeParse(sample).success).toBe(true)
+      expect(StreamEventSchema.safeParse(sample).success, sample.type).toBe(true)
     }
-    expect(
-      StreamEventSchema.safeParse({ type: 'event_start', event: { type: 'agent.message', id } })
-        .success,
-    ).toBe(true)
-    expect(
-      StreamEventSchema.safeParse({
-        type: 'event_delta',
-        event_id: id,
-        delta: { type: 'content_delta', index: 0, content: { type: 'text', text: 'x' } },
-      }).success,
-    ).toBe(true)
+  })
+
+  it('rejects a stream-only preview: the envelope-less form was removed in P4', () => {
+    const { id: _id, seq: _seq, processed_at: _processedAt, ...start } = storedSamples.event_start
+    expect(StreamEventSchema.safeParse(start).success).toBe(false)
+    const { event_id, delta } = storedSamples.event_delta
+    expect(StreamEventSchema.safeParse({ type: 'event_delta', event_id, delta }).success).toBe(
+      false,
+    )
   })
 
   it('still rejects unknown types', () => {
-    expect(StreamEventSchema.safeParse({ type: 'agent.tool_use', id, seq: 1 }).success).toBe(false)
+    expect(
+      StreamEventSchema.safeParse({ type: 'agent.tool_use', id: eventId(), seq: 1 }).success,
+    ).toBe(false)
   })
 
-  it('tells stored events from previews', () => {
+  it('is the stored event union', () => {
     const stored = StreamEventSchema.parse(storedSamples['agent.message'])
-    const preview = StreamEventSchema.parse({
-      type: 'event_start',
-      event: { type: 'agent.message', id },
-    })
     expect(isStoredEvent(stored)).toBe(true)
-    expect(isStoredEvent(preview)).toBe(false)
   })
 })
 
@@ -503,7 +466,7 @@ describe('user event inputs', () => {
   })
 })
 
-describe('span.model_request_start claims (D9)', () => {
+describe('claims (D9, P4)', () => {
   it('still parses without consumes and model: events stored before D9', () => {
     const parsed = ModelRequestStartEventSchema.parse(storedSamples['span.model_request_start'])
     expect(parsed.consumes).toBeUndefined()
@@ -511,6 +474,48 @@ describe('span.model_request_start claims (D9)', () => {
     expect(StoredEventSchema.safeParse(storedSamples['span.model_request_start']).success).toBe(
       true,
     )
+  })
+
+  it('carries consumes on a span end that answers an interrupt, and on an interrupt-idle turn', () => {
+    const stopped = newEventId()
+    const parsedEnd = ModelRequestEndEventSchema.parse({
+      ...storedSamples['span.model_request_end'],
+      is_error: true,
+      error: { type: 'interrupted', message: 'Interrupted by the user.' },
+      consumes: [stopped],
+    })
+    expect(parsedEnd.consumes).toEqual([stopped])
+    const parsedIdle = SessionStatusIdleEventSchema.parse({
+      ...storedSamples['session.status_idle'],
+      consumes: [stopped],
+    })
+    expect(parsedIdle.consumes).toEqual([stopped])
+  })
+
+  it('leaves consumes off an event that claims nothing: a log stored before P4 parses', () => {
+    const parsedEnd = ModelRequestEndEventSchema.parse(storedSamples['span.model_request_end'])
+    expect(parsedEnd.consumes).toBeUndefined()
+    const parsedIdle = SessionStatusIdleEventSchema.parse(storedSamples['session.status_idle'])
+    expect(parsedIdle.consumes).toBeUndefined()
+  })
+
+  it('rejects a consumed id that is not a `sevt_` id on any of the three claim sites', () => {
+    for (const consumed of ['user_01H…', 'nope']) {
+      expect(
+        ModelRequestEndEventSchema.safeParse({
+          ...storedSamples['span.model_request_end'],
+          consumes: [consumed],
+        }).success,
+        consumed,
+      ).toBe(false)
+      expect(
+        SessionStatusIdleEventSchema.safeParse({
+          ...storedSamples['session.status_idle'],
+          consumes: [consumed],
+        }).success,
+        consumed,
+      ).toBe(false)
+    }
   })
 
   it('carries the user events the request claims, and the model that served it', () => {
@@ -642,60 +647,23 @@ describe('stored chunks (D9)', () => {
     expect(parsed.type === 'event_delta' && parsed.delta.content.text).toBe('Here')
   })
 
-  it('rejects a chunk without the stored envelope: that is the stream-only form', () => {
+  it('rejects a chunk without the stored envelope: there is no preview form left', () => {
     const { id: _id, seq: _seq, processed_at: _processedAt, ...start } = storedSamples.event_start
     expect(StoredEventSchema.safeParse(start).success).toBe(false)
-    expect(EventStartSchema.safeParse(start).success).toBe(true)
+    expect(StreamEventSchema.safeParse(start).success).toBe(false)
   })
 
-  it('parses a stored chunk as its stream-only shape too, with the envelope dropped', () => {
-    // The stored form is a superset of the preview, which is what lets a reader that does not
-    // care which form it holds read `event` / `event_id` / `delta` either way.
-    expect(EventStartSchema.parse(storedSamples.event_start)).toEqual({
-      type: 'event_start',
-      event: storedSamples.event_start.event,
-    })
-    expect(EventDeltaSchema.parse(storedSamples.event_delta)).toEqual({
-      type: 'event_delta',
-      event_id: storedSamples.event_delta.event_id,
-      delta: storedSamples.event_delta.delta,
-    })
-  })
-
-  it('tells stored chunks from stream-only chunks by seq', () => {
-    const previewStart = { type: 'event_start', event: storedSamples.event_start.event } as const
-    const previewDelta = {
-      type: 'event_delta',
-      event_id: storedSamples.event_delta.event_id,
-      delta: storedSamples.event_delta.delta,
-    } as const
-
-    const stored = StreamEventSchema.parse(storedSamples.event_start)
-    const preview = StreamEventSchema.parse(previewStart)
-    expect(isStoredEvent(stored)).toBe(true)
-    expect(isStoredEvent(preview)).toBe(false)
-    expect(isStoredEvent(StreamEventSchema.parse(storedSamples.event_delta))).toBe(true)
-    expect(isStoredEvent(StreamEventSchema.parse(previewDelta))).toBe(false)
-  })
-
-  it('accepts both chunk forms in the stream union', () => {
+  it('carries the chunk as a stored event of the stream union', () => {
     for (const sample of [storedSamples.event_start, storedSamples.event_delta]) {
       expect(StreamEventSchema.safeParse(sample).success, sample.type).toBe(true)
-      expect(StreamOnlyEventSchema.safeParse(sample).success, sample.type).toBe(true)
+      expect(isStoredEvent(StreamEventSchema.parse(sample))).toBe(true)
     }
-    expect(
-      StreamEventSchema.safeParse({
-        type: 'event_delta',
-        event_id: storedSamples.event_delta.event_id,
-        delta: storedSamples.event_delta.delta,
-      }).success,
-    ).toBe(true)
   })
 })
 
-describe('the immutable event types (D9)', () => {
+describe('the readonly event types (D9)', () => {
   it('makes a stored event and everything inside it readonly', () => {
-    const event: ImmutableStoredEvent = StoredEventSchema.parse(storedSamples['agent.message'])
+    const event: StoredEvent = StoredEventSchema.parse(storedSamples['agent.message'])
 
     // Each assignment below is a compile error — the `@ts-expect-error` is what proves it.
     // They run against a throwaway parsed value, so nothing here is frozen or observed.
@@ -715,16 +683,41 @@ describe('the immutable event types (D9)', () => {
     expect(event.type).toBe('agent.message')
   })
 
-  it('keeps branded ids usable: DeepReadonly must not turn `EventId` into an object', () => {
-    const event: ImmutableUserMessageEvent = UserMessageEventSchema.parse(
-      storedSamples['user.message'],
+  it('makes every event member and every domain sub-union readonly', () => {
+    const message: UserMessageEvent = UserMessageEventSchema.parse(storedSamples['user.message'])
+    // @ts-expect-error — a user event's `processed_at` is derived, never written by a reader
+    message.processed_at = '2026-03-15T10:00:00Z'
+    // @ts-expect-error — the content blocks are readonly through the union too
+    message.content = []
+
+    const unionEvent: UserEvent = UserEventSchema.parse(storedSamples['user.interrupt'])
+    // @ts-expect-error — the domain sub-unions are the readonly members
+    unionEvent.seq = 9
+
+    const start: StoredEventStart = StoredEventStartSchema.parse(storedSamples.event_start)
+    // @ts-expect-error — a stored chunk is as immutable as any other event
+    start.event.id = newEventId()
+
+    const end: ModelRequestEndEvent = ModelRequestEndEventSchema.parse(
+      storedSamples['span.model_request_end'],
     )
+    // @ts-expect-error — so is a span end
+    end.is_error = true
+    const idle: SessionStatusIdleEvent = SessionStatusIdleEventSchema.parse(
+      storedSamples['session.status_idle'],
+    )
+    // @ts-expect-error — and a status event
+    idle.stop_reason = { type: 'end_turn' }
+
+    expect(message.type).toBe('user.message')
+  })
+
+  it('keeps branded ids usable: DeepReadonly must not turn `EventId` into an object', () => {
+    const event: UserMessageEvent = UserMessageEventSchema.parse(storedSamples['user.message'])
     const id: EventId = event.id
     expect(id).toBe(storedSamples['user.message'].id)
 
-    const typed: ImmutableAgentMessageEvent = AgentMessageEventSchema.parse(
-      storedSamples['agent.message'],
-    )
+    const typed: AgentMessageEvent = AgentMessageEventSchema.parse(storedSamples['agent.message'])
     expect(typed.content.map((block) => block.text)).toEqual(['hi'])
   })
 })
