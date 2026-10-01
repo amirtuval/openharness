@@ -9,6 +9,7 @@ import type { CreateSessionOptions, ListSessionsOptions } from '@openharness/ses
 import type { AppEnv } from '../types'
 import { notFoundError } from '../http/errors'
 import { parseBody, parseQuery, sessionIdParam } from '../http/request'
+import { PLACEHOLDER_OWNER_ID } from '../placeholder-owner'
 import { nameSessionFromFirstMessage } from '../titles'
 import type { RouteDeps } from './deps'
 import { signalKinds } from './signals'
@@ -25,6 +26,9 @@ export function registerSessionRoutes(app: Hono<AppEnv>, deps: RouteDeps): void 
   app.post(sessions, async (c) => {
     const body = await parseBody(c, CreateSessionRequestSchema)
     const options: CreateSessionOptions = {
+      // Every session belongs to a user (epic #65, A4); until #61 authenticates callers, that
+      // user is the placeholder — and the agent it snapshots has to be the placeholder's too.
+      ownerId: PLACEHOLDER_OWNER_ID,
       ...(body.title === undefined ? {} : { title: body.title }),
       ...(body.metadata === undefined ? {} : { metadata: body.metadata }),
       ...(body.initial_events === undefined ? {} : { initial_events: body.initial_events }),

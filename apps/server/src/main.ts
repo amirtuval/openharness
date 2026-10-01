@@ -17,6 +17,7 @@ import { DeltaCompactor } from './compaction'
 import { ENV_VARS, type ServerConfig, describeConfig, readServerConfig } from './config'
 import { resolveModelFactory } from './model'
 import { PostgresPartitionScheduler } from './partition-scheduler'
+import { ensurePlaceholderUser } from './placeholder-owner'
 import { LocalScheduler, type SessionScheduler } from './scheduler'
 
 /**
@@ -272,6 +273,10 @@ async function openStore(
   const db = new Kysely<PostgresSchema>({ dialect: new PostgresDialect({ pool }) })
   const applied = await migrate(db)
   logger.info(`applied ${applied.length} migration file(s)`)
+  // Transition glue (#58 until #61): the routes own what they create to a placeholder user
+  // (A4), and `owner_id` is a foreign key into Better Auth's `"user"` table, so the row has
+  // to exist before the first agent is created. Better Auth will insert real users here.
+  await ensurePlaceholderUser(db)
   // The store's partition count is what a session's `partition` column holds, and it has to be
   // the scheduler's: `findSessionsNeedingWork` and a signal's channel both name partitions.
   const store = createPostgresSessionStore({ pool }, { partitionCount: config.partitions })

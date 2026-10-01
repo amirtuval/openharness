@@ -2,7 +2,10 @@
 
 The durable, append-only session event log: the `SessionStore` contract the brain and the
 server code against, the in-memory implementation every other package tests against, the
-Postgres implementation production runs on, and the conformance suite all of them pass.
+Postgres implementation production runs on, and the conformance suite all of them pass. It also
+owns the **Better Auth tables** the server signs users in against, the `CredentialStore` that
+holds users' sealed model-provider keys (epic #65, A1/A4/A5), and the SQL every one of those
+tables comes from.
 
 A session is a log of events — the user's messages, the agent's replies, the status
 transitions that bracket a turn, and the spans around every model request. It is the source of
@@ -10,6 +13,12 @@ truth for a run, and it is why the brain holds no state of its own. The log is i
 (D9, issue #46): events are appended and never modified, and the one deletion — compaction of
 superseded stream chunks — is a single contract method. Around the log sit the leases that
 decide who may write to it, and the signals that wake that owner up.
+
+Since the authentication epic (#65) every agent and session belongs to exactly one user:
+creating one takes the owner's `user.id`, the stored resource carries it as `owner_id`, and the
+reads a user-facing route makes are **owner-scoped** — another user's resource answers `null`
+or `SessionNotFoundError`, never 403. A user's provider credentials live in the same database,
+sealed by `@openharness/vault` before this package ever sees them.
 
 ## Commands
 
@@ -39,9 +48,10 @@ See [Running Postgres](#running-postgres) below.
 
 ```
 src/
-  index.ts              the barrel: the contract, the store, clocks, errors
+  index.ts              the barrel: the contracts, the stores, clocks, errors
   store.ts              SessionStore, its vocabulary, and the semantics in TSDoc
-  memory.ts             InMemorySessionStore: the fake, and the reference behaviour
+  credentials.ts        CredentialStore: sealed blobs, metadata, and the semantics in TSDoc
+  memory.ts             InMemorySessionStore and InMemoryCredentialStore: the fakes, and the reference behaviour
   clock.ts              Clock, systemClock, timestampAt()
   errors.ts             FencedError, SessionNotFoundError, AgentNotFoundError, DuplicateEventIdError, ClaimConflictError
   inputs.ts             the argument checks both stores share (limits, cursors, lease ttls)
@@ -50,18 +60,21 @@ src/
   postgres/
     index.ts            the `@openharness/session/postgres` entry point
     store.ts            PostgresSessionStore and createPostgresSessionStore
+    credentials.ts      PostgresCredentialStore and createPostgresCredentialStore
     schema.ts           the Kysely table types, row → protocol mapping, channel names
     listen.ts           the dedicated LISTEN connection, and its reconnection
     migrate.ts          migrate(): the SQL-file runner
     cli.ts              the `openharness-session-migrate` bin
-    postgres.test.ts    the conformance suite against Postgres, plus extra tests
+    postgres.test.ts    the conformance suites against Postgres, plus extra tests
     no-updates.test.ts  the source scan proving no SQL path writes back to the log
   testing/
-    index.ts            the subpath entry: re-exports, plus the suite and the test clock
-    conformance.ts      runSessionStoreConformance()
+    index.ts            the subpath entry: re-exports, plus the suites and the test clock
+    conformance.ts      runSessionStoreConformance(), and the suite's two owners
+    credentials-conformance.ts  runCredentialStoreConformance()
     clock.ts            createTestClock()
-migrations/             the SQL the Postgres store needs, applied by `migrate()`
-docs/postgres.md        the Postgres store: schema, migrations, delivery, local setup
+migrations/             the SQL the Postgres stores need, applied by `migrate()`:
+                        0001–0010 the log, 0011 Better Auth, 0012 ownership, 0013 credentials
+docs/postgres.md        the Postgres stores: schema, migrations, delivery, local setup
 ```
 
 ## Public API
@@ -73,6 +86,9 @@ docs/postgres.md        the Postgres store: schema, migrations, delivery, local 
 | `SessionStore`                                                                                                                                  | the storage and signaling contract; every method is async, and documented below                                      |
 | `AppendableEvent`                                                                                                                               | an event a caller appends: a `StoredEvent` minus `seq` and `processed_at`, plus an optional `id` the caller supplies |
 | `CreateSessionOptions`, `ListAgentsOptions`, `ListSessionsOptions`, `ListEventsOptions`                                                         | the options objects of the list and create methods                                                                   |
+| `OwnerScopeOptions`                                                                                                                             | `{ ownerId? }`: how a read is scoped to one owner (A4); see [the contract](#the-contract)                            |
+| `CredentialStore`                                                                                                                               | the sealed-blob credential contract; see [The CredentialStore](#the-credentialstore-epic-65-a5)                      |
+| `SealedSecret`, `CredentialKey`, `UpsertCredentialInput`, `ListCredentialsOptions`, `SealedProviderCredential`                                  | the credential contract's vocabulary: the sealed form, the key, what `upsert` writes, and what `get` returns         |
 | `UpdateSessionRequest`                                                                                                                          | what `updateSession()` changes: the title, or nothing                                                                |
 | `AppendEventsOptions`, `PartitionFence`                                                                                                         | the optional fence a brain attaches to a write                                                                       |
 | `CompactOptions`                                                                                                                                | what `compact()` takes: the retention cutoff (`olderThan: Date \| number`)                                           |
@@ -80,6 +96,7 @@ docs/postgres.md        the Postgres store: schema, migrations, delivery, local 
 | `TurnState`, `TurnStateKind`                                                                                                                    | what `getTurnState()` answers                                                                                        |
 | `SessionEventListener`, `PartitionSignalListener`, `Unsubscribe`                                                                                | subscription plumbing                                                                                                |
 | `InMemorySessionStore`, `InMemorySessionStoreOptions`                                                                                           | the in-memory implementation and its `{ now, partitionCount }` options                                               |
+| `InMemoryCredentialStore`, `InMemoryCredentialStoreOptions`                                                                                     | the in-memory credential store and its `{ now }` option                                                              |
 | `Clock`, `systemClock`, `timestampAt()`                                                                                                         | the injectable time source, and how an instant is written as a timestamp                                             |
 | `FencedError`, `SessionNotFoundError`, `AgentNotFoundError`, `DuplicateEventIdError`, `ClaimConflictError`, `isFencedError()`                   | the typed failures a store raises                                                                                    |
 | `FENCED_ERROR_CODE`, `SESSION_NOT_FOUND_ERROR_CODE`, `AGENT_NOT_FOUND_ERROR_CODE`, `DUPLICATE_EVENT_ID_ERROR_CODE`, `CLAIM_CONFLICT_ERROR_CODE` | the stable `code` of each error, for detection across bundles                                                        |
@@ -87,13 +104,16 @@ docs/postgres.md        the Postgres store: schema, migrations, delivery, local 
 
 ### `@openharness/session/postgres`
 
-| export                                                                                                                                 | what it is                                                                        |
-| -------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| `PostgresSessionStore`, `createPostgresSessionStore(config, options?)`                                                                 | the durable implementation; `{ connectionString }` or `{ pool }`, plus options    |
-| `PostgresSessionStoreOptions`, `PostgresSessionStoreConfig`                                                                            | its options (`now`, `partitionCount`, `onError`) and the two ways to reach a DB   |
-| `migrate(db, options?)`                                                                                                                | applies `migrations/`, idempotently, in one locked transaction; returns the files |
-| `MigrateOptions`                                                                                                                       | `{ migrationsDir? }`, for a migrations directory that is not this package's       |
-| `PostgresSchema`, `AgentsTable`, `SessionsTable`, `EventsTable`, `EventClaimsTable`, `EventSupersessionsTable`, `PartitionLeasesTable` | the Kysely table types, for a caller that wants to query alongside the store      |
+| export                                                                                                                                                             | what it is                                                                                                                           |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `PostgresSessionStore`, `createPostgresSessionStore(config, options?)`                                                                                             | the durable implementation; `{ connectionString }` or `{ pool }`, plus options                                                       |
+| `PostgresSessionStoreOptions`, `PostgresSessionStoreConfig`                                                                                                        | its options (`now`, `partitionCount`, `onError`) and the two ways to reach a DB                                                      |
+| `PostgresCredentialStore`, `createPostgresCredentialStore(config, options?)`                                                                                       | the durable credential store; `{ connectionString }` or `{ pool }`, plus `now`                                                       |
+| `PostgresCredentialStoreOptions`, `PostgresCredentialStoreConfig`                                                                                                  | its options, and the two ways to reach a DB                                                                                          |
+| `migrate(db, options?)`                                                                                                                                            | applies `migrations/` — the log, Better Auth and `provider_credentials` — idempotently, in one locked transaction; returns the files |
+| `MigrateOptions`                                                                                                                                                   | `{ migrationsDir? }`, for a migrations directory that is not this package's                                                          |
+| `PostgresSchema`, `AgentsTable`, `SessionsTable`, `EventsTable`, `EventClaimsTable`, `EventSupersessionsTable`, `PartitionLeasesTable`, `ProviderCredentialsTable` | the Kysely table types, for a caller that wants to query alongside the stores                                                        |
+| `ProviderCredentialRow`, `ProviderCredentialMetadataRow`                                                                                                           | the two shapes a `provider_credentials` read has: with the sealed blob, and without                                                  |
 
 This entry point is a separate subpath on purpose: it is the only module that depends on `pg`
 and `kysely`, and a consumer that only needs the contract, the fake or the suite must not load
@@ -102,16 +122,21 @@ opened it**. See [`docs/postgres.md`](./docs/postgres.md).
 
 ### `@openharness/session/testing`
 
-| export                                               | what it is                                                      |
-| ---------------------------------------------------- | --------------------------------------------------------------- |
-| `runSessionStoreConformance(makeStore, options?)`    | the suite every implementation must pass                        |
-| `MakeSessionStore`, `SessionStoreConformanceOptions` | the factory it takes, and how to name the suite                 |
-| `createTestClock(startMs?)`, `TestClock`             | a clock a test advances by hand                                 |
-| everything from `@openharness/session`               | re-exported, so a test imports the store and the suite together |
+| export                                                     | what it is                                                    |
+| ---------------------------------------------------------- | ------------------------------------------------------------- |
+| `runSessionStoreConformance(makeStore, options?)`          | the suite every `SessionStore` implementation must pass       |
+| `runCredentialStoreConformance(makeStore, options?)`       | the suite every `CredentialStore` implementation must pass    |
+| `MakeSessionStore`, `SessionStoreConformanceOptions`       | the session factory, and how to name the suite                |
+| `MakeCredentialStore`, `CredentialStoreConformanceOptions` | the credential factory, and how to name the suite             |
+| `OWNER_A`, `OWNER_B`                                       | the two users everything in the session suite belongs to (A4) |
+| `createTestClock(startMs?)`, `TestClock`                   | a clock a test advances by hand                               |
+| everything from `@openharness/session`                     | re-exported, so a test imports a store and its suite together |
 
-This entry point is for test code only: the suite calls `describe`/`it` from `vitest`, which
+This entry point is for test code only: the suites call `describe`/`it` from `vitest`, which
 is therefore a devDependency of any package that uses it, and never a runtime dependency of
-this one.
+this one. Both suites take an optional `ensureUsers(userIds)`, which a store whose schema
+references Better Auth's `"user"` row (Postgres) uses to seed the owners the suite creates
+things as.
 
 ## The contract
 
@@ -121,6 +146,36 @@ summary a caller — or a new implementation — needs before writing a line aga
 **Everything is asynchronous**, and nothing may assume synchronous delivery. A store built on
 `LISTEN`/`NOTIFY` notifies after it commits, and a subscription or a signal arrives a tick
 later than the append that caused it. Read state; do not assume a listener has run.
+
+**Ownership** (epic #65, A4). Every agent and session belongs to exactly one user:
+`createAgent(input, ownerId)` and `createSession(agentId, { ownerId, … })` take the owner's
+Better Auth `user.id`, the stored resource carries it as `owner_id`, and it never changes.
+Which methods are **owner-scoped** — they take an `OwnerScopeOptions` `{ ownerId }`, and a
+resource belonging to somebody else is answered as if it did not exist, because a 404 must not
+leak that it does:
+
+| method                            | scoped form                                                                                                                                            |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `getAgent(agentId, options?)`     | `null` for another owner's agent                                                                                                                       |
+| `listAgents(options?)`            | `data: []` for another owner; `[]`, never somebody else's                                                                                              |
+| `getSession(sessionId, options?)` | `null` for another owner's session                                                                                                                     |
+| `listSessions(options?)`          | only the owner's sessions; the `agentId` filter narrows inside them                                                                                    |
+| `listEvents(sessionId, options?)` | `SessionNotFoundError` for another owner's session — the user-facing events route's 404                                                                |
+| `createSession(agentId, options)` | `ownerId` is **required**, and the agent must belong to that owner or it is an `AgentNotFoundError` — a session may not snapshot somebody else's agent |
+
+Everything else is **unscoped**, and deliberately so:
+
+- `createAgent` takes its owner as an argument rather than an option: a resource cannot be
+  created without one.
+- the brain's and scheduler's paths — `appendEvents`, `listEvents` without `ownerId`,
+  `getPendingUserEvents`, `getTurnState`, `compact`, `subscribe`, `signalPartition`,
+  `onPartitionSignal`, `findSessionsNeedingWork`, the leases — act _for a session_, never for a
+  user, and must not be narrowed by one.
+- `updateAgent` and `updateSession` are not reads and take no scope: a user-facing route calls
+  the scoped read first and answers 404 for a `null`. Nothing can go stale between the two
+  calls, because no method writes `owner_id` after creation.
+- `getSession` and `getAgent` without `ownerId` see any owner's resource; that is for server
+  internals that already resolved the caller, like the brain recovering a turn.
 
 **Ordering.** `seq` is the ordering key, not time: it starts at `1` and increases by one per
 event, per session, in append order. Timestamps are metadata. Reads return events in `seq`
@@ -292,6 +347,36 @@ validate the wire, and callers (the API, the brain) run them. `InMemorySessionSt
 one exception, and only to be _stricter_: it rebuilds each appended event through
 `StoredEventSchema`, so the fake cannot hand back anything but the exact wire shape.
 
+## The CredentialStore (epic #65, A5)
+
+`CredentialStore` in `src/credentials.ts` is the second contract: where a user's
+model-provider keys live. It stores **only sealed blobs**. The server seals a plaintext with
+`@openharness/vault` and hands the store a `SealedSecret` — `{ ciphertext, nonce, wrappedKey,
+kekVersion }`, base64 strings — which the store writes down as given; it never sees a
+plaintext, never opens a blob, and this package deliberately does **not** depend on
+`@openharness/vault` (the sealed shape is restated here so the two are structurally
+interchangeable without one importing the other).
+
+| method                         | what it does                                                                                                                                |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `upsert(input)`                | writes `{ userId, provider, type, sealed, last4, validatedAt }` and answers the metadata; replaces in place for the same `(user, provider)` |
+| `get({ userId, provider })`    | the record **including the sealed form**, or `null` — the one read the server's model path uses, and the only one that hands a blob back    |
+| `list({ userId })`             | metadata only, ordered by `provider`; the sealed columns are not even selected                                                              |
+| `delete({ userId, provider })` | `true` when one was deleted, `false` when there was none                                                                                    |
+
+The answers are the protocol's `ProviderCredential` metadata (`pcred_` id, `type`, `provider`,
+`last4`, `created_at`, `updated_at`, `validated_at`); `get` adds `sealed`, as a
+`SealedProviderCredential`. Every method is keyed by `userId` — there is no unscoped read of a
+credential — and implementations deep-freeze what they return, because a sealed blob is a
+value. One credential per `(user, provider)`, and two users may each hold the same provider:
+the upsert replaces (keeping the stored `id` and `created_at`) rather than accumulating rows.
+
+Both implementations pass `runCredentialStoreConformance`: `InMemoryCredentialStore` (in
+`memory.ts`, for tests) and `PostgresCredentialStore`
+(`@openharness/session/postgres`, on the `provider_credentials` table). This package never
+sees the plaintext, so the credential's _validation_ — the one cheap provider call on save —
+and its decryption are the server's (`apps/server`, #61).
+
 ## The Postgres store
 
 `@openharness/session/postgres` implements the same contract against Postgres, with Kysely and
@@ -299,7 +384,8 @@ one exception, and only to be _stricter_: it rebuilds each appended event throug
 the whole suite against a real database. [docs/postgres.md](./docs/postgres.md) is the long
 version; this is the shape of it.
 
-**Schema.** Six tables, all created by `migrations/`: `agents`, `sessions` (with the
+**Schema.** Sixteen tables, all created by `migrations/`. Ten are this package's: `agents` and
+`sessions` (each with the `owner_id` an agent or session belongs to, `sessions` also with the
 `partitionOf` partition and the `status` the log's last status event implies), `events` (`id`,
 `session_id`, `seq`, `type`, `payload jsonb`, `created_at`, `processed_at`, `unique
 (session_id, seq)`, an index on `(session_id, seq)` and a partial index for queued user
@@ -307,9 +393,17 @@ events), `event_claims` (one row per claim of a user event: `event_id` primary k
 whose `consumes` claimed it or `null` on a pre-P4 `markProcessed` row, `claimed_at` — the
 primary key is what makes double-claiming fail atomically), `event_supersessions` (one row per
 recorded `{ from_seq, to_seq }` range: `by_event_id` primary key, `by_seq`, and a `check
-(by_seq > to_seq)`) and `partition_leases` (`partition`, `owner`, `epoch`, `expires_at`). Ids
-are `text collate "C"`, so SQL ordering is the byte order the protocol's keyset cursors use;
-every timestamp is `timestamptz` written from the injected clock, never from `now()`.
+(by_seq > to_seq)`), `partition_leases` (`partition`, `owner`, `epoch`, `expires_at`) and
+`provider_credentials` (a sealed credential per `(user_id, provider)`; see `0013`). Six are
+**Better Auth's**, created by the same migrations and read and written by Better Auth itself
+(decision A1): `user`, `session`, `account`, `verification` and `deviceCode`.
+
+Ids of this package's tables are `text collate "C"`, so SQL ordering is the byte order the
+protocol's keyset cursors use; every timestamp is `timestamptz` written from the injected
+clock, never from `now()`. Better Auth's tables are the exception to both rules: their columns
+are camelCase and their timestamps are `timestamptz default CURRENT_TIMESTAMP`, because Better
+Auth writes them and the schema has to be exactly what it expects. `owner_id` is Better Auth's
+opaque text, so it carries no special collation either — nothing orders by it.
 
 `events.processed_at` is written for everything **except** a user event (P4): a user event is
 queued, its `processed_at` is derived from the claim on read, and the append leaves the column
@@ -333,13 +427,38 @@ this package's source for the two spellings such a write would use and fails on 
 the rule cannot come back in a later change unnoticed.
 
 **Migrations.** Plain SQL files in `migrations/`, applied in name order by `migrate(db)` — one
-transaction under an advisory lock, every statement `if not exists`, so it is idempotent and
-safe to run from two instances at once. There is no ledger: a file that has been applied
-anywhere must never be edited. `yarn migrate` runs the built bin. D9 added `0007_event_claims`,
-`0008_event_claims_backfill` (one-time: the pre-D9 `events.processed_at` of user events is
-copied into claim rows, so a log written before the change reads exactly as it did),
-`0009_event_supersessions` and — in P4, the cleanup — `0010_drop_session_previews`, which drops
-the preview table the removed `publishEphemeral`/`getPreview` pair used.
+transaction under an advisory lock, every statement idempotent (`if not exists`, or a guard),
+so it is safe to run from two instances at once. There is no ledger: a file that has been
+applied anywhere must never be edited. `yarn migrate` runs the built bin. D9 added
+`0007_event_claims`, `0008_event_claims_backfill` (one-time: the pre-D9 `events.processed_at`
+of user events is copied into claim rows, so a log written before the change reads exactly as
+it did), `0009_event_supersessions` and — in P4, the cleanup — `0010_drop_session_previews`,
+which drops the preview table the removed `publishEphemeral`/`getPreview` pair used.
+
+Wave 2 of the authentication epic (#65, issue #58) added `0011_better_auth`, `0012_ownership`
+and `0013_provider_credentials`:
+
+- **`0011_better_auth.sql` — Better Auth's tables** (decision A1): `user`, `session`,
+  `account`, `verification` and the device-authorization plugin's `deviceCode`, for a config
+  with the core library, the `google`, `github` and `microsoft` social providers and the
+  `device-authorization` and `bearer` plugins. The SQL is **generated, not hand-written**: it
+  came out of **Better Auth 1.7.7**'s CLI (`npx @better-auth/cli generate`, with the
+  Postgres/Kysely adapter) in a scratch directory, and is committed verbatim but for
+  whitespace and the `if not exists` the migrator needs. The server sub-issue (#61) mounts
+  Better Auth against these tables with its own migrator disabled, so if the Better Auth
+  version moves, regenerate and diff: **they have to match exactly.** The file's header
+  records the same provenance.
+- **`0012_ownership.sql` — delete the v1 data, then ownership** (decision A4): v1 is
+  unreleased, so there is no backfill — all rows of `events`, `event_claims`,
+  `event_supersessions`, `sessions` and `agents` are deleted, and `agents` and `sessions` gain
+  `owner_id text not null references "user"(id) on delete cascade` plus an
+  `(owner_id, created_at, id)` index for each list. The delete is guarded by the absence of
+  the column it introduces, because the runner re-runs every file on every `migrate()` call:
+  without the guard a later server boot would wipe every log in the database.
+- **`0013_provider_credentials.sql` — the sealed credential table** (decision A5): id
+  (`pcred_`), user, provider, type, the four sealed fields, `last4`, the timestamps and
+  `validated_at`, unique on `(user_id, provider)` and `on delete cascade` from `"user"`. There
+  is no plaintext column, and none may ever be added.
 
 **Appending.** `seq` is assigned inside the append transaction, under `select … for update` on
 the session row, so concurrent appends — from any number of connections, stores or processes —
@@ -384,8 +503,9 @@ database's `now()`.
 - **Locally** set `DATABASE_URL`, or have a Docker daemon running and let the tests start
   `postgres:18-alpine` with testcontainers. With neither, the suite is skipped with a note —
   a skip is not a pass.
-- The tests truncate `agents`, `sessions`, `events` and `partition_leases` before every test,
-  so point `DATABASE_URL` at a scratch database.
+- The tests truncate every table this package owns — including `provider_credentials` — before
+  every test, so point `DATABASE_URL` at a scratch database. Better Auth's tables are not
+  truncated; the two `"user"` rows the suites seed are re-inserted as needed.
 
 ## Running the conformance suite against a new implementation
 
@@ -418,7 +538,19 @@ runSessionStoreConformance(async (clock) => new PostgresSessionStore({ pool, now
   be one**: `RangeError` for something that is not a valid event id, and `DuplicateEventIdError`
   for an id the store already holds — anywhere in it, not just in that session — or one that
   appears twice in the same batch. Either way the batch stores nothing.
+- **Owners have to exist** where the schema says so: both suites create everything as
+  `OWNER_A` or `OWNER_B`, and a store whose tables reference Better Auth's `"user"` row must
+  seed them through `ensureUsers`. An in-memory store has no users and leaves the hook out.
 - Name the suite (`{ name: '…' }`) so a failure says which implementation broke.
+
+`runCredentialStoreConformance` works the same way: a factory that takes the clock the store
+must use (`(clock) => new InMemoryCredentialStore({ now: clock.now })`), the same optional
+`ensureUsers`, and the same rule that the factory hands out no state an earlier store could
+see. What it asks for is what the `CredentialStore` contract promises — replace-in-place
+upsert, metadata-only lists with no sealed field in them, `null`/`false`/`[]` for another
+user, delete, one row per `(user, provider)`, clock-derived timestamps, and deep-frozen
+answers. `validated_at` is the caller's instant, so the suite passes its own and checks it
+comes back unchanged.
 
 ## Allowed `@openharness/*` dependencies
 
@@ -435,32 +567,43 @@ relative paths. `yarn check:deps` at the repo root enforces this.
 
 `src/**/*.test.ts` with Vitest (node environment):
 
-- `testing/conformance.test.ts` runs the whole suite against `InMemorySessionStore` — the
-  acceptance test of this package.
-- `postgres/postgres.test.ts` runs the same suite against Postgres — the acceptance test of
-  the durable store — and adds what only a shared store can be asked: concurrent appends from
+- `testing/conformance.test.ts` and `testing/credentials-conformance.test.ts` run the two
+  suites against the in-memory stores — the acceptance tests of this package.
+- `postgres/postgres.test.ts` runs both suites against Postgres — the acceptance tests of the
+  durable stores — and adds what only a shared store can be asked: concurrent appends from
   two stores, a supplied event id two of them try to take, fencing across stores, a burst that
   must be delivered exactly once, catching up after the listening connection is killed, a
   chunk another store appended delivered to this store's subscriber, idempotent migrations,
   `close()` leaving a borrowed pool alone, the raw `events.processed_at` column staying `NULL`
-  for a user event (a claim is a row of its own), and the append-only guarantee against the
-  real SQL: a snapshot of every `events` row is compared before and after claims, a
-  supersession and a compaction, and no surviving row may differ by a field.
+  for a user event (a claim is a row of its own), the append-only guarantee against the real
+  SQL (a snapshot of every `events` row is compared before and after claims, a supersession
+  and a compaction, and no surviving row may differ by a field), two stores racing to `upsert`
+  one provider (one row, whatever happens), and the user-delete cascade: deleting the `"user"`
+  row takes that user's agents, sessions, events and credentials and leaves the other user's
+  alone. Since `owner_id` is a foreign key into `"user"`, the factory seeds the suite's owners
+  (`ensureUsers`) on empty tables.
 - `postgres/no-updates.test.ts` scans this package's source for the two spellings a write back
   to `events` would use and fails on either. It needs no database, so the append-only rule is
   guarded even where the Postgres suite is skipped.
-- `memory.test.ts` covers what the fake promises _on top of_ the contract: the injected
-  clock, the copies it hands out (events deep-frozen, sessions and agents mutable clones),
-  microtask delivery, and error identity.
+- `memory.test.ts` covers what the fakes promise _on top of_ the contracts: the injected
+  clocks, the copies they hand out (events deep-frozen, sessions and agents mutable clones,
+  credentials frozen), microtask delivery, error identity, and that two stores share nothing.
 - `index.test.ts` and `testing/clock.test.ts` cover the entry points and the test clock.
 
 ## Rules
 
 - Stay inside this folder; do not edit other packages. A change that needs another package
   belongs in a separate issue.
-- `SessionStore` is a contract: the Postgres store, the brain and the server are written
-  against it, so it changes only when v1 as a whole does. Add to the TSDoc with every change.
+- `SessionStore` and `CredentialStore` are contracts: the Postgres stores, the brain and the
+  server are written against them, so they change only when v1 as a whole does. Add to the
+  TSDoc with every change.
+- The Better Auth schema is **generated, not ours**: it is committed as SQL exactly as
+  Better Auth's CLI produced it (see `0011_better_auth.sql`), and a Better Auth upgrade means
+  regenerating and diffing it, never editing it by hand. The version that produced it is in
+  that file's header and in this document.
+- `CredentialStore` stores sealed blobs and nothing else: no plaintext column, no plaintext
+  parameter, no dependency on `@openharness/vault`, and no sealed field in a `list` answer.
 - An implementation detail belongs in the implementation's TSDoc, not in the contract's; the
-  conformance suite tests only what the contract promises.
+  conformance suites test only what the contracts promise.
 - Update this file whenever the behaviour or the public API changes.
 - Larger docs go in `packages/session/docs/`.

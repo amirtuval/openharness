@@ -10,6 +10,7 @@ import {
 } from '@openharness/protocol'
 import { isFencedError, type SessionStore } from '@openharness/session'
 
+import { PLACEHOLDER_OWNER_ID } from './placeholder-owner'
 import { PostgresPartitionScheduler } from './partition-scheduler'
 import {
   POSTGRES_STARTUP_TIMEOUT_MS,
@@ -146,9 +147,12 @@ if (SOURCE === null) {
 
   /** A session whose `sessionId` hashes to `partition`, created directly in the store. */
   async function sessionIn(store: SessionStore, partition: number): Promise<Session> {
-    const agent = await store.createAgent({ name: 'Agent', model: { id: 'openharness-test/x' } })
+    const agent = await store.createAgent(
+      { name: 'Agent', model: { id: 'openharness-test/x' } },
+      PLACEHOLDER_OWNER_ID,
+    )
     for (let attempt = 0; attempt < 200; attempt += 1) {
-      const session = await store.createSession(agent.id)
+      const session = await store.createSession(agent.id, { ownerId: PLACEHOLDER_OWNER_ID })
       if (partitionOf(session.id, PARTITIONS) === partition) {
         return session
       }

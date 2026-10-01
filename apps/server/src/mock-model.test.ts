@@ -10,6 +10,7 @@ import {
 import { InMemorySessionStore } from '@openharness/session'
 import type { RetryPolicy } from '@openharness/brain'
 
+import { PLACEHOLDER_OWNER_ID } from './placeholder-owner'
 import { LocalScheduler } from './scheduler'
 import {
   MOCK_ECHO_CHUNKS,
@@ -47,8 +48,11 @@ async function runTurn(
     ...(options.retry === undefined ? {} : { retry: options.retry }),
   })
   await scheduler.start()
-  const agent = await store.createAgent({ name: 'Agent', model: { id: 'openharness-test/x' } })
-  const session = await store.createSession(agent.id)
+  const agent = await store.createAgent(
+    { name: 'Agent', model: { id: 'openharness-test/x' } },
+    PLACEHOLDER_OWNER_ID,
+  )
+  const session = await store.createSession(agent.id, { ownerId: PLACEHOLDER_OWNER_ID })
   const previews: StreamEvent[] = []
   await store.subscribe(session.id, (event) => {
     previews.push(event)

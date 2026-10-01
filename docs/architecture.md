@@ -13,7 +13,12 @@ ideas carry the design:
   (see [`packages/brain/AGENTS.md`](../packages/brain/AGENTS.md)). The log is immutable: a
   stored event is never modified — the types are deep-readonly, so writing to one is a
   compile error — and the only deletion is compacting the streamed chunks a finished reply
-  superseded (D9, [#46](https://github.com/amirtuval/openharness/issues/46)).
+  superseded (D9, [#46](https://github.com/amirtuval/openharness/issues/46)). Every agent and
+  session belongs to exactly one user (epic [#65](https://github.com/amirtuval/openharness/issues/65),
+  A4): it carries the owner's id, the reads a user-facing route makes are scoped to it, and
+  another user's resource is answered 404, never 403. `@openharness/session` also owns the SQL
+  everything else sits on: Better Auth's own tables (A1) and the sealed
+  `provider_credentials` users' model keys live in (A5).
 
   What a model request answers is a fact in the log, not state beside it: the events that
   claim user input — a `span.model_request_start` claims the messages its request folds in,
@@ -77,7 +82,7 @@ no CORS to configure.
 | `@openharness/config`   | `packages/config`   | shared tooling config (tsconfig, ESLint, Prettier, Vitest) |
 | `@openharness/protocol` | `packages/protocol` | wire types and schemas shared by everything                |
 | `@openharness/vault`    | `packages/vault`    | envelope encryption for user secrets                       |
-| `@openharness/session`  | `packages/session`  | the append-only session event log                          |
+| `@openharness/session`  | `packages/session`  | the append-only session event log, its owners, and the SQL |
 | `@openharness/hands`    | `packages/hands`    | sandboxes and tools behind `execute(name, input)`          |
 | `@openharness/brain`    | `packages/brain`    | the stateless harness loop                                 |
 | `@openharness/client`   | `packages/client`   | client for the server, used by the web app and the TUI     |

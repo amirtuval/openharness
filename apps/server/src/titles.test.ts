@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { EVENT_TYPES, SESSION_TITLE_MAX_LENGTH } from '@openharness/protocol'
 import { InMemorySessionStore } from '@openharness/session'
 
+import { PLACEHOLDER_OWNER_ID } from './placeholder-owner'
 import { deriveSessionTitle, nameSessionFromFirstMessage } from './titles'
 
 /**
@@ -20,8 +21,11 @@ function userMessage(text: string): {
 /** A store with one agent and one session, and an empty log. */
 async function storeWithSession() {
   const store = new InMemorySessionStore()
-  const agent = await store.createAgent({ name: 'Agent', model: { id: 'test/model' } })
-  const session = await store.createSession(agent.id)
+  const agent = await store.createAgent(
+    { name: 'Agent', model: { id: 'test/model' } },
+    PLACEHOLDER_OWNER_ID,
+  )
+  const session = await store.createSession(agent.id, { ownerId: PLACEHOLDER_OWNER_ID })
   return { store, session }
 }
 

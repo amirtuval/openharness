@@ -2,6 +2,7 @@ import { EVENT_TYPES, newEventId, type SessionId } from '@openharness/protocol'
 import { InMemorySessionStore, type CompactOptions, type SessionStore } from '@openharness/session'
 import { describe, expect, it } from 'vitest'
 
+import { PLACEHOLDER_OWNER_ID } from './placeholder-owner'
 import { DeltaCompactor } from './compaction'
 import type { Logger } from './types'
 import { waitFor } from './test-support'
@@ -42,8 +43,11 @@ function recordingLogger(): Logger & { readonly lines: string[] } {
 async function seedSupersededReply(
   store: SessionStore,
 ): Promise<{ sessionId: SessionId; chunkSeqs: number[] }> {
-  const agent = await store.createAgent({ name: 'Agent', model: { id: 'test/model' } })
-  const session = await store.createSession(agent.id)
+  const agent = await store.createAgent(
+    { name: 'Agent', model: { id: 'test/model' } },
+    PLACEHOLDER_OWNER_ID,
+  )
+  const session = await store.createSession(agent.id, { ownerId: PLACEHOLDER_OWNER_ID })
   const messageId = newEventId()
   const chunks = await store.appendEvents(session.id, [
     { type: EVENT_TYPES.eventStart, event: { type: EVENT_TYPES.agentMessage, id: messageId } },
@@ -98,8 +102,11 @@ describe('DeltaCompactor', () => {
   it('keeps an in-flight reply out of the window: nothing supersedes it', async () => {
     const clock = movableClock(1_000_000)
     const store = new InMemorySessionStore({ now: clock.now })
-    const agent = await store.createAgent({ name: 'Agent', model: { id: 'test/model' } })
-    const session = await store.createSession(agent.id)
+    const agent = await store.createAgent(
+      { name: 'Agent', model: { id: 'test/model' } },
+      PLACEHOLDER_OWNER_ID,
+    )
+    const session = await store.createSession(agent.id, { ownerId: PLACEHOLDER_OWNER_ID })
     const messageId = newEventId()
     await store.appendEvents(session.id, [
       { type: EVENT_TYPES.eventStart, event: { type: EVENT_TYPES.agentMessage, id: messageId } },

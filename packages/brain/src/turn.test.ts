@@ -39,6 +39,7 @@ import {
 } from './testing/mock-model'
 import {
   TEST_MODEL_ID,
+  TEST_OWNER_ID,
   chunkDeltaOf,
   chunksOf,
   deltaTextOf,
@@ -1059,12 +1060,18 @@ describe('runTurn', () => {
     }
 
     const store = new RivalStore()
-    const agent = await store.createAgent({
-      name: 'Summarizer',
-      model: { id: TEST_MODEL_ID },
-      system: 'You are a concise technical assistant.',
+    const agent = await store.createAgent(
+      {
+        name: 'Summarizer',
+        model: { id: TEST_MODEL_ID },
+        system: 'You are a concise technical assistant.',
+      },
+      TEST_OWNER_ID,
+    )
+    const session = await store.createSession(agent.id, {
+      ownerId: TEST_OWNER_ID,
+      initial_events: [message('Hello')],
     })
-    const session = await store.createSession(agent.id, { initial_events: [message('Hello')] })
     const [pending] = await store.getPendingUserEvents(session.id)
     store.rivalTargets = [pending?.id ?? newEventId()]
     const { factory, calls } = mockModel({ text: ['unused'] })

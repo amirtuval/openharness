@@ -7,6 +7,7 @@ import {
   encodeSeqCursor,
   newAgentId,
   newEventId,
+  newProviderCredentialId,
   newSessionId,
   partitionOf,
   type Agent,
@@ -20,6 +21,7 @@ import {
   type ListSessionsResponse,
   type ModelRequestStartEvent,
   type NextPage,
+  type ProviderCredential,
   type Session,
   type SessionId,
   type StoredEvent,
@@ -27,9 +29,17 @@ import {
   type Timestamp,
   type UpdateAgentRequest,
   type UserEvent,
+  type UserId,
 } from '@openharness/protocol'
 
 import { type Clock, systemClock, timestampAt } from './clock'
+import type {
+  CredentialKey,
+  CredentialStore,
+  ListCredentialsOptions,
+  SealedProviderCredential,
+  UpsertCredentialInput,
+} from './credentials'
 import {
   AgentNotFoundError,
   ClaimConflictError,
@@ -55,6 +65,7 @@ import type {
   ListAgentsOptions,
   ListEventsOptions,
   ListSessionsOptions,
+  OwnerScopeOptions,
   PartitionFence,
   PartitionLease,
   PartitionSignal,
@@ -69,13 +80,14 @@ import type {
 } from './store'
 
 /**
- * The in-memory `SessionStore`: the test fake for every other package, and the reference
- * behaviour for the contract in `store.ts`.
+ * The in-memory stores: `InMemorySessionStore` here, and `InMemoryCredentialStore` below it —
+ * the test fakes for every other package, and the reference behaviour for the contracts in
+ * `store.ts` and `credentials.ts`.
  *
- * It holds everything in `Map`s — agents, sessions and their logs, leases, listeners — and is
- * single-process by construction: two instances share nothing, and a lease in one is invisible
- * to the other. That is the one place it cannot be Postgres-like, so the conformance suite
- * only tests what a shared store can also do.
+ * The session store holds everything in `Map`s — agents, sessions and their logs, leases,
+ * listeners — and is single-process by construction: two instances share nothing, and a lease
+ * in one is invisible to the other. That is the one place it cannot be Postgres-like, so the
+ * conformance suite only tests what a shared store can also do.
  *
  * Three implementation details are worth knowing, because they are choices the contract leaves
  * open and tests may rely on:
@@ -135,12 +147,13 @@ export class InMemorySessionStore implements SessionStore {
 
   // ------------------------------------------------------------------ agents
 
-  createAgent(input: CreateAgentRequest): Promise<Agent> {
+  createAgent(input: CreateAgentRequest, ownerId: UserId): Promise<Agent> {
     const now = this.#clock()
     const at = timestampAt(now)
     const agent: Agent = {
       id: newAgentId(now),
       type: 'agent',
+      owner_id: ownerId,
       name: input.name,
       description: input.description ?? null,
       model: { id: input.model.id },
@@ -152,14 +165,19 @@ export class InMemorySessionStore implements SessionStore {
     return resolved(clone(agent))
   }
 
-  getAgent(agentId: AgentId): Promise<Agent | null> {
+  getAgent(agentId: AgentId, options: OwnerScopeOptions = {}): Promise<Agent | null> {
     const agent = this.#agents.get(agentId)
-    return resolved(agent === undefined ? null : clone(agent))
+    if (agent === undefined || !matchesOwner(agent, options)) {
+      return resolved(null)
+    }
+    return resolved(clone(agent))
   }
 
   listAgents(options: ListAgentsOptions = {}): Promise<ListAgentsResponse> {
     const cursor = options.page === undefined ? null : decodeKeyPage(options.page)
-    const agents = [...this.#agents.values()].sort(compareKeys)
+    const agents = [...this.#agents.values()]
+      .filter((agent) => matchesOwner(agent, options))
+      .sort(compareKeys)
     const { data, next_page } = paginate(agents, pageSize(options.limit), cursor, 'asc')
     return resolved({ data: data.map(clone), next_page })
   }
@@ -183,9 +201,11 @@ export class InMemorySessionStore implements SessionStore {
 
   // ---------------------------------------------------------------- sessions
 
-  createSession(agentId: AgentId, options: CreateSessionOptions = {}): Promise<Session> {
+  createSession(agentId: AgentId, options: CreateSessionOptions): Promise<Session> {
     const agent = this.#agents.get(agentId)
-    if (agent === undefined) {
+    // Somebody else's agent is not a session this caller may create: the same "not found" as
+    // an id nothing names, so the answer does not leak that the agent exists (A4).
+    if (agent === undefined || agent.owner_id !== options.ownerId) {
       throw new AgentNotFoundError(agentId)
     }
     const now = this.#clock()
@@ -193,6 +213,7 @@ export class InMemorySessionStore implements SessionStore {
     const session: Session = {
       id: newSessionId(now),
       type: 'session',
+      owner_id: options.ownerId,
       status: 'idle',
       title: options.title ?? null,
       metadata: { ...options.metadata },
@@ -213,9 +234,12 @@ export class InMemorySessionStore implements SessionStore {
     return resolved(clone(session))
   }
 
-  getSession(sessionId: SessionId): Promise<Session | null> {
+  getSession(sessionId: SessionId, options: OwnerScopeOptions = {}): Promise<Session | null> {
     const record = this.#sessions.get(sessionId)
-    return resolved(record === undefined ? null : clone(record.session))
+    if (record === undefined || !matchesOwner(record.session, options)) {
+      return resolved(null)
+    }
+    return resolved(clone(record.session))
   }
 
   listSessions(options: ListSessionsOptions = {}): Promise<ListSessionsResponse> {
@@ -223,6 +247,7 @@ export class InMemorySessionStore implements SessionStore {
     const wanted = options.agentId
     const sessions = [...this.#sessions.values()]
       .map((record) => record.session)
+      .filter((session) => matchesOwner(session, options))
       .filter((session) => wanted === undefined || session.agent.id === wanted)
     // Newest first: the list order is `(created_at, id)` descending, which is the order the
     // cursors seek into.
@@ -260,7 +285,7 @@ export class InMemorySessionStore implements SessionStore {
   }
 
   listEvents(sessionId: SessionId, options: ListEventsOptions = {}): Promise<ListEventsResponse> {
-    const record = this.#requireSession(sessionId)
+    const record = this.#requireSession(sessionId, options)
     const order = options.order ?? DEFAULT_EVENT_ORDER
     const cursor = options.page === undefined ? null : decodeSeqPage(options.page)
     const afterSeq = options.afterSeq
@@ -448,10 +473,14 @@ export class InMemorySessionStore implements SessionStore {
 
   // ------------------------------------------------------------------ internals
 
-  /** The session's log record, or a {@link SessionNotFoundError} for an id nothing has. */
-  #requireSession(sessionId: SessionId): SessionRecord {
+  /**
+   * The session's log record, or a {@link SessionNotFoundError} for an id nothing has — and
+   * for one that belongs to another owner than a scoped read named: both are the same answer,
+   * so a user-facing 404 leaks nothing (epic #65, A4).
+   */
+  #requireSession(sessionId: SessionId, options: OwnerScopeOptions = {}): SessionRecord {
     const record = this.#sessions.get(sessionId)
-    if (record === undefined) {
+    if (record === undefined || !matchesOwner(record.session, options)) {
       throw new SessionNotFoundError(sessionId)
     }
     return record
@@ -638,6 +667,118 @@ export interface InMemorySessionStoreOptions {
   readonly partitionCount?: number
 }
 
+/**
+ * The in-memory `CredentialStore` (epic #65, A5): the test fake for the contract in
+ * `credentials.ts`, and the reference behaviour for the Postgres one.
+ *
+ * It holds the sealed blobs in nested `Map`s — one per user, keyed by provider — and follows
+ * the same three choices {@link InMemorySessionStore} makes:
+ *
+ * - **Time is injectable** ({@link InMemoryCredentialStoreOptions.now}): `created_at` and
+ *   `updated_at` come from that clock, so a test can assert the exact instants.
+ * - **Nothing is shared with the caller**: every answer is a fresh object.
+ * - **Answers are deep-frozen**: a sealed blob is a value, and neither it nor the metadata
+ *   beside it can be written to after the store hands it out.
+ *
+ * There are no users to cascade from here — the real cascade is the Postgres schema's foreign
+ * key — so the fake simply never has a credential for a user it was not given one for.
+ */
+export class InMemoryCredentialStore implements CredentialStore {
+  readonly #clock: Clock
+
+  /** One entry per user, holding that user's credentials keyed by provider. */
+  readonly #credentials = new Map<UserId, Map<string, StoredCredential>>()
+
+  constructor(options: InMemoryCredentialStoreOptions = {}) {
+    this.#clock = options.now ?? systemClock
+  }
+
+  upsert(input: UpsertCredentialInput): Promise<ProviderCredential> {
+    const now = this.#clock()
+    const at = timestampAt(now)
+    const stored = this.#forUser(input.userId)
+    const existing = stored.get(input.provider)
+    // A replacement keeps the id and `created_at` it is replacing — one credential per
+    // `(user, provider)`, so a second save is the same credential with a new secret.
+    const record: StoredCredential = {
+      id: existing?.id ?? newProviderCredentialId(now),
+      type: input.type,
+      provider: input.provider,
+      last4: input.last4,
+      created_at: existing?.created_at ?? at,
+      updated_at: at,
+      validated_at: input.validatedAt,
+      sealed: { ...input.sealed },
+    }
+    stored.set(input.provider, record)
+    return resolved(deepFreeze(metadataOf(record)))
+  }
+
+  get(key: CredentialKey): Promise<SealedProviderCredential | null> {
+    const record = this.#credentials.get(key.userId)?.get(key.provider)
+    return resolved(record === undefined ? null : deepFreeze(structuredClone(record)))
+  }
+
+  list(options: ListCredentialsOptions): Promise<ProviderCredential[]> {
+    const stored = this.#credentials.get(options.userId)
+    if (stored === undefined) {
+      return resolved([])
+    }
+    const metadata = [...stored.values()]
+      .sort((left, right) => compareProviders(left.provider, right.provider))
+      .map((record) => deepFreeze(metadataOf(record)))
+    return resolved(metadata)
+  }
+
+  delete(key: CredentialKey): Promise<boolean> {
+    const stored = this.#credentials.get(key.userId)
+    if (stored === undefined) {
+      return resolved(false)
+    }
+    const deleted = stored.delete(key.provider)
+    if (stored.size === 0) {
+      this.#credentials.delete(key.userId)
+    }
+    return resolved(deleted)
+  }
+
+  /** One user's credentials, created on first use. */
+  #forUser(userId: UserId): Map<string, StoredCredential> {
+    let stored = this.#credentials.get(userId)
+    if (stored === undefined) {
+      stored = new Map()
+      this.#credentials.set(userId, stored)
+    }
+    return stored
+  }
+}
+
+/** Everything {@link InMemoryCredentialStore} takes. */
+export interface InMemoryCredentialStoreOptions {
+  /**
+   * The store's time source. Defaults to {@link systemClock}; pass a controllable clock in
+   * tests, which is what the conformance suite does.
+   */
+  readonly now?: Clock
+}
+
+/** A stored credential: {@link SealedProviderCredential} as the in-memory store keeps it. */
+type StoredCredential = SealedProviderCredential
+
+/** The metadata of a stored credential, without its sealed blob: what `upsert` and `list` answer. */
+function metadataOf(record: SealedProviderCredential): ProviderCredential {
+  const { sealed: _sealed, ...metadata } = record
+  return metadata
+}
+
+/** The `provider` ordering `list` promises: byte order, the `C` collation the SQL uses. */
+function compareProviders(left: string, right: string): number {
+  if (left === right) {
+    return 0
+  }
+  return left < right ? -1 : 1
+}
+
 /** One event in a session's log, with the internal creation time the protocol has no field for. */
 interface EventRecord {
   /**
@@ -709,6 +850,20 @@ function resolved<T>(value: T): Promise<T> {
 /** A deep copy, so a caller cannot reach into the store's state through what it was handed. */
 function clone<T>(value: T): T {
   return structuredClone(value)
+}
+
+/**
+ * Whether a resource belongs to the owner a read was scoped to.
+ *
+ * An unscoped read — no `ownerId` — matches anything: it is the brain's and the scheduler's
+ * form, and they act for a session rather than for a user. A scoped read matches only the
+ * owner's own resources (epic #65, A4).
+ */
+function matchesOwner(
+  resource: { readonly owner_id?: UserId },
+  options: OwnerScopeOptions,
+): boolean {
+  return options.ownerId === undefined || resource.owner_id === options.ownerId
 }
 
 /**
