@@ -44,7 +44,7 @@ Node 24 and Yarn 4 (corepack) are required; see [`docs/development.md`](./docs/d
 apps/      server (@openharness/server), web (@openharness/web), tui (@openharness/cli)
 packages/  config, protocol, session, hands, brain, client
 e2e/       @openharness/e2e — cross-package tests
-docs/      architecture.md, development.md, workflow.md, decisions/
+docs/      architecture.md, development.md, workflow.md, ROADMAP.md, decisions/
 scripts/   check-deps.mjs
 ```
 
