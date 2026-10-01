@@ -1,6 +1,6 @@
 import {
-  LONG_REPLY_PROMPT,
   QA_MODEL,
+  RELOAD_REPLY_PROMPT,
   conversation,
   createAgent,
   createSession,
@@ -46,9 +46,23 @@ test.describe('W4 scrolling', () => {
     await openChat(page, session.id)
     await expectNoErrorBanner(page)
 
-    const prompt = isRealModel ? LONG_REPLY_PROMPT : '__slow__ a long reply'
+    // A real provider answers 60 numbers before the reader can scroll around in them; 300
+    // stream for around six seconds, which is the premise "the stream is still running while
+    // the reader is scrolling" (#74 §12 found 60 too short for `openai/gpt-4.1-mini`).
+    const prompt = isRealModel ? RELOAD_REPLY_PROMPT : '__slow__ a long reply'
+    const existingReply = await lastAgentText(page)
     await sendFromComposer(page, prompt)
     await waitForLongReplyStart(page)
+    // The reply to *this* prompt has to have started first: with a real provider the check
+    // above is satisfied by the filler turns' own replies, and a scroll-up in the same
+    // instant as the send's pin-to-bottom is a race — the app quite rightly keeps the view
+    // at the bottom for a moment after a send (#74 §12).
+    await expect
+      .poll(async () => (await lastAgentText(page)) !== existingReply, {
+        timeout: 60_000,
+        message: 'the reply to the scrolling prompt never started',
+      })
+      .toBe(true)
 
     await test.step('scroll up: the view stays where the reader put it', async () => {
       await conversation(page).evaluate((element) => {
