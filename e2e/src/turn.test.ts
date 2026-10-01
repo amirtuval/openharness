@@ -6,7 +6,12 @@ import {
   type Client,
 } from '@openharness/client'
 import { EVENT_TYPES, type ModelRequestEndEvent, type Session } from '@openharness/protocol'
-import { MOCK_MODEL_USAGE, MOCK_SLOW_MARKER, MOCK_SLOW_TOTAL_MS } from '@openharness/server'
+import {
+  MOCK_ECHO_CHUNKS,
+  MOCK_MODEL_USAGE,
+  MOCK_SLOW_MARKER,
+  MOCK_SLOW_TOTAL_MS,
+} from '@openharness/server'
 import { describe, expect, it } from 'vitest'
 
 import {
@@ -109,6 +114,9 @@ describe('a full turn', () => {
     const sent = await client.sendMessage(session.id, prompt)
     await waitForTurnEnd(client, session.id, { afterSeq: sent.seq })
 
+    // The replay read (`events.iterate`) is what a client folds: the reply's stored chunks are
+    // superseded by its message and are not in it — which is why the seqs have a gap where the
+    // chunks were (the log positions are never reused; see D9, issue #46).
     const log = await readLog(client, session.id)
     expect(typesOf(log)).toEqual([
       EVENT_TYPES.userMessage,
@@ -118,8 +126,22 @@ describe('a full turn', () => {
       EVENT_TYPES.modelRequestEnd,
       EVENT_TYPES.sessionStatusIdle,
     ])
-    expect(log.map((event) => event.seq)).toEqual([1, 2, 3, 4, 5, 6])
+    // seq 4 is the reply's `event_start`, 5.. its deltas; the message supersedes them all.
+    const messageSeq = 3 + MOCK_ECHO_CHUNKS + 2
+    expect(log.map((event) => event.seq)).toEqual([
+      1,
+      2,
+      3,
+      messageSeq,
+      messageSeq + 1,
+      messageSeq + 2,
+    ])
     expect(log.every((event) => event.processed_at !== null)).toBe(true)
+
+    const reply = log.find((event) => event.type === EVENT_TYPES.agentMessage)
+    expect(reply).toMatchObject({
+      supersedes: { from_seq: 4, to_seq: 3 + MOCK_ECHO_CHUNKS + 1 },
+    })
 
     const spanEnd = log.find(
       (event): event is ModelRequestEndEvent => event.type === EVENT_TYPES.modelRequestEnd,
@@ -176,6 +198,9 @@ describe('a full turn', () => {
     await stream.stop()
 
     const log = await readLog(client, session.id)
+    // The interrupting brain writes two spans: the request it cut short, and a span of its own
+    // that claims the `user.interrupt` (the claim on a user event *is* the `consumes` of a
+    // span start, D9) and closes immediately — nothing was asked of the model for it.
     expect(typesOf(log)).toEqual([
       EVENT_TYPES.userMessage,
       EVENT_TYPES.sessionStatusRunning,
@@ -183,19 +208,28 @@ describe('a full turn', () => {
       EVENT_TYPES.userInterrupt,
       EVENT_TYPES.agentMessage,
       EVENT_TYPES.modelRequestEnd,
+      EVENT_TYPES.modelRequestStart,
+      EVENT_TYPES.modelRequestEnd,
       EVENT_TYPES.sessionStatusIdle,
     ])
 
-    const spanEnd = log.find(
+    const spanEnds = log.filter(
       (event): event is ModelRequestEndEvent => event.type === EVENT_TYPES.modelRequestEnd,
     )
-    expect(spanEnd?.error?.type).toBe('interrupted')
-    expect(spanEnd?.is_error).toBe(true)
+    expect(spanEnds.map((end) => end.error?.type)).toEqual(['interrupted', 'interrupted'])
+    expect(spanEnds[0]?.is_error).toBe(true)
+    // The interrupt is claimed by the second span's `consumes`, so nothing is left queued.
+    expect(log[6]).toMatchObject({
+      type: EVENT_TYPES.modelRequestStart,
+      consumes: [log[3]?.id],
+    })
 
     // The reply that was cut short is kept, under the id its previews announced, and it is a
     // strict prefix of what the model was streaming: proof the interrupt landed mid-flight.
     const reply = agentMessages(log)[0]
     expect(reply?.id).toBe(announced)
+    // The partial message supersedes the chunks it was streamed as, so replay showed it once.
+    expect(reply?.supersedes).toBeDefined()
     const partial = textOf(reply!)
     expect(partial.length).toBeGreaterThan(0)
     expect(expectedSlowReply().startsWith(partial)).toBe(true)

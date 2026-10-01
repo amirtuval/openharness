@@ -1,4 +1,9 @@
-import { type Client } from '@openharness/client'
+import {
+  createTranscript,
+  selectMessages,
+  selectStreamingMessage,
+  type Client,
+} from '@openharness/client'
 import { EVENT_TYPES, type Session } from '@openharness/protocol'
 import { MOCK_SLOW_MARKER } from '@openharness/server'
 import { describe, expect, it } from 'vitest'
@@ -77,12 +82,29 @@ describe('a server that dies mid-turn', () => {
     expect(ends).toHaveLength(2)
     expect(ends[0]?.error?.type).toBe('brain_lost')
     expect(ends[0]?.is_error).toBe(true)
+    // The crash closed the request before any message was stored, so the recovering brain's
+    // span end supersedes the chunks the dead one had streamed: the orphaned range is skipped
+    // by every reader from then on (D9).
+    expect(ends[0]?.supersedes).toBeDefined()
     expect(ends[1]?.is_error).toBeNull()
+    expect(ends[1]?.supersedes).toBeUndefined()
+    // Exactly one reply, whole: the crashed attempt's chunks never became a message.
     expect(agentMessages(log).map(textOf)).toEqual([expectedSlowReply()])
 
     expect(typesOf(log).at(-1)).toBe(EVENT_TYPES.sessionStatusIdle)
     expect(hasOpenTurn(log)).toBe(false)
     // Every event is claimed: nothing is left queued for a third process to pick up.
     expect(log.every((event) => event.processed_at !== null)).toBe(true)
+
+    // No ghost previews: a client that reads the log after the recovery folds one clean
+    // conversation — nothing left streaming, the half-written reply nowhere in it.
+    const transcript = createTranscript()
+    for await (const event of resumed.sessions.events.iterate(session.id)) {
+      transcript.apply(event)
+    }
+    expect(selectStreamingMessage(transcript.getState())).toBeNull()
+    expect(
+      selectMessages(transcript.getState()).map((message) => `${message.role}:${message.text}`),
+    ).toEqual([`user:${prompt}`, `agent:${expectedSlowReply()}`])
   })
 })

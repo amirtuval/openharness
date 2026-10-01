@@ -25,7 +25,8 @@ that core. This document stays at that level; package details live in each packa
 
 The v1 epic ([#2](https://github.com/amirtuval/openharness/issues/2), "v1 chat") is in
 progress: a chat server with a web UI and a TUI. What works end to end today: agents and
-sessions, a chat turn with streamed previews, steering a turn in flight, interrupting it,
+sessions, a chat turn whose streamed chunks are stored events, steering a turn in flight,
+interrupting it,
 automatic retries of a failed model request, and sessions that survive the process that was
 running them — a turn a dead server left open is closed as `brain_lost` and run again by the
 next one. Several servers can share one database (`SCHEDULER=postgres`): they split the session

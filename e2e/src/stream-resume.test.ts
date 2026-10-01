@@ -64,12 +64,17 @@ describe('resuming a session stream', () => {
     )
     await second.stop()
 
-    // What the two connections delivered, in order, is the log: every event once, in the
-    // order it happened, with nothing between them missing.
+    // What the two connections delivered between them covers the log in order, with every
+    // event once. The first connection asked for deltas, so it also saw the reply's stored
+    // chunks — which the log's replay read has since superseded — so the check is that the
+    // union holds every event a reader needs, once, and nothing was delivered twice.
     const seen = [...storedSeqs(first.events), ...storedSeqs(second.events)]
-    expect(seen).toEqual(log.map((event) => event.seq))
+    expect(seen).toEqual([...seen].sort((left, right) => left - right))
     expect(new Set(seen).size).toBe(seen.length)
     expect(seen[0]).toBe(1)
+    expect(log.every((event) => seen.includes(event.seq))).toBe(true)
+    // The resume picked up exactly where the first connection stopped.
+    expect(storedSeqs(second.events)[0]).toBeGreaterThan(resumedFrom)
   })
 
   it('keeps one stream alive across a restart of the server it is reading', async () => {
