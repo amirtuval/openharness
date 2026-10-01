@@ -224,6 +224,26 @@ export function composeServer(env: NodeJS.ProcessEnv = {}, ...args: string[]): v
   })
 }
 
+/**
+ * The value of an environment variable inside the running server container, or `null` when the
+ * container does not set it.
+ *
+ * For the §8 scenario of the #74 pass, which has to prove a variable *is* in the container's
+ * environment before it can prove the server ignores it — and that it is gone afterwards. The
+ * callers compare lengths or emptiness, so the value itself is never printed.
+ */
+export function serverContainerEnv(name: string): string | null {
+  try {
+    return execFileSync(
+      'docker',
+      ['compose', ...COMPOSE_ARGS, 'exec', '-T', 'server', 'printenv', name],
+      { cwd: REPO_ROOT, encoding: 'utf8' },
+    ).trimEnd()
+  } catch {
+    return null
+  }
+}
+
 /** Wait for the server to answer `/health` again after a restart. */
 export async function waitForHealth(timeoutMs = 90_000): Promise<void> {
   const deadline = Date.now() + timeoutMs
