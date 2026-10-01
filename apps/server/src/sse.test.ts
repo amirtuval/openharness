@@ -298,7 +298,7 @@ describe('the chunks of a reply (D9)', () => {
       expect(deltas).toHaveLength(2)
       // A chunk is a stored event: it carries its own `seq` and `id`, and the SSE `id:` field
       // is that `seq` — which is what makes a resume from mid-reply possible.
-      const startEvent = start?.event as StoredEvent | undefined
+      const startEvent = start?.event
       expect(start?.id).not.toBeNull()
       expect(startEvent?.type).toBe(EVENT_TYPES.eventStart)
       expect(startEvent?.seq).toBeGreaterThan(0)

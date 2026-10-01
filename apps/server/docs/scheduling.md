@@ -54,8 +54,9 @@ or an expired lease, and **never a live lease somebody else holds**. Every succe
 opens a new tenure, so the epoch never repeats.
 
 That epoch is what makes a write safe. `runTurn` passes `fence: { partition, epoch }` to every
-`appendEvents` and `markProcessed` it makes, and the store accepts the write only while that
-partition's lease is live at that epoch. So a brain whose lease has been taken over — a
+`appendEvents` it makes — since D9 an append is the only write a turn makes, the claim included
+— and the store accepts the write only while that partition's lease is live at that epoch. So a
+brain whose lease has been taken over — a
 _process that is still running but no longer owns anything_ — cannot append into the log its
 successor now owns. It stops at its first refused write with a `FencedError`, and the store is
 unchanged by it.

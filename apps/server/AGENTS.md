@@ -121,8 +121,8 @@ stack trace is never part of a response.
 `GET …/events/stream` is the live half of the log, in the format `packages/client` reads:
 
 - one message per event, `data: <the JSON StreamEvent>`;
-- stored events carry `id: <seq>` — the resume position; a stream-only preview, from a writer
-  that still publishes rather than stores them, carries none;
+- every event carries `id: <seq>` — the resume position; every event is a stored one since P4,
+  so the field is never absent;
 - `: ping` comments every 15 seconds when nothing else is happening.
 
 The replay position comes from `after_seq` if the query carries it, otherwise from the
@@ -138,11 +138,11 @@ Replay and live delivery are stitched together so a client cannot tell where one
 3. **flush the buffer**, dropping anything at or below the last `seq` the replay covered,
    which is exactly the overlap — whether the replay wrote an event or filtered it out.
 
-`event_start` / `event_delta` — a reply's chunks, whether stored or stream-only — go only to a
-connection that asked for them with `event_deltas[]=agent.message`, in **both** halves: a
-connection that did not opt in never sees a chunk in a replay either. Disconnecting cancels the
-body stream, and that is what ends the store subscription and the keepalive timer — there is
-nothing left running for a client that has gone away.
+`event_start` / `event_delta` — a reply's chunks — go only to a connection that asked for them
+with `event_deltas[]=agent.message`, in **both** halves: a connection that did not opt in never
+sees a chunk in a replay either. Disconnecting cancels the body stream, and that is what ends
+the store subscription and the keepalive timer — there is nothing left running for a client
+that has gone away.
 
 ### Mid-reply connections (D9)
 
@@ -150,10 +150,11 @@ Since D9 (issue #46) the brain stores each chunk as it streams, so a reply in fl
 log: a connection that opens mid-reply — a reloaded page, a second tab — replays the chunks
 already written under `seq` like any other event, and the stored `agent.message` supersedes
 them at the end of the turn. There is no preview snapshot to keep: the text that used to live
-in `session_previews`, and the text-overlap de-duplication it needed, went with it (P3). A
-client resuming from inside a reply's chunks gets the remaining chunks and then the message;
-after compaction has deleted the chunks it gets the message alone, which is the same
-conversation (the message's position is where its range started).
+in `session_previews`, and the text-overlap de-duplication it needed, went with it in P3, and
+the table itself was dropped in P4. A client resuming from inside a reply's chunks gets the
+remaining chunks and then the message; after compaction has deleted the chunks it gets the
+message alone, which is the same conversation (the message's position is where its range
+started).
 
 `GET …/events` — the list the clients load history with — is the same replay read: it skips
 superseded chunks and returns the chunks of a reply still in flight, which is exactly what a
@@ -207,7 +208,7 @@ when ownership stops being trivial:
 `findSessionsNeedingWork` reports — queued user events, or a turn some dead process left open —
 is queued. `work` enqueues the session, or wakes the pass already running for it; `interrupt`
 aborts that pass's turn, and _starts a turn if none was running_, because a queued
-`user.interrupt` still has to be claimed (the brain handles one and marks it processed). At
+`user.interrupt` still has to be claimed (the turn's idle event carries the claim, P4). At
 most `OPENHARNESS_MAX_CONCURRENT_SESSIONS` sessions run at once; the rest wait their turn.
 `stop()` accepts nothing more, aborts the turns in flight and gives them the drain timeout to
 write their last events.
@@ -325,7 +326,7 @@ talk to a session without knowing about the event log.
 
 It takes the last `user` message's text out of the AI SDK request (`parts`, or a `content`
 string), appends it as a `user.message`, signals the scheduler, and answers with a UI message
-stream built from the session's live events: previews become `text-start` / `text-delta` /
+stream built from the session's live events: a reply's chunks become `text-start` / `text-delta` /
 `text-end` under the `sevt_` id the brain announced, the stored `agent.message` closes the
 block (streaming any tail the previews shed), a `session.error` becomes an `error` chunk, and
 `session.status_idle` ends the response. The subscription is opened _before_ the message is

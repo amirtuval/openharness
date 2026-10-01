@@ -124,9 +124,9 @@ export async function startPostgres(
   return fixture
 }
 
-/** Empty the five tables the store uses. */
+/** Empty every table the store uses; `session_previews` was dropped in P4 (issue #46). */
 export async function truncateAll(db: Kysely<PostgresSchema>): Promise<void> {
-  await sql`truncate table events, session_previews, sessions, agents, partition_leases`.execute(db)
+  await sql`truncate table events, sessions, agents, partition_leases`.execute(db)
 }
 
 /** What a recorded write carried: the fence, when the writer attached one. */
@@ -149,8 +149,8 @@ export class RecordingStore extends PostgresSessionStore {
    * Every `appendEvents` this store has been asked to make, in order.
    *
    * One entry per append, because since D9 (issue #46) an append is the only write a turn
-   * makes: the claim on a user event rides on the span start, and there is no `markProcessed`
-   * call left to record.
+   * makes: a claim on a user event rides on the event that answers it — a span start, a span
+   * end or a status idle (P4) — and there is no out-of-band claim call left to record.
    */
   readonly writes: RecordedWrite[] = []
 

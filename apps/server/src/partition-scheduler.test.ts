@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import {
   EVENT_TYPES,
   partitionOf,
+  type ModelRequestEndEvent,
   type Session,
   type SessionId,
   type StoredEvent,
@@ -578,10 +579,14 @@ if (SOURCE === null) {
       await waitForIdle(store, session.id, WAIT_MS)
       unsubscribe()
       const history = await readHistory(store, session.id)
-      // Two span ends, both interrupted: the request that was streaming, and the claim span the
-      // interrupting brain writes to claim the `user.interrupt` itself (D9 — the claim on a
-      // user event is the `consumes` of a span start, and that span has to be closed).
-      expect(spanErrors(history)).toEqual(['interrupted', 'interrupted'])
+      // One span, closed interrupted: an interrupt is not a model request, so the request
+      // that was streaming is the only span, and its end is what claims the interrupt (P4).
+      expect(spanErrors(history)).toEqual(['interrupted'])
+      const interrupt = history.find(
+        (event): event is ModelRequestEndEvent => event.type === EVENT_TYPES.modelRequestEnd,
+      )
+      const interruptEvent = history.find((event) => event.type === EVENT_TYPES.userInterrupt)
+      expect(interrupt?.consumes).toEqual([interruptEvent?.id])
       expect(history.at(-1)?.type).toBe(EVENT_TYPES.sessionStatusIdle)
       // The partial reply is stored — an interrupt keeps what was already said, up to the
       // chunk the brain had when the signal reached it — and the interrupt itself is claimed,
