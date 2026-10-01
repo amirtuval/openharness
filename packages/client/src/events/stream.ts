@@ -166,7 +166,9 @@ export function reconnectDelayMs(attempt: number): number {
 /**
  * Whether reconnecting can help: `fetch` failures (the request never got an answer) and the
  * retryable HTTP statuses. Anything else is the server saying no, and retrying it forever
- * would only hide the problem.
+ * would only hide the problem — a 401 in particular, which arrives as an
+ * {@link AuthenticationError}, is not retryable, so the loop stops on it and the caller can
+ * send the user to sign-in.
  */
 function isRetryable(error: unknown): boolean {
   if (error instanceof ApiError) {

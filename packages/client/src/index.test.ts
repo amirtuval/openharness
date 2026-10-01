@@ -3,6 +3,9 @@ import { describe, expect, it } from 'vitest'
 
 import {
   ApiError,
+  AuthenticationError,
+  DeviceLoginError,
+  OPENHARNESS_CLI_CLIENT_ID,
   PACKAGE_NAME,
   ResponseValidationError,
   createClient,
@@ -26,7 +29,13 @@ describe('@openharness/client', () => {
     expect(typeof createClient).toBe('function')
     expect(typeof errorTypeForStatus).toBe('function')
     expect(ApiError.prototype).toBeInstanceOf(Error)
+    expect(AuthenticationError.prototype).toBeInstanceOf(ApiError)
     expect(ResponseValidationError.prototype).toBeInstanceOf(Error)
+  })
+
+  it('exposes the device-login helper and the CLI client id', () => {
+    expect(OPENHARNESS_CLI_CLIENT_ID).toBe('openharness-cli')
+    expect(DeviceLoginError.prototype).toBeInstanceOf(Error)
   })
 
   it('exposes the transcript and its selectors', () => {

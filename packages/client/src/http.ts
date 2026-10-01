@@ -1,5 +1,4 @@
 import {
-  API_KEY_HEADER,
   JSON_CONTENT_TYPE,
   LAST_EVENT_ID_HEADER,
   REQUEST_ID_HEADER,
@@ -14,6 +13,11 @@ import { ResponseValidationError, apiErrorFromResponse } from './errors'
  *
  * Everything above it (the resources, the helpers, the event stream) is written in terms of
  * `request`, so headers, the base URL and error handling exist once.
+ *
+ * Authentication is the two ways the API accepts (epic #65, A2): every request is sent with
+ * `credentials: 'include'`, so a browser carries the web app's session cookie, and a client
+ * built with a `token` — the CLI — sends `Authorization: Bearer <token>`. A 401 comes back as
+ * an {@link import('./errors').AuthenticationError}.
  */
 
 /**
@@ -56,8 +60,8 @@ export type QueryParams = Record<string, QueryValue | undefined>
 
 /** Everything the transport needs to issue one request. */
 export interface RequestSpec {
-  /** HTTP method; the API only reads and creates. */
-  method: 'GET' | 'POST'
+  /** HTTP method. The API reads, creates, replaces and deletes. */
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE'
   /** Path below the base URL, e.g. `/v1/sessions`. */
   path: string
   /** Query parameters; an array value repeats its key. */
@@ -75,6 +79,18 @@ export interface RequestSpec {
   lastEventId?: number
 }
 
+/** A response as it came off the wire, before any interpretation. */
+export interface RawResponse {
+  /** HTTP status of the answer. */
+  readonly status: number
+  /** The `statusText` the server gave, when it gave one. */
+  readonly statusText: string
+  /** The JSON body, or `undefined` when there was none or it was not JSON. */
+  readonly body: unknown
+  /** The `request-id` header, when the server set one. */
+  readonly requestId: string | undefined
+}
+
 /** The request layer, as the resources see it. */
 export interface Transport {
   /** Hook for tolerated, non-fatal problems. */
@@ -82,6 +98,22 @@ export interface Transport {
 
   /** Issue `spec`, then parse the JSON body against `schema`. */
   json<T>(schema: ResponseSchema<T>, spec: RequestSpec): Promise<T>
+
+  /**
+   * Issue `spec` and hand back the status and the parsed body as they are, non-2xx included.
+   *
+   * For the endpoints that do not speak the protocol's error envelope — Better Auth's device
+   * flow answers its polling errors as `{ error, error_description }` on a 400 — where the
+   * caller has to read the body to tell `authorization_pending` from a real failure.
+   */
+  rawJson(spec: RequestSpec): Promise<RawResponse>
+
+  /**
+   * Issue `spec` for its effect alone. The body is ignored; a non-2xx still throws.
+   *
+   * For a `DELETE` that answers `204` with no body, where there is nothing to parse.
+   */
+  noContent(spec: RequestSpec): Promise<void>
 
   /**
    * Issue `spec` as an event-stream request and hand back the response body.
@@ -96,8 +128,12 @@ export interface Transport {
 export interface TransportOptions {
   /** Server root, e.g. `https://api.example.com`; a trailing slash is ignored. */
   baseUrl: string
-  /** Value of the `x-api-key` header; omitted when the server needs no auth. */
-  apiKey?: string | undefined
+  /**
+   * Session token, sent as `Authorization: Bearer <token>` on every request — the CLI's way
+   * in (epic #65, A2). Omitted for the web app, whose session rides the cookie that
+   * `credentials: 'include'` attaches.
+   */
+  token?: string | undefined
   /** `fetch` implementation; defaults to the global. */
   fetch?: FetchLike | undefined
   /** Called for events the client skips rather than throws on. */
@@ -110,14 +146,23 @@ export function createTransport(options: TransportOptions): Transport {
   const fetchImpl = resolveFetch(options.fetch)
   const debug: DebugHook = options.debug ?? (() => {})
 
-  async function send(spec: RequestSpec, accept: string): Promise<Response> {
+  /** Issue the request as written; the caller decides what a non-2xx status means. */
+  async function fetchResponse(spec: RequestSpec, accept: string): Promise<Response> {
     const url = baseUrl + spec.path + queryString(spec.query)
-    const response = await fetchImpl(url, {
+    return fetchImpl(url, {
       method: spec.method,
-      headers: requestHeaders(options.apiKey, spec, accept),
+      // The web app's session is a cookie: sending it is opt-in on every request, and the SSE
+      // stream opts in the same way (the whole reason the stream is `fetch` and not
+      // `EventSource`). With no cookie around — the CLI — the header is simply absent.
+      credentials: 'include',
+      headers: requestHeaders(options.token, spec, accept),
       ...(spec.body === undefined ? {} : { body: JSON.stringify(spec.body) }),
       ...(spec.signal === undefined ? {} : { signal: spec.signal }),
     })
+  }
+
+  async function send(spec: RequestSpec, accept: string): Promise<Response> {
+    const response = await fetchResponse(spec, accept)
     if (!response.ok) {
       // The error envelope is JSON; a proxy may answer with something else, which the
       // factory tolerates. Reading the body can itself fail — then there is nothing to
@@ -138,6 +183,25 @@ export function createTransport(options: TransportOptions): Transport {
       const response = await send(spec, JSON_CONTENT_TYPE)
       const body = await readJson(response)
       return parseBody(schema, body, response.status)
+    },
+
+    async rawJson(spec: RequestSpec): Promise<RawResponse> {
+      // Deliberately not `send`: this is for endpoints whose non-2xx bodies are part of their
+      // contract (the device flow's polling errors), so the status decides, not the promise.
+      const response = await fetchResponse(spec, JSON_CONTENT_TYPE)
+      return {
+        status: response.status,
+        statusText: response.statusText,
+        body: await readJson(response),
+        requestId: response.headers.get(REQUEST_ID_HEADER) ?? undefined,
+      }
+    },
+
+    async noContent(spec: RequestSpec): Promise<void> {
+      const response = await send(spec, JSON_CONTENT_TYPE)
+      // Drain whatever came with the 2xx (the API answers `204`), so an idle keep-alive
+      // connection is not left mid-response.
+      await response.text()
     },
 
     async openEventStream(spec: RequestSpec): Promise<ReadableStream<Uint8Array>> {
@@ -175,7 +239,7 @@ function parseBody<T>(schema: ResponseSchema<T>, body: unknown, status: number):
 
 /** The headers every request carries, plus the ones only the event stream uses. */
 function requestHeaders(
-  apiKey: string | undefined,
+  token: string | undefined,
   spec: RequestSpec,
   accept: string,
 ): Record<string, string> {
@@ -183,8 +247,8 @@ function requestHeaders(
   if (spec.body !== undefined) {
     headers['content-type'] = JSON_CONTENT_TYPE
   }
-  if (apiKey !== undefined) {
-    headers[API_KEY_HEADER] = apiKey
+  if (token !== undefined) {
+    headers.authorization = `Bearer ${token}`
   }
   if (spec.lastEventId !== undefined) {
     headers[LAST_EVENT_ID_HEADER] = String(spec.lastEventId)

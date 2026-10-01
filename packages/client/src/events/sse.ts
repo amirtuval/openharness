@@ -2,9 +2,9 @@
  * A Server-Sent Events parser over a `ReadableStream`, per the WHATWG EventSource grammar.
  *
  * `fetch` rather than `EventSource` is the point: `EventSource` cannot set request headers,
- * and the API authenticates with `x-api-key`. What the protocol puts in the stream is one
- * JSON `StreamEvent` per `data:` line; everything below is the transport's business, not the
- * client's.
+ * and the CLI authenticates with `Authorization: Bearer`. What the protocol puts in the
+ * stream is one JSON `StreamEvent` per `data:` line; everything below is the transport's
+ * business, not the client's.
  *
  * The wire, from the protocol:
  *

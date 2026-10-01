@@ -36,13 +36,8 @@ export interface AppProps {
 export function App({ client: providedClient, fakeClient = false }: AppProps = {}) {
   const settings = useSettings()
   const client = useMemo(
-    () =>
-      providedClient ??
-      createClient({
-        baseUrl: settings.serverUrl,
-        apiKey: settings.apiKey === '' ? undefined : settings.apiKey,
-      }),
-    [providedClient, settings.serverUrl, settings.apiKey],
+    () => providedClient ?? createClient({ baseUrl: settings.serverUrl }),
+    [providedClient, settings.serverUrl],
   )
 
   const route = useRoute()
