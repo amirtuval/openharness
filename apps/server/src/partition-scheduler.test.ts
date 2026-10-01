@@ -578,7 +578,10 @@ if (SOURCE === null) {
       await waitForIdle(store, session.id, WAIT_MS)
       unsubscribe()
       const history = await readHistory(store, session.id)
-      expect(spanErrors(history)).toEqual(['interrupted'])
+      // Two span ends, both interrupted: the request that was streaming, and the claim span the
+      // interrupting brain writes to claim the `user.interrupt` itself (D9 — the claim on a
+      // user event is the `consumes` of a span start, and that span has to be closed).
+      expect(spanErrors(history)).toEqual(['interrupted', 'interrupted'])
       expect(history.at(-1)?.type).toBe(EVENT_TYPES.sessionStatusIdle)
       // The partial reply is stored — an interrupt keeps what was already said, up to the
       // chunk the brain had when the signal reached it — and the interrupt itself is claimed,

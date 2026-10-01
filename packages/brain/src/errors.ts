@@ -1,5 +1,7 @@
 import type { SessionErrorType } from '@openharness/protocol'
 import { APICallError } from 'ai'
+import { CLAIM_CONFLICT_ERROR_CODE, ClaimConflictError, isFencedError } from '@openharness/session'
+import type { FencedError } from '@openharness/session'
 
 /**
  * Turning whatever a model request threw into the two things the turn loop needs: whether the
@@ -8,6 +10,10 @@ import { APICallError } from 'ai'
  * The classification is deliberately one function. A retry decision and the event that
  * documents it have to agree — a `retry_status: "retrying"` the brain then does not retry, or a
  * silent drop of an error the provider said was transient, are both worse than a wrong retry.
+ *
+ * Not every failure that reaches this module is a model failure: a write the store refused
+ * because another owner holds the log ({@link isOwnershipError}) must never be classified,
+ * retried or written about — it is the refusal itself that matters, and the turn stops at it.
  *
  * ## What is retryable
  *
@@ -108,6 +114,38 @@ export function classifyModelError(error: unknown): ModelErrorClassification {
 /** Whether {@link classifyModelError} says the request may be attempted again. */
 export function isRetryableModelError(error: unknown): boolean {
   return classifyModelError(error).retryable
+}
+
+/**
+ * Whether `value` is the store's {@link ClaimConflictError}.
+ *
+ * `instanceof` first, then the stable `name`/`code` pair, for the same reason
+ * `isFencedError()` does it: a store reached through a second copy of `@openharness/session`
+ * throws that copy's class, which no `instanceof` check here can match.
+ */
+export function isClaimConflictError(value: unknown): value is ClaimConflictError {
+  if (value instanceof ClaimConflictError) {
+    return true
+  }
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const candidate: Partial<ClaimConflictError> = value
+  return candidate.name === 'ClaimConflictError' && candidate.code === CLAIM_CONFLICT_ERROR_CODE
+}
+
+/**
+ * Whether a refused write is an ownership failure: the partition is somebody else's
+ * (`FencedError`), or another owner claimed the user events this write answers
+ * (`ClaimConflictError`).
+ *
+ * The two are one thing to the turn loop — "this log is not mine any more" — and both must
+ * stop the turn where it stands rather than be classified, retried or written about: an event
+ * that could not be stored is not a model failure, and a turn that kept going would answer
+ * events another brain owns. See `runTurn`.
+ */
+export function isOwnershipError(error: unknown): error is FencedError | ClaimConflictError {
+  return isFencedError(error) || isClaimConflictError(error)
 }
 
 /** A value as a string-keyed record, or `null` when it is not an object. */

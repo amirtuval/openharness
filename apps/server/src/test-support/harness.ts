@@ -12,6 +12,7 @@ import {
 import { InMemorySessionStore, type SessionStore } from '@openharness/session'
 
 import { createApp } from '../app'
+import { DEFAULT_DELTA_RETENTION_MS } from '../compaction'
 import type { SchedulerKind, ServerConfig } from '../config'
 import { startServer } from '../main'
 import {
@@ -85,6 +86,10 @@ export interface TestOptions {
   readonly heartbeatMs?: number
   /** How often owned partitions are re-scanned. */
   readonly sweepMs?: number
+  /** How long superseded chunks are kept before compaction deletes them. */
+  readonly deltaRetentionMs?: number
+  /** How often the compaction job runs; `0` disables it. */
+  readonly compactIntervalMs?: number
 }
 
 /** Build an app, a store and a scheduler in-process; nothing listens. */
@@ -183,6 +188,10 @@ export function testConfig(options: TestOptions = {}): ServerConfig {
     leaseTtlMs: options.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS,
     heartbeatMs: options.heartbeatMs ?? DEFAULT_HEARTBEAT_MS,
     sweepMs: options.sweepMs ?? DEFAULT_SWEEP_MS,
+    deltaRetentionMs: options.deltaRetentionMs ?? DEFAULT_DELTA_RETENTION_MS,
+    // Off unless a test asks: a compaction timer running under every test's feet would make
+    // "the chunks are still there" assertions a race. The job's own suite turns it on.
+    compactIntervalMs: options.compactIntervalMs ?? 0,
   }
 }
 
@@ -286,15 +295,27 @@ export async function httpInterrupt(
 
 // -------------------------------------------------------------------- store helpers
 
-/** Every event in a session's log, in order, page by page. */
+/**
+ * Every event in a session's log, in order, page by page.
+ *
+ * The default read is the replay read, which skips superseded chunks — what a client gets and
+ * what most assertions are about. `includeSuperseded: true` reads the raw log, which is what a
+ * test needs to see a chunk at all, or to see that compaction took it away.
+ */
 export async function readHistory(
   store: SessionStore,
   sessionId: SessionId,
+  options: { readonly includeSuperseded?: boolean } = {},
 ): Promise<StoredEvent[]> {
   const events: StoredEvent[] = []
   let afterSeq = 0
   for (;;) {
-    const page = await store.listEvents(sessionId, { afterSeq, limit: 100, order: 'asc' })
+    const page = await store.listEvents(sessionId, {
+      afterSeq,
+      limit: 100,
+      order: 'asc',
+      ...options,
+    })
     events.push(...page.data)
     if (page.next_page === null || page.data.length === 0) {
       return events

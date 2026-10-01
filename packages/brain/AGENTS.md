@@ -3,8 +3,8 @@
 The stateless brain: the harness loop that drives a session.
 
 A turn is one call to `runTurn`. It reads the session log, streams a reply from the model, and
-appends what happened — user events claimed, a span around every model request, the reply, the
-status transitions and any error. It remembers nothing between turns and knows nothing about
+appends what happened — user events claimed, a span around every model request, the chunks of
+the reply as they arrive, the reply itself, the status transitions and any error. It remembers nothing between turns and knows nothing about
 scheduling, ownership, HTTP or Postgres: it is handed a `SessionStore`, a model factory and an
 abort signal. The log is the state, which is what lets a crashed turn be resumed by another
 process — and why a brain that holds a partition lease writes under its fence.
@@ -68,6 +68,8 @@ emits what that reaches.
 | `toModelUsage(usage)`, `ZERO_MODEL_USAGE`                                     | what a request reported → the protocol's four counters, always integers |
 | `classifyModelError(error)`, `ModelErrorClassification`                       | retryable or not, and the `session.error` type that says so             |
 | `isRetryableModelError(error)`                                                | the same answer, when only the boolean is wanted                        |
+| `isClaimConflictError(error)`                                                 | whether the store refused a claim another owner had taken               |
+| `isOwnershipError(error)`                                                     | a fenced write or a claim conflict: the log is somebody else's (D9)     |
 | `RetryPolicy`, `ResolvedRetryPolicy`, `resolveRetryPolicy(policy?)`           | how failures are retried                                                |
 | `backoffDelay(attempt, policy)`, `abortableSleep`, `Sleep`                    | the delay, and the sleep that honors an abort                           |
 | `DEFAULT_MAX_RETRIES`, `DEFAULT_BASE_DELAY_MS`, `DEFAULT_MAX_DELAY_MS`        | `3`, `500`, `8000`                                                      |
@@ -86,7 +88,8 @@ the first thing this package documents and the first thing its tests assert.
 
 START — an inherited turn (`getTurnState` is not idle; the brain that opened it is gone)
   an open span ............................................ span.model_request_end
-                                                             { error: brain_lost, is_error: true }
+                                                             { error: brain_lost, is_error: true,
+                                                               supersedes: that span's chunks }
   last status is session.status_rescheduled ............... session.status_running
   last status is session.status_running ................... (nothing: that turn is already open)
 START — a fresh turn (idle, with something queued)
@@ -94,64 +97,88 @@ START — a fresh turn (idle, with something queued)
 
 LOOP — once per model request
   1. the signal aborted, or a queued user.interrupt ....... INTERRUPT
-  2. claim the queued user.message events (markProcessed)
-  3. nothing left to answer ............................... session.status_idle, return idle
-  4. ...................................................... span.model_request_start
-  5. stream ............................................... event_start, then one event_delta
-                                                             per text chunk, all under one
-                                                             pre-generated sevt_ id (ephemeral:
-                                                             published, never stored)
-  6. text arrived ......................................... agent.message (that same sevt_ id)
-  7. ...................................................... span.model_request_end
+  2. nothing left to answer ............................... session.status_idle, return idle
+  3. ................ span.model_request_start { consumes: the queued user.message ids,
+                                                  model: the provider/model of the request }
+     (the append IS the claim: atomic, fenced, refused whole with ClaimConflictError)
+  4. stream ............................................... stored event_start under a fresh
+                                                             sevt_ id, then one stored
+                                                             event_delta per text chunk
+  5. text arrived ......................................... agent.message { same sevt_ id,
+                                                             supersedes: the chunk range }
+     no text .............................................. (no message: the span end below
+                                                             carries the range)
+  6. ...................................................... span.model_request_end
                                                              { model_usage, is_error: null }
-  8. another user.message arrived ......................... loop, from 1
-  9. otherwise ............................................ session.status_idle, return idle
+  7. another user.message arrived ......................... loop, from 1
+  8. otherwise ............................................ session.status_idle, return idle
 
 INTERRUPT — an aborted signal, or a queued user.interrupt, at any point above
-  text was streamed ....................................... agent.message (that same id)
-  a span is open .......................................... span.model_request_end
-                                                             { error: interrupted, is_error: true }
-  queued user.interrupt events ............................ markProcessed
-  ......................................................... session.status_idle, return interrupted
+  text was streamed ......................... agent.message { supersedes: the chunk range }
+  a span is open ............................ span.model_request_end
+                                               { error: interrupted, is_error: true }
+                                               (with the chunk range when no text was stored)
+  queued user.interrupt events .............. claimed by a span of their own: an append of
+                                               span.model_request_start { consumes: the ids }
+                                               and its span.model_request_end { interrupted },
+                                               in one batch — there is no model request to
+                                               answer an interrupt, so the claim is the span
+  ........................................... session.status_idle, return interrupted
 
   The user messages that are still queued stay queued: they start the next turn.
 
 MODEL FAILURE — retryable, attempts left
-  ......................................................... span.model_request_end
-                                                             { error: model_error, is_error: true }
-  ......................................................... session.error { retry_status: retrying }
-  ......................................................... session.status_rescheduled
+  ........................................... span.model_request_end
+                                               { error: model_error, is_error: true,
+                                                 supersedes: this attempt's chunks }
+  ........................................... session.error { retry_status: retrying }
+  ........................................... session.status_rescheduled
   backoff sleep (the signal is honored here too)
-  ......................................................... session.status_running, loop from 1
+  ......................... session.status_running, loop from 3 — a NEW sevt_ id and its own
+                             event_start; the failed attempt's partial output is never stored
 
 MODEL FAILURE — not retryable, or out of attempts
-  ......................................................... span.model_request_end
-                                                             { error: model_error, is_error: true }
-  ......................................................... session.error
-                                                             { retry_status: terminal | exhausted }
-  ......................................................... session.status_idle, return error
+  ........................................... span.model_request_end
+                                               { error: model_error, is_error: true,
+                                                 supersedes: this attempt's chunks }
+  ........................................... session.error
+                                               { retry_status: terminal | exhausted }
+  ........................................... session.status_idle, return error
 
 AN EVENT THE PROTOCOL DOES NOT ACCEPT — a write the schema refuses, before it is stored
-  the open span ........................................... span.model_request_end
-                                                             { error: model_error, model_usage: 0 }
-  ......................................................... session.error
-                                                             { type: unknown_error, retry_status: terminal }
-  ......................................................... session.status_idle, return error
+  the open span ............................. span.model_request_end
+                                               { error: model_error, model_usage: 0,
+                                                 supersedes: the chunks }
+  ........................................... session.error
+                                               { type: unknown_error, retry_status: terminal }
+  ........................................... session.status_idle, return error
 
-FENCED WRITE — any append or markProcessed the store refuses
-  ......................................................... stop, write nothing more, rethrow
+FENCED WRITE — any append the store refuses with FencedError, or with ClaimConflictError
+  (another owner claimed the user events this request was about to answer)
+  ........................................... stop, write nothing more, rethrow
 ```
 
 Notes on the corners:
 
 - **Every span is closed.** `brain_lost` for one a dead brain left open, `interrupted` for an
   abort, `model_error` for a failure. A turn never ends with an open span.
+- **A claim is an append, not a write.** The user events a request answers are listed in its
+  span start's `consumes`, and the store takes them in the same transaction — so two brains can
+  never own one message, and a claim that cannot be taken (another owner got there first)
+  refuses the whole append with `ClaimConflictError`. That is the fencing loss of D9: the turn
+  stops where it stands, like a `FencedError`, and nothing more is written.
 - **A request that produced no text stores no message.** An empty `agent.message` would be a
-  reply the model did not make; the span and the status still record that the request ran. An
-  interrupted request stores its partial text for the same reason, and only when there is one.
+  reply the model did not make; the span still records that the request ran, and its
+  `supersedes` covers the `event_start` the request announced. An interrupted request stores its
+  partial text for the same reason, and only when there is one — with the range on the message,
+  or on the span end when there is no message to carry it.
+- **Partial output is never stored as a reply.** A failure mid-stream supersedes the chunks the
+  attempt streamed and the retry mints a **new** message id with its own `event_start`; a reply
+  that is not the model's final answer never becomes one.
 - **An interrupt ends the turn the same way at every point** — before the first request, during
   a stream, during a backoff — and always writes `session.status_idle`. Only the partial text
-  and the span close depend on whether anything was streaming.
+  and the span close depend on whether anything was streaming, and the queued `user.interrupt`
+  events are claimed either way (by a span of their own when no request is open to end).
 - **Retried failures close the span and open a new one**: `session.error` and
   `session.status_rescheduled` precede the backoff, `session.status_running` follows it, and the
   next attempt is a fresh `span.model_request_start`.
@@ -223,13 +250,21 @@ with itself, so the brain recovers the numbers itself:
 Sessions whose turns ran before the fix keep the unreadable rows they were stored with; v1 is
 unreleased, so nothing migrates them — the fix is what stops new ones being written.
 
-## Preview and stored ids
+## Chunks, ids and supersession (D9)
 
-`@openharness/protocol` says a stored `agent.message` has the id its `event_start` announced, so a
-client can replace the preview it accumulated with the stored reply. The brain generates that
-`sevt_` id before streaming, publishes every `event_start`/`event_delta` under it, and passes it
-to `appendEvents`, which stores a caller-supplied id exactly as given (see
-`@openharness/session`). The tests assert the two ids are equal.
+A streamed reply is stored as it streams (issue #46). The brain mints the `sevt_` id the
+`agent.message` will have before it talks to the model, appends a stored `event_start` under it,
+and appends one stored `event_delta` per chunk as the chunk arrives — each append awaited, so a
+store refusal ends the request the way a failed write always did rather than being swallowed.
+`appendEvents` stores a caller-supplied id exactly as given (see `@openharness/session`), which
+is what makes the chunks and the message one identity throughout.
+
+The event that finishes the reply supersedes the chunks it replaced:
+`supersedes: { from_seq, to_seq }` from the `event_start` to the last `event_delta`. Replay skips
+the range, so a client resuming from inside it sees the reply once, whole, and the server's
+compaction job deletes it later — none of which the brain has to think about beyond writing the
+range. The tests assert the message's id, its range and that a replay of the log holds no
+superseded chunk.
 
 ## Testing
 
@@ -237,11 +272,13 @@ to `appendEvents`, which stores a caller-supplied id exactly as given (see
 `@openharness/session/testing` and scripted mock models from `ai/test` — no keys, no network, no
 timers: retries run on an injected `sleep`, and the clock is a `TestClock`.
 
-- `turn.test.ts` is the acceptance suite: the exact event order of every path above, the preview
-  ids, steering in a second request, interrupts at each point, the retry ladder, the six ways a
-  turn can be recovered, a fenced write that stops the turn where it stands, and a turn against
-  a model that declares the wrong provider spec, whose stored log is checked against the
-  protocol event by event.
+- `turn.test.ts` is the acceptance suite: the exact event order of every path above — claims
+  (`consumes`), the model that served each request, the stored chunks, the `supersedes` ranges —
+  steering in a second request, interrupts at each point (including the claim span a queued
+  `user.interrupt` gets), the retry ladder, the six ways a turn can be recovered, a fenced write
+  and a claim another owner took (both stop the turn where it stands), a turn against a model
+  that declares the wrong provider spec, and, on every scenario, that a replay of the log holds
+  no superseded chunk and that the brain never calls `markProcessed` or `publishEphemeral`.
 - `context.test.ts`, `errors.test.ts`, `retry.test.ts`, `log.test.ts`, `model.test.ts` and
   `validate.test.ts` cover the pieces on their own, including the branches the loop cannot
   reach.

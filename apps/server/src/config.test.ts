@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { DEFAULT_PARTITION_COUNT } from '@openharness/protocol'
 
+import { DEFAULT_COMPACT_INTERVAL_MS, DEFAULT_DELTA_RETENTION_MS } from './compaction'
 import { DEFAULT_HEARTBEAT_MS, DEFAULT_LEASE_TTL_MS, DEFAULT_SWEEP_MS } from './partition-scheduler'
 import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
 import { DEFAULT_DRAIN_TIMEOUT_MS } from './runner'
@@ -38,6 +39,8 @@ describe('readServerConfig', () => {
       leaseTtlMs: DEFAULT_LEASE_TTL_MS,
       heartbeatMs: DEFAULT_HEARTBEAT_MS,
       sweepMs: DEFAULT_SWEEP_MS,
+      deltaRetentionMs: DEFAULT_DELTA_RETENTION_MS,
+      compactIntervalMs: DEFAULT_COMPACT_INTERVAL_MS,
     })
     // The instance id is generated, so it is only asserted to look like one: this host, this
     // process, and a suffix that makes two instances on the host unique.
@@ -64,6 +67,8 @@ describe('readServerConfig', () => {
       OPENHARNESS_LEASE_TTL_MS: '900',
       OPENHARNESS_HEARTBEAT_MS: '300',
       OPENHARNESS_SWEEP_MS: '450',
+      OPENHARNESS_DELTA_RETENTION_MS: '120000',
+      OPENHARNESS_COMPACT_INTERVAL_MS: '60000',
     })
 
     expect(config).toEqual({
@@ -81,8 +86,29 @@ describe('readServerConfig', () => {
       leaseTtlMs: 900,
       heartbeatMs: 300,
       sweepMs: 450,
+      deltaRetentionMs: 120_000,
+      compactIntervalMs: 60_000,
     })
     expect(usesTestModel(config)).toBe(true)
+  })
+
+  it('allows a retention window of zero and an interval that disables compaction', () => {
+    const config = readServerConfig({
+      OPENHARNESS_DELTA_RETENTION_MS: '0',
+      OPENHARNESS_COMPACT_INTERVAL_MS: '0',
+    })
+
+    expect(config.deltaRetentionMs).toBe(0)
+    expect(config.compactIntervalMs).toBe(0)
+  })
+
+  it('refuses a retention window that is not a count of milliseconds', () => {
+    expect(() => readServerConfig({ OPENHARNESS_DELTA_RETENTION_MS: '-1' })).toThrow(
+      /OPENHARNESS_DELTA_RETENTION_MS/,
+    )
+    expect(() => readServerConfig({ OPENHARNESS_COMPACT_INTERVAL_MS: 'soon' })).toThrow(
+      /OPENHARNESS_COMPACT_INTERVAL_MS/,
+    )
   })
 
   it('refuses a scheduler it does not have', () => {
@@ -190,5 +216,20 @@ describe('describeConfig', () => {
     expect(line).toContain('lease 900ms')
     expect(line).toContain('heartbeat 300ms')
     expect(line).toContain('sweep 450ms')
+  })
+
+  it('says how often superseded chunks are compacted, and when that is off', () => {
+    const retaining = describeConfig(
+      readServerConfig({
+        OPENHARNESS_DELTA_RETENTION_MS: '60000',
+        OPENHARNESS_COMPACT_INTERVAL_MS: '5000',
+      }),
+    ).join('\n')
+    expect(retaining).toContain('compaction: every 5000ms')
+    expect(retaining).toContain('retaining superseded chunks 60000ms')
+
+    expect(
+      describeConfig(readServerConfig({ OPENHARNESS_COMPACT_INTERVAL_MS: '0' })).join('\n'),
+    ).toContain('compaction: disabled')
   })
 })

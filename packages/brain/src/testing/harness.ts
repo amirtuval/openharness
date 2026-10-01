@@ -1,7 +1,11 @@
 import type {
+  AgentMessageEvent,
+  ModelRequestEndEvent,
   ModelRequestStartEvent,
   SessionId,
   StoredEvent,
+  StoredEventDelta,
+  StoredEventStart,
   UserEventInput,
 } from '@openharness/protocol'
 import { InMemorySessionStore } from '@openharness/session'
@@ -63,15 +67,48 @@ export function interrupt(): UserEventInput {
   return { type: 'user.interrupt' }
 }
 
-/** The session's whole log, oldest first, as the store hands it back. */
+/**
+ * The session's whole log, oldest first, as a **reader** sees it: the replay read, which skips
+ * superseded chunks.
+ *
+ * This is what a client resumes from, so it is what most assertions want — a test that asks
+ * whether replay holds a superseded chunk asks this and sees none.
+ */
 export async function logOf(
   store: InMemorySessionStore,
   sessionId: SessionId,
 ): Promise<StoredEvent[]> {
+  return await readLogWith(store, sessionId, {})
+}
+
+/**
+ * The raw log, oldest first: superseded chunks included.
+ *
+ * What the store physically holds, which is what a test needs to assert that a chunk was
+ * written at all, or that compaction deleted it. See `listEvents`' `includeSuperseded`.
+ */
+export async function rawLogOf(
+  store: InMemorySessionStore,
+  sessionId: SessionId,
+): Promise<StoredEvent[]> {
+  return await readLogWith(store, sessionId, { includeSuperseded: true })
+}
+
+/** Page through a session's log with the given list options. */
+async function readLogWith(
+  store: InMemorySessionStore,
+  sessionId: SessionId,
+  options: { readonly includeSuperseded?: boolean },
+): Promise<StoredEvent[]> {
   const events: StoredEvent[] = []
   let afterSeq = 0
   for (;;) {
-    const page = await store.listEvents(sessionId, { order: 'asc', afterSeq, limit: 100 })
+    const page = await store.listEvents(sessionId, {
+      order: 'asc',
+      afterSeq,
+      limit: 100,
+      ...options,
+    })
     events.push(...page.data)
     const last = page.data[page.data.length - 1]
     if (page.next_page === null || last === undefined) {
@@ -112,6 +149,48 @@ export function spanStartOf(event: StoredEvent | undefined): ModelRequestStartEv
     throw new Error(`expected a stored span.model_request_start, got ${event?.type ?? 'nothing'}`)
   }
   return event
+}
+
+/** A stored event a test knows is a `span.model_request_end`. */
+export function spanEndOf(event: StoredEvent | undefined): ModelRequestEndEvent {
+  if (event?.type !== 'span.model_request_end') {
+    throw new Error(`expected a stored span.model_request_end, got ${event?.type ?? 'nothing'}`)
+  }
+  return event
+}
+
+/** A stored event a test knows is a stored `event_start` chunk. */
+export function chunkStartOf(event: StoredEvent | undefined): StoredEventStart {
+  if (event?.type !== 'event_start') {
+    throw new Error(`expected a stored event_start, got ${event?.type ?? 'nothing'}`)
+  }
+  return event
+}
+
+/** A stored event a test knows is a stored `event_delta` chunk. */
+export function chunkDeltaOf(event: StoredEvent | undefined): StoredEventDelta {
+  if (event?.type !== 'event_delta') {
+    throw new Error(`expected a stored event_delta, got ${event?.type ?? 'nothing'}`)
+  }
+  return event
+}
+
+/** A stored event a test knows is an `agent.message`. */
+export function agentMessageOf(event: StoredEvent | undefined): AgentMessageEvent {
+  if (event?.type !== 'agent.message') {
+    throw new Error(`expected a stored agent.message, got ${event?.type ?? 'nothing'}`)
+  }
+  return event
+}
+
+/** Every stored chunk of a log, in order — `event_start` and `event_delta` events. */
+export function chunksOf(events: readonly StoredEvent[]): StoredEvent[] {
+  return events.filter((event) => event.type === 'event_start' || event.type === 'event_delta')
+}
+
+/** The text a stored `event_delta` carries. */
+export function deltaTextOf(event: StoredEventDelta): string {
+  return event.delta.content.text
 }
 
 /** Let every queued microtask (a store's delivery, a listener) run before asserting. */

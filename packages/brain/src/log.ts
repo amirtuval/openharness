@@ -3,7 +3,10 @@ import { EVENT_TYPES, MAX_PAGE_LIMIT } from '@openharness/protocol'
 import type {
   SessionId,
   StoredEvent,
+  StoredEventDelta,
+  StoredEventStart,
   StoredEventType,
+  Supersedes,
   UserEvent,
   UserInterruptEvent,
   UserMessageEvent,
@@ -123,4 +126,38 @@ export function isUserMessage(event: UserEvent): event is UserMessageEvent {
 /** Whether a queued event is a `user.interrupt`. */
 export function isUserInterrupt(event: UserEvent): event is UserInterruptEvent {
   return event.type === EVENT_TYPES.userInterrupt
+}
+
+/** Whether a stored event is one of a reply's chunks: an `event_start` or an `event_delta`. */
+export function isStoredChunk(event: StoredEvent): event is StoredEventStart | StoredEventDelta {
+  return event.type === EVENT_TYPES.eventStart || event.type === EVENT_TYPES.eventDelta
+}
+
+/**
+ * The chunk range a request left behind: the stored chunks after `afterSeq`, from the first
+ * one's `seq` to the last one's — or `null` when there is none.
+ *
+ * This is how a brain that is closing a request it did not run finds what that request
+ * streamed: the chunks it stored lie after its `span.model_request_start` and nothing has
+ * superseded them, so the span end it is about to write carries this range and replay skips
+ * them. A log read through {@link readLog} already leaves superseded chunks out, so what this
+ * sees is exactly the range still in flight.
+ *
+ * @param events the log, as {@link readLog} handed it over
+ * @param afterSeq the `seq` of the span start whose chunks are wanted
+ */
+export function chunkRangeAfter(
+  events: readonly StoredEvent[],
+  afterSeq: number,
+): Supersedes | null {
+  let from: number | null = null
+  let to: number | null = null
+  for (const event of events) {
+    if (event.seq <= afterSeq || !isStoredChunk(event)) {
+      continue
+    }
+    from ??= event.seq
+    to = event.seq
+  }
+  return from === null || to === null ? null : { from_seq: from, to_seq: to }
 }

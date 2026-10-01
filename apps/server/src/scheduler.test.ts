@@ -253,11 +253,20 @@ describe('interrupts', () => {
 
     await waitForIdle(test.store, sessionId)
     const history = await readHistory(test.store, sessionId)
+    // The interrupt is claimed by a span of its own, closed immediately: nothing was asked of
+    // the model, and the claim is what keeps the interrupt from being reached twice.
     expect(history.map((event) => event.type)).toEqual([
       EVENT_TYPES.userInterrupt,
       EVENT_TYPES.sessionStatusRunning,
+      EVENT_TYPES.modelRequestStart,
+      EVENT_TYPES.modelRequestEnd,
       EVENT_TYPES.sessionStatusIdle,
     ])
+    expect(history[2]).toMatchObject({ consumes: [history[0]?.id] })
+    expect(history[3]).toMatchObject({
+      model_request_start_id: history[2]?.id,
+      error: { type: 'interrupted' },
+    })
     expect(history[0]?.processed_at).not.toBeNull()
     // Nothing was asked of the model: there was no message to answer.
     expect(test.model.requests).toBe(0)

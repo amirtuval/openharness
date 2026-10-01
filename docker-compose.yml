@@ -51,11 +51,16 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GOOGLE_GENERATIVE_AI_API_KEY: ${GOOGLE_GENERATIVE_AI_API_KEY:-}
-      # Optional: everything below is off unless it is set. `OPENHARNESS_TEST_MODEL=mock` runs
-      # the deterministic test model; `OPENHARNESS_API_KEY` requires `x-api-key` on /v1 (and
-      # then the same key has to be entered in the web app's settings).
+      # Optional: everything below is off unless it is set, and every one has a working
+      # default when it is empty. `OPENHARNESS_TEST_MODEL=mock` runs the deterministic test
+      # model; `OPENHARNESS_API_KEY` requires `x-api-key` on /v1 (and then the same key has to
+      # be entered in the web app's settings); the two compaction variables control the job
+      # that deletes superseded stream chunks (retention 1 h by default; an interval of 0
+      # disables it).
       OPENHARNESS_TEST_MODEL: ${OPENHARNESS_TEST_MODEL:-}
       OPENHARNESS_API_KEY: ${OPENHARNESS_API_KEY:-}
+      OPENHARNESS_DELTA_RETENTION_MS: ${OPENHARNESS_DELTA_RETENTION_MS:-}
+      OPENHARNESS_COMPACT_INTERVAL_MS: ${OPENHARNESS_COMPACT_INTERVAL_MS:-}
     ports:
       - '3000:3000'
     healthcheck:

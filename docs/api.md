@@ -140,20 +140,32 @@ data: {"type":"agent.message","id":"sevt_01H…","seq":12,"processed_at":"…","
 
 ### Reloading mid-reply
 
-`event_start` and `event_delta` go only to the connections attached when they are published, so
-a client that connects while a reply is streaming would otherwise render it from the first
-delta it caught — a message that begins mid-word until the stored `agent.message` arrives at
-the end of the turn.
+A client that connects while a reply is streaming — a reloaded page, a second tab — must not
+start rendering it mid-word. Since D9 there is nothing special to do about it: the chunks are
+stored events (see above), so what a client loads carries the reply in flight.
 
-A connection that asked for `agent.message` previews is given what it missed instead: after the
-replay, and before the live events, the server sends the `event_start` of the reply in flight
-and **one** `event_delta` carrying the whole text accumulated so far (`index: 0`). Deltas that
-follow continue from there, and the stored `agent.message` — the same `sevt_` id — replaces the
-preview as it always does. A delta that arrives while that snapshot is being read is not
-delivered twice.
+The documented flow is two calls, and it is what `@openharness/client` and both frontends do:
 
-From phase P3 on the chunks are stored events instead (see above), so the replay itself carries
-a reply in flight — minus any chunk already superseded — and no snapshot is needed.
+```bash
+# 1. what the log holds: the reply in flight, chunk by chunk, plus everything settled
+curl localhost:3000/v1/sessions/sesn_01H…/events
+
+# 2. follow from where that read ended — from `seq`, never repeating one
+curl -N "localhost:3000/v1/sessions/sesn_01H…/events/stream?after_seq=17&event_deltas[]=agent.message"
+```
+
+`GET …/events` skips superseded chunks and **returns the chunks of a reply still in flight** —
+the message that will supersede them is not in the log yet. A client that resumes from inside
+that range gets the rest of the chunks and then the stored `agent.message`; once compaction has
+deleted them it gets the message alone. Both are the same conversation: the message sorts where
+its range started, so a reply interleaved with a steering message renders the same live and
+after a reload.
+
+A connection that asked for `event_deltas[]=agent.message` gets the chunks — live and replayed
+alike; one that did not is never sent an `event_start` or an `event_delta`, and sees the
+`agent.message` when the turn ends. Stream-only previews (a writer that publishes rather than
+stores chunks) still arrive the same way: live, to the connections attached when they are sent,
+never replayed.
 
 ## Authentication
 
