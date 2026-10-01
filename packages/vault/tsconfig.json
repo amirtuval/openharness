@@ -1,0 +1,4 @@
+{
+  "extends": "@openharness/config/tsconfig/node.json",
+  "include": ["src", "*.config.ts"]
+}

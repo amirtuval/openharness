@@ -76,6 +76,7 @@ no CORS to configure.
 | ----------------------- | ------------------- | ---------------------------------------------------------- |
 | `@openharness/config`   | `packages/config`   | shared tooling config (tsconfig, ESLint, Prettier, Vitest) |
 | `@openharness/protocol` | `packages/protocol` | wire types and schemas shared by everything                |
+| `@openharness/vault`    | `packages/vault`    | envelope encryption for user secrets                       |
 | `@openharness/session`  | `packages/session`  | the append-only session event log                          |
 | `@openharness/hands`    | `packages/hands`    | sandboxes and tools behind `execute(name, input)`          |
 | `@openharness/brain`    | `packages/brain`    | the stateless harness loop                                 |
@@ -90,17 +91,18 @@ no CORS to configure.
 The rules cover `dependencies`, `devDependencies` and `peerDependencies`.
 `@openharness/config` is allowed everywhere as a **devDependency**.
 
-| package                 | may depend on                   |
-| ----------------------- | ------------------------------- |
-| `@openharness/protocol` | (none)                          |
-| `@openharness/hands`    | protocol                        |
-| `@openharness/session`  | protocol                        |
-| `@openharness/client`   | protocol                        |
-| `@openharness/brain`    | protocol, session, hands        |
-| `@openharness/server`   | protocol, session, brain, hands |
-| `@openharness/web`      | protocol, client                |
-| `@openharness/cli`      | protocol, client                |
-| `@openharness/e2e`      | anything                        |
+| package                 | may depend on                          |
+| ----------------------- | -------------------------------------- |
+| `@openharness/protocol` | (none)                                 |
+| `@openharness/vault`    | (none)                                 |
+| `@openharness/hands`    | protocol                               |
+| `@openharness/session`  | protocol                               |
+| `@openharness/client`   | protocol                               |
+| `@openharness/brain`    | protocol, session, hands               |
+| `@openharness/server`   | protocol, session, brain, hands, vault |
+| `@openharness/web`      | protocol, client                       |
+| `@openharness/cli`      | protocol, client                       |
+| `@openharness/e2e`      | anything                               |
 
 `yarn check:deps` enforces this table and fails with the offending package, the dependency and
 the allowed list. ESLint (`import-x/no-relative-packages`, configured in

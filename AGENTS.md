@@ -42,15 +42,15 @@ Node 24 and Yarn 4 (corepack) are required; see [`docs/development.md`](./docs/d
 
 ```
 apps/      server (@openharness/server), web (@openharness/web), tui (@openharness/cli)
-packages/  config, protocol, session, hands, brain, client
+packages/  config, protocol, vault, session, hands, brain, client
 e2e/       @openharness/e2e — cross-package tests
 docs/      architecture.md, development.md, workflow.md, ROADMAP.md, decisions/
 scripts/   check-deps.mjs
 ```
 
 Dependency direction — `protocol` → `session`/`hands`/`client` → `brain` → `server`, with the
-frontends (`web`, `cli`) on `protocol` + `client`. The full table is in
-[`docs/architecture.md`](./docs/architecture.md).
+frontends (`web`, `cli`) on `protocol` + `client`; `vault` depends on nothing, and `server`
+may depend on it. The full table is in [`docs/architecture.md`](./docs/architecture.md).
 
 ## Rules
 
