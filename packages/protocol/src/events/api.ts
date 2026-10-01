@@ -1,11 +1,11 @@
 import { z } from 'zod'
 
 import { ListOrderSchema, PageLimitSchema } from '../common'
-import { NextPageSchema, PageCursorStringSchema } from '../pagination'
+import { NextPageSchema, PageCursorStringSchema, type NextPage } from '../pagination'
 import { AfterSeqSchema, STORED_EVENT_TYPES } from './common'
 import { DeltaTypeSchema } from './stream'
-import { UserEventInputSchema, UserEventSchema } from './user'
-import { StoredEventSchema } from './union'
+import { UserEventInputSchema, UserEventSchema, type UserEvent } from './user'
+import { StoredEventSchema, type StoredEvent } from './union'
 
 /**
  * The three event endpoints:
@@ -44,7 +44,16 @@ export const SendEventsResponseSchema = z.object({
   data: z.array(UserEventSchema),
 })
 
-export type SendEventsResponse = z.infer<typeof SendEventsResponseSchema>
+/**
+ * The response of `POST …/events`, deep-readonly.
+ *
+ * Hand-written rather than `z.infer`-ed: a stored event is deep-readonly (D9, issue #46), and
+ * a schema's inferred type cannot be. The schema above is still what validates the wire; this
+ * is the type a caller gets, so mutating a returned event is a compile error.
+ */
+export interface SendEventsResponse {
+  readonly data: UserEvent[]
+}
 
 /** Query parameters of `GET /v1/sessions/{session_id}/events`. */
 export const ListEventsQuerySchema = z.object({
@@ -73,7 +82,16 @@ export const ListEventsResponseSchema = z.object({
   next_page: NextPageSchema,
 })
 
-export type ListEventsResponse = z.infer<typeof ListEventsResponseSchema>
+/**
+ * The response of `GET …/events`, deep-readonly.
+ *
+ * Hand-written for the reason {@link SendEventsResponse} is: `data` carries the log, and a
+ * stored event is deep-readonly, so the read a caller replays from is the immutable one.
+ */
+export interface ListEventsResponse {
+  readonly data: StoredEvent[]
+  readonly next_page: NextPage
+}
 
 /** Largest number of `event_deltas[]` values a stream request may carry, per Anthropic. */
 export const MAX_EVENT_DELTAS = 100
@@ -81,8 +99,9 @@ export const MAX_EVENT_DELTAS = 100
 /** Query parameters of `GET /v1/sessions/{session_id}/events/stream`. */
 export const StreamEventsQuerySchema = z.object({
   /**
-   * Opt in to previews, per connection. The wire key is `event_deltas[]`; repeating it opts
-   * in to several event types. Omit it for a plain stream of stored events.
+   * Opt in to the chunks of a reply (`event_start` / `event_delta`), per connection. The wire
+   * key is `event_deltas[]`; repeating it opts in to several event types. Omit it for a plain
+   * stream of stored events.
    */
   event_deltas: z.array(DeltaTypeSchema).max(MAX_EVENT_DELTAS).optional(),
   /**

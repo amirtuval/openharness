@@ -9,7 +9,7 @@ import {
   SessionStatusRunningEventSchema,
 } from './session'
 import { ModelRequestEndEventSchema, ModelRequestStartEventSchema } from './span'
-import { StoredEventDeltaSchema, StoredEventStartSchema, StreamOnlyEventSchema } from './stream'
+import { StoredEventDeltaSchema, StoredEventStartSchema } from './stream'
 import { UserInterruptEventSchema, UserMessageEventSchema } from './user'
 
 /**
@@ -19,21 +19,22 @@ import { UserInterruptEventSchema, UserMessageEventSchema } from './user'
  * log, {@link StreamEventSchema} for anything read off a stream, and
  * {@link UserEventInputSchema} (in `events/user.ts`) for anything a client sends.
  *
- * Since D9 (issue #46) a streamed reply is stored chunk by chunk, so the stored union includes
- * the stored forms of `event_start` and `event_delta`. Each event type also has a deep-readonly
- * alias — {@link ImmutableStoredEvent}, {@link ImmutableStreamEvent} and one per member — which
- * is the view a store hands out: the log is immutable, and the aliases say so in the types.
- * The `z.infer` types below stay as they are for the transition; the store, brain and server
- * phases move to the `Immutable*` names as they take the D9 rules on.
+ * Since D9 (issue #46) a streamed reply is stored chunk by chunk, so a stream and the log
+ * carry the same events: {@link StreamEvent} is {@link StoredEvent}. The pre-D9 stream-only
+ * previews — `event_start` / `event_delta` with no envelope, never stored — were removed in
+ * phase P4, when nothing wrote them any more.
+ *
+ * Every event type is deep-readonly: the log is immutable, and the types say so — `event.seq
+ * = …` is a compile error, and the stores hand out deep-frozen events so it would throw at
+ * runtime too. The `Immutable*` names still exist as deprecated aliases of the plain ones.
  */
 
 /**
  * The stored events whose `type` string no stream-only event shares.
  *
- * `event_start` and `event_delta` are the exceptions: their stored forms carry the same
- * `type` as their stream-only counterparts, and a zod discriminated union cannot hold two
- * options with one discriminator value (it throws when it parses), so those two join
- * {@link StoredEventSchema} beside this union instead of inside it.
+ * `event_start` and `event_delta` join {@link StoredEventSchema} beside this union rather than
+ * inside it: a zod discriminated union cannot hold two options with one discriminator value
+ * (it throws when it parses), and their schemas are built from their own bodies.
  */
 const StoredEventCoreSchema = z.discriminatedUnion('type', [
   UserMessageEventSchema,
@@ -51,10 +52,7 @@ const StoredEventCoreSchema = z.discriminatedUnion('type', [
  * Every event a session can store, discriminated on `type`.
  *
  * The nine core members are one discriminated union; the two stored chunks are members too,
- * reached first by `type` and then by shape. A stored chunk is never ambiguous: it is the
- * stream-only preview plus the envelope, so an input with an `id`, a `seq` and a `processed_at`
- * parses as the stored form, and one without parses only as the stream-only form in
- * {@link StreamEventSchema}.
+ * reached first by `type` and then by shape.
  */
 export const StoredEventSchema = z.union([
   StoredEventCoreSchema,
@@ -62,31 +60,35 @@ export const StoredEventSchema = z.union([
   StoredEventDeltaSchema,
 ])
 
-export type StoredEvent = z.infer<typeof StoredEventSchema>
+/** A stored event, deep-readonly (D9, issue #46): the shape a store returns. */
+export type StoredEvent = DeepReadonly<z.infer<typeof StoredEventSchema>>
 
-/** {@link StoredEvent}, deep-readonly: the shape a store returns (D9, issue #46). */
-export type ImmutableStoredEvent = DeepReadonly<StoredEvent>
+/** @deprecated The plain name is deep-readonly now (D9, issue #46); use {@link StoredEvent}. */
+export type ImmutableStoredEvent = StoredEvent
 
 /**
- * Every event a stream can deliver: the stored events plus the stream-only previews.
+ * Every event a stream can deliver: the stored events, and nothing else.
  *
- * Discriminate on `type` and handle `event_start` / `event_delta` with care — both forms
- * exist, and which one a value is, is `seq`: present on the stored form, absent on the
- * preview. That is what {@link isStoredEvent} answers.
+ * Before phase P4 this union also held the stream-only previews of `event_start` /
+ * `event_delta`; the brain stores its chunks since P3, so there is no second form left. A
+ * payload from a pre-P4 server that carries a seq-less chunk does not parse and is skipped by
+ * a reader, the way any event a reader does not know is.
  */
-export const StreamEventSchema = z.union([StoredEventSchema, StreamOnlyEventSchema])
+export const StreamEventSchema = StoredEventSchema
 
-export type StreamEvent = z.infer<typeof StreamEventSchema>
+/** A stream event, deep-readonly (D9, issue #46). The stream carries the log, so this is {@link StoredEvent}. */
+export type StreamEvent = StoredEvent
 
-/** {@link StreamEvent}, deep-readonly: the shape a reader that does not mutate can hold (D9). */
-export type ImmutableStreamEvent = DeepReadonly<StreamEvent>
+/** @deprecated The plain name is deep-readonly now (D9, issue #46); use {@link StreamEvent}. */
+export type ImmutableStreamEvent = StreamEvent
 
 /**
  * Whether a stream event was persisted, i.e. whether it is a {@link StoredEvent}.
  *
- * `seq` is the test, not the event type: since D9 an `event_start` / `event_delta` may be
- * either a stored event (with an `id`, a `seq` and a `processed_at`) or a stream-only preview
- * (with none of them). Every other event type is always stored.
+ * Every event a P4 server delivers is stored, so this is `true` for anything that parses; the
+ * `seq` test stays because it is the honest runtime check against a value that did not come
+ * from the schemas — a seq-less `event_start` from a pre-D9 server, for one — and because it
+ * is what told the two chunk forms apart before P4.
  */
 export function isStoredEvent(event: StreamEvent): event is StoredEvent {
   return 'seq' in event

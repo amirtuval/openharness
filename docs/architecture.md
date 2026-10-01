@@ -11,9 +11,19 @@ ideas carry the design:
   event against it before appending: one row in a shape no reader accepts makes the whole
   session unreadable, so a turn that cannot write a valid event ends with an error instead
   (see [`packages/brain/AGENTS.md`](../packages/brain/AGENTS.md)). The log is immutable: a
-  stored event is never modified — a claim on a user message is a record of its own, not a
-  write to the event — and the only deletion is compacting the streamed chunks a finished
-  reply superseded (D9, [#46](https://github.com/amirtuval/openharness/issues/46)).
+  stored event is never modified — the types are deep-readonly, so writing to one is a
+  compile error — and the only deletion is compacting the streamed chunks a finished reply
+  superseded (D9, [#46](https://github.com/amirtuval/openharness/issues/46)).
+
+  What a model request answers is a fact in the log, not state beside it: the events that
+  claim user input — a `span.model_request_start` claims the messages its request folds in,
+  the `span.model_request_end` and `session.status_idle` that end a request or a turn claim
+  the interrupts they answer — carry a `consumes` list, and a user event's `processed_at` is
+  derived from the claim that took it. A streamed reply is stored as it streams, chunk by
+  chunk, so a reply in flight is as resumable as anything else; the event that finishes it
+  carries a `supersedes` range over those chunks, replay skips the range, and a compaction job
+  deletes it after a retention window without changing what any reader sees.
+
 - **Hands** — the things that actually act on the world (sandboxes, tools) behind a single
   `execute(name, input)` shape, so they can be swapped without touching the brain.
 

@@ -103,19 +103,30 @@ async function expectClean(
   for (const event of raw) {
     expect(StoredEventSchema.safeParse(event).success, `${event.type} parses`).toBe(true)
     if (event.type === EVENT_TYPES.modelRequestStart) {
+      // Every span start is a real model request: it claims what it answers, records the model
+      // that served it, and — since P4 removed the claim span — a span start with no request
+      // behind it does not exist.
       expect(event.consumes, `${event.id} claims`).toBeDefined()
       expect(event.model, `${event.id} records its model`).toBe(TEST_MODEL_ID)
     }
   }
-  // Every claim names a real user event of the log, and no event is claimed twice.
+  // Every claim names a real user event of the log, and no event is claimed twice. The three
+  // event types may carry a claim (P4): a span start, a span end, a status idle.
   const claimed: EventId[] = []
   for (const event of raw) {
-    if (event.type !== EVENT_TYPES.modelRequestStart) {
+    if (
+      event.type !== EVENT_TYPES.modelRequestStart &&
+      event.type !== EVENT_TYPES.modelRequestEnd &&
+      event.type !== EVENT_TYPES.sessionStatusIdle
+    ) {
       continue
     }
     for (const id of event.consumes ?? []) {
-      expect(raw.some((other) => other.id === id)).toBe(true)
-      expect(claimed).not.toContain(id)
+      expect(
+        raw.some((other) => other.id === id),
+        `${event.id} claims ${id}`,
+      ).toBe(true)
+      expect(claimed, `${id} is claimed once`).not.toContain(id)
       claimed.push(id)
     }
   }
@@ -217,7 +228,7 @@ describe('runTurn', () => {
     const delivered: StoredEvent[] = []
     await store.subscribe(sessionId, (event) => {
       if (event.type === EVENT_TYPES.eventStart || event.type === EVENT_TYPES.eventDelta) {
-        delivered.push(event as StoredEvent)
+        delivered.push(event)
       }
     })
 
@@ -450,19 +461,19 @@ describe('runTurn', () => {
 
     expect(outcome).toEqual({ outcome: 'interrupted' })
     const raw = await rawLogOf(store, sessionId)
-    // The interrupt is claimed by a span of its own — the claim on a user event is the
-    // `consumes` of the span that answers it — and the span is closed immediately: the
-    // interrupt answered itself by ending the turn.
+    // Nothing was running, so the turn ends on the interrupt and its `session.status_idle`
+    // carries the claim (P4). No span is opened for an interrupt: there is no model request
+    // to bracket, and since P4 no span exists without one.
     expect(eventTypes(raw)).toEqual([
       EVENT_TYPES.userInterrupt,
       EVENT_TYPES.userMessage,
       EVENT_TYPES.sessionStatusRunning,
-      EVENT_TYPES.modelRequestStart,
-      EVENT_TYPES.modelRequestEnd,
       EVENT_TYPES.sessionStatusIdle,
     ])
-    expect(raw[3]).toMatchObject({ consumes: [raw[0]?.id] })
-    expect(spanEndRange(raw, 0)).toBeUndefined()
+    expect(raw[3]).toMatchObject({
+      type: EVENT_TYPES.sessionStatusIdle,
+      consumes: [raw[0]?.id],
+    })
     // The interrupt was claimed; the message it interrupted was not, so the next turn answers it.
     expect(raw[0]?.processed_at).not.toBeNull()
     expect(raw[1]?.processed_at).toBeNull()
@@ -471,7 +482,7 @@ describe('runTurn', () => {
     await expectClean(store, sessionId)
   })
 
-  it('claims a user.interrupt that arrives while the turn is streaming', async () => {
+  it('claims a user.interrupt that arrives while the turn is streaming on the span end', async () => {
     const { store, sessionId } = await newSession([message('Hello')])
     let interruptId: EventId | undefined
     const controller = new AbortController()
@@ -490,8 +501,47 @@ describe('runTurn', () => {
 
     expect(outcome).toEqual({ outcome: 'interrupted' })
     const raw = await rawLogOf(store, sessionId)
-    const claim = raw.filter((event) => event.type === EVENT_TYPES.modelRequestStart).at(-1)
-    expect(claim).toMatchObject({ consumes: [interruptId] })
+    // The interrupt stopped an open request, so that request's span end is what claims it —
+    // and it is the only span in the log: the turn called the model once.
+    expect(raw.filter(isSpanStart)).toHaveLength(1)
+    const end = raw.find((event) => event.type === EVENT_TYPES.modelRequestEnd)
+    expect(end).toMatchObject({
+      is_error: true,
+      error: { type: 'interrupted' },
+      consumes: [interruptId],
+    })
+    expect(await store.getPendingUserEvents(sessionId)).toEqual([])
+    await expectClean(store, sessionId)
+  })
+
+  it('claims a user.interrupt that arrives with nothing running on the status idle', async () => {
+    // The interrupt lands during the backoff after a failed request: the span is already
+    // closed, so nothing is in flight to end, and the turn's idle event is what claims it.
+    const { store, sessionId } = await newSession([message('Hello')])
+    let interruptId: EventId | undefined
+    const controller = new AbortController()
+    const { factory } = mockModel({ failWith: rateLimited() })
+
+    const outcome = await runTurn(sessionId, {
+      store,
+      model: factory,
+      signal: controller.signal,
+      retry: {
+        sleep: async () => {
+          const [event] = await store.appendEvents(sessionId, [{ type: 'user.interrupt' }])
+          interruptId = event?.id
+          controller.abort()
+        },
+      },
+    })
+
+    expect(outcome).toEqual({ outcome: 'interrupted' })
+    const raw = await rawLogOf(store, sessionId)
+    expect(raw.filter(isSpanStart)).toHaveLength(1)
+    expect(raw.at(-1)).toMatchObject({
+      type: EVENT_TYPES.sessionStatusIdle,
+      consumes: [interruptId],
+    })
     expect(await store.getPendingUserEvents(sessionId)).toEqual([])
     await expectClean(store, sessionId)
   })
@@ -734,7 +784,9 @@ describe('runTurn', () => {
         options?: AppendEventsOptions,
       ): Promise<StoredEvent[]> {
         if (this.rivalTargets.length > 0 && events.some(isSpanStart)) {
-          await super.markProcessed(sessionId, this.rivalTargets)
+          // The rival claims the way the contract says one does: a span start of its own,
+          // whose `consumes` takes the event (P4 — the claim is the append).
+          await super.appendEvents(sessionId, [spanStart(this.rivalTargets, TEST_MODEL_ID)])
           this.rivalTargets = []
         }
         return super.appendEvents(sessionId, events, options)
@@ -757,9 +809,12 @@ describe('runTurn', () => {
     )
 
     expect(calls).toHaveLength(0)
+    // The rival's claiming span is the last thing in the log; the brain's own span start —
+    // the one whose append was refused — never landed.
     expect(eventTypes(await rawLogOf(store, session.id))).toEqual([
       EVENT_TYPES.userMessage,
       EVENT_TYPES.sessionStatusRunning,
+      EVENT_TYPES.modelRequestStart,
     ])
     expect(await store.getPendingUserEvents(session.id)).toEqual([])
   })
@@ -980,14 +1035,15 @@ describe('runTurn', () => {
     expect(calls).toHaveLength(0)
   })
 
-  it('carries the fence on every write it makes, and claims without markProcessed', async () => {
+  it('carries the fence on every write it makes, and writes only through appendEvents', async () => {
     const { store, sessionId } = await newSession([interrupt(), message('Hello')])
     const partition = partitionOf(sessionId)
     const lease = await store.acquirePartition(partition, 'owner-1', 30_000)
     const { factory } = mockModel({ text: ['Hi there'] })
+    const before = (await rawLogOf(store, sessionId)).length
     const append = vi.spyOn(store, 'appendEvents')
-    const markProcessed = vi.spyOn(store, 'markProcessed')
-    const publishEphemeral = vi.spyOn(store, 'publishEphemeral')
+    // Every write is an append: the contract has no other way in (P4 removed the out-of-band
+    // claim and preview calls), so a spy on the log's own rows is what proves nothing else ran.
     const fence = { partition, epoch: lease!.epoch }
 
     await runTurn(sessionId, { store, model: factory, fence })
@@ -996,32 +1052,37 @@ describe('runTurn', () => {
     for (const [, , options] of append.mock.calls) {
       expect(options).toMatchObject({ fence })
     }
-    // The D9 rule, asserted: a claim is an append, and nothing rewrites the log.
-    expect(markProcessed).not.toHaveBeenCalled()
-    expect(publishEphemeral).not.toHaveBeenCalled()
+    // The events the turn added are exactly what the appends carried — no row appeared any
+    // other way. `rawLogOf` reads what the log actually holds.
+    const raw = await rawLogOf(store, sessionId)
+    const written = append.mock.calls.reduce((total, [, events]) => total + events.length, 0)
+    expect(raw.length - before).toBe(written)
   })
 
-  it('never calls markProcessed or publishEphemeral', async () => {
-    const { store, sessionId } = await newSession([message('Hello')])
-    const markProcessed = vi.spyOn(store, 'markProcessed')
-    const publishEphemeral = vi.spyOn(store, 'publishEphemeral')
-    const { factory } = mockModel(
-      { text: ['steer me'], onChunk: async () => {} },
-      { text: ['the second reply'] },
-    )
+  it('opens no span without a model request, for an interrupt or the turn it ends', async () => {
+    // The P4 rule, asserted where the old brain broke it: an interrupt used to be claimed by a
+    // pretend `span.model_request_start`/`_end` pair with no model call behind it. Now the only
+    // spans in any log are ones a request really ran, and every interrupt is claimed by the
+    // event that ended the work it stopped.
+    for (const initial of [[message('Hello')], [interrupt()], [interrupt(), message('Hello')]]) {
+      const { store, sessionId } = await newSession(initial)
+      const { factory, calls } = mockModel({ text: ['Hi'] })
 
-    await runTurn(sessionId, { store, model: factory })
-    expect(markProcessed).not.toHaveBeenCalled()
-    expect(publishEphemeral).not.toHaveBeenCalled()
+      const outcome = await runTurn(sessionId, { store, model: factory })
 
-    // The interrupt path too, where the old brain marked the interrupt itself.
-    const interrupted = await newSession([interrupt()])
-    const interruptMark = vi.spyOn(interrupted.store, 'markProcessed')
-    await runTurn(interrupted.sessionId, {
-      store: interrupted.store,
-      model: mockModel({ text: ['unused'] }).factory,
-    })
-    expect(interruptMark).not.toHaveBeenCalled()
+      const raw = await rawLogOf(store, sessionId)
+      const spans = raw.filter(isSpanStart).length
+      const interrupted = initial.some((event) => event.type === 'user.interrupt')
+      // One span per model request, and one model call per span — nothing else opens one.
+      expect(spans, `${initial.length} initial events: spans`).toBe(calls.length)
+      expect(outcome.outcome).toBe(interrupted ? 'interrupted' : 'idle')
+      // Every interrupt the log holds is claimed, and by an event that ends work.
+      for (const event of raw) {
+        if (event.type === EVENT_TYPES.userInterrupt) {
+          expect(event.processed_at, `${event.id} is claimed`).not.toBeNull()
+        }
+      }
+    }
   })
 
   it('streams the context the strategy builds', async () => {

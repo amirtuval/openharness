@@ -163,14 +163,16 @@ function storedUserEventParser<T extends UserEvent>(type: T['type']): ResponseSc
       if (!envelope.success) {
         return envelope
       }
-      const stored = envelope.data.data.find((candidate): candidate is T => candidate.type === type)
+      const stored = envelope.data.data.find((candidate) => candidate.type === type)
       if (stored === undefined) {
         return {
           success: false,
           error: { message: `The response does not contain the stored ${type}.` },
         }
       }
-      return { success: true, data: stored }
+      // The schema's inferred type is the mutable spelling of the deep-readonly event (D9);
+      // the envelope's value is the same shape, so this is the boundary cast between them.
+      return { success: true, data: stored as unknown as T }
     },
   }
 }

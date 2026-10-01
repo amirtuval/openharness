@@ -116,16 +116,16 @@ LOOP — once per model request
 INTERRUPT — an aborted signal, or a queued user.interrupt, at any point above
   text was streamed ......................... agent.message { supersedes: the chunk range }
   a span is open ............................ span.model_request_end
-                                               { error: interrupted, is_error: true }
+                                               { error: interrupted, is_error: true,
+                                                 consumes: the queued user.interrupt ids }
                                                (with the chunk range when no text was stored)
-  queued user.interrupt events .............. claimed by a span of their own: an append of
-                                               span.model_request_start { consumes: the ids }
-                                               and its span.model_request_end { interrupted },
-                                               in one batch — there is no model request to
-                                               answer an interrupt, so the claim is the span
+  nothing was in flight ..................... session.status_idle { consumes: the ids }
   ........................................... session.status_idle, return interrupted
 
-  The user messages that are still queued stay queued: they start the next turn.
+  An interrupt is claimed by the event that ends the work it stopped (P4) — the open
+  request's span end, or the turn's idle event when nothing was running. No span is opened
+  for an interrupt: every span start is a real model request. The user messages that are
+  still queued stay queued; they start the next turn.
 
 MODEL FAILURE — retryable, attempts left
   ........................................... span.model_request_end
@@ -177,8 +177,9 @@ Notes on the corners:
   that is not the model's final answer never becomes one.
 - **An interrupt ends the turn the same way at every point** — before the first request, during
   a stream, during a backoff — and always writes `session.status_idle`. Only the partial text
-  and the span close depend on whether anything was streaming, and the queued `user.interrupt`
-  events are claimed either way (by a span of their own when no request is open to end).
+  and the span close depend on whether anything was streaming; the queued `user.interrupt`
+  events are claimed either way, by the span end that stopped their request or by the idle
+  event that ended a turn with nothing in flight (P4).
 - **Retried failures close the span and open a new one**: `session.error` and
   `session.status_rescheduled` precede the backoff, `session.status_running` follows it, and the
   next attempt is a fresh `span.model_request_start`.
@@ -273,12 +274,14 @@ superseded chunk.
 timers: retries run on an injected `sleep`, and the clock is a `TestClock`.
 
 - `turn.test.ts` is the acceptance suite: the exact event order of every path above — claims
-  (`consumes`), the model that served each request, the stored chunks, the `supersedes` ranges —
-  steering in a second request, interrupts at each point (including the claim span a queued
-  `user.interrupt` gets), the retry ladder, the six ways a turn can be recovered, a fenced write
-  and a claim another owner took (both stop the turn where it stands), a turn against a model
-  that declares the wrong provider spec, and, on every scenario, that a replay of the log holds
-  no superseded chunk and that the brain never calls `markProcessed` or `publishEphemeral`.
+  (`consumes` on all three claim sites), the model that served each request, the stored chunks,
+  the `supersedes` ranges — steering in a second request, interrupts at each point (the span
+  end claiming an interrupt that stopped a request, the idle claiming one that arrived with
+  nothing running), the retry ladder, the six ways a turn can be recovered, a fenced write and
+  a claim another owner took (both stop the turn where it stands), a turn against a model that
+  declares the wrong provider spec, and, on every scenario, that a replay of the log holds no
+  superseded chunk, that no span start exists without a model request behind it, and that the
+  brain writes only through `appendEvents`.
 - `context.test.ts`, `errors.test.ts`, `retry.test.ts`, `log.test.ts`, `model.test.ts` and
   `validate.test.ts` cover the pieces on their own, including the branches the loop cannot
   reach.

@@ -1,10 +1,9 @@
 import { EVENT_TYPES } from '@openharness/protocol'
 import type {
-  ImmutableAgentMessageEvent,
-  ImmutableModelRequestStartEvent,
-  ImmutableStoredEvent,
-  ImmutableStreamEvent,
-  ImmutableUserMessageEvent,
+  AgentMessageEvent,
+  StreamEvent,
+  StoredEvent,
+  UserMessageEvent,
   RetryStatusType,
   SessionErrorType,
   SessionStatus,
@@ -27,12 +26,12 @@ import type {
  * ```
  *
  * Messages are keyed by the `sevt_` id of the event that wrote them, and every message has a
- * sort position ({@link TranscriptMessage.position}). A preview and the reply it previews
- * share an id, so the reply replaces the preview — wherever the client picked the reply up —
- * and sorts where the reply started. A message a client never saw the preview of (a reload,
- * a join mid-reply, a log whose chunks were already superseded) still sorts in the same place:
- * the `supersedes` range the stored event carries says where its chunks were. The whole
- * conversation therefore renders identically however much of a reply a client witnessed.
+ * sort position ({@link TranscriptMessage.position}). A reply's chunks and the reply itself
+ * share an id, so the reply replaces the accumulated chunks — wherever the client picked the
+ * reply up — and sorts where the reply started. A message a client never saw the chunks of (a
+ * reload, a join mid-reply, a log whose chunks were already superseded) still sorts in the
+ * same place: the `supersedes` range the stored reply carries says where its chunks were. The
+ * whole conversation therefore renders identically however much of a reply a client witnessed.
  *
  * The state is plain data — arrays, strings, numbers — so a framework can hold it in a store,
  * snapshot it, or send it to a devtool. Nothing here knows about React.
@@ -66,10 +65,11 @@ export interface TranscriptMessage {
   /**
    * Where the message sorts, in the log's own numbering. `messages` is kept in this order.
    *
-   * A stored message sits at its `seq` — a finished reply at the `from_seq` of the chunk
-   * range it supersedes, which is where the reply started — and a stream-only preview (a
-   * server from before D9, whose chunks carry no `seq`) just after the last stored event, so
-   * today's placement of a streaming bubble is unchanged. See {@link reduceTranscript}.
+   * Everything is a stored event since P4, so every position is a real `seq`: a user message
+   * at its own, a reply at the `from_seq` of the chunk range it supersedes — which is where
+   * the reply started — and a reply whose chunks were never stored (a log from before D9) at
+   * its own `seq`, or at the position of the preview it replaces. See
+   * {@link reduceTranscript}.
    */
   readonly position: number
 }
@@ -119,71 +119,52 @@ export function initialTranscriptState(): TranscriptState {
  * incoming event is only ever read, never written — so a framework can compare states by
  * reference and a caller can hand over a shared, frozen event.
  *
- * Stored events are idempotent — an event at or below `state.lastSeq` is dropped — which is
- * what lets history and a resumed stream overlap without doubling a message. Since D9 the
- * streamed chunks of a reply are stored events too (`event_start` / `event_delta` with a
- * `seq`), so they take the same path: they are deduplicated by `seq`, they advance `lastSeq`,
- * and a client that resumes mid-reply gets the rest of the chunks rather than skipping them.
- * Stream-only previews (a server from before D9) have no `seq` and are always applied.
+ * Events are idempotent — an event at or below `state.lastSeq` is dropped — which is what lets
+ * history and a resumed stream overlap without doubling a message. Since D9 the streamed chunks
+ * of a reply are stored events too (`event_start` / `event_delta` with a `seq`), so they take
+ * the same path: they are deduplicated by `seq`, they advance `lastSeq`, and a client that
+ * resumes mid-reply gets the rest of the chunks rather than skipping them. The pre-D9
+ * stream-only previews — a chunk with no envelope — were removed in phase P4: every event this
+ * reducer takes is a `StoredEvent`.
  *
  * The rules, in one place:
  *
  * - **A delta appends to its message's preview**, creating the preview if the client missed
- *   (`event_delta` carries the id of the message being previewed — stored or stream-only). A
- *   delta for a message that is already stored is ignored: the stored event is the record.
+ *   (`event_delta` carries the id of the message being previewed). A delta for a message that
+ *   is already stored is ignored: the stored event is the record.
  * - **A stored `agent.message` replaces whatever the transcript holds for its id** — a whole
  *   preview, a partial one, or nothing at all. It never merges.
  * - **A stored preview sits where its chunks started**: at its `event_start`'s `seq`, or at
  *   its first delta's `seq` when the start was skipped (a client that joined mid-reply).
- * - **A stream-only preview sits after everything stored so far** (`lastSeq + 0.5`): with no
- *   `seq` of its own, the place its bubble opened is the only position it can claim, and
- *   keeping it there is what today's servers already do.
  * - **A finished reply sits where it started.** An `agent.message` that carries `supersedes`
  *   sorts at `from_seq`, whether or not the client saw the chunks, so a steer sent mid-reply
- *   stays behind the reply in every view. A reply with no range keeps the position of the
- *   preview it replaces — where the old server's bubble opened — or, with no preview to
- *   replace, its own `seq`.
+ *   stays behind the reply in every view. A reply with no range — a log stored before D9 —
+ *   keeps the position of the preview it replaces, or, with no preview to replace, its own
+ *   `seq`.
  * - **Unfinished previews are dropped when the turn moves on**: `span.model_request_end` and
  *   `session.status_idle` discard previews still streaming (#40), which since D9 includes the
  *   previews of a chunk range a span end supersedes. An interrupt is not this case: its
  *   partial reply is stored as an `agent.message` before the span closes.
+ * - **`pending` clears on the claim.** The event that answers a user message names it in its
+ *   `consumes`: a `span.model_request_start` claims the messages its request folds in (P3),
+ *   and a `span.model_request_end` or `session.status_idle` claims the interrupts it ends on
+ *   (P4). A claim event with no list at all — a log stored before D9 — keeps the old reading:
+ *   a span start says everything pending was picked up, and a span end or an idle says
+ *   nothing.
  *
  * @param state the transcript so far
  * @param event the next event, from `iterate`, `stream`, or anywhere else
  */
-export function reduceTranscript(
-  state: TranscriptState,
-  event: ImmutableStreamEvent,
-): TranscriptState {
-  // The `typeof` check is not redundant for a caller that feeds this reducer raw events: a
-  // newer server's stream-only event type carries no `seq`, and without the check it would
-  // arrive with `seq: undefined` and move `lastSeq` to nowhere.
-  if (isStored(event) && typeof event.seq === 'number') {
-    if (event.seq <= state.lastSeq) {
-      // Already folded in: a resumed stream replaying from before where we got to, or the
-      // same history loaded twice.
-      return state
-    }
-    const reduced = reduceStoredEvent(state, event)
-    return { ...reduced, lastSeq: event.seq }
+export function reduceTranscript(state: TranscriptState, event: StreamEvent): TranscriptState {
+  if (event.seq <= state.lastSeq) {
+    // Already folded in: a resumed stream replaying from before where we got to, or the
+    // same history loaded twice. A value that did not come from the protocol's schemas and
+    // carries no `seq` compares false and is folded in; the switch below drops what it
+    // cannot read.
+    return state
   }
-
-  switch (event.type) {
-    case EVENT_TYPES.eventStart:
-      return startPreview(state, event.event.id, previewPosition(state))
-    case EVENT_TYPES.eventDelta:
-      return appendDelta(
-        state,
-        event.event_id,
-        event.delta.index,
-        event.delta.content.text,
-        previewPosition(state),
-      )
-    default:
-      // Unreachable for a value that came from the protocol's schemas; a hand-built event
-      // could still land here, and dropping it beats crashing a UI.
-      return state
-  }
+  const reduced = reduceStoredEvent(state, event)
+  return { ...reduced, lastSeq: event.seq }
 }
 
 /**
@@ -194,7 +175,7 @@ export function reduceTranscript(
  */
 export function reduceTranscriptAll(
   state: TranscriptState,
-  events: Iterable<ImmutableStreamEvent>,
+  events: Iterable<StreamEvent>,
 ): TranscriptState {
   let next = state
   for (const event of events) {
@@ -204,7 +185,7 @@ export function reduceTranscriptAll(
 }
 
 /** The stored-event half of {@link reduceTranscript}. */
-function reduceStoredEvent(state: TranscriptState, event: ImmutableStoredEvent): TranscriptState {
+function reduceStoredEvent(state: TranscriptState, event: StoredEvent): TranscriptState {
   switch (event.type) {
     case EVENT_TYPES.userMessage:
       return upsertMessage(state, messageFromUserEvent(event))
@@ -221,9 +202,8 @@ function reduceStoredEvent(state: TranscriptState, event: ImmutableStoredEvent):
       return state
 
     case EVENT_TYPES.eventStart:
-      // The stored form of a preview (D9): the reply's chunks are log events, so a client
-      // that resumes mid-reply meets them here rather than as stream-only previews. The
-      // preview opens where the reply started — this event's `seq`.
+      // The reply's chunks are log events (D9), so a client that resumes mid-reply meets
+      // them here. The preview opens where the reply started — this event's `seq`.
       return startPreview(state, event.event.id, event.seq)
 
     case EVENT_TYPES.eventDelta:
@@ -247,8 +227,12 @@ function reduceStoredEvent(state: TranscriptState, event: ImmutableStoredEvent):
       // span end never arrived at all — a stored event this client cannot parse is skipped
       // (`events/stream.ts`), and a preview no longer watched by anything would otherwise stay
       // streaming for the life of the session, drawing an empty bubble in a frontend that
-      // renders it (#40).
-      return { ...state, status: 'idle', messages: withoutPreviews(state.messages) }
+      // renders it (#40). An idle that ended a turn on an interrupt also carries that
+      // interrupt's claim (P4).
+      return clearClaimedPending(
+        { ...state, status: 'idle', messages: withoutPreviews(state.messages) },
+        event.consumes,
+      )
 
     case EVENT_TYPES.sessionError:
       return {
@@ -264,15 +248,11 @@ function reduceStoredEvent(state: TranscriptState, event: ImmutableStoredEvent):
       // The brain folds every queued user message into the request it is about to make, and
       // since D9 the request says which ones: its `consumes` list. That is where "queued"
       // becomes "delivered" — a message sent while the turn was running stays pending until
-      // the request that claims it. A span start with no list at all is a server from before
-      // the claims existed, and keeps the older reading: everything pending when a request
-      // starts has just been picked up.
-      return {
-        ...state,
-        messages: state.messages.map((message) =>
-          isClaimed(event, message) ? { ...message, pending: false } : message,
-        ),
-      }
+      // the request that claims it. A span start with no list at all is a log from before
+      // the claims existed (or one written before P4, whose writer claimed out of band), and
+      // keeps the older reading: everything pending when a request starts has just been
+      // picked up.
+      return clearClaimedPending(state, event.consumes, { absentMeansAll: true })
 
     case EVENT_TYPES.modelRequestEnd:
       // A preview that was never replaced by its stored event belongs to a request that
@@ -280,8 +260,12 @@ function reduceStoredEvent(state: TranscriptState, event: ImmutableStoredEvent):
       // brain; there is nothing to keep. (A reconciled preview is no longer `streaming`, so
       // it survives.) A span end that carries `supersedes` says the same about a specific
       // range — the previews of the chunks it replaces sit inside it — and those previews are
-      // streaming, so this is the rule that drops them.
-      return { ...state, messages: withoutPreviews(state.messages) }
+      // streaming, so this is the rule that drops them. A span end that ended a request on an
+      // interrupt also carries that interrupt's claim (P4).
+      return clearClaimedPending(
+        { ...state, messages: withoutPreviews(state.messages) },
+        event.consumes,
+      )
 
     default:
       return state
@@ -289,29 +273,40 @@ function reduceStoredEvent(state: TranscriptState, event: ImmutableStoredEvent):
 }
 
 /**
- * Whether a stream event was persisted.
+ * Clear the `pending` flag of the messages a claim reaches.
  *
- * The protocol's `isStoredEvent` answers the same question for a mutable event; this is the
- * deep-readonly spelling of it (`readonly T[]` is not assignable to `T[]`, so a caller that
- * types its events with the `Immutable*` aliases cannot reuse the predicate directly). `seq`
- * is the test, not the type: since D9 a stored chunk and a stream-only preview share one.
+ * The claim is the event's `consumes` list — a `span.model_request_start` naming the messages
+ * its request folds in, or a `span.model_request_end` / `session.status_idle` naming the
+ * interrupts it ended on (P4). Only what the list names is cleared, and a message that is
+ * already delivered is left alone, so the state keeps its identity when nothing changes.
+ *
+ * `absentMeansAll` is the pre-D9 fallback, for a log whose writer claimed out of band: a span
+ * start with no list says everything pending when a request starts has just been picked up,
+ * which is how every message was read before the claims existed. For the other two event
+ * types an absent list claims nothing — their older form never claimed anything.
+ *
+ * @param state the transcript so far
+ * @param consumes the ids the event claims, or `undefined` when it carries no list
+ * @param options.absentMeansAll what a missing list means; `false` by default
  */
-function isStored(event: ImmutableStreamEvent): event is ImmutableStoredEvent {
-  return 'seq' in event
-}
-
-/**
- * Whether this model request reaches `message`: the `consumes` list it claims, or — with no
- * list, on a server from before D9 — everything still pending.
- */
-function isClaimed(event: ImmutableModelRequestStartEvent, message: TranscriptMessage): boolean {
-  if (!message.pending) {
-    return false
+function clearClaimedPending(
+  state: TranscriptState,
+  consumes: readonly string[] | undefined,
+  options: { readonly absentMeansAll?: boolean } = {},
+): TranscriptState {
+  if (consumes === undefined && options.absentMeansAll !== true) {
+    return state
   }
-  if (event.consumes === undefined) {
-    return true
-  }
-  return event.consumes.some((id) => id === message.id)
+  const claimed = consumes === undefined ? null : new Set(consumes)
+  let changed = false
+  const messages = state.messages.map((message) => {
+    if (!message.pending || (claimed !== null && !claimed.has(message.id))) {
+      return message
+    }
+    changed = true
+    return { ...message, pending: false }
+  })
+  return changed ? { ...state, messages } : state
 }
 
 /**
@@ -325,7 +320,7 @@ function withoutPreviews(messages: readonly TranscriptMessage[]): readonly Trans
 }
 
 /** The transcript message for a stored `user.message`. */
-function messageFromUserEvent(event: ImmutableUserMessageEvent): TranscriptMessage {
+function messageFromUserEvent(event: UserMessageEvent): TranscriptMessage {
   const blocks = event.content.map((block) => block.text)
   return {
     id: event.id,
@@ -339,10 +334,7 @@ function messageFromUserEvent(event: ImmutableUserMessageEvent): TranscriptMessa
 }
 
 /** The transcript message for a stored `agent.message`, reconciled with any preview of it. */
-function messageFromAgentEvent(
-  event: ImmutableAgentMessageEvent,
-  position: number,
-): TranscriptMessage {
+function messageFromAgentEvent(event: AgentMessageEvent, position: number): TranscriptMessage {
   const blocks = event.content.map((block) => block.text)
   return {
     id: event.id,
@@ -365,24 +357,11 @@ function messageFromAgentEvent(
  * position of the preview it replaces, where the bubble opened; and a message that replaces
  * nothing lands at its own `seq`.
  */
-function agentMessagePosition(state: TranscriptState, event: ImmutableAgentMessageEvent): number {
+function agentMessagePosition(state: TranscriptState, event: AgentMessageEvent): number {
   if (event.supersedes !== undefined) {
     return event.supersedes.from_seq
   }
   return state.messages.find((message) => message.id === event.id)?.position ?? event.seq
-}
-
-/**
- * The position of a stream-only preview: just after everything stored so far.
- *
- * A preview from a server that stores none of its chunks has no `seq` to sit at, so the only
- * place it can claim is the one its bubble opens at — after every stored event the client has
- * seen. `lastSeq + 0.5` is that place in the log's own numbering: a stored event that follows
- * still sorts after it, and today's servers, which place the bubble when its preview starts,
- * render exactly as before.
- */
-function previewPosition(state: TranscriptState): number {
-  return state.lastSeq + 0.5
 }
 
 /**
@@ -450,8 +429,7 @@ function isSameMessage(current: TranscriptMessage | undefined, next: TranscriptM
  * `text` is the blocks in order — the same string the stored event will carry once it
  * replaces the preview. A delta for an event whose `event_start` was missed (a connection
  * that opened mid-reply) still lands: it opens the preview itself, at `createPosition` —
- * the delta's own `seq` for a stored chunk, just after the log for a stream-only one. A delta
- * for a message that is already stored changes nothing.
+ * the delta's own `seq`. A delta for a message that is already stored changes nothing.
  *
  * @param state the transcript so far
  * @param eventId the id of the event being previewed
@@ -508,10 +486,10 @@ export interface Transcript {
   getState(): TranscriptState
 
   /** Fold one event in, notify subscribers, and return the new state. */
-  apply(event: ImmutableStreamEvent): TranscriptState
+  apply(event: StreamEvent): TranscriptState
 
   /** Fold a sequence in — history, or a batch of stream events — and return the new state. */
-  applyAll(events: Iterable<ImmutableStreamEvent>): TranscriptState
+  applyAll(events: Iterable<StreamEvent>): TranscriptState
 
   /** Start over from {@link initialTranscriptState}, notifying subscribers. */
   reset(): TranscriptState

@@ -14,7 +14,6 @@ import type {
   StoredEvent,
   StoredEventType,
   StreamEvent,
-  StreamOnlyEvent,
   Timestamp,
   UserEvent,
   UserEventInput,
@@ -44,12 +43,15 @@ import type {
  *   the only way in, and the one deletion — {@link SessionStore.compact} — removes superseded
  *   stream chunks and nothing else. Every implementation hands out events it will never
  *   change, and both implementations deep-freeze what they return, so a caller that tries to
- *   write to one throws instead of forking the log it was handed.
+ *   write to one throws instead of forking the log it was handed. The event types are
+ *   deep-readonly (`StoredEvent` and every member, D9, issue #46), so a write is a compile
+ *   error too.
  * - **Claims.** A turn's claim on the user events it answers is itself in the log: the append
- *   of a `span.model_request_start` carrying `consumes` claims those ids (D9, issue #46), and
- *   {@link SessionStore.markProcessed} is the equivalent for writers that have not moved to
- *   that form yet. A claim is recorded once and never removed; `processed_at` on a user event
- *   is derived from it on every read. An event that is claimed cannot be claimed again.
+ *   of an event carrying `consumes` claims those ids — `span.model_request_start` for the
+ *   messages a request folds in, `span.model_request_end` for an interrupt that cut its
+ *   request short, `session.status_idle` for an interrupt that arrived with nothing running
+ *   (P4). A claim is recorded once and never removed; `processed_at` on a user event is
+ *   derived from it on every read. An event that is claimed cannot be claimed again.
  * - **Durability per append.** An append is one transaction. `initial_events` on
  *   {@link SessionStore.createSession} are part of the session's creation transaction, not
  *   appends that follow it.
@@ -164,16 +166,18 @@ export interface SessionStore {
    * — each in the same transaction as the events themselves, so a reader never sees half of
    * any of them:
    *
-   * - **Stored chunks.** An `event_start` or `event_delta` in its stored form is an ordinary
-   *   event: it gets a `seq` and a `processed_at` like everything else, is delivered to
-   *   subscribers like everything else, and is skipped by replay once superseded. It is the
-   *   same shape the stream-only preview of the same name carries, plus the envelope.
-   * - **`consumes`.** A `span.model_request_start` whose `consumes` names user events claims
-   *   them: the store records a claim per id, and from then on those events read with
-   *   `processed_at` set (see {@link SessionStore.markProcessed}) and no longer count as
-   *   pending. Every id must be a pending `user.message` / `user.interrupt` of this session
-   *   that no earlier claim took, or the whole append is refused with
-   *   {@link ClaimConflictError} and nothing is stored.
+   * - **Stored chunks.** An `event_start` or `event_delta` is an ordinary event: it gets a
+   *   `seq` and a `processed_at` like everything else, is delivered to subscribers like
+   *   everything else, and is skipped by replay once superseded.
+   * - **`consumes`.** An event whose `consumes` names user events claims them: the store
+   *   records a claim per id, and from then on those events read with `processed_at` set and
+   *   no longer count as pending. Three event types carry the list — a
+   *   `span.model_request_start` claims the `user.message`s the request folds in, a
+   *   `span.model_request_end` claims the `user.interrupt`s that cut its request short, and a
+   *   `session.status_idle` claims the `user.interrupt`s an idle turn ended on. Every id must
+   *   be a pending `user.message` / `user.interrupt` of this session that no earlier claim
+   *   took, or the whole append is refused with {@link ClaimConflictError} and nothing is
+   *   stored.
    * - **`supersedes`.** An `agent.message` or `span.model_request_end` that carries
    *   `supersedes` records the chunk range it replaces: replay skips the range and
    *   {@link SessionStore.compact} deletes it after the retention window. The range has to lie
@@ -183,11 +187,11 @@ export interface SessionStore {
    * ## Supplying an id
    *
    * An event may bring its own `id` (see {@link AppendableEvent}), and the store then writes it
-   * under exactly that id. This is what lines a stored `agent.message` up with the previews
-   * that came before it: the brain generates a `sevt_` id, publishes `event_start` and
-   * `event_delta` under it with {@link SessionStore.publishEphemeral}, and appends the final
-   * event with the same id — so a client replaces the preview with the stored message by id,
-   * and the two are one event throughout.
+   * under exactly that id. This is what lines a stored `agent.message` up with the chunks that
+   * came before it: the brain generates a `sevt_` id, appends the `event_start` and
+   * `event_delta` chunks under it, and appends the finished message with the same id — so a
+   * client matches what it accumulated to what was stored, and the whole reply is one event
+   * throughout.
    *
    * An id has to be one the store can use, and an append that carries one it cannot is refused
    * whole — nothing from that batch is stored:
@@ -215,28 +219,6 @@ export interface SessionStore {
   ): Promise<StoredEvent[]>
 
   /**
-   * Claim user events, and return those that were still pending.
-   *
-   * This is the pre-D9 way to record a turn's claim, kept working for the writers that have not
-   * moved to `consumes` yet (D9, issue #46): it records a claim per id — the same claim
-   * {@link SessionStore.appendEvents} records for a `span.model_request_start` — and from then
-   * on those events read with `processed_at` set to the clock's instant at the claim. Nothing
-   * about the stored events changes; a claim is a fact recorded beside them, not an edit.
-   *
-   * Events that are already claimed, ids that name no event of this session, and ids of events
-   * that are not user events are ignored, so claiming twice is a no-op — the call is a claim,
-   * not an assertion, and what it returns is what this call took.
-   *
-   * @throws SessionNotFoundError when the session does not exist
-   * @throws FencedError when `options.fence` is not the partition's current live lease
-   */
-  markProcessed(
-    sessionId: SessionId,
-    eventIds: EventId[],
-    options?: MarkProcessedOptions,
-  ): Promise<UserEvent[]>
-
-  /**
    * Read a page of the log.
    *
    * `order` defaults to `asc` (oldest first). `after_seq` keeps only events with a greater
@@ -259,8 +241,9 @@ export interface SessionStore {
   /**
    * The user events waiting to be folded into a turn: `processed_at` is `null`, ordered by `seq`.
    *
-   * The brain reads these at the start of every iteration of its loop and
-   * {@link SessionStore.markProcessed} them before it acts on them.
+   * The brain reads these at the start of every iteration of its loop, and the append that
+   * follows claims them: the events it answers are named in its `consumes` list, and the store
+   * takes them in the same transaction as the append (see {@link SessionStore.appendEvents}).
    *
    * @throws SessionNotFoundError when the session does not exist
    */
@@ -315,8 +298,8 @@ export interface SessionStore {
   // ------------------------------------------------------- live subscription
 
   /**
-   * Listen to everything that happens in a session: stored events as they are appended, and
-   * ephemeral ones as they are published, interleaved in the order they occurred.
+   * Listen to everything that happens in a session: every stored event, in the order it was
+   * appended.
    *
    * Delivery may be asynchronous, and a listener is never called for an event that was already
    * in the log when the subscription was established: a client that needs the history reads it
@@ -328,58 +311,6 @@ export interface SessionStore {
    * @returns the function that ends the subscription
    */
   subscribe(sessionId: SessionId, listener: SessionEventListener): Promise<Unsubscribe>
-
-  /**
-   * Publish a stream-only event — an `event_start` or an `event_delta` — to a session's
-   * subscribers without storing it.
-   *
-   * Ephemeral events are a display aid, not the record: the log holds the event they preview,
-   * under the same `sevt_` id — the one the append that stores it supplies (see
-   * {@link AppendableEvent}).
-   *
-   * Publishing also maintains the session's in-flight preview, which is what lets a connection
-   * that opens mid-stream see the text already sent: an `event_start` begins one, and each
-   * `event_delta` for that id extends it. {@link SessionStore.getPreview} is the read.
-   *
-   * @throws SessionNotFoundError when the session does not exist
-   */
-  publishEphemeral(sessionId: SessionId, event: StreamOnlyEvent): Promise<void>
-
-  /**
-   * The preview in flight for the session's current `agent.message`: the `sevt_` id its
-   * `event_start` announced, and the text its `event_delta`s have accumulated so far — or
-   * `null` when nothing is in flight.
-   *
-   * This is the read a connection that arrives late needs. Previews are delivered only to the
-   * listeners attached when they are published, so a client that was reloaded, or that opened
-   * a second tab, cannot see what the deltas before it contained; the store keeps the
-   * accumulation instead, and the server sends it as `event_start` plus one `event_delta`
-   * before it follows live.
-   *
-   * ## The lifecycle
-   *
-   * {@link SessionStore.publishEphemeral} with an `event_start` begins a preview: `eventId` is
-   * the id it announced and `text` is empty. Each `event_delta` published for that id appends
-   * its text, in publish order, so `text` is what a listener attached at that moment would have
-   * accumulated. There is **at most one preview per session**, and a new `event_start`
-   * replaces the previous one.
-   *
-   * The preview ends — this answers `null` from then on — when either
-   *
-   * - **the event it previews is stored**: an append carrying that id, which is how the
-   *   `agent.message` the deltas were for takes the preview's place (see
-   *   {@link AppendableEvent}); or
-   * - **a `span.model_request_end` is appended** for the session, which ends the model request
-   *   the preview belonged to whether or not it produced a message.
-   *
-   * Deltas stay best-effort, and so does the preview: a delta for an id that is not the current
-   * preview's is ignored rather than starting one, and one an implementation had to drop (a
-   * Postgres store cannot publish an ephemeral event bigger than a `NOTIFY` payload) is not
-   * accumulated either — what this returns is what was actually published.
-   *
-   * @throws SessionNotFoundError when the session does not exist
-   */
-  getPreview(sessionId: SessionId): Promise<SessionPreview | null>
 
   // -------------------------------------------------------- scheduler support
 
@@ -464,11 +395,11 @@ export interface SessionStore {
  * `null` for user events and the clock's instant for everything else — with one exception:
  * `id`, which a caller may supply and the store then stores as given.
  *
- * Supplying an id is how a stored event keeps the identity its stream-only previews already
- * had: the brain mints a `sevt_` id, publishes `event_start` and `event_delta` under it with
- * {@link SessionStore.publishEphemeral}, and appends the final `agent.message` carrying the
- * same id. The id it supplies has to be a valid event id and one the store does not already
- * hold, or the append is refused whole; see {@link SessionStore.appendEvents}.
+ * Supplying an id is how a reply's chunks and its message are one identity: the brain mints a
+ * `sevt_` id, appends the `event_start` and `event_delta` chunks under it, and appends the
+ * finished `agent.message` carrying the same id. The id it supplies has to be a valid event
+ * id and one the store does not already hold, or the append is refused whole; see
+ * {@link SessionStore.appendEvents}.
  */
 export type AppendableEvent = DistributiveOmit<StoredEvent, 'id' | 'seq' | 'processed_at'> & {
   /**
@@ -481,20 +412,6 @@ export type AppendableEvent = DistributiveOmit<StoredEvent, 'id' | 'seq' | 'proc
 
 /** `Omit` that distributes over a union, so the members of a discriminated union stay discriminated. */
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never
-
-/** The in-flight preview of a session's current `agent.message`; what {@link SessionStore.getPreview} returns. */
-export interface SessionPreview {
-  /** The `sevt_` id the previewing `event_start` announced — the id its deltas carry. */
-  readonly eventId: EventId
-  /**
-   * Every `event_delta` text published for that id so far, concatenated in publish order.
-   *
-   * It is a *prefix* of the `content[index].text` of the `agent.message` the id will be stored
-   * under: deltas are best-effort, so one that was dropped never makes it here, and the text of
-   * blocks other than index `0` is not distinguished — a preview is one string.
-   */
-  readonly text: string
-}
 
 /** What {@link SessionStore.updateSession} changes. */
 export interface UpdateSessionRequest {
@@ -575,12 +492,6 @@ export interface AppendEventsOptions {
   readonly fence?: PartitionFence
 }
 
-/** Options of {@link SessionStore.markProcessed}. */
-export interface MarkProcessedOptions {
-  /** The partition lease this write is made under; see {@link AppendEventsOptions.fence}. */
-  readonly fence?: PartitionFence
-}
-
 /**
  * Proof that a write is made by the partition's current owner.
  *
@@ -652,7 +563,7 @@ export interface TurnState {
   readonly openSpan: ModelRequestStartEvent | null
 }
 
-/** Called for every event of a subscribed session, stored or ephemeral. */
+/** Called for every event of a subscribed session. */
 export type SessionEventListener = (event: StreamEvent) => void | Promise<void>
 
 /** Called for every signal of a subscribed partition. */

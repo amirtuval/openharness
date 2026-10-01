@@ -82,12 +82,15 @@ import { backoffDelay, resolveRetryPolicy } from './retry'
  *
  * INTERRUPT (an aborted signal, or a queued user.interrupt)
  *   partial text streamed ............ agent.message { supersedes: the chunk range }
- *   a span is open ......... span.model_request_end { error: interrupted }
- *                            (with `supersedes` when no text was stored)
- *   queued user.interrupt events ...... claimed by a span of their own: an append of
- *                                       span.model_request_start { consumes } and its end,
- *                                       so an interrupt is claimed like any other user event
- *   ................................... session.status_idle, return interrupted
+ *   a span is open ......... span.model_request_end { error: interrupted,
+ *                            consumes: the interrupt ids }
+ *                            (with `supersedes` too when no text was stored)
+ *   nothing in flight ...... session.status_idle { consumes: the interrupt ids }
+ *   ................................... return interrupted
+ *
+ * An interrupt is claimed by the event that ends the work it stopped (P4) — the open
+ * request's span end, or the turn's idle event when nothing was running. No span is opened
+ * for an interrupt, so no span exists without a real model request behind it.
  *
  * MODEL FAILURE (a retryable error, attempts left)
  *    ............ span.model_request_end { error: model_error, supersedes: the chunks }
@@ -223,15 +226,13 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       // they previewed, so this span end supersedes them and replay skips them.
       const range = chunkRangeAfter(inherited, turnState.openSpan.seq)
       await append([
-        spanEnd(
-          turnState.openSpan.id,
-          ZERO_MODEL_USAGE,
-          {
+        spanEnd(turnState.openSpan.id, ZERO_MODEL_USAGE, {
+          error: {
             type: 'brain_lost',
             message: 'The brain that opened this model request is gone.',
           },
-          range ?? undefined,
-        ),
+          supersedes: range ?? undefined,
+        }),
       ])
     }
     if (lastStatusEventType(inherited) === EVENT_TYPES.sessionStatusRescheduled) {
@@ -241,59 +242,48 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
   }
 
   /**
-   * Claim the queued `user.interrupt` events.
+   * The ids of the queued `user.interrupt` events, for the event that ends the turn to claim.
    *
-   * The claim on a user event is the `consumes` list of the span that answers it, and an
-   * interrupt is answered by the turn ending — there is no model request for it. So it is
-   * claimed by a span of its own: the start that consumes it, and the end that closes that
-   * span immediately with `interrupted`. Nothing ran; what the pair records is that the
-   * interrupt has been reached and will not be reached again.
+   * The claim on a user event is the `consumes` list of the event that answers it, and an
+   * interrupt is answered by the turn ending — there is no model request for it (P4). The
+   * event that carries the list is the one that closes what the interrupt stopped: a span end
+   * for an open request, and the `session.status_idle` when nothing was in flight.
    */
-  const claimInterrupts = async (): Promise<void> => {
-    const interrupts = (await store.getPendingUserEvents(sessionId)).filter(isUserInterrupt)
-    if (interrupts.length === 0) {
-      return
-    }
-    const claimId = newEventId()
-    await append([
-      spanStart(
-        interrupts.map((event) => event.id),
-        agentModel.id,
-        claimId,
-      ),
-      spanEnd(claimId, ZERO_MODEL_USAGE, {
-        type: 'interrupted',
-        message: 'Interrupted by the user.',
-      }),
-    ])
-  }
+  const pendingInterruptIds = async (): Promise<EventId[]> =>
+    (await store.getPendingUserEvents(sessionId)).filter(isUserInterrupt).map((event) => event.id)
 
   /** End the turn the way an interrupt does, whatever it interrupted. */
   const endInterrupted = async (partial?: PartialReply): Promise<TurnOutcome> => {
+    const interrupts = await pendingInterruptIds()
     if (partial !== undefined) {
+      // A request is open, so its span end is what ends the work the interrupt stopped — and
+      // it carries the claim (P4). No model request is opened for an interrupt.
       if (partial.text.length > 0) {
         // The partial reply is kept, superseding the chunks it was streamed as.
         await append([agentMessage(partial.id, partial.text, partial.range)])
         await append([
           spanEnd(partial.spanId, ZERO_MODEL_USAGE, {
-            type: 'interrupted',
-            message: 'Interrupted by the user.',
+            error: { type: 'interrupted', message: 'Interrupted by the user.' },
+            consumes: interrupts,
           }),
         ])
       } else {
         // Nothing was stored as a message, so the span end supersedes the chunks itself.
         await append([
-          spanEnd(
-            partial.spanId,
-            ZERO_MODEL_USAGE,
-            { type: 'interrupted', message: 'Interrupted by the user.' },
-            partial.range,
-          ),
+          spanEnd(partial.spanId, ZERO_MODEL_USAGE, {
+            error: { type: 'interrupted', message: 'Interrupted by the user.' },
+            supersedes: partial.range,
+            consumes: interrupts,
+          }),
         ])
       }
+      // The span end took the claim, so the turn's idle event carries none.
+      await append([statusIdle()])
+      return { outcome: 'interrupted' }
     }
-    await claimInterrupts()
-    await append([statusIdle()])
+    // Nothing was in flight: the turn ends on the interrupt, and its idle event carries the
+    // claim on the interrupt events that arrived while nothing was running.
+    await append([statusIdle(interrupts)])
     return { outcome: 'interrupted' }
   }
 
@@ -311,7 +301,10 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     range: Supersedes,
   ): Promise<TurnOutcome> => {
     await append([
-      spanEnd(spanId, ZERO_MODEL_USAGE, { type: 'model_error', message: error.message }, range),
+      spanEnd(spanId, ZERO_MODEL_USAGE, {
+        error: { type: 'model_error', message: error.message },
+        supersedes: range,
+      }),
     ])
     await append([
       sessionError({
@@ -399,12 +392,10 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       // Partial output is never stored, so the span end supersedes the chunks this attempt
       // streamed. The retry below mints a new message id and its own `event_start`.
       await append([
-        spanEnd(
-          start.id,
-          ZERO_MODEL_USAGE,
-          { type: 'model_error', message: classification.message },
-          range,
-        ),
+        spanEnd(start.id, ZERO_MODEL_USAGE, {
+          error: { type: 'model_error', message: classification.message },
+          supersedes: range,
+        }),
       ])
       if (classification.retryable && retriesUsed < retry.maxRetries) {
         retriesUsed += 1
@@ -444,7 +435,7 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
         await append([agentMessage(eventId, result.text, range)])
         await append([spanEnd(start.id, result.usage)])
       } else {
-        await append([spanEnd(start.id, result.usage, undefined, range)])
+        await append([spanEnd(start.id, result.usage, { supersedes: range })])
       }
     } catch (error) {
       // The events a model's report shapes are the ones that can turn out not to be protocol

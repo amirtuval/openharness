@@ -91,10 +91,9 @@ describe('ListEventsQuerySchema', () => {
     expect(ListEventsQuerySchema.safeParse({ types: [] }).success).toBe(true)
   })
 
-  it('accepts the chunk types since D9: they are stored event types now', () => {
-    // A streamed reply's `event_start` / `event_delta` are stored events since D9, so a
-    // reader may filter the log by them. They are the same type strings the stream-only
-    // previews use — one spelling, two forms, told apart by `seq`.
+  it('accepts the chunk types: a reply’s chunks are stored events', () => {
+    // A streamed reply's `event_start` / `event_delta` are stored events since D9 — the only
+    // form they have since P4 — so a reader may filter the log by them.
     expect(ListEventsQuerySchema.safeParse({ types: ['event_start'] }).success).toBe(true)
     expect(ListEventsQuerySchema.safeParse({ types: ['event_delta'] }).success).toBe(true)
   })

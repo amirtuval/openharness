@@ -85,9 +85,10 @@ test.describe('W7 reload', () => {
   })
 
   // Was `test.fail` as the reproduction of issue #27 (the reply resumed mid-word after a
-  // reload, because the deltas that had already arrived were stream-only). Fixed by PR #32:
-  // the server hands a late connection one accumulated `event_delta` snapshot built from
-  // `SessionStore.getPreview`, so the beginning is there when the page comes back.
+  // reload, because the deltas that had already arrived were stream-only). Fixed in two
+  // steps: PR #32 had the server hand a late connection an accumulated snapshot, and since
+  // D9 the chunks *are* the log — a reloaded page replays them by `seq`, so the beginning is
+  // there when the page comes back (the preview table is gone since P4).
   test('W7b a reload mid-stream keeps the text that already arrived', async ({ page, request }) => {
     const agent = await createAgent(request, {
       name: uniqueName('QA W7b'),

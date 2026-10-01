@@ -11,8 +11,6 @@ import {
   type CreateAgentRequest,
   type EventId,
   type Session,
-  type StoredEvent,
-  type StreamOnlyEvent,
   type UserEventInput,
 } from '@openharness/protocol'
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql'
@@ -22,6 +20,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 
 import { DuplicateEventIdError, FencedError, isFencedError } from '../errors'
 import type { AppendableEvent } from '../store'
+import { timestampAt } from '../clock'
 import { createTestClock, type TestClock } from '../testing/clock'
 import { runSessionStoreConformance, type MakeSessionStore } from '../testing/conformance'
 import { createPostgresSessionStore, migrate, type PostgresSchema } from './index'
@@ -41,7 +40,7 @@ import { createPostgresSessionStore, migrate, type PostgresSchema } from './inde
  * The extras are the ones a shared store can be asked and a single-process fake cannot: two
  * stores appending at once, a supplied event id two of them try to take, fencing across
  * stores, a burst that must be delivered exactly once, catching up after the listening
- * connection is killed, a dropped oversized ephemeral event, idempotent migrations, and
+ * connection is killed, a chunk delivered across stores, idempotent migrations, and
  * `close()` leaving a borrowed pool alone.
  *
  * ## How each test is isolated
@@ -280,58 +279,28 @@ if (target === null) {
       expect(received).toEqual([1, 2, 3])
     })
 
-    it('drops an ephemeral event that cannot fit in a notification', async () => {
-      const { store, session } = await seeded()
+    it('delivers a stored chunk of another store, like any other event', async () => {
+      const { store, clock, session } = await seeded()
+      // A second store on the same pool is a second process as far as the database is
+      // concerned: a chunk appended by one is delivered to a subscriber of the other, because
+      // since D9 it is a row of the log rather than an ephemeral payload.
+      const second = track(createPostgresSessionStore({ pool }, { now: clock.now }))
       const received: string[] = []
       await store.subscribe(session.id, (event) => {
         received.push(event.type)
       })
-      const [message] = await store.appendEvents(session.id, [userMessage('hi')])
-      const previewed = message?.id ?? ('sevt_00000000000000000000000000' as StoredEvent['id'])
-
-      // Well past the 8000-byte `NOTIFY` payload Postgres accepts. Deltas are a preview, not
-      // the record, so the publish succeeds and the delta is simply not delivered.
-      await store.publishEphemeral(session.id, {
-        type: EVENT_TYPES.eventDelta,
-        event_id: previewed,
-        delta: {
-          type: 'content_delta',
-          index: 0,
-          content: { type: 'text', text: 'x'.repeat(9_000) },
-        },
-      })
-      await store.publishEphemeral(session.id, {
-        type: EVENT_TYPES.eventStart,
-        event: { type: EVENT_TYPES.agentMessage, id: previewed },
-      })
-      await waitFor(() => received.length === 2, 'the stored event and the small preview')
-      expect(received).toEqual([EVENT_TYPES.userMessage, EVENT_TYPES.eventStart])
-    })
-
-    it('keeps the in-flight preview in the table, for any store to read', async () => {
-      const { store, clock, session } = await seeded()
-      // A second store on the same pool is a second process as far as the database is
-      // concerned: a preview written by one is what the other reads, which is what makes the
-      // snapshot work when the brain and the stream are served by different instances.
-      const second = track(createPostgresSessionStore({ pool }, { now: clock.now }))
-      const previewId = newEventId()
-
-      await store.publishEphemeral(session.id, eventStart(previewId))
-      await store.publishEphemeral(session.id, deltaOf(previewId, 'half a '))
-      // The row is written in the publish's own transaction, so a reader sees it as soon as
-      // the publish resolved — never a delta that is announced but not yet readable.
-      expect(await second.getPreview(session.id)).toEqual({ eventId: previewId, text: 'half a ' })
-
-      await second.publishEphemeral(session.id, deltaOf(previewId, 'reply'))
-      expect(await store.getPreview(session.id)).toEqual({
-        eventId: previewId,
-        text: 'half a reply',
-      })
-
-      // And the append that stores the message clears it for every store, not only the writer's.
-      await second.appendEvents(session.id, [agentMessageUnder(previewId, 'half a reply')])
-      expect(await store.getPreview(session.id)).toBeNull()
-      expect(await second.getPreview(session.id)).toBeNull()
+      const previewed = newEventId()
+      await second.appendEvents(session.id, [
+        storedEventStart(previewed),
+        storedEventDelta(previewed, 'half a '),
+        storedEventDelta(previewed, 'reply'),
+      ])
+      await waitFor(() => received.length === 3, 'the three chunks the other store appended')
+      expect(received).toEqual([
+        EVENT_TYPES.eventStart,
+        EVENT_TYPES.eventDelta,
+        EVENT_TYPES.eventDelta,
+      ])
     })
 
     it('never rewrites a stored row, whatever happens to the session', async () => {
@@ -376,11 +345,43 @@ if (target === null) {
       const gone = [...before.keys()].filter((id) => !after.has(id)).sort()
       expect(gone).toEqual(chunks.map((event) => event.id).sort())
       // ...and the claim is a row of its own, not a value written back onto the user event.
+      // The column is *never written* for a user event since P4 — the append omits it, and a
+      // claim writes `event_claims` — so its raw value stays the null it was inserted with.
       expect(after.get(queued?.id ?? 'sevt_00000000000000000000000000')?.processed_at).toBeNull()
       const claims = await sql<{ event_id: string; claimed_by_event_id: string | null }>`
         select event_id, claimed_by_event_id from event_claims where session_id = ${session.id}
       `.execute(db)
       expect(claims.rows).toEqual([{ event_id: queued?.id, claimed_by_event_id: span?.id }])
+    })
+
+    it('never writes the processed_at column for a user event, and derives it from the claim', async () => {
+      const { store, clock, session } = await seeded()
+      clock.advance(3 * SECOND)
+      const [message] = await store.appendEvents(session.id, [userMessage('hi')])
+      const id = message?.id ?? ('sevt_00000000000000000000000000' as EventId)
+
+      /** The raw column, straight from the table; `null` is what "not written" leaves. */
+      const rawProcessedAt = async (): Promise<unknown> => {
+        const row = await sql<{ processed_at: unknown }>`
+          select processed_at from events where id = ${id}
+        `.execute(db)
+        return row.rows[0]?.processed_at
+      }
+      expect(await rawProcessedAt()).toBeNull()
+
+      clock.advance(5 * SECOND)
+      await store.appendEvents(session.id, [
+        {
+          type: EVENT_TYPES.modelRequestStart,
+          consumes: [id],
+          model: 'anthropic/claude-sonnet-5',
+        },
+      ])
+      // The claim did not touch the row: the column is still the null it was inserted with,
+      // and the read derives `processed_at` from `event_claims` instead.
+      expect(await rawProcessedAt()).toBeNull()
+      const reread = (await store.listEvents(session.id)).data.find((event) => event.id === id)
+      expect(reread?.processed_at).toBe(timestampAt(clock.currentMs))
     })
 
     it('applies its migrations idempotently', async () => {
@@ -452,10 +453,9 @@ if (target === null) {
     // `event_claims` and `event_supersessions` reference `events`, so they are truncated in the
     // same statement rather than with `cascade`: this is the complete list of the schema's
     // tables, and a table missing from it should be a failure, not silently cascaded away.
+    // `session_previews` was dropped by `0010_drop_session_previews.sql` (P4).
     await sql`truncate table
-      events, event_claims, event_supersessions, session_previews, sessions, agents, partition_leases`.execute(
-      db,
-    )
+      events, event_claims, event_supersessions, sessions, agents, partition_leases`.execute(db)
   }
 }
 
@@ -467,25 +467,6 @@ function agentInput(name = 'Summarizer'): CreateAgentRequest {
 /** A `user.message` to append. */
 function userMessage(text: string): UserEventInput {
   return { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text }] }
-}
-
-/** An `event_start` previewing `id`. */
-function eventStart(id: EventId): StreamOnlyEvent {
-  return { type: EVENT_TYPES.eventStart, event: { type: EVENT_TYPES.agentMessage, id } }
-}
-
-/** An `event_delta` carrying `text` for the preview of `id`. */
-function deltaOf(id: EventId, text: string): StreamOnlyEvent {
-  return {
-    type: EVENT_TYPES.eventDelta,
-    event_id: id,
-    delta: { type: 'content_delta', index: 0, content: { type: 'text', text } },
-  }
-}
-
-/** An `agent.message` to append under the id `id`, as the brain appends one its previews announced. */
-function agentMessageUnder(id: EventId, text: string): AppendableEvent {
-  return { id, type: EVENT_TYPES.agentMessage, content: [{ type: 'text', text }] }
 }
 
 /** A stored `event_start` chunk previewing `id`, as a brain appends one since D9. */

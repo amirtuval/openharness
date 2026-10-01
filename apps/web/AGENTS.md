@@ -226,7 +226,8 @@ from shadcn/ui primitives plus five presentational components in `src/components
   use `useChat` — is the wrong trade.
 - assistant-ui's external-store runtime expects its own message model (`ThreadMessageLike`
   parts) and its own streaming flags. That is a second state model next to the transcript
-  reducer, which already models exactly this (previews, reconciliation, pending, errors).
+  reducer, which already models exactly this (streaming chunks, reconciliation, pending,
+  errors).
 
 So: `MessageList`/`MessageItem`/`Composer`/`StatusIndicator`/`ErrorBanner`, driven by
 `useSession`, styled with Tailwind and shadcn/ui's Button, Textarea, Input, Label, Card and

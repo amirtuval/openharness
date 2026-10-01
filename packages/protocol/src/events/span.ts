@@ -74,10 +74,11 @@ export const ModelRequestStartEventSchema = z.object({
    * // extension: the user events this request claims — the `sevt_` ids of the
    * `user.message` / `user.interrupt` events it folds into the request.
    *
-   * Optional for the D9 transition only, so events stored before D9 and writers that have not
-   * been ported yet still validate; phase P3 makes the brain set it on every request it
-   * appends, and it is then never absent in a log written from scratch. An empty array claims
-   * nothing.
+   * Optional only so a log stored before D9 (issue #46) keeps validating: those events carry
+   * no list, and a reader falls back to the pre-D9 reading (everything queued when the request
+   * started was picked up). Every request the brain appends from phase P3 on carries one — and
+   * since P4 an interrupt that ends a request is claimed here on the request's
+   * `span.model_request_end` instead of by a request of its own. An empty array claims nothing.
    */
   consumes: z.array(EventIdSchema).optional(),
   /**
@@ -92,13 +93,15 @@ export const ModelRequestStartEventSchema = z.object({
   model: z.string().min(1).optional(),
 })
 
-export type ModelRequestStartEvent = z.infer<typeof ModelRequestStartEventSchema>
+/** A stored `span.model_request_start`, deep-readonly (D9, issue #46). */
+export type ModelRequestStartEvent = DeepReadonly<z.infer<typeof ModelRequestStartEventSchema>>
 
-/** {@link ModelRequestStartEvent}, deep-readonly: the shape a store returns (D9). */
-export type ImmutableModelRequestStartEvent = DeepReadonly<ModelRequestStartEvent>
+/** @deprecated The plain name is deep-readonly now (D9, issue #46); use {@link ModelRequestStartEvent}. */
+export type ImmutableModelRequestStartEvent = ModelRequestStartEvent
 
 /**
- * A model request finished.
+ * A model request finished — and, since P4, the claim on any user events the request itself
+ * answers that its span start did not already list.
  *
  * `model_request_start_id` points at the matching `span.model_request_start`, which is what
  * lets a brain recovering from a crash find and close the span it inherited.
@@ -132,12 +135,24 @@ export const ModelRequestEndEventSchema = z.object({
    * {@link SupersedesSchema} for the range's meaning and who reads it.
    */
   supersedes: SupersedesSchema.optional(),
+  /**
+   * // extension: the user events this span end claims (P4).
+   *
+   * A `user.interrupt` that cut an open model request short is answered by the request's end,
+   * not by a request of its own — no model was called for it — so the interrupt's ids are
+   * claimed here, with the same rules and the same atomic, insert-only claim as
+   * {@link ModelRequestStartEventSchema}'s `consumes`. The brain writes the list on an
+   * `interrupted` end; for every other outcome it is absent. Optional so a log stored before
+   * P4 keeps validating.
+   */
+  consumes: z.array(EventIdSchema).optional(),
 })
 
-export type ModelRequestEndEvent = z.infer<typeof ModelRequestEndEventSchema>
+/** A stored `span.model_request_end`, deep-readonly (D9, issue #46). */
+export type ModelRequestEndEvent = DeepReadonly<z.infer<typeof ModelRequestEndEventSchema>>
 
-/** {@link ModelRequestEndEvent}, deep-readonly: the shape a store returns (D9). */
-export type ImmutableModelRequestEndEvent = DeepReadonly<ModelRequestEndEvent>
+/** @deprecated The plain name is deep-readonly now (D9, issue #46); use {@link ModelRequestEndEvent}. */
+export type ImmutableModelRequestEndEvent = ModelRequestEndEvent
 
 /** Any stored span event. */
 export const SpanEventSchema = z.discriminatedUnion('type', [
@@ -145,4 +160,5 @@ export const SpanEventSchema = z.discriminatedUnion('type', [
   ModelRequestEndEventSchema,
 ])
 
-export type SpanEvent = z.infer<typeof SpanEventSchema>
+/** Any stored span event, deep-readonly (D9, issue #46). */
+export type SpanEvent = DeepReadonly<z.infer<typeof SpanEventSchema>>

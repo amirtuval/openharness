@@ -6,37 +6,30 @@ import type { DeepReadonly } from '../readonly'
 import { EVENT_TYPES, EventSeqSchema, ProcessedAtSchema } from './common'
 
 /**
- * Preview events: `event_start` and `event_delta`, in the two forms they take.
+ * The chunk events: `event_start` and `event_delta`.
  *
  * A connection opts in per event type with the `event_deltas[]` query parameter on
- * `GET /v1/sessions/{session_id}/events/stream`. A preview is a best-effort display aid: the
- * stored event is the record, and a client that ignores previews still receives a complete,
- * correct stream.
+ * `GET /v1/sessions/{session_id}/events/stream`. Since D9 (issue #46) a streamed reply is
+ * stored chunk by chunk: these are ordinary stored events — `id`, `seq`, `processed_at` — so a
+ * reply in flight is part of the log, resumable by `seq` like anything else, and the event
+ * that finishes the reply supersedes the range it spanned.
  *
- * Since D9 (issue #46) a streamed reply is stored chunk by chunk, so `event_start` and
- * `event_delta` are **stored events** with the usual envelope — `id`, `seq`, `processed_at` —
- * and {@link StoredEventStartSchema} / {@link StoredEventDeltaSchema} below are that form.
- * The original stream-only form — no envelope of its own, published to live connections while
- * the reply streams — is {@link EventStartSchema} / {@link EventDeltaSchema}, kept unchanged
- * for the servers, stores and clients that still publish and read it; the pair is removed in
- * phase P4.
+ * There is one form, and it is the stored one. The pre-D9 stream-only preview — the same
+ * event names with no envelope, published to live connections and never stored — was removed
+ * in phase P4, when there were no writers left that produced it; the stored schemas below are
+ * what `StoredEventSchema` carries, and `seq` is still the field that tells a log event apart
+ * from anything a pre-D9 server might still send (see `isStoredEvent()` in `union.ts`).
  *
- * A reader tells the two apart by `seq`: the stored form has one, the preview does not (see
- * `isStoredEvent()` in `union.ts`, and `STREAM_ONLY_EVENT_TYPES` in `common.ts`). The stored
- * form is a superset of the preview — parsing a stored chunk with the stream-only schema
- * succeeds and drops the envelope — so a reader that does not care which form it holds can
- * always read `event` / `event_id` / `delta`.
- *
- * In both forms the only identifier a chunk announces is the id of the event it previews, and
- * the identifiers always line up: `event_start.event.id`, every `event_delta.event_id` and the
- * stored event's `id` are the same `sevt_` value.
+ * The chunk announces the id of the event it previews, and the identifiers always line up:
+ * `event_start.event.id`, every `event_delta.event_id` and the finished event's `id` are the
+ * same `sevt_` value.
  *
  * The wire format is deliberately *not* the Messages API streaming format — the delta type is
  * `content_delta`, not `content_block_delta`, and there are no per-block start/stop events.
  */
 
 /**
- * The event types a connection may ask to preview.
+ * The event types whose chunks a connection may ask to receive (`event_deltas[]`).
  *
  * Anthropic also accepts `agent.thinking`, which it emits as `event_start` only;
  * openharness has no `agent.thinking` event, so `agent.message` is the whole v1 set.
@@ -46,27 +39,12 @@ export const DeltaTypeSchema = z.enum([EVENT_TYPES.agentMessage])
 export type DeltaType = z.infer<typeof DeltaTypeSchema>
 
 /**
- * A previewed event has started generating.
- *
- * `event` announces the upcoming event's type and `id`; for `agent.message`, deltas follow.
- */
-export const EventStartSchema = z.object({
-  type: z.literal(EVENT_TYPES.eventStart),
-  event: z.object({
-    type: DeltaTypeSchema,
-    id: EventIdSchema,
-  }),
-})
-
-export type EventStart = z.infer<typeof EventStartSchema>
-
-/**
  * Incremental content for a previewed event.
  *
  * `index` is the index of the content block being extended, so a multi-block message
- * accumulates into one buffer per `(event_id, index)` pair. Concatenating a preview's deltas
- * in arrival order yields a prefix of `content[index].text` in the stored event — a prefix
- * rather than the whole text, because deltas may be shed under load.
+ * accumulates into one buffer per `(event_id, index)` pair. Concatenating a reply's deltas in
+ * arrival order yields a prefix of `content[index].text` in the stored event — a prefix rather
+ * than the whole text, because deltas may be shed under load.
  *
  * Anthropic marks `index` optional and its own accumulator reads a missing index as `0`, so
  * this schema defaults it: `{ delta: { type: 'content_delta', content: … } }` parses to
@@ -80,56 +58,48 @@ export const ContentDeltaSchema = z.object({
 
 export type ContentDelta = z.infer<typeof ContentDeltaSchema>
 
-/** Incremental content for the previewed event named by `event_id`. */
-export const EventDeltaSchema = z.object({
+/**
+ * A reply started streaming: the first chunk of the range the finished event supersedes.
+ *
+ * Stored since D9 (issue #46): the event carries the usual envelope and is appended by the
+ * brain as the reply starts. The message it previews is stored later under `event.id`, and
+ * either that message — or the `span.model_request_end` that closes a request which stored
+ * none — carries a `supersedes` range over this event and the deltas that follow it.
+ */
+export const StoredEventStartSchema = z.object({
+  type: z.literal(EVENT_TYPES.eventStart),
+  id: EventIdSchema,
+  seq: EventSeqSchema,
+  processed_at: ProcessedAtSchema,
+  event: z.object({
+    type: DeltaTypeSchema,
+    id: EventIdSchema,
+  }),
+})
+
+/** A stored `event_start`, deep-readonly (D9, issue #46). */
+export type StoredEventStart = DeepReadonly<z.infer<typeof StoredEventStartSchema>>
+
+/** @deprecated The plain name is deep-readonly now (D9, issue #46); use {@link StoredEventStart}. */
+export type ImmutableStoredEventStart = StoredEventStart
+
+/**
+ * One streamed fragment of a reply, as a log entry: an `event_delta` with the stored envelope.
+ *
+ * `event_id` names the reply being written; the deltas of one reply are the consecutive
+ * `seq`s after its `event_start`, and the finished event's `supersedes` range covers them.
+ */
+export const StoredEventDeltaSchema = z.object({
   type: z.literal(EVENT_TYPES.eventDelta),
+  id: EventIdSchema,
+  seq: EventSeqSchema,
+  processed_at: ProcessedAtSchema,
   event_id: EventIdSchema,
   delta: ContentDeltaSchema,
 })
 
-export type EventDelta = z.infer<typeof EventDeltaSchema>
+/** A stored `event_delta`, deep-readonly (D9, issue #46). */
+export type StoredEventDelta = DeepReadonly<z.infer<typeof StoredEventDeltaSchema>>
 
-/**
- * The stored form of an `event_start` (D9): the preview's fields plus the stored envelope.
- *
- * Appended by the brain as a reply starts streaming (phase P3). The message it previews is
- * stored later under `event.id`, and either that `agent.message` — or the
- * `span.model_request_end` that closes the request without one — carries a `supersedes` range
- * over this event and the deltas that follow it.
- */
-export const StoredEventStartSchema = EventStartSchema.extend({
-  id: EventIdSchema,
-  seq: EventSeqSchema,
-  processed_at: ProcessedAtSchema,
-})
-
-export type StoredEventStart = z.infer<typeof StoredEventStartSchema>
-
-/** {@link StoredEventStart}, deep-readonly: the shape a store returns (D9). */
-export type ImmutableStoredEventStart = DeepReadonly<StoredEventStart>
-
-/** The stored form of an `event_delta` (D9): one streamed fragment, as a log entry. */
-export const StoredEventDeltaSchema = EventDeltaSchema.extend({
-  id: EventIdSchema,
-  seq: EventSeqSchema,
-  processed_at: ProcessedAtSchema,
-})
-
-export type StoredEventDelta = z.infer<typeof StoredEventDeltaSchema>
-
-/** {@link StoredEventDelta}, deep-readonly: the shape a store returns (D9). */
-export type ImmutableStoredEventDelta = DeepReadonly<StoredEventDelta>
-
-/**
- * Any stream-only event: the preview pair as a live connection receives it, with no envelope.
- *
- * Not to be confused with {@link StoredEventStartSchema} / {@link StoredEventDeltaSchema} —
- * since D9 those are the *stored* forms of the same two event names, and they are what
- * `StoredEventSchema` carries. This union is unchanged from before D9 and is removed in P4.
- */
-export const StreamOnlyEventSchema = z.discriminatedUnion('type', [
-  EventStartSchema,
-  EventDeltaSchema,
-])
-
-export type StreamOnlyEvent = z.infer<typeof StreamOnlyEventSchema>
+/** @deprecated The plain name is deep-readonly now (D9, issue #46); use {@link StoredEventDelta}. */
+export type ImmutableStoredEventDelta = StoredEventDelta

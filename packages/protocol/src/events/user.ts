@@ -10,9 +10,10 @@ import { EVENT_TYPES, EventSeqSchema, QueuedProcessedAtSchema } from './common'
  *
  * These are the only events a client may append; `POST /v1/sessions/{session_id}/events`
  * accepts them and nothing else. A user event is written to the log the moment it is
- * accepted, with `processed_at: null`, and its `processed_at` is filled in later, when the
- * brain actually folds it into a turn. The `null` is what tells a client that the agent has
- * not seen the message yet.
+ * accepted and is never modified after that (D9, issue #46): it is stored as written — with
+ * `processed_at: null` — and the claim the brain takes on it is a fact recorded beside it,
+ * so a read derives the `processed_at` it reports from the claim that took the event. `null`
+ * (no claim yet) is what tells a client that the agent has not seen the message.
  */
 
 /** A message from the user to the agent. v1 carries text blocks only. */
@@ -24,10 +25,11 @@ export const UserMessageEventSchema = z.object({
   content: ContentBlocksSchema,
 })
 
-export type UserMessageEvent = z.infer<typeof UserMessageEventSchema>
+/** A stored `user.message`, deep-readonly (D9, issue #46). */
+export type UserMessageEvent = DeepReadonly<z.infer<typeof UserMessageEventSchema>>
 
-/** {@link UserMessageEvent}, deep-readonly: the shape a store returns (D9). */
-export type ImmutableUserMessageEvent = DeepReadonly<UserMessageEvent>
+/** @deprecated The plain name is deep-readonly now (D9, issue #46); use {@link UserMessageEvent}. */
+export type ImmutableUserMessageEvent = UserMessageEvent
 
 /**
  * Stop the agent mid-execution.
@@ -44,10 +46,11 @@ export const UserInterruptEventSchema = z.object({
   processed_at: QueuedProcessedAtSchema,
 })
 
-export type UserInterruptEvent = z.infer<typeof UserInterruptEventSchema>
+/** A stored `user.interrupt`, deep-readonly (D9, issue #46). */
+export type UserInterruptEvent = DeepReadonly<z.infer<typeof UserInterruptEventSchema>>
 
-/** {@link UserInterruptEvent}, deep-readonly: the shape a store returns (D9). */
-export type ImmutableUserInterruptEvent = DeepReadonly<UserInterruptEvent>
+/** @deprecated The plain name is deep-readonly now (D9, issue #46); use {@link UserInterruptEvent}. */
+export type ImmutableUserInterruptEvent = UserInterruptEvent
 
 /** Any stored user event. */
 export const UserEventSchema = z.discriminatedUnion('type', [
@@ -55,7 +58,8 @@ export const UserEventSchema = z.discriminatedUnion('type', [
   UserInterruptEventSchema,
 ])
 
-export type UserEvent = z.infer<typeof UserEventSchema>
+/** Any stored user event, deep-readonly (D9, issue #46). */
+export type UserEvent = DeepReadonly<z.infer<typeof UserEventSchema>>
 
 /**
  * A user event as a client sends it: the same shapes without the fields the server assigns

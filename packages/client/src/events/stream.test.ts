@@ -1,14 +1,12 @@
 import { EVENT_TYPES, isStoredEvent, newEventId } from '@openharness/protocol'
 import {
   makeAgentMessage,
-  makeEventDelta,
-  makeEventStart,
+  makeStoredEventDelta,
+  makeStoredEventStart,
   makeSessionError,
   makeStatusIdle,
   makeStatusRescheduled,
   makeStatusRunning,
-  makeStoredEventDelta,
-  makeStoredEventStart,
   makeUserMessage,
 } from '@openharness/protocol/fixtures'
 import type { StreamEvent } from '@openharness/protocol'
@@ -277,17 +275,20 @@ describe('delivering events', () => {
     expect(new URL(mock.urlOf(1)).searchParams.get('after_seq')).toBe('5')
   })
 
-  it('delivers previews before the stored message that replaces them', async () => {
-    const message = makeAgentMessage('the whole reply', { seq: 3 })
-    const preview: StreamEvent[] = [
-      makeEventStart(message.id),
-      makeEventDelta(message.id, 'the whole '),
-      makeEventDelta(message.id, 'reply'),
+  it('delivers stored chunks before the message that supersedes them', async () => {
+    const message = makeAgentMessage('the whole reply', {
+      seq: 6,
+      supersedes: { from_seq: 3, to_seq: 5 },
+    })
+    const chunks: StreamEvent[] = [
+      makeStoredEventStart(message.id, { seq: 3 }),
+      makeStoredEventDelta(message.id, 'the whole ', { seq: 4 }),
+      makeStoredEventDelta(message.id, 'reply', { seq: 5 }),
     ]
     const body = [
       ...sseLines(TURN.slice(0, 2)),
-      ...sseLines(preview),
-      ...sseLines([message, ...TURN.slice(3)]),
+      ...sseLines(chunks),
+      ...sseLines([message, makeStatusIdle({ seq: 7 })]),
     ]
     const { client } = clientWith(() => sseResponse(body))
     const controller = new AbortController()
@@ -306,7 +307,40 @@ describe('delivering events', () => {
       EVENT_TYPES.agentMessage,
       EVENT_TYPES.sessionStatusIdle,
     ])
-    expect(events.filter(isStoredEvent).map((event) => event.seq)).toEqual([1, 2, 3, 4])
+    expect(events.map((event) => event.seq)).toEqual([1, 2, 3, 4, 5, 6, 7])
+  })
+
+  it('drops a seq-less chunk: the stream-only preview was removed in P4', async () => {
+    // A pre-P4 server's stream-only `event_start` has no envelope, so it does not parse as a
+    // stored event and the connection skips it — the same treatment as any event this client
+    // does not know. What it previewed arrives as the stored message.
+    const message = makeAgentMessage('the whole reply', { seq: 3 })
+    const {
+      id: _id,
+      seq: _seq,
+      processed_at: _processedAt,
+      ...seqLessStart
+    } = makeStoredEventStart(message.id, { seq: 4 })
+    const body = [
+      ...sseLines(TURN.slice(0, 2)),
+      `data: ${JSON.stringify(seqLessStart)}\n\n`,
+      ...sseLines([message, ...TURN.slice(3)]),
+    ]
+    const { client, debug } = clientWith(() => sseResponse(body))
+    const controller = new AbortController()
+
+    const events = await collectUntilIdle(
+      client.sessions.events.stream(SESSION_ID, { deltas: true, signal: controller.signal }),
+      controller,
+    )
+
+    expect(events.map((event) => event.type)).toEqual([
+      EVENT_TYPES.sessionStatusRunning,
+      EVENT_TYPES.userMessage,
+      EVENT_TYPES.agentMessage,
+      EVENT_TYPES.sessionStatusIdle,
+    ])
+    expect(debug.some((message) => message.includes('event_start'))).toBe(true)
   })
 })
 

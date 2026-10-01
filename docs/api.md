@@ -48,20 +48,20 @@ same way, in the same request.
 
 ## Routes
 
-| method | path                                      | what it does                                                    |
-| ------ | ----------------------------------------- | --------------------------------------------------------------- |
-| `GET`  | `/health`                                 | liveness; the only route that never needs a key                 |
-| `POST` | `/v1/agents`                              | create an agent                                                 |
-| `GET`  | `/v1/agents`                              | list agents, oldest first                                       |
-| `GET`  | `/v1/agents/{agent_id}`                   | read one agent                                                  |
-| `POST` | `/v1/agents/{agent_id}`                   | update an agent; sessions already created keep their snapshot   |
-| `POST` | `/v1/sessions`                            | create a session that snapshots an agent                        |
-| `GET`  | `/v1/sessions`                            | list sessions, newest first (`agent_id` filters)                |
-| `GET`  | `/v1/sessions/{session_id}`               | read one session                                                |
-| `POST` | `/v1/sessions/{session_id}/events`        | append user events; the server owns every other event type      |
-| `GET`  | `/v1/sessions/{session_id}/events`        | read the log, with `types[]`, `after_seq`, `limit` and `page`   |
-| `GET`  | `/v1/sessions/{session_id}/events/stream` | follow it live over SSE; `event_deltas[]` opts into previews    |
-| `POST` | `/v1/sessions/{session_id}/ai-sdk/chat`   | AI SDK `useChat` compatibility — an extension, not the protocol |
+| method | path                                      | what it does                                                         |
+| ------ | ----------------------------------------- | -------------------------------------------------------------------- |
+| `GET`  | `/health`                                 | liveness; the only route that never needs a key                      |
+| `POST` | `/v1/agents`                              | create an agent                                                      |
+| `GET`  | `/v1/agents`                              | list agents, oldest first                                            |
+| `GET`  | `/v1/agents/{agent_id}`                   | read one agent                                                       |
+| `POST` | `/v1/agents/{agent_id}`                   | update an agent; sessions already created keep their snapshot        |
+| `POST` | `/v1/sessions`                            | create a session that snapshots an agent                             |
+| `GET`  | `/v1/sessions`                            | list sessions, newest first (`agent_id` filters)                     |
+| `GET`  | `/v1/sessions/{session_id}`               | read one session                                                     |
+| `POST` | `/v1/sessions/{session_id}/events`        | append user events; the server owns every other event type           |
+| `GET`  | `/v1/sessions/{session_id}/events`        | read the log, with `types[]`, `after_seq`, `limit` and `page`        |
+| `GET`  | `/v1/sessions/{session_id}/events/stream` | follow it live over SSE; `event_deltas[]` opts into a reply's chunks |
+| `POST` | `/v1/sessions/{session_id}/ai-sdk/chat`   | AI SDK `useChat` compatibility — an extension, not the protocol      |
 
 List endpoints answer `{ data, next_page }`; `next_page` is an opaque cursor handed back as
 `page`, and `null` means there is nothing more.
@@ -72,19 +72,19 @@ The log is the source of truth, and `seq` is the order it happened in: `1`, `2`,
 session. It is also the SSE `id` and the resume position, so a client that reconnects with
 `last-event-id: 7` gets `8` next — never `7` twice, never a gap.
 
-| event                        | who writes it | what it means                                        |
-| ---------------------------- | ------------- | ---------------------------------------------------- |
-| `user.message`               | the client    | a message, until the brain claims it                 |
-| `user.interrupt`             | the client    | stop the turn in flight                              |
-| `agent.message`              | the brain     | a reply, under the `sevt_` id its previews announced |
-| `session.status_running`     | the brain     | a turn started (also after a retry)                  |
-| `session.status_idle`        | the brain     | the turn ended; the session is waiting for input     |
-| `session.status_rescheduled` | the brain     | a transient failure; it is retrying                  |
-| `session.error`              | the brain     | what went wrong, and whether it is retrying          |
-| `span.model_request_start`   | the brain     | a model request began, and the user events it claims |
-| `span.model_request_end`     | the brain     | it finished, with `model_usage` and any error        |
-| `event_start`                | the brain     | a reply started streaming — a stored chunk since D9  |
-| `event_delta`                | the brain     | a streamed fragment of it — a stored chunk since D9  |
+| event                        | who writes it | what it means                                          |
+| ---------------------------- | ------------- | ------------------------------------------------------ |
+| `user.message`               | the client    | a message, until the brain claims it                   |
+| `user.interrupt`             | the client    | stop the turn in flight                                |
+| `agent.message`              | the brain     | a reply, under the `sevt_` id its chunks announced     |
+| `session.status_running`     | the brain     | a turn started (also after a retry)                    |
+| `session.status_idle`        | the brain     | the turn ended; the session is waiting for input       |
+| `session.status_rescheduled` | the brain     | a transient failure; it is retrying                    |
+| `session.error`              | the brain     | what went wrong, and whether it is retrying            |
+| `span.model_request_start`   | the brain     | a model request began, and the messages it claims      |
+| `span.model_request_end`     | the brain     | it finished — usage, any error, the interrupts it ends |
+| `event_start`                | the brain     | a reply started streaming — a stored chunk since D9    |
+| `event_delta`                | the brain     | a streamed fragment of it — a stored chunk since D9    |
 
 ### Claims, chunks and superseding (D9)
 
@@ -92,15 +92,18 @@ The log is immutable: once an event is appended no field of it changes, and the 
 is compaction ([issue #46](https://github.com/amirtuval/openharness/issues/46)). Four fields
 carry that:
 
-- `span.model_request_start` lists `consumes`, the ids of the `user.message` / `user.interrupt`
-  events the request answers, and `model`, the `provider/model` that served it. The claim _is_
-  that append: an event already consumed by one span cannot be consumed again. `processed_at`
-  stays in the payload and is derived on read from the span that consumed the event.
+- Three event types list `consumes`, the ids of the user events they claim: a
+  `span.model_request_start` claims the `user.message`s its request folds in (and `model`, the
+  `provider/model` that served it); a `span.model_request_end` claims the `user.interrupt`s that
+  cut its request short; a `session.status_idle` claims the `user.interrupt`s a turn that had
+  nothing running ended on. The claim _is_ that append: an event already consumed by one event
+  cannot be consumed again. `processed_at` stays in the payload and is derived on read from the
+  claim that took the event.
 - `event_start` and `event_delta` are **stored events**, with `id`, `seq` and `processed_at`
   like any other — a reply in flight is part of the log, so reconnecting mid-reply is
   `after_seq` / `last-event-id` alone. They keep the names and shapes of Anthropic's previews,
-  and a connection that asked for `event_deltas[]=agent.message` still gets the envelope-less
-  previews on the live stream.
+  and a connection that asked for `event_deltas[]=agent.message` gets them live; there is no
+  second, envelope-less form.
 - The event that finishes a reply — the `agent.message`, or the `span.model_request_end` that
   closes a request that stored none (an interrupt, a brain that died, a reply that streamed no
   text) — carries `supersedes: { from_seq, to_seq }`, the chunk range it replaces, inclusive
@@ -119,9 +122,19 @@ carry that:
  "content":[{"type":"text","text":"Hello there"}],"supersedes":{"from_seq":4,"to_seq":5}}
 ```
 
+An interrupt that arrives with nothing running is claimed by the `session.status_idle` that
+ends the turn — no span is opened for it, because no model request runs:
+
+```json
+{"type":"user.interrupt","id":"sevt_…","seq":7,"processed_at":null}
+{"type":"session.status_running","id":"sevt_…","seq":8,"processed_at":"…"}
+{"type":"session.status_idle","id":"sevt_…","seq":9,"processed_at":"…",
+ "stop_reason":{"type":"end_turn"},"consumes":["sevt_…"]}
+```
+
 `consumes`, `model` and `supersedes` are optional in the schema so that a log written before
-D9 keeps validating; from phase P3 on the server writes all three on every event that takes
-them.
+D9 keeps validating; from phase P3 on the server writes them on every event that takes them
+(and from P4 on, `consumes` on all three claim sites).
 
 ## Reading the stream
 
@@ -163,9 +176,9 @@ after a reload.
 
 A connection that asked for `event_deltas[]=agent.message` gets the chunks — live and replayed
 alike; one that did not is never sent an `event_start` or an `event_delta`, and sees the
-`agent.message` when the turn ends. Stream-only previews (a writer that publishes rather than
-stores chunks) still arrive the same way: live, to the connections attached when they are sent,
-never replayed.
+`agent.message` when the turn ends. The chunks are stored events and nothing else: the
+envelope-less previews a pre-D9 server published were removed in P4, when nothing wrote them
+any more.
 
 ## Authentication
 

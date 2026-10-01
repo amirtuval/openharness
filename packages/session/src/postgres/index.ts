@@ -27,6 +27,5 @@ export type {
   EventSupersessionsTable,
   PartitionLeasesTable,
   PostgresSchema,
-  SessionPreviewsTable,
   SessionsTable,
 } from './schema'
