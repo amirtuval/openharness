@@ -34,13 +34,17 @@ describe('the dev-login boot guard (A7)', () => {
   })
 
   it('is the flag that enables it: without it, no password sign-in at all', async () => {
-    // The boot the guard permits — a loopback public URL — comes up, and the flag is what
-    // decides whether the dev login exists: with it off, nothing about the documented
-    // credentials works.
-    const server = await harness.server({ devLogin: false })
+    // The boot the guard permits — a loopback public URL with a provider configured, since
+    // a server with no provider and no dev login has no way to sign in and refuses to boot —
+    // comes up, and the flag is what decides whether the dev login exists: with it off,
+    // nothing about the documented credentials works.
+    const server = await harness.server({
+      devLogin: false,
+      env: { GOOGLE_CLIENT_ID: 'dummy', GOOGLE_CLIENT_SECRET: 'dummy' },
+    })
 
     const config = await fetch(`${server.baseUrl}/v1/auth-config`)
-    expect(await config.json()).toEqual({ providers: [], dev_login: false })
+    expect(await config.json()).toEqual({ providers: ['google'], dev_login: false })
 
     const attempt = await fetch(`${server.baseUrl}/api/auth/sign-in/email`, {
       method: 'POST',

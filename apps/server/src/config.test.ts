@@ -27,13 +27,18 @@ const REQUIRED = {
   OPENHARNESS_SECRETS_KEY: 'b3Blbmhhcm5lc3MtdGVzdC1zZWNyZXRzLWtleS0zMmI=',
 }
 
-/** {@link REQUIRED} plus whatever the test is about. */
+/**
+ * {@link REQUIRED} plus whatever the test is about, with the dev login on: every boot needs a
+ * way to sign in, and a test that is not about sign-in should not have to configure a
+ * provider. A test that *is* about the sign-in rules overrides `OPENHARNESS_DEV_LOGIN` (an
+ * empty value counts as unset) or sets provider credentials of its own.
+ */
 function env(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
-  return { ...REQUIRED, ...extra }
+  return { ...REQUIRED, OPENHARNESS_DEV_LOGIN: '1', ...extra }
 }
 
 describe('readServerConfig', () => {
-  it('fills in the defaults for an environment that only carries the required variables', () => {
+  it('fills in the defaults for a minimal environment', () => {
     const config = readServerConfig(env())
 
     expect(config).toEqual({
@@ -43,7 +48,7 @@ describe('readServerConfig', () => {
       betterAuthSecret: REQUIRED.BETTER_AUTH_SECRET,
       betterAuthUrl: REQUIRED.BETTER_AUTH_URL,
       secretsKey: REQUIRED.OPENHARNESS_SECRETS_KEY,
-      devLogin: false,
+      devLogin: true,
       google: undefined,
       github: undefined,
       microsoft: undefined,
@@ -74,6 +79,7 @@ describe('readServerConfig', () => {
       env({
         PORT: '8080',
         DATABASE_URL: 'postgres://localhost/openharness',
+        OPENHARNESS_DEV_LOGIN: '1',
         OPENHARNESS_TEST_MODEL: 'mock',
         GOOGLE_CLIENT_ID: 'g-id',
         GOOGLE_CLIENT_SECRET: 'g-secret',
@@ -104,7 +110,7 @@ describe('readServerConfig', () => {
       betterAuthSecret: REQUIRED.BETTER_AUTH_SECRET,
       betterAuthUrl: REQUIRED.BETTER_AUTH_URL,
       secretsKey: REQUIRED.OPENHARNESS_SECRETS_KEY,
-      devLogin: false,
+      devLogin: true,
       google: { clientId: 'g-id', clientSecret: 'g-secret' },
       github: { clientId: 'gh-id', clientSecret: 'gh-secret' },
       microsoft: { clientId: 'ms-id', clientSecret: 'ms-secret', tenantId: 'contoso' },
@@ -180,7 +186,15 @@ describe('readServerConfig', () => {
 
   it('treats an empty variable as unset', () => {
     const config = readServerConfig(
-      env({ PORT: '', DATABASE_URL: '  ', OPENHARNESS_DEV_LOGIN: '' }),
+      env({
+        PORT: '',
+        DATABASE_URL: '  ',
+        // Empty counts as unset, so this turns the dev login off — a provider carries the
+        // boot instead (a boot with neither is the next test).
+        OPENHARNESS_DEV_LOGIN: '',
+        GOOGLE_CLIENT_ID: 'id',
+        GOOGLE_CLIENT_SECRET: 'secret',
+      }),
     )
 
     expect(config.port).toBe(DEFAULT_PORT)
@@ -250,10 +264,18 @@ describe('readServerConfig', () => {
         readServerConfig(env({ OPENHARNESS_DEV_LOGIN: '1', BETTER_AUTH_URL: url })),
       ).toThrow(/OPENHARNESS_DEV_LOGIN/)
     }
-    // Off is always allowed, wherever the deployment lives.
-    expect(readServerConfig(env({ BETTER_AUTH_URL: 'https://openharness.example' })).devLogin).toBe(
-      false,
-    )
+    // Off is always allowed, wherever the deployment lives — as long as a provider is the
+    // way in instead.
+    expect(
+      readServerConfig(
+        env({
+          BETTER_AUTH_URL: 'https://openharness.example',
+          OPENHARNESS_DEV_LOGIN: '',
+          GITHUB_CLIENT_ID: 'id',
+          GITHUB_CLIENT_SECRET: 'secret',
+        }),
+      ).devLogin,
+    ).toBe(false)
   })
 
   it('refuses a dev-login flag that is not a flag', () => {
@@ -261,6 +283,48 @@ describe('readServerConfig', () => {
       /OPENHARNESS_DEV_LOGIN/,
     )
     expect(readServerConfig(env({ OPENHARNESS_DEV_LOGIN: 'true' })).devLogin).toBe(true)
+  })
+
+  it('refuses a boot with no way to sign in at all', () => {
+    // Every route is behind a session, so no provider and no dev login is a server nobody
+    // could ever sign in to: the boot fails with the variables to set, rather than coming up
+    // and answering 401 forever.
+    const message =
+      'no way to sign in: configure at least one provider (GOOGLE_CLIENT_ID/_SECRET, ' +
+      'GITHUB_CLIENT_ID/_SECRET or MICROSOFT_CLIENT_ID/_SECRET), or set ' +
+      'OPENHARNESS_DEV_LOGIN=1 for local development (localhost only)'
+    // Unset and set-but-empty are the same thing.
+    expect(() => readServerConfig({ ...REQUIRED })).toThrow(message)
+    expect(() => readServerConfig(env({ OPENHARNESS_DEV_LOGIN: '' }))).toThrow(message)
+  })
+
+  it('allows the dev login as the only way in, on a localhost URL', () => {
+    const config = readServerConfig(env({ OPENHARNESS_DEV_LOGIN: '1' }))
+
+    expect(config.devLogin).toBe(true)
+    expect(config.google).toBeUndefined()
+    expect(config.github).toBeUndefined()
+    expect(config.microsoft).toBeUndefined()
+  })
+
+  it('allows a single provider with the dev login off', () => {
+    const config = readServerConfig(
+      env({
+        OPENHARNESS_DEV_LOGIN: '',
+        MICROSOFT_CLIENT_ID: 'id',
+        MICROSOFT_CLIENT_SECRET: 'secret',
+      }),
+    )
+
+    expect(config.devLogin).toBe(false)
+    expect(config.microsoft).toEqual({ clientId: 'id', clientSecret: 'secret', tenantId: 'common' })
+  })
+
+  it('names the missing half of a half-configured provider even with no other way in', () => {
+    // The specific mistake beats the general one: the message says which variable is missing.
+    expect(() =>
+      readServerConfig(env({ OPENHARNESS_DEV_LOGIN: '', GOOGLE_CLIENT_ID: 'id' })),
+    ).toThrow(/GOOGLE_CLIENT_SECRET/)
   })
 
   it('enables a provider only when both of its variables are set', () => {
@@ -281,25 +345,26 @@ describe('describeConfig', () => {
 
     expect(lines.join('\n')).toContain('store: in-memory')
     expect(lines.join('\n')).toContain('model: TEST MODEL')
+    // No providers only comes up when the dev login is the way in.
     expect(lines.join('\n')).toContain('sign-in: no social providers configured')
-    expect(lines.join('\n')).toContain('dev login: off')
+    expect(lines.join('\n')).toContain('dev login: ENABLED')
   })
 
-  it('names postgres, the providers and the dev login when they are configured', () => {
+  it('names postgres, the providers and no dev login when they are configured', () => {
     const lines = describeConfig(
       readServerConfig(
         env({
           DATABASE_URL: 'postgres://localhost/x',
           GOOGLE_CLIENT_ID: 'g',
           GOOGLE_CLIENT_SECRET: 'gs',
-          OPENHARNESS_DEV_LOGIN: '1',
+          OPENHARNESS_DEV_LOGIN: '',
         }),
       ),
     ).join('\n')
 
     expect(lines).toContain('store: postgres')
     expect(lines).toContain('sign-in: google')
-    expect(lines).toContain('dev login: ENABLED')
+    expect(lines).toContain('dev login: off')
   })
 
   it('says which scheduler and which partition space the server runs', () => {
