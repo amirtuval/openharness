@@ -599,10 +599,13 @@ rather than a server: request building and response parsing (cookie and bearer, 
 credential routes, the preferences routes — `null` and a refused value included — deleting a
 session's 204, the model catalog, sending a message with a model, and creating a session from
 a model, from an agent and with overrides — each body asserted against
-`CreateSessionRequestSchema`), the 401 → `AuthenticationError` mapping, the device flow's
-polling with fake timers (`src/auth.test.ts`), the SSE parser's edge cases, reconnect/resume
-(including a resume mid-reply, from a stored chunk, and the stream ending on `session.deleted`
-without a reconnect), every transcript rule (the model-switch marker and the deleted flag
+`CreateSessionRequestSchema`), the 401 → `AuthenticationError` mapping, the transport-side
+leak assertions (a rejected key and a bearer token appear in the request and in no error,
+stack or debug line), the device flow's polling with fake timers (`src/auth.test.ts`), the
+SSE parser's edge cases, reconnect/resume (including a resume mid-reply, from a stored chunk,
+and the stream ending on `session.deleted` without a reconnect), the server's `event: error`
+goodbye being skipped with the loop ending on the 401 its reconnect meets, every transcript
+rule (the model-switch marker and the deleted flag
 included), one scripted D9 session folded from five different client views that must all
 converge on the same conversation, frozen events through the reducer, the fake's own auth
 (signed-out 401s, credentials, preferences, the scripted device flow — `slow_down` included),

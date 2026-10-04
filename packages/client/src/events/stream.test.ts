@@ -169,6 +169,40 @@ describe('stream requests', () => {
     expect(mock.requests).toHaveLength(1)
   })
 
+  it('skips the server’s `event: error` goodbye and stops on the 401 its reconnect meets', async () => {
+    // A revoked or expired session closes a stream with one final `event: error` frame
+    // carrying the `authentication_error` envelope (epic #65, #76). It is not a StreamEvent,
+    // so the client drops it like any unknown message — and its reconnect is refused with a
+    // 401, which is not retryable. The 401 ends the loop, not the frame; what this pins is
+    // that the goodbye neither becomes an event nor crashes the iteration on its way.
+    vi.useFakeTimers()
+    const goodbye = `event: error\ndata: ${JSON.stringify({
+      type: 'error',
+      error: {
+        type: 'authentication_error',
+        message: 'the session behind this stream was revoked or has expired',
+      },
+    })}\n\n`
+    const { client, mock, debug } = clientWith((_request, call) =>
+      call === 0
+        ? sseResponse([...sseLines(TURN.slice(0, 1)), goodbye])
+        : errorResponse(401, 'authentication_error', 'Not signed in.'),
+    )
+
+    const iterating = collect(client.sessions.events.stream(SESSION_ID))
+    // The rejection handler is attached before the timers run: the 401 lands *during* the
+    // advance, and an unhandled rejection would fail the test before the assertion sees it.
+    const rejection = expect(iterating).rejects.toBeInstanceOf(AuthenticationError)
+    await vi.advanceTimersByTimeAsync(1000)
+    await rejection
+    // Two connections: the one the server ended with the goodbye, and the reconnect the 401
+    // answered. The frame was skipped, and reported as skipped — never decoded as an event.
+    expect(mock.requests).toHaveLength(2)
+    expect(debug.some((message) => message.includes('skipping the stream event "error"'))).toBe(
+      true,
+    )
+  })
+
   it('refuses a 200 that is not an event stream', async () => {
     const { client } = clientWith(
       () =>
