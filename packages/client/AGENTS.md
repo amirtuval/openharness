@@ -112,11 +112,16 @@ const client = createClient({
   onDebug: (message, detail) => {}, // optional; see "Unknown events" below
 })
 
+// Model-first: chatting needs no agent — pick a model and go (epic #92).
+const session = await client.sessions.create({ model: { id: 'anthropic/claude-sonnet-5' } })
+
+// Or from an agent preset, optionally overriding its model or system prompt.
 const agent = await client.agents.create({
   name: 'Summarizer',
   model: { id: 'anthropic/claude-sonnet-5' },
 })
-const session = await client.sessions.create({ agent: agent.id })
+const preset = await client.sessions.create({ agent: agent.id, system: 'Be terse.' })
+
 await client.sendMessage(session.id, 'Summarize the README.')
 for await (const event of client.sessions.events.stream(session.id, { deltas: true })) {
   // ...
@@ -217,6 +222,21 @@ The server caches the answer in memory per user and provider for an hour;
 off the wire otherwise). Refreshing is rate-limited to once a minute per user, so a
 too-frequent one is answered `429 rate_limit_error` — an `ApiError` with `retryable: true`,
 which a Refresh button should surface to the user rather than retry in a loop.
+
+### Creating a session (model-first)
+
+`client.sessions.create(body)` takes the protocol's `CreateSessionRequest`: an agent, a model,
+or both — **at least one of `agent`/`model`**, which the request schema's refinement enforces
+on the wire and the server answers as a 400.
+
+- `{ model: { id: 'provider/model' }, system? }` creates a **model-first** session: no agent,
+  the model it runs, and `system` (a string, or `null` for none).
+- `{ agent: 'agent_…', model?, system? }` snapshots the agent preset and runs it; an explicit
+  `model`/`system` overrides what the agent contributes, field by field.
+
+Every session the API returns carries `model` and `system` — the configuration it actually
+runs, always set — beside its `agent` snapshot, which is `null` for a model-first session
+(issue #93). Read those two, not `agent.model`, in code that has to work for both shapes.
 
 ### The device flow (`oh login`)
 
@@ -387,7 +407,15 @@ await fake.waitForIdle() // the whole turn, retries included
 `fake.session`, `fake.agent` and `fake.user` are the seeded trio; all are the fake's live
 objects, so `fake.session.status` reads the current state and an update through `fake.agents`
 shows up in `fake.agent` at once. `createFakeClient({ session, agent, user, authenticated, delayMs, now })`
-seeds your own, sets how slowly the stream runs, and fixes the clock.
+seeds your own, sets how slowly the stream runs, and fixes the clock. The seeded session runs
+the seeded agent's configuration, the way one created from that agent would.
+
+`sessions.create` takes both shapes the real endpoint does (issue #93): `{ model }` for a
+model-first session — `agent: null`, the model it runs, `system: null` unless given — and
+`{ agent }` for one snapshotted from a preset, with `model`/`system` overriding what the
+preset contributes. A body that matches neither is refused with the server's 400
+`invalid_request_error`, and the created session runs the model it was created from, so a
+turn's `span.model_request_start` carries that model.
 
 | scripting                  | what it does                                                                                         |
 | -------------------------- | ---------------------------------------------------------------------------------------------------- |
@@ -471,7 +499,9 @@ Details that follow the server and can surprise a test:
 `src/**/*.test.ts` with Vitest: `node` everywhere except `src/browser.test.ts`, which declares
 `@vitest-environment jsdom`. The suite drives a mock `fetch` (`src/test-support/mock-fetch.ts`)
 rather than a server: request building and response parsing (cookie and bearer, `me`, the
-credential routes, the model catalog), the 401 → `AuthenticationError` mapping, the device flow's polling with
+credential routes, the model catalog, and creating a session from a model, from an agent and
+with overrides — each body asserted against `CreateSessionRequestSchema`), the 401 →
+`AuthenticationError` mapping, the device flow's polling with
 fake timers (`src/auth.test.ts`), the SSE parser's edge cases, reconnect/resume (including a
 resume mid-reply, from a stored chunk), every transcript rule, one scripted D9 session folded
 from five different client views that must all converge on the same conversation, frozen events

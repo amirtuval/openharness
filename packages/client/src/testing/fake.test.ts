@@ -492,6 +492,77 @@ describe('the fake resources', () => {
     expect(listed.data.map((candidate) => candidate.id)).toContain(session.id)
   })
 
+  it('creates a model-first session: no agent, the model it runs, no system prompt', async () => {
+    const fake = createFakeClient()
+
+    const session = await fake.sessions.create({ model: { id: 'openai/gpt-4.1-mini' } })
+    fake.respondWith('hello', { sessionId: session.id })
+
+    expect(session).toMatchObject({
+      type: 'session',
+      status: 'idle',
+      model: { id: 'openai/gpt-4.1-mini' },
+      system: null,
+      agent: null,
+    })
+    // It is a session like any other: it reads back the same way, and its turn runs the model
+    // it was created from — the span says which model served the request (issue #93).
+    expect(await fake.sessions.get(session.id)).toEqual(session)
+    await fake.sendMessage(session.id, 'hello')
+    await fake.waitForIdle(session.id)
+    const span = fake
+      .history(session.id)
+      .find((event) => event.type === EVENT_TYPES.modelRequestStart)
+    expect(span).toMatchObject({ model: 'openai/gpt-4.1-mini' })
+  })
+
+  it('takes the effective model and system from the request, overriding the agent', async () => {
+    const fake = createFakeClient()
+
+    const fromAgent = await fake.sessions.create({ agent: fake.agent.id })
+    expect(fromAgent.model).toEqual(fake.agent.model)
+    expect(fromAgent.system).toBe(fake.agent.system)
+    expect(fromAgent.agent?.id).toBe(fake.agent.id)
+
+    const overridden = await fake.sessions.create({
+      agent: fake.agent.id,
+      model: { id: 'openai/gpt-4.1-mini' },
+      system: null,
+    })
+    expect(overridden.model).toEqual({ id: 'openai/gpt-4.1-mini' })
+    expect(overridden.system).toBeNull()
+    // The snapshot is untouched: it records what the agent was, not what it contributed.
+    expect(overridden.agent?.model).toEqual(fake.agent.model)
+    expect(overridden.agent?.system).toBe(fake.agent.system)
+  })
+
+  it('refuses a request that names neither an agent nor a model, like the server', async () => {
+    const fake = createFakeClient()
+
+    await expect(fake.sessions.create({ title: 'A chat' })).rejects.toMatchObject({
+      status: 400,
+      type: 'invalid_request_error',
+    })
+  })
+
+  it('lists a model-first session, and never under an agent filter', async () => {
+    const fake = createFakeClient()
+
+    const modelFirst = await fake.sessions.create({ model: { id: 'openai/gpt-4.1-mini' } })
+    const fromAgent = await fake.sessions.create({ agent: fake.agent.id })
+
+    const all = await fake.sessions.list()
+    expect(all.data.map((session) => session.id)).toEqual(
+      expect.arrayContaining([fromAgent.id, modelFirst.id]),
+    )
+    const filtered = await fake.sessions.list({ agent_id: fake.agent.id })
+    const filteredIds = filtered.data.map((session) => session.id)
+    expect(filteredIds).toContain(fromAgent.id)
+    // The agent filter matches the sessions created with that agent — and nothing else: a
+    // model-first session has no agent id to match.
+    expect(filteredIds).not.toContain(modelFirst.id)
+  })
+
   it('appends user events through the events resource', async () => {
     const fake = createFakeClient()
     fake.respondWith('answer')

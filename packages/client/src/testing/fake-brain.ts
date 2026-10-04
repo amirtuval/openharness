@@ -514,7 +514,9 @@ export class FakeBrain {
       seq: this.#nextSeq(),
       processed_at: this.#timestamp(),
       consumes: [...consumes],
-      model: this.session.agent.model.id,
+      // The model the session runs, which is its own field since #93 — an agent-less,
+      // model-first session has none to read the model off.
+      model: this.session.model.id,
     }
     this.#emit(event)
     return event

@@ -1,5 +1,6 @@
 import {
   AgentSchema,
+  CreateSessionRequestSchema,
   ListModelsResponseSchema,
   ProviderCredentialSchema,
   SessionSchema,
@@ -351,6 +352,10 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
         model: seedAgent.model,
         system: seedAgent.system,
       },
+      // A session created from an agent runs the agent's configuration (issue #93): the
+      // seeded session carries it beside the snapshot, the way `sessions.create` does.
+      model: seedAgent.model,
+      system: seedAgent.system,
     })
   brains.set(seedSession.id, new FakeBrain(seedSession, delayMs, now))
 
@@ -502,7 +507,26 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       if (!authenticated) {
         return unauthenticated()
       }
-      const agentSnapshot = await requireAgent(body.agent)
+      // The server parses the body with the protocol's request schema — an agent and/or a
+      // model, at least one — and answers 400 when it does not match, so the fake refuses the
+      // same body the same way rather than storing a session that cannot run. `issue.message`
+      // is what the server's error carries too, and what a UI shows: a readable sentence.
+      const request = CreateSessionRequestSchema.safeParse(body)
+      if (!request.success) {
+        const issue = request.error.issues[0]
+        const where =
+          issue === undefined || issue.path.length === 0 ? '' : `${issue.path.join('.')}: `
+        return Promise.reject(
+          new ApiError(400, `${where}${issue?.message ?? 'the request is not valid'}`, {
+            type: 'invalid_request_error',
+          }),
+        )
+      }
+      // The agent the session snapshots, when the request named one: an unknown id — or one
+      // the fake's single user does not own — is the 404 an unknown agent gets.
+      const agent = request.data.agent === undefined ? null : await requireAgent(request.data.agent)
+      // What the session runs (issue #93): the request's model and system, or the agent's when
+      // the request named none — the protocol's refinement guarantees one of the two exists.
       const timestamp = now().toISOString()
       const session = SessionSchema.parse({
         id: newSessionId(),
@@ -510,20 +534,27 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
         // Required since #61 (A4); the same signed-in user the agent belongs to.
         owner_id: user.id,
         status: 'idle',
-        title: body.title ?? null,
-        metadata: body.metadata ?? {},
-        agent: {
-          id: agentSnapshot.id,
-          name: agentSnapshot.name,
-          model: agentSnapshot.model,
-          system: agentSnapshot.system,
-        },
+        title: request.data.title ?? null,
+        metadata: request.data.metadata ?? {},
+        // The schema's refinement says one of agent/model is always there, so this resolves:
+        // the request's model, or the one the agent it named contributes.
+        model: request.data.model ?? agent?.model,
+        system: request.data.system === undefined ? (agent?.system ?? null) : request.data.system,
+        agent:
+          agent === null
+            ? null
+            : {
+                id: agent.id,
+                name: agent.name,
+                model: agent.model,
+                system: agent.system,
+              },
         created_at: timestamp,
         updated_at: timestamp,
       })
       const brain = new FakeBrain(session, delayMs, now)
       brains.set(session.id, brain)
-      const initialEvents = body.initial_events ?? []
+      const initialEvents = request.data.initial_events ?? []
       for (const input of initialEvents) {
         brain.appendUserEvent(input)
       }
@@ -549,7 +580,10 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       }
       const all = [...brains.values()]
         .map((candidate) => candidate.session)
-        .filter((session) => params?.agent_id === undefined || session.agent.id === params.agent_id)
+        // A model-first session has no agent and no agent id to match (issue #93).
+        .filter(
+          (session) => params?.agent_id === undefined || session.agent?.id === params.agent_id,
+        )
         .sort(byCreatedAtThenIdDescending)
       return Promise.resolve(pageByKey(all, params?.limit, params?.page, 'desc'))
     },
