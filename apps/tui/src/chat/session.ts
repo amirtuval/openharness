@@ -1,6 +1,6 @@
 import { createTranscript } from '@openharness/client'
 import type { Client, Transcript, TranscriptState } from '@openharness/client'
-import type { Session } from '@openharness/protocol'
+import type { ModelEntry, Session } from '@openharness/protocol'
 
 import { describeError, type ErrorContext } from '../errors'
 import { CTRL_C_WINDOW_MS, decideCtrlC, type CtrlCAction } from './ctrl-c'
@@ -20,6 +20,11 @@ export interface ChatViewState {
   readonly phase: 'loading' | 'ready' | 'closed'
   /** The transient line, or `null`. */
   readonly notice: Notice | null
+  /**
+   * A model `/model` picked but that no message has carried yet (#114, epic #116 U3): it
+   * rides the next message, so the status line says so until then.
+   */
+  readonly pendingModel: string | null
 }
 
 /** What {@link createChatSession} needs. */
@@ -66,6 +71,15 @@ export interface ChatSession {
   readonly start: () => Promise<void>
   /** Send a message. Allowed while a turn is running — that is what steering is. */
   readonly send: (text: string) => Promise<void>
+  /**
+   * Remember a model for the next message (#114, epic #116 U3): the choice is sent on the
+   * next `user.message`, which is what makes the session run it from then on.
+   */
+  readonly setModel: (modelId: string) => void
+  /** The catalog, for the in-chat model picker. */
+  readonly listModels: () => Promise<readonly ModelEntry[]>
+  /** Show an error the screen hit itself, e.g. a catalog that would not load. */
+  readonly reportError: (error: unknown) => void
   /** Ask a running turn to stop, keeping what it has produced so far. */
   readonly interrupt: () => Promise<void>
   /** Apply the Ctrl+C rules; the caller exits when this returns `exit`. */
@@ -88,12 +102,28 @@ export function createChatSession(options: ChatSessionOptions): ChatSession {
   // leave a socket, a timer or a reconnect loop behind.
   const lifetime = new AbortController()
   let streamAbort: AbortController | undefined
-  let state: ChatViewState = { transcript: transcript.getState(), phase: 'loading', notice: null }
+  let state: ChatViewState = {
+    transcript: transcript.getState(),
+    phase: 'loading',
+    notice: null,
+    pendingModel: null,
+  }
   let armedAt: number | null = null
   const listeners = new Set<(state: ChatViewState) => void>()
 
   transcript.subscribe(() => {
-    setState({ transcript: transcript.getState() })
+    const next = transcript.getState()
+    // A `session.deleted` is terminal (epic #116 U5): the log is gone, so the chat is over.
+    // The notice is what the screen has to show before it exits; the screen exits on it.
+    if (next.deleted && state.phase !== 'closed') {
+      setState({
+        transcript: next,
+        phase: 'closed',
+        notice: { kind: 'hint', text: 'This chat was deleted elsewhere.', hints: [] },
+      })
+      return
+    }
+    setState({ transcript: next })
   })
 
   function setState(patch: Partial<ChatViewState>): void {
@@ -137,15 +167,36 @@ export function createChatSession(options: ChatSessionOptions): ChatSession {
     async send(text) {
       if (text.trim() === '') return
       armedAt = null
+      // A model `/model` picked rides this message (epic #116 U3); the session runs it from
+      // the turn the message starts, and it is cleared whether or not the send worked —
+      // a failed send stored nothing, so there is nothing for the choice to have applied to.
+      const pending = state.pendingModel
       try {
-        const stored = await client.sendMessage(sessionId, text, { signal: lifetime.signal })
+        const stored = await client.sendMessage(sessionId, text, {
+          signal: lifetime.signal,
+          ...(pending === null ? {} : { model: { id: pending } }),
+        })
         // Fold the stored event in now rather than waiting for the stream: the message shows
         // immediately, and the stream's copy of it is dropped as already seen.
         transcript.apply(stored)
-        setState({ notice: null })
+        setState({ notice: null, pendingModel: null })
       } catch (error) {
-        if (!lifetime.signal.aborted) setState({ notice: noticeFor(error) })
+        if (!lifetime.signal.aborted) setState({ notice: noticeFor(error), pendingModel: null })
       }
+    },
+
+    setModel(modelId) {
+      // Picking a model is activity: it dismisses the armed exit, like typing does.
+      armedAt = null
+      setState({ pendingModel: modelId, notice: null })
+    },
+
+    async listModels() {
+      return (await client.models.list()).data
+    },
+
+    reportError(error) {
+      setState({ notice: noticeFor(error) })
     },
 
     async interrupt() {

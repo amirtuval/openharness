@@ -33,8 +33,10 @@ export interface TargetOptions {
  * 2. `--continue` takes the newest session the server lists, or falls through to a new one
  *    when there is nothing to continue.
  * 3. Otherwise start a new session. Model-first (epic #92): `--agent` presets the session,
- *    `--model` names the model directly and skips the picker, and with neither the catalog's
- *    models are offered to choose from — or, when the account has no provider keys, nothing
+ *    `--model` names the model directly and skips everything else. With neither, the stored
+ *    **default model** (`preferences.get`, epic #116 U1) is used with no picker at all —
+ *    that is what makes a new chat immediate. Only when there is no default either is the
+ *    catalog offered to choose from, or — when the account has no provider keys — nothing
  *    is: the caller says how to add one. An account with keys but an empty catalog is the
  *    same case, because there is nothing to start a chat with either way.
  *
@@ -77,8 +79,18 @@ async function startNew(client: Client, options: TargetOptions): Promise<TargetR
     return { kind: 'session', session: await client.sessions.create(request) }
   }
 
+  // An explicit --model beats the stored default, and neither is consulted on the way: the
+  // router accepts ids the catalog does not know (C5), so nothing else needs reading.
   if (model !== undefined) {
     return { kind: 'session', session: await client.sessions.create({ model: { id: model } }) }
+  }
+
+  const preferences = await client.preferences.get()
+  if (preferences.default_model !== null) {
+    return {
+      kind: 'session',
+      session: await client.sessions.create({ model: { id: preferences.default_model } }),
+    }
   }
 
   const catalog = await client.models.list()

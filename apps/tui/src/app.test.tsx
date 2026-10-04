@@ -1,4 +1,4 @@
-import type { Client } from '@openharness/client'
+import { ApiError, type Client } from '@openharness/client'
 import { createFakeClient, type FakeClient } from '@openharness/client/testing'
 import { cleanup, render } from 'ink-testing-library'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -58,10 +58,12 @@ async function waitForChat(app: TestApp, sessionId?: string): Promise<void> {
   await waitForScreen(app, / · (idle|running)$/mu)
 }
 
-/** Get past the model picker a new chat starts with: Enter on the model it starts on. */
+/** Get past the picker a chat with no default starts with: Enter, then "no" to the save. */
 async function pickFirstModel(app: TestApp): Promise<void> {
   await waitForScreen(app, 'Which model?')
   pressKey(app, 'enter')
+  await waitForScreen(app, 'as your default model for new chats?')
+  typeText(app, 'n')
 }
 
 /** The session a new chat opened: the fake's newest. */
@@ -140,9 +142,146 @@ describe('App', () => {
     // The catalog's only model — the picker's first row — is what the session will run.
     await waitForScreen(app, '❯ 1. Claude Sonnet 5 · 200k context')
     pressKey(app, 'enter')
+    await waitForScreen(app, 'as your default model for new chats?')
+    typeText(app, 'n')
 
     await waitForFrame(app, 'anthropic/claude-sonnet-5 · sesn_')
     await waitForFrame(app, /sesn_[0-9A-Z]+ · idle/u)
+  })
+
+  it('starts on the default model with no picker (#114, U1)', async () => {
+    const fake = createFakeClient({ preferences: { default_model: 'openai/gpt-4.1-mini' } })
+    const app = renderApp(fake)
+
+    await waitForChat(app)
+    expect(frameOf(app)).not.toContain('Which model?')
+
+    const created = (await fake.sessions.list()).data[0]
+    expect(created?.model.id).toBe('openai/gpt-4.1-mini')
+    expect(created?.agent).toBeNull()
+  })
+
+  it('offers to save the picked model as the default, and saves it on yes (#114, U1)', async () => {
+    const fake = createFakeClient()
+    const app = renderApp(fake)
+
+    await waitForScreen(app, '❯ 1. Claude Sonnet 5 · 200k context')
+    pressKey(app, 'enter')
+
+    await waitForScreen(app, 'Save anthropic/claude-sonnet-5 as your default model for new chats?')
+    typeText(app, 'y')
+
+    await waitForChat(app)
+    expect((await fake.preferences.get()).default_model).toBe('anthropic/claude-sonnet-5')
+  })
+
+  it('offers to save on a free-text model id too, and Enter skips the save', async () => {
+    const fake = createFakeClient()
+    const app = renderApp(fake)
+
+    await waitForScreen(app, 'Which model?')
+    typeText(app, '2')
+    await waitForScreen(app, 'type a model id as provider/model')
+    submit(app, 'meta/llama-4')
+
+    await waitForScreen(app, 'Save meta/llama-4 as your default model for new chats?')
+    pressKey(app, 'enter')
+
+    await waitForFrame(app, 'meta/llama-4 · sesn_')
+    expect((await fake.preferences.get()).default_model).toBeNull()
+  })
+
+  it('chats without saving when the default cannot be stored, saying why', async () => {
+    const fake = createFakeClient()
+    const client: Client = {
+      ...fake,
+      preferences: {
+        ...fake.preferences,
+        put: () => Promise.reject(new ApiError(500, 'the server failed')),
+      },
+    }
+    const app = renderApp(client)
+
+    await waitForScreen(app, 'Which model?')
+    pressKey(app, 'enter')
+    await waitForScreen(app, 'as your default model for new chats?')
+    typeText(app, 'y')
+
+    await waitForScreen(app, 'could not save the default model')
+    pressKey(app, 'enter')
+
+    await waitForChat(app)
+    expect((await fake.sessions.list()).data[0]?.model.id).toBe('anthropic/claude-sonnet-5')
+  })
+
+  it('switches models with /model, sending the choice on the next message (#114, U3)', async () => {
+    const fake = createFakeClient({
+      models: [
+        makeModelEntry({ id: 'anthropic/claude-sonnet-5' }),
+        makeModelEntry({ id: 'openai/gpt-4.1-mini', provider: 'openai', name: 'GPT-4.1 Mini' }),
+      ],
+    })
+    const app = renderApp(fake, chatOptions({ session: fake.session.id }))
+    const sessionId = fake.session.id
+    await waitForChat(app, sessionId)
+
+    submit(app, '/model')
+    await waitForScreen(app, 'Which model?')
+    pressKey(app, 'down')
+    await waitForFrame(app, '❯ 2. GPT-4.1 Mini')
+    pressKey(app, 'enter')
+
+    // The pick is not sent until a message is: the status line says when it applies.
+    await waitForFrame(app, 'openai/gpt-4.1-mini (next message)')
+    expect(fake.history(sessionId).filter((event) => event.type === 'user.message')).toEqual([])
+
+    submit(app, 'On the other model.')
+
+    await waitForFrame(app, 'you › On the other model.')
+    const sent = fake.history(sessionId).find((event) => event.type === 'user.message')
+    expect(sent?.type === 'user.message' && sent.model?.id).toBe('openai/gpt-4.1-mini')
+    await waitForFrame(app, /openai\/gpt-4\.1-mini · sesn_/)
+  })
+
+  it('leaves the chat with /model on Ctrl+C, changing nothing', async () => {
+    const fake = createFakeClient()
+    const app = renderApp(fake, chatOptions({ session: fake.session.id }))
+    await waitForChat(app, fake.session.id)
+
+    submit(app, '/model')
+    await waitForScreen(app, 'Which model?')
+    pressKey(app, 'ctrlC')
+
+    // The picker is gone, the chat is back, and no model was picked.
+    await waitForScreen(app, '❯ ')
+    expect(frameOf(app)).not.toContain('Which model?')
+    expect(app.exits).toEqual([])
+  })
+
+  it('reports a catalog the picker could not load, and keeps chatting', async () => {
+    const fake = createFakeClient()
+    const client: Client = {
+      ...fake,
+      models: { list: () => Promise.reject(new Error('the catalog is down')) },
+    }
+    const app = renderApp(client, chatOptions({ session: fake.session.id }))
+    await waitForChat(app, fake.session.id)
+
+    submit(app, '/model')
+
+    await waitForFrame(app, 'error: the catalog is down')
+    expect(frameOf(app)).not.toContain('Which model?')
+  })
+
+  it('leaves cleanly with a notice when the chat is deleted elsewhere (#114, U5)', async () => {
+    const fake = createFakeClient()
+    const app = renderApp(fake, chatOptions({ session: fake.session.id }))
+    await waitForChat(app, fake.session.id)
+
+    await fake.sessions.delete(fake.session.id)
+
+    await waitFor(() => app.exits.length === 1)
+    expect(app.exits[0]).toEqual({ code: 0, deleted: true })
   })
 
   it('offers the catalog grouped by provider, and chats on the model Enter picks', async () => {
@@ -174,6 +313,8 @@ describe('App', () => {
     pressKey(app, 'down')
     await waitForFrame(app, '❯ 2. GPT-4.1 Mini · 1M context')
     pressKey(app, 'enter')
+    await waitForScreen(app, 'Save openai/gpt-4.1-mini as your default model for new chats?')
+    typeText(app, 'n')
 
     await waitForFrame(app, 'openai/gpt-4.1-mini · sesn_')
     const created = (await fake.sessions.list()).data[0]
@@ -192,6 +333,8 @@ describe('App', () => {
     typeText(app, '2')
     await waitForScreen(app, 'type a model id as provider/model')
     submit(app, 'meta/llama-4')
+    await waitForScreen(app, 'as your default model for new chats?')
+    typeText(app, 'n')
 
     await waitForFrame(app, 'meta/llama-4 · sesn_')
     expect((await fake.sessions.list()).data[0]?.model.id).toBe('meta/llama-4')

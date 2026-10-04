@@ -1,4 +1,4 @@
-import type { Client } from '@openharness/client'
+import { ApiError, type Client } from '@openharness/client'
 import { createFakeClient } from '@openharness/client/testing'
 import { newAgentId, type Agent } from '@openharness/protocol'
 import { makeAgent, makeModelEntry } from '@openharness/protocol/fixtures'
@@ -85,6 +85,85 @@ describe('resolveTarget', () => {
     })
 
     expect(target.kind === 'session' && target.session.id).toBe('sesn_newest')
+  })
+
+  it('starts a new chat on the stored default model, without the picker or the catalog', async () => {
+    const fake = createFakeClient({ preferences: { default_model: 'openai/gpt-4.1-mini' } })
+    let catalogReads = 0
+    const client: Client = {
+      ...fake,
+      models: {
+        list: () => {
+          catalogReads += 1
+          return Promise.reject(new Error('the catalog should not be read'))
+        },
+      },
+    }
+
+    const target = await resolveTarget(client, { continue: false })
+
+    expect(target.kind).toBe('session')
+    expect(target.kind === 'session' && target.session.model.id).toBe('openai/gpt-4.1-mini')
+    expect(target.kind === 'session' && target.session.agent).toBeNull()
+    expect(catalogReads).toBe(0)
+  })
+
+  it('lets --model override the stored default', async () => {
+    const fake = createFakeClient({ preferences: { default_model: 'anthropic/claude-sonnet-5' } })
+
+    const target = await resolveTarget(fake, { continue: false, model: 'openai/gpt-4.1-mini' })
+
+    expect(target.kind === 'session' && target.session.model.id).toBe('openai/gpt-4.1-mini')
+  })
+
+  it('lets --agent ignore the stored default: the preset decides', async () => {
+    const fake = createFakeClient({ preferences: { default_model: 'openai/gpt-4.1-mini' } })
+
+    const target = await resolveTarget(fake, { continue: false, agent: fake.agent.name })
+
+    expect(target.kind === 'session' && target.session.agent?.id).toBe(fake.agent.id)
+    expect(target.kind === 'session' && target.session.model.id).toBe(fake.agent.model.id)
+  })
+
+  it('ignores the default when resuming: -s and -c name the session', async () => {
+    const fake = createFakeClient({ preferences: { default_model: 'openai/gpt-4.1-mini' } })
+
+    const target = await resolveTarget(fake, { session: fake.session.id, continue: false })
+
+    expect(target).toEqual({ kind: 'session', session: fake.session })
+  })
+
+  it('offers the picker when there is no default', async () => {
+    const fake = createFakeClient({ models: [makeModelEntry()] })
+
+    const target = await resolveTarget(fake, { continue: false })
+
+    expect(target.kind).toBe('choose-model')
+  })
+
+  it('trusts the stored default even when the catalog is empty: a saved choice is a choice', async () => {
+    const fake = createFakeClient({
+      models: [],
+      providers: [],
+      preferences: { default_model: 'meta/llama-4' },
+    })
+
+    const target = await resolveTarget(fake, { continue: false })
+
+    expect(target.kind === 'session' && target.session.model.id).toBe('meta/llama-4')
+  })
+
+  it('fails loudly when the preferences cannot be read', async () => {
+    const fake = createFakeClient()
+    const client: Client = {
+      ...fake,
+      preferences: {
+        ...fake.preferences,
+        get: () => Promise.reject(new ApiError(500, 'boom')),
+      },
+    }
+
+    await expect(resolveTarget(client, { continue: false })).rejects.toThrow(/boom/)
   })
 
   it('offers the catalog when neither --agent nor --model is given', async () => {

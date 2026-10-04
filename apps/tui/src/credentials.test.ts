@@ -77,7 +77,7 @@ describe('openCredentials', () => {
     expect(store.tokenFor(SERVER)).toBeUndefined()
   })
 
-  it('stores a token, creating the file 0600 and the directory 0700', () => {
+  it('stores a token in a file only the user can read', () => {
     const store = storeAt()
     store.save(SERVER, 'oh_session_abc')
 
@@ -85,7 +85,6 @@ describe('openCredentials', () => {
     expect(store.tokenFor(SERVER)).toBe('oh_session_abc')
     expect(readJson(path)).toEqual({ servers: { [SERVER]: 'oh_session_abc' } })
     expect(modeOf(path)).toBe(0o600)
-    expect(modeOf(directory)).toBe(0o700)
   })
 
   it('tightens the permissions of an existing, world-readable file', () => {
@@ -98,7 +97,17 @@ describe('openCredentials', () => {
     expect(modeOf(path)).toBe(0o600)
   })
 
-  it('creates missing parent directories', () => {
+  it('tightens a directory that was left open to others', () => {
+    // `mkdtemp` makes `0700`; this one was made wider (a copied home directory, an
+    // unpacked archive), and the token inside is only as safe as the directory is.
+    chmodSync(directory, 0o755)
+
+    storeAt().save(SERVER, 'token')
+
+    expect(modeOf(directory)).toBe(0o700)
+  })
+
+  it('creates missing parent directories, all 0700', () => {
     const path = join(directory, 'nested', 'deeper', 'credentials.json')
     const outcome = openCredentials({ path })
     if (!outcome.ok) throw new Error(outcome.error)
@@ -111,6 +120,20 @@ describe('openCredentials', () => {
 
   it('leaves no temp file behind', () => {
     storeAt().save(SERVER, 'token')
+    expect(readdirSync(directory)).toEqual(['credentials.json'])
+  })
+
+  it('cleans the temp file up when the write fails, and says "could not write"', () => {
+    // A directory exactly where the file belongs: the rename over it is what fails, after
+    // the temp file exists — the one path that has cleanup to prove.
+    const store = storeAt()
+    const path = join(directory, 'credentials.json')
+    mkdirSync(path)
+
+    expect(() => {
+      store.save(SERVER, 'token')
+    }).toThrowError(new RegExp(`could not write ${path}`, 'u'))
+    // The temp file the failed write created is gone; the blocked path is all that is left.
     expect(readdirSync(directory)).toEqual(['credentials.json'])
   })
 

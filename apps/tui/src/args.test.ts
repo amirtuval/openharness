@@ -130,8 +130,58 @@ describe('parseArgs', () => {
     expect(error).toContain('sessions, agents')
   })
 
-  it('rejects arguments after a listing command', () => {
-    expect(errorOf(['sessions', 'extra'])).toContain('takes no arguments')
+  it('rejects an argument after a command that takes none', () => {
+    expect(errorOf(['agents', 'extra'])).toContain('takes no arguments')
+    expect(errorOf(['sessions', 'extra'])).toContain('unknown `oh sessions` argument')
+  })
+
+  it('reads `oh sessions delete <id>` and its --yes', () => {
+    expect(commandOf(['sessions', 'delete', 'sesn_1'])).toEqual({
+      kind: 'sessions-delete',
+      id: 'sesn_1',
+      yes: false,
+      options: { debug: false, server: undefined },
+    })
+    expect(commandOf(['sessions', 'delete', 'sesn_1', '--yes'])).toMatchObject({
+      kind: 'sessions-delete',
+      id: 'sesn_1',
+      yes: true,
+    })
+  })
+
+  it('rejects a `sessions delete` with no id, or with more arguments than one', () => {
+    expect(errorOf(['sessions', 'delete'])).toContain('needs the session id')
+    expect(errorOf(['sessions', 'delete', 'sesn_1', 'sesn_2'])).toContain('takes one session id')
+  })
+
+  it('rejects --yes anywhere but `sessions delete`', () => {
+    expect(errorOf(['sessions', '--yes'])).toContain('--yes')
+    expect(errorOf(['agents', '--yes'])).toContain('--yes')
+    expect(errorOf(['--yes'])).toContain('--yes')
+    expect(errorOf(['login', '--yes'])).toContain('--yes')
+  })
+
+  it('rejects the chat flags on `sessions delete`', () => {
+    expect(errorOf(['sessions', 'delete', 'sesn_1', '-c'])).toContain('--continue')
+    expect(errorOf(['sessions', 'delete', 'sesn_1', '--model', 'x/y'])).toContain('--model')
+  })
+
+  it('reads `oh default-model` with and without a model id', () => {
+    expect(commandOf(['default-model'])).toEqual({
+      kind: 'default-model',
+      model: undefined,
+      options: { debug: false, server: undefined },
+    })
+    expect(commandOf(['default-model', 'anthropic/claude-sonnet-5'])).toMatchObject({
+      kind: 'default-model',
+      model: 'anthropic/claude-sonnet-5',
+    })
+  })
+
+  it('rejects a `default-model` line it cannot read', () => {
+    expect(errorOf(['default-model', ' '])).toContain('needs a model id')
+    expect(errorOf(['default-model', 'a/b', 'c/d'])).toContain('at most one model id')
+    expect(errorOf(['default-model', '--model', 'a/b'])).toContain('--model <provider/model>')
   })
 
   it('rejects --session with --continue', () => {

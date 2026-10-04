@@ -7,7 +7,8 @@ import { App, type ExitPayload } from './app'
 import { parseArgs, type ChatOptions } from './args'
 import { openBrowser } from './browser'
 import { runLogin, runLogout, runWhoami, type AuthIo } from './commands/auth'
-import { runAgents, runSessions } from './commands/list'
+import { runAgents, runSessionDelete, runSessions } from './commands/list'
+import { runDefaultModel } from './commands/preferences'
 import { resolveConfig, type ResolvedConfig } from './config'
 import { openCredentials, type CredentialStore } from './credentials'
 import { createDevClient, FAKE_BANNER, isFakeMode } from './dev/fake'
@@ -110,8 +111,30 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
     switch (command.kind) {
       case 'sessions':
         return await runSessions(connected.client, { stdout: out, stderr: err, context })
+      case 'sessions-delete':
+        return await runSessionDelete(
+          connected.client,
+          {
+            stdout: out,
+            stderr: err,
+            context,
+            // The question goes out without a newline so the answer lands on its line.
+            prompt: (text) => {
+              stdout.write(text)
+            },
+            stdin,
+          },
+          command.id,
+          { yes: command.yes },
+        )
       case 'agents':
         return await runAgents(connected.client, { stdout: out, stderr: err, context })
+      case 'default-model':
+        return await runDefaultModel(
+          connected.client,
+          { stdout: out, stderr: err, context },
+          command.model,
+        )
       case 'chat':
         return await runChat(connected, command.options, context, { stdin, stdout, stderr })
       case 'login': {
@@ -283,7 +306,10 @@ async function runChat(
     const payload = toExitPayload(await instance.waitUntilExit())
     const code = signalCode ?? payload?.code ?? 0
 
-    if (payload?.sessionId !== undefined && code === 0) {
+    if (payload?.deleted === true && code === 0) {
+      // The chat was deleted while it was open (epic #116 U5): there is no id to resume.
+      streams.stdout.write('\nThis chat was deleted; it is gone.\n')
+    } else if (payload?.sessionId !== undefined && code === 0) {
       streams.stdout.write(`\nResume this session with: oh -s ${payload.sessionId}\n`)
     }
 
@@ -298,11 +324,12 @@ async function runChat(
 /** What `exit()` was called with, when it looks like ours. */
 function toExitPayload(result: unknown): ExitPayload | undefined {
   if (typeof result !== 'object' || result === null) return undefined
-  const candidate = result as { code?: unknown; sessionId?: unknown }
+  const candidate = result as { code?: unknown; sessionId?: unknown; deleted?: unknown }
   if (typeof candidate.code !== 'number') return undefined
   return {
     code: candidate.code,
     sessionId: typeof candidate.sessionId === 'string' ? candidate.sessionId : undefined,
+    deleted: candidate.deleted === true ? true : undefined,
   }
 }
 

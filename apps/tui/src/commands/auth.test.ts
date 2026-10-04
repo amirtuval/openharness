@@ -81,11 +81,25 @@ describe('runLogin', () => {
     fake.scriptDeviceLogin({ pendingPolls: 2, outcome: 'approved' })
     const store = credentials()
     const opened: string[] = []
+    // The client the login's last request is made with must be the one carrying the token it
+    // just received (the review of #105, P2): a shared fake would sign itself in on approval,
+    // so the assertable part is the token each call carried and whose `me()` answered.
+    const tokens: (string | undefined)[] = []
+    const anonymous: Client = {
+      ...fake,
+      me: () => Promise.reject(new AuthenticationError('Not signed in.')),
+    }
     const { io, out } = loginHarness(fake, store, {
       noBrowser: false,
       openBrowser: (url) => {
         opened.push(url)
         return { opened: true, command: 'xdg-open' }
+      },
+      createApiClient: (token) => {
+        tokens.push(token)
+        return token === undefined
+          ? anonymous
+          : { ...fake, me: () => Promise.resolve({ ...fake.user, email: 'via-token@example.com' }) }
       },
     })
 
@@ -96,7 +110,10 @@ describe('runLogin', () => {
     expect(text).toContain('http://localhost:3000/device?user_code=FAKE-CODE')
     expect(text).toContain('FAKE-CODE')
     expect(opened).toEqual(['http://localhost:3000/device?user_code=FAKE-CODE'])
-    expect(text).toContain(`Logged in as ${fake.user.email} on ${SERVER}`)
+    // The name comes from the client holding the new token, not from the anonymous one.
+    expect(text).toContain(`Logged in as via-token@example.com on ${SERVER}`)
+    // start and poll are anonymous; only the closing `me()` carries the token.
+    expect(tokens).toEqual([undefined, undefined, FAKE_SESSION_TOKEN])
     expect(store.tokenFor(SERVER)).toBe(FAKE_SESSION_TOKEN)
     expect(tokenFileMode()).toBe(0o600)
   })
@@ -188,29 +205,61 @@ describe('runLogin', () => {
     expect(store.tokenFor(SERVER)).toBeUndefined()
   })
 
-  it('a Ctrl+C cancels the poll and exits 130', async () => {
+  it.each([
+    [130, 'Ctrl+C'],
+    [143, 'SIGTERM'],
+  ])('a %s (%s) mid-poll cancels the login and exits with it', async (reason) => {
     const fake = createFakeClient({ authenticated: false })
-    fake.scriptDeviceLogin({ interval: 1, pendingPolls: 100 })
+    fake.scriptDeviceLogin({ interval: 0, pendingPolls: 100 })
     const controller = new AbortController()
-    const { io, err } = loginHarness(fake, credentials(), { signal: controller.signal })
+    let polls = 0
+    const client: Client = {
+      ...fake,
+      auth: {
+        ...fake.auth,
+        // The poll is in flight — the server would answer `authorization_pending` — when the
+        // signal lands, and the pending request rejects the way the real client's does: its
+        // loop checks the signal after every wait (`throwIfAborted`). runLogin reads the exit
+        // code from the signal's reason, not the error. This is the mid-poll cancels the
+        // pre-aborted test never reached (#105, P2).
+        pollDeviceLogin: (code, options) => {
+          polls += 1
+          controller.abort(reason)
+          return Promise.reject(
+            new Error(`the poll was cancelled (${String(options?.signal?.reason)})`),
+          )
+        },
+      },
+    }
+    const { io, out, err } = loginHarness(client, credentials(), { signal: controller.signal })
 
-    const running = runLogin(io)
-    controller.abort(130)
-
-    expect(await running).toBe(130)
-    expect(err.join('\n')).toContain('login cancelled')
+    expect(await runLogin(io)).toBe(reason)
+    if (reason === 130) {
+      expect(err.join('\n')).toContain('login cancelled')
+    }
+    // It was cancelled mid-poll, not before it: the flow got as far as asking and waiting.
+    expect(polls).toBe(1)
+    expect(out.join('\n')).toContain('Waiting for approval')
   })
 
-  it('a SIGTERM reports the code it was signalled with', async () => {
+  it('reports a token it could not store, and does not pretend to be signed in', async () => {
     const fake = createFakeClient({ authenticated: false })
-    fake.scriptDeviceLogin({ interval: 1, pendingPolls: 100 })
-    const controller = new AbortController()
-    const { io } = loginHarness(fake, credentials(), { signal: controller.signal })
+    fake.scriptDeviceLogin({ outcome: 'approved' })
+    const store = credentials()
+    const failing: CredentialStore = {
+      ...store,
+      save: () => {
+        throw new Error(`could not write ${store.path}: ENOSPC`)
+      },
+    }
+    const { io, out, err } = loginHarness(fake, failing)
 
-    const running = runLogin(io)
-    controller.abort(143)
+    const code = await runLogin(io)
 
-    expect(await running).toBe(143)
+    expect(code).toBe(1)
+    expect(out.join('\n')).not.toContain('Logged in')
+    expect(err.join('\n')).toContain('could not write')
+    expect(store.tokenFor(SERVER)).toBeUndefined()
   })
 
   it('reports a server that is not there, with the URL', async () => {

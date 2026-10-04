@@ -25,23 +25,27 @@ repo.
 
 ## The `oh` command
 
-| command                                 | what it does                                       |
-| --------------------------------------- | -------------------------------------------------- |
-| `oh`                                    | start a new chat, asking which model to run        |
-| `oh -s <id>` / `--session <id>`         | resume a session, showing its history              |
-| `oh -c` / `--continue`                  | resume the most recent session                     |
-| `oh sessions`                           | list every session: id, title, status, updated     |
-| `oh agents`                             | list the saved agents (optional presets): id, name |
-| `oh login`                              | sign in through the browser (the device flow)      |
-| `oh logout`                             | revoke the session on the server, forget the token |
-| `oh whoami`                             | print the signed-in email and server               |
-| `oh -v` / `--version`, `oh -h`/`--help` | print and stop                                     |
+| command                                 | what it does                                             |
+| --------------------------------------- | -------------------------------------------------------- |
+| `oh`                                    | start a new chat on the default model                    |
+| `oh -s <id>` / `--session <id>`         | resume a session, showing its history                    |
+| `oh -c` / `--continue`                  | resume the most recent session                           |
+| `oh sessions`                           | list every session: id, title, status, updated           |
+| `oh sessions delete <id>`               | delete a chat and everything in it (asks; `--yes` skips) |
+| `oh agents`                             | list the saved agents (optional presets): id, name       |
+| `oh default-model [provider/model]`     | print or set the model a new chat starts on              |
+| `oh login`                              | sign in through the browser (the device flow)            |
+| `oh logout`                             | revoke the session on the server, forget the token       |
+| `oh whoami`                             | print the signed-in email and server                     |
+| `oh -v` / `--version`, `oh -h`/`--help` | print and stop                                           |
 
-Global flags: `--server <url>`, `--debug`; `oh login` also takes `--no-browser`. The chat
-flags are `-s`/`-c`, `--agent` and `--model`; the other commands take none of them.
+Global flags: `--server <url>`, `--debug`; `oh login` also takes `--no-browser`, and
+`oh sessions delete` takes `--yes`. The chat flags are `-s`/`-c`, `--agent` and `--model`;
+the other commands take none of them (and reject them loudly).
 
-Exit codes: `0` did what it was asked (including a chat the user ended, and a `logout` whose
-server-side revoke could not be reached — the token is still gone locally); `1` the server,
+Exit codes: `0` did what it was asked (including a chat the user ended, a chat that was
+deleted elsewhere, a delete answer of "no", and a `logout` whose server-side revoke could
+not be reached — the token is still gone locally); `1` the server,
 the network or the sign-in state said no — a 401 is the not-signed-in error described under
 "Signing in" below, and an account with no provider keys ends there too, as "Choosing a
 model" describes; `2`
@@ -110,31 +114,66 @@ than retrying. The chat shows the not-signed-in error, the same one any 401 gets
 
 ### Choosing a model
 
-Chatting is model-first (epic #92): a new chat picks a **model**, not an agent. In order:
+Chatting is model-first (epic #92) and starts on the **default model** (epic #116): a new
+chat picks a model, not an agent, and usually picks it with no dialog at all. In order:
 
-1. `--model <provider/model>` names the model directly and skips the picker: the catalog is
-   not even read, because the router accepts models the catalog does not know (C5).
+1. `--model <provider/model>` names the model directly and skips everything else — the
+   default is not read and the catalog is not even fetched, because the router accepts
+   models the catalog does not know (C5).
 2. `--agent <id|name>` starts from a saved agent preset instead, matched against every agent
    the server has — by id, then exact name, then case-insensitive name, and an ambiguous
    match is an error rather than a guess. A value shaped like an `agent_…` id is read
    straight from the server first (`agents.get`): one request instead of a walk, with a
    value that misses that way still matched by name. `--model` beside `--agent` overrides
    the preset's model — the protocol's own combination. This CLI does not create agents.
-3. Otherwise a **model picker**, fed by `client.models.list()`: the chat models the user's
-   own provider keys can use, grouped by provider, each row showing the display name and
-   the context window, and a last row, "Other model id…", that takes a free-text
-   `provider/model` id. Up/down move, Enter picks, the number keys pick directly, Ctrl+C
-   leaves; the list is windowed to ten rows and scrolls with the cursor, and the numbers
-   are positions in the whole list (and are off past nine rows, where "12" would choose 1).
-4. With no provider keys at all — `client.models.list()` answers with no entries — there is
-   nothing to chat with: `oh` prints where to add a key (the web app's Settings → Model
-   providers) and exits `1`, the documented code for the server saying no.
+3. Otherwise the **default model** (`client.preferences.get()`, U1) decides, and the chat
+   opens on it immediately: the session is created with `{ model }` and no picker is drawn.
+   The stored id wins even when the catalog is empty — it is the user's own choice, and
+   free-text ids are allowed (the server validates the shape, not the catalog).
+4. Only with no default either is there a **model picker**, fed by `client.models.list()`:
+   the chat models the user's own provider keys can use, grouped by provider, each row
+   showing the display name and the context window, and a last row, "Other model id…", that
+   takes a free-text `provider/model` id. Up/down move, Enter picks, the number keys pick
+   directly, Ctrl+C leaves; the list is windowed to ten rows and scrolls with the cursor,
+   and the numbers are positions in the whole list (and are off past nine rows, where "12"
+   would choose 1). After a pick, `oh` asks once — `Save <id> as your default model for new
+chats? [y/N]` — and a `y` writes it with `preferences.put`; the chat opens either way,
+   and a save that failed says so and steps aside on the next Enter.
+5. With no provider keys at all — `client.models.list()` answers with no entries and there
+   is no default — there is nothing to chat with: `oh` prints where to add a key (the web
+   app's Settings → Model providers) and exits `1`, the documented code for the server
+   saying no.
 
-The session is created with `{ model }` (`sessions.create`), so it is agent-less and runs
-the chosen model; `--agent` sessions still name their preset.
+`oh default-model` prints the stored default (`Default model: …`, or that there is none and
+a new chat will ask); `oh default-model <provider/model>` stores it and prints what the
+server kept. The value is the one the web app's Settings show — it lives on the server
+(`GET`/`PUT /v1/me/preferences`), so both frontends start a chat the same way.
 
 `--session` and `--continue` win over everything: they name the session to resume, whatever
-agents or models exist.
+default, agents or models exist.
+
+### Switching the model in a chat
+
+`/model` typed into the prompt opens the same picker with the catalog. The choice is
+**pending** rather than applied: the status line shows `<id> (next message)`, and the next
+message carries it as `user.message.model` (`sendMessage(..., { model })`, U3). From then
+on the session runs that model — later messages send no model — and the status line shows
+the model the log last said the session runs (`transcript.model`, falling back to the
+session's own). Switching provider mid-chat is supported; the history is rebuilt per
+request. Ctrl+C in the picker closes it and changes nothing.
+
+### Deleting a chat
+
+`oh sessions delete <id>` asks `Delete chat <id>? This cannot be undone [y/N] ` (read from
+stdin; a `y`/`yes`, any case, goes ahead and anything else — including end of input, so a
+pipe nobody wrote to cannot delete — answers no and prints `Not deleted.`). `--yes` skips
+the question. On success it prints `Deleted chat <id>.`; the server answers an unknown or
+already-deleted id as `not found`, exit `1`.
+
+A chat whose session is deleted while `oh` is in it — from the web app, another terminal —
+receives the stream's final `session.deleted`, shows `This chat was deleted elsewhere.`,
+and exits `0` without a resume hint: there is no session to resume, so printing one would
+lie.
 
 ### Reading a list to the end
 
@@ -156,6 +195,7 @@ at most nine long, with the same "12" rule as before.
 
 | key               | what it does                                                 |
 | ----------------- | ------------------------------------------------------------ |
+| `/model` + Enter  | pick a model; it applies from the next message and sticks    |
 | Enter             | send — also while a reply streams, which is what steering is |
 | Ctrl+J, Alt+Enter | insert a newline                                             |
 | ←/→, Home/End     | move the cursor; Backspace deletes behind it, Delete at it   |
@@ -166,7 +206,9 @@ newline is bound to **Ctrl+J** (line feed, `0x0A`, against Enter's `0x0D`), whic
 terminal can send and none confuses with Enter, and to **Alt+Enter** (`ESC` + `\r`) for muscle
 memory. A paste arrives as one chunk and is inserted verbatim, newlines included.
 
-On the way out the CLI prints `Resume this session with: oh -s <id>`.
+On the way out the CLI prints `Resume this session with: oh -s <id>` — unless the session
+was deleted while the chat was open, when it prints `This chat was deleted; it is gone.`
+instead (epic #116 U5).
 
 ### Terminal hygiene
 
@@ -195,13 +237,16 @@ src/
   version.ts             the version injected at build time
   paging.ts              listAll: walk next_page to the end of an agents/sessions list
   chat/
-    session.ts           the runtime: transcript + stream + send/interrupt/dispose
-    screen.tsx           the chat screen (transcript, status line, prompt)
+    session.ts           the runtime: transcript + stream + send/interrupt/dispose,
+                         the pending `/model` pick, and the deleted-session end state
+    screen.tsx           the chat screen (transcript, status line, prompt, `/model`)
     target.ts            which session to open, and the model/agent-selection rules
     ctrl-c.ts            the Ctrl+C rules (interrupt / arm / exit)
   components/            message-view, transcript-view, status-line, prompt-input,
                          notice-view, model-picker
-  commands/list.ts       `oh sessions` / `oh agents`
+  commands/list.ts       `oh sessions` / `oh agents` / `oh sessions delete`
+  commands/preferences.ts  `oh default-model`
+  commands/io.ts         what a print-and-stop command writes, and how it fails
   commands/auth.ts       `oh login` / `oh logout` / `oh whoami`
   dev/fake.ts            OPENHARNESS_FAKE: the fake client, seeded, dev only
   test-support/          test-only helpers (fake clients, keystrokes, frame waits)
@@ -216,10 +261,12 @@ OPENHARNESS_FAKE=1 yarn dev     # or: OPENHARNESS_FAKE=1 node dist/index.js
 `OPENHARNESS_FAKE=1` makes `oh` run against `createFakeClient()` from
 `@openharness/client/testing` instead of a server: no network, no model, scripted replies that
 stream in. The fake is seeded with a three-provider model catalog
-(`DEV_MODELS`) so a new chat's picker has groups and context windows to show, three agents
-for `oh agents` and the `--agent` path, a scripted conversation, and a session with history
-behind it for `--continue` and `-s <id>`. It is a development and QA aid — the entry point is loaded lazily, so a normal `oh`
-never reads it, and nothing in this package enables it on its own. See `src/dev/fake.ts`.
+(`DEV_MODELS`) — for the `/model` picker and for a chat with the default cleared — the
+default model itself (`DEV_DEFAULT_MODEL`, so `oh` starts chatting with no dialog, the way
+an account that has saved one does), three agents for `oh agents` and the `--agent` path, a
+scripted conversation, and a session with history behind it for `--continue` and `-s <id>`.
+It is a development and QA aid — the entry point is loaded lazily, so a normal `oh` never
+reads it, and nothing in this package enables it on its own. See `src/dev/fake.ts`.
 
 The auth commands run against the fake too: `oh login` asks it for the (deterministic) codes,
 polls it once, and stores its `FAKE_SESSION_TOKEN` in the real credentials file — point
@@ -254,31 +301,43 @@ command), and `src/commands/auth.ts` against the fake's scripted device flow (ap
 denial, cancellation, revoke failures); `src/index.test.ts` drives `run()` all the way through
 `login` / `whoami` / `logout` with `XDG_CONFIG_HOME` pointed at a temp directory.
 
-| file                                              | covers                                                                      |
-| ------------------------------------------------- | --------------------------------------------------------------------------- |
-| `src/index.test.ts`                               | `run()` end to end: the exit codes, login / whoami / logout, signals        |
-| `src/args.test.ts`                                | `parseArgs` and `readVersion`: every command, unknown and conflicting flags |
-| `src/config.test.ts`                              | the precedence chain, and the errors a bad config file produces             |
-| `src/credentials.test.ts`                         | the credentials file: atomic write, `0600`/`0700`, per-server tokens        |
-| `src/browser.test.ts`                             | the skip rules and the per-platform command, with an injected spawn         |
-| `src/commands/auth.test.ts`                       | `oh login` / `logout` / `whoami` against the fake's scripted device flow    |
-| `src/commands/list.test.ts`, `src/paging.test.ts` | the two listings, their formatting, and the `next_page` walk                |
-| `src/chat/session.test.ts`                        | the runtime: transcript, stream, send, interrupt, dispose                   |
-| `src/chat/target.test.ts`                         | session/model/agent selection, and the paging it needs                      |
-| `src/chat/ctrl-c.test.ts`                         | the Ctrl+C rules: interrupt, arm, exit                                      |
-| `src/components/model-picker.test.tsx`            | the picker: windowing, number keys, the free-text row                       |
-| `src/app.test.tsx`                                | the Ink screens through `ink-testing-library` and `createFakeClient()`      |
-| `src/errors.test.ts`                              | `describeError`: the 401 line, the connection hints, `--debug`              |
-| `src/signals.test.ts`, `src/terminal.test.ts`     | the signal handlers and `restoreTerminal`                                   |
-| `src/dev/fake.test.ts`                            | the fake-mode gate and the seeded dev client                                |
+| file                                              | covers                                                                                                      |
+| ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `src/index.test.ts`                               | `run()` end to end: the exit codes, login / whoami / logout, signals, `default-model` and `sessions delete` |
+| `src/args.test.ts`                                | `parseArgs` and `readVersion`: every command, unknown and conflicting flags                                 |
+| `src/config.test.ts`                              | the precedence chain, and the errors a bad config file produces                                             |
+| `src/credentials.test.ts`                         | the credentials file: atomic write, `0600`/`0700`, per-server tokens, a write that failed                   |
+| `src/browser.test.ts`                             | the skip rules and the per-platform command, with an injected spawn                                         |
+| `src/commands/auth.test.ts`                       | `oh login` / `logout` / `whoami` against the fake's scripted device flow, mid-poll cancellation included    |
+| `src/commands/preferences.test.ts`                | `oh default-model`: print, set, replace, the failures                                                       |
+| `src/commands/list.test.ts`, `src/paging.test.ts` | the listings, their formatting, `sessions delete`, and the `next_page` walk                                 |
+| `src/chat/session.test.ts`                        | the runtime: transcript, stream, send, `/model`, deleted sessions, dispose                                  |
+| `src/chat/target.test.ts`                         | session/model/agent selection, the default model, and the paging it needs                                   |
+| `src/chat/ctrl-c.test.ts`                         | the Ctrl+C rules: interrupt, arm, exit                                                                      |
+| `src/components/model-picker.test.tsx`            | the picker: windowing, number keys, the free-text row                                                       |
+| `src/app.test.tsx`                                | the Ink screens through `ink-testing-library` and `createFakeClient()`                                      |
+| `src/errors.test.ts`                              | `describeError`: the 401 line, the connection hints, 403/429, `--debug`                                     |
+| `src/signals.test.ts`, `src/terminal.test.ts`     | the signal handlers and `restoreTerminal`                                                                   |
+| `src/dev/fake.test.ts`                            | the fake-mode gate and the seeded dev client                                                                |
 
-Two things worth knowing before writing a test here:
+Every `run()` test gets its own `XDG_CONFIG_HOME` (`index.test.ts` creates one per test):
+without it the suite reads the developer's real `~/.config/openharness`, where a hand-written
+`config.json` flips the server and a mangled `credentials.json` makes unrelated commands
+exit 2 (the review of #105, P1).
 
-- `waitForScreen` waits for a frame _and_ a tick: Ink writes the frame before React runs the
-  passive effect that subscribes `useInput`, so a key pressed the instant a screen appears is
-  a key nobody hears. A person cannot type that fast; a test can.
+Three things worth knowing before writing a test here:
+
+- `waitForScreen` waits for a frame _and_ for the screen to be ready for keys: Ink writes the
+  frame during React's commit, but `useInput` subscribes in the passive-effect flush after
+  it, so a key pressed the instant a screen appears is a key nobody hears. A person cannot
+  type that fast; a test can. The wait is a condition — one event-loop turn (a yield, not a
+  timeout), then Ink's `readable` listener on stdin must exist — not a fixed sleep: it costs
+  a fast machine nothing and a loaded one exactly what it needs (#105, P1).
 - Keystrokes must be written one at a time (`typeText`): a chunk with several characters is a
-  paste, and the prompt inserts pastes verbatim, `\r` included.
+  paste, and the prompt inserts pastes verbatim, `\r` included. `pressKey` covers the named
+  keys only — a plain letter is `typeText`, or the write is `undefined`.
+- The suite's ceiling is 20 s per test (`vitest.config.ts`): the Ink tests drive real timers,
+  so a contended CI runner is slower, not broken — but a hang still fails.
 
 ## Allowed `@openharness/*` dependencies
 

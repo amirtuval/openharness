@@ -36,7 +36,7 @@ describe('restoreTerminal', () => {
     }).not.toThrow()
   })
 
-  it('is safe to call twice', () => {
+  it('gives the same terminal back on a second call: idempotent, not a no-op', () => {
     const setRawMode = vi.fn()
     const write = vi.fn()
     const targets = { stdin: { isTTY: true, setRawMode }, stdout: { isTTY: true, write } }
@@ -44,7 +44,12 @@ describe('restoreTerminal', () => {
     restoreTerminal(targets)
     restoreTerminal(targets)
 
-    expect(setRawMode).toHaveBeenCalledTimes(2)
-    expect(write).toHaveBeenCalledTimes(2)
+    // Both calls leave line mode on and ask for the cursor, so a signal landing mid-teardown
+    // cannot leave a terminal that stopped echoing (which is why it exists at all).
+    expect(setRawMode).toHaveBeenNthCalledWith(1, false)
+    expect(setRawMode).toHaveBeenNthCalledWith(2, false)
+    for (const call of write.mock.calls) {
+      expect(call[0]).toContain('[?25h')
+    }
   })
 })

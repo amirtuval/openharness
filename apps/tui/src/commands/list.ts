@@ -1,22 +1,15 @@
 import type { Client } from '@openharness/client'
 import type { Agent, Session } from '@openharness/protocol'
+import { createInterface } from 'node:readline'
 
-import { describeError, type ErrorContext } from '../errors'
 import { listAllAgents, listAllSessions } from '../paging'
+import { reportFailure, type CommandIo } from './io'
+
+export type { CommandIo }
 
 /** How wide a column gets before it is cut short; ids and timestamps are never cut. */
 const TITLE_WIDTH = 32
 const NAME_WIDTH = 24
-
-/** Where a listing writes, and what its errors should mention. */
-export interface CommandIo {
-  /** One line of output. */
-  readonly stdout: (line: string) => void
-  /** One line of error output. */
-  readonly stderr: (line: string) => void
-  /** The server these listings came from, for the error hints. */
-  readonly context: ErrorContext
-}
 
 /**
  * `oh sessions` — the sessions the server has, newest first.
@@ -42,6 +35,72 @@ export async function runAgents(client: Client, io: CommandIo): Promise<number> 
   } catch (error) {
     return reportFailure(io, error)
   }
+}
+
+/** What `oh sessions delete` needs on top of {@link CommandIo}. */
+export interface SessionDeleteIo extends CommandIo {
+  /** Write the question without a trailing newline: the answer belongs on the same line. */
+  readonly prompt: (text: string) => void
+  /** Where the answer is read from; one line, `y`/`yes` (any case) deletes. */
+  readonly stdin: NodeJS.ReadStream
+}
+
+/**
+ * `oh sessions delete <id>` (#114, epic #116 U5) — delete a chat and everything in it.
+ *
+ * The question is asked unless `--yes` was given, because the delete is irreversible:
+ * stopping at `[y/N]` is the whole safeguard. A line that is not a yes — including an
+ * end-of-input from a pipe nobody wrote to — answers no and changes nothing.
+ */
+export async function runSessionDelete(
+  client: Client,
+  io: SessionDeleteIo,
+  id: string,
+  options: { readonly yes: boolean },
+): Promise<number> {
+  if (!options.yes) {
+    io.prompt(`Delete chat ${id}? This cannot be undone [y/N] `)
+    if (!isYes(await readLine(io.stdin))) {
+      io.stdout('Not deleted.')
+      return 0
+    }
+  }
+
+  try {
+    await client.sessions.delete(id)
+    io.stdout(`Deleted chat ${id}.`)
+    return 0
+  } catch (error) {
+    return reportFailure(io, error)
+  }
+}
+
+/** One line from `stdin`, without its line terminator; `''` at end of input. */
+function readLine(stdin: NodeJS.ReadStream): Promise<string> {
+  return new Promise((resolve) => {
+    const lines = createInterface({ input: stdin, crlfDelay: Number.POSITIVE_INFINITY })
+    // Whichever comes first settles it. `close()` can emit 'close' synchronously, so the
+    // guard is what keeps a read line from being overwritten by the close it caused.
+    let settled = false
+    const finish = (line: string): void => {
+      if (settled) return
+      settled = true
+      lines.close()
+      resolve(line)
+    }
+
+    lines.once('line', (line) => {
+      finish(line)
+    })
+    lines.once('close', () => {
+      finish('')
+    })
+  })
+}
+
+/** What the confirmation accepts as yes. */
+function isYes(answer: string): boolean {
+  return /^y(es)?$/iu.test(answer.trim())
 }
 
 /**
@@ -81,12 +140,4 @@ function pad(value: string, width: number): string {
 
 function writeLines(write: (line: string) => void, lines: readonly string[]): void {
   for (const line of lines) write(line)
-}
-
-function reportFailure(io: CommandIo, error: unknown): number {
-  const report = describeError(error, io.context)
-  io.stderr(`oh: ${report.message}`)
-  for (const hint of report.hints) io.stderr(`  ${hint}`)
-  if (report.stack !== undefined) io.stderr(report.stack)
-  return 1
 }

@@ -1,6 +1,6 @@
 import type { Client } from '@openharness/client'
 import type { ModelEntry, Session } from '@openharness/protocol'
-import { Box, Text, useApp } from 'ink'
+import { Box, Text, useApp, useInput } from 'ink'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import type { ChatOptions } from './args'
@@ -16,14 +16,24 @@ export interface ExitPayload {
   readonly code: number
   /** The session that was in use, for the `oh -s <id>` hint; absent if none was opened. */
   readonly sessionId?: string | undefined
+  /**
+   * The chat was deleted while it was open (#114, epic #116 U5): there is no session to
+   * point at, and the process says so instead of printing a resume hint.
+   */
+  readonly deleted?: boolean | undefined
 }
 
 /** Where the app is in its short life. */
 type Screen =
   /** Resuming, continuing, or creating the session. */
   | { readonly kind: 'resolving' }
-  /** No `--agent` and no `--model`: asking which catalog model to chat with. */
+  /**
+   * No `--agent`, no `--model` and no stored default: asking which catalog model to chat
+   * with — the one screen that asks, and only until the default is set (#116, U1).
+   */
   | { readonly kind: 'choose-model'; readonly models: readonly ModelEntry[] }
+  /** The picker answered a chat that has no default: offer to remember the choice. */
+  | { readonly kind: 'save-default'; readonly modelId: string; readonly error?: string | undefined }
   /** The account has no provider keys: there is no model to chat with (epic #92). */
   | { readonly kind: 'no-models' }
   /** Chatting. */
@@ -78,8 +88,8 @@ export function App({ client, options, context, banner, onExit }: AppProps) {
     [client, context],
   )
 
-  /** The picker answered: open a model-first session on the chosen model, then chat. */
-  const chooseModel = useCallback(
+  /** Open a model-first session on a chosen model, then chat. */
+  const openModel = useCallback(
     (modelId: string): void => {
       void (async () => {
         try {
@@ -90,6 +100,38 @@ export function App({ client, options, context, banner, onExit }: AppProps) {
       })()
     },
     [beginChat, client, context],
+  )
+
+  /**
+   * The picker answered a chat that had no default: offer to save the choice, then open the
+   * session either way — the offer is an offer, not a gate on chatting (#114, U1).
+   */
+  const chooseModel = useCallback((modelId: string): void => {
+    setScreen({ kind: 'save-default', modelId })
+  }, [])
+
+  const answerSaveDefault = useCallback(
+    (save: boolean): void => {
+      if (screen.kind !== 'save-default') return
+      const { modelId } = screen
+      if (!save) {
+        openModel(modelId)
+        return
+      }
+
+      void (async () => {
+        try {
+          await client.preferences.put({ default_model: modelId })
+        } catch (error) {
+          // Chatting must not wait on the preference: say what happened and let the next
+          // keypress continue without the save.
+          setScreen({ kind: 'save-default', modelId, error: describeError(error, context).message })
+          return
+        }
+        openModel(modelId)
+      })()
+    },
+    [client, context, openModel, screen],
   )
 
   useEffect(() => {
@@ -148,14 +190,33 @@ export function App({ client, options, context, banner, onExit }: AppProps) {
         />
       )
 
+    case 'save-default':
+      return (
+        <SaveDefaultPrompt
+          modelId={screen.modelId}
+          error={screen.error}
+          onAnswer={answerSaveDefault}
+          onCancel={() => {
+            leave({ code: 0 })
+          }}
+        />
+      )
+
     case 'chat':
       return (
         <ChatScreen
           session={screen.session}
           banner={banner}
           onExit={() => {
-            screen.session.dispose()
-            leave({ code: 0, sessionId: screen.session.session.id })
+            const { session } = screen
+            session.dispose()
+            // A deleted chat has no session to resume (epic #116 U5): say so instead of
+            // printing a hint for an id the server no longer has.
+            leave(
+              session.getState().transcript.deleted
+                ? { code: 0, deleted: true }
+                : { code: 0, sessionId: session.session.id },
+            )
           }}
         />
       )
@@ -166,6 +227,62 @@ export function App({ client, options, context, banner, onExit }: AppProps) {
     case 'failed':
       return <ErrorScreen report={screen.report} />
   }
+}
+
+/**
+ * The one question a chat with no default asks after the picker: remember this choice?
+ *
+ * `y` saves it (`preferences.put`) and `n`/Enter skips; either way the chat opens. A save
+ * that failed says so and steps out of the way on the next Enter — the chat is the point,
+ * and the default can be set any time with `oh default-model`.
+ */
+function SaveDefaultPrompt({
+  modelId,
+  error,
+  onAnswer,
+  onCancel,
+}: {
+  readonly modelId: string
+  readonly error?: string | undefined
+  readonly onAnswer: (save: boolean) => void
+  readonly onCancel: () => void
+}) {
+  useInput((input, key) => {
+    if (key.ctrl && input === 'c') {
+      onCancel()
+      return
+    }
+
+    if (error !== undefined) {
+      if (key.return) onAnswer(false)
+      return
+    }
+
+    const answer = input.toLowerCase()
+    if (answer === 'y') {
+      onAnswer(true)
+      return
+    }
+    if (answer === 'n' || key.return || key.escape) {
+      onAnswer(false)
+    }
+  })
+
+  if (error !== undefined) {
+    return (
+      <Box flexDirection="column">
+        <Text color="red">{`could not save the default model: ${error}`}</Text>
+        <Text dimColor>{`Press Enter to chat on ${modelId} without saving it.`}</Text>
+      </Box>
+    )
+  }
+
+  return (
+    <Box flexDirection="column">
+      <Text>{`Save ${modelId} as your default model for new chats? [y/N]`}</Text>
+      <Text dimColor>It is stored on the server, and the web app's Settings show it too.</Text>
+    </Box>
+  )
 }
 
 /** What to say when the account has no provider keys: where a key comes from, and that's it. */
