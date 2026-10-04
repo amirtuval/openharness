@@ -506,8 +506,12 @@ event's `processed_at` is derived by joining `event_claims`, and the only two de
 `compact()` — superseded chunks, and nothing else — and `deleteSession`, which removes a whole
 session's rows, its log included, at the owner's request (`0016`/#111). Both are the
 contract's documented exceptions and nothing else ever goes.
-`src/postgres/no-updates.test.ts` scans this package's source for the two spellings such a
-write would use and fails on either, so the rule cannot come back in a later change unnoticed.
+`src/postgres/no-updates.test.ts` scans this package's source (tests excluded) for the
+spellings such a write would use — raw `update` on `events` however it is quoted or qualified,
+and `updateTable(...)` naming it, `as const` included — and fails on any of them, so the rule
+cannot come back in a later change unnoticed. The patterns are themselves pinned against
+spellings that must be caught and near-misses that must not, and the same file asserts the
+compaction delete's `WHERE` clause by clause.
 
 **Migrations.** Plain SQL files in `migrations/`, applied in name order by `migrate(db)` — one
 transaction under an advisory lock, every statement idempotent (`if not exists`, or a guard),
@@ -734,9 +738,11 @@ dependency table.
   alone. Since `owner_id` is a foreign key into `"user"`, the factory seeds the suite's owners
   (`ensureUsers`) on empty tables. The harness truncates every table this package owns,
   `user_preferences` included, so preferences cannot leak between tests.
-- `postgres/no-updates.test.ts` scans this package's source for the two spellings a write back
-  to `events` would use and fails on either. It needs no database, so the append-only rule is
-  guarded even where the Postgres suite is skipped.
+- `postgres/no-updates.test.ts` scans this package's source (tests excluded) for the spellings
+  a write back to `events` would use and fails on any of them; the patterns carry self-tests
+  for what they must catch and must not, and the compaction delete's `WHERE` is asserted
+  clause by clause. It needs no database, so the append-only rule is guarded even where the
+  Postgres suite is skipped.
 - `memory.test.ts` covers what the fakes promise _on top of_ the contracts: the injected
   clocks, the copies they hand out (events deep-frozen, sessions and agents mutable clones,
   credentials frozen), microtask delivery, error identity, and that two stores share nothing.

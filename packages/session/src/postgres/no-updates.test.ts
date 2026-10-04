@@ -11,21 +11,43 @@ import { describe, expect, it } from 'vitest'
  * "No code path writes back to a stored event" is the rule the whole replay story rests on,
  * and it is the kind of rule a later change can break without any test noticing: an append
  * that turned into a correction, a claim that started out easy as a write to the row. So this
- * file scans every source file of the package for the two shapes that would be that write —
- * a SQL statement rewriting the `events` table, and the Kysely builder's equivalent — and
- * fails on either. It runs without a database, so it also guards the suite on a machine where
- * the Postgres tests are skipped.
+ * file scans every non-test source file of the package for the shapes that would be that
+ * write — raw SQL rewriting the `events` table (`update events`, `update "events"`,
+ * schema-qualified, behind `only`, any case) and the Kysely builder's equivalent
+ * (`updateTable('events')`, quoted, and behind `as const`) — and fails on either. Every
+ * pattern is pinned against both halves in the second describe: the spellings that must be
+ * caught, and the near-misses (appends, reads, other tables) that must not be. The scan needs
+ * no database, so it also guards the suite on a machine where the Postgres tests are skipped;
+ * where a database exists, `postgres.test.ts` verifies the rule structurally instead — a
+ * snapshot of every `events` row across claims, a supersession and a compaction, compared
+ * field by field.
+ *
+ * What no source scan can see is a table name that reaches `updateTable` as a runtime value
+ * (`updateTable(EVENTS_TABLE)`), so that spelling would be missed; a reviewer who reads this
+ * file knows exactly which spellings are covered.
  *
  * This is a scan of the package's own source, not of a database session: statements the store
- * composes at runtime are all built from these literals, and a reviewer who reads this file
- * knows exactly which spellings are covered.
+ * composes at runtime are all built from these literals. The compaction delete — the one
+ * `delete` the log itself has — is asserted clause by clause in the second describe.
  */
 
 /** `packages/session/src`, from this file's own URL, whichever directory the tests run from. */
 const SRC_DIR = fileURLToPath(new URL('..', import.meta.url))
 
-/** The two spellings a write back to the log would use. */
-const WRITE_SHAPES = [/update\s+events/i, /updateTable\(\s*['"]events['"]\s*\)/]
+/**
+ * The spellings a write back to the log would use.
+ *
+ * Raw SQL: `update` on `events` — bare, quoted, schema-qualified or behind `only`, any case,
+ * any whitespace. The `\b` on either side keeps a different table whose name merely starts
+ * with `events` (`update events_archive`) out.
+ *
+ * Kysely: `updateTable(...)` whose argument expression carries the literal `'events'` — a
+ * plain string, a double-quoted one, a template literal, or any of those behind `as const`.
+ */
+const WRITE_SHAPES = [
+  /\bupdate\s+(?:only\s+)?(?:[\w"]+\.)?"?events"?\b/i,
+  /updateTable\([^)]*['"`]events['"`]/i,
+]
 
 describe('the log is append-only', () => {
   it('has no source line that writes back to the stored events', async () => {
@@ -49,12 +71,73 @@ describe('the log is append-only', () => {
     const schema = await readFile(join(SRC_DIR, 'postgres', 'schema.ts'), 'utf8')
     // Append-only means appends and exactly one delete — compaction. Both are in the store.
     expect(store).toContain("insertInto('events')")
-    expect(store).toContain('delete from events')
     expect(schema).toContain('events: EventsTable')
+  })
+
+  it('confines the compaction delete to superseded chunks', async () => {
+    const store = await readFile(join(SRC_DIR, 'postgres', 'store.ts'), 'utf8')
+    const start = store.indexOf('delete from events')
+    const end = store.indexOf('returning e.id', start)
+    expect(start).toBeGreaterThan(-1)
+    expect(end).toBeGreaterThan(start)
+    const statement = store.slice(start, end).replaceAll(/\s+/gu, ' ')
+
+    // Rows a recorded supersession covers: the join to `event_supersessions` and the range
+    // check are the difference between deleting a reply's chunks and deleting the log.
+    expect(statement).toContain('using event_supersessions s')
+    expect(statement).toContain('e.session_id = s.session_id')
+    expect(statement).toContain('e.seq between s.from_seq and s.to_seq')
+    // Of the two chunk types only, and old enough for the retention window. Nothing else
+    // narrows or widens the `WHERE`: exactly three conjuncts, so a fourth clause — or a
+    // relaxed one — fails here and has to be looked at rather than shipping quietly.
+    expect(statement).toContain('e.type in (${EVENT_TYPES.eventStart}, ${EVENT_TYPES.eventDelta})')
+    expect(statement).toContain('e.created_at < ${instant(cutoff)}')
+    expect(statement.match(/ and e\./gu)).toHaveLength(3)
   })
 })
 
-/** Every `.ts` file under `dir`, recursively, in a stable order. */
+describe('the write-shape patterns', () => {
+  const catches = (sample: string): boolean => WRITE_SHAPES.some((shape) => shape.test(sample))
+
+  it('catches every spelling a write back to the log would use', () => {
+    for (const sample of [
+      'await sql`update events set payload = ${json} where id = ${id}`',
+      "await trx.updateTable('events').set(row).where('id', '=', id).execute()",
+      'db.updateTable("events").set(row).execute()',
+      "trx.updateTable('events' as const).set(row).execute()",
+      'UPDATE Events SET processed_at = now()',
+      'update  "events"  set payload = $1',
+      'update only events set payload = $1',
+      'update public.events set payload = $1',
+    ]) {
+      expect(catches(sample), sample).toBe(true)
+    }
+  })
+
+  it('leaves appends, reads and other tables alone', () => {
+    for (const sample of [
+      "await trx.updateTable('agents').set(updated).where('id', '=', agentId).execute()",
+      "await trx.updateTable('sessions').set(updated).execute()",
+      'update partition_leases set expires_at = $1 where partition = $2',
+      'on conflict (instance_id) do update set last_seen = excluded.last_seen',
+      'insert into events (id, session_id) values ($1, $2)',
+      'delete from events e using event_supersessions s where e.seq between s.from_seq and s.to_seq',
+      'select * from events where created_at < $1',
+      "await trx.updateTable('events_archive').set(row).execute()",
+      'update events_archive set payload = $1',
+    ]) {
+      expect(catches(sample), sample).toBe(false)
+    }
+  })
+})
+
+/**
+ * Every `.ts` file under `dir`, recursively, in a stable order, tests excluded.
+ *
+ * A test file may legitimately spell the very thing this scan refuses — the hostile samples
+ * below do — and the rule being checked is about the code paths that run against a database,
+ * not about assertions naming them.
+ */
 async function sourceFiles(dir: string): Promise<string[]> {
   const entries = await readdir(dir, { withFileTypes: true })
   const files: string[] = []
@@ -62,7 +145,7 @@ async function sourceFiles(dir: string): Promise<string[]> {
     const path = join(dir, entry.name)
     if (entry.isDirectory()) {
       files.push(...(await sourceFiles(path)))
-    } else if (entry.name.endsWith('.ts')) {
+    } else if (entry.name.endsWith('.ts') && !entry.name.endsWith('.test.ts')) {
       files.push(path)
     }
   }
