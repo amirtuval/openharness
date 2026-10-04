@@ -8,7 +8,6 @@ import { App } from './App'
 import { saveSettings } from './lib/settings'
 import {
   agentText,
-  deriveSessionTitles,
   isStreaming,
   makeFake,
   messageElement,
@@ -53,7 +52,11 @@ describe('App', () => {
     await user.type(await screen.findByLabelText('Message'), 'Hi there')
     await user.click(screen.getByRole('button', { name: 'Send message' }))
 
-    expect(await screen.findByText('Hi there')).toBeInTheDocument()
+    // The message is on screen — and, being the session's first, it also named the session,
+    // so the header shows the same words: assert on the transcript, not just anywhere.
+    await waitFor(() => {
+      expect(visibleText(messageElement('user'))).toContain('Hi there')
+    })
     expect(await screen.findByLabelText('Status: Running')).toBeInTheDocument()
 
     // Deltas: the reply is on screen while it is still a strict prefix of the whole thing,
@@ -115,7 +118,9 @@ describe('App', () => {
     fake.respondWith('Second reply.')
     renderApp(fake)
 
-    expect(await screen.findByText('remember this')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(visibleText(messageElement('user'))).toContain('remember this')
+    })
     expect(await screen.findByText('Remembered reply.')).toBeInTheDocument()
 
     // …and the live stream is back: the next turn arrives without a reload.
@@ -258,8 +263,6 @@ describe('App', () => {
   it('shows the new title in the sidebar and the header without a reload', async () => {
     const user = userEvent.setup({ delay: null })
     const fake = makeFake()
-    // The fake does not name sessions the way the server does; this is that half.
-    deriveSessionTitles(fake)
     const lists = recordListRequests(fake)
     renderApp(fake, { hash: '#/new' })
 
@@ -288,7 +291,6 @@ describe('App', () => {
 
   it('names a chat by a first message it did not send', async () => {
     const fake = makeFake()
-    deriveSessionTitles(fake)
     renderApp(fake)
     expect(await screen.findByRole('heading', { name: 'Claude Sonnet 5' })).toBeInTheDocument()
 

@@ -522,6 +522,18 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
           }),
         )
       }
+      // The inline model id gets the same shape check the server applies on top of the
+      // schema (issue #94): the router's `provider/model`, at least two non-empty parts. A
+      // shape check, not a catalogue lookup — the router takes models no catalogue knows.
+      if (request.data.model !== undefined && !isModelId(request.data.model.id)) {
+        return Promise.reject(
+          new ApiError(
+            400,
+            `model.id must be a "provider/model" id with non-empty parts, got ${JSON.stringify(request.data.model.id)}`,
+            { type: 'invalid_request_error' },
+          ),
+        )
+      }
       // The agent the session snapshots, when the request named one: an unknown id — or one
       // the fake's single user does not own — is the 404 an unknown agent gets.
       const agent = request.data.agent === undefined ? null : await requireAgent(request.data.agent)
@@ -561,7 +573,10 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       if (initialEvents.length > 0) {
         brain.startTurn()
       }
-      return Promise.resolve(session)
+      // `brain.session`, not the local: an `initial_events` message names the session in the
+      // same request, and the creation response carries the title it just set (server
+      // behaviour, #29) — the brain's named copy is the one that has it.
+      return Promise.resolve(brain.session)
     },
 
     async get(sessionId, requestOptions): Promise<Session> {
@@ -801,13 +816,18 @@ interface FakeDeviceFlow {
 /** Build a device flow from a script, filling in deterministic defaults. */
 function makeDeviceFlow(options: FakeDeviceFlowOptions): FakeDeviceFlow {
   const userCode = options.userCode ?? 'FAKE-CODE'
-  const verificationUri = options.verificationUri ?? 'http://localhost:3000/device'
+  // The server's URIs are the web app's hash route, with the code inside the fragment — the
+  // router reads the hash, and a query before the `#` never reaches it (A6; the same shape
+  // `apps/server/src/auth.ts` rewrites Better Auth's field to). Encoded the way the web app
+  // parses it, `URLSearchParams`.
+  const verificationUri = options.verificationUri ?? 'http://localhost:3000/#/device'
   return {
     deviceCode: options.deviceCode ?? 'fake_device_code',
     userCode,
     verificationUri,
     verificationUriComplete:
-      options.verificationUriComplete ?? `${verificationUri}?user_code=${userCode}`,
+      options.verificationUriComplete ??
+      `${verificationUri}?user_code=${encodeURIComponent(userCode)}`,
     interval: options.interval ?? 0,
     expiresIn: options.expiresIn ?? 600,
     outcome: options.outcome ?? 'approved',
@@ -856,6 +876,17 @@ function isEventList(
   events: UserEventInput | readonly UserEventInput[],
 ): events is readonly UserEventInput[] {
   return Array.isArray(events)
+}
+
+/**
+ * Whether an inline model id has the router's `provider/model` shape (issue #94).
+ *
+ * The server checks this on top of the protocol's schema, where the id is only a non-empty
+ * string; the fake mirrors it so a UI tested here cannot ship ids the server answers 400 for.
+ */
+function isModelId(id: string): boolean {
+  const parts = id.split('/')
+  return parts.length >= 2 && parts.every((part) => part.length > 0)
 }
 
 /** Reject the way `fetch` does when the caller has already aborted. */

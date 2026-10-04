@@ -545,6 +545,60 @@ describe('the fake resources', () => {
     })
   })
 
+  it('refuses an inline model id that is not provider/model, like the server (#94)', async () => {
+    const fake = createFakeClient()
+
+    // `gpt-4.1-mini`, `openai/`, `/gpt-4.1-mini` and `openai//gpt-4.1-mini` all fail the
+    // server's shape check; the fake has to refuse them too, or a picker tested here can
+    // ship ids the server answers 400 for.
+    for (const id of ['gpt-4.1-mini', 'openai/', '/gpt-4.1-mini', 'openai//gpt-4.1-mini']) {
+      await expect(fake.sessions.create({ model: { id } })).rejects.toMatchObject({
+        status: 400,
+        type: 'invalid_request_error',
+      })
+    }
+
+    // A shape check, not a catalogue lookup: an unknown but well-formed id is accepted.
+    const session = await fake.sessions.create({ model: { id: 'acme/unknown' } })
+    expect(session.model).toEqual({ id: 'acme/unknown' })
+  })
+
+  it('names a session after its first message, once, as the server does (#29)', async () => {
+    const fake = createFakeClient()
+    fake.respondWith('ok')
+
+    const session = await fake.sessions.create({ model: { id: 'openai/gpt-4.1-mini' } })
+    expect(session.title).toBeNull()
+
+    await fake.sendMessage(session.id, '  Fix the SSE reload bug\nand then explain')
+    // The title is the first non-empty line, whitespace collapsed — and the same read
+    // (`sessions.get`) the web app's header and sidebar use shows it.
+    await expect(fake.sessions.get(session.id)).resolves.toMatchObject({
+      title: 'Fix the SSE reload bug',
+    })
+
+    await fake.sendMessage(session.id, 'a second message')
+    await expect(fake.sessions.get(session.id)).resolves.toMatchObject({
+      title: 'Fix the SSE reload bug',
+    })
+
+    // A title supplied at creation is never replaced.
+    const titled = await fake.sessions.create({
+      title: 'Already named',
+      model: { id: 'openai/gpt-4.1-mini' },
+    })
+    await fake.sendMessage(titled.id, 'this must not rename it')
+    await expect(fake.sessions.get(titled.id)).resolves.toMatchObject({ title: 'Already named' })
+
+    // A message with no text to name it after leaves the title null.
+    const blank = await fake.sessions.create({ model: { id: 'openai/gpt-4.1-mini' } })
+    await fake.sessions.events.send(blank.id, {
+      type: 'user.message',
+      content: [{ type: 'text', text: '   ' }],
+    })
+    await expect(fake.sessions.get(blank.id)).resolves.toMatchObject({ title: null })
+  })
+
   it('lists a model-first session, and never under an agent filter', async () => {
     const fake = createFakeClient()
 
@@ -698,11 +752,12 @@ describe("the fake's authentication", () => {
     fake.scriptDeviceLogin({ pendingPolls: 2, outcome: 'approved' })
 
     const start = await fake.auth.startDeviceLogin()
+    // The server's URI shape (A6): the web app's hash route, the code inside the fragment.
     expect(start).toEqual({
       deviceCode: 'fake_device_code',
       userCode: 'FAKE-CODE',
-      verificationUri: 'http://localhost:3000/device',
-      verificationUriComplete: 'http://localhost:3000/device?user_code=FAKE-CODE',
+      verificationUri: 'http://localhost:3000/#/device',
+      verificationUriComplete: 'http://localhost:3000/#/device?user_code=FAKE-CODE',
       interval: 0,
       expiresIn: 600,
     })

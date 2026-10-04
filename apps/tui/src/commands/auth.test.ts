@@ -93,9 +93,9 @@ describe('runLogin', () => {
 
     expect(code).toBe(0)
     const text = out.join('\n')
-    expect(text).toContain('http://localhost:3000/device?user_code=FAKE-CODE')
+    expect(text).toContain('http://localhost:3000/#/device?user_code=FAKE-CODE')
     expect(text).toContain('FAKE-CODE')
-    expect(opened).toEqual(['http://localhost:3000/device?user_code=FAKE-CODE'])
+    expect(opened).toEqual(['http://localhost:3000/#/device?user_code=FAKE-CODE'])
     expect(text).toContain(`Logged in as ${fake.user.email} on ${SERVER}`)
     expect(store.tokenFor(SERVER)).toBe(FAKE_SESSION_TOKEN)
     expect(tokenFileMode()).toBe(0o600)
@@ -109,7 +109,7 @@ describe('runLogin', () => {
     const code = await runLogin(io)
 
     expect(code).toBe(0)
-    expect(out.join('\n')).toContain('http://localhost:3000/device?user_code=FAKE-CODE')
+    expect(out.join('\n')).toContain('http://localhost:3000/#/device?user_code=FAKE-CODE')
     expect(out.join('\n')).toContain('FAKE-CODE')
   })
 
@@ -138,7 +138,7 @@ describe('runLogin', () => {
           Promise.resolve({
             deviceCode: 'device-1',
             userCode: 'WXYZ-9876',
-            verificationUri: 'http://localhost:3000/device',
+            verificationUri: 'http://localhost:3000/#/device',
             verificationUriComplete: undefined,
             interval: 0,
             expiresIn: 600,
@@ -157,7 +157,7 @@ describe('runLogin', () => {
     const code = await runLogin(io)
 
     expect(code).toBe(0)
-    expect(opened).toEqual(['http://localhost:3000/device'])
+    expect(opened).toEqual(['http://localhost:3000/#/device'])
     expect(out.join('\n')).toContain('WXYZ-9876')
   })
 
