@@ -1,5 +1,6 @@
 import {
   EVENT_TYPES,
+  SESSION_TITLE_MAX_LENGTH,
   StoredEventSchema,
   StreamEventSchema,
   isStoredEvent,
@@ -645,6 +646,14 @@ describe('the fake resources', () => {
     })
     await fake.sendMessage(titled.id, 'this must not rename it')
     await expect(fake.sessions.get(titled.id)).resolves.toMatchObject({ title: 'Already named' })
+
+    // A first line longer than the protocol's limit is cut with the ellipsis, exactly as the
+    // server cuts it — the length is the protocol's, never over it.
+    const long = await fake.sessions.create({ model: { id: 'openai/gpt-4.1-mini' } })
+    await fake.sendMessage(long.id, 'x'.repeat(SESSION_TITLE_MAX_LENGTH + 50))
+    const longTitle = (await fake.sessions.get(long.id)).title
+    expect(longTitle).toHaveLength(SESSION_TITLE_MAX_LENGTH)
+    expect(longTitle?.endsWith('…')).toBe(true)
 
     // A message with no text to name it after leaves the title null.
     const blank = await fake.sessions.create({ model: { id: 'openai/gpt-4.1-mini' } })
