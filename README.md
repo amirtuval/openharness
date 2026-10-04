@@ -32,11 +32,15 @@ turn can be resumed by a different process after the one that started it dies. S
 [`docs/architecture.md`](./docs/architecture.md) for the package map and the dependency rules,
 and [`docs/api.md`](./docs/api.md) for the HTTP API.
 
-**Status: early development.** The v1 epic ([#2](https://github.com/amirtuval/openharness/issues/2))
-is building a chat server with a web UI and a terminal UI. Working end to end today: agents and
-sessions, streaming replies whose chunks are stored as they arrive, steering a running turn,
-interrupting it, automatic retries, and sessions that survive a server restart. Each package's
-`AGENTS.md` says what it currently implements.
+**Status: v1 is built.** The v1 epic
+([#2](https://github.com/amirtuval/openharness/issues/2)) is closed: a chat server with a web
+UI and a terminal UI. Authentication
+([epic #65](https://github.com/amirtuval/openharness/issues/65)) is built — sign-in with
+Google, GitHub or Microsoft, per-user ownership, and each user's own encrypted provider keys
+— and so are the model catalog and model-first chat
+([epic #92](https://github.com/amirtuval/openharness/issues/92)): a new chat picks a model and
+needs no agent. Each package's `AGENTS.md` says what it currently implements;
+[`docs/ROADMAP.md`](./docs/ROADMAP.md) has what comes next.
 
 ## Quick start
 
@@ -64,10 +68,13 @@ cannot be read again.
    one call to the provider, sealed with `OPENHARNESS_SECRETS_KEY`, and never shown again —
    only its last four characters are. **Each user brings their own key**; the server reads no
    provider keys from the environment, not even as a fallback.
-3. **Agents → New agent**: give it a name and pick a model. An agent is the configuration a
-   session runs with — a model and, if you want one, a system prompt.
-4. **New chat**: pick the agent and send a message. The reply streams in as it is written, and
+3. **New chat**: pick a model — the list is read live from the providers your keys are for,
+   with context windows — and send a message. The reply streams in as it is written, and
    pressing Enter while it streams steers it instead of waiting for it to finish.
+
+Agents still exist in the API as optional presets — a name, a model and a system prompt a
+session can be created from — but the UI hides them for now
+([#96](https://github.com/amirtuval/openharness/issues/96)).
 
 To sign in with Google, GitHub or Microsoft instead, create an OAuth app for the provider,
 register `<BETTER_AUTH_URL>/api/auth/callback/<provider>` as its redirect URI, and set the two
@@ -86,8 +93,9 @@ OPENHARNESS_TEST_MODEL=mock docker compose up --build
 `docker compose` starts two containers: `postgres` (a named volume, and the server waits for it
 to be healthy) and `server`, which applies the database migrations on boot, serves the API
 under `/v1`, all of Better Auth at `/api/auth/*`, and serves the built web app at `/`.
-`.env.example` documents every variable the compose file passes through (the secrets, the
-providers, CORS, the concurrency limit, …).
+`.env.example` documents the server's whole environment — the secrets, the providers, CORS,
+the concurrency limit and the scheduler — including the variables this compose file does not
+pass through.
 
 ## Running it from source
 
@@ -101,15 +109,22 @@ yarn check:deps
 yarn turbo run build typecheck lint format:check test
 ```
 
-Then run something:
+Then run something. The server refuses to boot without the three required variables and a way
+to sign in, so a local run carries them — the dev login is the localhost-only way in:
 
 ```bash
-DATABASE_URL=postgres://localhost/openharness yarn turbo run dev --filter=@openharness/server
+BETTER_AUTH_SECRET=$(openssl rand -base64 32) \
+OPENHARNESS_SECRETS_KEY=$(openssl rand -base64 32) \
+BETTER_AUTH_URL=http://localhost:3000 \
+OPENHARNESS_DEV_LOGIN=1 \
+DATABASE_URL=postgres://localhost/openharness \
+yarn turbo run dev --filter=@openharness/server   # http://localhost:3000
 yarn turbo run dev --filter=@openharness/web      # http://localhost:5173, proxying /v1
 ```
 
-Without `DATABASE_URL` the server runs on an in-memory store: fine for a quick trial, and
-nothing survives a restart (it says so at startup).
+Sign in with `dev@localhost` / `dev`, then add a provider key under **Settings → Model
+providers**. Without `DATABASE_URL` the server runs on an in-memory store — fine for a quick
+trial, nothing survives a restart (it says so at startup).
 
 ### The terminal client, `oh`
 
@@ -143,26 +158,17 @@ has too.
 ## Repository map
 
 ```
-apps/
-  server/    @openharness/server   Hono HTTP API + SSE, the scheduler, and the web build
-  web/       @openharness/web      Vite + React chat UI
-  tui/       @openharness/cli      Ink terminal UI, installed as `oh`
-packages/
-  config/    @openharness/config   shared tsconfig / ESLint / Prettier / Vitest config
-  protocol/  @openharness/protocol shared wire types and schemas
-  vault/     @openharness/vault    envelope encryption for user secrets
-  session/   @openharness/session  the append-only session event log
-  hands/     @openharness/hands    sandboxes and tools
-  brain/     @openharness/brain    the stateless harness loop
-  client/    @openharness/client   client used by the web app and the TUI
-e2e/         @openharness/e2e      cross-package tests: real servers, real Postgres
-docker/      the image the compose file builds
-docs/        architecture, api, development, workflow, decisions, roadmap
+apps/      server, web, tui — the HTTP API + scheduler, the React chat UI, the Ink terminal UI (`oh`)
+packages/  config, protocol, vault, session, hands, brain, client — the libraries they run on
+e2e/       cross-package tests: real servers, real Postgres
+docker/    the image the compose file builds
+docs/      architecture, api, development, workflow, decisions, roadmap
 ```
 
 Every package is self-contained: you can build, typecheck, lint, format-check and test it from
 inside its own folder. Each folder has an `AGENTS.md` describing its purpose, commands, public
-API and the packages it may depend on.
+API and the packages it may depend on; [`docs/architecture.md`](./docs/architecture.md) has
+the package map and the allowed dependency graph.
 
 ## Documentation
 
@@ -172,6 +178,8 @@ API and the packages it may depend on.
 - [`docs/development.md`](./docs/development.md) — tooling, root and per-package commands, how
   to work inside a single package.
 - [`docs/workflow.md`](./docs/workflow.md) — issues, epics, PR policy, docs-before-merge.
+- [`.env.example`](./.env.example) — every server environment variable, with its default:
+  the required secrets, the OAuth providers, the dev login, compaction and the scheduler.
 - [`docs/decisions/`](./docs/decisions/README.md) — ADR convention (no ADRs yet).
 - [`docs/ROADMAP.md`](./docs/ROADMAP.md) — what comes after v1, in order, with what is decided
   and what is still open; [`docs/research/`](./docs/research/harness-features.md) holds the harness

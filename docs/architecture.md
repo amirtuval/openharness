@@ -38,15 +38,19 @@ that core. This document stays at that level; package details live in each packa
 
 ## Status
 
-The v1 epic ([#2](https://github.com/amirtuval/openharness/issues/2), "v1 chat") is in
-progress: a chat server with a web UI and a TUI. What works end to end today: agents and
-sessions, a chat turn whose streamed chunks are stored events, steering a turn in flight,
-interrupting it,
+The v1 epic ([#2](https://github.com/amirtuval/openharness/issues/2), "v1 chat") is closed: a
+chat server with a web UI and a TUI. Authentication
+([epic #65](https://github.com/amirtuval/openharness/issues/65)) is built — sign-in, ownership
+and per-user provider keys — and so are the model catalog and model-first chat
+([epic #92](https://github.com/amirtuval/openharness/issues/92)). What works end to end today:
+agents and sessions, a chat turn whose streamed chunks are stored events, steering a turn in
+flight, interrupting it,
 automatic retries of a failed model request, and sessions that survive the process that was
 running them — a turn a dead server left open is closed as `brain_lost` and run again by the
 next one. Several servers can share one database (`SCHEDULER=postgres`): they split the session
 space into leased partitions, and when one dies another takes its partitions over and finishes
-its turns (see `apps/server/docs/scheduling.md`).
+its turns (see `apps/server/docs/scheduling.md`). [`docs/ROADMAP.md`](./ROADMAP.md) has the
+phases and what comes next.
 
 ## How it runs
 
@@ -75,6 +79,22 @@ The deployment in `docker-compose.yml` is the same shape in two containers: Post
 server serving the web build it was built with (`OPENHARNESS_WEB_DIR`). One origin, one port,
 no CORS to configure.
 
+## Authentication and accounts
+
+Sign-in is the server's, not the protocol's: [Better Auth](https://www.better-auth.com) runs
+at `/api/auth/*` against the same Postgres as the log, with Google, GitHub or Microsoft as the
+providers. A user is a **provider-verified email** — any of the three providers can sign in
+the same person — and the web app carries a session cookie while `oh` carries a bearer token
+from the device flow (`oh login`). The server refuses to boot without a way to sign in: at
+least one OAuth provider, or the localhost-only dev login (`OPENHARNESS_DEV_LOGIN=1`).
+
+Everything under `/v1` is scoped to the signed-in user. Agents and sessions carry an owner,
+another user's resource is answered 404 rather than 403, and there is no static server API
+key. Model-provider keys are each user's own: a key is validated on save, sealed with
+envelope encryption from `@openharness/vault` under `OPENHARNESS_SECRETS_KEY`, and never
+returned. [`docs/api.md`](./api.md#authentication) has the routes and rules;
+[`apps/server/AGENTS.md`](../apps/server/AGENTS.md) has the implementation.
+
 ## Package map
 
 | package                 | folder              | role                                                       |
@@ -91,10 +111,13 @@ no CORS to configure.
 | `@openharness/cli`      | `apps/tui`          | Ink + React terminal UI, installed as `oh`                 |
 | `@openharness/e2e`      | `e2e`               | cross-package tests: real servers, real Postgres           |
 
+`@openharness/hands` is a placeholder today — the tools phase builds it, and the seam is
+`execute(name, input)` ([`docs/ROADMAP.md`](./ROADMAP.md), "Tools").
+
 ## Allowed dependency graph
 
-The rules cover `dependencies`, `devDependencies` and `peerDependencies`.
-`@openharness/config` is allowed everywhere as a **devDependency**.
+The rules cover `dependencies`, `devDependencies`, `peerDependencies` and
+`optionalDependencies`. `@openharness/config` is allowed everywhere as a **devDependency**.
 
 | package                 | may depend on                          |
 | ----------------------- | -------------------------------------- |

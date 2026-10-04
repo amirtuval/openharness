@@ -11,20 +11,26 @@ _Last updated: 2026-10-04._
 
 ## Where we are
 
-- **v1 chat** ([epic #2](https://github.com/amirtuval/openharness/issues/2)) is built. QA passes
-  on the mock model and on a real provider (OpenAI) are done and all of their bugs are fixed. The
-  epic is waiting for the maintainer to test it by hand and approve it.
+- **v1 chat** ([epic #2](https://github.com/amirtuval/openharness/issues/2)) is closed: built,
+  QA'd on the mock model and on a real provider (OpenAI), all of their bugs fixed, and the
+  maintainer's hands-on test done.
 - **The immutable event log** ([#46](https://github.com/amirtuval/openharness/issues/46), decision
   D9 on the epic) is done (PRs #47, #49, #50, #52 and #54):
   - no stored event is ever modified, and the event types are deep-readonly;
   - claims are events (`consumes` on the event that claims);
   - streamed chunks are stored, superseded by the event that finishes them, skipped on replay and
     deleted after a retention window.
+- **Authentication** ([epic #65](https://github.com/amirtuval/openharness/issues/65)) is built
+  and in close-out ([#97](https://github.com/amirtuval/openharness/issues/97)): Google sign-in
+  is verified; GitHub and Microsoft checks remain.
+- **Model catalog and model-first chat** ([epic #92](https://github.com/amirtuval/openharness/issues/92))
+  are done (closed 2026-10-04): New chat picks a model, sessions carry their own model, and
+  agents are optional.
 - **Flaky server tests** ([#43](https://github.com/amirtuval/openharness/issues/43)) are open.
 
 ## Order
 
-1. Finish v1: the maintainer's manual test and approval.
+1. Finish v1 — done: the epic is closed.
 2. Authentication
 3. Deployment and CI/CD
 4. Model selection and provider keys
@@ -35,12 +41,13 @@ needs to know who owns what. The features that cost money or can act on the worl
 calls, tools) should land on a platform that already has users, environments and a trustworthy
 CI.
 
-## 2. Authentication (built: [epic #65](https://github.com/amirtuval/openharness/issues/65), awaiting the maintainer's check of real OAuth sign-in)
+## 2. Authentication (built: [epic #65](https://github.com/amirtuval/openharness/issues/65), in close-out — [#97](https://github.com/amirtuval/openharness/issues/97))
 
 **Status:** implemented and through a hands-on QA pass (#74) with no security defects; its
 three minor findings are fixed. Google sign-in has been verified by the maintainer. GitHub is
-still to confirm. Microsoft is to be checked from a personal device (a managed work laptop
-blocks personal Microsoft accounts through tenant restrictions).
+still to confirm, and Microsoft is to be checked from a personal device (a managed work laptop
+blocks personal Microsoft accounts through tenant restrictions). Closing the epic is the
+remaining step.
 
 **Decided** (details and the sub-issues are on the epic):
 
@@ -126,10 +133,10 @@ Today there is CI (lint, typecheck and tests with turbo `--affected`) and `docke
   The credential store keeps a type plus an encrypted payload, so these are new types rather
   than a new design;
 
-- the **model catalog** and **model-first chat** were pulled forward into
-  [epic #92](https://github.com/amirtuval/openharness/issues/92) (2026-10-04):
-  - New chat means picking a model from the models the user's own keys can use, read live from
-    each provider's API and joined with Mastra's registry for filtering and context windows;
+- the **model catalog** and **model-first chat** shipped early in
+  [epic #92](https://github.com/amirtuval/openharness/issues/92) (closed 2026-10-04):
+  - New chat picks a model from the models the user's own keys can use, read live from each
+    provider's API and joined with Mastra's registry for filtering and context windows;
   - sessions carry their own model, and agents are optional;
   - customizable agents are hidden from the UI until they return as an advanced feature
     ([#96](https://github.com/amirtuval/openharness/issues/96)).
@@ -218,8 +225,7 @@ own.
 - **Multiple agents:** subagents, background and parallel agents.
 - **Smaller follow-ups:**
   - merge streamed deltas (e.g. every ~50 ms) to cut writes, when performance matters;
-  - a tab watching a session started in another tab may not show the new title until reload;
-  - the web app's model suggestions lean towards Anthropic models.
+  - a tab watching a session started in another tab may not show the new title until reload.
 
 ## Ideas from other harnesses (low priority)
 

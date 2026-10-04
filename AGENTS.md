@@ -2,11 +2,14 @@
 
 openharness is an open-source implementation of Anthropic's
 [Managed Agents](https://www.anthropic.com/engineering/managed-agents) architecture: a
-stateless **brain** (harness loop), a durable append-only **session** event log, and pluggable
-**hands** (sandboxes/tools behind `execute(name, input)`).
+stateless **brain**, a durable append-only **session** event log, and pluggable **hands**.
+See [`docs/architecture.md`](./docs/architecture.md) for the package map and
+[`docs/api.md`](./docs/api.md) for the HTTP API.
 
-The v1 epic ("v1 chat", issue #2) is in progress: a chat server with a web UI and a TUI. Each
-package's `AGENTS.md` describes what that package implements today.
+v1 (chat server, web UI, TUI), authentication (epic #65: sign-in, ownership, per-user provider
+keys) and model-first chat (epic #92) are built; the next phase is deployment —
+[`docs/ROADMAP.md`](./docs/ROADMAP.md). Each package's `AGENTS.md` describes what that package
+implements today.
 
 ## How to work here
 
@@ -27,30 +30,21 @@ package's `AGENTS.md` describes what that package implements today.
 
 ## Commands
 
-| command                                                            | where   | what it does                                     |
-| ------------------------------------------------------------------ | ------- | ------------------------------------------------ |
-| `yarn install --immutable`                                         | root    | install exactly what `yarn.lock` pins            |
-| `yarn check:deps`                                                  | root    | enforce the allowed `@openharness/*` graph       |
-| `yarn turbo run build typecheck lint format:check test`            | root    | the full CI run                                  |
-| `yarn build:deps`                                                  | package | build just this package's workspace dependencies |
-| `yarn build`                                                       | package | tsdown (or Vite for `apps/web`) → `dist/`        |
-| `yarn typecheck` / `yarn lint` / `yarn format:check` / `yarn test` | package | the checks                                       |
-
-Node 24 and Yarn 4 (corepack) are required; see [`docs/development.md`](./docs/development.md).
+Node 24 and Yarn 4 (corepack) are required. From the root: `yarn install --immutable`,
+`yarn check:deps` (the allowed `@openharness/*` graph), and
+`yarn turbo run build typecheck lint format:check test` (the full CI run). Inside a package:
+`yarn build:deps` builds its workspace dependencies first, then `yarn build`, `yarn typecheck`,
+`yarn lint`, `yarn format:check`, `yarn test`. The full reference — every root command and
+what each one does — is in [`docs/development.md`](./docs/development.md).
 
 ## Repo map
 
-```
-apps/      server (@openharness/server), web (@openharness/web), tui (@openharness/cli)
-packages/  config, protocol, vault, session, hands, brain, client
-e2e/       @openharness/e2e — cross-package tests
-docs/      architecture.md, development.md, workflow.md, ROADMAP.md, decisions/
-scripts/   check-deps.mjs
-```
-
-Dependency direction — `protocol` → `session`/`hands`/`client` → `brain` → `server`, with the
-frontends (`web`, `cli`) on `protocol` + `client`; `vault` depends on nothing, and `server`
-may depend on it. The full table is in [`docs/architecture.md`](./docs/architecture.md).
+`apps/` (server, web, tui) and `packages/` (config, protocol, vault, session, hands, brain,
+client) hold the packages; `e2e/` the cross-package tests. Dependency direction —
+`protocol` → `session`/`hands`/`client` → `brain` → `server`, with the frontends (`web`,
+`cli`) on `protocol` + `client`; `vault` depends on nothing, and `server` may depend on it.
+The full package map and the allowed-dependency table are in
+[`docs/architecture.md`](./docs/architecture.md).
 
 ## Rules
 

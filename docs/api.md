@@ -93,8 +93,10 @@ same way, in the same request.
 
 Every `/v1` resource belongs to the caller and is scoped to them.
 
-List endpoints answer `{ data, next_page }`; `next_page` is an opaque cursor handed back as
-`page`, and `null` means there is nothing more.
+Paginated lists answer `{ data, next_page }` — `next_page` is an opaque cursor handed back as
+`page`, and `null` means there is nothing more. The credential list and the model catalog have
+no cursor: `/v1/provider-credentials` answers `{ data }` and `/v1/models` `{ data, providers }`,
+both bounded by the caller's own keys.
 
 ## Events
 
@@ -119,8 +121,8 @@ session. It is also the SSE `id` and the resume position, so a client that recon
 ### Claims, chunks and superseding (D9)
 
 The log is immutable: once an event is appended no field of it changes, and the only deletion
-is compaction ([issue #46](https://github.com/amirtuval/openharness/issues/46)). Four fields
-carry that:
+is compaction ([issue #46](https://github.com/amirtuval/openharness/issues/46)). The rules
+that carry it:
 
 - Three event types list `consumes`, the ids of the user events they claim: a
   `span.model_request_start` claims the `user.message`s its request folds in (and `model`, the
@@ -131,9 +133,9 @@ carry that:
   claim that took the event.
 - `event_start` and `event_delta` are **stored events**, with `id`, `seq` and `processed_at`
   like any other — a reply in flight is part of the log, so reconnecting mid-reply is
-  `after_seq` / `last-event-id` alone. They keep the names and shapes of Anthropic's previews,
-  and a connection that asked for `event_deltas[]=agent.message` gets them live; there is no
-  second, envelope-less form.
+  `after_seq` / `last-event-id` alone. Their names and shapes are Anthropic's
+  `event_deltas[]` previews; a connection that asked for `event_deltas[]=agent.message` gets
+  them live, and there is no second, envelope-less form.
 - The event that finishes a reply — the `agent.message`, or the `span.model_request_end` that
   closes a request that stored none (an interrupt, a brain that died, a reply that streamed no
   text) — carries `supersedes: { from_seq, to_seq }`, the chunk range it replaces, inclusive
@@ -163,8 +165,7 @@ ends the turn — no span is opened for it, because no model request runs:
 ```
 
 `consumes`, `model` and `supersedes` are optional in the schema so that a log written before
-D9 keeps validating; from phase P3 on the server writes them on every event that takes them
-(and from P4 on, `consumes` on all three claim sites).
+D9 keeps validating; the server writes them on every event that takes them.
 
 ## Reading the stream
 
@@ -228,9 +229,7 @@ after a reload.
 
 A connection that asked for `event_deltas[]=agent.message` gets the chunks — live and replayed
 alike; one that did not is never sent an `event_start` or an `event_delta`, and sees the
-`agent.message` when the turn ends. The chunks are stored events and nothing else: the
-envelope-less previews a pre-D9 server published were removed in P4, when nothing wrote them
-any more.
+`agent.message` when the turn ends.
 
 ## Authentication
 
@@ -270,7 +269,7 @@ curl localhost:3000/v1/me -H "Authorization: Bearer $TOKEN"
 
   ```bash
   curl localhost:3000/v1/auth-config
-  # → {"providers":["github","google"],"dev_login":false}
+  # → {"providers":["google","github"],"dev_login":false}
   ```
 
   `providers` lists only the providers whose client id and secret are configured, in the order
@@ -287,12 +286,11 @@ curl localhost:3000/v1/me -H "Authorization: Bearer $TOKEN"
   it was created) — with the same `401 authentication_error` as no session at all, which is
   what tells a client to sign the user in again. Reads are not sensitive.
 - Anything not signed in — or carrying an invalid or expired session or token — gets an
-  `authentication_error` with status `401`. `/health` is the only route that never asks.
+  `authentication_error` with status `401`. `/health` and `/v1/auth-config` are the only
+  routes that never ask.
 - **Everything belongs to the user who created it.** Agents and sessions carry a read-only
   `owner_id`; a resource that belongs to another user answers **`404`**, not `403`, so its
   existence never leaks. Nothing is shared and no request ever carries an owner.
-- The static `OPENHARNESS_API_KEY` / `x-api-key` scheme of v1 is gone; provider keys live in
-  encrypted settings, below.
 
 ### The signed-in user
 
@@ -412,9 +410,9 @@ parameter bypasses the server's cache (below). The response is `ListModelsRespon
   provider's own capability data, e.g. Gemini's `supportedGenerationMethods` without
   `generateContent`); an explicit chat verdict keeps it (OpenRouter lists chat models only);
   otherwise it is dropped only when its id names a known non-chat family (embedding, TTS,
-  whisper, transcription, image, moderation, realtime, audio, search, rerank, video, the
-  legacy completions models) — an id the rule does not recognise is kept, so a usable chat
-  model is never hidden. `apps/server/AGENTS.md` has the exact family list.
+  whisper, transcription, speech, image, moderation, realtime, audio, search, rerank, video,
+  instruct, the legacy completions models) — an id the rule does not recognise is kept, so a
+  usable chat model is never hidden. `apps/server/AGENTS.md` has the exact family list.
 - **Fallback is visible, never silent.** If the provider call fails or times out (5 seconds),
   the provider has no known list endpoint, or the stored credential cannot be opened, that
   provider's chat models are served from the registry instead (through the same chat filter —
@@ -434,6 +432,7 @@ parameter bypasses the server's cache (below). The response is `ListModelsRespon
 | ------ | ----------------------------- | --------------------------------------------------------------------------------------- |
 | 400    | `invalid_request_error`       | the request does not match the protocol's schemas                                       |
 | 401    | `authentication_error`        | not signed in, or the session or bearer token is invalid/expired                        |
+| 403    | `permission_error`            | a cookie-authenticated write from an untrusted origin (CSRF)                            |
 | 404    | `not_found_error`             | the id names nothing, the route does not exist, or the resource belongs to another user |
 | 422    | `invalid_provider_credential` | a provider credential failed validation on save                                         |
 | 429    | `rate_limit_error`            | a cache-bypassing refresh (`/v1/models?refresh=true`) more than once a minute per user  |
