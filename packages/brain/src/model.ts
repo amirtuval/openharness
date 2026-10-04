@@ -32,7 +32,7 @@ export interface ModelCredential {
  * Where the credential for one model request comes from.
  *
  * Called once per model request with the provider — the part of the session's
- * `agent.model.id` before the slash, as {@link providerOf} reads it — and awaited before the
+ * `model.id` before the slash, as {@link providerOf} reads it — and awaited before the
  * request is made. A host supplies it (the server decodes the session owner's stored
  * credential; #61); `null` means the owner has none for that provider, and the request is then
  * never attempted: the turn ends with a non-retryable `missing_provider_credential` error
@@ -41,7 +41,7 @@ export interface ModelCredential {
 export type ResolveCredential = (provider: string) => Promise<ModelCredential | null>
 
 /**
- * The model for a session's `agent.model.id`, made with the credential the request runs under.
+ * The model for a session's `model.id`, made with the credential the request runs under.
  *
  * The default is {@link routerModelFactory}, which resolves the router string the protocol
  * stores. A host that wants its own provider setup — a different gateway, a fixed model, a
@@ -53,7 +53,7 @@ export type ModelFactory = (modelId: string, credential: ModelCredential) => Lan
 /**
  * The default {@link ModelFactory}: Mastra's model router.
  *
- * `provider/model` is what the protocol documents for `agent.model.id`, and Mastra's router is
+ * `provider/model` is what the protocol documents for a session's `model.id`, and Mastra's router is
  * the thing that turns that string into a language model. The API key is passed **explicitly**
  * in the router's config, and that is the whole of A5's "no environment fallback": Mastra's
  * `resolveAuth()` returns a config-supplied key as-is (`source: 'explicit'`) without ever
@@ -84,7 +84,7 @@ export const routerModelFactory: ModelFactory = (modelId, credential) =>
  * router uses. An id with no slash is its own provider, so a stray config cannot silently
  * resolve somebody else's credential.
  *
- * @param modelId the session's `agent.model.id`
+ * @param modelId the session's `model.id`
  */
 export function providerOf(modelId: string): string {
   const slash = modelId.indexOf('/')

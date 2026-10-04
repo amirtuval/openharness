@@ -190,6 +190,37 @@ describe('runTurn', () => {
     expect(calls).toHaveLength(0)
   })
 
+  it('runs a model-first session on its own model and system, with no agent at all', async () => {
+    // Model-first (epic #92, #93, #94): the session has no agent, and the turn reads the
+    // model and system prompt from the session itself.
+    const store = new InMemorySessionStore()
+    const session = await store.createSession(null, {
+      ownerId: TEST_OWNER_ID,
+      model: { id: 'openai/gpt-5.1' },
+      system: 'Be terse.',
+      initial_events: [message('Hello')],
+    })
+    const { factory, calls } = mockModel({ text: ['Hi'] })
+
+    const outcome = await runTurn(session.id, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+    })
+
+    expect(session.agent).toBeNull()
+    expect(outcome).toEqual({ outcome: 'idle' })
+    // The span records the session's model, and the prompt opens with its system prompt.
+    const raw = await rawLogOf(store, session.id)
+    expect(
+      spanStartOf(raw.find((event) => event.type === EVENT_TYPES.modelRequestStart)).model,
+    ).toBe('openai/gpt-5.1')
+    expect(readPrompt(calls[0]!)).toEqual([
+      { role: 'system', text: 'Be terse.' },
+      { role: 'user', text: 'Hello' },
+    ])
+  })
+
   it('runs a turn in the documented order, claims its prompt, and supersedes its chunks', async () => {
     const { store, sessionId } = await newSession([message('Hello')])
     const { factory } = mockModel({ text: ['Hi ', 'there'] })

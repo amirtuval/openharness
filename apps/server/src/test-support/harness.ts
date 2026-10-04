@@ -1,4 +1,5 @@
 import type { Hono } from 'hono'
+import type { ModelFactory } from '@openharness/brain'
 import {
   API_VERSION_PREFIX,
   DEFAULT_PARTITION_COUNT,
@@ -190,6 +191,12 @@ export interface TestOptions {
    * `createSessionCredentialResolver` over its own store, credentials and vault.
    */
   readonly resolveCredential?: ResolveSessionCredential
+  /**
+   * The model factory the runner builds each request with. Defaults to the scripted model's
+   * own; a test that wraps it — to record the `(modelId, credential)` a request was made
+   * with, say — passes its wrapper, and the scripted replies still drive the turns.
+   */
+  readonly model?: ModelFactory
   /** Social provider credentials, for tests of `/v1/auth-config`. */
   readonly providers?: {
     readonly google?: { clientId: string; clientSecret: string }
@@ -233,7 +240,7 @@ export function createTestApp(options: TestOptions = {}): TestContext {
   const model = createScriptedModel(...(options.replies ?? []))
   const scheduler = new LocalScheduler({
     store,
-    model: model.factory,
+    model: options.model ?? model.factory,
     resolveCredential: options.resolveCredential ?? resolveTestSessionCredential,
     ...(options.maxConcurrentSessions === undefined
       ? {}
@@ -292,7 +299,7 @@ export async function startTestServer(options: TestOptions = {}): Promise<TestCo
   const started = await startServer({
     config: testConfig(options),
     store,
-    model: model.factory,
+    model: options.model ?? model.factory,
     resolveCredential: resolveTestSessionCredential,
     credentials,
     vault,

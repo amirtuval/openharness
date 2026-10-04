@@ -59,7 +59,7 @@ export interface StopSchedulerOptions {
 export interface LocalSchedulerOptions {
   /** The log the turns read and write. */
   readonly store: SessionStore
-  /** How a session's `agent.model.id` becomes a model to stream from. */
+  /** How a session's `model.id` becomes a model to stream from (issue #93). */
   readonly model: ModelFactory
   /**
    * Where each model request's provider credential comes from (epic #65, A5); see

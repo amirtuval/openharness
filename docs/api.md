@@ -48,13 +48,18 @@ stream carries what it does. `user.interrupt` is the same call with
 `{"type":"user.interrupt"}`, and it aborts the turn in flight.
 
 **Creating a session.** `POST /v1/sessions` takes a `model`, an `agent`, or both, and at least
-one of the two: a request that names neither is refused with a clear message. What the session
+one of the two: a request that names neither is refused with a 400 `invalid_request_error`. An
+inline `model.id` must have the router's `provider/model` shape — two or more non-empty
+slash-separated parts — or the request is a 400 too; it is a shape check, not a catalogue
+lookup, because the router accepts models the catalog does not know yet. What the session
 _runs_ is one model and one system prompt — with an agent, its configuration is copied, and an
-explicit `model` or `system` in the request overrides it; without one, `model` is required and
-`system` defaults to `null`. The session the API answers with carries that effective
-configuration as `model` and `system` (always set), and `agent` — the preset it was created
-from, `{ id, name, model, system }` — or `null` for a model-first session. The snapshot is
-never rewritten: editing an agent changes no session that already exists.
+explicit `model` or `system` in the request overrides it (per field); without one, `model` is
+required and `system` defaults to `null`. The session the API answers with carries that
+effective configuration as `model` and `system` (always set), and `agent` — the preset it was
+created from, `{ id, name, model, system }` — or `null` for a model-first session. The snapshot
+is never rewritten: editing an agent changes no session that already exists. Creating a session
+never calls a provider and never needs a stored credential: a key the owner lacks is reported
+when a turn runs, as the brain's `missing_provider_credential` `session.error`.
 
 The first `user.message` a session is sent also names it: the session's `title` — `null` until
 then — becomes the message's first non-empty line, whitespace collapsed and cut to
