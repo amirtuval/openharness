@@ -1,7 +1,5 @@
 import {
-  QA_MODEL,
-  createAgent,
-  createSession,
+  ensureDefaultModel,
   expect,
   expectNoErrorBanner,
   isRealModel,
@@ -13,11 +11,11 @@ import {
 } from './support'
 import {
   AGENT_LINE,
-  CLI_COMMAND,
-  CLI_SERVER,
   Terminal,
+  ensureCliSignedIn,
   expectNoErrorNotice,
   occurrences,
+  ohCommand,
   sendAndAwaitAnswer,
 } from './tmux'
 
@@ -36,6 +34,10 @@ async function quit(terminal: Terminal): Promise<void> {
  * The CLI half runs in a real pseudo-terminal; the browser half is the same Playwright page
  * the other specs use. Opt-in with `QA_WITH_CLI=1`, so `yarn qa:web` stays runnable on a
  * machine without tmux.
+ *
+ * A new chat in `oh` starts on the account's default model with no dialog (U2) — this file
+ * used to drive the agent picker, which is gone — and the default has to exist for that to be
+ * the reading on a fresh mock stack.
  */
 test.describe('C10 cross-client', () => {
   test.skip(process.env.QA_WITH_CLI !== '1', 'set QA_WITH_CLI=1 to drive the oh CLI in tmux')
@@ -44,23 +46,11 @@ test.describe('C10 cross-client', () => {
     page,
     request,
   }) => {
-    // A session per run, so `oh -s` below names something this test made.
-    const agent = await createAgent(request, {
-      name: `QA C10 ${Date.now().toString(36)}`,
-      model: QA_MODEL,
-      system: 'Answer briefly.',
-    })
-
-    // `oh` skips the picker when the server has exactly one agent, and the first thing this
-    // test does is choose from it — so make sure there is a choice to make.
-    const agents = await request.get('/v1/agents', { params: { limit: 100 } })
-    if (((await agents.json()) as { data: unknown[] }).data.length < 2) {
-      await createAgent(request, {
-        name: `QA C10 decoy ${Date.now().toString(36)}`,
-        model: QA_MODEL,
-        system: 'Answer briefly.',
-      })
-    }
+    const model = await ensureDefaultModel(request)
+    // This file sorts before `cli.spec.ts`, so on a fresh run it is the first thing to drive
+    // `oh` — and a config directory with no token in it is a "not signed in" error, not a
+    // chat. `ensureCliSignedIn` runs the device flow when there is none and is a no-op after.
+    await ensureCliSignedIn(page)
 
     const terminal = new Terminal('oh-qa-c10', 100, 30)
     terminal.start()
@@ -68,15 +58,14 @@ test.describe('C10 cross-client', () => {
     try {
       let startedInChat = ''
 
-      await test.step('oh starts a new chat', async () => {
-        terminal.run(`${CLI_COMMAND} --server ${CLI_SERVER}`)
-        await terminal.waitFor(/Which agent\?/)
-        // Enter takes the row the cursor starts on: the picker does not offer number keys
-        // once the server has more than nine agents.
-        terminal.send('Enter')
+      await test.step('oh starts a new chat on the default model', async () => {
+        terminal.run(ohCommand())
         await terminal.waitForIdle()
         startedInChat = (await terminal.waitFor(/sesn_[A-Z0-9]+/))[0]
-        expectNoErrorNotice(terminal.capture())
+        const opened = terminal.capture()
+        expect(opened).toContain(model)
+        expect(opened, 'no model dialog').not.toContain('Which model?')
+        expectNoErrorNotice(opened)
       })
 
       await test.step('what oh sends shows up in the browser', async () => {
@@ -111,7 +100,7 @@ test.describe('C10 cross-client', () => {
         await quit(terminal)
         await terminal.waitForShellPrompt()
 
-        terminal.run(`${CLI_COMMAND} --server ${CLI_SERVER} -s ${startedInChat}`)
+        terminal.run(ohCommand('-s', startedInChat))
         await terminal.waitFor(/sent from the browser/)
         await terminal.waitForIdle()
         const screen = terminal.capture(400)
@@ -124,14 +113,17 @@ test.describe('C10 cross-client', () => {
     }
 
     // And the other way round: a session the web app made, resumed by id in `oh`.
-    const webSession = await createSession(request, agent.id)
-    await openChat(page, webSession.id)
+    const created = await request.post('/v1/sessions', { data: { model: { id: model } } })
+    expect(created.status(), await created.text()).toBe(201)
+    const webSession = ((await created.json()) as { id: string }).id
+    await openChat(page, webSession)
     await expectNoErrorBanner(page)
     await sendFromComposer(page, 'started in the browser')
+    await waitForAnswer(page, 'started in the browser')
 
     terminal.start()
     try {
-      terminal.run(`${CLI_COMMAND} --server ${CLI_SERVER} -s ${webSession.id}`)
+      terminal.run(ohCommand('-s', webSession))
       await terminal.waitFor(/started in the browser/)
       expect(terminal.capture()).toContain('started in the browser')
       expectNoErrorNotice(terminal.capture())

@@ -2,12 +2,13 @@ import {
   QA_MODEL,
   createAgent,
   createSession,
+  ensureDefaultModel,
   expect,
   expectNoErrorBanner,
   openChat,
-  sendFromComposer,
   sendMessage,
   shot,
+  startChatFromNew,
   test,
   uniqueName,
   waitForAnswer,
@@ -87,15 +88,11 @@ test.describe('W9 session list', () => {
   // every chat with one agent read identically). Fixed by PR #32: the server derives the
   // title from the first `user.message` and never overwrites one that exists.
   test('W9b a chat gets a title to tell it apart', async ({ page, request }) => {
-    await page.goto('/#/new')
-    // Whatever model the picker offers first: which one it is has nothing to do with the
-    // title this test is about.
-    await page.getByRole('button', { name: 'Create chat' }).click()
-    await expect(page).toHaveURL(/#\/s\/sesn_/)
-
-    const sessionId = (await page.evaluate(() => window.location.hash)).replace('#/s/', '')
+    // Which model the chat starts on has nothing to do with the title this test is about —
+    // but a new chat is a composer on the default model now (U2), so there has to be one.
+    await ensureDefaultModel(request)
+    const sessionId = await startChatFromNew(page, 'a chat about the release checklist')
     await expectNoErrorBanner(page)
-    await sendFromComposer(page, 'a chat about the release checklist')
     await waitForAnswer(page, 'a chat about the release checklist')
     await expectNoErrorBanner(page)
 
@@ -117,13 +114,12 @@ test.describe('W9 session list', () => {
   // chat header — kept the label they had until something reloaded the page. Fixed by PR #37:
   // the open chat re-reads the session once after its first message and both surfaces merge
   // that copy in.
-  test('W9d the sidebar shows a new title without a reload', async ({ page }) => {
-    await page.goto('/#/new')
-    await page.getByRole('button', { name: 'Create chat' }).click()
-    await expect(page).toHaveURL(/#\/s\/sesn_/)
-    const sessionId = (await page.evaluate(() => window.location.hash)).replace('#/s/', '')
+  test('W9d the sidebar shows a new title without a reload', async ({ page, request }) => {
+    await ensureDefaultModel(request)
+    // The row the sidebar is holding is added by the create, before the name exists: the
+    // first message is what names it, and the re-read is what moves the row (U2/#35).
+    const sessionId = await startChatFromNew(page, 'a chat about the release checklist')
     await expectNoErrorBanner(page)
-    await sendFromComposer(page, 'a chat about the release checklist')
     await waitForAnswer(page, 'a chat about the release checklist')
     await expectNoErrorBanner(page)
 

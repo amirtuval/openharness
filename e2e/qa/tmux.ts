@@ -424,7 +424,7 @@ export function expectNoErrorNotice(screen: string): void {
 }
 
 /** `text` with everything a regexp would read as syntax escaped. */
-function escapeRegExp(text: string): string {
+export function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 

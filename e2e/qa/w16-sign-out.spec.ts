@@ -1,4 +1,4 @@
-import { BASE_URL, expect, shot, signInWithDevForm, test } from './support'
+import { BASE_URL, defaultModelCard, expect, shot, signInWithDevForm, test } from './support'
 
 /**
  * W16 — signing out (epic #65, A2).
@@ -9,7 +9,9 @@ import { BASE_URL, expect, shot, signInWithDevForm, test } from './support'
  *
  * What the scenario proves: the control is in the sidebar, it puts the app back on the
  * sign-in page without moving the URL, the cookie is gone (a reload stays signed out, and the
- * API refuses it), and signing in again comes back to where the person was.
+ * API refuses it), and signing in again comes back to where the person was. The "where" is
+ * Settings — an ordinary route, and one that reads the server when it loads, so the page
+ * coming back is a signed-in read and not a stale render.
  */
 test.describe('W16 sign out', () => {
   test('signs out from the sidebar, and the session is gone for real', async ({ browser }) => {
@@ -22,15 +24,18 @@ test.describe('W16 sign out', () => {
         await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible()
       })
 
-      // Somewhere that is not the home screen, so "comes back here" means something.
-      await page.goto('/#/agents')
-      await expect(page.getByRole('heading', { name: 'Agents' })).toBeVisible()
+      // Somewhere that is not the home screen, so "comes back here" means something. Settings
+      // reads the server when it loads (the default model, the keys), so the page coming back
+      // after the second sign-in is a signed-in read and not a cached render.
+      await page.goto('/#/settings')
+      await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible()
+      await expect(defaultModelCard(page)).toBeVisible()
       await shot(page, 'w16-01-signed-in')
 
       await test.step('sign out puts the sign-in page back, at the same URL', async () => {
         await page.getByRole('button', { name: 'Sign out' }).click()
         await expect(page.getByRole('heading', { name: 'Sign in to openharness' })).toBeVisible()
-        expect(new URL(page.url()).hash).toBe('#/agents')
+        expect(new URL(page.url()).hash).toBe('#/settings')
         await shot(page, 'w16-02-signed-out')
       })
 
@@ -47,8 +52,8 @@ test.describe('W16 sign out', () => {
 
       await test.step('signing in again comes back to where the person was', async () => {
         await signInWithDevForm(page)
-        await expect(page.getByRole('heading', { name: 'Agents' })).toBeVisible()
-        expect(page.url()).toBe(`${BASE_URL}/#/agents`)
+        await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible()
+        expect(page.url()).toBe(`${BASE_URL}/#/settings`)
       })
     } finally {
       await context.close()

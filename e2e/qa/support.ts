@@ -6,6 +6,7 @@ import {
   test as base,
   type APIRequestContext,
   type Cookie,
+  type Locator,
   type Page,
 } from '@playwright/test'
 
@@ -413,6 +414,80 @@ export async function expectNoErrorBanner(page: Page, settleMs = BANNER_SETTLE_M
   }
 }
 
+// --- the default model and the model picker (epic #116) ---------------------------------------------
+
+/**
+ * The account's stored default model, or `null` — `GET /v1/me/preferences` (U1).
+ *
+ * The value both frontends start a chat from: `#/new` renders it, `oh` opens the session with
+ * it, and Settings shows it. A fresh mock stack (no provider key) has none, which is a state
+ * the flow specs have to handle rather than assume away.
+ */
+export async function getDefaultModel(request: APIRequestContext): Promise<string | null> {
+  const response = await request.get('/v1/me/preferences')
+  expect(response.status(), await response.text()).toBe(200)
+  return ((await response.json()) as { default_model: string | null }).default_model
+}
+
+/** Set — or clear, with `null` — the account's default model; the settings screen's own call. */
+export async function setDefaultModel(
+  request: APIRequestContext,
+  modelId: string | null,
+): Promise<void> {
+  const response = await request.put('/v1/me/preferences', {
+    data: { default_model: modelId },
+  })
+  expect(response.status(), await response.text()).toBe(200)
+}
+
+/**
+ * Make sure the account has a default model, so `#/new` is a chat and `oh` starts with no
+ * dialog (U2).
+ *
+ * A stack with no stored provider keys has no default and no catalog — the first-run state
+ * W1 asserts — and every scenario that is about *chatting* needs one set. The value is only
+ * written when there is none, so a pass that has already picked a default (a real-provider
+ * pass, an earlier scenario) keeps it; the scenarios that are about the empty state read
+ * {@link getDefaultModel} and decide for themselves.
+ *
+ * @returns the default the account has now — the model a new chat will start on
+ */
+export async function ensureDefaultModel(
+  request: APIRequestContext,
+  modelId: string = QA_MODEL,
+): Promise<string> {
+  const stored = await getDefaultModel(request)
+  if (stored !== null) {
+    return stored
+  }
+  await setDefaultModel(request, modelId)
+  return modelId
+}
+
+/** The composer's model control — the button that shows the session's model (U3). */
+export function composerModel(page: Page) {
+  return page.getByRole('button', { name: /^Model: / })
+}
+
+/** The Settings → Default model card (U1/U4). */
+export function defaultModelCard(page: Page) {
+  return page.locator('[data-slot="card"]').filter({ hasText: 'Default model' })
+}
+
+/**
+ * Pick `modelId` in whichever model picker `trigger` opens.
+ *
+ * The free-text route ("Other model ID…") works with or without a catalog, so a mock pass and
+ * a real-model pass take the same path: open the control, choose the escape hatch, type the
+ * router id, confirm.
+ */
+export async function pickModelId(page: Page, trigger: Locator, modelId: string): Promise<void> {
+  await trigger.click()
+  await page.getByRole('option', { name: /Other model ID/ }).click()
+  await page.getByLabel('Model ID').fill(modelId)
+  await page.getByRole('button', { name: 'Use model' }).click()
+}
+
 // --- a thin client for the HTTP API -----------------------------------------------------------------
 
 /** Create an agent and answer it. Throws with the server's envelope when it says no. */
@@ -577,6 +652,22 @@ export async function sendFromComposer(page: Page, text: string): Promise<void> 
   await input.click()
   await input.fill(text)
   await input.press('Enter')
+}
+
+/**
+ * Start a chat the way the app does since U2: `#/new` is an empty composer on the account's
+ * default model, and the session is created by the first message — no dialog, no button.
+ *
+ * The account needs a default for this to be a chat at all (`ensureDefaultModel`).
+ *
+ * @returns the id of the session the app created and moved to
+ */
+export async function startChatFromNew(page: Page, text: string): Promise<string> {
+  await page.goto('/#/new')
+  await expect(page.getByRole('heading', { name: 'New chat' })).toBeVisible()
+  await sendFromComposer(page, text)
+  await expect(page).toHaveURL(/#\/s\/sesn_/)
+  return (await page.evaluate(() => window.location.hash)).replace('#/s/', '')
 }
 
 /**

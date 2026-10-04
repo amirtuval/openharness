@@ -9,9 +9,13 @@ import {
   LONG_REPLY_PROMPT,
   QA_MODEL,
   createAgent,
+  ensureDefaultModel,
   eventTypes,
   expect,
+  getDefaultModel,
   isRealModel,
+  readEvents,
+  setDefaultModel,
   test,
   uniqueName,
 } from './support'
@@ -24,6 +28,7 @@ import {
   Terminal,
   cliCredentialsMode,
   ensureCliSignedIn,
+  escapeRegExp,
   expectNoErrorNotice,
   forgetCliCredentials,
   loggedInAs,
@@ -139,7 +144,14 @@ test.describe('cli scenarios', () => {
   // sized for the browser scenarios.
   test.setTimeout(240_000)
 
-  test('C1 new chat: pick an agent, send, stream, prompt back', async ({ context }) => {
+  test('C1 new chat: the default model starts it, send, stream, prompt back', async ({
+    context,
+    request,
+  }) => {
+    // A new chat opens on the account's default model, with no dialog (U2) — the CLI half of
+    // what W1 and W10 check in the web app. The default has to exist for that to be the
+    // reading; a fresh mock stack has none.
+    const model = await ensureDefaultModel(request)
     const terminal = new Terminal('oh-qa-c1')
     const shot = await context.newPage()
     await ensureCliSignedIn(shot)
@@ -147,14 +159,13 @@ test.describe('cli scenarios', () => {
 
     try {
       terminal.run(ohCommand())
-      await terminal.waitFor(/Which agent\?/)
-      await terminal.screenshot(shot, 'c1-01-agent-picker')
-
-      // Enter takes the row the cursor starts on — the first agent. Every pick in this file
-      // is made that way: the picker only offers the number keys for a list of at most nine
-      // agents (a bare `12` would otherwise choose 1), and a QA server has more.
-      terminal.send('Enter')
       await terminal.waitForIdle()
+      // No picker was drawn: the status line names the default model and a session already.
+      const opened = terminal.capture()
+      expect(opened).toContain(model)
+      expect(opened).toContain('sesn_')
+      expect(opened, 'no model dialog for a chat with a default').not.toContain('Which model?')
+      await terminal.screenshot(shot, 'c1-01-start-on-the-default')
 
       // Wait for the reply, not just for "idle": the status line says idle before the turn
       // starts too, so an `idle` that was already on screen is not the end of anything.
@@ -176,7 +187,8 @@ test.describe('cli scenarios', () => {
     }
   })
 
-  test('C2 a long reply at 80x24 and at 200x50', async ({ context }) => {
+  test('C2 a long reply at 80x24 and at 200x50', async ({ context, request }) => {
+    await ensureDefaultModel(request)
     const terminal = new Terminal('oh-qa-c2', 80, 24)
     const shot = await context.newPage()
     await ensureCliSignedIn(shot)
@@ -184,8 +196,6 @@ test.describe('cli scenarios', () => {
 
     try {
       terminal.run(ohCommand())
-      await terminal.waitFor(/Which agent\?/)
-      terminal.send('Enter')
       await terminal.waitForIdle()
 
       const longPrompt = isRealModel ? LONG_REPLY_PROMPT : '__slow__ a long reply please'
@@ -232,7 +242,8 @@ test.describe('cli scenarios', () => {
     }
   })
 
-  test('C3 resume: the printed hint, and -c', async ({ context }) => {
+  test('C3 resume: the printed hint, and -c', async ({ context, request }) => {
+    await ensureDefaultModel(request)
     const terminal = new Terminal('oh-qa-c3', 100, 30)
     const shot = await context.newPage()
     await ensureCliSignedIn(shot)
@@ -240,8 +251,6 @@ test.describe('cli scenarios', () => {
 
     try {
       terminal.run(ohCommand())
-      await terminal.waitFor(/Which agent\?/)
-      terminal.send('Enter')
       await terminal.waitForIdle()
 
       await sendAndAwaitAnswer(terminal, 'a message worth resuming')
@@ -280,7 +289,11 @@ test.describe('cli scenarios', () => {
     }
   })
 
-  test('C4 a message sent while a reply streams is queued and answered', async ({ context }) => {
+  test('C4 a message sent while a reply streams is queued and answered', async ({
+    context,
+    request,
+  }) => {
+    await ensureDefaultModel(request)
     const terminal = new Terminal('oh-qa-c4', 100, 30)
     const shot = await context.newPage()
     await ensureCliSignedIn(shot)
@@ -288,8 +301,6 @@ test.describe('cli scenarios', () => {
 
     try {
       terminal.run(ohCommand())
-      await terminal.waitFor(/Which agent\?/)
-      terminal.send('Enter')
       await terminal.waitForIdle()
 
       const firstQuestion = isRealModel ? LONG_REPLY_PROMPT : '__slow__ first question'
@@ -317,7 +328,11 @@ test.describe('cli scenarios', () => {
     }
   })
 
-  test('C5 Ctrl+C stops a stream and a second Ctrl+C exits cleanly', async ({ context }) => {
+  test('C5 Ctrl+C stops a stream and a second Ctrl+C exits cleanly', async ({
+    context,
+    request,
+  }) => {
+    await ensureDefaultModel(request)
     // A terminal of its own: an earlier `__slow__` reply would still be on screen and its
     // "part 3/40" would satisfy the wait below before this turn had started.
     const terminal = new Terminal('oh-qa-c5', 100, 30)
@@ -327,8 +342,6 @@ test.describe('cli scenarios', () => {
 
     try {
       terminal.run(ohCommand())
-      await terminal.waitFor(/Which agent\?/)
-      terminal.send('Enter')
       await terminal.waitForIdle()
 
       await test.step('Ctrl+C stops the stream and keeps the partial reply', async () => {
@@ -385,7 +398,8 @@ test.describe('cli scenarios', () => {
     }
   })
 
-  test('C6 Ctrl+J and Alt+Enter insert a newline', async ({ context }) => {
+  test('C6 Ctrl+J and Alt+Enter insert a newline', async ({ context, request }) => {
+    await ensureDefaultModel(request)
     const terminal = new Terminal('oh-qa-c6', 100, 30)
     const shot = await context.newPage()
     await ensureCliSignedIn(shot)
@@ -393,8 +407,6 @@ test.describe('cli scenarios', () => {
 
     try {
       terminal.run(ohCommand())
-      await terminal.waitFor(/Which agent\?/)
-      terminal.send('Enter')
       await terminal.waitForIdle()
 
       terminal.type('first line')
@@ -606,6 +618,192 @@ test.describe('cli scenarios', () => {
     expect(stale.status).toBe(1)
     expect(stale.stdout).toContain(`not signed in to ${CLI_SERVER}. Run \`oh login\`.`)
     expect(stale.stdout, 'no stack trace').not.toMatch(/\n\s+at /)
+  })
+
+  // --- the default model, and switching it in a chat (U1/U3) ---------------------------------
+
+  /** The model of the last model request in a session's log — what the turn actually ran. */
+  async function lastRequestModel(
+    request: APIRequestContext,
+    sessionId: string,
+  ): Promise<string | undefined> {
+    const events = await readEvents(request, sessionId)
+    const starts = events.filter((event) => event.type === 'span.model_request_start')
+    return starts.at(-1)?.model as string | undefined
+  }
+
+  /**
+   * Pick `modelId` in `oh`'s model picker by typing it in the free-text row.
+   *
+   * The typed row is the last one in the list, and the arrows clamp, so walking down well
+   * past the end lands on it whatever the catalog holds — the same path on a mock pass (an
+   * empty catalog, one row) and on a real one.
+   */
+  async function pickModelById(terminal: Terminal, modelId: string): Promise<void> {
+    await terminal.waitFor(/Which model\?/)
+    for (let index = 0; index < 20; index += 1) {
+      terminal.send('Down')
+    }
+    terminal.send('Enter')
+    await terminal.waitFor(/type a model id as provider\/model/)
+    terminal.type(modelId)
+    terminal.send('Enter')
+  }
+
+  test('C15 /model switches the chat from the next message, and it sticks', async ({
+    context,
+    request,
+  }) => {
+    // A target that will actually answer: a free-text id on the mock (which answers every
+    // id), another catalog entry on a real pass.
+    let target = 'openai/qa-cli-switch'
+    if (isRealModel) {
+      const listed = await request.get('/v1/models')
+      const body = (await listed.json()) as { data: { id: string }[] }
+      target = body.data.map((entry) => entry.id).find((id) => id !== QA_MODEL) ?? ''
+      test.skip(target === '', 'the account can list only the model the chat already runs')
+    }
+
+    const model = await ensureDefaultModel(request)
+    const terminal = new Terminal('oh-qa-c15', 100, 30)
+    const shot = await context.newPage()
+    await ensureCliSignedIn(shot)
+    terminal.start()
+
+    try {
+      terminal.run(ohCommand())
+      await terminal.waitForIdle()
+      const sessionId = (await terminal.waitFor(/sesn_[A-Z0-9]+/))[0]
+      await sendAndAwaitAnswer(terminal, 'asked before the switch')
+      await terminal.waitForIdle()
+
+      await test.step('/model opens the picker, and the pick is pending, not applied', async () => {
+        terminal.type('/model')
+        terminal.send('Enter')
+        await terminal.screenshot(shot, 'c15-01-model-picker')
+        await pickModelById(terminal, target)
+        // Held for the next message: the status line says so, and nothing was switched yet.
+        await terminal.waitFor(new RegExp(`${escapeRegExp(target)} \\(next message\\)`))
+        expect(await lastRequestModel(request, sessionId)).toBe(model)
+        await terminal.screenshot(shot, 'c15-02-pending-switch')
+      })
+
+      await test.step('the next message carries it and the session runs it', async () => {
+        await sendAndAwaitAnswer(terminal, 'sent on the switched model')
+        await terminal.waitForIdle()
+        const screen = terminal.capture()
+        expect(screen).toContain(target)
+        expect(screen).not.toContain(`${target} (next message)`)
+        expect(await lastRequestModel(request, sessionId)).toBe(target)
+
+        // It sticks: a later message names no model and still runs the switched one.
+        await sendAndAwaitAnswer(terminal, 'and one more, unnamed')
+        await terminal.waitForIdle()
+        expect(await lastRequestModel(request, sessionId)).toBe(target)
+        expectNoErrorNotice(terminal.capture())
+      })
+    } finally {
+      terminal.kill()
+      await shot.close()
+    }
+  })
+
+  test('C16 oh default-model prints, sets, and restores the account’s default', async ({
+    request,
+  }) => {
+    const before = await getDefaultModel(request)
+
+    // With no default, the command says so and says what a new chat will do instead.
+    await setDefaultModel(request, null)
+    const empty = oh(['default-model', '--server', CLI_SERVER])
+    expect(empty.status).toBe(0)
+    expect(empty.stdout).toContain('No default model set. A new chat will ask which model to run.')
+
+    // Setting one is the same write Settings makes; the server echoes what it stored.
+    const chosen = isRealModel ? QA_MODEL : `anthropic/qa-cli-default-${Date.now().toString(36)}`
+    try {
+      const set = oh(['default-model', chosen, '--server', CLI_SERVER])
+      expect(set.status).toBe(0)
+      expect(set.stdout).toContain(`Default model set to ${chosen}.`)
+      expect(await getDefaultModel(request)).toBe(chosen)
+
+      const printed = oh(['default-model', '--server', CLI_SERVER])
+      expect(printed.status).toBe(0)
+      expect(printed.stdout).toContain(`Default model: ${chosen}`)
+    } finally {
+      // Put back what the account had, so the web scenarios after this one are unchanged.
+      await setDefaultModel(request, before)
+    }
+
+    // `oh` itself explains the option in its help.
+    expect(oh(['--help']).stdout).toContain('oh default-model [id]')
+  })
+
+  test('C17 oh sessions delete asks, answers, and takes the whole chat', async ({
+    page,
+    request,
+  }) => {
+    // A chat of this scenario's own, made the way the web app makes one (the API), so the
+    // delete below has something real to remove.
+    const model = await ensureDefaultModel(request)
+    const created = await request.post('/v1/sessions', { data: { model: { id: model } } })
+    expect(created.status(), await created.text()).toBe(201)
+    const sessionId = ((await created.json()) as { id: string }).id
+
+    await ensureCliSignedIn(page)
+
+    await test.step('a “no” leaves it alone', async () => {
+      const terminal = new Terminal('oh-qa-c17a', 100, 30)
+      terminal.start()
+      try {
+        terminal.run(ohCommand('sessions', 'delete', sessionId))
+        await terminal.waitFor(new RegExp(`Delete chat ${sessionId}\\? This cannot be undone`))
+        terminal.type('n')
+        terminal.send('Enter')
+        await terminal.waitFor(/Not deleted\./)
+        await terminal.waitForShellPrompt()
+      } finally {
+        terminal.kill()
+      }
+      const stillThere = await request.get(`/v1/sessions/${sessionId}`)
+      expect(stillThere.status(), await stillThere.text()).toBe(200)
+    })
+
+    await test.step('--yes deletes it, and the API agrees it is gone', async () => {
+      const deleted = oh(['sessions', 'delete', sessionId, '--yes', '--server', CLI_SERVER])
+      expect(deleted.status, deleted.stdout).toBe(0)
+      expect(deleted.stdout).toContain(`Deleted chat ${sessionId}.`)
+
+      const gone = await request.get(`/v1/sessions/${sessionId}`)
+      expect(gone.status()).toBe(404)
+      const goneAgain = oh(['sessions', 'delete', sessionId, '--yes', '--server', CLI_SERVER])
+      expect(goneAgain.status, 'deleting it twice is a not-found').toBe(1)
+      expect(goneAgain.stdout).toContain('not found')
+    })
+
+    await test.step('a chat deleted while oh is in it says so and exits cleanly', async () => {
+      const again = await request.post('/v1/sessions', { data: { model: { id: model } } })
+      const openId = ((await again.json()) as { id: string }).id
+
+      const terminal = new Terminal('oh-qa-c17b', 100, 30)
+      terminal.start()
+      try {
+        terminal.run(ohCommand('-s', openId))
+        await terminal.waitForIdle()
+
+        // Deleted elsewhere — the web app, another terminal — while this chat is open: the
+        // stream's last event is what tells it, and there is no session left to resume.
+        const removed = await request.delete(`/v1/sessions/${openId}`)
+        expect(removed.status(), await removed.text()).toBe(204)
+        await terminal.waitFor(/This chat was deleted; it is gone\./)
+        const screen = terminal.capture()
+        expect(screen, 'no resume hint for a session that is gone').not.toContain(
+          'Resume this session with',
+        )
+      } finally {
+        terminal.kill()
+      }
+    })
   })
 
   // --- signing in, and out, from the terminal (A6) ------------------------------------------
