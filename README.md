@@ -41,7 +41,8 @@ interrupting it, automatic retries, and sessions that survive a server restart. 
 ## Quick start
 
 Requirements: **Docker** — nothing else. The stack starts with the development login on, so
-the first run needs no OAuth app and no provider key.
+the first run needs no OAuth app and no provider key: **a way to sign in is required**, and
+either one provider or the dev login provides it — the server refuses to boot without one.
 
 ```bash
 cp .env.example .env
@@ -71,7 +72,9 @@ cannot be read again.
 To sign in with Google, GitHub or Microsoft instead, create an OAuth app for the provider,
 register `<BETTER_AUTH_URL>/api/auth/callback/<provider>` as its redirect URI, and set the two
 `<PROVIDER>_CLIENT_ID`/`_SECRET` variables from `.env.example`. Each provider appears on the
-sign-in screen as soon as its credentials are set.
+sign-in screen as soon as its credentials are set. At least one provider is required unless
+the dev login is on; a provider is enabled only when both its client id and secret are set
+(set both empty to hide its button).
 
 No provider key yet? Run the server with the deterministic test model — it echoes your message
 back, so the whole app works with no key and no network:

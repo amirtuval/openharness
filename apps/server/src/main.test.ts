@@ -327,8 +327,10 @@ describe('startServer', () => {
 
 describe('main', () => {
   /**
-   * The environment every boot needs (A2/A5). A test that cares about one of these — or
-   * about a provider key it is *not* setting — spells out the rest around it.
+   * The environment every boot needs (A2/A5): the three required variables, and the dev login
+   * on the loopback URL as the way to sign in — a boot with no provider and no dev login is
+   * refused. A test that cares about one of these — or about a provider key it is *not*
+   * setting — spells out the rest around it.
    */
   function bootEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
     return {
@@ -336,6 +338,7 @@ describe('main', () => {
       BETTER_AUTH_SECRET: 'a-test-secret-that-is-long-enough-for-better-auth',
       BETTER_AUTH_URL: TEST_PUBLIC_URL,
       OPENHARNESS_SECRETS_KEY: TEST_SECRETS_KEY,
+      OPENHARNESS_DEV_LOGIN: '1',
       ...extra,
     }
   }

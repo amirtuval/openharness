@@ -76,31 +76,31 @@ a `user.interrupt` signals `interrupt` — exactly what the same events would do
 
 ## Environment variables
 
-| variable                              | default                        | what it does                                                       |
-| ------------------------------------- | ------------------------------ | ------------------------------------------------------------------ |
-| `DATABASE_URL`                        | —                              | run on Postgres, migrating on boot; unset means in-memory          |
-| `SCHEDULER`                           | `local`                        | `local`, or `postgres` for the multi-instance scheduler            |
-| `BETTER_AUTH_SECRET`                  | — (**required**)               | signs sessions and cookies                                         |
-| `BETTER_AUTH_URL`                     | — (**required**)               | the public URL: Better Auth's base, the one trusted origin (CSRF)  |
-| `OPENHARNESS_SECRETS_KEY`             | — (**required**)               | base64 32-byte master key the vault seals credentials with         |
-| `OPENHARNESS_DEV_LOGIN`               | off                            | `1` enables the local dev login; localhost URLs only (A7)          |
-| `GOOGLE_CLIENT_ID`/`_SECRET`          | —                              | enable Google sign-in (both, or neither)                           |
-| `GITHUB_CLIENT_ID`/`_SECRET`          | —                              | enable GitHub sign-in                                              |
-| `MICROSOFT_CLIENT_ID`/`_SECRET`       | —                              | enable Microsoft sign-in                                           |
-| `MICROSOFT_TENANT_ID`                 | `common`                       | the Entra tenant the Microsoft provider authenticates against      |
-| `PORT`                                | `3000`                         | the port to listen on                                              |
-| `OPENHARNESS_TEST_MODEL`              | —                              | `mock` swaps in the deterministic test model                       |
-| `OPENHARNESS_WEB_DIR`                 | —                              | a built web app to serve at `/`                                    |
-| `OPENHARNESS_CORS_ORIGINS`            | —                              | comma-separated origins to allow; unset means no CORS headers      |
-| `OPENHARNESS_MAX_CONCURRENT_SESSIONS` | `4`                            | how many sessions may be running at once                           |
-| `OPENHARNESS_DRAIN_TIMEOUT_MS`        | `5000`                         | how long shutdown waits for a turn in flight                       |
-| `OPENHARNESS_INSTANCE_ID`             | hostname + pid + random suffix | this instance's id in the lease table                              |
-| `OPENHARNESS_PARTITIONS`              | `64` (the protocol's)          | how many partitions the session space has                          |
-| `OPENHARNESS_LEASE_TTL_MS`            | `30000`                        | how long a partition lease lasts before it must be renewed         |
-| `OPENHARNESS_HEARTBEAT_MS`            | `10000`                        | how often leases are renewed and free partitions taken             |
-| `OPENHARNESS_SWEEP_MS`                | `60000`                        | how often owned partitions are re-scanned for missed work          |
-| `OPENHARNESS_DELTA_RETENTION_MS`      | `3600000`                      | how long superseded chunks are kept before compaction deletes them |
-| `OPENHARNESS_COMPACT_INTERVAL_MS`     | `300000`                       | how often the compaction job runs; `0` disables it                 |
+| variable                              | default                        | what it does                                                                                  |
+| ------------------------------------- | ------------------------------ | --------------------------------------------------------------------------------------------- |
+| `DATABASE_URL`                        | —                              | run on Postgres, migrating on boot; unset means in-memory                                     |
+| `SCHEDULER`                           | `local`                        | `local`, or `postgres` for the multi-instance scheduler                                       |
+| `BETTER_AUTH_SECRET`                  | — (**required**)               | signs sessions and cookies                                                                    |
+| `BETTER_AUTH_URL`                     | — (**required**)               | the public URL: Better Auth's base, the one trusted origin (CSRF)                             |
+| `OPENHARNESS_SECRETS_KEY`             | — (**required**)               | base64 32-byte master key the vault seals credentials with                                    |
+| `OPENHARNESS_DEV_LOGIN`               | off                            | `1` enables the local dev login; localhost URLs only (A7); the way in when no provider is set |
+| `GOOGLE_CLIENT_ID`/`_SECRET`          | —                              | enable Google sign-in (both, or neither; one provider or the dev login is required)           |
+| `GITHUB_CLIENT_ID`/`_SECRET`          | —                              | enable GitHub sign-in                                                                         |
+| `MICROSOFT_CLIENT_ID`/`_SECRET`       | —                              | enable Microsoft sign-in                                                                      |
+| `MICROSOFT_TENANT_ID`                 | `common`                       | the Entra tenant the Microsoft provider authenticates against                                 |
+| `PORT`                                | `3000`                         | the port to listen on                                                                         |
+| `OPENHARNESS_TEST_MODEL`              | —                              | `mock` swaps in the deterministic test model                                                  |
+| `OPENHARNESS_WEB_DIR`                 | —                              | a built web app to serve at `/`                                                               |
+| `OPENHARNESS_CORS_ORIGINS`            | —                              | comma-separated origins to allow; unset means no CORS headers                                 |
+| `OPENHARNESS_MAX_CONCURRENT_SESSIONS` | `4`                            | how many sessions may be running at once                                                      |
+| `OPENHARNESS_DRAIN_TIMEOUT_MS`        | `5000`                         | how long shutdown waits for a turn in flight                                                  |
+| `OPENHARNESS_INSTANCE_ID`             | hostname + pid + random suffix | this instance's id in the lease table                                                         |
+| `OPENHARNESS_PARTITIONS`              | `64` (the protocol's)          | how many partitions the session space has                                                     |
+| `OPENHARNESS_LEASE_TTL_MS`            | `30000`                        | how long a partition lease lasts before it must be renewed                                    |
+| `OPENHARNESS_HEARTBEAT_MS`            | `10000`                        | how often leases are renewed and free partitions taken                                        |
+| `OPENHARNESS_SWEEP_MS`                | `60000`                        | how often owned partitions are re-scanned for missed work                                     |
+| `OPENHARNESS_DELTA_RETENTION_MS`      | `3600000`                      | how long superseded chunks are kept before compaction deletes them                            |
+| `OPENHARNESS_COMPACT_INTERVAL_MS`     | `300000`                       | how often the compaction job runs; `0` disables it                                            |
 
 Provider credentials (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) are **not read at all**
 (epic #65, A5), and the server keeps none of its own: every model request is made with the
@@ -111,7 +111,10 @@ a fallback. The mock kind resolves a placeholder the deterministic model ignores
 
 A variable that is set but empty counts as unset. A value that cannot be what it claims — a
 `PORT` that is not a port, an `OPENHARNESS_TEST_MODEL` that is not `mock` — fails the boot
-with a message naming the variable, rather than coming up in a state nobody asked for.
+with a message naming the variable, rather than coming up in a state nobody asked for. The
+boot also needs **a way to sign in**: with no `*_CLIENT_ID`/`*_SECRET` pair configured and
+`OPENHARNESS_DEV_LOGIN` off, `readServerConfig` refuses to start — every route is behind a
+session nobody could create — and says which variables to set.
 
 **The store.** With `DATABASE_URL`, `main.ts` builds a pool, runs `migrate()` (idempotent, so
 two instances starting together are safe) and hands the pool to `createPostgresSessionStore`.
@@ -130,8 +133,11 @@ exactly this plugin list — core + `google`/`github`/`microsoft` + `device-auth
 `bearer` — so the configuration and the schema have to keep matching; a Postgres test asserts
 Better Auth's own schema check passes on the migrated database.
 
-- **Providers** are enabled only when their `*_CLIENT_ID`/`*_SECRET` are set; `/v1/auth-config`
-  reports the list (the interface agreed with the web app, #62).
+- **Providers** are enabled only when their `*_CLIENT_ID`/`*_SECRET` are set — both, or
+  neither; with both empty (i.e. unset) the provider has no button — and `/v1/auth-config`
+  reports the list (the interface agreed with the web app, #62). **At least one provider, or
+  the dev login, has to be configured**: with neither the boot fails, naming the variables to
+  set, because nobody could ever sign in.
 - **Identity is the verified email** (A3), enforced by `auth-profile.ts`: Google's
   `email_verified`, GitHub's _primary verified_ address, and Microsoft's claims (personal
   accounts, `xms_edov`, the verified lists) — the nOAuth guard. A provider that cannot prove

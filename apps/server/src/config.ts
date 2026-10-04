@@ -25,7 +25,7 @@ import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
  * | `BETTER_AUTH_SECRET`                | **required**: signs sessions and cookies (epic #65, A2)          |
  * | `BETTER_AUTH_URL`                   | **required**: the public URL; Better Auth's base and the only trusted origin |
  * | `OPENHARNESS_SECRETS_KEY`           | **required**: the base64 32-byte vault key for provider credentials (A5) |
- * | `OPENHARNESS_DEV_LOGIN`             | `1` enables the local dev login; localhost public URLs only (A7) |
+ * | `OPENHARNESS_DEV_LOGIN`             | `1` enables the local dev login; localhost public URLs only (A7); with no provider, the only way in |
  * | `GOOGLE_CLIENT_ID`/`_SECRET`        | enable Google sign-in (A1)                                       |
  * | `GITHUB_CLIENT_ID`/`_SECRET`        | enable GitHub sign-in (A1)                                       |
  * | `MICROSOFT_CLIENT_ID`/`_SECRET`     | enable Microsoft sign-in (A1)                                    |
@@ -47,6 +47,11 @@ import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
  * There are **no provider credentials in the environment** any more (epic #65, A5): every
  * model request is made with the session owner's own stored key, and `OPENAI_API_KEY` and
  * friends are not read by anything this server runs.
+ *
+ * The environment has to carry **a way to sign in**: at least one `*_CLIENT_ID`/`*_SECRET`
+ * pair, or `OPENHARNESS_DEV_LOGIN=1` on a localhost URL. A provider is enabled only when both
+ * of its variables are set; setting both empty (i.e. unset) hides its button. A server with
+ * neither is a boot failure — see {@link readServerConfig}.
  */
 
 /** The environment variable names this package reads. */
@@ -172,10 +177,15 @@ export function defaultInstanceId(): string {
  * third no provider credential could ever be stored. A missing one is a boot failure with a
  * message naming the variable, not a server that comes up half-configured.
  *
+ * There also has to be a **way to sign in**: at least one social provider (both of its
+ * variables set), or the dev login on a localhost URL. With neither, every request would be
+ * answered 401 forever, so the boot fails and says how to fix it.
+ *
  * @param env the environment; defaults to `process.env`
  * @throws Error when a required variable is missing, when a variable is set to something it
  *   cannot be — a boot failure is much easier to read than a server that came up listening on
- *   `NaN` — or when dev login is asked for on a public URL
+ *   `NaN` — when dev login is asked for on a public URL, or when no provider is configured
+ *   and dev login is off
  */
 export function readServerConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const databaseUrl = readString(env, ENV_VARS.databaseUrl)
@@ -212,6 +222,20 @@ export function readServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
         `URL (http://localhost… or http://127.0.0.1…), got ${JSON.stringify(betterAuthUrl)}`,
     )
   }
+  const google = readProvider(env, ENV_VARS.googleClientId, ENV_VARS.googleClientSecret)
+  const github = readProvider(env, ENV_VARS.githubClientId, ENV_VARS.githubClientSecret)
+  const microsoft = readMicrosoft(env)
+  if (!devLogin && google === undefined && github === undefined && microsoft === undefined) {
+    // Every route is behind a session, and a session comes from a sign-in: a server with no
+    // provider and no dev login is one nobody can ever sign in to. That is a boot failure,
+    // not a server that quietly logs "no social providers configured" and then answers 401
+    // to everyone.
+    throw new Error(
+      'no way to sign in: configure at least one provider (GOOGLE_CLIENT_ID/_SECRET, ' +
+        'GITHUB_CLIENT_ID/_SECRET or MICROSOFT_CLIENT_ID/_SECRET), or set ' +
+        `${ENV_VARS.devLogin}=1 for local development (localhost only)`,
+    )
+  }
   return {
     port: readInteger(env, ENV_VARS.port, DEFAULT_PORT, { min: 0, max: 65535 }),
     databaseUrl,
@@ -220,9 +244,9 @@ export function readServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
     betterAuthUrl,
     secretsKey,
     devLogin,
-    google: readProvider(env, ENV_VARS.googleClientId, ENV_VARS.googleClientSecret),
-    github: readProvider(env, ENV_VARS.githubClientId, ENV_VARS.githubClientSecret),
-    microsoft: readMicrosoft(env),
+    google,
+    github,
+    microsoft,
     testModel: readString(env, ENV_VARS.testModel),
     webDir: readString(env, ENV_VARS.webDir),
     corsOrigins: readOrigins(env),
