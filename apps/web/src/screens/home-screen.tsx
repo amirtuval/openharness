@@ -10,7 +10,7 @@ export function HomeScreen() {
       <div className="space-y-1">
         <h1 className="text-base font-medium">openharness</h1>
         <p className="max-w-sm text-sm text-muted-foreground">
-          Pick a chat from the sidebar, or start a new one with one of your agents.
+          Pick a chat from the sidebar, or start a new one with a model your keys can use.
         </p>
       </div>
       <Button asChild>

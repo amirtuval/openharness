@@ -12,6 +12,9 @@
  *
  * Framework-free, like `settings.ts`: {@link parseRoute} is a pure function, the hook next to
  * it is the React binding.
+ *
+ * There is no `#/agents` route since #91: agents are hidden from the UI (they stay in the
+ * API), so the screen and its route are gone and an old bookmark lands on the home screen.
  */
 
 /** Where the app is. */
@@ -19,7 +22,6 @@ export type Route =
   | { readonly name: 'home' }
   | { readonly name: 'new' }
   | { readonly name: 'chat'; readonly sessionId: string }
-  | { readonly name: 'agents' }
   | { readonly name: 'settings' }
   | { readonly name: 'signin'; readonly next: string | null }
   | { readonly name: 'device'; readonly userCode: string | null }
@@ -36,8 +38,6 @@ export function parseRoute(hash: string): Route {
       return { name: 'home' }
     case 'new':
       return { name: 'new' }
-    case 'agents':
-      return { name: 'agents' }
     case 'settings':
       return { name: 'settings' }
     case 'signin':
@@ -58,8 +58,6 @@ export function routeToHash(route: Route): string {
       return '#/'
     case 'new':
       return '#/new'
-    case 'agents':
-      return '#/agents'
     case 'settings':
       return '#/settings'
     case 'signin':
