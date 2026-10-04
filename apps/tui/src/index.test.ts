@@ -294,7 +294,7 @@ describe('run: auth', () => {
 
     expect(code).toBe(0)
     expect(err).toBe('')
-    expect(out).toContain('http://localhost:3000/device?user_code=FAKE-CODE')
+    expect(out).toContain('http://localhost:3000/#/device?user_code=FAKE-CODE')
     expect(out).toContain('FAKE-CODE')
     expect(out).toContain('Logged in as ada@example.com on http://localhost:3000')
     expect(storedTokens()).toEqual({ 'http://localhost:3000': FAKE_SESSION_TOKEN })

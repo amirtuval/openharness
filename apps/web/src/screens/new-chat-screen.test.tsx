@@ -51,8 +51,9 @@ describe('New chat', () => {
     expect(creates).toEqual([{ model: { id: 'anthropic/claude-sonnet-5' } }])
     const sessionId = window.location.hash.replace('#/s/', '')
     expect(fake.history(sessionId).filter((event) => event.type === 'user.message')).toHaveLength(1)
-    // The chat opens on it: a model-first chat, labelled by its model, with the cursor in the box.
-    expect(await screen.findByRole('heading', { name: 'Claude Sonnet 5' })).toBeInTheDocument()
+    // The chat opens on it: a model-first chat, named by its first message — the fake derives
+    // titles the way the server does (#35) — with the cursor in the box.
+    expect(await screen.findByRole('heading', { name: 'hello there' })).toBeInTheDocument()
     expect(await screen.findByLabelText('Message')).toHaveFocus()
   })
 

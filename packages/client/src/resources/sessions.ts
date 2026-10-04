@@ -22,6 +22,7 @@ import type { RequestOptions } from '../client'
 import { followSessionEvents } from '../events/stream'
 import type { StreamOptions } from '../events/stream'
 import type { Transport } from '../http'
+import { isEventList } from '../internal/events'
 
 /**
  * The session endpoints, and the events that belong to a session.
@@ -276,11 +277,4 @@ function createSessionEventsResource(transport: Transport): SessionEventsResourc
       return followSessionEvents(transport, sessionId, options ?? {})
     },
   }
-}
-
-/** A single event or a list of them, without guessing from the contents of one. */
-function isEventList(
-  events: UserEventInput | readonly UserEventInput[],
-): events is readonly UserEventInput[] {
-  return Array.isArray(events)
 }

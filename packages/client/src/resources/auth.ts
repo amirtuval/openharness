@@ -41,7 +41,7 @@ const DEVICE_LOGIN_SCOPE = 'openid profile email'
 const DEFAULT_POLL_INTERVAL_SECONDS = 5
 
 /** RFC 8628: a `slow_down` answer means the client adds five seconds to its interval. */
-const SLOW_DOWN_INCREMENT_SECONDS = 5
+export const SLOW_DOWN_INCREMENT_SECONDS = 5
 
 /** A device login as {@link AuthResource.startDeviceLogin} reports it, in camelCase. */
 export interface DeviceLoginStart {

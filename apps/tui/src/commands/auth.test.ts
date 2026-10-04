@@ -107,9 +107,9 @@ describe('runLogin', () => {
 
     expect(code).toBe(0)
     const text = out.join('\n')
-    expect(text).toContain('http://localhost:3000/device?user_code=FAKE-CODE')
+    expect(text).toContain('http://localhost:3000/#/device?user_code=FAKE-CODE')
     expect(text).toContain('FAKE-CODE')
-    expect(opened).toEqual(['http://localhost:3000/device?user_code=FAKE-CODE'])
+    expect(opened).toEqual(['http://localhost:3000/#/device?user_code=FAKE-CODE'])
     // The name comes from the client holding the new token, not from the anonymous one.
     expect(text).toContain(`Logged in as via-token@example.com on ${SERVER}`)
     // start and poll are anonymous; only the closing `me()` carries the token.
@@ -126,7 +126,7 @@ describe('runLogin', () => {
     const code = await runLogin(io)
 
     expect(code).toBe(0)
-    expect(out.join('\n')).toContain('http://localhost:3000/device?user_code=FAKE-CODE')
+    expect(out.join('\n')).toContain('http://localhost:3000/#/device?user_code=FAKE-CODE')
     expect(out.join('\n')).toContain('FAKE-CODE')
   })
 

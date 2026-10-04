@@ -60,8 +60,12 @@ describe('App', () => {
     await user.click(screen.getByRole('button', { name: 'Send message' }))
 
     // The message shows before any streamed event is released: the POST's own copy is folded
-    // in, so the reader never waits on the stream to echo their own message.
-    expect(await screen.findByText('Hi there')).toBeInTheDocument()
+    // in, so the reader never waits on the stream to echo their own message. It is also the
+    // session's first, so the fake — like the server — names the session after it and the
+    // header reads the same words: assert on the transcript, not just anywhere on screen.
+    await waitFor(() => {
+      expect(visibleText(messageElement('user'))).toContain('Hi there')
+    })
     // The stream follows the history with deltas on (#91's rule, pinned here).
     expect(stream.calls).toHaveLength(1)
     expect(stream.calls[0]?.deltas).toBe(true)
