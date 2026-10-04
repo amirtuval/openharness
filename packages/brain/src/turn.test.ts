@@ -31,6 +31,7 @@ import type { ModelFactory } from './model'
 import { routerModelFactory } from './model'
 import { REDACTED_PLACEHOLDER } from './redact'
 import {
+  apiCallError,
   misdeclaredSpec,
   mockModel,
   readPrompt,
@@ -67,14 +68,20 @@ import { runTurn } from './turn'
  * the log it would have followed live.
  */
 
-/** A retryable provider error, the shape a real SDK throws. */
+/**
+ * A retryable provider error, the shape a real SDK throws: an `APICallError` with the status
+ * and the `isRetryable` verdict the AI SDK's own retry classifier reads. A bare `Error` with a
+ * `statusCode` property would be ignored by that classifier, and every test below that asserts
+ * how many provider calls an attempt takes would pass no matter how the loop is written
+ * (issue #117).
+ */
 function rateLimited(): Error {
-  return Object.assign(new Error('Rate limited by the provider.'), { statusCode: 429 })
+  return apiCallError(429, 'Rate limited by the provider.')
 }
 
 /** A failure the model reports mid-stream, after some text reached the client. */
 function overloaded(): Error {
-  return Object.assign(new Error('Overloaded.'), { statusCode: 503 })
+  return apiCallError(503, 'Overloaded.')
 }
 
 /** Whether an appendable event opens a model-request span. */
@@ -734,6 +741,86 @@ describe('runTurn', () => {
     await expectClean(store, sessionId)
   })
 
+  it('retries a 503 after exactly one provider call per attempt', async () => {
+    // Issue #117: the failure is retryable by the SDK's own classifier, so if the SDK were
+    // allowed to retry underneath the loop each turn-loop attempt would be several `doStream`
+    // calls — invisible in the log — and the loop would see an `AI_RetryError` wrapper instead
+    // of the provider's error, ending the turn without its own retry ladder.
+    const { store, sessionId } = await newSession([message('Hello')])
+    const sleep = vi.fn(async () => {})
+    const { factory, calls } = mockModel({ failWith: overloaded() }, { text: ['Recovered'] })
+
+    const outcome = await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+      retry: { sleep },
+    })
+
+    expect(outcome).toEqual({ outcome: 'idle' })
+    // One call for the failed attempt, one for the retry: the loop's retry, not the SDK's.
+    expect(calls).toHaveLength(2)
+    expect(sleep).toHaveBeenCalledTimes(1)
+    const raw = await rawLogOf(store, sessionId)
+    expect(eventTypes(raw)).toEqual([
+      EVENT_TYPES.userMessage,
+      EVENT_TYPES.sessionStatusRunning,
+      EVENT_TYPES.modelRequestStart,
+      EVENT_TYPES.eventStart,
+      EVENT_TYPES.modelRequestEnd,
+      EVENT_TYPES.sessionError,
+      EVENT_TYPES.sessionStatusRescheduled,
+      EVENT_TYPES.sessionStatusRunning,
+      EVENT_TYPES.modelRequestStart,
+      EVENT_TYPES.eventStart,
+      EVENT_TYPES.eventDelta,
+      EVENT_TYPES.agentMessage,
+      EVENT_TYPES.modelRequestEnd,
+      EVENT_TYPES.sessionStatusIdle,
+    ])
+    // The retry is the loop's, and the log says so: the provider's error as the session error,
+    // `retrying`, then the reschedule it sleeps under.
+    expect(raw[5]).toMatchObject({
+      type: EVENT_TYPES.sessionError,
+      error: {
+        type: 'model_overloaded_error',
+        message: 'Overloaded.',
+        retry_status: { type: 'retrying' },
+      },
+    })
+    expect(raw[6]?.type).toBe(EVENT_TYPES.sessionStatusRescheduled)
+    await expectClean(store, sessionId)
+  })
+
+  it('gives up after the three loop retries on repeated 503s', async () => {
+    const { store, sessionId } = await newSession([message('Hello')])
+    const sleep = vi.fn(async () => {})
+    const { factory, calls } = mockModel({ failWith: overloaded() })
+
+    const outcome = await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+      retry: { sleep },
+    })
+
+    expect(outcome).toEqual({ outcome: 'error' })
+    // One provider call per attempt — the initial one plus the loop's three retries — and one
+    // sleep between each: the SDK added none of its own.
+    expect(calls).toHaveLength(4)
+    expect(sleep).toHaveBeenCalledTimes(3)
+    const raw = await rawLogOf(store, sessionId)
+    expect(raw.filter((event) => event.type === EVENT_TYPES.sessionError).at(-1)).toMatchObject({
+      error: {
+        type: 'model_overloaded_error',
+        message: 'Overloaded.',
+        retry_status: { type: 'exhausted' },
+      },
+    })
+    expect(await store.getTurnState(sessionId)).toMatchObject({ state: 'idle' })
+    await expectClean(store, sessionId)
+  })
+
   it('classifies a 5xx as an overloaded model, and never stores the partial output', async () => {
     const { store, sessionId } = await newSession([message('Hello')])
     const { factory, calls } = mockModel(
@@ -796,12 +883,13 @@ describe('runTurn', () => {
     await expectClean(store, sessionId)
   })
 
-  it('ends the turn without retrying a failure that is not retryable', async () => {
+  it.each([
+    [400, 'Bad request.'],
+    [401, 'Unauthorized.'],
+  ])('ends the turn without retrying a %i', async (status, text) => {
     const { store, sessionId } = await newSession([message('Hello')])
     const sleep = vi.fn(async () => {})
-    const { factory, calls } = mockModel({
-      failWith: Object.assign(new Error('Bad request.'), { statusCode: 400 }),
-    })
+    const { factory, calls } = mockModel({ failWith: apiCallError(status, text) })
 
     const outcome = await runTurn(sessionId, {
       store,
@@ -811,6 +899,7 @@ describe('runTurn', () => {
     })
 
     expect(outcome).toEqual({ outcome: 'error' })
+    // The provider decided against the request; one call, no retry, not even the SDK's own.
     expect(calls).toHaveLength(1)
     expect(sleep).not.toHaveBeenCalled()
     const raw = await rawLogOf(store, sessionId)
@@ -824,7 +913,11 @@ describe('runTurn', () => {
       EVENT_TYPES.sessionStatusIdle,
     ])
     expect(raw[5]).toMatchObject({
-      error: { type: 'model_request_failed_error', retry_status: { type: 'terminal' } },
+      error: {
+        type: 'model_request_failed_error',
+        message: text,
+        retry_status: { type: 'terminal' },
+      },
     })
     await expectClean(store, sessionId)
   })

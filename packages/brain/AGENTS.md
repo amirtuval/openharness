@@ -265,8 +265,25 @@ after trying Mastra's `Agent` first. `Agent.stream()` swallows what this loop ne
 - the model object it wants is not the AI SDK's, so the factory could not be a `LanguageModel`.
 
 `streamText` gives all three cleanly: an `error` part plus `onError` with the original error
-(including its status), an `abort` part, and a `usage` report. `streamRetries: 0` keeps the SDK
-from retrying underneath the loop.
+(including its status), an `abort` part, and a `usage` report. The SDK must not retry
+underneath the loop, and in `ai@7` two options control retries — only the first is a call-level
+retry (issue #117):
+
+- `maxRetries: 0` disables the provider retries of one model call; the default is **2**. Left
+  at the default, a retryable failure makes up to three provider calls the loop never sees,
+  and what `onError` then reports is not the provider error but an `AI_RetryError` wrapper
+  around it — `statusCode` and `isRetryable` gone from the wrapper itself. This is the option
+  that keeps the turn loop the only retrier.
+- `streamRetries: 0` disables retries of provider errors received _after_ streaming has
+  started; its default is already 0 (disabled when omitted). It is kept explicit so a changed
+  default cannot re-enable them. `onError` never returns `{ retry: true }`, the one way a
+  stream error could still be retried with this set.
+
+`classifyModelError` follows the wrapper's `lastError` (and `errors`/`cause` in other wrappers)
+when the error itself says nothing, so a retryable failure that still arrives wrapped is
+classified by the provider's verdict rather than downgraded to `unknown_error` — see
+`errors.ts`. `model.test.ts` pins the call-count invariant (one failure, one `doStream` call)
+with a failure the SDK's own classifier would retry.
 
 ### The credential of one request
 
@@ -350,7 +367,9 @@ retries run on an injected `sleep`, the clock is a `TestClock` from
   (`consumes` on all three claim sites), the model that served each request, the stored chunks,
   the `supersedes` ranges — steering in a second request, interrupts at each point (the span
   end claiming an interrupt that stopped a request, the idle claiming one that arrived with
-  nothing running), the retry ladder, the six ways a turn can be recovered, a fenced write and
+  nothing running), the retry ladder — a 429 and a 503 (before and mid-stream), each asserting
+  exactly one provider call per attempt, because the SDK must not retry underneath the loop
+  (#117) — the six ways a turn can be recovered, a fenced write and
   a claim another owner took (both stop the turn where it stands), a turn against a model that
   declares the wrong provider spec; most scenarios also assert that a replay of the log holds
   no superseded chunk and that no span start exists without a model request behind it, and one
@@ -364,10 +383,14 @@ retries run on an injected `sleep`, the clock is a `TestClock` from
   appears in the stored events or in captured console output.
 - `context.test.ts`, `errors.test.ts`, `retry.test.ts`, `log.test.ts`, `model.test.ts`,
   `redact.test.ts`, `validate.test.ts` and `index.test.ts` cover the pieces on their own,
-  including the branches the loop cannot reach.
+  including the branches the loop cannot reach. `errors.test.ts` also covers the wrappers the
+  classification follows (`AI_RetryError` and duck-typed ones), and `model.test.ts` pins the
+  one-failure-one-call invariant with a failure the SDK's retry classifier would act on.
 - `src/testing/harness.ts` builds the session and reads the log back; `src/testing/mock-model.ts`
   scripts what each model request answers with, records the prompts, and can act mid-stream
-  (abort, append a steering message) between two chunks. Its `misdeclaredSpec` is the one model
+  (abort, append a steering message) between two chunks. Its `apiCallError` is the failure
+  shape a retry test needs — an `APICallError` the SDK's own retry classifier would act on, so
+  a call-count assertion can actually fail (#117). Its `misdeclaredSpec` is the one model
   no provider has to be asked for: a mock that declares the `v2` provider spec over v3-shaped
   usage, which is how the real router fails — the tests that use it assert the counts still reach
   the log, as integers.

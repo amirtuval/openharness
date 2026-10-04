@@ -251,7 +251,17 @@ export async function streamModelRequest(params: ModelRequestParams): Promise<Mo
     // loop hands it over; the AI SDK otherwise warns about a system message there.
     allowSystemInMessages: true,
     // The turn loop owns retries — it writes the `session.error` and `session.status_*` events
-    // an SDK-level retry would silently skip — so the SDK must not retry underneath it.
+    // an SDK-level retry would silently skip — so the SDK must not retry underneath it. In
+    // `ai@7` two options control retries, and only the second is about streaming:
+    // - `maxRetries` bounds the provider retries of one model call and defaults to 2, so it
+    //   must be 0: left at the default, one failure makes up to three provider calls the loop
+    //   never sees, and what the loop does see is an `AI_RetryError` wrapper around the
+    //   provider's error rather than the error itself.
+    // - `streamRetries` bounds only provider errors received *after* streaming has started;
+    //   its default is already 0 (disabled when omitted). It is kept explicit so a changed
+    //   default cannot re-enable those retries. `onError` here never returns `{ retry: true }`,
+    //   the one way a stream error could still be retried with this set.
+    maxRetries: 0,
     streamRetries: 0,
     onError: ({ error }) => {
       failures.push(error)

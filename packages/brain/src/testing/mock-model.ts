@@ -1,6 +1,7 @@
 import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from '@ai-sdk/provider'
 import type { ModelUsage } from '@openharness/protocol'
 import { FIXTURE_MODEL_USAGE } from '@openharness/protocol/fixtures'
+import { APICallError } from 'ai'
 import type { LanguageModel } from 'ai'
 import { MockLanguageModelV4 } from 'ai/test'
 
@@ -19,7 +20,10 @@ import type { ModelCredential, ModelFactory, ResolveCredential } from '../model'
 export interface MockModelScript {
   /** The text chunks to stream, in order. Default: no text at all. */
   readonly text?: readonly string[]
-  /** Reject the request outright, as a provider failing before the stream opens. */
+  /**
+   * Reject the request outright, as a provider failing before the stream opens. A test about
+   * retries passes an {@link apiCallError}, so the SDK's own classifier can see the failure.
+   */
   readonly failWith?: Error
   /** Stream `text`, then report this error mid-stream, as a provider dying halfway. */
   readonly failAfterText?: Error
@@ -35,6 +39,32 @@ export interface MockModel {
   readonly factory: ModelFactory
   /** One entry per model request made, in order. */
   readonly calls: LanguageModelV4CallOptions[]
+}
+
+/**
+ * A provider failure in the shape a real SDK throws: an `APICallError` carrying the status and
+ * the `isRetryable` verdict the AI SDK's own retry classifier reads.
+ *
+ * A mock failing with a bare `Error` that merely has a `statusCode` property is invisible to
+ * that classifier — the SDK only retries an `APICallError.isInstance()` with `isRetryable:
+ * true` — so a test that pins "the SDK must not retry underneath the loop" has to fail the way
+ * a provider really would, or it passes whichever way the loop is written (issue #117). The
+ * retry tests' failure scripts use this shape.
+ *
+ * @param statusCode the HTTP status the failure reports
+ * @param message the provider's error text
+ */
+export function apiCallError(
+  statusCode: number,
+  message = `provider said ${statusCode}`,
+): APICallError {
+  return new APICallError({
+    message,
+    url: 'https://api.example.test/v1/messages',
+    requestBodyValues: {},
+    statusCode,
+    isRetryable: statusCode === 429 || statusCode >= 500,
+  })
 }
 
 /** The text block the mock streams under; a real provider picks its own ids. */
