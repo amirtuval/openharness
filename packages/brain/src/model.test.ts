@@ -9,7 +9,7 @@ import {
   streamModelRequest,
   toModelUsage,
 } from './model'
-import { TEST_CREDENTIAL, misdeclaredSpec, mockModel } from './testing/mock-model'
+import { TEST_CREDENTIAL, apiCallError, misdeclaredSpec, mockModel } from './testing/mock-model'
 
 describe('toModelUsage', () => {
   it('maps the AI SDK report onto the protocol counters', () => {
@@ -163,7 +163,10 @@ describe('streamModelRequest', () => {
   })
 
   it('reports a provider failure rather than throwing', async () => {
-    const failure = Object.assign(new Error('Overloaded.'), { statusCode: 529 })
+    // The failure is an `APICallError` with `isRetryable: true` — the shape the SDK's retry
+    // classifier recognises — so this also fails if `maxRetries` ever lets the SDK retry: the
+    // error would arrive wrapped in an `AI_RetryError` instead of as itself.
+    const failure = apiCallError(529, 'Overloaded.')
     const { factory } = mockModel({ failWith: failure })
 
     const result = await streamModelRequest({
@@ -175,7 +178,7 @@ describe('streamModelRequest', () => {
   })
 
   it('reports a failure that arrives mid-stream', async () => {
-    const failure = Object.assign(new Error('Overloaded.'), { statusCode: 529 })
+    const failure = apiCallError(529, 'Overloaded.')
     const { factory } = mockModel({ text: ['par'], failAfterText: failure })
 
     const result = await streamModelRequest({
@@ -207,15 +210,19 @@ describe('streamModelRequest', () => {
   })
 
   it('never retries on its own: the turn loop owns the retries', async () => {
-    const failure = Object.assign(new Error('Overloaded.'), { statusCode: 503 })
-    const { factory, calls } = mockModel({ failWith: failure })
+    // The failure is retryable by the SDK's own classifier — an `APICallError` 503 with
+    // `isRetryable: true` — which is exactly what `maxRetries` would act on if it were left at
+    // its default: `doStream` would be called again underneath the loop, invisibly, and this
+    // test would see the calls (issue #117). With `maxRetries: 0` one failure is one call.
+    const { factory, calls } = mockModel({ failWith: apiCallError(503, 'Overloaded.') })
 
-    await streamModelRequest({
+    const result = await streamModelRequest({
       model: factory('anthropic/claude-sonnet-5', TEST_CREDENTIAL),
       messages,
     })
 
     expect(calls).toHaveLength(1)
+    expect(result.error).toMatchObject({ statusCode: 503, isRetryable: true })
   })
 
   it('passes the abort signal down to the provider', async () => {

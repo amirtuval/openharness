@@ -33,6 +33,22 @@ import type { FencedError } from '@openharness/session'
  *
  * The `retry_status` the brain writes next to it is not part of the classification — the loop
  * knows whether it is retrying or has run out of attempts (see `runTurn`).
+ *
+ * ## Wrapped errors
+ *
+ * A failure does not always arrive as itself. The AI SDK reports call-level retries that ran
+ * out as an `AI_RetryError` — a wrapper whose own `statusCode` and `isRetryable` are undefined,
+ * carrying the provider's final error in `lastError` (and every attempt in `errors`) — and a
+ * provider SDK may wrap a failure the same way in its own retry/aggregate error. Classifying
+ * such a wrapper on its own would end the turn as `unknown_error` even though the error inside
+ * it is a 429 or a 503 the loop should have retried. So when nothing on the error itself
+ * decides, the error it carries is classified instead: `lastError`, the last of `errors`, or
+ * `cause`. What an error decides about itself always wins — a wrapper never overrides the
+ * status or `isRetryable` of the error around it.
+ *
+ * The brain sets `maxRetries: 0` (see `model.ts`), so the AI SDK's own wrapper should not be
+ * reached; the unwrapping is what keeps a wrapper from a provider SDK — or from the AI SDK,
+ * should a future version start wrapping again — from downgrading a retryable failure.
  */
 
 /** What {@link classifyModelError} decides about a failure: retry it, and how to name it. */
@@ -76,39 +92,102 @@ const NETWORK_MESSAGE_PATTERN =
 const MAX_CAUSE_DEPTH = 3
 
 /**
+ * How deep a wrapper is followed — through `lastError`, `errors` or `cause` — before the
+ * failure inside it is called unreadable. A wrapper of a wrapper is still a wrapper.
+ */
+const MAX_WRAPPER_DEPTH = 3
+
+/**
  * Classify a failed model request.
  *
  * Takes `unknown` because that is what `catch` and the AI SDK's error callbacks hand over: a
  * provider error arrives as an `APICallError`, a network failure as a `TypeError` with a
- * `cause`, and a bug in this process as anything at all. Nothing here throws — an unrecognised
- * value classifies as `unknown_error` and is not retried.
+ * `cause`, a wrapper as an `AI_RetryError` around either (see the module docs), and a bug in
+ * this process as anything at all. Nothing here throws — an unrecognised value classifies as
+ * `unknown_error` and is not retried.
+ *
+ * The message is the outer error's own — what the provider or the wrapping SDK said — even
+ * when the decision comes from the error inside it.
  *
  * @param error whatever the model request failed with
  */
 export function classifyModelError(error: unknown): ModelErrorClassification {
   const message = messageOf(error)
+  return { ...decideModelError(error, 0), message }
+}
+
+/**
+ * The retry/type half of the classification for one error, looking inside a wrapper when the
+ * error itself does not decide anything.
+ *
+ * Each step asks the same three questions in order — a status, a network failure,
+ * `isRetryable` — and only when all three are silent follows {@link wrappedErrorOf} into the
+ * error a wrapper carries. That is what keeps a wrapper from downgrading the 429 or 503
+ * inside it to `unknown_error`, and equally keeps it from overriding anything the outer error
+ * really said.
+ *
+ * @param error the error to decide on
+ * @param depth how many wrappers have already been opened
+ */
+function decideModelError(
+  error: unknown,
+  depth: number,
+): Omit<ModelErrorClassification, 'message'> {
   const status = statusOf(error)
   if (status !== undefined) {
     if (status === 429) {
-      return { retryable: true, type: 'model_rate_limited_error', message }
+      return { retryable: true, type: 'model_rate_limited_error' }
     }
     if (status === 503 || status === 529) {
-      return { retryable: true, type: 'model_overloaded_error', message }
+      return { retryable: true, type: 'model_overloaded_error' }
     }
     if (status === 408 || status >= 500) {
-      return { retryable: true, type: 'model_request_failed_error', message }
+      return { retryable: true, type: 'model_request_failed_error' }
     }
-    return { retryable: false, type: 'model_request_failed_error', message }
+    return { retryable: false, type: 'model_request_failed_error' }
   }
   if (isNetworkError(error, 0)) {
-    return { retryable: true, type: 'model_request_failed_error', message }
+    return { retryable: true, type: 'model_request_failed_error' }
   }
   if (asRecord(error)?.isRetryable === true) {
     // A provider that flags a failure retryable without a status is still telling us it never
     // decided: trust it rather than losing the turn.
-    return { retryable: true, type: 'model_request_failed_error', message }
+    return { retryable: true, type: 'model_request_failed_error' }
   }
-  return { retryable: false, type: 'unknown_error', message }
+  if (depth < MAX_WRAPPER_DEPTH) {
+    const wrapped = wrappedErrorOf(error)
+    if (wrapped !== undefined && wrapped !== error) {
+      return decideModelError(wrapped, depth + 1)
+    }
+  }
+  return { retryable: false, type: 'unknown_error' }
+}
+
+/**
+ * The failure a wrapper error carries, or `undefined` when the error wraps none.
+ *
+ * `lastError` is the AI SDK's `AI_RetryError` — the provider error of the attempt that ran the
+ * retries out — and the only one of the three the SDK sets. `cause` is the ordinary chain of
+ * `TypeError('fetch failed', { cause })` and of a provider SDK's own wrapper. `errors` is the
+ * same idea in an `AggregateError` or another provider's retry error, read from its last
+ * entry: the final attempt is the one whose verdict counts. A value with none of them is not
+ * a wrapper, and stays unreadable.
+ */
+function wrappedErrorOf(error: unknown): unknown {
+  const record = asRecord(error)
+  if (record === null) {
+    return undefined
+  }
+  for (const carried of [record.lastError, record.cause]) {
+    if (carried !== undefined && carried !== null) {
+      return carried
+    }
+  }
+  const errors = record.errors
+  if (Array.isArray(errors) && errors.length > 0) {
+    return errors[errors.length - 1]
+  }
+  return undefined
 }
 
 /** Whether {@link classifyModelError} says the request may be attempted again. */
