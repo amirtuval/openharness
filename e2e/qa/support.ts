@@ -161,36 +161,74 @@ export function devSession(playwright: PlaywrightApi, baseURL: string): Promise<
 async function signInOverDev(playwright: PlaywrightApi, baseURL: string): Promise<DevSession> {
   const context = await playwright.request.newContext({ baseURL })
   try {
-    // Sign-in allows three attempts per ten seconds (A2). The specs share one sign-in, so this
-    // only bites when a previous *run* left the counter warm; waiting out the window is what a
-    // person would do, and it keeps a fresh suite from failing on a timing accident.
-    let response = await signInRequest(context)
-    if (response.status() === 429) {
-      await new Promise((resolve) => setTimeout(resolve, 11_000))
-      response = await signInRequest(context)
-    }
-    if (!response.ok()) {
-      throw new Error(
-        `the dev login failed (${String(response.status())}): ${await response.text()}\n` +
-          'Is the stack running with OPENHARNESS_DEV_LOGIN=1 on localhost (A7)?',
-      )
-    }
-    const body = (await response.json()) as { token?: string }
-    if (typeof body.token !== 'string') {
-      throw new Error('the sign-in answer carried no token')
-    }
+    const token = await signInDevToken(context, baseURL)
     const { cookies } = await context.storageState()
-    return { token: body.token, cookies }
+    return { token, cookies }
   } finally {
     await context.dispose()
   }
 }
 
-/** One `POST /api/auth/sign-in/email` as the dev user. */
-function signInRequest(context: APIRequestContext) {
-  return context.post('/api/auth/sign-in/email', {
-    data: { email: DEV_LOGIN_EMAIL, password: DEV_LOGIN_PASSWORD },
-  })
+/** How long a rate-limited dev sign-in keeps waiting the window out before it gives up. */
+const DEV_SIGN_IN_WAIT_BUDGET_MS = 30_000
+
+/**
+ * Sign in over the dev login (A7) and answer the session token, waiting out the rate limit.
+ *
+ * `POST /api/auth/sign-in/email` allows three attempts per ten seconds (A2), and the server
+ * names the remaining window in the `X-Retry-After` header of the 429. Waiting that out is
+ * what a person told "too many requests" would do — the same pattern
+ * {@link signInWithDevForm} uses for the page's form — and it keeps a fresh run from failing
+ * on a counter a previous run left warm. **Only a 429 is ever retried**; every other refusal
+ * is thrown with the server's own words.
+ *
+ * @param request the context to send from; `page.context().request` for a scenario that has
+ *   only a page, or a context of one's own
+ * @param baseURL the server under test, so the call does not depend on the context's base
+ */
+export async function signInDevToken(request: APIRequestContext, baseURL: string): Promise<string> {
+  const deadline = Date.now() + DEV_SIGN_IN_WAIT_BUDGET_MS
+  for (;;) {
+    const response = await request.post(`${baseURL}/api/auth/sign-in/email`, {
+      // The Origin a browser sends, and the server's one trusted origin — its public URL
+      // (#79). A request carrying fetch metadata without one is refused
+      // (`MISSING_OR_NULL_ORIGIN`), which is exactly what a sign-in sent through an
+      // APIRequestContext looks like to a production-mode server.
+      headers: { origin: baseURL },
+      data: { email: DEV_LOGIN_EMAIL, password: DEV_LOGIN_PASSWORD },
+    })
+    if (response.status() === 429) {
+      if (Date.now() >= deadline) {
+        throw new Error('the dev sign-in stayed rate-limited')
+      }
+      await new Promise((resolve) =>
+        setTimeout(resolve, retryAfterMs(response.headers()) ?? 11_000),
+      )
+      continue
+    }
+    const body = (await response.json()) as { token?: unknown }
+    if (!response.ok() || typeof body.token !== 'string') {
+      throw new Error(
+        `the dev login failed (${String(response.status())}): ${await response.text()}\n` +
+          'Is the stack running with OPENHARNESS_DEV_LOGIN=1 on localhost (A7)?',
+      )
+    }
+    return body.token
+  }
+}
+
+/**
+ * The wait a 429 named, in milliseconds — the `X-Retry-After` header Better Auth's rate
+ * limiter sends (seconds), or a `Retry-After` from a proxy in front of it. `null` when
+ * neither names one.
+ *
+ * A second is added because the header is rounded to the window's edge: the retry must land
+ * inside the new window, not on the boundary.
+ */
+export function retryAfterMs(headers: Record<string, string>): number | null {
+  const raw = headers['x-retry-after'] ?? headers['retry-after']
+  const seconds = raw === undefined ? Number.NaN : Number(raw)
+  return Number.isFinite(seconds) && seconds >= 0 ? (seconds + 1) * 1000 : null
 }
 
 // --- the stack itself, for the scenarios that stop and start it -------------------------------------

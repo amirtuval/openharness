@@ -31,9 +31,9 @@ import {
   expectNoErrorNotice,
   forgetCliCredentials,
   loggedInAs,
-  loginCli,
   occurrences,
   ohCommand,
+  openDevicePage,
   replyHasText,
   sendAndAwaitAnswer,
 } from './tmux'
@@ -668,7 +668,7 @@ test.describe('cli scenarios', () => {
       expect(url).toBe(`${CLI_SERVER}/#/device?user_code=${userCode}`)
       await terminal.screenshot(shot, 'c12-01-login-code')
 
-      await page.goto(url)
+      await openDevicePage(page, url)
       await expect(page.getByRole('heading', { name: 'Approve a CLI login' })).toBeVisible()
       await expect(page.locator('[data-slot="device-user-code"]')).toHaveText(userCode)
       await page.getByRole('button', { name: 'Approve' }).click()
@@ -713,16 +713,12 @@ test.describe('cli scenarios', () => {
     expect(chat.status).toBe(1)
     expect(chat.stdout).toContain('Run `oh login`.')
 
-    // Signing in again works — and leaves a session behind for anything that runs after this
-    // scenario (they call `ensureCliSignedIn`, which finds it).
-    const terminal = new Terminal('oh-qa-c14', 100, 30)
-    terminal.start()
-    try {
-      const again = await loginCli(terminal, page)
-      expect(again.userCode.length).toBeGreaterThan(0)
-    } finally {
-      terminal.kill()
-    }
+    // And `oh` gets a session again, which leaves one behind for anything that runs after
+    // this scenario (they call `ensureCliSignedIn`, which finds it). Deliberately not another
+    // device login: the device-verification endpoint allows five requests per ten minutes
+    // (#140), the scenarios that are *about* the device page already spend that budget, and
+    // signing in again through the flow is covered where it is the point — C12 and W26a.
+    await ensureCliSignedIn(page)
   })
 
   // --- the chat's model, from the terminal (epic #116, U1/U3) -------------------------------

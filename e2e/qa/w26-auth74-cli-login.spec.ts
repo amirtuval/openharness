@@ -26,6 +26,7 @@ import {
   oh,
   ohCommand,
   ohCommandIn,
+  openDevicePage,
   replyHasText,
   scratchConfigHome,
   sendAndAwaitAnswer,
@@ -88,7 +89,7 @@ test.describe('W26 §10 oh login and friends', () => {
       })
 
       await test.step('10.3 the page shows the same code; approve', async () => {
-        await page.goto(loginUrl)
+        await openDevicePage(page, loginUrl)
         await expect(page.getByRole('heading', { name: 'Approve a CLI login' })).toBeVisible()
         await expect(page.locator('[data-slot="device-user-code"]')).toHaveText(loginCode)
         await shot(page, 'w26-02-device-page')
@@ -218,7 +219,7 @@ test.describe('W26 §10 oh login and friends', () => {
       terminal.run(`${ohCommandIn(home, 'login', '--no-browser')}; echo "login-exit:$?"`)
       const hint = await terminal.waitFor(CLI_LOGIN_HINT, 30_000)
       const url = hint[1] ?? ''
-      await page.goto(url)
+      await openDevicePage(page, url)
       await expect(page.getByRole('heading', { name: 'Approve a CLI login' })).toBeVisible()
       await page.getByRole('button', { name: 'Deny' }).click()
       await expect(page.getByText('Denied')).toBeVisible()
@@ -244,7 +245,7 @@ test.describe('W26 §10 oh login and friends', () => {
     // stand-in "The sign-in request failed."; it now reads the body and says so in a sentence.
     // The code alphabet is `[A-HJ-NP-Z2-9]{8}` (the server's own shape), so this is a
     // well-formed code nobody issued — the case a phishing terminal hits.
-    await page.goto(`${BASE_URL}/#/device?user_code=ZZZZZZZZ`)
+    await openDevicePage(page, `${BASE_URL}/#/device?user_code=ZZZZZZZZ`)
     await expect(page.getByText('Device login failed')).toBeVisible()
     await expect(page.getByRole('button', { name: 'Approve' })).toHaveCount(0)
     await expect(page.getByText('Approved')).toHaveCount(0)
