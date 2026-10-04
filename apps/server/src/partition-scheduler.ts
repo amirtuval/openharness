@@ -96,7 +96,7 @@ export const DEFAULT_SWEEP_MS = 60_000
 export interface PostgresPartitionSchedulerOptions {
   /** The store the leases live in, and the log every turn reads and writes. */
   readonly store: SessionStore
-  /** How a session's `agent.model.id` becomes a model to stream from. */
+  /** How a session's `model.id` becomes a model to stream from (issue #93). */
   readonly model: ModelFactory
   /**
    * Where each model request's provider credential comes from (epic #65, A5); see

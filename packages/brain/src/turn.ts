@@ -160,7 +160,7 @@ export interface TurnOutcome {
 export interface RunTurnOptions {
   /** The session's log: the only thing the turn reads, and the only thing it writes. */
   readonly store: SessionStore
-  /** The model to stream from, resolved by the session's `agent.model.id`. */
+  /** The model to stream from, resolved by the session's `model.id` (issue #93, #94). */
   readonly model: ModelFactory
   /**
    * Where the credential for each model request comes from — the session owner's own provider

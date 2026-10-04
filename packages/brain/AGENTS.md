@@ -12,6 +12,11 @@ resolver answered — the session owner's own provider key, never one from the e
 is the state, which is what lets a crashed turn be resumed by another process — and why a brain
 that holds a partition lease writes under its fence.
 
+What a turn streams is the **session's** configuration: `session.model` is the id every request
+is built from and recorded on its span, and `session.system` is the system prompt the context
+strategy is handed (epic #92, #93/#94). The brain never reads `session.agent` — a session may
+have none, and even when it does the session's `model`/`system` are the effective ones.
+
 ## Commands
 
 Run from this folder (`packages/brain`):
@@ -261,7 +266,7 @@ from retrying underneath the loop.
 
 Each model request is made with an explicit credential, and only with one (epic #65, A5). The
 loop asks `runTurn`'s `resolveCredential` for the model's provider — the part of
-`agent.model.id` before the first slash, `providerOf`'s reading — and hands the answer to the
+`session.model.id` before the first slash, `providerOf`'s reading — and hands the answer to the
 `ModelFactory`, which builds the model for that one request. Nothing is held between requests:
 a retry resolves again, so a key the owner just added is picked up. `isUsableCredential` treats
 `null` **and a blank key** as "no credential": a blank one is not merely useless, it is

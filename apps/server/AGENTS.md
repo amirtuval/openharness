@@ -38,26 +38,26 @@ Everything under `API_VERSION_PREFIX` (`/v1`). Bodies and queries are validated 
 protocol's schemas, so the shapes are not repeated here — see
 [`packages/protocol/AGENTS.md`](../../packages/protocol/AGENTS.md).
 
-| method   | path                                      | body / query                             | answers                                                    |
-| -------- | ----------------------------------------- | ---------------------------------------- | ---------------------------------------------------------- |
-| `GET`    | `/health`                                 | —                                        | `{ status: 'ok' }`; never needs a session                  |
-| `GET`    | `/v1/auth-config`                         | —                                        | `{ providers, dev_login }`; never needs a session          |
-| `GET`    | `/v1/me`                                  | —                                        | the signed-in `User`                                       |
-| `POST`   | `/v1/agents`                              | `CreateAgentRequestSchema`               | 201, the `Agent`                                           |
-| `GET`    | `/v1/agents`                              | `ListAgentsQuerySchema`                  | `{ data, next_page }`                                      |
-| `GET`    | `/v1/agents/{agent_id}`                   | —                                        | the `Agent`, or 404                                        |
-| `POST`   | `/v1/agents/{agent_id}`                   | `UpdateAgentRequestSchema`               | the updated `Agent`, or 404                                |
-| `POST`   | `/v1/sessions`                            | `CreateSessionRequestSchema`             | 201, the `Session`; 404 for an unknown agent               |
-| `GET`    | `/v1/sessions`                            | `ListSessionsQuerySchema`                | `{ data, next_page }`                                      |
-| `GET`    | `/v1/sessions/{session_id}`               | —                                        | the `Session`, or 404                                      |
-| `POST`   | `/v1/sessions/{session_id}/events`        | `SendEventsRequestSchema`                | `{ data: user event[] }`; then signals, and a title        |
-| `GET`    | `/v1/sessions/{session_id}/events`        | `ListEventsQuerySchema`                  | `{ data, next_page }`                                      |
-| `GET`    | `/v1/sessions/{session_id}/events/stream` | `StreamEventsQuerySchema`                | the SSE stream; 404 for an unknown session                 |
-| `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`   | the AI SDK `useChat` request (see below) | an AI SDK UI message stream — an **extension**             |
-| `GET`    | `/v1/models`                              | `ListModelsQuerySchema` (`refresh`)      | `{ data, providers }`; 429 for a refresh inside the minute |
-| `PUT`    | `/v1/provider-credentials/{provider}`     | `PutProviderCredentialRequestSchema`     | the credential's metadata; 422 if the key is refused       |
-| `GET`    | `/v1/provider-credentials`                | —                                        | `{ data: ProviderCredential[] }`, metadata only            |
-| `DELETE` | `/v1/provider-credentials/{provider}`     | —                                        | 204; never an error for one that is not there              |
+| method   | path                                      | body / query                             | answers                                                                            |
+| -------- | ----------------------------------------- | ---------------------------------------- | ---------------------------------------------------------------------------------- |
+| `GET`    | `/health`                                 | —                                        | `{ status: 'ok' }`; never needs a session                                          |
+| `GET`    | `/v1/auth-config`                         | —                                        | `{ providers, dev_login }`; never needs a session                                  |
+| `GET`    | `/v1/me`                                  | —                                        | the signed-in `User`                                                               |
+| `POST`   | `/v1/agents`                              | `CreateAgentRequestSchema`               | 201, the `Agent`                                                                   |
+| `GET`    | `/v1/agents`                              | `ListAgentsQuerySchema`                  | `{ data, next_page }`                                                              |
+| `GET`    | `/v1/agents/{agent_id}`                   | —                                        | the `Agent`, or 404                                                                |
+| `POST`   | `/v1/agents/{agent_id}`                   | `UpdateAgentRequestSchema`               | the updated `Agent`, or 404                                                        |
+| `POST`   | `/v1/sessions`                            | `CreateSessionRequestSchema`             | 201, the `Session`; 404 for an unknown agent; 400 for neither an agent nor a model |
+| `GET`    | `/v1/sessions`                            | `ListSessionsQuerySchema`                | `{ data, next_page }`                                                              |
+| `GET`    | `/v1/sessions/{session_id}`               | —                                        | the `Session`, or 404                                                              |
+| `POST`   | `/v1/sessions/{session_id}/events`        | `SendEventsRequestSchema`                | `{ data: user event[] }`; then signals, and a title                                |
+| `GET`    | `/v1/sessions/{session_id}/events`        | `ListEventsQuerySchema`                  | `{ data, next_page }`                                                              |
+| `GET`    | `/v1/sessions/{session_id}/events/stream` | `StreamEventsQuerySchema`                | the SSE stream; 404 for an unknown session                                         |
+| `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`   | the AI SDK `useChat` request (see below) | an AI SDK UI message stream — an **extension**                                     |
+| `GET`    | `/v1/models`                              | `ListModelsQuerySchema` (`refresh`)      | `{ data, providers }`; 429 for a refresh inside the minute                         |
+| `PUT`    | `/v1/provider-credentials/{provider}`     | `PutProviderCredentialRequestSchema`     | the credential's metadata; 422 if the key is refused                               |
+| `GET`    | `/v1/provider-credentials`                | —                                        | `{ data: ProviderCredential[] }`, metadata only                                    |
+| `DELETE` | `/v1/provider-credentials/{provider}`     | —                                        | 204; never an error for one that is not there                                      |
 
 Every `/v1` route except `auth-config` requires a session (see "Authentication"), and every
 resource is scoped to its owner. `/api/auth/*` is Better Auth's own surface: sign-in, sign-out,
@@ -388,6 +388,29 @@ and cut to the protocol's `SESSION_TITLE_MAX_LENGTH` with an ellipsis. It is wri
 a title supplied at creation, and one an earlier message produced, is never replaced, and a
 message with no text leaves the title `null`.
 
+### Model-first sessions (#94)
+
+Chatting does not require an agent (epic #92). `POST /v1/sessions` takes an agent, an inline
+`model`, or both — the protocol's `CreateSessionRequestSchema` refinement refuses a request
+naming neither, and the server answers it as the 400 `invalid_request_error` it is. What the
+session _stores_ is its effective configuration, `model` and `system`, always: with an agent
+those are the agent's, copied at creation (the snapshot stays in `agent`, whose four fields are
+the agent's own values), and an inline `model`/`system` overrides either field. Without an
+agent, `agent` is `null`, `model` is required and `system` defaults to `null` — and `routes/sessions.ts`
+checks the inline id has the router's `provider/model` shape, at least two non-empty
+slash-separated parts, or the request is a 400. It is a shape check, not a catalogue lookup:
+the router accepts models the catalog does not know yet (C5).
+
+The route passes the request's `model`/`system` into `SessionStore.createSession`'s options
+(#93), and `effectiveSessionConfig` — shared by both stores — is the one place the merge
+happens. **Creating a session never calls a provider and never needs a stored credential**: it
+is a store write, so a key the owner lacks is not learned here. The turn is where it surfaces
+— the brain reads `session.model` for the request and the owner's credential for its provider,
+and a session whose owner has no key for it ends with the brain's `missing_provider_credential`
+`session.error`, exactly as before. The AI SDK adapter and the title fallback (`titles.ts`
+derives from the first message, whatever the session was created from) do not read the agent,
+so both already work with `agent: null`.
+
 ## Scheduler
 
 ```ts
@@ -712,6 +735,11 @@ delete each other's sessions. Packages still run in parallel with each other.
   logged rather than thrown, and `stop()` waiting for a run in flight.
 - `titles.test.ts` — the derivation: first non-empty line, whitespace, truncation with an
   ellipsis, and the write path that never replaces a title that exists.
+- `model-first-sessions.test.ts` — issue #94: creating from a model alone, from an agent, and
+  from an agent plus an override (per field); the 400s (neither an agent nor a model, a
+  malformed model id) and the 404 for another user's agent; `agent: null` round-tripping
+  through GET and the list; and a turn on a model-first session, whose span names the session's
+  model and whose request was built with the owner's credential for that model's provider.
 - `scheduler.test.ts` — one turn per session, steering, interrupts (running and idle), a
   message queued behind an interrupt, recovery on start, concurrency, stopping, and the fence
   reaching the store.

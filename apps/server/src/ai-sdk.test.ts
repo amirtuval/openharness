@@ -120,6 +120,27 @@ describe('the AI SDK chat endpoint', () => {
     expect(reply).toMatchObject({ type: EVENT_TYPES.agentMessage })
   })
 
+  it('works for a model-first session, with no agent at all (#94)', async () => {
+    // The adapter reads the session's events and the session's model, never an agent, so a
+    // session created from a model alone streams exactly like one created from an agent.
+    const test = await startTestServer({ replies: [{ text: ['Hello ', 'model-first'] }] })
+    context = test
+    const created = await postJson(test, `${API_VERSION_PREFIX}/sessions`, {
+      model: { id: 'openharness-test/test-model' },
+    })
+    expect(created.status).toBe(201)
+    const session = (await created.json()) as { readonly id: SessionId }
+
+    const { text } = await chat(test, session.id, [userMessage('Hi')])
+
+    expect(text).toBe('Hello model-first')
+    await waitForIdle(test.store, session.id)
+    const span = (await readHistory(test.store, session.id)).find(
+      (event) => event.type === EVENT_TYPES.modelRequestStart,
+    )
+    expect(span).toMatchObject({ model: 'openharness-test/test-model' })
+  })
+
   it('streams the stored chunks of a reply as they arrive (D9)', async () => {
     // Since D9 the brain stores every chunk it streams. This adapter reads the session's live
     // events, so what it translates is the stored `event_start` / `event_delta` — under the
