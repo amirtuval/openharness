@@ -14,11 +14,11 @@ import {
 } from './support'
 import {
   AGENT_LINE,
-  CLI_COMMAND,
-  CLI_SERVER,
   Terminal,
+  ensureCliSignedIn,
   expectNoErrorNotice,
   occurrences,
+  ohCommand,
   sendAndAwaitAnswer,
 } from './tmux'
 
@@ -54,6 +54,11 @@ test.describe('C10 cross-client', () => {
       system: 'Answer briefly.',
     })
 
+    // The CLI needs a token of its own, and this file runs before `cli.spec.ts` in a pass that
+    // names both (its name sorts first): it must not depend on another scenario having signed
+    // in — C14 signs *out* on its way through.
+    await ensureCliSignedIn(page)
+
     const terminal = new Terminal('oh-qa-c10', 100, 30)
     terminal.start()
 
@@ -62,7 +67,7 @@ test.describe('C10 cross-client', () => {
 
       await test.step('oh starts a new chat on the default model', async () => {
         await ensureDefaultModel(request)
-        terminal.run(`${CLI_COMMAND} --server ${CLI_SERVER}`)
+        terminal.run(ohCommand())
         await terminal.waitFor(/sesn_[A-Z0-9]+/, 30_000)
         await terminal.waitForIdle()
         startedInChat = (await terminal.waitFor(/sesn_[A-Z0-9]+/))[0]
@@ -101,7 +106,7 @@ test.describe('C10 cross-client', () => {
         await quit(terminal)
         await terminal.waitForShellPrompt()
 
-        terminal.run(`${CLI_COMMAND} --server ${CLI_SERVER} -s ${startedInChat}`)
+        terminal.run(ohCommand('-s', startedInChat))
         await terminal.waitFor(/sent from the browser/)
         await terminal.waitForIdle()
         const screen = terminal.capture(400)
@@ -121,7 +126,7 @@ test.describe('C10 cross-client', () => {
 
     terminal.start()
     try {
-      terminal.run(`${CLI_COMMAND} --server ${CLI_SERVER} -s ${webSession.id}`)
+      terminal.run(ohCommand('-s', webSession.id))
       await terminal.waitFor(/started in the browser/)
       expect(terminal.capture()).toContain('started in the browser')
       expectNoErrorNotice(terminal.capture())
