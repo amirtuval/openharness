@@ -2,13 +2,14 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { DefaultChatTransport, type UIMessage, type UIMessageChunk } from 'ai'
 import { API_VERSION_PREFIX, EVENT_TYPES, type SessionId } from '@openharness/protocol'
 
-import { DEV_LOGIN_EMAIL, DEV_LOGIN_PASSWORD, type Auth } from './auth'
+import { type Auth } from './auth'
 import { SESSION_INVALID_MESSAGE } from './sse'
 import {
   ObservableStore,
   TEST_PUBLIC_URL,
   defer,
   openSse,
+  signInCookie,
   startTestServer,
   waitFor,
   type SseReader,
@@ -46,20 +47,6 @@ afterEach(async () => {
 /** The path of a session's stream. */
 function streamPath(sessionId: SessionId): string {
   return `${API_VERSION_PREFIX}/sessions/${sessionId}/events/stream`
-}
-
-/** Sign in over the dev login and answer the session cookie a browser would hold. */
-async function signInWithCookie(test: TestContext): Promise<string> {
-  const response = await test.anonymous('/api/auth/sign-in/email', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ email: DEV_LOGIN_EMAIL, password: DEV_LOGIN_PASSWORD }),
-  })
-  const setCookie = response.headers.get('set-cookie')
-  if (setCookie === null) {
-    throw new Error('the sign-in answered no cookie')
-  }
-  return setCookie.split(';')[0] ?? ''
 }
 
 /** POST `/api/auth/sign-out` with a cookie, as the web app does. */
@@ -196,7 +183,7 @@ describe('a revoked session ends its open stream', () => {
     const store = new ObservableStore()
     const test = await startTestServer({ store })
     context = test
-    const cookie = await signInWithCookie(test)
+    const cookie = await signInCookie(test)
     const { sessionId } = await createChat(test, (await test.signIn()).token)
 
     const response = await test.anonymous(streamPath(sessionId), { headers: { cookie } })

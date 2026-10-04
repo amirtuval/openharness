@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   API_VERSION_PREFIX,
   ApiErrorBodySchema,
+  EVENT_TYPES,
   type Agent,
   type GetMeResponse,
   type ListAgentsResponse,
@@ -124,12 +125,15 @@ describe('user isolation (A4)', () => {
       expect(JSON.stringify(refusal)).not.toContain('a private thought')
     }
 
-    // A's agent is untouched by the attempted update, and its log has nothing new.
+    // A's agent is untouched by the attempted update, and its log has nothing new: the one
+    // user message in it is A's, and B's was never stored.
     const reread = await test.store.getAgent(a.agent.id, { ownerId: (await test.currentUser()).id })
     expect(reread?.name).toBe('A’s agent')
     const history = await test.store.listEventsUnscoped(a.session.id)
-    expect(history.data.some((event) => event.type === 'user.message')).toBe(true)
-    expect(history.data).toHaveLength(history.data.length)
+    const userMessages = history.data.filter((event) => event.type === EVENT_TYPES.userMessage)
+    expect(userMessages).toHaveLength(1)
+    expect(JSON.stringify(userMessages)).toContain('a private thought')
+    expect(JSON.stringify(history.data)).not.toContain('B was here')
   })
 
   it('lists nothing of another user’s, and everything of one’s own', async () => {

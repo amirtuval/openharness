@@ -41,9 +41,12 @@ describe('@openharness/protocol', () => {
   it('exports the constants shared by the server and the store', () => {
     expect(protocol.API_VERSION_PREFIX).toBe('/v1')
     expect(protocol.DEFAULT_PARTITION_COUNT).toBe(64)
-    expect(protocol.partitionOf('sesn_01JQZ8R6X9M4V0W7Y2B3C5D6E7')).toBe(
-      protocol.partitionOf('sesn_01JQZ8R6X9M4V0W7Y2B3C5D6E7'),
-    )
+    // The exact partition for a given id is pinned in `constants.test.ts`; what the barrel
+    // has to show is that the function is the same one and lands in range for the default
+    // partition count.
+    const partition = protocol.partitionOf('sesn_01JQZ8R6X9M4V0W7Y2B3C5D6E7')
+    expect(partition).toBeGreaterThanOrEqual(0)
+    expect(partition).toBeLessThan(protocol.DEFAULT_PARTITION_COUNT)
     expect(protocol.partitionOf('sesn_01JQZ8R6X9M4V0W7Y2B3C5D6E7', 1)).toBe(0)
   })
 })
