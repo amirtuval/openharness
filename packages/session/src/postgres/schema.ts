@@ -3,8 +3,10 @@ import { createHash } from 'node:crypto'
 import type {
   Agent,
   Metadata,
+  ModelConfig,
   ProviderCredential,
   Session,
+  SessionAgent,
   SessionStatus,
   StoredEvent,
   Timestamp,
@@ -42,7 +44,7 @@ export interface AgentsTable {
   updated_at: Date
 }
 
-/** `sessions`: the header of a log, with the agent configuration it snapshotted. */
+/** `sessions`: the header of a log, with the configuration it runs and the agent it snapshotted. */
 export interface SessionsTable {
   id: string
   /** The `user.id` the session belongs to (epic #65, A4); written once, never updated. */
@@ -51,9 +53,21 @@ export interface SessionsTable {
   partition: number
   title: string | null
   metadata: Metadata
-  agent_id: string
-  agent_name: string
-  agent_model_id: string
+  /**
+   * The effective model the session runs (issue #93): `{ id }`, the agent's or the request's.
+   * Not null — every session runs *some* model, with or without an agent.
+   */
+  model: ModelConfig
+  /** The effective system prompt (issue #93): the agent's, the request's, or `null`. */
+  system: string | null
+  /**
+   * The agent preset the session was created from, or `null` for a model-first session. Null
+   * in the snapshot columns too, which are written together — the model and system the session
+   * runs live in the columns above, not here.
+   */
+  agent_id: string | null
+  agent_name: string | null
+  agent_model_id: string | null
   agent_system: string | null
   created_at: Date
   updated_at: Date
@@ -238,7 +252,10 @@ export function agentFromRow(row: AgentRow): Agent {
   }
 }
 
-/** The `session` resource a row carries, with its snapshotted agent. */
+/**
+ * The `session` resource a row carries: the configuration it runs (`model`, `system`) and the
+ * agent it snapshotted, when there was one (issue #93).
+ */
 export function sessionFromRow(row: SessionRow): Session {
   return {
     id: row.id as Session['id'],
@@ -247,14 +264,32 @@ export function sessionFromRow(row: SessionRow): Session {
     status: row.status,
     title: row.title,
     metadata: row.metadata,
-    agent: {
-      id: row.agent_id as Session['agent']['id'],
-      name: row.agent_name,
-      model: { id: row.agent_model_id },
-      system: row.agent_system,
-    },
+    model: row.model,
+    system: row.system,
+    agent: sessionAgentFromRow(row),
     created_at: timestampOf(row.created_at),
     updated_at: timestampOf(row.updated_at),
+  }
+}
+
+/**
+ * The agent snapshot a session row carries, or `null` when the session was created from a
+ * model alone.
+ *
+ * The four snapshot columns are written together — one `agent_id` means one `agent_name`,
+ * `agent_model_id` and `agent_system` beside it, and `0015_session_model.sql` backfilled the
+ * effective `model`/`system` for rows that predate the agent being optional — so a row with an
+ * `agent_id` has the others, and a row without one is a model-first session.
+ */
+function sessionAgentFromRow(row: SessionRow): Session['agent'] {
+  if (row.agent_id === null) {
+    return null
+  }
+  return {
+    id: row.agent_id as SessionAgent['id'],
+    name: row.agent_name as string,
+    model: { id: row.agent_model_id as string },
+    system: row.agent_system,
   }
 }
 

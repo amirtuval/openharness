@@ -73,9 +73,10 @@ import { type TestClock, createTestClock } from './clock'
  * ## What the suite covers
  *
  * - **agents** — create, get, update, and keyset pagination, including `created_at` ties.
- * - **sessions** — the agent snapshot, creation options, `initial_events`, newest-first
- *   pagination, the agent filter, not-found behaviour, and the title an `updateSession` sets,
- *   keeps or clears.
+ * - **sessions** — the agent snapshot, the effective `model`/`system` (the agent's, the
+ *   request's override of either, or a model-first session's inline model with `agent: null`,
+ *   issue #93), creation options, `initial_events`, newest-first pagination, the agent filter,
+ *   not-found behaviour, and the title an `updateSession` sets, keeps or clears.
  * - **ownership** (epic #65, A4) — the owner a created resource carries, the scoped reads
  *   (a second user gets `null` or an empty list for the first user's agents and sessions,
  *   and `SessionNotFoundError` for their events), the explicitly named unscoped methods that
@@ -259,13 +260,72 @@ export function runSessionStoreConformance(
           created_at: timestampAt(clock.currentMs),
           updated_at: timestampAt(clock.currentMs),
         })
+        // The configuration the session runs is the agent's, copied beside the snapshot
+        // (issue #93): what it runs and where it came from are two different fields.
+        expect(session.model).toEqual(agent.model)
+        expect(session.system).toBe(agent.system)
         expect(session.id).toMatch(/^sesn_/)
         expectExact(SessionSchema, session, 'a session')
 
         await store.updateAgent(agent.id, { name: 'Renamed', model: { id: 'other/model' } })
         const reread = await store.getSession(session.id, { ownerId: OWNER_A })
-        expect(reread?.agent.name).toBe(agent.name)
-        expect(reread?.agent.model.id).toBe(agent.model.id)
+        expect(reread?.agent?.name).toBe(agent.name)
+        expect(reread?.agent?.model.id).toBe(agent.model.id)
+        expect(reread?.model).toEqual(agent.model)
+      })
+
+      it('creates a model-first session: no agent, the model it was given, system null', async () => {
+        const { store, clock } = await setup()
+        const session = await store.createSession(null, {
+          ownerId: OWNER_A,
+          model: { id: 'openai/gpt-4.1-mini' },
+          title: 'From a model',
+        })
+        expect(session).toMatchObject({
+          type: 'session',
+          status: 'idle',
+          title: 'From a model',
+          metadata: {},
+          model: { id: 'openai/gpt-4.1-mini' },
+          system: null,
+          agent: null,
+          created_at: timestampAt(clock.currentMs),
+          updated_at: timestampAt(clock.currentMs),
+        })
+        expect(session.id).toMatch(/^sesn_/)
+        expectExact(SessionSchema, session, 'a model-first session')
+        // It reads back the same way — a model-first session is a stored session like any
+        // other, and this read is the one a backfilled row also goes through.
+        expect(await store.getSession(session.id, { ownerId: OWNER_A })).toEqual(session)
+      })
+
+      it('takes the effective model and system from the request, overriding the agent', async () => {
+        const { store } = await setup()
+        const agent = await store.createAgent(agentInput(), OWNER_A)
+        const session = await store.createSession(agent.id, {
+          ownerId: OWNER_A,
+          model: { id: 'openai/gpt-4.1-mini' },
+        })
+        // The model is the request's, the system is still the agent's — one override does not
+        // silently take the other with it.
+        expect(session.model).toEqual({ id: 'openai/gpt-4.1-mini' })
+        expect(session.system).toBe(agent.system)
+        // The snapshot is untouched: it records what the agent was, not what it contributed.
+        expect(session.agent).toMatchObject({ id: agent.id, model: agent.model })
+
+        const cleared = await store.createSession(agent.id, {
+          ownerId: OWNER_A,
+          model: agent.model,
+          system: null,
+        })
+        expect(cleared.system).toBeNull()
+        expect(cleared.agent?.system).toBe(agent.system)
+      })
+
+      it('refuses a session with neither an agent nor a model', async () => {
+        const { store } = await setup()
+        const error = await thrownBy(() => store.createSession(null, { ownerId: OWNER_A }))
+        expect(error).toBeInstanceOf(RangeError)
       })
 
       it('stores the title and metadata it was created with', async () => {
@@ -413,8 +473,13 @@ export function runSessionStoreConformance(
         const mine = await store.createSession(wanted.id, { ownerId: OWNER_A })
         clock.advance(SECOND)
         await store.createSession(other.id, { ownerId: OWNER_A })
+        clock.advance(SECOND)
+        // A model-first session has no agent id, so no agent filter can match it (#93).
+        await store.createSession(null, { ownerId: OWNER_A, model: { id: 'openai/gpt-4.1-mini' } })
         const page = await store.listSessions({ ownerId: OWNER_A, agentId: wanted.id })
         expect(page.data.map((session) => session.id)).toEqual([mine.id])
+        const all = await store.listSessions({ ownerId: OWNER_A })
+        expect(all.data).toHaveLength(3)
       })
 
       // One test per method, so a failure names the call that misbehaved.

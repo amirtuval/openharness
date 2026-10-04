@@ -45,15 +45,15 @@ schema.
 
 Sixteen tables, in `migrations/`. Ten are this package's:
 
-| table                  | what a row is                                                                                           |
-| ---------------------- | ------------------------------------------------------------------------------------------------------- |
-| `agents`               | an agent configuration: `owner_id`, name, description, model, system prompt, timestamps                 |
-| `sessions`             | a log's header: `owner_id`, `status`, `partition`, title, metadata, and the agent snapshot              |
-| `events`               | one stored event: `id`, `session_id`, `seq`, `type`, `payload jsonb`, `created_at`, `processed_at`      |
-| `event_claims`         | one claim of one user event: `event_id` (primary key), the claiming event or `null`, `claimed_at`       |
-| `event_supersessions`  | one recorded chunk range: `from_seq`, `to_seq`, `by_event_id` (primary key), `by_seq`, `created_at`     |
-| `partition_leases`     | who holds a partition, at which epoch, until when                                                       |
-| `provider_credentials` | a user's sealed model-provider key, one per `(user_id, provider)`: the sealed blob, `last4`, timestamps |
+| table                  | what a row is                                                                                                                              |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `agents`               | an agent configuration: `owner_id`, name, description, model, system prompt, timestamps                                                    |
+| `sessions`             | a log's header: `owner_id`, `status`, `partition`, title, metadata, the effective `model`/`system`, and the agent snapshot (nullable, #93) |
+| `events`               | one stored event: `id`, `session_id`, `seq`, `type`, `payload jsonb`, `created_at`, `processed_at`                                         |
+| `event_claims`         | one claim of one user event: `event_id` (primary key), the claiming event or `null`, `claimed_at`                                          |
+| `event_supersessions`  | one recorded chunk range: `from_seq`, `to_seq`, `by_event_id` (primary key), `by_seq`, `created_at`                                        |
+| `partition_leases`     | who holds a partition, at which epoch, until when                                                                                          |
+| `provider_credentials` | a user's sealed model-provider key, one per `(user_id, provider)`: the sealed blob, `last4`, timestamps                                    |
 
 and six are **Better Auth's**, created by the same migrations and read and written by Better
 Auth itself (epic #65, decision A1): `user`, `session`, `account`, `verification` and
@@ -143,22 +143,23 @@ consequence is that **a migration file must never be edited once it has been app
 anywhere** — the runner will not re-run it, so an edit is silently ignored on existing
 databases while applying to new ones. Add a new file instead.
 
-| file                               | what it creates                                                                                     |
-| ---------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `0001_agents.sql`                  | `agents`, and the `(created_at, id)` index the agent list pages through                             |
-| `0002_sessions.sql`                | `sessions`, plus the indexes for the three ways sessions are queried                                |
-| `0003_events.sql`                  | `events`, its uniqueness constraint and its two secondary indexes                                   |
-| `0004_partition_leases.sql`        | `partition_leases`                                                                                  |
-| `0005_events_id_unique.sql`        | the `unique` index that states the id guarantee (`events_id_key`) by name                           |
-| `0006_session_previews.sql`        | `session_previews`, the `unlogged` table of previews in flight                                      |
-| `0007_event_claims.sql`            | `event_claims`, the insert-only record of which events a turn claimed (D9)                          |
-| `0008_event_claims_backfill.sql`   | the one-time copy of the pre-D9 `processed_at` values into claim rows (D9)                          |
-| `0009_event_supersessions.sql`     | `event_supersessions`, the insert-only record of the ranges events replace                          |
-| `0010_drop_session_previews.sql`   | drops `session_previews`, the pre-D9 preview table (P4)                                             |
-| `0011_better_auth.sql`             | Better Auth's tables: `user`, `session`, `account`, `verification`, `deviceCode` (epic #65, A1)     |
-| `0012_ownership.sql`               | deletes the v1 data once, then `owner_id` on `agents` and `sessions` and the per-owner indexes (A4) |
-| `0013_provider_credentials.sql`    | `provider_credentials`, the sealed-blob table (epic #65, A5)                                        |
-| `0014_auth_session_revocation.sql` | the `after delete` trigger on `"session"` that announces revoked sessions (#76)                     |
+| file                               | what it creates                                                                                                       |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `0001_agents.sql`                  | `agents`, and the `(created_at, id)` index the agent list pages through                                               |
+| `0002_sessions.sql`                | `sessions`, plus the indexes for the three ways sessions are queried                                                  |
+| `0003_events.sql`                  | `events`, its uniqueness constraint and its two secondary indexes                                                     |
+| `0004_partition_leases.sql`        | `partition_leases`                                                                                                    |
+| `0005_events_id_unique.sql`        | the `unique` index that states the id guarantee (`events_id_key`) by name                                             |
+| `0006_session_previews.sql`        | `session_previews`, the `unlogged` table of previews in flight                                                        |
+| `0007_event_claims.sql`            | `event_claims`, the insert-only record of which events a turn claimed (D9)                                            |
+| `0008_event_claims_backfill.sql`   | the one-time copy of the pre-D9 `processed_at` values into claim rows (D9)                                            |
+| `0009_event_supersessions.sql`     | `event_supersessions`, the insert-only record of the ranges events replace                                            |
+| `0010_drop_session_previews.sql`   | drops `session_previews`, the pre-D9 preview table (P4)                                                               |
+| `0011_better_auth.sql`             | Better Auth's tables: `user`, `session`, `account`, `verification`, `deviceCode` (epic #65, A1)                       |
+| `0012_ownership.sql`               | deletes the v1 data once, then `owner_id` on `agents` and `sessions` and the per-owner indexes (A4)                   |
+| `0013_provider_credentials.sql`    | `provider_credentials`, the sealed-blob table (epic #65, A5)                                                          |
+| `0014_auth_session_revocation.sql` | the `after delete` trigger on `"session"` that announces revoked sessions (#76)                                       |
+| `0015_session_model.sql`           | the effective `model`/`system` on `sessions`, backfilled from the agent snapshot; the snapshot becomes nullable (#93) |
 
 To run them outside an application:
 
@@ -216,6 +217,24 @@ guard skips the deletes forever, so data created after the migration is safe.
 timestamps. **There is no plaintext column**, and the store that writes it
 (`PostgresCredentialStore`) never sees a plaintext either: the server seals with
 `@openharness/vault` and this package only moves blobs.
+
+### The effective model and system (#93)
+
+`0015_session_model.sql` (epic #92, issue #93) is the model-first change. Until it, a session
+was always created from an agent and the agent snapshot columns _were_ the configuration it
+ran. Now `sessions` carries `model jsonb not null` and `system text` — what the session runs —
+and the four snapshot columns (`agent_id`, `agent_name`, `agent_model_id`, `agent_system`)
+became nullable together, NULL for a session created from a model alone.
+
+Unlike `0012`, this migration **backfills** rather than deletes, because sessions created since
+the auth epic exist in real databases: every row gets `model = jsonb_build_object('id',
+agent_model_id)` and `system = agent_system` from its stored snapshot, so a pre-#93 session
+reads exactly as it did. The backfill is `update … where model is null` — guarded by the
+condition rather than by an `if not exists`, because this migrator re-runs every file on every
+`migrate()` call: a session created after the change always writes its own `model`, so a
+re-run matches nothing. The `not null` on `model` is set only after the backfill, so existing
+rows pass it. `postgres.test.ts` writes a legacy-shaped row, re-runs the migrations, and reads
+the session back to prove exactly that.
 
 ## `seq`: gap-free, in order, under concurrent appends
 

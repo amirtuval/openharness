@@ -74,7 +74,8 @@ src/
     clock.ts            createTestClock()
 migrations/             the SQL the Postgres stores need, applied by `migrate()`:
                         0001–0010 the log, 0011 Better Auth, 0012 ownership, 0013 credentials,
-                        0014 the auth-session revocation trigger (#76)
+                        0014 the auth-session revocation trigger (#76),
+                        0015 the effective session model/system (#93)
 docs/postgres.md        the Postgres stores: schema, migrations, delivery, local setup
 ```
 
@@ -86,7 +87,7 @@ docs/postgres.md        the Postgres stores: schema, migrations, delivery, local
 | ----------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
 | `SessionStore`                                                                                                                                  | the storage and signaling contract; every method is async, and documented below                                                          |
 | `AppendableEvent`                                                                                                                               | an event a caller appends: a `StoredEvent` minus `seq` and `processed_at`, plus an optional `id` the caller supplies                     |
-| `CreateSessionOptions`, `ListAgentsOptions`, `ListSessionsOptions`, `ListEventsOptions`                                                         | the options objects of the list and create methods                                                                                       |
+| `CreateSessionOptions`, `ListAgentsOptions`, `ListSessionsOptions`, `ListEventsOptions`                                                         | the options objects of the list and create methods (`CreateSessionOptions` carries the effective `model`/`system`, #93)                  |
 | `OwnerScope`                                                                                                                                    | `{ ownerId }`: how a read is scoped to one owner (A4) — required, so forgetting it is a compile error; see [the contract](#the-contract) |
 | `UnscopedListEventsOptions`                                                                                                                     | the filters of `listEventsUnscoped`, the brain's replay                                                                                  |
 | `CredentialStore`                                                                                                                               | the sealed-blob credential contract; see [The CredentialStore](#the-credentialstore-epic-65-a5)                                          |
@@ -158,14 +159,14 @@ forgetting the owner is a compile error, not a silent unscoped read (#61's secur
 a resource belonging to somebody else is answered as if it did not exist, because a 404 must
 not leak that it does:
 
-| method                                  | scoped form                                                                                                                                            |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `getAgent(agentId, { ownerId })`        | `null` for another owner's agent                                                                                                                       |
-| `listAgents({ ownerId, … })`            | `data: []` for another owner; `[]`, never somebody else's                                                                                              |
-| `getSession(sessionId, { ownerId })`    | `null` for another owner's session                                                                                                                     |
-| `listSessions({ ownerId, … })`          | only the owner's sessions; the `agentId` filter narrows inside them                                                                                    |
-| `listEvents(sessionId, { ownerId, … })` | `SessionNotFoundError` for another owner's session — the user-facing events route's 404                                                                |
-| `createSession(agentId, options)`       | `ownerId` is **required**, and the agent must belong to that owner or it is an `AgentNotFoundError` — a session may not snapshot somebody else's agent |
+| method                                  | scoped form                                                                                                                                                                                                                       |
+| --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `getAgent(agentId, { ownerId })`        | `null` for another owner's agent                                                                                                                                                                                                  |
+| `listAgents({ ownerId, … })`            | `data: []` for another owner; `[]`, never somebody else's                                                                                                                                                                         |
+| `getSession(sessionId, { ownerId })`    | `null` for another owner's session                                                                                                                                                                                                |
+| `listSessions({ ownerId, … })`          | only the owner's sessions; the `agentId` filter narrows inside them                                                                                                                                                               |
+| `listEvents(sessionId, { ownerId, … })` | `SessionNotFoundError` for another owner's session — the user-facing events route's 404                                                                                                                                           |
+| `createSession(agentId, options)`       | `ownerId` is **required**, and the agent — when one is passed — must belong to that owner or it is an `AgentNotFoundError`; a session may not snapshot somebody else's agent. `agentId: null` creates a model-first session (#93) |
 
 Everything else is **unscoped**, and deliberately so:
 
@@ -261,6 +262,24 @@ log.
 `session.status_idle` sets it to `idle` — in the same transaction as the append. A
 `session.status_rescheduled` does not end a turn and leaves the status alone; v1 has no
 resting `rescheduling` status. Every append also advances the session's `updated_at`.
+
+**Creation, and what a session runs** (issue #93). A session is created from an agent, a
+model, or both, and always stores the configuration it _runs_ — `model` and `system` — beside
+the agent preset it snapshotted, if there was one:
+
+| caller                            | stored `agent`                            | stored `model` / `system`                                            |
+| --------------------------------- | ----------------------------------------- | -------------------------------------------------------------------- |
+| `createSession(agentId, options)` | the agent's `{ id, name, model, system }` | the agent's, or `options.model`/`options.system` when given          |
+| `createSession(null, options)`    | `null`                                    | `options.model` (required), and `options.system` — `null` if omitted |
+
+The resolution is one rule in one place — `effectiveSessionConfig`, shared by both stores — so
+the two implementations cannot disagree: an explicit `model` or `system` wins over what the
+agent contributes, and what is omitted falls back to the agent's. An override is per field:
+passing `model` alone keeps the agent's `system`. Without an agent there is nothing to fall
+back to, so a missing `model` is a `RangeError` — the protocol's request refinement is what
+keeps a caller from getting there, and the store refuses to invent a configuration. The
+`agentId` lookup stays owner-scoped exactly as it was (A4); `null` skips it, because there is
+no agent to own.
 
 **The title.** A session's `title` is the one field that changes after creation:
 `updateSession(sessionId, { title })` sets it, `{ title: null }` clears it, and an omitted
@@ -400,7 +419,10 @@ version; this is the shape of it.
 
 **Schema.** Sixteen tables, all created by `migrations/`. Ten are this package's: `agents` and
 `sessions` (each with the `owner_id` an agent or session belongs to, `sessions` also with the
-`partitionOf` partition and the `status` the log's last status event implies), `events` (`id`,
+`partitionOf` partition, the `status` the log's last status event implies, the effective
+`model jsonb`/`system` the session runs, and the nullable agent snapshot columns beside them —
+`agent_id`, `agent_name`, `agent_model_id`, `agent_system`, all NULL together for a model-first
+session; #93), `events` (`id`,
 `session_id`, `seq`, `type`, `payload jsonb`, `created_at`, `processed_at`, `unique
 (session_id, seq)`, an index on `(session_id, seq)` and a partial index for queued user
 events), `event_claims` (one row per claim of a user event: `event_id` primary key, the event
@@ -481,6 +503,17 @@ and `0013_provider_credentials`:
   server's `session.delete.after` hook; the trigger is what catches an operator's plain SQL
   and the cascade from a `"user"` delete. TRUNCATE does not fire row triggers, so a harness
   emptying `session` announces nothing.
+
+Wave 1 of the catalog epic (#92, issue #93) added one more:
+
+- **`0015_session_model.sql` — the effective model and system, agent optional** (issue #93):
+  `sessions` gains `model jsonb not null` and `system text`, backfilled from the stored agent
+  snapshot (`model = { id: agent_model_id }`, `system = agent_system`) because sessions created
+  since the auth epic already exist in real databases; the four agent snapshot columns become
+  nullable together, so a model-first session stores none of them. The `update … where model is
+null` backfill is a no-op on a re-run — a session created after the change always writes its
+  own `model` — which is what keeps the file idempotent like the rest. `postgres.test.ts`
+  proves it over a row written the pre-#93 way.
 
 **Appending.** `seq` is assigned inside the append transaction, under `select … for update` on
 the session row, so concurrent appends — from any number of connections, stores or processes —
@@ -599,7 +632,9 @@ relative paths. `yarn check:deps` at the repo root enforces this.
   two stores, a supplied event id two of them try to take, fencing across stores, a burst that
   must be delivered exactly once, catching up after the listening connection is killed, a
   chunk another store appended delivered to this store's subscriber, idempotent migrations,
-  `close()` leaving a borrowed pool alone, the raw `events.processed_at` column staying `NULL`
+  the #93 backfill over a session row written the pre-#93 way (the agent's model and system
+  copied into the new columns, the row read back as the protocol's session), `close()` leaving
+  a borrowed pool alone, the raw `events.processed_at` column staying `NULL`
   for a user event (a claim is a row of its own), the append-only guarantee against the real
   SQL (a snapshot of every `events` row is compared before and after claims, a supersession
   and a compaction, and no surviving row may differ by a field), two stores racing to `upsert`

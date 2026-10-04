@@ -101,11 +101,16 @@ describe('InMemorySessionStore', () => {
       throw new Error('the session it just created is gone')
     }
     readBack.title = 'mutated'
-    readBack.agent.name = 'mutated'
     readBack.metadata['ticket'] = 'mutated'
+    readBack.model.id = 'mutated/model'
+    if (readBack.agent === null) {
+      throw new Error('a session created from an agent carries its snapshot')
+    }
+    readBack.agent.name = 'mutated'
     const after = await store.getSession(session.id, { ownerId: OWNER })
     expect(after?.title).toBeNull()
-    expect(after?.agent.name).toBe('Summarizer')
+    expect(after?.agent?.name).toBe('Summarizer')
+    expect(after?.model).toEqual(agent.model)
     expect(after?.metadata).toEqual({ ticket: 'OH-4' })
 
     const [event] = await store.listEventsUnscoped(session.id).then((page) => page.data)

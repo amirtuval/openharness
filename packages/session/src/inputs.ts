@@ -5,6 +5,7 @@ import {
   isEventId,
   type EventId,
   type KeyCursor,
+  type ModelConfig,
   type SeqCursor,
   type SessionId,
 } from '@openharness/protocol'
@@ -45,6 +46,35 @@ export function decodeKeyPage(page: string): KeyCursor {
     throw new RangeError(`this list takes a key cursor, but got a ${cursor.kind} cursor`)
   }
   return cursor
+}
+
+/**
+ * The effective `model` and `system` a new session runs, from the agent it snapshots (if any)
+ * and the options the caller gave (issue #93).
+ *
+ * A session is created from an agent, a model, or both. What it *runs* is one model and one
+ * system prompt, always: an explicit `model`/`system` in the options overrides what the agent
+ * contributes, and what is omitted falls back to the agent's — `system` to `null` when there
+ * is no agent. A `model` with nothing to fall back to cannot be resolved, so it is a
+ * `RangeError`: the protocol's `CreateSessionRequest` refinement is what keeps a caller from
+ * getting here without one, and this is the same rule one layer down.
+ *
+ * @throws RangeError when there is no agent and no explicit `model` to fall back to
+ */
+export function effectiveSessionConfig(
+  agent: { readonly model: ModelConfig; readonly system: string | null } | null,
+  options: { readonly model?: ModelConfig; readonly system?: string | null },
+): { model: ModelConfig; system: string | null } {
+  const model = options.model ?? agent?.model
+  if (model === undefined) {
+    throw new RangeError(
+      'a session without an agent needs a model: pass "model", or create it from an agent',
+    )
+  }
+  return {
+    model: { id: model.id },
+    system: options.system === undefined ? (agent?.system ?? null) : options.system,
+  }
 }
 
 /** A lease only lasts a positive amount of time; anything else is a caller bug, not a lease. */

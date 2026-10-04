@@ -5,8 +5,10 @@ import { join } from 'node:path'
 import {
   EVENT_TYPES,
   MAX_PAGE_LIMIT,
+  SessionSchema,
   isStoredEvent,
   newEventId,
+  newSessionId,
   partitionOf,
   type CreateAgentRequest,
   type EventId,
@@ -53,8 +55,8 @@ import {
  * The extras are the ones a shared store can be asked and a single-process fake cannot: two
  * stores appending at once, a supplied event id two of them try to take, fencing across
  * stores, a burst that must be delivered exactly once, catching up after the listening
- * connection is killed, a chunk delivered across stores, idempotent migrations, and
- * `close()` leaving a borrowed pool alone.
+ * connection is killed, a chunk delivered across stores, idempotent migrations, the #93
+ * backfill over a row written before the change, and `close()` leaving a borrowed pool alone.
  *
  * ## How each test is isolated
  *
@@ -430,6 +432,54 @@ if (target === null) {
 
       const { store, session } = await seeded()
       expect(await store.getSession(session.id, { ownerId: OWNER_A })).toEqual(session)
+    })
+
+    it('backfills model and system for a session stored before #93, and reads it back', async () => {
+      // A real database holds sessions created since the auth epic, whose configuration lives
+      // in the agent snapshot columns and nowhere else: `0015_session_model.sql` copies it
+      // into the new `model`/`system` columns, and this is that row — written the way the
+      // pre-#93 store wrote it, with the new columns left empty.
+      await truncateAll()
+      await ensureUsers([OWNER_A])
+      const store = track(createPostgresSessionStore({ pool }, { now: () => START_MS }))
+      const agent = await store.createAgent(agentInput(), OWNER_A)
+      const legacyId = newSessionId()
+
+      // `model` is `not null` since 0015. The migration sets that back; dropping it here is
+      // what a database that predates the column looks like to the insert.
+      await sql`alter table sessions alter column model drop not null`.execute(db)
+      await sql`
+        insert into sessions (
+          id, owner_id, status, partition, title,
+          agent_id, agent_name, agent_model_id, agent_system,
+          model, system, created_at, updated_at
+        ) values (
+          ${legacyId}, ${OWNER_A}, 'idle', ${partitionOf(legacyId)}, ${'Before #93'},
+          ${agent.id}, ${agent.name}, ${agent.model.id}, ${agent.system},
+          null, null, ${new Date(START_MS)}, ${new Date(START_MS)}
+        )
+      `.execute(db)
+
+      // The runner re-runs every file on every `migrate()` call, so this applies the backfill
+      // to the row above — which is exactly what a deploy of #93 does to a real database.
+      await migrate(db)
+
+      const session = await store.getSession(legacyId, { ownerId: OWNER_A })
+      expect(session).toMatchObject({
+        id: legacyId,
+        title: 'Before #93',
+        model: agent.model,
+        system: agent.system,
+        agent: {
+          id: agent.id,
+          name: agent.name,
+          model: agent.model,
+          system: agent.system,
+        },
+      })
+      // What the store hands out is the protocol's session, exactly — the backfilled row
+      // included: no leftover field and nothing missing.
+      expect(SessionSchema.parse(session)).toEqual(session)
     })
 
     it('leaves a pool it did not open alone, and ends one it did', async () => {
