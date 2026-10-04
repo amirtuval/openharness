@@ -92,14 +92,14 @@ describe('resolveTarget', () => {
     const target = await resolveTarget(listingSessions(fake, []), { continue: true })
 
     expect(target.kind).toBe('session')
-    expect(target.kind === 'session' && target.session.agent.id).toBe(fake.agent.id)
+    expect(target.kind === 'session' && target.session.agent?.id).toBe(fake.agent.id)
   })
 
   it('uses the only agent there is', async () => {
     const fake = createFakeClient()
     const target = await resolveTarget(fake, { continue: false })
 
-    expect(target.kind === 'session' && target.session.agent.name).toBe(fake.agent.name)
+    expect(target.kind === 'session' && target.session.agent?.name).toBe(fake.agent.name)
   })
 
   it('asks which agent when there are several', async () => {
@@ -128,7 +128,7 @@ describe('resolveTarget', () => {
     const client = listingAgents(fake, [fake.agent, extra])
     const target = await resolveTarget(client, { continue: false, agent: 'Reviewer' })
 
-    expect(target.kind === 'session' && target.session.agent.id).toBe(extra.id)
+    expect(target.kind === 'session' && target.session.agent?.id).toBe(extra.id)
   })
 
   it('fails loudly when --agent names nothing', async () => {
@@ -177,8 +177,8 @@ describe('resolveTarget with a list longer than one page', () => {
 
     const target = await resolveTarget(client, { continue: false, agent: 'Agent 45' })
 
-    expect(target.kind === 'session' && target.session.agent.id).toBe(last.id)
-    expect(target.kind === 'session' && target.session.agent.name).toBe('Agent 45')
+    expect(target.kind === 'session' && target.session.agent?.id).toBe(last.id)
+    expect(target.kind === 'session' && target.session.agent?.name).toBe('Agent 45')
   })
 
   it('finds an agent on the third page by id', async () => {
@@ -186,7 +186,7 @@ describe('resolveTarget with a list longer than one page', () => {
 
     const target = await resolveTarget(client, { continue: false, agent: last.id })
 
-    expect(target.kind === 'session' && target.session.agent.id).toBe(last.id)
+    expect(target.kind === 'session' && target.session.agent?.id).toBe(last.id)
   })
 
   it('reads an id instead of walking the list', async () => {
@@ -203,7 +203,7 @@ describe('resolveTarget with a list longer than one page', () => {
 
     const target = await resolveTarget(client, { continue: false, agent: agent.id })
 
-    expect(target.kind === 'session' && target.session.agent.id).toBe(agent.id)
+    expect(target.kind === 'session' && target.session.agent?.id).toBe(agent.id)
   })
 
   it('falls back to the name match when an id is not found', async () => {
@@ -219,7 +219,7 @@ describe('resolveTarget with a list longer than one page', () => {
 
     const target = await resolveTarget(client, { continue: false, agent: name })
 
-    expect(target.kind === 'session' && target.session.agent.id).toBe(named.id)
+    expect(target.kind === 'session' && target.session.agent?.id).toBe(named.id)
   })
 
   it('offers every agent to the picker, not just the first page', async () => {

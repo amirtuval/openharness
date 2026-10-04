@@ -1,11 +1,16 @@
 import type { Session } from '@openharness/protocol'
 
-/** A session's label in the sidebar: its title, or the agent it runs. */
+/**
+ * A session's label in the sidebar: its title, or the agent it runs.
+ *
+ * A model-first session has no agent to name (issue #93), so it falls back to its model —
+ * the display-name rule #91 brings to the header replaces this.
+ */
 export function sessionLabel(session: Session): string {
   if (session.title !== null && session.title.trim() !== '') {
     return session.title
   }
-  return session.agent.name
+  return session.agent?.name ?? session.model.id
 }
 
 /**

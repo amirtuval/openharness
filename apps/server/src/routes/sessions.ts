@@ -34,8 +34,9 @@ export function registerSessionRoutes(app: Hono<AppEnv>, deps: RouteDeps): void 
       ...(body.initial_events === undefined ? {} : { initial_events: body.initial_events }),
     }
     // `createSession` answers `AgentNotFoundError` for an unknown agent, which the app maps
-    // to a 404 in the protocol's envelope.
-    const session = await deps.store.createSession(body.agent, options)
+    // to a 404 in the protocol's envelope. The agent is optional in the request since #93 —
+    // model-first sessions are wired through here by #94, which also validates the model id.
+    const session = await deps.store.createSession(body.agent ?? null, options)
     // A session created with a message is named after it, exactly as one that has its first
     // message posted afterwards — unless the request carried a title of its own, which wins.
     const named = await nameSessionFromFirstMessage(

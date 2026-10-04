@@ -150,7 +150,7 @@ describe('App', () => {
     await waitForFrame(app, 'Reviewer · anthropic/claude-opus-5-5 ·')
 
     const created = (await fake.sessions.list()).data.find(
-      (session) => session.agent.name === 'Reviewer',
+      (session) => session.agent?.name === 'Reviewer',
     )
     expect(created).toBeDefined()
     expect(app.exits).toEqual([])
@@ -188,7 +188,7 @@ describe('App', () => {
     pressKey(app, 'enter')
     await waitForFrame(app, 'Agent 45 · anthropic/claude-sonnet-5 · sesn_')
 
-    expect((await fake.sessions.list()).data[0]?.agent.name).toBe('Agent 45')
+    expect((await fake.sessions.list()).data[0]?.agent?.name).toBe('Agent 45')
   })
 
   it('scrolls back up the picker too', async () => {

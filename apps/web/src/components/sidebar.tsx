@@ -121,7 +121,7 @@ export function Sidebar({
                 >
                   <span className="truncate text-sm">{sessionLabel(session)}</span>
                   <span className="truncate text-xs text-muted-foreground">
-                    {session.agent.model.id} · {relativeTime(session.created_at)}
+                    {session.model.id} · {relativeTime(session.created_at)}
                   </span>
                 </a>
               </li>

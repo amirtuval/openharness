@@ -27,7 +27,10 @@ export interface ChatScreenProps {
  */
 export function ChatScreen({ session, banner, onExit }: ChatScreenProps) {
   const view = useSyncExternalStore(session.subscribe, session.getState, session.getState)
-  const agent = session.session.agent
+  // A model-first session has no agent to name (issue #93), and the model it runs is its own
+  // field either way; the model-picker labels #95 brings replace both of these.
+  const agentName = session.session.agent?.name ?? 'Model'
+  const model = session.session.model.id
 
   useInput((input, key) => {
     if (!key.ctrl || input !== 'c') return
@@ -42,8 +45,8 @@ export function ChatScreen({ session, banner, onExit }: ChatScreenProps) {
         <NoticeView notice={turnErrorNotice(view.transcript.lastError)} />
       )}
       <StatusLine
-        agentName={agent.name}
-        model={agent.model.id}
+        agentName={agentName}
+        model={model}
         sessionId={session.session.id}
         status={view.transcript.status}
         phase={view.phase}
