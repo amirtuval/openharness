@@ -3,9 +3,24 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { FAKE_SESSION_TOKEN } from '@openharness/client/testing'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { run, type RunOptions } from './index'
+
+/**
+ * A config home of the test run's own.
+ *
+ * `runCaptured` passes an environment with no `XDG_CONFIG_HOME` when a test does not set one,
+ * and `run` then resolves the CLI's files under the real `~/.config/openharness` — so a
+ * developer's own `config.json` (or a mangled `credentials.json`) would change what these
+ * tests see. Pointing every run that does not bring its own config home at an empty temporary
+ * directory makes the suite independent of the machine it runs on.
+ */
+const TEST_CONFIG_HOME = mkdtempSync(join(tmpdir(), 'oh-index-test-'))
+
+afterAll(() => {
+  rmSync(TEST_CONFIG_HOME, { recursive: true, force: true })
+})
 
 /** Run the CLI with its output captured, without touching the real terminal. */
 async function runCaptured(
@@ -17,7 +32,10 @@ async function runCaptured(
   const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
 
   try {
-    const code = await run(argv, { env, ...options })
+    const code = await run(argv, {
+      env: { XDG_CONFIG_HOME: TEST_CONFIG_HOME, ...env },
+      ...options,
+    })
     return { code, out: stdoutText(stdout), err: stderrText(stderr) }
   } finally {
     stdout.mockRestore()
@@ -179,7 +197,7 @@ describe('run: auth', () => {
 
     expect(code).toBe(0)
     expect(err).toBe('')
-    expect(out).toContain('http://localhost:3000/device?user_code=FAKE-CODE')
+    expect(out).toContain('http://localhost:3000/#/device?user_code=FAKE-CODE')
     expect(out).toContain('FAKE-CODE')
     expect(out).toContain('Logged in as ada@example.com on http://localhost:3000')
     expect(storedTokens()).toEqual({ 'http://localhost:3000': FAKE_SESSION_TOKEN })
