@@ -38,9 +38,10 @@ import type { RouteDeps } from './deps'
  * must not outlive it.
  *
  * And both writes maintain the user's automatic default model (epic #116, U4): a save picks
- * one when the user has none, a delete re-picks or clears a default whose provider just lost
- * its key. The pick is made against the live catalog, so it happens *after* the cache
- * invalidation above; a pick that fails never fails the credential write (`DefaultModelPicker`).
+ * one when the user has none, a delete that removed a row re-picks or clears a default whose
+ * provider just lost its key. The pick is made against the live catalog, so it happens *after*
+ * the cache invalidation above; a pick that fails never fails the credential write
+ * (`DefaultModelPicker`).
  */
 
 /** What the credential routes need beyond the store: the vault and the validator. */
@@ -105,13 +106,17 @@ export function registerProviderCredentialRoutes(app: Hono<AppEnv>, deps: RouteD
     const userId = c.get('user').id
     // Deleting a provider that has no credential is not an error: the caller's state is
     // "no credential for this provider" either way, and 204 says exactly that.
-    await deps.credentialRoutes.credentials.delete({ userId, provider })
+    const removed = await deps.credentialRoutes.credentials.delete({ userId, provider })
     // The catalogue must stop listing a provider the moment its key is gone (C4/C5).
     deps.catalog.invalidate(userId, provider)
     // A default the deleted key was carrying is re-picked from the providers that remain, or
     // cleared (epic #116, U4): the model can no longer run, and a default that cannot run is
     // worse than none — the client shows "add a key" rather than failing the first message.
-    await deps.defaultModel.onCredentialRemoved(userId, provider)
+    // Only a delete that removed a row is a credential deletion: one that deleted nothing
+    // leaves the stored preferences exactly as they were (#139).
+    if (removed) {
+      await deps.defaultModel.onCredentialRemoved(userId, provider)
+    }
     return c.body(null, 204)
   })
 }

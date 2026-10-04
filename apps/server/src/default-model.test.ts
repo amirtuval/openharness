@@ -298,4 +298,26 @@ describe('the automatic default over HTTP', () => {
     ).toBe(204)
     expect(await storedDefault(test)).toBeNull()
   })
+
+  it('leaves the stored default alone when the delete removed no credential (#139)', async () => {
+    const catalog = fakeCatalog(['openai/gpt-5-mini'])
+    const test = createTestApp({ catalog })
+
+    // A default naming a provider this account has no key for — the state a hand-written
+    // preference (or another instance's automatic pick) leaves behind. The delete removes no
+    // row, so it must not change the stored preferences either: deleting nothing is not
+    // deleting the key the default depends on.
+    const written = await test.request(`${API_VERSION_PREFIX}/me/preferences`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ default_model: 'ghost/model' }),
+    })
+    expect(written.status).toBe(200)
+
+    const deleted = await test.request(`${API_VERSION_PREFIX}/provider-credentials/ghost`, {
+      method: 'DELETE',
+    })
+    expect(deleted.status).toBe(204)
+    expect(await storedDefault(test)).toBe('ghost/model')
+  })
 })

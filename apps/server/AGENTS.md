@@ -462,7 +462,9 @@ behavioural difference is confined to one branch of a credential delete, below.
   still has a key is left alone. One whose provider is gone is **re-picked** from the
   providers that remain (or cleared when none does) **if it was automatic**, and **cleared**
   if the user chose it — their model can no longer run, and substituting another for their
-  choice is not the server's to do.
+  choice is not the server's to do. All of this runs only when the delete removed a row (#139):
+  deleting a provider the account has no credential for deletes nothing, and a delete that
+  deleted nothing leaves the stored preferences exactly as they were.
 - A pick that fails (a store error, an unreadable catalog) is logged and swallowed: the
   credential write has already succeeded, and a settings screen is where a user fixes it.
 
