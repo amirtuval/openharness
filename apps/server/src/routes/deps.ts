@@ -2,6 +2,7 @@ import type { SessionStore } from '@openharness/session'
 
 import type { SocialProviderName } from '../auth-profile'
 import type { ModelCatalog } from '../catalog/catalog'
+import type { DefaultModelPicker } from '../default-model'
 import type { SessionScheduler } from '../scheduler'
 import type { SessionRevocations } from '../session-watch'
 import type { ProviderCredentialDeps } from './provider-credentials'
@@ -28,6 +29,11 @@ export interface RouteDeps {
    * credential drops that provider's cached answer with (C4).
    */
   readonly catalog: Pick<ModelCatalog, 'list' | 'invalidate'>
+  /**
+   * The automatic default model (epic #116, U4): the credential routes let it set, re-pick or
+   * clear a user's default, and the preferences route tells it a choice was the user's own.
+   */
+  readonly defaultModel: DefaultModelPicker
   /** The SSE keepalive interval; tests shorten it. */
   readonly sseKeepaliveMs?: number
   /** The re-check interval of the long-lived routes (A2/#76); tests shorten it. */

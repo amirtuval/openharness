@@ -20,6 +20,7 @@ import { parseBody, parseQuery, sessionIdParam } from '../http/request'
 import { SSE_HEADERS, createSessionEventStream } from '../sse'
 import { nameSessionFromFirstMessage } from '../titles'
 import type { RouteDeps } from './deps'
+import { requireEventModelIds } from './sessions'
 import { signalKinds } from './signals'
 
 /** The `event_deltas[]` value that opts a connection into `agent.message` previews. */
@@ -46,6 +47,10 @@ export function registerEventRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
     // the ownership check (A4).
     await requireOwnedSession(deps, c, sessionId)
     const body = await parseBody(c, SendEventsRequestSchema)
+    // A `user.message` may carry a model to switch the session to (epic #116, U3); the id is
+    // checked for the router's shape here, so a value no provider could resolve is a 400
+    // before anything is appended.
+    requireEventModelIds(body.events)
     // The store writes `processed_at: null` on every user event, which is what makes it
     // queued work rather than history: the brain claims it at the start of a turn.
     const stored = await deps.store.appendEvents(sessionId, body.events)

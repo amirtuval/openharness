@@ -12,6 +12,8 @@ import { AgentNotFoundError, SessionNotFoundError, type SessionStore } from '@op
 import { consoleLogger, type AppEnv, type Logger } from './types'
 import { createAuthGuard } from './auth-guard'
 import { rewriteDevLoginRequest, type BetterAuthInstance } from './auth'
+import { emptyRegistry, type ModelRegistry } from './catalog/registry'
+import { DefaultModelPicker } from './default-model'
 import { createSessionRevocations } from './session-watch'
 import { errorResponse, httpErrorResponse, HttpError } from './http/errors'
 import { registerAgentRoutes } from './routes/agents'
@@ -80,6 +82,12 @@ export interface AppOptions {
    * provider fetch and the bundled `@mastra/core` registry; a test injects its own seams.
    */
   readonly catalog: RouteDeps['catalog']
+  /**
+   * Where the automatic default's registry fallback reads model ids (epic #116, U4). The
+   * bundled `@mastra/core` registry in production — `main.ts` passes the same one the
+   * catalogue was built with — and `emptyRegistry` (no fallback) otherwise.
+   */
+  readonly registry?: ModelRegistry
   /**
    * A directory of built web assets to serve at `/`, e.g. `apps/web/dist`.
    *
@@ -172,6 +180,14 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
     auth: { enabledProviders: options.auth.enabledProviders, devLogin: options.auth.devLogin },
     credentialRoutes: options.credentialRoutes,
     catalog: options.catalog,
+    // The automatic default model (epic #116, U4) is built here, per app: the record of who
+    // the server has picked for lives as long as this app does (see `default-model.ts`).
+    defaultModel: new DefaultModelPicker({
+      store: options.store,
+      catalog: options.catalog,
+      registry: options.registry ?? emptyRegistry,
+      logger,
+    }),
     revocations,
     revalidateSession,
     ...(options.sseKeepaliveMs === undefined ? {} : { sseKeepaliveMs: options.sseKeepaliveMs }),

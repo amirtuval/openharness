@@ -14,8 +14,12 @@ that holds a partition lease writes under its fence.
 
 What a turn streams is the **session's** configuration: `session.model` is the id every request
 is built from and recorded on its span, and `session.system` is the system prompt the context
-strategy is handed (epic #92, #93/#94). The brain never reads `session.agent` — a session may
-have none, and even when it does the session's `model`/`system` are the effective ones.
+strategy is handed (epic #92, #93/#94). Since #111/#116 the model is not frozen for a turn: a
+`user.message` carrying `model` switches it in the append transaction, and the loop re-reads
+the session at **every request boundary**, so a switch applies from the next request on —
+across providers, since each request is built from the current id and credential alone (U3).
+The brain never reads `session.agent` — a session may have none, and even when it does the
+session's `model`/`system` are the effective ones.
 
 ## Commands
 
@@ -113,21 +117,25 @@ START — a fresh turn (idle, with something queued)
 LOOP — once per model request
   1. the signal aborted, or a queued user.interrupt ....... INTERRUPT
   2. nothing left to answer ............................... session.status_idle, return idle
-  3. no credential for the model's provider ............... MISSING CREDENTIAL (below)
-  4. ... span.model_request_start { consumes: the queued user.message ids,
+  3. re-read the session; its CURRENT model is this request's model (U3 — a user.message may
+     have switched it, even mid-stream of the previous request), and it chooses the
+     credential's provider. A session deleted meanwhile throws SessionNotFoundError and the
+     turn stops, writing nothing (U5)
+  4. no credential for the model's provider ............... MISSING CREDENTIAL (below)
+  5. ... span.model_request_start { consumes: the queued user.message ids,
                                     model: the provider/model of the request }
      (the append IS the claim: atomic, fenced, refused whole with ClaimConflictError)
-  5. stream ............................................... stored event_start under a fresh
+  6. stream ............................................... stored event_start under a fresh
                                                              sevt_ id, then one stored
                                                              event_delta per text chunk
-  6. text arrived ......................................... agent.message { same sevt_ id,
+  7. text arrived ......................................... agent.message { same sevt_ id,
                                                              supersedes: the chunk range }
      no text .............................................. (no message: the span end below
                                                              carries the range)
-  7. ...................................................... span.model_request_end
+  8. ...................................................... span.model_request_end
                                                              { model_usage, is_error: null }
-  8. another user.message arrived ......................... loop, from 1
-  9. otherwise ............................................ session.status_idle, return idle
+  9. another user.message arrived ......................... loop, from 1
+ 10. otherwise ............................................ session.status_idle, return idle
 
 MISSING CREDENTIAL — the owner has no stored key for the model's provider (epic #65, A5)
   ........................................... session.error
@@ -189,7 +197,8 @@ FENCED WRITE — any append the store refuses with FencedError, or with ClaimCon
   (another owner claimed the user events this request was about to answer)
   ........................................... stop, write nothing more, rethrow
 
-NO SUCH SESSION — `runTurn` on an id no session has
+NO SUCH SESSION — `runTurn` on an id no session has, or one hard-deleted while the turn ran
+  (the session is re-read at every request boundary, U5)
   ........................................... throw SessionNotFoundError, write nothing
 ```
 
@@ -271,8 +280,10 @@ from retrying underneath the loop.
 ### The credential of one request
 
 Each model request is made with an explicit credential, and only with one (epic #65, A5). The
-loop asks `runTurn`'s `resolveCredential` for the model's provider — the part of
-`session.model.id` before the first slash, `providerOf`'s reading — and hands the answer to the
+loop asks `runTurn`'s `resolveCredential` for the provider of the session's **current** model
+— read at that request's boundary, so a `user.message` that switched the model mid-turn
+changes which provider is asked from the next request (U3) — the part before the first slash,
+`providerOf`'s reading — and hands the answer to the
 `ModelFactory`, which builds the model for that one request. Nothing is held between requests:
 a retry resolves again, so a key the owner just added is picked up. `isUsableCredential` treats
 `null` **and a blank key** as "no credential": a blank one is not merely useless, it is
@@ -355,6 +366,11 @@ retries run on an injected `sleep`, the clock is a `TestClock` from
   declares the wrong provider spec; most scenarios also assert that a replay of the log holds
   no superseded chunk and that no span start exists without a model request behind it, and one
   asserts that the brain writes only through `appendEvents`.
+- `per-request-model.test.ts` — the per-request model (U3): a queued message that switched
+  the session's model is what the first request runs (and its provider is whose credential is
+  resolved), a steering message carrying a switch — across providers — is the model of the
+  **next** request while the first keeps its own, the session's projection follows the log,
+  and the newest switch among several queued messages wins.
 - The credential paths live in `turn.test.ts` too: a turn that ends with
   `missing_provider_credential` (no span, the queued message claimed by the idle event, no
   model call), the same with `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` set to decoys and `fetch`

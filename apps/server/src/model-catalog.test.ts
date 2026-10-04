@@ -621,13 +621,19 @@ describe('GET /v1/models', () => {
         START.toISOString(),
       ),
     )
+    // Saving the key also read the live catalogue — the automatic default model (epic #116,
+    // U4) is picked against it — and that read cached a good answer for this (user, provider).
+    // Drop it, so this read really has to open the tampered row.
+    fixture.catalog.invalidate(user.id, 'openai')
+    const callsBeforeRead = fixture.calls.length
 
     const response = await modelsOf(fixture)
 
     expect(statusOf(response, 'openai').status).toBe('fallback')
     expect(statusOf(response, 'openai').message).toContain('could not be opened')
     expect(idsOf(response)).toEqual(['openai/gpt-4.1'])
-    expect(fixture.calls).toEqual([])
+    // The degraded read dials nothing: the registry stands in (the key cannot be opened).
+    expect(fixture.calls.length).toBe(callsBeforeRead)
   })
 
   it('answers an empty catalogue for a caller with no credentials at all', async () => {

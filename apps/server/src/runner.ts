@@ -6,8 +6,9 @@ import {
   runTurn,
 } from '@openharness/brain'
 import type { SessionId } from '@openharness/protocol'
+import { SessionNotFoundError, type PartitionFence, type SessionStore } from '@openharness/session'
+
 import type { ResolveSessionCredential } from './credentials'
-import type { PartitionFence, SessionStore } from '@openharness/session'
 
 /**
  * The piece of scheduling that is the same however a session is owned: run its turns, one at
@@ -87,6 +88,11 @@ interface TurnHandle {
   pass: Promise<TurnOutcome> | null
   /** Set when someone asked for another look at the log before the pass ends. */
   woken: boolean
+  /**
+   * Set by {@link SessionRunner.stopSession}: the turn in flight ends, and the pass does not
+   * start another one — the session is being deleted, so there is nothing left to run.
+   */
+  stopRequested: boolean
   /** The fence the next turn writes under; the newest one a caller passed wins. */
   fence: PartitionFence | undefined
   /** The external abort signal, if any. */
@@ -183,15 +189,53 @@ export class SessionRunner {
   }
 
   /**
+   * Stop the pass in flight for `sessionId` — abort its turn, do not start another — and wait
+   * (bounded by `drainTimeoutMs`) for it to finish writing.
+   *
+   * This is the abort {@link SessionRunner.abort} cannot be for a session that is about to be
+   * deleted (epic #116, U5): an `abort` ends the turn the way an interrupt does and the pass
+   * then *looks for more work*, which would answer a queued message for a session that is
+   * gone. Here the pass stops after the aborted turn, so once this resolves nothing more will
+   * be written for the session — which is what lets the caller delete it (`store.deleteSession`)
+   * knowing the log is quiet. A session with no pass in flight resolves at once.
+   *
+   * @returns whether a pass was in flight — `false` means there was nothing to stop
+   */
+  async stopSession(
+    sessionId: SessionId,
+    options: { readonly drainTimeoutMs?: number } = {},
+  ): Promise<boolean> {
+    const handle = this.#turns.get(sessionId)
+    if (handle === undefined) {
+      return false
+    }
+    handle.stopRequested = true
+    handle.controller.abort()
+    if (handle.pass !== null) {
+      // The pass may reject (a fenced write); that is the caller-of-`run`'s news, not this
+      // method's — here it only means there is nothing left to wait for.
+      await withTimeout(
+        handle.pass.then(
+          () => undefined,
+          () => undefined,
+        ),
+        options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS,
+      )
+    }
+    return true
+  }
+
+  /**
    * Run a pass for `sessionId`: turns until the log has nothing left for it.
    *
    * Called while a pass is already in flight, it does not start a second one — it wakes the
    * one running and answers with its outcome, so `run` can be called as often as a signal
    * arrives without ever putting two turns on one session.
    *
-   * A rejected pass means `runTurn` threw: a fenced write, or a session that is gone. Model
-   * failures are not rejections — they are part of the turn's story and end in the log (see
-   * `packages/brain`).
+   * A rejected pass means `runTurn` threw: a fenced write, or an unexpected failure. Model
+   * failures are not rejections — they are part of the turn's story and end in the log — and
+   * neither is a session that is gone: `SessionNotFoundError` ends the pass quietly (the
+   * session was hard-deleted, U5), so a deleted session can never become a crash loop.
    *
    * @param sessionId the session to run
    * @param options the fence and the external abort signal, if any
@@ -216,6 +260,7 @@ export class SessionRunner {
       controller: new AbortController(),
       pass: null,
       woken: false,
+      stopRequested: false,
       fence: options.fence,
       signal: options.signal,
     }
@@ -285,19 +330,30 @@ export class SessionRunner {
         if (handle.controller.signal.aborted) {
           handle.controller = new AbortController()
         }
-        outcome = await runTurn(sessionId, {
-          store: this.#store,
-          model: this.#model,
-          // The brain's resolver is provider-only; the session is bound here, where it is
-          // known, so the credential lookup is the owner's own key for this session (A5).
-          resolveCredential: (provider) => this.#resolveCredential(sessionId, provider),
-          signal: abortSignalFor(handle),
-          ...(handle.fence === undefined ? {} : { fence: handle.fence }),
-          ...(this.#retry === undefined ? {} : { retry: this.#retry }),
-          ...(this.#contextStrategy === undefined
-            ? {}
-            : { contextStrategy: this.#contextStrategy }),
-        })
+        try {
+          outcome = await runTurn(sessionId, {
+            store: this.#store,
+            model: this.#model,
+            // The brain's resolver is provider-only; the session is bound here, where it is
+            // known, so the credential lookup is the owner's own key for this session (A5).
+            resolveCredential: (provider) => this.#resolveCredential(sessionId, provider),
+            signal: abortSignalFor(handle),
+            ...(handle.fence === undefined ? {} : { fence: handle.fence }),
+            ...(this.#retry === undefined ? {} : { retry: this.#retry }),
+            ...(this.#contextStrategy === undefined
+              ? {}
+              : { contextStrategy: this.#contextStrategy }),
+          })
+        } catch (error) {
+          if (error instanceof SessionNotFoundError) {
+            // The session was deleted while this pass was running (epic #116, U5) — or
+            // between the signal that queued it and this turn. There is nothing to answer,
+            // nothing to report and nothing to retry: a pass for a session nobody has is
+            // over, and the next boot's recovery will not find it either.
+            break
+          }
+          throw error
+        }
         // A `noop` means this turn found nothing to do, which is a reason to stop — unless a
         // wake arrived while it was looking. A signal for an event appended in that window
         // (the brain reads the log before it decides) is exactly the case the flag exists for,
@@ -332,7 +388,7 @@ export class SessionRunner {
    * aborted signal would interrupt its way round the loop forever.
    */
   #stopping(handle: TurnHandle): boolean {
-    return this.#stopped || handle.signal?.aborted === true
+    return this.#stopped || handle.stopRequested || handle.signal?.aborted === true
   }
 
   /**
@@ -343,12 +399,20 @@ export class SessionRunner {
    * pass that ends here would leave exactly the work recovery would later pick up.
    */
   async #hasMoreWork(sessionId: SessionId): Promise<boolean> {
-    const pending = await this.#store.getPendingUserEvents(sessionId)
-    if (pending.length > 0) {
-      return true
+    try {
+      const pending = await this.#store.getPendingUserEvents(sessionId)
+      if (pending.length > 0) {
+        return true
+      }
+      const turn = await this.#store.getTurnState(sessionId)
+      return turn.state !== 'idle'
+    } catch (error) {
+      if (error instanceof SessionNotFoundError) {
+        // Deleted while this pass was between two turns (U5): there is no more work, ever.
+        return false
+      }
+      throw error
     }
-    const turn = await this.#store.getTurnState(sessionId)
-    return turn.state !== 'idle'
   }
 }
 

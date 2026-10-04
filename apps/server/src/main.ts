@@ -24,7 +24,7 @@ import { createApp } from './app'
 import { createAuth, createDevLoginUser, type Auth, type AuthDatabase } from './auth'
 import { ModelCatalog } from './catalog/catalog'
 import { createProviderFetch } from './catalog/provider-fetch'
-import { createMastraRegistry } from './catalog/registry'
+import { createMastraRegistry, type ModelRegistry } from './catalog/registry'
 import { DeltaCompactor } from './compaction'
 import { ENV_VARS, type ServerConfig, describeConfig, readServerConfig } from './config'
 import { createSessionCredentialResolver, type ResolveSessionCredential } from './credentials'
@@ -98,6 +98,12 @@ export interface StartServerOptions {
    * injects one whose fetch is a stub, so nothing reaches a provider.
    */
   readonly catalog?: Pick<ModelCatalog, 'list' | 'invalidate'>
+  /**
+   * The registry the catalogue joins against, and the automatic default's fallback reads
+   * (epic #116, U4). Defaults to the bundled `@mastra/core` registry. A host that supplies
+   * its own catalogue supplies this too when the fallback should use its stub.
+   */
+  readonly registry?: ModelRegistry
   /** Where to log; defaults to the console. */
   readonly logger?: Logger
   /** The SSE keepalive interval, for a test that wants to see a `: ping` quickly. */
@@ -173,13 +179,15 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   // The model catalogue (epic #92): the caller's own keys, the providers' own lists, joined
   // with the bundled `@mastra/core` registry and cached in memory per (user, provider). It is
   // built from the same credential store and vault the brain's resolver uses, and its one
-  // outbound path is `createProviderFetch()`, which honors the egress-proxy variables.
+  // outbound path is `createProviderFetch()`, which honors the egress-proxy variables. One
+  // registry instance serves both the catalogue and the automatic default's fallback (U4).
+  const registry = options.registry ?? createMastraRegistry()
   const catalog =
     options.catalog ??
     new ModelCatalog({
       credentials,
       vault,
-      registry: createMastraRegistry(),
+      registry,
       fetch: createProviderFetch(),
       logger,
     })
@@ -200,6 +208,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
       validate: options.validateProviderCredential ?? validateProviderApiKey,
     },
     catalog,
+    registry,
     ...(config.webDir === undefined ? {} : { webDir: config.webDir }),
     ...(config.corsOrigins.length === 0 ? {} : { corsOrigins: config.corsOrigins }),
     ...(options.sseKeepaliveMs === undefined ? {} : { sseKeepaliveMs: options.sseKeepaliveMs }),

@@ -77,24 +77,28 @@ import { backoffDelay, resolveRetryPolicy } from './retry'
  * LOOP (per model request)
  *   1. an aborted signal, or a queued user.interrupt ....... INTERRUPT
  *   2. no unanswered message left ........................... session.status_idle, return idle
- *   3. no credential for the model's provider ............... session.error
+ *   3. re-read the session; its CURRENT `model` (U3 — a `user.message` may have switched it,
+ *      even while the previous request was streaming) is what this request runs, is recorded
+ *      on its span and chooses the credential's provider. A session deleted meanwhile throws
+ *      SessionNotFoundError and the turn stops, writing nothing (U5).
+ *   4. no credential for the model's provider ............... session.error
  *                                                             { missing_provider_credential,
  *                                                               retry_status: exhausted }
  *                                                             session.status_idle
  *                                                             { consumes: the queued ids }
  *                                                             return error
- *   4. claim the queued user.message events; the claim is the append of the span start below
- *   5. ............. span.model_request_start { consumes, model }
- *   6. stream ....... stored event_start (one sevt_ id), then one stored event_delta per chunk
- *   7. text streamed ......... agent.message { supersedes: the chunk range }
+ *   5. claim the queued user.message events; the claim is the append of the span start below
+ *   6. ............. span.model_request_start { consumes, model }
+ *   7. stream ....... stored event_start (one sevt_ id), then one stored event_delta per chunk
+ *   8. text streamed ......... agent.message { supersedes: the chunk range }
  *      no text ................................... (no message; the span end supersedes)
- *   8. .............................. span.model_request_end { model_usage }
- *   9. another user.message arrived .......................... loop from 1
- *  10. otherwise ............................................. session.status_idle, return idle
+ *   9. .............................. span.model_request_end { model_usage }
+ *  10. another user.message arrived .......................... loop from 1
+ *  11. otherwise ............................................. session.status_idle, return idle
  *
  * MODEL FAILURE — no credential for the model's provider (epic #65, A5)
  *   The credential is resolved before the span start, so no span is opened for a request that
- *   was never made and no chunk exists to supersede — shown above as step 3. The messages the
+ *   was never made and no chunk exists to supersede — shown above as step 4. The messages the
  *   request would have answered are claimed by the idle event that ends the turn, the way an
  *   interrupt's are (P4): leaving them queued would make the scheduler run the same failing
  *   turn again. Nothing is retried.
@@ -160,7 +164,11 @@ export interface TurnOutcome {
 export interface RunTurnOptions {
   /** The session's log: the only thing the turn reads, and the only thing it writes. */
   readonly store: SessionStore
-  /** The model to stream from, resolved by the session's `model.id` (issue #93, #94). */
+  /**
+   * The model to stream from. The id it is called with is the session's **current**
+   * `model.id` (issue #93, #94), re-read at every request boundary — so a `user.message`
+   * that switched the model mid-turn applies from the next request (epic #116, U3).
+   */
   readonly model: ModelFactory
   /**
    * Where the credential for each model request comes from — the session owner's own provider
@@ -209,11 +217,16 @@ interface PartialReply {
  * records it (`span.model_request_end`, `session.error`, `session.status_idle`). It does throw
  * for a `FencedError` — the one failure the turn must not write anything about, because the log
  * is not the writer's any more — for a `ClaimConflictError`, which means another owner claimed
- * the user events this request was about to answer, and for a `SessionNotFoundError`.
+ * the user events this request was about to answer, and for a `SessionNotFoundError` — which
+ * includes a session hard-deleted while the turn was running (epic #116, U5): the turn stops
+ * at the next request boundary and writes nothing more.
  *
- * Each request is made with a credential `resolveCredential` answered for its provider, and
- * with no other: an owner who has none ends the turn with `missing_provider_credential` before
- * a span is opened — the provider keys of the environment are never a fallback (epic #65, A5).
+ * Each request is made with a credential `resolveCredential` answered for the provider of the
+ * session's **current** model — re-read at that request's boundary (epic #116, U3), so a
+ * model switch mid-turn changes which provider is asked from the next request on — and with
+ * no other credential: an owner who has none ends the turn with `missing_provider_credential`
+ * before a span is opened — the provider keys of the environment are never a fallback (epic
+ * #65, A5).
  *
  * @param sessionId the session to run; a `sesn_` id
  * @param options the store, the model factory, the credential resolver, and the turn's knobs
@@ -244,10 +257,6 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
   if (session === null) {
     throw new SessionNotFoundError(sessionId)
   }
-  // The session's own effective model and system, not its agent's (issue #93): a session may
-  // have no agent, and the two fields are always set — from the agent when it has one, from
-  // the request's override when it does not, and from the backfill for rows written before it.
-  const sessionModel: ModelConfig = session.model
   const queued = await store.getPendingUserEvents(sessionId)
   const turnState = await store.getTurnState(sessionId)
   if (turnState.state === 'idle' && queued.length === 0) {
@@ -382,13 +391,24 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
         return { outcome: 'idle' }
       }
     }
+    // Per request, not per turn (epic #116, U3): a `user.message` carrying a `model` switched
+    // `session.model` in the append transaction, and re-reading here is what makes the switch
+    // — including one that arrived while the previous request was streaming — apply from this
+    // request on, across providers, since each request is built from the current id alone. A
+    // session deleted while the turn ran is gone for good: the turn stops here, before this
+    // request claims anything, so the delete is the last thing written (U5).
+    const current = await store.getSessionUnscoped(sessionId)
+    if (current === null) {
+      throw new SessionNotFoundError(sessionId)
+    }
+    const requestModel: ModelConfig = current.model
     // The credential this request is made with, asked for before anything is claimed. A
     // request that cannot be made opens no span — every span start is a real model request,
     // and this one has none — and streams nothing, so there is no chunk range to supersede.
     // The turn still ends on it, and its idle event claims the messages it could not answer;
     // leaving them queued would make the scheduler that finds work in the log run the same
     // failing turn again, and again (epic #65, A5).
-    const provider = providerOf(sessionModel.id)
+    const provider = providerOf(requestModel.id)
     const credential = await resolveCredential(provider)
     if (!isUsableCredential(credential)) {
       await append([
@@ -401,14 +421,14 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       ])
       return { outcome: 'error' }
     }
-    const [start] = await append([spanStart(claims, sessionModel.id)])
+    const [start] = await append([spanStart(claims, requestModel.id)])
     if (start === undefined) {
       throw new Error('the store did not return the span it was asked to append')
     }
     // Read the log again: the claim just landed, and what this request answers is the log as it
     // stands after it — the messages it consumes, in order, and nothing still queued.
     const answered = contextView(await readLog(store, sessionId))
-    const messages = strategy(answered, { model: sessionModel, system: session.system })
+    const messages = strategy(answered, { model: requestModel, system: current.system })
 
     // The reply's chunks are stored as they arrive, under one pre-minted id: the stored
     // `event_start` announces the id the `agent.message` will be stored under, and every
@@ -419,10 +439,11 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       throw new Error('the store did not return the event_start it was asked to append')
     }
     let lastChunkSeq = chunkOpen.seq
-    // One model per request, built with this request's credential: the resolved key lives for
-    // exactly this request and is not held on to between them.
+    // One model per request, built with this request's model id and credential: both are read
+    // at this request's boundary, so a switch or a key added mid-turn is picked up by the next
+    // request, and neither is held on to between them.
     const result = await streamModelRequest({
-      model: model(sessionModel.id, credential),
+      model: model(requestModel.id, credential),
       messages,
       signal,
       onTextDelta: async (text) => {

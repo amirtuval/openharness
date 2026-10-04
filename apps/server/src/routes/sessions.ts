@@ -2,13 +2,16 @@ import type { Hono } from 'hono'
 import {
   API_VERSION_PREFIX,
   CreateSessionRequestSchema,
+  EVENT_TYPES,
   ListSessionsQuerySchema,
+  type UserEventInput,
 } from '@openharness/protocol'
 import type { CreateSessionOptions, ListSessionsOptions } from '@openharness/session'
 
 import type { AppEnv } from '../types'
 import { invalidRequest, notFoundError } from '../http/errors'
 import { parseBody, parseQuery, sessionIdParam } from '../http/request'
+import { isRouterModelId } from '../model-id'
 import { nameSessionFromFirstMessage } from '../titles'
 import type { RouteDeps } from './deps'
 import { signalKinds } from './signals'
@@ -32,11 +35,13 @@ export function registerSessionRoutes(app: Hono<AppEnv>, deps: RouteDeps): void 
     // non-empty parts — a value no provider could ever resolve is a request, not a session
     // (issue #94). The format lives outside the protocol's `ModelConfigSchema` until the
     // catalog wave is done; this is the one route that acts on it today.
-    if (body.model !== undefined && !isModelId(body.model.id)) {
-      throw invalidRequest(
-        `model.id must be a "provider/model" id with non-empty parts, got ${JSON.stringify(body.model.id)}`,
-      )
+    if (body.model !== undefined) {
+      requireModelId(body.model.id)
     }
+    // `initial_events` go through the same rules as events posted afterwards, a model switch
+    // included: a `user.message` carrying one sets what the session runs (#111), so its id is
+    // checked here the way `POST …/events` checks it.
+    requireEventModelIds(body.initial_events ?? [])
     const options: CreateSessionOptions = {
       // Every session belongs to the caller (epic #65, A4), and the agent it snapshots has
       // to be theirs too: `createSession` answers `AgentNotFoundError` — a 404 — for an
@@ -92,18 +97,54 @@ export function registerSessionRoutes(app: Hono<AppEnv>, deps: RouteDeps): void 
     }
     return c.json(session)
   })
+
+  /**
+   * `DELETE /v1/sessions/{session_id}` — hard delete (epic #116, U5). `204`, owner-scoped:
+   * another user's session is the 404 an id nothing has gets, so nothing leaks (A4).
+   *
+   * In order, so the one promise it makes — nothing lands in the log after it returns — holds:
+   *
+   * 1. the scoped read is the ownership check;
+   * 2. the scheduler stops the turn in flight and waits for its pass to finish writing
+   *    (`SessionScheduler.stopSession`; on another instance that is a partition signal);
+   * 3. `store.deleteSession` removes the session and every row keyed by it in one transaction,
+   *    and notifies the session's subscribers — every open stream for it gets a final
+   *    `session.deleted` and closes, on whichever instance it runs.
+   *
+   * A `false` from `deleteSession` means somebody deleted it first (or it never existed): the
+   * same 404, since there is nothing left to delete.
+   */
+  app.delete(`${sessions}/:session_id`, async (c) => {
+    const sessionId = sessionIdParam(c, 'session_id')
+    const ownerId = c.get('user').id
+    if ((await deps.store.getSession(sessionId, { ownerId })) === null) {
+      throw notFoundError(`no session with id ${sessionId}`)
+    }
+    await deps.scheduler.stopSession(sessionId)
+    if (!(await deps.store.deleteSession(sessionId, { ownerId }))) {
+      throw notFoundError(`no session with id ${sessionId}`)
+    }
+    return c.body(null, 204)
+  })
 }
 
 /**
- * Whether an inline model id has the `provider/model` shape the router takes (issue #94):
- * two or more slash-separated parts, none empty. `openai/gpt-4.1-mini` and
- * `openrouter/meta-llama/llama-3` pass; `gpt-4.1-mini`, `/gpt-4.1-mini`, `openai/` and
- * `openai//gpt-4.1-mini` do not — none of them names a provider and a model.
- *
- * Deliberately a shape check and not a catalogue lookup: the router accepts models the
- * catalogue does not know yet (C5), so anything that could resolve stays allowed.
+ * Refuse an id that does not have the `provider/model` shape the router takes (issue #94;
+ * epic #116 U1/U3), as the protocol's `invalid_request_error` 400.
  */
-function isModelId(id: string): boolean {
-  const parts = id.split('/')
-  return parts.length >= 2 && parts.every((part) => part.length > 0)
+export function requireModelId(id: string): void {
+  if (!isRouterModelId(id)) {
+    throw invalidRequest(
+      `model.id must be a "provider/model" id with non-empty parts, got ${JSON.stringify(id)}`,
+    )
+  }
+}
+
+/** Refuse a `model` on any `user.message` among these events; see {@link requireModelId}. */
+export function requireEventModelIds(events: readonly UserEventInput[]): void {
+  for (const event of events) {
+    if (event.type === EVENT_TYPES.userMessage && event.model !== undefined) {
+      requireModelId(event.model.id)
+    }
+  }
 }
