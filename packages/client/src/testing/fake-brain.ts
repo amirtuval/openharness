@@ -3,6 +3,7 @@ import {
   EVENT_TYPES,
   MAX_PAGE_LIMIT,
   encodeSeqCursor,
+  isStoredEvent,
   newEventId,
   tryDecodePageCursor,
 } from '@openharness/protocol'
@@ -16,6 +17,7 @@ import type {
   ModelRequestStartEvent,
   RetryStatusType,
   Session,
+  SessionDeletedEvent,
   SessionError,
   SessionErrorType,
   StoredEvent,
@@ -53,6 +55,12 @@ import { deepFreeze } from './freeze'
  *   request or a turn claims the interrupts it ends on, and the event that finishes a reply
  *   supersedes its chunk range. A component tested against this fake is a test against what
  *   the real server writes.
+ * - **A model on a user message switches the session (epic #116, U1).** The event stores the
+ *   choice and the session header moves to it, so the next `span.model_request_start` carries
+ *   the new id — while a session created with a model still runs it.
+ * - **A deleted session ends its streams (#111).** {@link FakeBrain.markDeleted} delivers one
+ *   final `session.deleted` event, closes every subscriber behind it, and drops the log; after
+ *   that the fake answers 404 for the session.
  */
 
 /** A reply the fake's brain produces for the next model request. */
@@ -115,16 +123,20 @@ class Subscriber {
    * A reply's chunks are stored events, but the stream still gates them on the connection's
    * `deltas` opt-in — the same filter the server applies in both halves of its stream. The
    * `lastSeq` check is the server-side half of the resume rule — the client drops events at or
-   * below its own position, and the fake never sends one below the subscriber's.
+   * below its own position, and the fake never sends one below the subscriber's — and it
+   * applies to stored events only: `session.deleted` (#111) has no `seq` and is delivered to
+   * whoever is subscribed, whatever their resume position is.
    */
   deliver(event: StreamEvent): void {
     if (isChunk(event) && !this.wantsDeltas) {
       return
     }
-    if (event.seq <= this.#lastSeq) {
-      return
+    if (isStoredEvent(event)) {
+      if (event.seq <= this.#lastSeq) {
+        return
+      }
+      this.#lastSeq = event.seq
     }
-    this.#lastSeq = event.seq
     this.queue.push(event)
   }
 }
@@ -162,6 +174,7 @@ export class FakeBrain {
   #seq = 0
   #turn: Promise<void> | null = null
   #interruptRequested = false
+  #deleted = false
 
   constructor(session: Session, delayMs: number, now: () => Date) {
     this.session = session
@@ -172,6 +185,14 @@ export class FakeBrain {
   /** Whether a turn is running right now. */
   get running(): boolean {
     return this.#turn !== null
+  }
+
+  /**
+   * Whether the session was deleted (#111): the log is gone and the session is gone with it,
+   * so every wire call for it is answered 404.
+   */
+  get deleted(): boolean {
+    return this.#deleted
   }
 
   /** Queue what the next model request should do. */
@@ -199,6 +220,7 @@ export class FakeBrain {
             seq: this.#nextSeq(),
             processed_at: null,
             content: input.content,
+            ...(input.model === undefined ? {} : { model: input.model }),
           }
         : {
             id: newEventId(),
@@ -208,6 +230,12 @@ export class FakeBrain {
           }
     deepFreeze(stored)
     this.#log.push(stored)
+    // A message that carries a model switches what the session runs (epic #116, U1): the
+    // event stores the choice, and the session header — the live projection a reader sees —
+    // moves with it, so the next `span.model_request_start` carries the new id.
+    if (stored.type === EVENT_TYPES.userMessage && stored.model !== undefined) {
+      this.session.model = { id: stored.model.id }
+    }
     // Subscribers and callers get the stored event itself: it is frozen, and it says what
     // the wire says — a queued message, `processed_at: null` — however much later it is read.
     this.#broadcast(stored)
@@ -215,6 +243,32 @@ export class FakeBrain {
       this.#interruptRequested = true
     }
     return stored
+  }
+
+  /**
+   * Delete the session (#111): tell the subscribers, end their streams, and drop the log.
+   *
+   * `session.deleted` is stream-only — it has no `seq` and never lands in a log — so it is
+   * delivered rather than emitted: every subscriber gets it exactly once, as the last event
+   * of its stream, and the queue closes behind it. From here on the brain answers nothing:
+   * `deleted` is what the fake turns into its 404s.
+   */
+  markDeleted(): void {
+    if (this.#deleted) {
+      return
+    }
+    this.#deleted = true
+    const event: SessionDeletedEvent = {
+      type: EVENT_TYPES.sessionDeleted,
+      session_id: this.session.id,
+    }
+    deepFreeze(event)
+    for (const subscriber of this.#subscribers) {
+      subscriber.deliver(event)
+      subscriber.queue.close()
+    }
+    this.#subscribers.clear()
+    this.#log.length = 0
   }
 
   /**
@@ -452,6 +506,11 @@ export class FakeBrain {
   #emit<T extends StoredEvent>(event: T): T {
     // The log is append-only (D9): every event is frozen before anything can hold it.
     deepFreeze(event)
+    if (this.#deleted) {
+      // The session and its log are gone: a turn still finishing after a delete has nowhere
+      // to write and no one to tell.
+      return event
+    }
     this.#log.push(event)
     // The claim is the append (P4): an event's `consumes` list is what takes the user events
     // it names, recorded beside the log the way the real store's `event_claims` table is.

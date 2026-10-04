@@ -309,7 +309,10 @@ describe('the chunks of a reply (D9)', () => {
       const startEvent = start?.event
       expect(start?.id).not.toBeNull()
       expect(startEvent?.type).toBe(EVENT_TYPES.eventStart)
-      expect(startEvent?.seq).toBeGreaterThan(0)
+      // A stored chunk carries its own `seq`; the stream can also deliver `session.deleted`,
+      // which has none — so narrow to the stored union before reading one (#111).
+      const startSeq = startEvent !== undefined && isStoredEvent(startEvent) ? startEvent.seq : 0
+      expect(startSeq).toBeGreaterThan(0)
       const messageId = startEvent?.type === EVENT_TYPES.eventStart ? startEvent.event.id : ''
       expect(messageId).toMatch(/^sevt_/)
       expect(stored?.type === EVENT_TYPES.agentMessage && stored.id).toBe(messageId)

@@ -59,8 +59,9 @@ src/
   resources/agents.ts   agents.create/get/list/update
   resources/auth.ts     auth.startDeviceLogin/pollDeviceLogin/signOut, DeviceLoginError
   resources/models.ts   models.list: the model catalog (epic #92)
+  resources/preferences.ts  preferences.get/put: the caller's default model (#111)
   resources/provider-credentials.ts  providerCredentials.list/put/delete
-  resources/sessions.ts sessions.create/get/list + sessions.events.send/list/iterate/stream
+  resources/sessions.ts sessions.create/get/list/delete + sessions.events.send/list/iterate/stream
   events/sse.ts         the SSE parser over a ReadableStream
   events/stream.ts      the reconnect/resume loop around it
   internal/async.ts     sleep and a small async queue (the fake's plumbing)
@@ -81,10 +82,12 @@ src/
 | `AgentsResource`, `SessionsResource`, `SessionEventsResource`                                   | the resource interfaces                                              |
 | `ProviderCredentialsResource`                                                                   | `providerCredentials.list/put/delete`                                |
 | `ModelsResource`                                                                                | `models.list`: the chat models the caller's keys can use (epic #92)  |
+| `PreferencesResource`                                                                           | `preferences.get/put`: the caller's stored default model (#111)      |
 | `AuthResource`                                                                                  | `auth.startDeviceLogin/pollDeviceLogin/signOut`                      |
 | `OPENHARNESS_CLI_CLIENT_ID`                                                                     | the `client_id` the device flow presents: `'openharness-cli'`        |
 | `DeviceLoginError`, `DeviceLoginStart`, `PollDeviceLoginOptions`                                | the device flow's error, its start result and its poll options       |
 | `StreamOptions`                                                                                 | `{ deltas?, afterSeq?, signal? }` for `events.stream`                |
+| `SendMessageOptions`                                                                            | `sendMessage`'s options: cancellation, plus the `model` to switch to |
 | `FetchLike`, `DebugHook`, `RawResponse`                                                         | the `fetch` seam, the hook for what the client skips, the raw answer |
 | `ApiError`, `AuthenticationError`, `ResponseValidationError`, `errorTypeForStatus()`            | the three errors and the status → `error.type` map                   |
 | `createTranscript()`, `reduceTranscript()`, `reduceTranscriptAll()`, `initialTranscriptState()` | the transcript store and the pure reducer                            |
@@ -139,6 +142,7 @@ for await (const event of client.sessions.events.stream(session.id, { deltas: tr
 | `sessions.create(body, options?)`                | `POST /v1/sessions`                          | `Session`                                                    |
 | `sessions.get(id, options?)`                     | `GET /v1/sessions/{id}`                      | `Session`                                                    |
 | `sessions.list(params?, options?)`               | `GET /v1/sessions`                           | `{ data, next_page }`                                        |
+| `sessions.delete(id, options?)`                  | `DELETE /v1/sessions/{id}`                   | `void` (the wire answers `204`)                              |
 | `sessions.events.send(id, events, options?)`     | `POST /v1/sessions/{id}/events`              | `{ data: user event[] }`                                     |
 | `sessions.events.list(id, params?, options?)`    | `GET /v1/sessions/{id}/events`               | `{ data: stored event[], next_page }`                        |
 | `sessions.events.iterate(id, params?, options?)` | the same, page after page                    | `AsyncIterable<StoredEvent>`                                 |
@@ -147,6 +151,8 @@ for await (const event of client.sessions.events.stream(session.id, { deltas: tr
 | `providerCredentials.put(provider, body, …)`     | `PUT /v1/provider-credentials/{provider}`    | `ProviderCredential` (metadata only)                         |
 | `providerCredentials.delete(provider, options?)` | `DELETE /v1/provider-credentials/{provider}` | `void` (the wire answers `204`)                              |
 | `models.list(params?, options?)`                 | `GET /v1/models`                             | `{ data: ModelEntry[], providers: ProviderCatalogStatus[] }` |
+| `preferences.get(options?)`                      | `GET /v1/me/preferences`                     | `{ default_model }` (`null` when none is set)                |
+| `preferences.put(preferences, options?)`         | `PUT /v1/me/preferences`                     | `{ default_model }` (the stored value)                       |
 | `auth.startDeviceLogin(options?)`                | `POST /api/auth/device/code`                 | `DeviceLoginStart`                                           |
 | `auth.pollDeviceLogin(code, options?)`           | `POST /api/auth/device/token`, polled        | the session token (`string`)                                 |
 | `auth.signOut(options?)`                         | `POST /api/auth/sign-out`                    | `void`                                                       |
@@ -169,6 +175,9 @@ Notes worth knowing before reading the code:
   `credentials: 'include'`, so a browser carries the web app's session cookie, and a client
   built with a `token` sends `Authorization: Bearer <token>` — the CLI.
 - **`options.signal`** cancels any request; the promise then rejects with the abort reason.
+- **`sendMessage(id, text, { model })`** rides the `model` on its `user.message` (epic #116,
+  U1): the log records the choice, and the turn the message starts runs it. A caller that
+  builds the event itself passes the same `model` to `sessions.events.send`.
 - A failed `fetch` (no network, DNS, TLS, an abort) rejects with the original error — only an
   answer from the server becomes an `ApiError`.
 
@@ -222,6 +231,23 @@ The server caches the answer in memory per user and provider for an hour;
 off the wire otherwise). Refreshing is rate-limited to once a minute per user, so a
 too-frequent one is answered `429 rate_limit_error` — an `ApiError` with `retryable: true`,
 which a Refresh button should surface to the user rather than retry in a loop.
+
+### Preferences and deleting a session
+
+`client.preferences` is the caller's own settings (#111): `get` reads
+`GET /v1/me/preferences` and `put` writes the complete value to `PUT /v1/me/preferences` —
+there is no partial update, and `default_model: null` clears the stored choice. `default_model`
+is the `provider/model` a new chat starts with, validated for shape only (a free-text id the
+catalog has not caught up with is allowed); it is `null`, never a 404, for an account that has
+never saved one. Both routes are owner-only, like `GET /v1/me`.
+
+`client.sessions.delete(id)` removes a session and its whole log (`DELETE /v1/sessions/{id}`,
+answered `204`, so it resolves `void`). It is owner-scoped: another user's session is answered
+as if it did not exist, which is also what an unknown or already-deleted id gets
+(`not_found_error`). A stream following the session receives one final `session.deleted`
+event — stream-only, with no `seq` — and the server closes the connection; the client ends the
+iteration there instead of reconnecting, and the transcript folds the event into
+`deleted: true`.
 
 ### Creating a session (model-first)
 
@@ -297,6 +323,10 @@ the `Authorization` header the CLI authenticates with.
   before it reaches the caller, so a resume can neither duplicate nor skip a stored event.
   Reconnects back off from 500 ms to 15 s (with ±25% jitter).
 - **Keepalive comments** (`: ping`) and any other comment line are ignored.
+- **`session.deleted` ends the stream** (#111). It is the stream-only last event of a deleted
+  session: the client yields it and then returns quietly, the way an abort ends the
+  iteration — reconnecting could only ask for a session that is gone, so the loop would churn
+  through 404s. The transcript folds it into `deleted: true`.
 - **When it stops.** `signal.abort()` ends the iteration quietly — no throw — so a caller can
   `for await` without a try/catch. An `ApiError` that is not retryable (an unknown session) is
   thrown: retrying it forever would only hide the problem — and a **401 is an
@@ -326,10 +356,12 @@ for await (const event of client.sessions.events.stream(sessionId, {
 
 ```ts
 interface TranscriptState {
-  messages: TranscriptMessage[] // { id, role: 'user' | 'agent', text, blocks, pending, streaming, position }
+  messages: TranscriptMessage[] // { id, role, text, blocks, pending, streaming, position, modelChangedTo? }
   status: 'idle' | 'running' // from the session status events
   lastError: TranscriptError | null // { type, message, retryStatus }
   lastSeq: number // the `seq` to resume from
+  deleted: boolean // a `session.deleted` arrived: the session is gone (#111)
+  model: string | null // the model the log last said the session runs (#111)
 }
 ```
 
@@ -378,6 +410,15 @@ true`, keyed by the id of the event it previews; `event_delta`s extend it (per c
 - **`lastSeq`** advances to the highest `seq` seen, and an event at or below it is dropped
   before anything else happens — so history and a resumed stream can overlap, and loading the
   same history twice changes nothing.
+- **`session.deleted` is a terminal end state** (#111). It has no `seq` — it is stream-only —
+  so it is folded in _before_ the dedupe above, and the only thing it does is set
+  `deleted: true`; seeing it again changes nothing. The stream ends after it, so a UI reacts
+  to the state rather than to the end of an iteration.
+- **A `model` on a `user.message` may switch the session** (epic #116, U1). `state.model`
+  becomes the new id, and the message carries `modelChangedTo` when that id differs from the
+  one already in effect — the change a UI draws its marker for. The first model the log shows
+  is not a change (`state.model` starts at `null`), so it sets the state silently, and a
+  message naming the model already in effect changes nothing.
 
 ## The fake client
 
@@ -402,10 +443,11 @@ await fake.sendMessage(fake.session.id, 'Hi') // starts a turn
 await fake.waitForIdle() // the whole turn, retries included
 ```
 
-`fake.session`, `fake.agent` and `fake.user` are the seeded trio. `fake.session` is the fake's
-live object — `fake.session.status` reads the current state — and `fake.user` is what `me()`
-answers. `fake.agent` is seeded by reference and, as of today, does _not_ follow an update
-through `fake.agents` (issue #106). `createFakeClient({ session, agent, user, authenticated, delayMs, now })`
+`fake.session`, `fake.agent` and `fake.user` are the seeded trio. `fake.session` and
+`fake.agent` are **live views through the fake's own store**, not the seed objects:
+`fake.session.status` and `fake.session.model` read the current state, and an update through
+`fake.agents.update(...)` is visible through `fake.agent` immediately (issue #106).
+`fake.user` is what `me()` answers. `createFakeClient({ session, agent, user, preferences, authenticated, delayMs, now })`
 seeds your own, sets how slowly the stream runs, and fixes the clock. The seeded session runs
 the seeded agent's configuration, the way one created from that agent would.
 
@@ -415,6 +457,14 @@ model-first session — `agent: null`, the model it runs, `system: null` unless 
 preset contributes. A body that matches neither is refused with the server's 400
 `invalid_request_error`, and the created session runs the model it was created from, so a
 turn's `span.model_request_start` carries that model.
+
+`sessions.delete(id)` deletes a session the way the route does (#111): one final
+`session.deleted` event is delivered to that session's subscribers — the streams close behind
+it — the log is dropped, and from then on `sessions.get`, the events routes and `sendMessage`
+answer the 404 `not_found_error` an unknown id gets, as does deleting it a second time. A
+`user.message` sent with a `model` stores the choice on the event and switches the fake
+session's live `model`, so the next turn's `span.model_request_start` carries it — while a
+session created with a model still runs the model it was created with.
 
 | scripting                  | what it does                                                                                         |
 | -------------------------- | ---------------------------------------------------------------------------------------------------- |
@@ -446,6 +496,10 @@ The credential routes are an in-memory store: `put` keeps the metadata (`last4` 
 and never the key, replacing keeps `id` and `created_at`, `delete` is idempotent, and an empty
 key answers 422 `invalid_provider_credential` — the one provider rejection a test can spell
 without a provider.
+
+The preferences routes are an in-memory value too: `{ default_model: null }` unless
+`createFakeClient({ preferences })` seeds it, `put` replaces it whole, and both answer 401
+while signed out like every `/v1` route.
 
 The model catalog is configurable too: `createFakeClient({ models, providers })` seeds what
 `models.list` answers — one `anthropic/claude-sonnet-5` entry with an `ok` status by default —
@@ -498,15 +552,19 @@ Details that follow the server and can surprise a test:
 `src/**/*.test.ts` with Vitest: `node` everywhere except `src/browser.test.ts`, which declares
 `@vitest-environment jsdom`. The suite drives a mock `fetch` (`src/test-support/mock-fetch.ts`)
 rather than a server: request building and response parsing (cookie and bearer, `me`, the
-credential routes, the model catalog, and creating a session from a model, from an agent and
-with overrides — each body asserted against `CreateSessionRequestSchema`), the 401 →
-`AuthenticationError` mapping, the device flow's polling with
-fake timers (`src/auth.test.ts`), the SSE parser's edge cases, reconnect/resume (including a
-resume mid-reply, from a stored chunk), every transcript rule, one scripted D9 session folded
-from five different client views that must all converge on the same conversation, frozen events
-through the reducer, the fake's own auth (signed-out 401s, credentials, the scripted device
-flow), and the fake against the real client on the same scripted scenario (the fake's events
-are replayed to the real client as an SSE body, and the two transcripts must be equal).
+credential routes, the preferences routes — `null` and a refused value included — deleting a
+session's 204, the model catalog, sending a message with a model, and creating a session from
+a model, from an agent and with overrides — each body asserted against
+`CreateSessionRequestSchema`), the 401 → `AuthenticationError` mapping, the device flow's
+polling with fake timers (`src/auth.test.ts`), the SSE parser's edge cases, reconnect/resume
+(including a resume mid-reply, from a stored chunk, and the stream ending on `session.deleted`
+without a reconnect), every transcript rule (the model-switch marker and the deleted flag
+included), one scripted D9 session folded from five different client views that must all
+converge on the same conversation, frozen events through the reducer, the fake's own auth
+(signed-out 401s, credentials, preferences, the scripted device flow), a deleted fake
+session's final event and the 404s that follow it, and the fake against the real client on the
+same scripted scenario (the fake's events are replayed to the real client as an SSE body, and
+the two transcripts must be equal).
 
 ## Allowed `@openharness/*` dependencies
 

@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest'
 
-import { GetMeResponseSchema, UserIdSchema, UserSchema } from './user'
+import {
+  DEFAULT_MODEL_PATTERN,
+  GetMeResponseSchema,
+  GetPreferencesResponseSchema,
+  PutPreferencesRequestSchema,
+  UserIdSchema,
+  UserPreferencesSchema,
+  UserSchema,
+} from './user'
 
 const user = {
   id: 'Qm3xT7bR9kL2nV5wZ8yA4cD6fG1hJ0pS',
@@ -67,5 +75,57 @@ describe('GetMeResponseSchema', () => {
   it('rejects the check-it-somewhere-else shapes a wrapper would have', () => {
     expect(GetMeResponseSchema.safeParse({ data: user }).success).toBe(false)
     expect(GetMeResponseSchema.safeParse([user]).success).toBe(false)
+  })
+})
+
+describe('UserPreferencesSchema (epic #116, U1)', () => {
+  it('parses a default model and a cleared one', () => {
+    expect(UserPreferencesSchema.parse({ default_model: 'anthropic/claude-sonnet-5' })).toEqual({
+      default_model: 'anthropic/claude-sonnet-5',
+    })
+    expect(UserPreferencesSchema.parse({ default_model: null })).toEqual({ default_model: null })
+  })
+
+  it('accepts a free-text id the catalog may not have, and a slash in the model part', () => {
+    // The shape is all that is validated: `provider/model`, free text, and a provider's own
+    // model id may itself contain a slash.
+    expect(DEFAULT_MODEL_PATTERN.test('mistral/codestral-latest')).toBe(true)
+    expect(DEFAULT_MODEL_PATTERN.test('openrouter/meta-llama/llama-3.1-70b')).toBe(true)
+    expect(UserPreferencesSchema.safeParse({ default_model: 'some-new/model-v2' }).success).toBe(
+      true,
+    )
+  })
+
+  it('requires default_model to be present, and an object around it', () => {
+    expect(UserPreferencesSchema.safeParse({}).success).toBe(false)
+    expect(UserPreferencesSchema.safeParse('anthropic/claude-sonnet-5').success).toBe(false)
+  })
+
+  it('rejects ids that are not `provider/model` shaped', () => {
+    for (const bad of [
+      '',
+      'anthropic', // no model
+      '/claude', // empty provider
+      'anthropic/', // empty model
+      'anthropic//claude', // empty segment
+      ' anthropic/claude', // whitespace
+      'anthropic/claude sonnet', // whitespace in the model
+      42,
+    ]) {
+      expect(UserPreferencesSchema.safeParse({ default_model: bad }).success, String(bad)).toBe(
+        false,
+      )
+    }
+  })
+
+  it('strips unknown preference fields rather than rejecting them', () => {
+    expect(
+      UserPreferencesSchema.parse({ default_model: null, theme: 'dark', future: { x: 1 } }),
+    ).toEqual({ default_model: null })
+  })
+
+  it('Get and Put are the same shape', () => {
+    expect(GetPreferencesResponseSchema).toBe(UserPreferencesSchema)
+    expect(PutPreferencesRequestSchema).toBe(UserPreferencesSchema)
   })
 })

@@ -82,8 +82,14 @@ import { type TestClock, createTestClock } from './clock'
  *   and `SessionNotFoundError` for their events), the explicitly named unscoped methods that
  *   read any owner's session and log (`getSessionUnscoped`, `listEventsUnscoped`), and the
  *   refusal to create a session from somebody else's agent.
+ * - **preferences** (#111, epic #116 U1) — the protocol's default for a user who saved none,
+ *   the put/get round-trip, replace-in-place, clearing with `null`, two users kept apart, and
+ *   a deep-frozen answer.
  * - **appending events** — `id`/`seq` assignment, `processed_at` per event kind, and the shape
  *   of what comes back.
+ * - **the model projection** (#111) — a `user.message` carrying a `model` switches the
+ *   session's model in the append's transaction, a message without one leaves it, the last
+ *   message in a batch wins, and `initial_events` project like any other append.
  * - **caller-supplied event ids** — an id the caller brings is the stored event's id and keeps
  *   a reply's chunks and its message one identity, `seq` is still the store's, and a batch is
  *   refused whole when an id is taken, repeated in it, or not a valid event id.
@@ -101,13 +107,16 @@ import { type TestClock, createTestClock } from './clock'
  *   that does not fit raises.
  * - **compaction** — the retention window, only superseded chunks deleted, idempotence, and
  *   readers seeing the same log before and after.
+ * - **deletion** (#111, epic #116 U5) — `deleteSession`: owner-scoped `true`/`false`, the
+ *   whole log gone from every read, the event ids it held free again, and a subscription that
+ *   ends with one final `session.deleted` delivery and nothing after it.
  * - **immutability** — a returned event is deep-frozen, so writing to it throws.
  * - **status updates** — the session `status` mirroring the log, and a reschedule not ending a
  *   turn.
  * - **turn state** — `idle`, `running` (with the open span) and `unfinished`, from the log.
  * - **reading the log** — order, `after_seq`, `types`, `seq` pagination and bad cursors.
  * - **subscriptions** — stored events in `seq` order, chunk delivery interleaved, isolation,
- *   unsubscribe.
+ *   unsubscribe, and the final `session.deleted` a deleted session's subscribers receive.
  * - **partition signals** — delivery, fan-out to a partition's listeners, and dropping.
  * - **findSessionsNeedingWork** — pending events and open turns, scoped to partitions.
  * - **partition leases** — acquire, renew, expiry at `expires_at`, steal after expiry, release.
@@ -616,6 +625,73 @@ export function runSessionStoreConformance(
       })
     })
 
+    // ------------------------------------------------------------- preferences
+
+    describe('preferences (#111, epic #116 U1)', () => {
+      it('reads the protocol default for a user who has saved none', async () => {
+        const { store } = await setup()
+        // No row is the absence of a choice, not an error: one shape for a settings screen.
+        expect(await store.getPreferences(OWNER_A)).toEqual({ default_model: null })
+        expect(await store.getPreferences(OWNER_B)).toEqual({ default_model: null })
+      })
+
+      it('round-trips a put through the read, as written', async () => {
+        const { store } = await setup()
+        const stored = await store.putPreferences(OWNER_A, {
+          default_model: 'anthropic/claude-sonnet-5',
+        })
+        expect(stored).toEqual({ default_model: 'anthropic/claude-sonnet-5' })
+        expect(await store.getPreferences(OWNER_A)).toEqual(stored)
+      })
+
+      it('replaces the stored value in place on a second put', async () => {
+        const { store } = await setup()
+        await store.putPreferences(OWNER_A, { default_model: 'anthropic/claude-sonnet-5' })
+        const replaced = await store.putPreferences(OWNER_A, {
+          default_model: 'openai/gpt-5-mini',
+        })
+        // One value per user, so the second put is the same preferences with a new choice.
+        expect(replaced).toEqual({ default_model: 'openai/gpt-5-mini' })
+        expect(await store.getPreferences(OWNER_A)).toEqual(replaced)
+      })
+
+      it('clears the stored default when put null', async () => {
+        const { store } = await setup()
+        await store.putPreferences(OWNER_A, { default_model: 'anthropic/claude-sonnet-5' })
+        expect(await store.putPreferences(OWNER_A, { default_model: null })).toEqual({
+          default_model: null,
+        })
+        expect(await store.getPreferences(OWNER_A)).toEqual({ default_model: null })
+      })
+
+      it('keeps two users’ preferences apart', async () => {
+        const { store } = await setup()
+        await store.putPreferences(OWNER_A, { default_model: 'anthropic/claude-sonnet-5' })
+        // B has saved nothing while A has — and neither read ever sees the other's value.
+        expect(await store.getPreferences(OWNER_B)).toEqual({ default_model: null })
+        await store.putPreferences(OWNER_B, { default_model: 'openai/gpt-5-mini' })
+        expect(await store.getPreferences(OWNER_A)).toEqual({
+          default_model: 'anthropic/claude-sonnet-5',
+        })
+        expect(await store.getPreferences(OWNER_B)).toEqual({ default_model: 'openai/gpt-5-mini' })
+      })
+
+      it('hands out deep-frozen values, so writing to one throws', async () => {
+        const { store } = await setup()
+        const stored = await store.putPreferences(OWNER_A, {
+          default_model: 'anthropic/claude-sonnet-5',
+        })
+        const read = await store.getPreferences(OWNER_A)
+        expect(Object.isFrozen(stored)).toBe(true)
+        expect(Object.isFrozen(read)).toBe(true)
+        expect(() => Object.assign(read, { default_model: 'openai/gpt-5-mini' })).toThrow(TypeError)
+        // None of it reached the store.
+        expect(await store.getPreferences(OWNER_A)).toEqual({
+          default_model: 'anthropic/claude-sonnet-5',
+        })
+      })
+    })
+
     // ----------------------------------------------------------------- events
 
     describe('appending events', () => {
@@ -698,6 +774,83 @@ export function runSessionStoreConformance(
       })
     })
 
+    // ------------------------------------------------------ the model projection
+
+    describe('the model projection (user.message.model, #111)', () => {
+      it('switches the session’s model to the one a user.message carries', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        await append(store, session.id, [userMessageWith('use this one', 'openai/gpt-5-mini')])
+        // The projection lands in the append's transaction, so a read after it sees the new
+        // model — scoped, and unscoped, which is the one the brain takes.
+        expect((await store.getSession(session.id, { ownerId: OWNER_A }))?.model).toEqual({
+          id: 'openai/gpt-5-mini',
+        })
+        expect((await store.getSessionUnscoped(session.id))?.model).toEqual({
+          id: 'openai/gpt-5-mini',
+        })
+        // The agent snapshot is untouched: it records what the agent was, not what runs.
+        expect((await store.getSessionUnscoped(session.id))?.agent?.model).toEqual(
+          session.agent?.model,
+        )
+        // And the message that carried the switch is stored as written, model and all.
+        const [message] = (await store.listEventsUnscoped(session.id)).data
+        expect(message).toMatchObject({
+          type: EVENT_TYPES.userMessage,
+          model: { id: 'openai/gpt-5-mini' },
+        })
+      })
+
+      it('leaves the session’s model alone for a message without one', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        await append(store, session.id, [userMessageWith('switch', 'openai/gpt-5-mini')])
+        await append(store, session.id, [userMessage('just talking'), statusRunning()])
+        expect((await store.getSessionUnscoped(session.id))?.model).toEqual({
+          id: 'openai/gpt-5-mini',
+        })
+      })
+
+      it('lets the last model-carrying message win, within a batch and across appends', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        await append(store, session.id, [
+          userMessageWith('one', 'openai/gpt-5-mini'),
+          userMessageWith('two', 'anthropic/claude-sonnet-5'),
+        ])
+        expect((await store.getSessionUnscoped(session.id))?.model).toEqual({
+          id: 'anthropic/claude-sonnet-5',
+        })
+        await append(store, session.id, [userMessageWith('three', 'google/gemini-3-pro')])
+        expect((await store.getSessionUnscoped(session.id))?.model).toEqual({
+          id: 'google/gemini-3-pro',
+        })
+      })
+
+      it('projects a model carried by a createSession initial_events message', async () => {
+        const { store } = await setup()
+        const agent = await store.createAgent(agentInput(), OWNER_A)
+        const session = await store.createSession(agent.id, {
+          ownerId: OWNER_A,
+          // Written out as a client writes it: `initial_events` are user event inputs, the
+          // shapes a request carries, not the stored events an append returns.
+          initial_events: [
+            {
+              type: EVENT_TYPES.userMessage,
+              content: [{ type: 'text', text: 'start here' }],
+              model: { id: 'openai/gpt-5-mini' },
+            },
+          ],
+        })
+        // The append and the creation are one transaction, so the session is never observable
+        // running the agent's model — what comes back already runs the message's.
+        expect(session.model).toEqual({ id: 'openai/gpt-5-mini' })
+        expect((await store.getSession(session.id, { ownerId: OWNER_A }))?.model).toEqual({
+          id: 'openai/gpt-5-mini',
+        })
+      })
+    })
+
     // ------------------------------------------------- caller-supplied event ids
 
     describe('caller-supplied event ids', () => {
@@ -765,7 +918,11 @@ export function runSessionStoreConformance(
 
         expect(stored?.id).toBe(id)
         // Every chunk names the message it previews from the inside; the message is itself.
-        expect(received.map((event) => previewedId(event))).toEqual([id, id, id])
+        expect(received.filter(isStoredEvent).map((event) => previewedId(event))).toEqual([
+          id,
+          id,
+          id,
+        ])
       })
 
       it('refuses an id the log already holds, and stores nothing of the batch', async () => {
@@ -1381,6 +1538,87 @@ export function runSessionStoreConformance(
       })
     })
 
+    // ---------------------------------------------- deleteSession (#111, #116 U5)
+
+    describe('deleting a session', () => {
+      it('deletes the owner’s session and its whole log, and answers true', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        await append(store, session.id, [userMessage('gone soon'), statusRunning()])
+
+        expect(await store.deleteSession(session.id, { ownerId: OWNER_A })).toBe(true)
+        // Gone from every read, and refused like an id that never existed, in both forms.
+        expect(await store.getSession(session.id, { ownerId: OWNER_A })).toBeNull()
+        expect(await store.getSessionUnscoped(session.id)).toBeNull()
+        for (const call of [
+          () => store.listEvents(session.id, { ownerId: OWNER_A }),
+          () => store.listEventsUnscoped(session.id),
+          () => store.appendEvents(session.id, [userMessage('too late')]),
+          () => store.getPendingUserEvents(session.id),
+          () => store.getTurnState(session.id),
+        ]) {
+          const error = await thrownBy(call)
+          expectErrorIdentity(error, 'SessionNotFoundError', SESSION_NOT_FOUND_ERROR_CODE)
+        }
+        // Deleting it again is nothing to delete, not an error.
+        expect(await store.deleteSession(session.id, { ownerId: OWNER_A })).toBe(false)
+      })
+
+      it('answers false for another owner’s session, and leaves it readable', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        await append(store, session.id, [userMessage('mine')])
+
+        expect(await store.deleteSession(session.id, { ownerId: OWNER_B })).toBe(false)
+        // The same answer an unknown id gets, so the refusal leaks nothing (A4) — and the
+        // owner's session is exactly as it was.
+        expect(await store.deleteSession(unknownSessionId(), { ownerId: OWNER_B })).toBe(false)
+        expect((await store.getSession(session.id, { ownerId: OWNER_A }))?.id).toBe(session.id)
+        expect((await store.listEvents(session.id, { ownerId: OWNER_A })).data).toHaveLength(1)
+      })
+
+      it('frees every event id the deleted session held', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const id = suppliedEventId()
+        await append(store, session.id, [{ ...userMessage('old'), id }])
+        expect(await store.deleteSession(session.id, { ownerId: OWNER_A })).toBe(true)
+
+        // An id identifies one event for the whole store, and the rows that held this one are
+        // gone — so a new event in a brand-new session may take it, which is the proof that
+        // nothing of the old log survives.
+        const other = await store.createSession(
+          (await store.createAgent(agentInput('Other'), OWNER_A)).id,
+          { ownerId: OWNER_A },
+        )
+        const [stored] = await append(store, other.id, [{ ...userMessage('new'), id }])
+        expect(stored?.id).toBe(id)
+      })
+
+      it('ends a subscription with one final session.deleted event, and nothing after it', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const received: StreamEvent[] = []
+        await store.subscribe(session.id, (event) => {
+          received.push(event)
+        })
+        await append(store, session.id, [userMessage('before')])
+        await waitFor(() => received.length === 1, 'the event before the delete')
+
+        expect(await store.deleteSession(session.id, { ownerId: OWNER_A })).toBe(true)
+        await waitFor(() => received.length === 2, 'the final session.deleted delivery')
+        // The deletion is the last delivery, and it is the stream-only event itself — no
+        // `seq`, no envelope — not a stored event read out of a log that no longer exists.
+        await settle()
+        expect(received).toHaveLength(2)
+        expect(received[received.length - 1]).toEqual({
+          type: EVENT_TYPES.sessionDeleted,
+          session_id: session.id,
+        })
+        expect(received.filter(isStoredEvent)).toHaveLength(1)
+      })
+    })
+
     // ------------------------------------------------------------ immutability
 
     describe('immutability', () => {
@@ -1691,7 +1929,9 @@ export function runSessionStoreConformance(
           EVENT_TYPES.eventDelta,
           EVENT_TYPES.agentMessage,
         ])
-        expect(received.map((event) => event.seq)).toEqual([1, 2, 3, 4, 5])
+        expect(received.map((event) => (isStoredEvent(event) ? event.seq : null))).toEqual([
+          1, 2, 3, 4, 5,
+        ])
         expect(message?.seq).toBe(1)
       })
 
@@ -2221,6 +2461,18 @@ function userMessage(text: string): AppendableEvent {
   return { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text }] }
 }
 
+/**
+ * A `user.message` carrying a model switch, as a client sends one (#111): it is stored like
+ * any message and also sets the session's `model` in the append's transaction.
+ */
+function userMessageWith(text: string, modelId: string): AppendableEvent {
+  return {
+    type: EVENT_TYPES.userMessage,
+    content: [{ type: 'text', text }],
+    model: { id: modelId },
+  }
+}
+
 /** An `agent.message` to append. */
 function agentMessage(text: string): AppendableEvent {
   return { type: EVENT_TYPES.agentMessage, content: [{ type: 'text', text }] }
@@ -2324,7 +2576,7 @@ function eventStart(id: EventId): AppendableEvent {
  * The id of the event a reply event carries from the inside: an `event_start` names it, an
  * `event_delta` points at it, and the finished message is its own.
  */
-function previewedId(event: StreamEvent): EventId {
+function previewedId(event: StoredEvent): EventId {
   if (event.type === EVENT_TYPES.eventStart) {
     return event.event.id
   }

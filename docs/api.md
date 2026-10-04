@@ -68,6 +68,14 @@ agent's name. That happens once. A title passed to `POST /v1/sessions`, and one 
 message produced, is never overwritten; a session created with `initial_events` is named the
 same way, in the same request.
 
+**Deleting a session.** `DELETE /v1/sessions/{session_id}` answers `204` and takes the session
+and its whole log with it — events, claims, supersessions, everything keyed by it. It is
+irreversible and owner-scoped: another user's session answers `404`, exactly as it does
+everywhere else. A running turn is stopped first, so nothing keeps writing to a log that is
+gone, and every open stream for the session receives one final `session.deleted` frame and
+closes. This is the one deliberate exception to the append-only log besides compaction — and
+the only way an event is ever removed together with its session.
+
 ## Routes
 
 | method   | path                                      | what it does                                                            |
@@ -75,6 +83,8 @@ same way, in the same request.
 | `GET`    | `/health`                                 | liveness; open, like `/v1/auth-config` below                            |
 | `GET`    | `/v1/auth-config`                         | unauthenticated: which providers are on, and whether dev login is       |
 | `GET`    | `/v1/me`                                  | the signed-in user                                                      |
+| `GET`    | `/v1/me/preferences`                      | the caller's preferences — today, the default model                     |
+| `PUT`    | `/v1/me/preferences`                      | set them whole; `default_model` is `provider/model` or `null`           |
 | `POST`   | `/v1/agents`                              | create an agent                                                         |
 | `GET`    | `/v1/agents`                              | list agents, oldest first                                               |
 | `GET`    | `/v1/agents/{agent_id}`                   | read one agent                                                          |
@@ -82,6 +92,7 @@ same way, in the same request.
 | `POST`   | `/v1/sessions`                            | create a session from a model and/or an agent (at least one)            |
 | `GET`    | `/v1/sessions`                            | list sessions, newest first (`agent_id` filters)                        |
 | `GET`    | `/v1/sessions/{session_id}`               | read one session                                                        |
+| `DELETE` | `/v1/sessions/{session_id}`               | delete it and its whole log; answers `204` with no body                 |
 | `POST`   | `/v1/sessions/{session_id}/events`        | append user events; the server owns every other event type              |
 | `GET`    | `/v1/sessions/{session_id}/events`        | read the log, with `types[]`, `after_seq`, `limit` and `page`           |
 | `GET`    | `/v1/sessions/{session_id}/events/stream` | follow it live over SSE; `event_deltas[]` opts into a reply's chunks    |
@@ -117,12 +128,20 @@ session. It is also the SSE `id` and the resume position, so a client that recon
 | `span.model_request_end`     | the brain     | it finished — usage, any error, the interrupts it ends                               |
 | `event_start`                | the brain     | a reply started streaming — a stored chunk since D9                                  |
 | `event_delta`                | the brain     | a streamed fragment of it — a stored chunk since D9                                  |
+| `session.deleted`            | the server    | stream-only: the session was deleted; sent last, then the stream closes (#111)       |
+
+A `user.message` may also carry a `model` (`{ "id": "provider/model" }`): it switches the
+model the session runs from that message on, and the session keeps running it until another
+message changes it (epic #116, U3). The switch is stored on the message — the log stays the
+source of truth — and each `span.model_request_start` still records the model its request
+actually used.
 
 ### Claims, chunks and superseding (D9)
 
-The log is immutable: once an event is appended no field of it changes, and the only deletion
-is compaction ([issue #46](https://github.com/amirtuval/openharness/issues/46)). The rules
-that carry it:
+The log is immutable: once an event is appended no field of it changes. There are exactly two
+deletions — compaction, and deleting a whole session ([issue #46](https://github.com/amirtuval/openharness/issues/46),
+[#111](https://github.com/amirtuval/openharness/issues/111)) — and everything else is
+append-only. The rules that carry it:
 
 - Three event types list `consumes`, the ids of the user events they claim: a
   `span.model_request_start` claims the `user.message`s its request folds in (and `model`, the
@@ -181,6 +200,10 @@ data: {"type":"agent.message","id":"sevt_01H…","seq":12,"processed_at":"…","
 - Without either, the stream is **live only**: it delivers what happens next. Read the log
   first with `GET …/events` (or `after_seq=0`) and pass the last `seq` to continue.
 - Comments (`: ping`, every 15 seconds) are keepalives and can be ignored.
+- When the session is **deleted**, the stream ends with one `session.deleted` frame
+  (`{"type":"session.deleted","session_id":"sesn_…"}`) and closes. It is stream-only — the log
+  it would belong to is gone — and carries no `seq`; a client treats it as terminal and stops
+  reconnecting. `@openharness/client`'s transcript records it as `deleted`.
 
 ### When the session is revoked mid-stream
 
@@ -310,6 +333,16 @@ scoped to:
 `name` and `image` are absent when the identity provider gave none. A user is a
 provider-verified email: signing in with Google, GitHub or Microsoft proves the same address,
 and it is the same user.
+
+#### Preferences
+
+`GET /v1/me/preferences` answers the caller's stored preferences, unwrapped —
+`{ "default_model": "anthropic/claude-sonnet-5" }` — and `{ "default_model": null }` for a
+caller who has never saved any (the absence of a choice, not a 404). `PUT` writes them whole:
+`default_model` is required and `null` clears it. The value is a router id of
+`provider/model` shape, checked for shape only — it does not have to be in the caller's
+catalog — and it is what a new chat starts with (epic #116, U1). Both routes are owner-only
+like the rest of `/v1/me`; there is no partial update and no other preference today.
 
 ### Provider credentials
 

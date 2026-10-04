@@ -19,8 +19,19 @@ import type {
   UserEvent,
   UserEventInput,
   UserId,
+  UserPreferences,
   UpdateAgentRequest,
 } from '@openharness/protocol'
+
+/**
+ * A user's stored preferences (#111, epic #116 U1): the `provider/model` a new chat starts
+ * with, or `null` for no default.
+ *
+ * The protocol defines it; it is re-exported here because it is the vocabulary of
+ * {@link SessionStore.getPreferences} and {@link SessionStore.putPreferences}, so an
+ * implementation of this contract — or a caller of it — can name the type beside the method.
+ */
+export type { UserPreferences } from '@openharness/protocol'
 
 /**
  * The storage and signaling contract the brain and the server code against.
@@ -42,12 +53,13 @@ import type {
  *   append. The events returned to the caller are the stored events: `StoredEvent` exactly,
  *   with no extra field (notably no `created_at` — the protocol has none).
  * - **Immutability.** No stored event is ever modified: the log is append-only, appends are
- *   the only way in, and the one deletion — {@link SessionStore.compact} — removes superseded
- *   stream chunks and nothing else. Every implementation hands out events it will never
- *   change, and both implementations deep-freeze what they return, so a caller that tries to
- *   write to one throws instead of forking the log it was handed. The event types are
- *   deep-readonly (`StoredEvent` and every member, D9, issue #46), so a write is a compile
- *   error too.
+ *   the only way in, and the two deletions — {@link SessionStore.compact}, which removes
+ *   superseded stream chunks, and {@link SessionStore.deleteSession}, which removes a whole
+ *   session and its log — are the deliberate, documented exceptions, and nothing else is ever
+ *   deleted. Every implementation hands out events it will never change, and both
+ *   implementations deep-freeze what they return, so a caller that tries to write to one
+ *   throws instead of forking the log it was handed. The event types are deep-readonly
+ *   (`StoredEvent` and every member, D9, issue #46), so a write is a compile error too.
  * - **Claims.** A turn's claim on the user events it answers is itself in the log: the append
  *   of an event carrying `consumes` claims those ids — `span.model_request_start` for the
  *   messages a request folds in, `span.model_request_end` for an interrupt that cut its
@@ -82,6 +94,14 @@ import type {
  *   the scheduler act *for* a session, not for a user, and use the explicitly named unscoped
  *   methods ({@link SessionStore.getSessionUnscoped}, {@link SessionStore.listEventsUnscoped})
  *   that no user-facing route may call.
+ * - **Preferences** (#111, epic #116 U1). {@link SessionStore.getPreferences} and
+ *   {@link SessionStore.putPreferences} are the per-user settings beside the log: one value
+ *   per user — `{ default_model }` — and a user who has never saved one reads the protocol's
+ *   default rather than a `null` or a throw. The answer is deep-frozen, like a credential,
+ *   because it is a value a caller owns.
+ * - **Deletion** (#111, epic #116 U5). {@link SessionStore.deleteSession} removes a session
+ *   and its whole log — owner-scoped, and irreversible — and a subscription to it ends with a
+ *   final `session.deleted` stream event instead of starving.
  * - **Async.** Every method is asynchronous. Nothing may assume synchronous delivery: a store
  *   built on `LISTEN`/`NOTIFY`, or one that commits a transaction before it notifies, delivers
  *   subscriptions and signals a tick later than it stored the event.
@@ -160,7 +180,10 @@ export interface SessionStore {
    * which never changes.
    *
    * `initial_events` are appended in the creation transaction, with `seq` starting at `1` and
-   * `processed_at: null`. The session is `idle` with no status events.
+   * `processed_at: null`. They go through the same append path a later append does, so a
+   * `user.message` among them that carries a `model` sets the created session's `model` to it
+   * — the same projection {@link SessionStore.appendEvents} describes. The session is `idle`
+   * with no status events.
    *
    * @param agentId the agent whose configuration the session snapshots, or `null` for a
    *   model-first session — one created from `options.model` alone
@@ -227,6 +250,59 @@ export interface SessionStore {
    */
   updateSession(sessionId: SessionId, update: UpdateSessionRequest): Promise<Session | null>
 
+  /**
+   * Delete a session and its whole log, returning whether one was deleted.
+   *
+   * **Owner-scoped** (epic #65, A4): `true` when the session existed and belonged to
+   * `options.ownerId`, and `false` when there is no such session or it belongs to somebody
+   * else — exactly the same answer either way, so nothing leaks, just as
+   * {@link SessionStore.getSession} answers `null` for both.
+   *
+   * This is the deliberate second exception to "events are never deleted", beside
+   * {@link SessionStore.compact} (epic #116 U5, issue #111), and unlike compaction it is
+   * **irreversible**: one transaction removes the session's row and every row keyed by the
+   * session in every table that has a session column — its `events`, their `event_claims` and
+   * their `event_supersessions` — so after it answers `true` the session is gone from every
+   * read. {@link SessionStore.getSession} and {@link SessionStore.getSessionUnscoped} answer
+   * `null`, and {@link SessionStore.listEvents}, {@link SessionStore.appendEvents},
+   * {@link SessionStore.getPendingUserEvents} and {@link SessionStore.getTurnState} throw
+   * {@link SessionNotFoundError} as if the id had never existed. Nothing is recoverable — and
+   * because an event id identifies one event for the whole store, an id the deleted session
+   * held is free again for a later append.
+   *
+   * The deletion is announced to the session's subscribers: each one receives a final
+   * `session.deleted` `StreamEvent` naming the session, and the subscription ends with it —
+   * see {@link SessionStore.subscribe}.
+   *
+   * @returns `true` when the caller's own session was deleted, `false` otherwise
+   */
+  deleteSession(sessionId: SessionId, options: OwnerScope): Promise<boolean>
+
+  // ------------------------------------------------------------- preferences
+
+  /**
+   * Read a user's stored preferences (#111, epic #116 U1), or the protocol's default when
+   * there are none.
+   *
+   * Preferences are per user, not per session: the settings a user applies to new sessions —
+   * today the `provider/model` a new chat starts with. A user who has never saved any has no
+   * stored value, and that reads as `{ default_model: null }`: the absence of a choice, never
+   * `null` and never a throw, so a settings screen always has a value to render. The answer
+   * is deep-frozen, like a credential — a caller owns it, and writing to it throws.
+   */
+  getPreferences(userId: UserId): Promise<UserPreferences>
+
+  /**
+   * Write a user's preferences whole, replacing what was stored, and answer what was stored
+   * (#111, epic #116 U1).
+   *
+   * One value per user, so a second put replaces the first in place rather than accumulating.
+   * There is no partial update: a caller always writes the complete value it wants, and
+   * `{ default_model: null }` is how it clears the stored default. `updated_at` moves to the
+   * injected clock's instant; the answer is the preferences as written, deep-frozen.
+   */
+  putPreferences(userId: UserId, preferences: UserPreferences): Promise<UserPreferences>
+
   // ----------------------------------------------------------------- events
 
   /**
@@ -238,6 +314,16 @@ export interface SessionStore {
    * session's `status` follows `session.status_running` and `session.status_idle` in the same
    * transaction, its `updated_at` advances, and subscribers are notified after the append is
    * committed.
+   *
+   * ## The model projection (#111)
+   *
+   * A `user.message` carrying a `model` also sets the session's `model` to it, in the same
+   * transaction as the append — the one projection of the event log onto the session's
+   * header, like `status`, so the log stays the source of truth for what the session runs.
+   * The session keeps that model until another message changes it: within one batch the later
+   * message wins, and a message without a `model` leaves the session's model alone. A
+   * message's `model` is stored on the event either way.
+   *
    *
    * The input carries only the fields the caller owns — an `AppendableEvent` is a `StoredEvent`
    * without the assigned ones. Inputs are stored as given and not validated: callers validate
@@ -383,10 +469,12 @@ export interface SessionStore {
    * Delete the stored stream chunks a supersession covers — older than the retention window —
    * and return how many went.
    *
-   * This is physical compaction, and the **only** way an event is ever deleted from a log
-   * (D9, issue #46). It deletes stored `event_start` / `event_delta` events whose `seq` a
-   * recorded `supersedes` range covers, and nothing else, ever: a chunk that is not superseded
-   * (one still in flight) and a superseded chunk inside the window stay where they are.
+   * This is physical compaction: with {@link SessionStore.deleteSession} — which removes a
+   * whole session and its log, and only the owner may ask — it is one of the only two ways
+   * anything is ever deleted (D9, issue #46). It deletes stored `event_start` / `event_delta`
+   * events whose `seq` a recorded `supersedes` range covers, and nothing else, ever: a chunk
+   * that is not superseded (one still in flight) and a superseded chunk inside the window
+   * stay where they are.
    *
    * Deleting changes no reader's answer: replay with
    * {@link SessionStore.listEvents} already skips superseded chunks, so correctness does not
@@ -397,7 +485,8 @@ export interface SessionStore {
    * Idempotent, and safe to run from several instances at once: whoever deletes a row first
    * owns it, and everyone else simply finds fewer rows. `seq` values are never reused — a
    * superseded chunk is always followed by the event that superseded it, which is not a chunk
-   * and is never deleted — so gaps in the sequence are the normal state of a compacted log.
+   * and which compaction never deletes — so gaps in the sequence are the normal state of a
+   * compacted log.
    *
    * @param options.olderThan the cutoff: only a chunk the store wrote strictly before this
    *   instant is deleted. A `Date`, or milliseconds since the Unix epoch.
@@ -417,6 +506,12 @@ export interface SessionStore {
    * Every listener is called for every event, in `seq` order; the order the listeners are
    * called in is not part of the contract, and a listener that throws does not affect the store
    * or the other listeners.
+   *
+   * A deleted session ends its subscriptions: when {@link SessionStore.deleteSession} removes
+   * it, each listener receives one final `session.deleted` `StreamEvent` naming the session,
+   * and the subscription ends with it. That event has no `seq` and is therefore outside the
+   * "delivered in `seq` order" rule — it is the last delivery a subscriber sees for the
+   * session, and nothing stored is fetched for it afterwards.
    *
    * @returns the function that ends the subscription
    */

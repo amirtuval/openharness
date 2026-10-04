@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { ContentBlocksSchema } from '../content'
 import { EventIdSchema } from '../ids'
 import type { DeepReadonly } from '../readonly'
+import { ModelConfigSchema } from '../resources/agent'
 import { EVENT_TYPES, EventSeqSchema, QueuedProcessedAtSchema } from './common'
 
 /**
@@ -23,6 +24,21 @@ export const UserMessageEventSchema = z.object({
   seq: EventSeqSchema,
   processed_at: QueuedProcessedAtSchema,
   content: ContentBlocksSchema,
+  /**
+   * // extension: switch the session's model for this message and the ones after it (#111).
+   *
+   * When a message carries a `model`, appending it also sets the session's current model —
+   * `Session.model`, the projection — to it, in the same transaction as the append, and the
+   * session keeps running that model until another message changes it. The brain makes each
+   * model request with the session's current model, so a switch sent while a turn is running
+   * applies from the next request. The log stays the source of truth: this field is the
+   * record of the switch, and each `span.model_request_start` records the model that ran.
+   *
+   * Optional: a message without one leaves the session's model alone, which is every message
+   * an agent-based client sends. Anthropic has no equivalent — there the model is the
+   * agent's, fixed when the session is created.
+   */
+  model: ModelConfigSchema.optional(),
 })
 
 /** A stored `user.message`, deep-readonly (D9, issue #46). */
@@ -71,6 +87,8 @@ export type UserEvent = DeepReadonly<z.infer<typeof UserEventSchema>>
 export const UserMessageEventInputSchema = z.object({
   type: z.literal(EVENT_TYPES.userMessage),
   content: ContentBlocksSchema,
+  /** Switch the session's model for this message and the ones after it (#111). */
+  model: ModelConfigSchema.optional(),
 })
 
 export type UserMessageEventInput = z.infer<typeof UserMessageEventInputSchema>

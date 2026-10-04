@@ -5,6 +5,7 @@ import {
   makeStoredEventStart,
   makeModelRequestEnd,
   makeModelRequestStart,
+  makeSessionDeleted,
   makeSessionError,
   makeStatusIdle,
   makeStatusRescheduled,
@@ -82,10 +83,17 @@ describe('reduceTranscript', () => {
     expect(state.lastError).toBeNull()
   })
 
-  it('starts idle and empty', () => {
+  it('starts idle, empty, not deleted, and with no model', () => {
     const state = initialTranscriptState()
 
-    expect(state).toEqual({ messages: [], status: 'idle', lastError: null, lastSeq: 0 })
+    expect(state).toEqual({
+      messages: [],
+      status: 'idle',
+      lastError: null,
+      lastSeq: 0,
+      deleted: false,
+      model: null,
+    })
   })
 
   it('shows a queued user message as pending until a model request starts', () => {
@@ -801,6 +809,99 @@ describe('interrupts and crashes (D9)', () => {
       script.filter((event) => !isStoredEvent(event) || event.seq < 3 || event.seq > 5),
     )
     expect(chunksGone.messages).toEqual(state.messages)
+  })
+})
+
+describe('a deleted session (#111)', () => {
+  it('marks the transcript deleted without touching lastSeq', () => {
+    const state = reduceEvents([makeUserMessage('bye', { seq: 1 }), makeSessionDeleted()])
+
+    expect(state.deleted).toBe(true)
+    // The event has no `seq`, so it is not a position: a resume still points where the log
+    // got to.
+    expect(state.lastSeq).toBe(1)
+    expect(asPairs(state)).toEqual(['user:bye'])
+    expect(state.status).toBe('idle')
+  })
+
+  it('is folded in even after a position the transcript passed', () => {
+    // A stream that replays from the start delivers the deletion last, and a log the client
+    // loaded from history already advanced `lastSeq` — either way the state has to flip.
+    const state = reduceEvents([makeUserMessage('bye', { seq: 9 }), makeSessionDeleted()])
+
+    expect(state.deleted).toBe(true)
+    expect(state.lastSeq).toBe(9)
+  })
+
+  it('is idempotent: a replayed session.deleted changes nothing', () => {
+    const deleted = makeSessionDeleted()
+    const once = reduceEvents([makeUserMessage('bye', { seq: 1 }), deleted])
+
+    const twice = reduceTranscript(once, deleted)
+
+    expect(twice).toBe(once)
+    expect(twice.deleted).toBe(true)
+  })
+})
+
+describe('the model a user message switches to (#111)', () => {
+  it('sets the state silently for the first model a message carries', () => {
+    // Nothing has been seen yet, so the first model is not a change: no marker, and the
+    // message just says which model the session is on.
+    const message = makeUserMessage('switch', { seq: 1, model: { id: 'openai/gpt-4.1-mini' } })
+
+    const state = reduceEvents([message])
+
+    expect(state.model).toBe('openai/gpt-4.1-mini')
+    expect(messageById(state, message.id)).not.toHaveProperty('modelChangedTo')
+  })
+
+  it('marks the message that changes the model, and moves the state', () => {
+    const first = makeUserMessage('one', { seq: 1, model: { id: 'anthropic/claude-sonnet-5' } })
+    const second = makeUserMessage('two', { seq: 2, model: { id: 'openai/gpt-4.1-mini' } })
+
+    const state = reduceEvents([first, second])
+
+    expect(messageById(state, second.id).modelChangedTo).toBe('openai/gpt-4.1-mini')
+    expect(state.model).toBe('openai/gpt-4.1-mini')
+    // The message that set the first model stays unmarked: the change is the second one.
+    expect(messageById(state, first.id)).not.toHaveProperty('modelChangedTo')
+  })
+
+  it('leaves a message naming the current model unmarked', () => {
+    const first = makeUserMessage('one', { seq: 1, model: { id: 'anthropic/claude-sonnet-5' } })
+    const again = makeUserMessage('two', { seq: 2, model: { id: 'anthropic/claude-sonnet-5' } })
+
+    const state = reduceEvents([first, again])
+
+    expect(messageById(state, again.id)).not.toHaveProperty('modelChangedTo')
+    expect(state.model).toBe('anthropic/claude-sonnet-5')
+  })
+
+  it('keeps the state and adds no marker for a message with no model', () => {
+    const first = makeUserMessage('one', { seq: 1, model: { id: 'anthropic/claude-sonnet-5' } })
+    const plain = makeUserMessage('two', { seq: 2 })
+
+    const state = reduceEvents([first, plain])
+
+    expect(state.model).toBe('anthropic/claude-sonnet-5')
+    expect(messageById(state, plain.id)).not.toHaveProperty('modelChangedTo')
+  })
+
+  it('changes nothing when a message with a model is replayed', () => {
+    const message = makeUserMessage('one', { seq: 1, model: { id: 'openai/gpt-4.1-mini' } })
+    const once = reduceEvents([message])
+
+    const twice = reduceTranscript(once, message)
+    const replayedFromBefore = reduceTranscript(
+      once,
+      makeUserMessage('zero', { seq: 0, model: { id: 'anthropic/claude-sonnet-5' } }),
+    )
+
+    expect(twice).toBe(once)
+    expect(twice.model).toBe('openai/gpt-4.1-mini')
+    expect(replayedFromBefore).toBe(once)
+    expect(replayedFromBefore.model).toBe('openai/gpt-4.1-mini')
   })
 })
 

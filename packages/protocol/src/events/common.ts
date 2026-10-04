@@ -36,12 +36,28 @@ export const EVENT_TYPES = {
   eventStart: 'event_start',
   /** Incremental content for a previewed event. A stored chunk since D9; stream-only before it. */
   eventDelta: 'event_delta',
+  /**
+   * // extension: the session this stream was following no longer exists (#111).
+   *
+   * Stream-only: it is **not** in {@link STORED_EVENT_TYPES} and never lands in a log — the
+   * session it names, and the log with it, is gone. A server sends it as the last event on
+   * every open stream for the session and then closes the stream, so a subscriber learns that
+   * the session was deleted rather than watching a reconnect loop for a session that can
+   * never answer. Anthropic has no equivalent event: deleting a session is an openharness
+   * extension (epic #116, U5).
+   */
+  sessionDeleted: 'session.deleted',
 } as const
 
 /** An event type string, stored or stream-only. */
 export type EventType = (typeof EVENT_TYPES)[keyof typeof EVENT_TYPES]
 
-/** Event types that are persisted in the session log. */
+/**
+ * Event types that are persisted in the session log.
+ *
+ * Every event type except {@link EVENT_TYPES.sessionDeleted}: that one is stream-only — it
+ * announces a session's deletion, so there is no log left to store it in (#111).
+ */
 export const STORED_EVENT_TYPES = [
   EVENT_TYPES.userMessage,
   EVENT_TYPES.userInterrupt,

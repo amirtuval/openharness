@@ -3,6 +3,7 @@ import {
   makeAgentMessage,
   makeStoredEventDelta,
   makeStoredEventStart,
+  makeSessionDeleted,
   makeSessionError,
   makeStatusIdle,
   makeStatusRescheduled,
@@ -326,7 +327,7 @@ describe('delivering events', () => {
       EVENT_TYPES.agentMessage,
       EVENT_TYPES.sessionStatusIdle,
     ])
-    expect(events.map((event) => event.seq)).toEqual([1, 2, 3, 4, 5, 6, 7])
+    expect(events.filter(isStoredEvent).map((event) => event.seq)).toEqual([1, 2, 3, 4, 5, 6, 7])
   })
 
   it('drops a seq-less chunk: the stream-only preview was removed in P4', async () => {
@@ -467,6 +468,27 @@ describe('resuming after a disconnect', () => {
 
     controller.abort()
     await iterating
+  })
+
+  it('ends on session.deleted instead of reconnecting to a session that is gone (#111)', async () => {
+    const deleted = makeSessionDeleted()
+    // The deletion arrives as the last event of the stream: the session and its log are
+    // gone, so the connection ends without an error.
+    const { client, mock } = clientWith(() =>
+      sseResponse([...sseLines(TURN.slice(0, 3)), ...sseLines([deleted])]),
+    )
+
+    const events = await collect(client.sessions.events.stream(SESSION_ID))
+
+    expect(events.map((event) => event.type)).toEqual([
+      EVENT_TYPES.sessionStatusRunning,
+      EVENT_TYPES.userMessage,
+      EVENT_TYPES.agentMessage,
+      EVENT_TYPES.sessionDeleted,
+    ])
+    // The `for await` completed by itself, and there was exactly one connection: a reconnect
+    // could only churn through 404s for a session that can never answer again.
+    expect(mock.requests).toHaveLength(1)
   })
 
   it('stops the iteration when the caller aborts, without throwing', async () => {

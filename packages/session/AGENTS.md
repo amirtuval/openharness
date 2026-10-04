@@ -10,9 +10,10 @@ tables comes from.
 A session is a log of events — the user's messages, the agent's replies, the status
 transitions that bracket a turn, and the spans around every model request. It is the source of
 truth for a run, and it is why the brain holds no state of its own. The log is immutable
-(D9, issue #46): events are appended and never modified, and the one deletion — compaction of
-superseded stream chunks — is a single contract method. Around the log sit the leases that
-decide who may write to it, and the signals that wake that owner up.
+(D9, issue #46): events are appended and never modified, and its two deletions — compaction of
+superseded stream chunks, and deleting a whole session (#111) — are deliberate contract
+methods, each documented as the exception it is. Around the log sit the leases that decide who
+may write to it, and the signals that wake that owner up.
 
 Since the authentication epic (#65) every agent and session belongs to exactly one user:
 creating one takes the owner's `user.id`, the stored resource carries it as `owner_id`, and the
@@ -75,7 +76,8 @@ src/
 migrations/             the SQL the Postgres stores need, applied by `migrate()`:
                         0001–0010 the log, 0011 Better Auth, 0012 ownership, 0013 credentials,
                         0014 the auth-session revocation trigger (#76),
-                        0015 the effective session model/system (#93)
+                        0015 the effective session model/system (#93),
+                        0016 the per-user preferences (#111)
 docs/postgres.md        the Postgres stores: schema, migrations, delivery, local setup
 ```
 
@@ -83,41 +85,42 @@ docs/postgres.md        the Postgres stores: schema, migrations, delivery, local
 
 ### `@openharness/session`
 
-| export                                                                                                                                              | what it is                                                                                                                               |
-| --------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `SessionStore`                                                                                                                                      | the storage and signaling contract; every method is async, and documented below                                                          |
-| `AppendableEvent`                                                                                                                                   | an event a caller appends: a `StoredEvent` minus `seq` and `processed_at`, plus an optional `id` the caller supplies                     |
-| `CreateSessionOptions`, `ListAgentsOptions`, `ListSessionsOptions`, `ListEventsOptions`                                                             | the options objects of the list and create methods (`CreateSessionOptions` carries the effective `model`/`system`, #93)                  |
-| `OwnerScope`                                                                                                                                        | `{ ownerId }`: how a read is scoped to one owner (A4) — required, so forgetting it is a compile error; see [the contract](#the-contract) |
-| `UnscopedListEventsOptions`                                                                                                                         | the filters of `listEventsUnscoped`, the brain's replay                                                                                  |
-| `CredentialStore`                                                                                                                                   | the sealed-blob credential contract; see [The CredentialStore](#the-credentialstore-epic-65-a5)                                          |
-| `SealedSecret`, `CredentialKey`, `UpsertCredentialInput`, `ListCredentialsOptions`, `SealedProviderCredential`                                      | the credential contract's vocabulary: the sealed form, the key, what `upsert` writes, and what `get` returns                             |
-| `UpdateSessionRequest`                                                                                                                              | what `updateSession()` changes: the title, or nothing                                                                                    |
-| `AppendEventsOptions`, `PartitionFence`                                                                                                             | the optional fence a brain attaches to a write                                                                                           |
-| `CompactOptions`                                                                                                                                    | what `compact()` takes: the retention cutoff (`olderThan: Date \| number`)                                                               |
-| `PartitionLease`, `PartitionSignal`, `PartitionSignalInput`, `PartitionSignalKind`                                                                  | leases over a partition, and the signals sent to its owner                                                                               |
-| `TurnState`, `TurnStateKind`                                                                                                                        | what `getTurnState()` answers                                                                                                            |
-| `SessionEventListener`, `PartitionSignalListener`, `AuthSessionRevocationListener`, `Unsubscribe`                                                   | subscription plumbing                                                                                                                    |
-| `AuthSessionId`                                                                                                                                     | a Better Auth session id (A2) — deliberately not a `SessionId`, which names a log                                                        |
-| `InMemorySessionStore`, `InMemorySessionStoreOptions`                                                                                               | the in-memory implementation and its `{ now, partitionCount }` options                                                                   |
-| `InMemoryCredentialStore`, `InMemoryCredentialStoreOptions`                                                                                         | the in-memory credential store and its `{ now }` option                                                                                  |
-| `Clock`, `systemClock`, `timestampAt()`                                                                                                             | the injectable time source, and how an instant is written as a timestamp                                                                 |
-| `FencedError`, `FencedErrorDetails`, `SessionNotFoundError`, `AgentNotFoundError`, `DuplicateEventIdError`, `ClaimConflictError`, `isFencedError()` | the typed failures a store raises, and what a fence reports                                                                              |
-| `FENCED_ERROR_CODE`, `SESSION_NOT_FOUND_ERROR_CODE`, `AGENT_NOT_FOUND_ERROR_CODE`, `DUPLICATE_EVENT_ID_ERROR_CODE`, `CLAIM_CONFLICT_ERROR_CODE`     | the stable `code` of each error, for detection across bundles                                                                            |
-| `PACKAGE_NAME`                                                                                                                                      | this package's name; lets a dependent prove the import resolved                                                                          |
+| export                                                                                                                                              | what it is                                                                                                                                                                                                                              |
+| --------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SessionStore`                                                                                                                                      | the storage and signaling contract; every method is async, and documented below. Since #111 it also carries `getPreferences`/`putPreferences` (the per-user settings beside the log) and `deleteSession` (the owner-scoped hard delete) |
+| `UserPreferences`                                                                                                                                   | a user's stored preferences, `{ default_model: string \| null }` (#111, epic #116 U1) — the vocabulary of `getPreferences`/`putPreferences`                                                                                             |
+| `AppendableEvent`                                                                                                                                   | an event a caller appends: a `StoredEvent` minus `seq` and `processed_at`, plus an optional `id` the caller supplies                                                                                                                    |
+| `CreateSessionOptions`, `ListAgentsOptions`, `ListSessionsOptions`, `ListEventsOptions`                                                             | the options objects of the list and create methods (`CreateSessionOptions` carries the effective `model`/`system`, #93)                                                                                                                 |
+| `OwnerScope`                                                                                                                                        | `{ ownerId }`: how a read is scoped to one owner (A4) — required, so forgetting it is a compile error; see [the contract](#the-contract)                                                                                                |
+| `UnscopedListEventsOptions`                                                                                                                         | the filters of `listEventsUnscoped`, the brain's replay                                                                                                                                                                                 |
+| `CredentialStore`                                                                                                                                   | the sealed-blob credential contract; see [The CredentialStore](#the-credentialstore-epic-65-a5)                                                                                                                                         |
+| `SealedSecret`, `CredentialKey`, `UpsertCredentialInput`, `ListCredentialsOptions`, `SealedProviderCredential`                                      | the credential contract's vocabulary: the sealed form, the key, what `upsert` writes, and what `get` returns                                                                                                                            |
+| `UpdateSessionRequest`                                                                                                                              | what `updateSession()` changes: the title, or nothing                                                                                                                                                                                   |
+| `AppendEventsOptions`, `PartitionFence`                                                                                                             | the optional fence a brain attaches to a write                                                                                                                                                                                          |
+| `CompactOptions`                                                                                                                                    | what `compact()` takes: the retention cutoff (`olderThan: Date \| number`)                                                                                                                                                              |
+| `PartitionLease`, `PartitionSignal`, `PartitionSignalInput`, `PartitionSignalKind`                                                                  | leases over a partition, and the signals sent to its owner                                                                                                                                                                              |
+| `TurnState`, `TurnStateKind`                                                                                                                        | what `getTurnState()` answers                                                                                                                                                                                                           |
+| `SessionEventListener`, `PartitionSignalListener`, `AuthSessionRevocationListener`, `Unsubscribe`                                                   | subscription plumbing                                                                                                                                                                                                                   |
+| `AuthSessionId`                                                                                                                                     | a Better Auth session id (A2) — deliberately not a `SessionId`, which names a log                                                                                                                                                       |
+| `InMemorySessionStore`, `InMemorySessionStoreOptions`                                                                                               | the in-memory implementation and its `{ now, partitionCount }` options                                                                                                                                                                  |
+| `InMemoryCredentialStore`, `InMemoryCredentialStoreOptions`                                                                                         | the in-memory credential store and its `{ now }` option                                                                                                                                                                                 |
+| `Clock`, `systemClock`, `timestampAt()`                                                                                                             | the injectable time source, and how an instant is written as a timestamp                                                                                                                                                                |
+| `FencedError`, `FencedErrorDetails`, `SessionNotFoundError`, `AgentNotFoundError`, `DuplicateEventIdError`, `ClaimConflictError`, `isFencedError()` | the typed failures a store raises, and what a fence reports                                                                                                                                                                             |
+| `FENCED_ERROR_CODE`, `SESSION_NOT_FOUND_ERROR_CODE`, `AGENT_NOT_FOUND_ERROR_CODE`, `DUPLICATE_EVENT_ID_ERROR_CODE`, `CLAIM_CONFLICT_ERROR_CODE`     | the stable `code` of each error, for detection across bundles                                                                                                                                                                           |
+| `PACKAGE_NAME`                                                                                                                                      | this package's name; lets a dependent prove the import resolved                                                                                                                                                                         |
 
 ### `@openharness/session/postgres`
 
-| export                                                                                                                                                             | what it is                                                                                                                           |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `PostgresSessionStore`, `createPostgresSessionStore(config, options?)`                                                                                             | the durable implementation; `{ connectionString }` or `{ pool }`, plus options                                                       |
-| `PostgresSessionStoreOptions`, `PostgresSessionStoreConfig`                                                                                                        | its options (`now`, `partitionCount`, `onError`) and the two ways to reach a DB                                                      |
-| `PostgresCredentialStore`, `createPostgresCredentialStore(config, options?)`                                                                                       | the durable credential store; `{ connectionString }` or `{ pool }`, plus `now`                                                       |
-| `PostgresCredentialStoreOptions`, `PostgresCredentialStoreConfig`                                                                                                  | its options, and the two ways to reach a DB                                                                                          |
-| `migrate(db, options?)`                                                                                                                                            | applies `migrations/` — the log, Better Auth and `provider_credentials` — idempotently, in one locked transaction; returns the files |
-| `MigrateOptions`                                                                                                                                                   | `{ migrationsDir? }`, for a migrations directory that is not this package's                                                          |
-| `PostgresSchema`, `AgentsTable`, `SessionsTable`, `EventsTable`, `EventClaimsTable`, `EventSupersessionsTable`, `PartitionLeasesTable`, `ProviderCredentialsTable` | the Kysely table types, for a caller that wants to query alongside the stores                                                        |
-| `ProviderCredentialRow`, `ProviderCredentialMetadataRow`                                                                                                           | the two shapes a `provider_credentials` read has: with the sealed blob, and without                                                  |
+| export                                                                                                                                                                                     | what it is                                                                                                                           |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `PostgresSessionStore`, `createPostgresSessionStore(config, options?)`                                                                                                                     | the durable implementation; `{ connectionString }` or `{ pool }`, plus options                                                       |
+| `PostgresSessionStoreOptions`, `PostgresSessionStoreConfig`                                                                                                                                | its options (`now`, `partitionCount`, `onError`) and the two ways to reach a DB                                                      |
+| `PostgresCredentialStore`, `createPostgresCredentialStore(config, options?)`                                                                                                               | the durable credential store; `{ connectionString }` or `{ pool }`, plus `now`                                                       |
+| `PostgresCredentialStoreOptions`, `PostgresCredentialStoreConfig`                                                                                                                          | its options, and the two ways to reach a DB                                                                                          |
+| `migrate(db, options?)`                                                                                                                                                                    | applies `migrations/` — the log, Better Auth and `provider_credentials` — idempotently, in one locked transaction; returns the files |
+| `MigrateOptions`                                                                                                                                                                           | `{ migrationsDir? }`, for a migrations directory that is not this package's                                                          |
+| `PostgresSchema`, `AgentsTable`, `SessionsTable`, `EventsTable`, `EventClaimsTable`, `EventSupersessionsTable`, `PartitionLeasesTable`, `ProviderCredentialsTable`, `UserPreferencesTable` | the Kysely table types, for a caller that wants to query alongside the stores                                                        |
+| `ProviderCredentialRow`, `ProviderCredentialMetadataRow`                                                                                                                                   | the two shapes a `provider_credentials` read has: with the sealed blob, and without                                                  |
 
 This entry point is a separate subpath on purpose: it is the only module that depends on `pg`
 and `kysely`, and a consumer that only needs the contract, the fake or the suite must not load
@@ -167,6 +170,7 @@ not leak that it does:
 | `listSessions({ ownerId, … })`          | only the owner's sessions; the `agentId` filter narrows inside them                                                                                                                                                               |
 | `listEvents(sessionId, { ownerId, … })` | `SessionNotFoundError` for another owner's session — the user-facing events route's 404                                                                                                                                           |
 | `createSession(agentId, options)`       | `ownerId` is **required**, and the agent — when one is passed — must belong to that owner or it is an `AgentNotFoundError`; a session may not snapshot somebody else's agent. `agentId: null` creates a model-first session (#93) |
+| `deleteSession(sessionId, { ownerId })` | `false` for another owner's session — the same answer as for an id nothing has, so the refusal leaks nothing (#111)                                                                                                               |
 
 Everything else is **unscoped**, and deliberately so:
 
@@ -211,9 +215,9 @@ where in the log it lands.
 **The log is immutable** (D9, issue #46). No stored event is ever modified: the contract has
 no method that edits one, the protocol's event types are deep-readonly (so a write is a
 compile error), and both stores deep-freeze the events they keep and hand out, so a mutation
-throws instead of forking a reader's copy from the log the store wrote. The one deletion is
-compaction, below. A brain reads what it needs and appends what it learns; nothing rewrites
-history.
+throws instead of forking a reader's copy from the log the store wrote. The two deletions are
+compaction and `deleteSession`, below — each a deliberate, documented exception and nothing
+else. A brain reads what it needs and appends what it learns; nothing rewrites history.
 
 **`processed_at` is derived from a claim.** A user event is stored with `processed_at: null` —
 the stored event never changes — and the claim taken on it is a fact recorded beside it: the
@@ -248,9 +252,9 @@ while the chunks of a message still in flight — nothing supersedes them — co
 other event. `includeSuperseded: true` reads the raw log instead, for debugging and tests.
 Cursors stay `seq` positions, and skipped chunks leave gaps in them; nothing else changes.
 
-**Compaction** — `compact({ olderThan })` — is the only code path that deletes from a log: it
-removes stored chunks a recorded supersession covers, once the store wrote them strictly
-before the cutoff, and nothing else, ever. It returns how many events it deleted, is
+**Compaction** — `compact({ olderThan })` — is one of the only two code paths that delete from
+a log: it removes stored chunks a recorded supersession covers, once the store wrote them
+strictly before the cutoff, and nothing else, ever. It returns how many events it deleted, is
 idempotent, and is safe to run from several instances at once. It changes no reader's answer —
 replay already skips those chunks — so a client never needs to know whether, or how recently,
 it ran; the retention window only keeps raw chunks around for debugging. `seq` values are
@@ -258,10 +262,32 @@ never reused (a superseded chunk is always followed by the event that superseded
 not a chunk and is never deleted), so gaps in the sequence are the normal state of a compacted
 log.
 
+**Deletion** — `deleteSession(sessionId, { ownerId })` — is the other, and the only one that
+removes a session itself (epic #116 U5, issue #111). It is **owner-scoped**: it answers `true`
+when the session existed and belonged to `options.ownerId`, and `false` for an id nothing has
+and for somebody else's session alike, exactly as `getSession` answers `null` for both. It is
+irreversible — one transaction removes the session row and every row keyed by the session in
+every table that has a session column: its `events`, their `event_claims` and their
+`event_supersessions` — so afterwards `getSession` and `getSessionUnscoped` answer `null`,
+`listEvents`, `appendEvents`, `getPendingUserEvents` and `getTurnState` throw
+`SessionNotFoundError`, and an event id the deleted session held is free again for a later
+append. A deleted session's subscribers receive one final `session.deleted` `StreamEvent`
+naming it — the one stream event that was never stored, and therefore outside the `seq` order
+— and the subscription ends with it.
+
 **Status.** `session.status_running` sets the session's `status` to `running` and
 `session.status_idle` sets it to `idle` — in the same transaction as the append. A
 `session.status_rescheduled` does not end a turn and leaves the status alone; v1 has no
 resting `rescheduling` status. Every append also advances the session's `updated_at`.
+
+**The model projection** (#111). A `user.message` carrying a `model: { id }` sets the
+session's `model` to it, in the same transaction as the append — the other projection of the
+log onto the session's header, beside `status`, so the session keeps running what its last
+model-carrying message asked for. Within a batch the later message wins; a message without a
+`model` leaves the session's model alone; and `initial_events` go through the same append
+path, so a model-carrying message among them is already what the created session runs. The
+log stays the source of truth: the message's `model` is stored on the event either way, and a
+`span.model_request_start` records the model each request actually used.
 
 **Creation, and what a session runs** (issue #93). A session is created from an agent, a
 model, or both, and always stores the configuration it _runs_ — `model` and `system` — beside
@@ -349,6 +375,15 @@ listening hears a revocation whichever instance published it, which is what lets
 close the open streams of a session revoked elsewhere. Like a signal, a missed notification is
 recoverable rather than fatal: the server re-validates the session periodically.
 
+**Preferences.** `getPreferences(userId)` and `putPreferences(userId, preferences)` are the
+per-user settings beside the log (#111, epic #116 U1), keyed by `userId` like the
+`CredentialStore` is. `UserPreferences` is one value, `{ default_model: string | null }` — the
+`provider/model` a new chat starts with, or `null` for no choice — and a user who has never
+saved one reads `{ default_model: null }`: there is no null answer and no throw, so a settings
+screen always has a value. `putPreferences` writes the value whole (one row per user, replaced
+in place; `{ default_model: null }` clears it), stamps `updated_at` from the injected clock,
+and answers what was stored. Both answers are deep-frozen, like a credential's.
+
 **Errors.** `SessionNotFoundError` (every session-scoped method except `getSession`,
 `getSessionUnscoped` and `updateSession`, which answer `null`),
 `AgentNotFoundError` (`createSession` with an unknown agent), `FencedError` (`appendEvents`),
@@ -409,7 +444,8 @@ and its decryption are the server's (`apps/server`, #61).
 the whole suite against a real database. [docs/postgres.md](./docs/postgres.md) is the long
 version; this is the shape of it.
 
-**Schema.** Twelve tables, all created by `migrations/`. Seven are this package's: `agents` and
+**Schema.** Thirteen tables, all created by `migrations/`. Eight are this package's: `agents`
+and
 `sessions` (each with the `owner_id` an agent or session belongs to, `sessions` also with the
 `partitionOf` partition, the `status` the log's last status event implies, the effective
 `model jsonb`/`system` the session runs, and the nullable agent snapshot columns beside them —
@@ -422,8 +458,10 @@ events), `event_claims` (one row per claim of a user event: `event_id` primary k
 and `claimed_at`; the primary key is what makes double-claiming fail atomically),
 `event_supersessions` (one row per
 recorded `{ from_seq, to_seq }` range: `by_event_id` primary key, `by_seq`, and a `check
-(by_seq > to_seq)`), `partition_leases` (`partition`, `owner`, `epoch`, `expires_at`) and
-`provider_credentials` (a sealed credential per `(user_id, provider)`; see `0013`). Five are
+(by_seq > to_seq)`), `partition_leases` (`partition`, `owner`, `epoch`, `expires_at`),
+`provider_credentials` (a sealed credential per `(user_id, provider)`; see `0013`) and
+`user_preferences` (one row per user: the stored `default_model`, or NULL; `on delete cascade`
+from `"user"`; see `0016`). Five are
 **Better Auth's**, created by the same migrations and read and written by Better Auth itself
 (decision A1): `user`, `session`, `account`, `verification` and `deviceCode`.
 
@@ -450,10 +488,12 @@ their own.
 
 **The events table is written once per event and never touched again.** There is no SQL path
 that writes back to a row of `events`: claims and supersessions are rows of their own, a user
-event's `processed_at` is derived by joining `event_claims`, and the one delete is
-`compact()`, which removes only superseded chunks. `src/postgres/no-updates.test.ts` scans
-this package's source for the two spellings such a write would use and fails on either, so
-the rule cannot come back in a later change unnoticed.
+event's `processed_at` is derived by joining `event_claims`, and the only two deletes are
+`compact()` — superseded chunks, and nothing else — and `deleteSession`, which removes a whole
+session's rows, its log included, at the owner's request (`0016`/#111). Both are the
+contract's documented exceptions and nothing else ever goes.
+`src/postgres/no-updates.test.ts` scans this package's source for the two spellings such a
+write would use and fails on either, so the rule cannot come back in a later change unnoticed.
 
 **Migrations.** Plain SQL files in `migrations/`, applied in name order by `migrate(db)` — one
 transaction under an advisory lock, every statement idempotent (`if not exists`, or a guard),
@@ -507,12 +547,25 @@ null` backfill is a no-op on a re-run — a session created after the change alw
   own `model` — which is what keeps the file idempotent like the rest. `postgres.test.ts`
   proves it over a row written the pre-#93 way.
 
+Wave 1 of the chat-UX epic (#111) added one more:
+
+- **`0016_user_preferences.sql` — the per-user preferences** (#111, epic #116 U1): the
+  `user_preferences` table, one row per user — `user_id` primary key, `on delete cascade` from
+  `"user"` — holding `default_model text` (NULL for no default) and `updated_at`. One
+  `create table if not exists`, and nothing to backfill: a user with no row reads the
+  protocol's default, `{ default_model: null }`. `putPreferences` upserts the row
+  (`on conflict (user_id) do update`), so the table is a value rather than a log.
+
 **Appending.** `seq` is assigned inside the append transaction, under `select … for update` on
 the session row, so concurrent appends — from any number of connections, stores or processes —
 serialize and the numbers are gap-free and ordered. `initial_events` go through the same path
 in the creation transaction. An event's id is the caller's when it supplied one: `events.id` is
 unique across the whole table, so a taken id fails the insert and rolls the append back — the
 store answers `DuplicateEventIdError`, and the id is the one the log already holds.
+
+The append also follows the batch's projections onto the session row, in the same transaction:
+the `status` a status event implies, and the `model` a `user.message` carrying one switches to
+(#111) — one more `update sessions …` beside the `updated_at` bump.
 
 The same transaction records what the batch carries beside its events: an insert into
 `event_claims` for every `consumes` id (the joined select is what refuses a foreign, non-user
@@ -529,6 +582,14 @@ successful take advances the epoch — the same owner included.
 **Titles.** `updateSession` reads, patches and writes the session row in one transaction, like
 `updateAgent`.
 
+**Deleting a session.** `deleteSession` locks the session row — the same lock an append takes,
+so a write in flight is serialized against the delete — checks the owner, and one transaction
+later removes the rows of `events`, `event_claims` and `event_supersessions` for the session
+and then the session row itself. The last statement is a `pg_notify` on the session's channel,
+delivered on commit: the payload is the session's id, the subscriber delivers a final
+`session.deleted` and ends the subscription (forgetting its position and `UNLISTEN`ing when
+that was the last listener), so nothing is ever fetched for the deleted log.
+
 **Live delivery.** One dedicated `LISTEN` connection per store, `LISTEN`/`UNLISTEN` per session
 as its first and last listener come and go, and per partition for signals. A notification
 carries the `seq` of the event that was appended (never the event itself — payloads are capped
@@ -539,7 +600,8 @@ Signal channels are per partition, so every instance listening for that partitio
 signal, not just the sender. Auth-session revocations travel on the one
 `ohr_auth_session_revoked` channel with the session id as the payload — a revocation lost
 while the connection was down is not replayed, which is why the server's re-check exists
-(issue #76).
+(issue #76). A session's deletion rides the session's own channel with `{"sessionId": "sesn_…"}`
+instead of a `seq`, so a subscriber tells the two apart and ends rather than fetching.
 
 **Time.** The store takes the same `Clock` and derives every `created_at`, `updated_at`,
 `processed_at`, lease `expires_at` and lease-expiry comparison from it. Nothing reads the
@@ -552,9 +614,10 @@ database's `now()`.
 - **Locally** set `DATABASE_URL`, or have a Docker daemon running and let the tests start
   `postgres:18-alpine` with testcontainers. With neither, the suite is skipped with a note —
   a skip is not a pass.
-- The tests truncate every table this package owns — including `provider_credentials` — before
-  every test, so point `DATABASE_URL` at a scratch database. Better Auth's tables are not
-  truncated; the two `"user"` rows the suites seed are re-inserted as needed.
+- The tests truncate every table this package owns — `provider_credentials` and
+  `user_preferences` included — before every test, so point `DATABASE_URL` at a scratch
+  database. Better Auth's tables are not truncated; the two `"user"` rows the suites seed are
+  re-inserted as needed.
 
 ## Running the conformance suite against a new implementation
 
@@ -619,12 +682,18 @@ dependency table.
 `src/**/*.test.ts` with Vitest (node environment):
 
 - `testing/conformance.test.ts` and `testing/credentials-conformance.test.ts` run the two
-  suites against the in-memory stores — the acceptance tests of this package.
+  suites against the in-memory stores — the acceptance tests of this package. The session
+  suite now also asks for the per-user preferences (#111), the model projection a
+  `user.message` carrying one applies, and `deleteSession` — its rows gone from every read,
+  the ids it held free again, and the final `session.deleted` a subscriber receives.
 - `postgres/postgres.test.ts` runs both suites against Postgres — the acceptance tests of the
   durable stores — and adds what only a shared store can be asked: concurrent appends from
   two stores, a supplied event id two of them try to take, fencing across stores, a burst that
   must be delivered exactly once, catching up after the listening connection is killed, a
-  chunk another store appended delivered to this store's subscriber, idempotent migrations,
+  chunk another store appended delivered to this store's subscriber, a deleted session's rows
+  really gone from `events`, `event_claims` and `event_supersessions` while another session's
+  are untouched, its `session.deleted` announced to a different store's subscriber,
+  idempotent migrations (`0016` included — the preferences table is exercised after a re-run),
   the #93 backfill over a session row written the pre-#93 way (the agent's model and system
   copied into the new columns, the row read back as the protocol's session), `close()` leaving
   a borrowed pool alone, the raw `events.processed_at` column staying `NULL`
@@ -634,7 +703,8 @@ dependency table.
   one provider (one row, whatever happens), and the user-delete cascade: deleting the `"user"`
   row takes that user's agents, sessions, events and credentials and leaves the other user's
   alone. Since `owner_id` is a foreign key into `"user"`, the factory seeds the suite's owners
-  (`ensureUsers`) on empty tables.
+  (`ensureUsers`) on empty tables. The harness truncates every table this package owns,
+  `user_preferences` included, so preferences cannot leak between tests.
 - `postgres/no-updates.test.ts` scans this package's source for the two spellings a write back
   to `events` would use and fails on either. It needs no database, so the append-only rule is
   guarded even where the Postgres suite is skipped.

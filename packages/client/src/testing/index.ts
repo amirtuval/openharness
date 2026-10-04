@@ -4,6 +4,7 @@ import {
   ListModelsResponseSchema,
   ProviderCredentialSchema,
   SessionSchema,
+  UserPreferencesSchema,
   encodeKeyCursor,
   newAgentId,
   newProviderCredentialId,
@@ -13,6 +14,7 @@ import {
 import { makeAgent, makeModelEntry, makeSession, makeUser } from '@openharness/protocol/fixtures'
 import type {
   Agent,
+  GetPreferencesResponse,
   ListAgentsResponse,
   ListEventsResponse,
   ListModelsResponse,
@@ -31,6 +33,7 @@ import type {
   UserEventInput,
   UserInterruptEvent,
   UserMessageEvent,
+  UserPreferences,
 } from '@openharness/protocol'
 
 import { ApiError, AuthenticationError } from '../errors'
@@ -125,6 +128,11 @@ export interface FakeClientOptions {
    * status for every provider the configured {@link models} name.
    */
   providers?: readonly ProviderCatalogStatus[]
+  /**
+   * The preferences {@link Client.preferences} starts with, in place of the default
+   * `{ default_model: null }` — the absence of a choice, like an account that never saved one.
+   */
+  preferences?: UserPreferences
 }
 
 /** A device flow, as {@link FakeClient.scriptDeviceLogin} takes it. */
@@ -204,12 +212,19 @@ export interface FakeClient extends Client {
   /**
    * The agent the fake starts with.
    *
-   * The live object, not a copy: `fake.agent.name` reads what the fake holds, and an update
-   * through {@link Client.agents} is visible here immediately.
+   * A live view through the fake's own store, not the seed object: `fake.agent.name` reads
+   * what the fake holds, so an update through {@link Client.agents} is visible here
+   * immediately (issue #106).
    */
   readonly agent: Agent
 
-  /** The session the fake starts with. The live object, like {@link agent}. */
+  /**
+   * The session the fake starts with.
+   *
+   * A live view through the fake's own store, like {@link agent}: `fake.session.status` and
+   * `fake.session.model` read the current state, however it was reached — a turn, a scripted
+   * flow, a message that switched the model.
+   */
   readonly session: Session
 
   /**
@@ -315,6 +330,11 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       message: null,
     }))
   const modelListCalls: ModelListCall[] = []
+  // The caller's settings (#111): one in-memory value, replaced whole by `put`, exactly like
+  // the server's row behind `GET`/`PUT /v1/me/preferences`.
+  let preferences: GetPreferencesResponse = UserPreferencesSchema.parse(
+    options.preferences ?? { default_model: null },
+  )
   let authenticated = options.authenticated ?? true
   let deviceFlow: FakeDeviceFlow | undefined
 
@@ -366,10 +386,13 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
    * the wire and should fail where they are called. The resource methods below go through
    * {@link requireBrain} instead, so that a client-interface call rejects the way a real
    * request would rather than throwing mid-expression.
+   *
+   * A deleted session (#111) is not found either: the session and its log are gone, and the
+   * real routes answer exactly that 404 for it.
    */
   const brainFor = (sessionId: string): FakeBrain => {
     const brain = brains.get(sessionId)
-    if (brain === undefined) {
+    if (brain === undefined || brain.deleted) {
       throw new ApiError(404, `No session ${sessionId}.`, { type: 'not_found_error' })
     }
     return brain
@@ -377,7 +400,7 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
 
   const requireBrain = (sessionId: string): Promise<FakeBrain> => {
     const brain = brains.get(sessionId)
-    return brain === undefined
+    return brain === undefined || brain.deleted
       ? Promise.reject(new ApiError(404, `No session ${sessionId}.`, { type: 'not_found_error' }))
       : Promise.resolve(brain)
   }
@@ -579,6 +602,8 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
         return unauthenticated()
       }
       const all = [...brains.values()]
+        // A deleted session (#111) is gone, log and all: it is not listed any more.
+        .filter((candidate) => !candidate.deleted)
         .map((candidate) => candidate.session)
         // A model-first session has no agent and no agent id to match (issue #93).
         .filter(
@@ -586,6 +611,17 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
         )
         .sort(byCreatedAtThenIdDescending)
       return Promise.resolve(pageByKey(all, params?.limit, params?.page, 'desc'))
+    },
+
+    async delete(sessionId, requestOptions): Promise<void> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      const brain = await requireBrain(sessionId)
+      // The 204 has no body: the effect is the deletion — one final `session.deleted` event
+      // to the subscribers, the streams closed behind it, and the log dropped.
+      brain.markDeleted()
     },
 
     events: eventsResource,
@@ -655,6 +691,27 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
     },
   }
 
+  const preferencesResource: Client['preferences'] = {
+    get(requestOptions): Promise<GetPreferencesResponse> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      return Promise.resolve(preferences)
+    },
+
+    put(next, requestOptions): Promise<GetPreferencesResponse> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      // Written whole, like the server's PUT — no partial update — and `null` clears the
+      // stored default. Parsed with the protocol's schema, the way the route validates it.
+      preferences = UserPreferencesSchema.parse(next)
+      return Promise.resolve(preferences)
+    },
+  }
+
   const authResource: Client['auth'] = {
     startDeviceLogin(requestOptions): Promise<DeviceLoginStart> {
       throwIfAborted(requestOptions)
@@ -702,8 +759,16 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
   }
 
   const fake: FakeClient = {
-    agent: seedAgent,
-    session: seedSession,
+    // The seeded agent and session are read back through the fake's own maps, not held by
+    // reference (issue #106): an update through `agents.update` is visible here at once, and
+    // so is every internal move of the session — its status, and its model after a message
+    // switched it.
+    get agent(): Agent {
+      return agents.get(seedAgent.id) ?? seedAgent
+    },
+    get session(): Session {
+      return brains.get(seedSession.id)?.session ?? seedSession
+    },
     user,
     modelListCalls,
     agents: agentsResource,
@@ -711,6 +776,7 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
     providerCredentials: providerCredentialsResource,
     models: modelsResource,
     auth: authResource,
+    preferences: preferencesResource,
 
     me(requestOptions): Promise<User> {
       throwIfAborted(requestOptions)
@@ -720,8 +786,8 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       return Promise.resolve(user)
     },
 
-    async sendMessage(sessionId, text, requestOptions): Promise<UserMessageEvent> {
-      throwIfAborted(requestOptions)
+    async sendMessage(sessionId, text, messageOptions): Promise<UserMessageEvent> {
+      throwIfAborted(messageOptions)
       if (!authenticated) {
         return unauthenticated()
       }
@@ -729,6 +795,7 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       const stored = brain.appendUserEvent({
         type: 'user.message',
         content: [{ type: 'text', text }],
+        ...(messageOptions?.model === undefined ? {} : { model: messageOptions.model }),
       })
       brain.startTurn()
       return stored as UserMessageEvent

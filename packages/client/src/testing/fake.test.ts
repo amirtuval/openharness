@@ -6,10 +6,14 @@ import {
   newAgentId,
 } from '@openharness/protocol'
 import type { StoredEvent, StreamEvent } from '@openharness/protocol'
-import { fixtureTimestamp, makeModelEntry } from '@openharness/protocol/fixtures'
+import {
+  fixtureTimestamp,
+  makeModelEntry,
+  makeUserPreferences,
+} from '@openharness/protocol/fixtures'
 import { describe, expect, it } from 'vitest'
 
-import { createClient } from '../client'
+import { createClient, type SendMessageOptions } from '../client'
 import { ApiError, AuthenticationError } from '../errors'
 import { initialTranscriptState, reduceTranscriptAll, type TranscriptState } from '../transcript'
 import { createMockFetch, sseLines, sseResponse } from '../test-support/mock-fetch'
@@ -24,8 +28,10 @@ describe('the fake client', () => {
     expect(typeof fake.me).toBe('function')
     expect(typeof fake.agents.create).toBe('function')
     expect(typeof fake.sessions.events.stream).toBe('function')
+    expect(typeof fake.sessions.delete).toBe('function')
     expect(typeof fake.providerCredentials.put).toBe('function')
     expect(typeof fake.models.list).toBe('function')
+    expect(typeof fake.preferences.get).toBe('function')
     expect(typeof fake.auth.startDeviceLogin).toBe('function')
     expect(fake.session.type).toBe('session')
     expect(fake.agent.type).toBe('agent')
@@ -52,9 +58,12 @@ describe('the fake client', () => {
     ])
 
     // Every event is stored (P4): the chunks carry a `seq` like the rest, which is what makes
-    // a reply in flight resumable by position.
+    // a reply in flight resumable by position. (`session.deleted` is the one stream event
+    // without a position, and this turn has none.)
     expect(events.every(isStoredEvent)).toBe(true)
-    expect(events.map((event) => event.seq)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    expect(events.filter(isStoredEvent).map((event) => event.seq)).toEqual([
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+    ])
     const message = events.find((event) => event.type === EVENT_TYPES.agentMessage)
     expect(message).toMatchObject({
       type: EVENT_TYPES.agentMessage,
@@ -67,8 +76,9 @@ describe('the fake client', () => {
       is_error: null,
     })
     // The request claimed the message it answered.
+    const first = events[0]
     expect(events.find((event) => event.type === EVENT_TYPES.modelRequestStart)).toMatchObject({
-      consumes: [events[0]?.id],
+      consumes: [first?.type === EVENT_TYPES.userMessage ? first.id : undefined],
     })
 
     for (const event of events) {
@@ -444,6 +454,52 @@ describe('the fake resources', () => {
     expect(page.next_page).toBeNull()
   })
 
+  it('follows an agent update through fake.agent, the fix for #106', async () => {
+    const fake = createFakeClient()
+
+    const updated = await fake.agents.update(fake.agent.id, {
+      name: 'Renamed',
+      model: { id: 'openai/gpt-4.1-mini' },
+    })
+
+    // The getter reads the fake's own store, not the seed object it was handed (#106): the
+    // update is visible without another lookup.
+    expect(fake.agent).toBe(updated)
+    expect(fake.agent.name).toBe('Renamed')
+    expect(fake.agent.model).toEqual({ id: 'openai/gpt-4.1-mini' })
+    expect((await fake.agents.get(fake.agent.id)).name).toBe('Renamed')
+
+    // And the fields a turn runs come from the same store: a session created after the
+    // update snapshots the new configuration, and its span carries the new model.
+    const session = await fake.sessions.create({ agent: fake.agent.id })
+    fake.respondWith('hi', { sessionId: session.id })
+    await fake.sendMessage(session.id, 'go')
+    await fake.waitForIdle(session.id)
+    const span = fake
+      .history(session.id)
+      .find((event) => event.type === EVENT_TYPES.modelRequestStart)
+    expect(span).toMatchObject({ model: 'openai/gpt-4.1-mini' })
+  })
+
+  it('switches the session model when a user.message carries one (#111)', async () => {
+    const fake = createFakeClient()
+    fake.respondWith('first').respondWith('second')
+
+    await sendAndSettle(fake, 'hello')
+    await sendAndSettle(fake, 'hello again', { model: { id: 'openai/gpt-4.1-mini' } })
+
+    // The switch is stored on the event that carried it...
+    const switcher = fake
+      .history()
+      .find((event) => event.type === EVENT_TYPES.userMessage && event.model !== undefined)
+    expect(switcher).toMatchObject({ model: { id: 'openai/gpt-4.1-mini' } })
+    // ...and it is the session's live projection now.
+    expect(fake.session.model).toEqual({ id: 'openai/gpt-4.1-mini' })
+    // The next turn's span carries the switched model; the first turn ran the seeded one.
+    const spans = fake.history().filter((event) => event.type === EVENT_TYPES.modelRequestStart)
+    expect(spans.map((span) => span.model)).toEqual([fake.agent.model.id, 'openai/gpt-4.1-mini'])
+  })
+
   it('pages a list with an opaque cursor', async () => {
     const fake = createFakeClient()
     await fake.agents.create({ name: 'two', model: { id: 'anthropic/claude-sonnet-5' } })
@@ -607,6 +663,102 @@ describe('the fake resources', () => {
   })
 })
 
+describe('the fake deletes a session (#111)', () => {
+  it('delivers one final session.deleted event, ends the stream, and answers 404 after', async () => {
+    const fake = createFakeClient()
+    fake.respondWith('bye')
+    await sendAndSettle(fake, 'hi')
+    const logged = fake.history()
+
+    const controller = new AbortController()
+    const events: StreamEvent[] = []
+    const iterating = (async () => {
+      for await (const event of fake.sessions.events.stream(fake.session.id, {
+        // The whole log, chunks included — the deletion is what ends the stream, and the
+        // events before it are exactly what the log held.
+        deltas: true,
+        afterSeq: 0,
+        signal: controller.signal,
+      })) {
+        events.push(event)
+      }
+    })()
+
+    await fake.sessions.delete(fake.session.id)
+    // The stream ends by itself after the deletion: no abort is needed, and the deletion is
+    // its last event.
+    await iterating
+
+    expect(events.filter(isStoredEvent)).toEqual(logged)
+    expect(events.at(-1)).toEqual({
+      type: EVENT_TYPES.sessionDeleted,
+      session_id: fake.session.id,
+    })
+    expect(events.filter((event) => event.type === EVENT_TYPES.sessionDeleted)).toHaveLength(1)
+
+    // The session and its log are gone: reads, sends, a second delete and a new stream are
+    // all the server's 404, and it is no longer listed.
+    await expect(fake.sessions.get(fake.session.id)).rejects.toMatchObject({
+      status: 404,
+      type: 'not_found_error',
+    })
+    await expect(fake.sessions.events.list(fake.session.id)).rejects.toMatchObject({ status: 404 })
+    await expect(fake.sendMessage(fake.session.id, 'anyone there?')).rejects.toMatchObject({
+      status: 404,
+    })
+    await expect(fake.sessions.delete(fake.session.id)).rejects.toMatchObject({ status: 404 })
+    expect(() => fake.history()).toThrow()
+    const listed = await fake.sessions.list()
+    expect(listed.data.map((session) => session.id)).not.toContain(fake.session.id)
+
+    const streaming = (async () => {
+      for await (const _event of fake.sessions.events.stream(fake.session.id)) {
+        // Nothing arrives: the session is gone.
+      }
+    })()
+    await expect(streaming).rejects.toMatchObject({ status: 404 })
+  })
+
+  it('deletes only the session it names', async () => {
+    const fake = createFakeClient()
+    const other = await fake.sessions.create({ agent: fake.agent.id })
+
+    await fake.sessions.delete(fake.session.id)
+
+    await expect(fake.sessions.get(other.id)).resolves.toEqual(other)
+    await expect(fake.sessions.delete(other.id)).resolves.toBeUndefined()
+    await expect(fake.sessions.get(other.id)).rejects.toMatchObject({ status: 404 })
+  })
+})
+
+describe('the fake preferences (#111)', () => {
+  it('starts at { default_model: null } and replaces the whole value', async () => {
+    const fake = createFakeClient()
+
+    await expect(fake.preferences.get()).resolves.toEqual({ default_model: null })
+
+    const stored = await fake.preferences.put({ default_model: 'openai/gpt-4.1-mini' })
+    expect(stored).toEqual({ default_model: 'openai/gpt-4.1-mini' })
+    await expect(fake.preferences.get()).resolves.toEqual({ default_model: 'openai/gpt-4.1-mini' })
+
+    // null clears the choice: the whole value is written, like the server's PUT.
+    await expect(fake.preferences.put({ default_model: null })).resolves.toEqual({
+      default_model: null,
+    })
+    await expect(fake.preferences.get()).resolves.toEqual({ default_model: null })
+  })
+
+  it('seeds the value from createFakeClient', async () => {
+    const fake = createFakeClient({
+      preferences: makeUserPreferences({ default_model: 'anthropic/claude-sonnet-5' }),
+    })
+
+    await expect(fake.preferences.get()).resolves.toEqual({
+      default_model: 'anthropic/claude-sonnet-5',
+    })
+  })
+})
+
 describe('the fake catalog', () => {
   it('lists the configured models sorted by provider then name, with the configured statuses', async () => {
     const fake = createFakeClient({
@@ -678,11 +830,16 @@ describe("the fake's authentication", () => {
     await expect(fake.me()).rejects.toBeInstanceOf(AuthenticationError)
     await expect(fake.agents.list()).rejects.toBeInstanceOf(AuthenticationError)
     await expect(fake.sessions.get(fake.session.id)).rejects.toBeInstanceOf(AuthenticationError)
+    await expect(fake.sessions.delete(fake.session.id)).rejects.toBeInstanceOf(AuthenticationError)
     await expect(fake.sendMessage(fake.session.id, 'hi')).rejects.toBeInstanceOf(
       AuthenticationError,
     )
     await expect(fake.providerCredentials.list()).rejects.toBeInstanceOf(AuthenticationError)
     await expect(fake.models.list()).rejects.toBeInstanceOf(AuthenticationError)
+    await expect(fake.preferences.get()).rejects.toBeInstanceOf(AuthenticationError)
+    await expect(fake.preferences.put({ default_model: null })).rejects.toBeInstanceOf(
+      AuthenticationError,
+    )
     await expect(fake.auth.signOut()).rejects.toBeInstanceOf(AuthenticationError)
 
     const streaming = (async () => {
@@ -890,8 +1047,12 @@ async function collect(
 }
 
 /** Append a user message and let the whole turn finish. */
-async function sendAndSettle(fake: FakeClient, text: string): Promise<void> {
-  await fake.sendMessage(fake.session.id, text)
+async function sendAndSettle(
+  fake: FakeClient,
+  text: string,
+  options?: SendMessageOptions,
+): Promise<void> {
+  await fake.sendMessage(fake.session.id, text, options)
   await fake.waitForIdle(fake.session.id)
 }
 

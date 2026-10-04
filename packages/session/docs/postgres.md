@@ -8,8 +8,9 @@ does in memory. The subpath also exports `PostgresCredentialStore`, the durable 
 `CredentialStore` contract, on the same migrations.
 
 This document covers what is specific to these stores: the schema, how the database is
-migrated, how `seq`, ownership, claims, supersession, compaction, fencing, leases and delivery
-are implemented, and how to run Postgres locally.
+migrated, how `seq`, ownership, claims, supersession, compaction, session deletion, the model
+projection, preferences, fencing, leases and delivery are implemented, and how to run Postgres
+locally.
 
 ---
 
@@ -43,7 +44,7 @@ schema.
 
 ## The schema
 
-Twelve tables, in `migrations/`. Seven are this package's:
+Thirteen tables, in `migrations/`. Eight are this package's:
 
 | table                  | what a row is                                                                                                                              |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -54,6 +55,7 @@ Twelve tables, in `migrations/`. Seven are this package's:
 | `event_supersessions`  | one recorded chunk range: `from_seq`, `to_seq`, `by_event_id` (primary key), `by_seq`, `created_at`                                        |
 | `partition_leases`     | who holds a partition, at which epoch, until when                                                                                          |
 | `provider_credentials` | a user's sealed model-provider key, one per `(user_id, provider)`: the sealed blob, `last4`, timestamps                                    |
+| `user_preferences`     | a user's settings across sessions — today the default `model` a new chat starts with — one row per user (#111)                             |
 
 and five are **Better Auth's**, created by the same migrations and read and written by Better
 Auth itself (epic #65, decision A1): `user`, `session`, `account`, `verification` and
@@ -122,6 +124,14 @@ to_seq)` are the range rules in the schema's own words (see
 - **`partition_leases.owner is null` means free**, and a `check` keeps owner and `expires_at`
   in step: an owned lease always has an expiry, a free one has neither.
 
+- **`user_preferences` is one row per user** (#111): `user_id` is the primary key — Better
+  Auth's opaque text, so it takes no `collate "C"`, like `owner_id` — and a foreign key
+  `on delete cascade` from `"user"`, so a user's preferences go with the user. The store
+  replaces the row whole (`on conflict (user_id) do update`), so a user's preferences are one
+  value rather than a history of edits; `default_model` is NULL when the user has no default,
+  and `updated_at` is written from the injected clock. A user with no row reads the protocol's
+  default, `{ default_model: null }` — there is nothing to backfill.
+
 ## Migrations
 
 Plain SQL files in `migrations/`, applied in file-name order by `migrate(db)`. They are
@@ -157,6 +167,7 @@ databases while applying to new ones. Add a new file instead.
 | `0013_provider_credentials.sql`    | `provider_credentials`, the sealed-blob table (epic #65, A5)                                                          |
 | `0014_auth_session_revocation.sql` | the `after delete` trigger on `"session"` that announces revoked sessions (#76)                                       |
 | `0015_session_model.sql`           | the effective `model`/`system` on `sessions`, backfilled from the agent snapshot; the snapshot becomes nullable (#93) |
+| `0016_user_preferences.sql`        | `user_preferences`, one row per user: the stored `default_model`, or NULL (#111)                                      |
 
 To run them outside an application:
 
@@ -232,6 +243,16 @@ condition rather than by an `if not exists`, because this migrator re-runs every
 re-run matches nothing. The `not null` on `model` is set only after the backfill, so existing
 rows pass it. `postgres.test.ts` writes a legacy-shaped row, re-runs the migrations, and reads
 the session back to prove exactly that.
+
+### The per-user preferences (#111)
+
+`0016_user_preferences.sql` (epic #116 U1, issue #111) creates `user_preferences`: one row per
+user — `user_id` primary key, `on delete cascade` from `"user"` — with `default_model text`
+(NULL for no default) and `updated_at timestamptz not null`. It is a single
+`create table if not exists`, and there is nothing to backfill: a user with no row reads the
+protocol's default, `{ default_model: null }`. `postgres.test.ts` re-runs the migrations and
+then reads and writes preferences through the store, so the re-run is proved to leave the
+table working.
 
 ## `seq`: gap-free, in order, under concurrent appends
 
@@ -362,8 +383,9 @@ it had got. `includeSuperseded: true` reads the raw log instead, for debugging. 
 is not filtered: a subscriber hears every event as it happens, and reconciling by id is the
 client's business (the protocol's transcript rules are written for exactly that).
 
-`compact({ olderThan })` is the **only** delete in this package, and it deletes only what a
-range covers, that is a chunk, and that is older than the cutoff:
+`compact({ olderThan })` is one of the **only two** deletes in this package — the other is
+`deleteSession`, below — and it deletes only what a range covers, that is a chunk, and that is
+older than the cutoff:
 
 ```sql
 delete from events e
@@ -375,13 +397,81 @@ delete from events e
 ```
 
 It returns how many events it deleted, is idempotent, and two instances running it at once
-simply split the rows between them. Nothing else is ever deleted: `event_claims` and
+simply split the rows between them. Compaction deletes nothing else: `event_claims` and
 `event_supersessions` are insert-only and outlive the chunks they name, and a superseded
-chunk always has the event that superseded it _after_ it, which is not a chunk and is never
-deleted — so `seq` is never reused, and the gaps a compaction leaves are the normal state of
-a compacted log. `src/postgres/no-updates.test.ts` scans this package's source for the two
-spellings a write back to `events` would use, so "written once, read forever" cannot break
-unnoticed.
+chunk always has the event that superseded it _after_ it, which is not a chunk and which
+compaction never deletes — so `seq` is never reused, and the gaps a compaction leaves are the
+normal state of a compacted log. The one other delete is `deleteSession` below, which is not compaction but
+removal: it takes the whole session, so nothing of it is left to read. `src/postgres/no-updates.test.ts`
+scans this package's source for the two spellings a write back to `events` would use, so
+"written once, read forever" cannot break unnoticed.
+
+## Preferences, the model projection and session deletion (#111)
+
+Three additions from the chat-UX wave (#111), all driven by the store rather than by SQL
+triggers.
+
+**Preferences.** `user_preferences` is one row per user (`user_id` primary key). Both reads
+are simple: `getPreferences` selects `default_model` and answers `{ default_model: null }`
+when no row matched — no row is "no default", not an error — and `putPreferences` is one
+conditional upsert, so two concurrent saves cannot both create a row:
+
+```sql
+insert into user_preferences (user_id, default_model, updated_at)
+values ($1, $2, $3)
+on conflict (user_id) do update
+   set default_model = excluded.default_model,
+       updated_at = excluded.updated_at
+```
+
+`updated_at` comes from the injected clock, and the answers are deep-frozen: a preference is
+a value.
+
+**The model projection.** A `user.message` may carry a `model: { id }` (#111): it is stored on
+the event like every other field, and the append's transaction also writes it onto the session
+row — one `update sessions set model = …, updated_at = …` beside the status update, so a
+session runs what its last model-carrying message asked for. Within a batch the later message
+wins, a message without one leaves the column alone, and `createSession`'s `initial_events`
+go through the same code path, so a model-carrying message among them is what the session
+starts with. The log stays the source of truth: the switch is recorded on the message, and
+every `span.model_request_start` records the model its request actually ran.
+
+**Session deletion.** `deleteSession(sessionId, { ownerId })` is the one delete that removes a
+session — the deliberate second exception to "events are never deleted" beside compaction, and
+irreversible. The owner's session row is locked first, exactly as an append locks it, so a
+write in flight is serialized against the delete; then, in one transaction:
+
+```sql
+delete from events               where session_id = $1;
+delete from event_claims         where session_id = $1;
+delete from event_supersessions  where session_id = $1;
+delete from sessions             where id = $1;
+select pg_notify($session_channel, '{"sessionId": "sesn_…"}');
+```
+
+The session's own row is deleted last, and the event rows explicitly — they would cascade from
+`sessions`, but a delete that names what it removes needs no cascade to be read (and
+`event_claims` and `event_supersessions` carry no foreign key at all, so nothing else would
+ever remove their rows). An id that names no session, or somebody else's, is answered `false`
+without touching anything, exactly as a scoped read answers `null`.
+
+The owner is part of the check (`owner_id = $caller`), so the refusal is the same `false` for
+a foreign session as for an unknown id — nothing leaks. After it returns `true` the session is
+gone from every read: `getSession`/`getSessionUnscoped` answer `null`, `listEvents`,
+`appendEvents`, `getPendingUserEvents` and `getTurnState` throw `SessionNotFoundError`, and an
+event id the deleted session held is free again for a later append (the unique constraint sees
+no row).
+
+**The notification.** The delete's last statement announces the session on **its own channel**
+— the same hashed channel its events travel on, because that is where its subscribers are
+listening — with a payload that names it, `{"sessionId": "sesn_…"}`, and no `seq`. A
+subscriber that sees it delivers one final `session.deleted` stream event to each of that
+session's listeners, forgets the subscription's position and `UNLISTEN`s the channel when that
+was the last listener, so nothing is ever fetched for a log that no longer exists. Because the
+notification is published inside the delete transaction, Postgres delivers it on commit — and
+to **every** instance listening, whichever one deleted the session. It is the one delivery
+outside the "in `seq` order" rule: there is no log left to position it in, so it is simply
+last.
 
 ## Fencing and leases
 
@@ -447,13 +537,19 @@ session.
 **Payloads.** A notification is `{"seq": n}` — never the event, which is unbounded while a
 notification is not. A subscriber that sees it fetches `seq > lastSeen` in order, which is
 what makes coalesced, repeated or missed notifications harmless: the log is the record, the
-notification is a nudge. (The pre-P4 store also announced ephemeral previews in the payload,
-and a payload shaped like one is ignored now; there is no preview to deliver.)
+notification is a nudge. **One payload on a session channel is not a `seq`**: a deletion is
+announced on the session's own channel as `{"sessionId": "sesn_…"}`, and a subscriber that
+sees it delivers a final `session.deleted` event to that session's listeners and ends the
+subscription (see [session deletion](#preferences-the-model-projection-and-session-deletion-111)).
+(The pre-P4 store also announced ephemeral previews in the payload, and a payload shaped like
+one is ignored now; there is no preview to deliver.)
 
 **Order.** All notification handling goes through one queue, one notification at a time, and
 each subscription remembers the last `seq` each of its listeners was given. So events are
 delivered in `seq` order, once each — and a fetch that happens to bring back rows a listener
-has already seen skips them rather than repeating them.
+has already seen skips them rather than repeating them. A `session.deleted` has no `seq`, so
+it is outside that rule: it is the subscription's **last** delivery, and nothing is fetched
+after it.
 
 **Signals** travel on the partition's channel, so every instance listening for that partition
 hears one — not just the instance that sent it. A signal that nobody is listening for is
@@ -492,9 +588,9 @@ DATABASE_URL=postgres://postgres:postgres@localhost:5432/openharness yarn test
 ```
 
 The suites truncate every table this package owns before each test, so they are happy to share
-a database with anything else — but they will empty all seven of them — `agents`, `sessions`,
-`events`, `event_claims`, `event_supersessions`, `partition_leases` and
-`provider_credentials` — in whatever database `DATABASE_URL` points at. Better Auth's tables
+a database with anything else — but they will empty all eight of them — `agents`, `sessions`,
+`events`, `event_claims`, `event_supersessions`, `partition_leases`, `provider_credentials`
+and `user_preferences` — in whatever database `DATABASE_URL` points at. Better Auth's tables
 are left alone apart from the two `"user"` rows the suites insert for their owners (the
 `ensureUsers` hook), so a database that also holds real sign-ins keeps them. Point
 `DATABASE_URL` at a scratch database anyway.
