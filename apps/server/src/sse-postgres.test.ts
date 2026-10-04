@@ -180,11 +180,16 @@ if (SOURCE === null) {
         // Better Auth validates the schema it is configured against on every request; this
         // asks it directly, so a migration that drifts from what 1.7.6 expects fails here by
         // name rather than as a strange sign-in failure later.
+        //
+        // The check answers a promise on its first call and `undefined` once it has already
+        // run and passed — boot seeds the dev user through `$context`, and that can be the
+        // first caller — so the answer is wrapped before `resolves`: asserting on the raw
+        // value made this test fail whenever the seed's check got there first.
         const authContext = await test.auth.auth.$context
         const checkSchema: unknown = (authContext as { checkSchema?: unknown }).checkSchema
         expect(typeof checkSchema).toBe('function')
         await expect(
-          (checkSchema as () => Promise<unknown> | undefined).call(authContext),
+          Promise.resolve((checkSchema as () => Promise<unknown> | undefined).call(authContext)),
         ).resolves.toBeUndefined()
         // And a sign-in really works on it — the same dev user the other suites use.
         const signedIn = await test.signIn()

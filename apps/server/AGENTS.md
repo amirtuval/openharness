@@ -364,11 +364,21 @@ only while it holds that partition's lease, writing every turn under `fence: {pa
   scan at half the space so instances booting together share it, and an instance holding more
   than `ceil(partitions / (1 + peers))` gives the surplus up — finishing the turns in it first,
   then releasing.
+- **A holder of the whole space, with nothing running and no peer visible, offers its newest
+  half back** for one heartbeat and takes back whatever nobody claimed. The estimate cannot
+  see a peer that holds _nothing_ — no failed acquire means no evidence — so without the offer
+  an instance whose first scan lost the race for the space (one slow round trip is enough on a
+  loaded runner, where the winner's next heartbeat arrives first) would starve forever while
+  the winner holds everything. The offer is a release, not a steal: no live lease is touched,
+  and it backs off from one heartbeat to one lease TTL, so an instance that really is alone
+  pays one partition's heartbeat only rarely and never while it is serving.
 - **Losing a lease** — a refused renewal, or a `FencedError` out of a turn — aborts that
   partition's turns, ends its subscription and stops it running work for it. It never crashes
   the process.
 - **`stop()`** drains the turns in flight and then releases every lease, so the next instance
-  takes over at its next heartbeat instead of waiting out the TTL.
+  takes over at its next heartbeat instead of waiting out the TTL. A lease whose acquire was
+  in flight when the stop began is released too, as soon as the scan sees the instance
+  stopped — a stop never leaves a live lease (and so a stranded, unserved partition) behind.
 - **`pause()`/`resume()`** stop and restart the timers without giving anything up: what a
   wedged process looks like from the outside, and what the zombie tests use.
 - **`heldPartitions()`** is what an instance owns right now.
@@ -618,11 +628,15 @@ delete each other's sessions. Packages still run in parallel with each other.
   message queued behind an interrupt, recovery on start, concurrency, stopping, and the fence
   reaching the store.
 - `partition-scheduler.test.ts` — the multi-instance scheduler against real Postgres, several
-  instances in one process each with its own store connection: spread and takeover, one turn
-  per session, a crash mid-turn and the recovery that finishes it, a zombie that cannot write,
-  a lease that cannot be renewed, interrupts routed across instances, the sweep, the fences a
-  turn writes with, and shutdown handing its partitions back. `DATABASE_URL` when it is set,
-  otherwise a container, otherwise the suite is skipped with a note.
+  instances in one process each with its own store connection: spread and takeover, the offer
+  that finds a peer whose first scan lost the race, one turn per session, a crash mid-turn and
+  the recovery that finishes it, a zombie that cannot write, a lease that cannot be renewed,
+  interrupts routed across instances, the sweep, the fences a turn writes with, and shutdown
+  handing its partitions back. Tests that are not _about_ lease loss run with long leases
+  (`LONG_TTL_MS`), so a loaded runner cannot make a healthy instance look dead and turn their
+  assertions into crash-recovery ones; only the pause/death/renewal tests keep the short TTL.
+  `DATABASE_URL` when it is set, otherwise a container, otherwise the suite is skipped with a
+  note.
 - `ai-sdk.test.ts` — the adapter through `DefaultChatTransport` and `readUIMessageStream`.
 - `mock-model.test.ts` — the echo, `__slow__`, both failure markers, fixed usage, and that the
   hook cannot activate without the variable.

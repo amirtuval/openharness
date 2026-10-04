@@ -63,9 +63,12 @@ import type { SessionScheduler, StopSchedulerOptions } from './scheduler'
  * expire, the survivor takes them, and `blocked` falls back to zero — so the survivor's share
  * grows back to the whole space rather than leaving half of it unowned. What this cannot do is
  * discover a peer that holds *nothing*: an instance that joins a space which is already fully
- * held live will stay idle until a lease is released or expires. Leases are released on
- * shutdown and expire on a crash, so that is a property of when work becomes available, not a
- * dead end.
+ * held live will stay idle until a lease is released or expires — with one exception, so that
+ * a peer that booted at the same time as this one and simply lost the race for the space is
+ * not starved forever: the `#offer` step. An instance that holds the *whole* space, sees no
+ * peer and has nothing running offers its partitions back for one heartbeat, so the invisible
+ * peer can take its share and become visible; the scan takes back whatever nobody claimed.
+ * Releasing — never stealing — is what keeps the promise that a live lease is inviolate.
  *
  * ## Losing a lease
  *
@@ -192,6 +195,12 @@ export class PostgresPartitionScheduler implements SessionScheduler {
   /** This instance's estimate of how many other instances are alive; see "Balancing". */
   #peers = 0
 
+  /** The earliest time the next offer may be made; see {@link #offer}. */
+  #offerAt = 0
+
+  /** How long until the offer after the next one; doubles from one heartbeat up to the TTL. */
+  #offerDelayMs = 0
+
   /** Whether the first scan — the one that stops at half the space — has happened. */
   #claimed = false
 
@@ -240,6 +249,7 @@ export class PostgresPartitionScheduler implements SessionScheduler {
       )
     }
     this.#cursor = hashOffset(options.instanceId, this.#partitions)
+    this.#offerDelayMs = this.#heartbeatMs
     this.#queue = new PassQueue({
       runner:
         options.runner ??
@@ -388,6 +398,56 @@ export class PostgresPartitionScheduler implements SessionScheduler {
       return
     }
     await this.#scan()
+    await this.#offer()
+  }
+
+  /**
+   * When this instance holds the whole space and can see no peer, give half of it back for one
+   * cooling window, so a peer the estimate cannot see can take its share.
+   *
+   * This is the one gap the share-based balancing cannot close. `#learnPeers` infers peers
+   * from leases this instance *failed to take*, and a peer that holds nothing has no lease to
+   * fail on: if its first scan loses the race for the free space (a loaded runner is enough —
+   * the first acquire's round trip overruns the winner's next heartbeat), it is invisible
+   * forever, and the winner holds the whole space forever. Nothing on either side can break
+   * that: the loser has nothing to release and the winner has no surplus to give up.
+   *
+   * Releasing is the way out, and it is safe because it is a *release*, not a steal: the
+   * lease's epoch advances, and at most one cooling window passes before the scan takes back
+   * whatever nobody claimed. It offers the *newest* half — the same half a fresh instance
+   * stops at, which is what makes the handshake work: a peer that is still scanning takes its
+   * half out of it and is visible from then on. It only runs while this instance has nothing
+   * running at all (a busy deployment is not interrupted for the sake of a peer that may not
+   * exist) and backs off from one heartbeat up to one lease TTL, so a deployment that really
+   * is one idle instance pays one heartbeat of one heartbeat's worth of the space, rarely.
+   */
+  async #offer(): Promise<void> {
+    if (this.#stopped || this.#paused || this.#held.size < this.#partitions || this.#peers > 0) {
+      return
+    }
+    if (this.#queue.activeSessions().length > 0 || Date.now() < this.#offerAt) {
+      return
+    }
+    const half = Math.max(1, Math.floor(this.#partitions / 2))
+    const offered: number[] = []
+    for (const partition of [...this.#order].reverse().slice(0, half)) {
+      const lease = this.#held.get(partition)
+      if (lease === undefined) {
+        continue
+      }
+      this.#forget(partition)?.abort()
+      this.#releasedAt.set(partition, Date.now())
+      offered.push(partition)
+      await this.#store.releasePartition(partition, this.#instanceId, lease.epoch)
+    }
+    if (offered.length === 0) {
+      return
+    }
+    this.#offerAt = Date.now() + this.#offerDelayMs
+    this.#offerDelayMs = Math.min(this.#offerDelayMs * 2, this.#ttlMs)
+    this.#notice(
+      `offered partitions ${describePartitions(offered)} to any peer that cannot be seen`,
+    )
   }
 
   /** Extend every lease; one that cannot be extended is not ours any more. */
@@ -464,10 +524,21 @@ export class PostgresPartitionScheduler implements SessionScheduler {
       this.#handleSignal(signal)
     })
     if (!this.#held.has(partition) || this.#stopped) {
-      // The lease went away while the subscription was being set up: drop the partition
-      // again, so nothing is held that has no listener of its own.
+      // The lease went away while the subscription was being set up — or this instance began
+      // stopping: either way, drop the partition again, so nothing is held that has no
+      // listener of its own. If the lease is still this instance's (a `stop()` that raced
+      // this acquire), it is *released* on the way out: a stopping instance must not leave a
+      // live lease behind, or the next instance waits out the whole TTL for a partition
+      // nobody is running. A lease that is no longer ours — it expired and somebody else
+      // took it — makes the release a no-op.
       unsubscribe()
       this.#forget(partition)
+      try {
+        await this.#store.releasePartition(partition, this.#instanceId, lease.epoch)
+      } catch (error: unknown) {
+        // A lease that cannot be released expires; the TTL is what makes that safe.
+        this.#report(error, undefined)
+      }
       return
     }
     this.#subscriptions.set(partition, unsubscribe)

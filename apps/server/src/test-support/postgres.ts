@@ -99,6 +99,22 @@ export async function startPostgres(
   }
   const pool = new Pool({ connectionString, max: POOL_SIZE })
   const db = new Kysely<PostgresSchema>({ dialect: new PostgresDialect({ pool }) })
+  // A `pg` pool re-emits an idle client's error as an `error` event on the pool itself, and a
+  // pool nobody listens to turns that into an unhandled 'error' event. One of those is the
+  // *expected* end of a run against a container: `pool.end()` resolves once every client has
+  // been marked released, but each client's socket closes a moment later, and the container
+  // stopping first makes Postgres answer the still-attached client with an admin shutdown
+  // (SQLSTATE 57P01). That error is only expected while `close()` is tearing the fixture
+  // down; anything else is kept here and thrown by `close()`, so a real connection problem is
+  // still loud rather than being swallowed for the sake of the teardown race.
+  const poolErrors: Error[] = []
+  let tearingDown = false
+  pool.on('error', (error: Error) => {
+    if (tearingDown && isAdminShutdown(error)) {
+      return
+    }
+    poolErrors.push(error)
+  })
   await migrate(db)
   // `owner_id` references Better Auth's `"user"` row, so the owner the tests create as has to
   // exist before the first agent does — exactly what Better Auth's sign-in does in production.
@@ -121,9 +137,20 @@ export async function startPostgres(
     },
     truncate: () => truncateAll(db),
     close: async () => {
+      // Order matters: every store's listening connection goes first, then the pool, and only
+      // then the container — so nothing is still attached when Postgres shuts down.
+      tearingDown = true
       await Promise.all(stores.splice(0).map((store) => store.close()))
       await pool.end()
       await container?.stop()
+      const first = poolErrors[0]
+      if (first !== undefined) {
+        throw new Error(
+          `the Postgres pool reported ${poolErrors.length} unexpected error(s) outside teardown; ` +
+            `the first was: ${first.message}`,
+          { cause: first },
+        )
+      }
     },
   }
   return fixture
@@ -147,6 +174,15 @@ export async function ensureTestUser(db: Kysely<PostgresSchema>, userId: UserId)
 /** Empty every table the store uses; `session_previews` was dropped in P4 (issue #46). */
 export async function truncateAll(db: Kysely<PostgresSchema>): Promise<void> {
   await sql`truncate table events, sessions, agents, partition_leases`.execute(db)
+}
+
+/**
+ * Whether an error is Postgres's admin shutdown — SQLSTATE `57P01`, "terminating connection
+ * due to administrator command" — which is what a client that is still attached when the
+ * server stops is answered with.
+ */
+function isAdminShutdown(error: Error): boolean {
+  return (error as { code?: unknown }).code === '57P01'
 }
 
 /** What a recorded write carried: the fence, when the writer attached one. */

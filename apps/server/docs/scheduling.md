@@ -113,14 +113,27 @@ time — balancing is inferred from lease _outcomes_:
   the lease released, so the peer that takes them over inherits closed turns. Released
   partitions are left alone by this instance for a heartbeat, so the peer gets the chance to
   take them instead of watching them bounce back.
+- **An instance that holds the whole space with nothing running offers its newest half back**
+  for one heartbeat, then takes back whatever nobody claimed. This is the one gap the estimate
+  cannot close: a peer that holds nothing produces no failed acquire, so it is invisible, and
+  if its first scan merely lost the race for the free space (a loaded runner is enough — one
+  slow round trip can let the winner's next heartbeat take everything) the two instances would
+  stand still forever, one holding the whole space and one holding nothing. Nothing on either
+  side can break that stand-off: the loser has nothing to release and the winner has no visible
+  peer to shed surplus for. The offer is a _release_, not a steal — the epoch advances, no
+  live lease is touched, and only partitions with no pass in flight are offered — and it backs
+  off from one heartbeat to one lease TTL, so an instance that really is alone pays one
+  partition's heartbeat, rarely, and never while it is busy serving.
 - **The estimate is not sticky.** When a peer dies its leases expire, the survivor takes them,
   `blocked` falls back to zero and its share grows back to the whole space — rather than half of
   it being left unowned because the survivor still remembered a peer that is gone.
 
-What this cannot do is _discover_ a peer that holds nothing: an instance that joins a space
-that is already fully held live stays idle until a lease is released or expires. Leases are
-released on shutdown and expire on a crash, so that is a property of when work becomes
-available, not a dead end — and it is the price of never taking a lease away from a live owner.
+What this still cannot do is _discover_ a peer that holds nothing while the holder is busy:
+an instance that joins a space that is fully held live, with work running, stays idle until a
+lease is released or expires. Leases are released on shutdown and expire on a crash, so that
+is a property of when work becomes available, not a dead end — and it is the price of never
+taking a lease away from a live owner. The offer narrows it to exactly that case: an idle
+holder gives the newcomer its door in.
 
 ## Signals
 
@@ -148,7 +161,10 @@ has just changed hands gets the same answer as one that has been running all alo
 `stop()` stops the timers, drains the turns in flight (they are aborted, so a brain cuts its
 model request short and writes the partial reply, the closed span and `session.status_idle`
 before it stops), and then **releases every lease it still holds**. The next instance takes the
-partitions over at its next heartbeat rather than waiting out the TTL.
+partitions over at its next heartbeat rather than waiting out the TTL. An acquire that was
+already in flight when the stop began is included: it cannot be cancelled, so the scan that
+holds it releases it the moment it sees the instance stopped — a stopping instance never
+leaves a live lease behind.
 
 A crash is the other half of that: nothing is released, so the partitions sit until
 `OPENHARNESS_LEASE_TTL_MS` passes and the survivors' scans find them expired and take them.
@@ -197,7 +213,9 @@ inside a test; every wait is a `waitFor` with a bounded timeout rather than a fi
 | test                                              | what it pins down                                           |
 | ------------------------------------------------- | ----------------------------------------------------------- |
 | spread over instances that boot together          | half each, no overlap, and nothing changes hands afterwards |
-| a live lease cannot be taken, a released one can  | the starved instance waits; the lease holder may give up    |
+| a first scan that loses the race                  | the offer finds a peer the estimate cannot see              |
+| a live lease cannot be taken, a released one can  | no renewal ever fails, no overlap, a released one moves     |
+| a stop racing an acquire                          | the lease it was taking is released, not left to the TTL    |
 | leases handed back on shutdown                    | takeover well inside a 30-second TTL                        |
 | one turn, in the instance that owns the session   | routed signal, one model request, one reply                 |
 | every write fenced with the lease the owner holds | `{partition, epoch}` on every append and claim              |

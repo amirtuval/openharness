@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { afterEach, describe, expect, it } from 'vitest'
+import { InMemorySessionStore } from '@openharness/session'
 import {
   API_VERSION_PREFIX,
   AgentSchema,
@@ -46,6 +47,12 @@ afterEach(async () => {
 function setup(options: Parameters<typeof createTestApp>[0] = {}): TestContext {
   context = createTestApp(options)
   return context
+}
+
+/** A clock for a store: real time does not matter, but no two reads share a millisecond. */
+function steppingClock(startMs: number): () => number {
+  let tick = startMs
+  return () => (tick += 1)
 }
 
 /** Read one session over HTTP, checked against the protocol's schema. */
@@ -119,7 +126,13 @@ describe('the agents API', () => {
   })
 
   it('lists agents, oldest first, in the list envelope', async () => {
-    const test = setup()
+    // Two agents created inside the same millisecond share `created_at`, and the list's
+    // tie-break is then the id: two ULIDs minted in one instant differ only in random bits,
+    // which know nothing about creation order. On a fast enough machine the two creations do
+    // land in one millisecond (it flaked on CI exactly that way), and the assertion below
+    // became a coin flip — so the store's clock gives every call its own instant. That is
+    // what "oldest first" is about: `(created_at, id)`, the order the list contract promises.
+    const test = setup({ store: new InMemorySessionStore({ now: steppingClock(Date.now()) }) })
     const first = await httpCreateAgent(test, { name: 'First' })
     const second = await httpCreateAgent(test, { name: 'Second' })
 
