@@ -32,6 +32,7 @@ export type { Client, ClientOptions, RequestOptions } from './client'
 export type { AgentsResource } from './resources/agents'
 export type { SessionEventsResource, SessionsResource } from './resources/sessions'
 export type { ProviderCredentialsResource } from './resources/provider-credentials'
+export type { ModelsResource } from './resources/models'
 
 export { DeviceLoginError, OPENHARNESS_CLI_CLIENT_ID } from './resources/auth'
 export type { AuthResource, DeviceLoginStart, PollDeviceLoginOptions } from './resources/auth'

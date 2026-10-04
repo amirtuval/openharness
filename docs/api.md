@@ -48,25 +48,26 @@ same way, in the same request.
 
 ## Routes
 
-| method   | path                                      | what it does                                                         |
-| -------- | ----------------------------------------- | -------------------------------------------------------------------- |
-| `GET`    | `/health`                                 | liveness; open, like `/v1/auth-config` below                         |
-| `GET`    | `/v1/auth-config`                         | unauthenticated: which providers are on, and whether dev login is    |
-| `GET`    | `/v1/me`                                  | the signed-in user                                                   |
-| `POST`   | `/v1/agents`                              | create an agent                                                      |
-| `GET`    | `/v1/agents`                              | list agents, oldest first                                            |
-| `GET`    | `/v1/agents/{agent_id}`                   | read one agent                                                       |
-| `POST`   | `/v1/agents/{agent_id}`                   | update an agent; sessions already created keep their snapshot        |
-| `POST`   | `/v1/sessions`                            | create a session that snapshots an agent                             |
-| `GET`    | `/v1/sessions`                            | list sessions, newest first (`agent_id` filters)                     |
-| `GET`    | `/v1/sessions/{session_id}`               | read one session                                                     |
-| `POST`   | `/v1/sessions/{session_id}/events`        | append user events; the server owns every other event type           |
-| `GET`    | `/v1/sessions/{session_id}/events`        | read the log, with `types[]`, `after_seq`, `limit` and `page`        |
-| `GET`    | `/v1/sessions/{session_id}/events/stream` | follow it live over SSE; `event_deltas[]` opts into a reply's chunks |
-| `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`   | AI SDK `useChat` compatibility — an extension, not the protocol      |
-| `PUT`    | `/v1/provider-credentials/{provider}`     | add or replace the caller's credential for a provider (write-only)   |
-| `GET`    | `/v1/provider-credentials`                | list the caller's credential metadata; never the secrets             |
-| `DELETE` | `/v1/provider-credentials/{provider}`     | delete one; answers `204` with no body                               |
+| method   | path                                      | what it does                                                            |
+| -------- | ----------------------------------------- | ----------------------------------------------------------------------- |
+| `GET`    | `/health`                                 | liveness; open, like `/v1/auth-config` below                            |
+| `GET`    | `/v1/auth-config`                         | unauthenticated: which providers are on, and whether dev login is       |
+| `GET`    | `/v1/me`                                  | the signed-in user                                                      |
+| `POST`   | `/v1/agents`                              | create an agent                                                         |
+| `GET`    | `/v1/agents`                              | list agents, oldest first                                               |
+| `GET`    | `/v1/agents/{agent_id}`                   | read one agent                                                          |
+| `POST`   | `/v1/agents/{agent_id}`                   | update an agent; sessions already created keep their snapshot           |
+| `POST`   | `/v1/sessions`                            | create a session that snapshots an agent                                |
+| `GET`    | `/v1/sessions`                            | list sessions, newest first (`agent_id` filters)                        |
+| `GET`    | `/v1/sessions/{session_id}`               | read one session                                                        |
+| `POST`   | `/v1/sessions/{session_id}/events`        | append user events; the server owns every other event type              |
+| `GET`    | `/v1/sessions/{session_id}/events`        | read the log, with `types[]`, `after_seq`, `limit` and `page`           |
+| `GET`    | `/v1/sessions/{session_id}/events/stream` | follow it live over SSE; `event_deltas[]` opts into a reply's chunks    |
+| `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`   | AI SDK `useChat` compatibility — an extension, not the protocol         |
+| `PUT`    | `/v1/provider-credentials/{provider}`     | add or replace the caller's credential for a provider (write-only)      |
+| `GET`    | `/v1/provider-credentials`                | list the caller's credential metadata; never the secrets                |
+| `DELETE` | `/v1/provider-credentials/{provider}`     | delete one; answers `204` with no body                                  |
+| `GET`    | `/v1/models`                              | the chat models the caller's own keys can use, with per-provider status |
 
 Every `/v1` resource belongs to the caller and is scoped to them.
 
@@ -322,6 +323,67 @@ curl -X DELETE localhost:3000/v1/provider-credentials/anthropic \
   type is `missing_provider_credential` — non-retryable, the message names the provider. The
   server never falls back to provider keys from the environment.
 
+## The model catalog
+
+`GET /v1/models` answers **the chat models the caller's own provider keys can use** — the list
+the agent form picks from. Authentication is the usual one; the optional `refresh=true` query
+parameter bypasses the server's cache (below). The response is `ListModelsResponse`:
+
+```json
+{
+  "data": [
+    {
+      "id": "openai/gpt-4.1-mini",
+      "provider": "openai",
+      "name": "GPT-4.1 mini",
+      "context_window": 1047576,
+      "max_output_tokens": 32768,
+      "source": "provider"
+    },
+    {
+      "id": "anthropic/claude-sonnet-5",
+      "provider": "anthropic",
+      "name": "Claude Sonnet 5",
+      "context_window": 200000,
+      "max_output_tokens": 64000,
+      "source": "registry"
+    }
+  ],
+  "providers": [
+    {
+      "provider": "anthropic",
+      "status": "fallback",
+      "fetched_at": null,
+      "message": "The provider model list timed out."
+    },
+    { "provider": "openai", "status": "ok", "fetched_at": "2026-03-15T10:00:00Z", "message": null }
+  ]
+}
+```
+
+- **Only providers the caller has a credential for are listed.** No environment key is ever
+  used, and neither a key nor any part of one appears in a response, an error or a log.
+  `data` is sorted by provider, then name; the form stays free text regardless — the router
+  accepts `provider/model` ids the catalog does not know yet.
+- **Where the list comes from.** Per provider, the server calls that provider's own
+  list-models endpoint with the caller's credential (`GET /v1/models` for OpenAI and
+  Anthropic, `GET /v1beta/models` for Gemini, `GET /api/v1/models` for OpenRouter,
+  `GET /models` for the OpenAI-compatible providers), from a fixed, known table — a
+  user-supplied URL is never called, so there is no SSRF surface. The Mastra registry then
+  cleans the result: non-chat models (embeddings, image, TTS, …) are dropped, and display
+  names, context windows and max output tokens are filled in where the provider's own list
+  lacks them. An entry's `source` says which side the listing came from.
+- **Fallback is visible, never silent.** If the provider call fails or times out (5 seconds),
+  or the provider has no known list endpoint, that provider's chat models are served from the
+  registry instead: `status: "fallback"`, `fetched_at: null`, and a `message` saying why —
+  never a key. `status: "ok"` means the provider's own list answered. A provider never hides
+  a usable chat model, and no non-chat model is ever shown.
+- **Cache.** The answer is held in memory on the serving instance, per user and provider, for
+  one hour; saving or deleting a credential drops that provider's entry. Nothing is stored in
+  Postgres. `refresh=true` bypasses the cache and re-fetches — rate-limited to **once a
+  minute per user**: a second refresh inside the window is answered `429 rate_limit_error`
+  rather than refreshed, so a Refresh button should show that instead of looping.
+
 ## Errors
 
 | status | type                          | when                                                                                    |
@@ -330,4 +392,5 @@ curl -X DELETE localhost:3000/v1/provider-credentials/anthropic \
 | 401    | `authentication_error`        | not signed in, or the session or bearer token is invalid/expired                        |
 | 404    | `not_found_error`             | the id names nothing, the route does not exist, or the resource belongs to another user |
 | 422    | `invalid_provider_credential` | a provider credential failed validation on save                                         |
+| 429    | `rate_limit_error`            | a cache-bypassing refresh (`/v1/models?refresh=true`) more than once a minute per user  |
 | 500    | `api_error`                   | an unexpected server failure — never a stack trace                                      |

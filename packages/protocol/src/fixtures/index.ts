@@ -4,9 +4,12 @@ import type {
   Agent,
   AgentMessageEvent,
   ContentDelta,
+  ListModelsResponse,
+  ModelEntry,
   ModelRequestEndEvent,
   ModelRequestStartEvent,
   ModelUsage,
+  ProviderCatalogStatus,
   ProviderCredential,
   Session,
   SessionAgent,
@@ -152,6 +155,43 @@ export function makeProviderCredential(
     validated_at: fixtureTimestamp(),
   }
   return { ...credential, ...overrides }
+}
+
+/**
+ * A model-catalog entry: `anthropic/claude-sonnet-5` as the provider's own list reports it,
+ * `source: 'provider'`.
+ *
+ * @param overrides fields to replace on the default entry
+ */
+export function makeModelEntry(overrides: Partial<ModelEntry> = {}): ModelEntry {
+  const entry: ModelEntry = {
+    id: 'anthropic/claude-sonnet-5',
+    provider: 'anthropic',
+    name: 'Claude Sonnet 5',
+    context_window: 200_000,
+    max_output_tokens: 64_000,
+    source: 'provider',
+  }
+  return { ...entry, ...overrides }
+}
+
+/**
+ * A `GET /v1/models` response: one model entry and the `ok` status of the provider it names.
+ *
+ * @param overrides fields to replace on the default response
+ */
+export function makeListModelsResponse(
+  overrides: Partial<ListModelsResponse> = {},
+): ListModelsResponse {
+  const entry = makeModelEntry()
+  const status: ProviderCatalogStatus = {
+    provider: entry.provider,
+    status: 'ok',
+    fetched_at: fixtureTimestamp(),
+    message: null,
+  }
+  const response: ListModelsResponse = { data: [entry], providers: [status] }
+  return { ...response, ...overrides }
 }
 
 // ---------------------------------------------------------------- user events

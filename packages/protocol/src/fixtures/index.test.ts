@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 
 import {
   AgentSchema,
+  ListModelsResponseSchema,
+  ModelEntrySchema,
   ModelRequestEndEventSchema,
   ModelRequestStartEventSchema,
   ProviderCredentialSchema,
@@ -23,6 +25,8 @@ import {
   makeAgent,
   makeAgentMessage,
   makeContentDelta,
+  makeListModelsResponse,
+  makeModelEntry,
   makeModelRequestEnd,
   makeModelRequestStart,
   makeProviderCredential,
@@ -95,6 +99,26 @@ describe('fixture builders', () => {
       ProviderCredentialSchema.safeParse(makeProviderCredential({ validated_at: undefined }))
         .success,
     ).toBe(true)
+  })
+
+  it('builds model catalog fixtures that parse, with the overrides applied', () => {
+    expect(ModelEntrySchema.safeParse(makeModelEntry()).success).toBe(true)
+    expect(ListModelsResponseSchema.safeParse(makeListModelsResponse()).success).toBe(true)
+
+    const registryOnly = makeModelEntry({
+      context_window: null,
+      max_output_tokens: null,
+      source: 'registry',
+    })
+    expect(ModelEntrySchema.safeParse(registryOnly).success).toBe(true)
+    expect(registryOnly.source).toBe('registry')
+
+    const response = makeListModelsResponse({
+      data: [makeModelEntry({ id: 'openai/gpt-5.1', provider: 'openai', name: 'GPT-5.1' })],
+      providers: [makeListModelsResponse().providers[0]!],
+    })
+    expect(ListModelsResponseSchema.safeParse(response).success).toBe(true)
+    expect(response.data[0]?.provider).toBe('openai')
   })
 
   it('build content deltas that parse', () => {

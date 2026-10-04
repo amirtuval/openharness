@@ -60,6 +60,7 @@ src/
   readonly.ts           DeepReadonly, the helper the immutable event types are built with
   resources/
     agent.ts            the agent resource + its endpoints
+    model.ts            the model catalog (GET /v1/models) and its entries
     provider-credential.ts  provider credential metadata (write-only) + its endpoints
     session.ts          the session resource + its endpoints
     user.ts             the signed-in user: GET /v1/me, UserIdSchema (owner_id)
@@ -84,21 +85,23 @@ Two entry points, named in `package.json`'s `exports`. Both resolve to built out
 
 **Resources**
 
-| export                                                                                                    | what it is                                                      |
-| --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| `AgentSchema` / `Agent`                                                                                   | the `agent` resource (carries a read-only `owner_id`)           |
-| `CreateAgentRequestSchema`, `UpdateAgentRequestSchema`                                                    | bodies of `POST /v1/agents`, `POST /v1/agents/{agent_id}`       |
-| `ListAgentsQuerySchema`, `ListAgentsResponseSchema`                                                       | `GET /v1/agents`                                                |
-| `ModelConfigSchema` / `ModelConfig`                                                                       | `{ id }`, where `id` is a Mastra router string `provider/model` |
-| `SessionSchema` / `Session`, `SessionAgentSchema` / `SessionAgent`                                        | the `session` resource (read-only `owner_id`) and its snapshot  |
-| `SessionStatusSchema`, `StopReasonSchema`                                                                 | `idle`/`running`; `{ type: 'end_turn' }`                        |
-| `CreateSessionRequestSchema`, `ListSessionsQuerySchema`, `ListSessionsResponseSchema`                     | the sessions endpoints                                          |
-| `UserSchema` / `User`, `GetMeResponseSchema` / `GetMeResponse`                                            | the signed-in user; `GET /v1/me`                                |
-| `UserIdSchema` / `UserId`                                                                                 | an opaque Better Auth user id; what `owner_id` holds            |
-| `ProviderCredentialSchema` / `ProviderCredential`, `ProviderCredentialTypeSchema`                         | credential metadata (`api_key` only today); never the secret    |
-| `ApiKeyProviderCredentialSchema`, `PutProviderCredentialRequestSchema` / `PutProviderCredentialRequest`   | body of `PUT /v1/provider-credentials/{provider}` (write-only)  |
-| `ListProviderCredentialsResponseSchema` / `ListProviderCredentialsResponse`                               | `GET /v1/provider-credentials`                                  |
-| `AGENT_NAME_MAX_LENGTH`, `AGENT_DESCRIPTION_MAX_LENGTH`, `SESSION_TITLE_MAX_LENGTH`, `MAX_INITIAL_EVENTS` | limits Anthropic documents                                      |
+| export                                                                                                    | what it is                                                               |
+| --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `AgentSchema` / `Agent`                                                                                   | the `agent` resource (carries a read-only `owner_id`)                    |
+| `CreateAgentRequestSchema`, `UpdateAgentRequestSchema`                                                    | bodies of `POST /v1/agents`, `POST /v1/agents/{agent_id}`                |
+| `ListAgentsQuerySchema`, `ListAgentsResponseSchema`                                                       | `GET /v1/agents`                                                         |
+| `ModelConfigSchema` / `ModelConfig`                                                                       | `{ id }`, where `id` is a Mastra router string `provider/model`          |
+| `ModelEntrySchema` / `ModelEntry`, `ProviderCatalogStatusSchema` / `ProviderCatalogStatus`                | one `GET /v1/models` entry, and one provider's catalog status (epic #92) |
+| `ListModelsResponseSchema` / `ListModelsResponse`, `ListModelsQuerySchema` / `ListModelsQuery`            | `GET /v1/models`; `refresh` bypasses the cache (C4)                      |
+| `SessionSchema` / `Session`, `SessionAgentSchema` / `SessionAgent`                                        | the `session` resource (read-only `owner_id`) and its snapshot           |
+| `SessionStatusSchema`, `StopReasonSchema`                                                                 | `idle`/`running`; `{ type: 'end_turn' }`                                 |
+| `CreateSessionRequestSchema`, `ListSessionsQuerySchema`, `ListSessionsResponseSchema`                     | the sessions endpoints                                                   |
+| `UserSchema` / `User`, `GetMeResponseSchema` / `GetMeResponse`                                            | the signed-in user; `GET /v1/me`                                         |
+| `UserIdSchema` / `UserId`                                                                                 | an opaque Better Auth user id; what `owner_id` holds                     |
+| `ProviderCredentialSchema` / `ProviderCredential`, `ProviderCredentialTypeSchema`                         | credential metadata (`api_key` only today); never the secret             |
+| `ApiKeyProviderCredentialSchema`, `PutProviderCredentialRequestSchema` / `PutProviderCredentialRequest`   | body of `PUT /v1/provider-credentials/{provider}` (write-only)           |
+| `ListProviderCredentialsResponseSchema` / `ListProviderCredentialsResponse`                               | `GET /v1/provider-credentials`                                           |
+| `AGENT_NAME_MAX_LENGTH`, `AGENT_DESCRIPTION_MAX_LENGTH`, `SESSION_TITLE_MAX_LENGTH`, `MAX_INITIAL_EVENTS` | limits Anthropic documents                                               |
 
 **Events**
 
@@ -213,6 +216,30 @@ part of this protocol, and no schema here names a cookie, a token or an auth hea
   (`newProviderCredentialId()`); a user's id is Better Auth's — opaque, with no prefix of
   ours — and that is exactly what `owner_id` holds.
 
+## The model catalog (epic #92, wave 1)
+
+This package carries the **wire shapes** of the model catalog — `GET /v1/models` — and nothing
+of how the server fills them (that is #90, in `apps/server`). The catalog is the chat models
+the caller's own provider keys can use; the route and its server-side semantics (caching,
+fallback, the refresh rate limit) are documented in
+[docs/api.md](../../docs/api.md#the-model-catalog).
+
+- **`ModelEntry`** is one chat model: `id` (the Mastra router string an agent's `model.id`
+  takes, `provider/model`), `provider` (its prefix), a display `name`, `context_window` and
+  `max_output_tokens` (`null` when neither the provider nor the registry knows them), and
+  `source` — `provider` when the provider's own list carried it, `registry` when it came from
+  the registry alone (C3).
+- **`ProviderCatalogStatus`** is one provider's outcome, one per provider the caller has a
+  credential for (C5): `ok`, or `fallback` when the provider's list failed or timed out (5 s)
+  and the registry's chat models stood in; `fetched_at` is the provider call's time (`null` on
+  a fallback), and `message` says why it fell back — never any part of a key.
+- **`ListModelsResponse`** is `{ data, providers }`: the entries sorted by provider then name,
+  and the statuses. There is no pagination envelope — the response is bounded by the caller's
+  own keys, and the agent form shows every provider at once.
+- **`ListModelsQuery.refresh`** bypasses the server's per-user, per-provider one-hour cache
+  (C4) and is rate-limited to once a minute per user. The schema reads the wire spelling
+  `'true'` / `'false'` as well as a real boolean, because a query string arrives as text.
+
 ## Page cursors
 
 `next_page` in a list response, and the `page` query parameter that carries it back, are one
@@ -303,25 +330,26 @@ column points at the definition in code; the same list appears in the TSDoc ther
 
 ### Deviations — subsets and changed shapes
 
-| deviation                                                                                              | where                         | Anthropic                                                                                                                                                                                           |
-| ------------------------------------------------------------------------------------------------------ | ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Content blocks are text only: no `image`, `document`, `file` or `redacted` blocks                      | `content.ts`                  | user messages accept image/document/file blocks; agent messages may carry `redacted`                                                                                                                |
-| `model` is `{ id }` only: no `effort`, `inference_geo`, `speed`                                        | `resources/agent.ts`          | `BetaManagedAgentsModelConfig`                                                                                                                                                                      |
-| `model.id` is a **Mastra router string** (`provider/model`), not a bare Anthropic model id             | `resources/agent.ts`          | `"claude-sonnet-5"`                                                                                                                                                                                 |
-| `stop_reason` is only `{ type: 'end_turn' }`                                                           | `events/session.ts`           | also `requires_action`, `retries_exhausted`, `budget_reached`                                                                                                                                       |
-| `SessionStatus` is only `idle`/`running`                                                               | `resources/session.ts`        | also `rescheduling` and `terminated`; openharness models retries as `session.status_rescheduled` events                                                                                             |
-| An agent has no `archived_at`, `mcp_servers`, `metadata`, `multiagent`, `skills`, `tools` or `version` | `resources/agent.ts`          | all present                                                                                                                                                                                         |
-| A session agent snapshot is `{ id, name, model, system }`                                              | `resources/session.ts`        | `BetaManagedAgentsSessionAgent` also carries `description`, `mcp_servers`, `skills`, `tools`, `version`                                                                                             |
-| `initial_events` accepts user events (`user.message`, `user.interrupt`); at most 50                    | `resources/session.ts`        | only `user.message` and `user.define_outcome`                                                                                                                                                       |
-| `POST /v1/sessions` takes an `agent` **id string**; no inline agent reference or per-session overrides | `resources/session.ts`        | `string`, `{ type: 'agent', id, version? }` or `{ type: 'agent_with_overrides', ... }`                                                                                                              |
-| `event_deltas[]` accepts `agent.message` only                                                          | `events/stream.ts`            | also `agent.thinking` (start-only)                                                                                                                                                                  |
-| No system events (`system.message`), tools, MCP, outcomes, multiagent threads, budgets or webhooks     | everything                    | all present in the beta                                                                                                                                                                             |
-| `GET /v1/sessions` takes only `limit`, `page` and `agent_id`; `GET /v1/agents` only `limit` and `page` | `resources/`                  | sessions also take `agent_version`, `created_at[gt]`-style bounds, `deployment_id`, `include_archived`, `memory_store_id` and `statuses`; agents also take `created_at[...]` and `include_archived` |
-| `processed_at` is written as an explicit `null` on a queued user event rather than omitted             | `events/common.ts`            | `optional string or null`                                                                                                                                                                           |
-| `content_delta.index` may be omitted, and parses as `0`                                                | `events/stream.ts`            | `index: optional number`; Anthropic's own accumulator reads a missing index as 0                                                                                                                    |
-| `request_id` in the error envelope is optional here                                                    | `errors.ts`                   | Anthropic always includes it; a proxy or a pre-app error may not have one to report                                                                                                                 |
-| `data` and `next_page` are required in every list response                                             | `events/api.ts`, `resources/` | Anthropic's generated spec marks both `optional`; openharness always writes them, and `next_page: null` is how "no more pages" is spelled                                                           |
-| Unknown **fields** are stripped, not rejected, by every object schema                                  | everywhere                    | —                                                                                                                                                                                                   |
+| deviation                                                                                              | where                         | Anthropic                                                                                                                                                                                                  |
+| ------------------------------------------------------------------------------------------------------ | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Content blocks are text only: no `image`, `document`, `file` or `redacted` blocks                      | `content.ts`                  | user messages accept image/document/file blocks; agent messages may carry `redacted`                                                                                                                       |
+| `model` is `{ id }` only: no `effort`, `inference_geo`, `speed`                                        | `resources/agent.ts`          | `BetaManagedAgentsModelConfig`                                                                                                                                                                             |
+| `model.id` is a **Mastra router string** (`provider/model`), not a bare Anthropic model id             | `resources/agent.ts`          | `"claude-sonnet-5"`                                                                                                                                                                                        |
+| `stop_reason` is only `{ type: 'end_turn' }`                                                           | `events/session.ts`           | also `requires_action`, `retries_exhausted`, `budget_reached`                                                                                                                                              |
+| `SessionStatus` is only `idle`/`running`                                                               | `resources/session.ts`        | also `rescheduling` and `terminated`; openharness models retries as `session.status_rescheduled` events                                                                                                    |
+| An agent has no `archived_at`, `mcp_servers`, `metadata`, `multiagent`, `skills`, `tools` or `version` | `resources/agent.ts`          | all present                                                                                                                                                                                                |
+| A session agent snapshot is `{ id, name, model, system }`                                              | `resources/session.ts`        | `BetaManagedAgentsSessionAgent` also carries `description`, `mcp_servers`, `skills`, `tools`, `version`                                                                                                    |
+| `initial_events` accepts user events (`user.message`, `user.interrupt`); at most 50                    | `resources/session.ts`        | only `user.message` and `user.define_outcome`                                                                                                                                                              |
+| `POST /v1/sessions` takes an `agent` **id string**; no inline agent reference or per-session overrides | `resources/session.ts`        | `string`, `{ type: 'agent', id, version? }` or `{ type: 'agent_with_overrides', ... }`                                                                                                                     |
+| `event_deltas[]` accepts `agent.message` only                                                          | `events/stream.ts`            | also `agent.thinking` (start-only)                                                                                                                                                                         |
+| No system events (`system.message`), tools, MCP, outcomes, multiagent threads, budgets or webhooks     | everything                    | all present in the beta                                                                                                                                                                                    |
+| `GET /v1/models` answers the caller's own usable chat models, not Anthropic's model list               | `resources/model.ts`          | `GET /v1/models` lists Anthropic's models — `{ data: [{ type: 'model', id, display_name, created_at }], has_more, first_id, last_id }`: no provider grouping, no per-provider status, no registry fallback |
+| `GET /v1/sessions` takes only `limit`, `page` and `agent_id`; `GET /v1/agents` only `limit` and `page` | `resources/`                  | sessions also take `agent_version`, `created_at[gt]`-style bounds, `deployment_id`, `include_archived`, `memory_store_id` and `statuses`; agents also take `created_at[...]` and `include_archived`        |
+| `processed_at` is written as an explicit `null` on a queued user event rather than omitted             | `events/common.ts`            | `optional string or null`                                                                                                                                                                                  |
+| `content_delta.index` may be omitted, and parses as `0`                                                | `events/stream.ts`            | `index: optional number`; Anthropic's own accumulator reads a missing index as 0                                                                                                                           |
+| `request_id` in the error envelope is optional here                                                    | `errors.ts`                   | Anthropic always includes it; a proxy or a pre-app error may not have one to report                                                                                                                        |
+| `data` and `next_page` are required in every list response                                             | `events/api.ts`, `resources/` | Anthropic's generated spec marks both `optional`; openharness always writes them, and `next_page: null` is how "no more pages" is spelled                                                                  |
+| Unknown **fields** are stripped, not rejected, by every object schema                                  | everywhere                    | —                                                                                                                                                                                                          |
 
 Stripping unknown fields is what lets a real Anthropic response (which carries `effort`,
 `archived_at`, `skills`, ...) parse cleanly against the v1 subset. Two things are still
