@@ -380,11 +380,14 @@ retries run on an injected `sleep`, the clock is a `TestClock` from
   end claiming an interrupt that stopped a request, the idle claiming one that arrived with
   nothing running), the retry ladder — a 429 and a 503 (before and mid-stream), each asserting
   exactly one provider call per attempt, because the SDK must not retry underneath the loop
-  (#117) — the six ways a turn can be recovered, a fenced write and
-  a claim another owner took (both stop the turn where it stands), a turn against a model that
-  declares the wrong provider spec; most scenarios also assert that a replay of the log holds
-  no superseded chunk and that no span start exists without a model request behind it, and one
-  asserts that the brain writes only through `appendEvents`.
+  (#117), and the delays that ladder sleeps, pinned with a fixed jitter so a wrong attempt
+  index or a missing policy ceiling fails a number — the six ways a turn can be recovered, a
+  fenced write and a claim another owner took (both stop the turn where it stands), a turn
+  against a model that declares the wrong provider spec, and the invalid-event ending (a store
+  subclass that refuses the `agent.message` with the loop's own `EventValidationError`, the one
+  branch no scripted model can reach); most scenarios also assert that a replay of the log
+  holds no superseded chunk and that no span start exists without a model request behind it,
+  and one asserts that the brain writes only through `appendEvents`.
 - `per-request-model.test.ts` — the per-request model (U3): a queued message that switched
   the session's model is what the first request runs (and its provider is whose credential is
   resolved), a steering message carrying a switch — across providers — is the model of the

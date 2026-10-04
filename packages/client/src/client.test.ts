@@ -449,6 +449,69 @@ describe('provider credentials', () => {
   })
 })
 
+/**
+ * The transport-side half of the leak suites (the vault's own covers the crypto side): a key
+ * on its way out and a token on its way in belong in the request, and nowhere else the client
+ * produces — not an error's message, request id or stack, not a debug line.
+ */
+describe('secrets in failures', () => {
+  it('keeps a rejected key out of the error, the debug hook and the stack', async () => {
+    const key = 'sk-ant-api03-real-looking-9Zk42x'
+    const debug: unknown[][] = []
+    const mock = createMockFetch(() =>
+      errorResponse(422, 'invalid_provider_credential', 'The anthropic key was rejected.'),
+    )
+    const client = createClient({
+      baseUrl: BASE_URL,
+      token: 'oh_test_token',
+      fetch: mock.fetch,
+      onDebug: (...args) => debug.push(args),
+    })
+
+    const failure = await client.providerCredentials
+      .put('anthropic', { type: 'api_key', api_key: key })
+      .catch((error: unknown) => error)
+
+    // The request is where the key belongs — that is the API's contract.
+    expect(bodyOf(mock.requests[0]?.init)).toEqual({ type: 'api_key', api_key: key })
+    expect(mock.requests[0]?.url).not.toContain(key)
+    // Everything the client hands back is checked for it — the message, the request id, the
+    // stack, the stringified error, and whatever the debug hook was told.
+    expect(failure).toBeInstanceOf(ApiError)
+    const report = [
+      String(failure),
+      (failure as ApiError).requestId ?? '',
+      (failure as ApiError).stack ?? '',
+      JSON.stringify(debug),
+    ].join('\n')
+    expect(report).not.toContain(key)
+    expect(report).not.toContain('9Zk42x')
+  })
+
+  it('keeps the bearer token out of a failure the server answers', async () => {
+    const token = 'oh_session_real-looking-token-42'
+    const debug: unknown[][] = []
+    const mock = createMockFetch(() => errorResponse(500, 'api_error', 'Boom.'))
+    const client = createClient({
+      baseUrl: BASE_URL,
+      token,
+      fetch: mock.fetch,
+      onDebug: (...args) => debug.push(args),
+    })
+
+    const failure = await client.me().catch((error: unknown) => error)
+
+    // The token authenticates the request — that is its job — and nothing the failure says
+    // repeats it.
+    expect(mock.requests[0]?.headers.get('authorization')).toBe(`Bearer ${token}`)
+    const report = [String(failure), (failure as ApiError).stack ?? '', JSON.stringify(debug)].join(
+      '\n',
+    )
+    expect(report).not.toContain(token)
+    expect(report).not.toContain('real-looking-token')
+  })
+})
+
 describe('preferences (#111)', () => {
   it('reads GET /v1/me/preferences and parses the value', async () => {
     const preferences = makeUserPreferences({ default_model: 'anthropic/claude-sonnet-5' })

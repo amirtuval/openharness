@@ -166,12 +166,16 @@ describe('page cursors', () => {
   it('decodes without any Node-only global', () => {
     // The package is imported by the web app. Take `Buffer` away and every cursor path still
     // has to work; `crypto.getRandomValues` in ids.ts is a Web API and stays available.
+    // `Buffer` is not a name this package can even refer to: without `@types/node` it does
+    // not exist in the type system, which is the compile-time half of this rule.
     vi.stubGlobal('Buffer', undefined)
     try {
-      // `Buffer` is not a name this package can even refer to: without `@types/node` it does
-      // not exist in the type system, which is the compile-time half of this test.
-      const globals = globalThis as { Buffer?: unknown }
-      expect(globals.Buffer).toBeUndefined()
+      // The runtime half is not "the global is gone" — that would only prove the stub landed.
+      // It is what any code path that reached for the global would hit: a `Buffer`-using
+      // expression, typed as if the global were there, fails under the stub. The round trips
+      // below only pass because none of them referenced it.
+      const asIfPresent = globalThis as unknown as { Buffer: { from(value: string): unknown } }
+      expect(() => asIfPresent.Buffer.from('x')).toThrow(TypeError)
       for (const cursor of [
         encodeSeqCursor(42),
         encodeKeyCursor({ created_at: CREATED_AT, id: SESSION_ID }),

@@ -379,8 +379,11 @@ is the other seam (see `docs/auth.md`).
 **Better Auth is mocked at the module boundary for every test file** (`vitest.setup.ts` maps
 `better-auth/client` and its plugin entry to the double in `src/test-support/`), because a
 social sign-in leaves the page and cannot be run in a test. The app code is untouched: the
-tests drive the same calls it makes, and assert their arguments. `GET /v1/auth-config` — the
-one request outside `@openharness/client` — is stubbed at `fetch` where a test needs it.
+tests drive the same calls it makes, and assert their arguments. The double also records what
+`createAuthClient()` was constructed with (`authClientCalls`), so `App.test.tsx` pins that
+sign-in is built against the same `settings.serverUrl` as the API client — and against this
+origin, with no `baseURL` at all, when none is set. `GET /v1/auth-config` — the one request
+outside `@openharness/client` — is stubbed at `fetch` where a test needs it.
 
 | file                                          | covers                                                                                                                                                                                                                                                                                                                                                                           |
 | --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

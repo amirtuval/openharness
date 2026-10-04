@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { App } from './App'
 import { saveSettings } from './lib/settings'
+import { authClientCalls } from './test-support/better-auth-client-mock'
 import { TWO_PROVIDERS, WITH_DEFAULT } from './test-support/catalog'
 import {
   agentText,
@@ -389,6 +390,27 @@ describe('App', () => {
     } finally {
       vi.unstubAllGlobals()
     }
+  })
+
+  it('builds the auth client against the configured server', () => {
+    // Sign-in and the API have to be the same server (App.tsx): the API client is built from
+    // the same `settings.serverUrl` the auth client is handed, and the module double records
+    // what it was constructed with (#105, P2).
+    saveSettings({ serverUrl: 'http://localhost:8787' })
+    renderApp(makeFake(), { hash: '#/' })
+
+    expect(authClientCalls.at(-1)?.baseURL).toBe('http://localhost:8787')
+  })
+
+  it('leaves the auth client on this origin when no server URL is set', () => {
+    // Empty means the page's own origin — Better Auth's own `/api/auth` default — so no
+    // `baseURL` is passed at all.
+    saveSettings({ serverUrl: '' })
+    renderApp(makeFake(), { hash: '#/' })
+
+    const options = authClientCalls.at(-1)
+    expect(options?.baseURL).toBeUndefined()
+    expect(options?.plugins).toHaveLength(1)
   })
 })
 

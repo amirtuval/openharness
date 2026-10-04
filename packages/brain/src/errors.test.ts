@@ -142,9 +142,14 @@ describe('classifyModelError', () => {
   })
 
   it('does not retry a failure it cannot name', () => {
+    // Concrete verdicts, not `classifyModelError(e).retryable` — which is what this function
+    // *is*, so asserting it would pass whatever the classification answered.
     for (const error of [new Error('?'), null, 7, { whatever: true }]) {
-      expect(isRetryableModelError(error)).toBe(classifyModelError(error).retryable)
+      expect(isRetryableModelError(error)).toBe(false)
     }
+    expect(isRetryableModelError(apiError(429))).toBe(true)
+    expect(isRetryableModelError(apiError(503))).toBe(true)
+    expect(isRetryableModelError(apiError(401))).toBe(false)
   })
 
   // A wrapper reports no status and no `isRetryable` of its own (issue #117): deciding on the
