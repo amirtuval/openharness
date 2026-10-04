@@ -4,9 +4,22 @@ on:
   pull_request:
   push:
     branches: [main]
+  # A fresh, uncached run of the whole suite on demand (Actions → CI → Run workflow). Cached
+  # turbo results replay a task's earlier outcome, so only an uncached run proves the current
+  # tree passes and surfaces flaky tests.
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Run every task without the turbo cache
+        type: boolean
+        default: true
+  # The same fresh run every night, against main.
+  schedule:
+    - cron: '0 3 * * *'
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # Per event, so a nightly or manual run is not cancelled by (and does not cancel) a push.
+  group: ci-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
@@ -87,9 +100,11 @@ jobs:
           DATABASE_URL: postgres://openharness:openharness@localhost:5432/openharness
         run: yarn turbo run build typecheck lint format:check test --affected --cache-dir=.turbo/cache
 
-      # main: everything (unchanged packages are turbo cache hits).
+      # main: everything. On a push, unchanged packages are turbo cache hits; the nightly run and
+      # a manual run with `force` (the default) bypass the cache, so every task really runs.
       - name: Build, typecheck, lint, test (all)
         if: github.event_name != 'pull_request'
         env:
           DATABASE_URL: postgres://openharness:openharness@localhost:5432/openharness
-        run: yarn turbo run build typecheck lint format:check test --cache-dir=.turbo/cache
+          TURBO_FORCE_FLAG: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.force)) && '--force' || '' }}
+        run: yarn turbo run build typecheck lint format:check test --cache-dir=.turbo/cache $TURBO_FORCE_FLAG
