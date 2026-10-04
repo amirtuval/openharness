@@ -38,6 +38,9 @@ describe('parseArgs', () => {
     const agent = commandOf(['--agent', 'Summarizer'])
     expect(agent).toMatchObject({ kind: 'chat', options: { agent: 'Summarizer' } })
 
+    const model = commandOf(['--model', 'openai/gpt-4.1-mini'])
+    expect(model).toMatchObject({ kind: 'chat', options: { model: 'openai/gpt-4.1-mini' } })
+
     const server = commandOf(['--server', 'http://example.test'])
     expect(server).toMatchObject({ kind: 'chat', options: { server: 'http://example.test' } })
   })
@@ -86,6 +89,14 @@ describe('parseArgs', () => {
     expect(errorOf(['whoami', '--no-browser'])).toContain('--no-browser')
   })
 
+  it('rejects an empty --model', () => {
+    expect(errorOf(['--model', ''])).toContain('--model needs a model id')
+  })
+
+  it('rejects a --model with no value', () => {
+    expect(errorOf(['--model'])).toContain('missing')
+  })
+
   it('rejects chat flags on the auth commands', () => {
     expect(errorOf(['login', '-c'])).toContain('--continue')
     expect(errorOf(['logout', '-s', 'sesn_1'])).toContain('--session <id>')
@@ -131,6 +142,9 @@ describe('parseArgs', () => {
 
   it('rejects chat-only flags on the listings', () => {
     expect(errorOf(['sessions', '--agent', 'Summarizer'])).toContain('--agent <id|name>')
+    expect(errorOf(['sessions', '--model', 'openai/gpt-4.1-mini'])).toContain(
+      '--model <provider/model>',
+    )
     expect(errorOf(['agents', '-c'])).toContain('--continue')
     expect(errorOf(['agents', '-s', 'sesn_1'])).toContain('--session <id>')
   })

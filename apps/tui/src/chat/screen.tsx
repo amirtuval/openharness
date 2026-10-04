@@ -27,9 +27,9 @@ export interface ChatScreenProps {
  */
 export function ChatScreen({ session, banner, onExit }: ChatScreenProps) {
   const view = useSyncExternalStore(session.subscribe, session.getState, session.getState)
-  // A model-first session has no agent to name (issue #93), and the model it runs is its own
-  // field either way; the model-picker labels #95 brings replace both of these.
-  const agentName = session.session.agent?.name ?? 'Model'
+  // A model-first session has no agent to name (issues #93, #95): the status line shows the
+  // model that session runs, which is its own field either way.
+  const agentName = session.session.agent?.name
   const model = session.session.model.id
 
   useInput((input, key) => {

@@ -39,8 +39,14 @@ describe('formatSessions', () => {
     expect(line).toContain('2026-09-28T10:00:00.000Z')
   })
 
-  it('calls an untitled session untitled', () => {
-    expect(formatSessions([makeSession({ title: null })])[0]).toContain('(untitled)')
+  it('labels an untitled session by the model it runs', () => {
+    const session = makeSession({
+      title: null,
+      agent: null,
+      model: { id: 'openai/gpt-4.1-mini' },
+    })
+
+    expect(formatSessions([session])[0]).toContain('openai/gpt-4.1-mini')
   })
 
   it('cuts a title too long for the column', () => {

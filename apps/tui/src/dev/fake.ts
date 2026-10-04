@@ -1,4 +1,5 @@
 import type { FakeClient } from '@openharness/client/testing'
+import type { ModelEntry } from '@openharness/protocol'
 
 /** Set this (to `1`, `true` or `yes`) and `oh` runs against the in-memory fake client. */
 export const FAKE_MODE_ENV = 'OPENHARNESS_FAKE'
@@ -11,6 +12,53 @@ export function isFakeMode(env: Record<string, string | undefined> = process.env
   const value = env[FAKE_MODE_ENV]?.trim().toLowerCase()
   return value === '1' || value === 'true' || value === 'yes'
 }
+
+/**
+ * The catalog the dev fake serves: three providers, so the model picker's grouping and
+ * context windows are visible without a server or a key.
+ */
+export const DEV_MODELS: readonly ModelEntry[] = [
+  {
+    id: 'anthropic/claude-sonnet-5',
+    provider: 'anthropic',
+    name: 'Claude Sonnet 5',
+    context_window: 200_000,
+    max_output_tokens: 64_000,
+    source: 'provider',
+  },
+  {
+    id: 'anthropic/claude-opus-5-5',
+    provider: 'anthropic',
+    name: 'Claude Opus 5.5',
+    context_window: 200_000,
+    max_output_tokens: 64_000,
+    source: 'provider',
+  },
+  {
+    id: 'openai/gpt-4.1-mini',
+    provider: 'openai',
+    name: 'GPT-4.1 Mini',
+    context_window: 1_000_000,
+    max_output_tokens: 32_768,
+    source: 'provider',
+  },
+  {
+    id: 'openai/o3',
+    provider: 'openai',
+    name: 'o3',
+    context_window: 200_000,
+    max_output_tokens: 100_000,
+    source: 'registry',
+  },
+  {
+    id: 'google/gemini-2.5-pro',
+    provider: 'google',
+    name: 'Gemini 2.5 Pro',
+    context_window: 1_048_576,
+    max_output_tokens: 65_536,
+    source: 'provider',
+  },
+]
 
 /** The replies the seeded session is scripted with, in order, before echoing. */
 export const DEV_REPLIES: readonly string[] = [
@@ -26,8 +74,10 @@ export const DEV_REPLIES: readonly string[] = [
  * It is loaded lazily, so a normal `oh` never even reads the testing entry point. What it
  * seeds is what a session needs to exercise the interesting paths:
  *
- * - three agents, which is one more than `oh` will pick from on its own — so the picker
- *   comes up until `--agent` names one;
+ * - a three-provider model catalog ({@link DEV_MODELS}), so a new chat's picker has
+ *   groups and context windows to show;
+ * - three agents, for `oh agents` and the `--agent` preset path — a new chat without
+ *   `--agent` picks a model, not an agent;
  * - a scripted conversation, so replies stream in visibly;
  * - a second session with history in it, so `oh --continue` and `oh -s <id>` have something
  *   to resume.
@@ -36,7 +86,7 @@ export const DEV_REPLIES: readonly string[] = [
  */
 export async function createDevClient(): Promise<FakeClient> {
   const { createFakeClient } = await import('@openharness/client/testing')
-  const fake = createFakeClient({ delayMs: 12 })
+  const fake = createFakeClient({ delayMs: 12, models: DEV_MODELS })
 
   await fake.agents.create({
     name: 'Reviewer',

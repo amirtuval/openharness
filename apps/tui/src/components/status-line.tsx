@@ -5,10 +5,10 @@ import type { ChatViewState } from '../chat/session'
 
 export interface StatusLineProps {
   /**
-   * Who is answering: the name of the agent the session snapshotted, or `Model` for a
-   * model-first session, which has none (issue #93).
+   * Who is answering: the name of the agent the session snapshotted — absent for a
+   * model-first session, which has none and is named by its model instead (issues #93, #95).
    */
-  readonly agentName: string
+  readonly agentName?: string | undefined
   /** The model, a `provider/model` router string. */
   readonly model: string
   /** The session's id, for `oh -s <id>`. */
@@ -37,7 +37,8 @@ export function StatusLine({
   banner,
 }: StatusLineProps) {
   const state = phase === 'loading' ? 'loading history' : status
-  const parts = [agentName, model, sessionId, state]
+  const parts =
+    agentName === undefined ? [model, sessionId, state] : [agentName, model, sessionId, state]
 
   if (banner !== undefined) {
     parts.push(banner)
