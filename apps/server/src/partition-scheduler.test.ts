@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import type { Pool } from 'pg'
 import {
   EVENT_TYPES,
   partitionOf,
@@ -9,6 +10,7 @@ import {
   type UserEvent,
 } from '@openharness/protocol'
 import { isFencedError, type SessionStore } from '@openharness/session'
+import { PostgresSessionStore } from '@openharness/session/postgres'
 
 import { TEST_OWNER_ID } from './test-support'
 import { PostgresPartitionScheduler } from './partition-scheduler'
@@ -58,6 +60,20 @@ const PARTITIONS = 8
 
 /** A lease that lapses quickly, so a dead instance's partitions move on in a test's lifetime. */
 const TTL_MS = 300
+
+/**
+ * The lease timings for tests that are *not* about lease loss.
+ *
+ * `TTL_MS` is deliberately short, so a test that pauses an instance sees its partitions move
+ * within its own patience. That also makes those leases fragile: a loaded runner — the CI
+ * boxes these tests flake on — can stall a process past 300 ms between two 30 ms heartbeats,
+ * and the scheduler then does exactly what it promises: treats the instance as dead, takes
+ * its partitions, and the recovered turns run again. Tests that assert *one* turn, *stable*
+ * ownership or an untouched log are about routing and balancing, not about crash recovery, so
+ * they run with leases long enough that no plausible stall expires one. Only the tests that
+ * want a takeover (a pause, a death, a lease that cannot be renewed) keep `TTL_MS`.
+ */
+const LONG_TTL_MS = 30_000
 
 /** A heartbeat well inside the TTL, so nothing lapses while an instance is healthy. */
 const HEARTBEAT_MS = 30
@@ -235,8 +251,8 @@ if (SOURCE === null) {
 
   describe('sharing the partition space', () => {
     it('spreads the partitions over the instances that boot together, and steals nothing', async () => {
-      const first = instance('first')
-      const second = instance('second')
+      const first = instance('first', { ttlMs: LONG_TTL_MS })
+      const second = instance('second', { ttlMs: LONG_TTL_MS })
 
       await Promise.all([first.scheduler.start(), second.scheduler.start()])
       // Each instance stops at half the space on its first scan, so two that boot together
@@ -260,22 +276,97 @@ if (SOURCE === null) {
       expect(sorted(second.scheduler.heldPartitions())).toEqual(sorted(heldBySecond))
     })
 
-    it('cannot take a partition a live lease holds, and takes over when it is released', async () => {
-      const first = instance('first')
+    it('offers the space to a peer whose first scan lost the race, instead of starving it', async () => {
+      // The slow store stands in for a loaded runner: the slow instance's first acquire holds
+      // its first scan up past the fast instance's next heartbeat, so the fast one finds the
+      // rest of the space free and takes the whole thing. Nothing on either side could break
+      // the stand-off that leaves: the fast one has no visible peer (the slow one holds no
+      // lease to be blocked on) and the slow one has nothing to release and can never take a
+      // live lease. The offer is the door out: the fast instance, holding everything with
+      // nothing running, releases its newest half for a heartbeat, the slow one takes its half
+      // out of it — and from then on it is visible and the share-based balancing applies.
+      const fast = instance('fast', { ttlMs: LONG_TTL_MS })
+      const slow = instance('slow', {
+        store: db.track(
+          new SlowFirstAcquireStore(
+            { pool: db.pool, partitionCount: PARTITIONS },
+            SLOW_FIRST_ACQUIRE_MS,
+          ),
+        ),
+        ttlMs: LONG_TTL_MS,
+      })
+
+      await Promise.all([fast.scheduler.start(), slow.scheduler.start()])
+
+      await waitFor(
+        () =>
+          fast.scheduler.heldPartitions().length > 0 && slow.scheduler.heldPartitions().length > 0,
+        {
+          timeoutMs: WAIT_MS,
+          message: 'the instance that lost the first-scan race was never offered a partition',
+        },
+      )
+      // And the space is whole: every partition is somebody's again once the offer windows
+      // close, with no partition held by both.
+      await waitFor(
+        () =>
+          fast.scheduler.heldPartitions().length + slow.scheduler.heldPartitions().length ===
+          PARTITIONS,
+        { timeoutMs: WAIT_MS },
+      )
+      const heldByFast = new Set(fast.scheduler.heldPartitions())
+      expect(
+        slow.scheduler.heldPartitions().filter((partition) => heldByFast.has(partition)),
+      ).toEqual([])
+    })
+
+    it('releases a lease it was acquiring when it stopped, instead of leaving it live for the TTL', async () => {
+      // `stop()` cannot cancel an acquire already in flight: the row commits after the stop's
+      // snapshot of held leases was taken, and the scan's next look at `#stopped` drops it.
+      // Dropping it without releasing it would strand a partition — leased, live, and run by
+      // nobody — for the whole TTL, which is exactly what `stop()` promises not to do.
+      const store = db.track(
+        new SlowFirstAcquireStore({ pool: db.pool, partitionCount: PARTITIONS }, 200),
+      )
+      const stopping = instance('stopping', { store, ttlMs: LONG_TTL_MS })
+
+      const starting = stopping.scheduler.start()
+      await sleep(50) // inside the first acquire, before the lease is even in hand
+      await stopping.scheduler.stop()
+      await starting // the scan finishes; the lease it just took goes back
+
+      const other = db.store()
+      for (let partition = 0; partition < PARTITIONS; partition += 1) {
+        expect(await other.acquirePartition(partition, 'other', 1_000)).not.toBeNull()
+      }
+    })
+
+    it('never takes a live lease: the holder keeps what it renews, and a released lease is taken', async () => {
+      const first = instance('first', { ttlMs: LONG_TTL_MS })
       await first.scheduler.start()
-      // give the instance the whole space, so the second one has nothing free to take
+      // give the instance the whole space, so nothing is free for the second one to take
       await waitFor(() => first.scheduler.heldPartitions().length === PARTITIONS, {
         timeoutMs: WAIT_MS,
         message: 'the single instance never claimed the whole space',
       })
-      const second = instance('second')
+      const second = instance('second', { ttlMs: LONG_TTL_MS })
 
       await second.scheduler.start()
-      await sleep(4 * HEARTBEAT_MS)
 
-      // Starved, not stealing: the leases are live, and a live lease is not taken by anybody.
-      expect(second.scheduler.heldPartitions()).toEqual([])
-      expect(first.scheduler.heldPartitions()).toHaveLength(PARTITIONS)
+      // What the second instance comes to hold, it holds only over partitions the first
+      // released first — never one the first still holds, and never one taken from it: a
+      // refused renewal would say "lost partition", and none may. (The first, idle and alone
+      // in the space, *offers* its newest half back for a heartbeat; that offer is the only
+      // door into a fully-held space, and it is a release, not a steal.)
+      for (let sample = 0; sample < 4; sample += 1) {
+        await sleep(HEARTBEAT_MS)
+        const heldByFirst = new Set(first.scheduler.heldPartitions())
+        expect(
+          second.scheduler.heldPartitions().filter((partition) => heldByFirst.has(partition)),
+        ).toEqual([])
+      }
+      expect(first.notices.filter((line) => line.includes('lost partition'))).toEqual([])
+      expect(second.notices.filter((line) => line.includes('lost partition'))).toEqual([])
 
       // The moment the first instance stops, the second takes the space over.
       await first.scheduler.stop()
@@ -312,8 +403,11 @@ if (SOURCE === null) {
 
   describe('running a session', () => {
     it('runs one turn, in the instance that owns the session', async () => {
-      const first = instance('first', { replies: [{ text: ['answered once'] }] })
-      const second = instance('second', { replies: [{ text: ['never'] }] })
+      const first = instance('first', {
+        replies: [{ text: ['answered once'] }],
+        ttlMs: LONG_TTL_MS,
+      })
+      const second = instance('second', { replies: [{ text: ['never'] }], ttlMs: LONG_TTL_MS })
       await Promise.all([first.scheduler.start(), second.scheduler.start()])
 
       const store = db.store()
@@ -344,7 +438,11 @@ if (SOURCE === null) {
       // The recording store is the instance's: everything it sees is a write the *scheduler*
       // made, so the unfenced append the test itself makes goes through a second store.
       const store = db.track(new RecordingStore({ pool: db.pool, partitionCount: PARTITIONS }))
-      const owner = instance('owner', { replies: [{ text: ['under a lease'] }], store })
+      const owner = instance('owner', {
+        replies: [{ text: ['under a lease'] }],
+        store,
+        ttlMs: LONG_TTL_MS,
+      })
       await owner.scheduler.start()
 
       const session = await sessionIn(store, 0)
@@ -364,8 +462,14 @@ if (SOURCE === null) {
     })
 
     it('recovers a partition it takes over, even when the signal for its work was dropped', async () => {
-      const first = instance('first', { replies: [{ text: ['found by the scan'] }] })
-      const second = instance('second', { replies: [{ text: ['found by the scan'] }] })
+      const first = instance('first', {
+        replies: [{ text: ['found by the scan'] }],
+        ttlMs: LONG_TTL_MS,
+      })
+      const second = instance('second', {
+        replies: [{ text: ['found by the scan'] }],
+        ttlMs: LONG_TTL_MS,
+      })
       const store = db.store()
       const session = await sessionIn(store, 0)
       await appendMessage(store, session.id, 'written while nobody was listening')
@@ -388,6 +492,7 @@ if (SOURCE === null) {
         replies: [{ text: ['found by the sweep'] }],
         heartbeatMs: 100,
         sweepMs: 200,
+        ttlMs: LONG_TTL_MS,
       })
       await owner.scheduler.start()
       const store = db.store()
@@ -552,8 +657,8 @@ if (SOURCE === null) {
 
   describe('interrupts across instances', () => {
     it('stops a turn through an interrupt raised at the instance that does not own it', async () => {
-      const first = instance('first')
-      const second = instance('second')
+      const first = instance('first', { ttlMs: LONG_TTL_MS })
+      const second = instance('second', { ttlMs: LONG_TTL_MS })
       await Promise.all([first.scheduler.start(), second.scheduler.start()])
 
       const store = db.store()
@@ -605,8 +710,8 @@ if (SOURCE === null) {
     })
 
     it('claims a queued interrupt for a session that was not running', async () => {
-      const first = instance('first')
-      const second = instance('second')
+      const first = instance('first', { ttlMs: LONG_TTL_MS })
+      const second = instance('second', { ttlMs: LONG_TTL_MS })
       await Promise.all([first.scheduler.start(), second.scheduler.start()])
 
       const store = db.store()
@@ -647,6 +752,38 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms)
   })
+}
+
+/**
+ * How long the losing instance's first acquire takes in the offer test: long past the
+ * winner's next heartbeat, so the winner's second scan takes the whole space while the
+ * loser's first scan is still waiting on its first round trip — the interleaving a loaded
+ * runner produces, and the one that used to leave the loser starved forever. Only the first
+ * acquire is slowed: the point is the *first* one, and the rest of the loser's attempts at
+ * normal speed are what lets it pick up an offered partition once the offer exists.
+ */
+const SLOW_FIRST_ACQUIRE_MS = 150
+
+/** A store whose first acquire waits, then behaves normally — a scan behind one slow query. */
+class SlowFirstAcquireStore extends PostgresSessionStore {
+  readonly #delayMs: number
+
+  #delaysLeft = 1
+
+  constructor(options: { pool: Pool; partitionCount: number }, delayMs: number) {
+    super(options)
+    this.#delayMs = delayMs
+  }
+
+  override async acquirePartition(
+    ...args: Parameters<PostgresSessionStore['acquirePartition']>
+  ): ReturnType<PostgresSessionStore['acquirePartition']> {
+    if (this.#delaysLeft > 0) {
+      this.#delaysLeft -= 1
+      await sleep(this.#delayMs)
+    }
+    return super.acquirePartition(...args)
+  }
 }
 
 function sorted(partitions: readonly number[]): number[] {
