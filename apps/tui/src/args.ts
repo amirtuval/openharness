@@ -18,6 +18,8 @@ export interface ChatOptions extends GlobalOptions {
   readonly continue: boolean
   /** `--agent <id|name>`: which agent to start a session with. */
   readonly agent?: string | undefined
+  /** `--model <provider/model>`: the model a new chat runs, skipping the picker. */
+  readonly model?: string | undefined
 }
 
 /** Flags `oh login` takes on top of the global ones. */
@@ -73,6 +75,7 @@ const OPTIONS = {
   session: { type: 'string', short: 's' },
   continue: { type: 'boolean', short: 'c' },
   agent: { type: 'string' },
+  model: { type: 'string' },
   server: { type: 'string' },
   'no-browser': { type: 'boolean' },
   debug: { type: 'boolean' },
@@ -153,6 +156,13 @@ export function parseArgs(argv: readonly string[]): ParseOutcome {
     return { ok: false, error: '--no-browser only makes sense with `oh login`.' }
   }
 
+  if (values.model !== undefined && values.model.trim() === '') {
+    return {
+      ok: false,
+      error: '--model needs a model id, like --model openai/gpt-4.1-mini.',
+    }
+  }
+
   if (values.session !== undefined && values.continue === true) {
     return {
       ok: false,
@@ -169,6 +179,7 @@ export function parseArgs(argv: readonly string[]): ParseOutcome {
         session: values.session,
         continue: values.continue === true,
         agent: values.agent,
+        model: values.model,
       },
     },
   }
@@ -196,6 +207,7 @@ function wrongFlagFor(
   if (values.session !== undefined) return `--session <id>`
   if (values.continue === true) return '--continue'
   if (values.agent !== undefined) return '--agent <id|name>'
+  if (values.model !== undefined) return '--model <provider/model>'
   if (values['no-browser'] === true && subcommand !== 'login') return '--no-browser'
   return undefined
 }

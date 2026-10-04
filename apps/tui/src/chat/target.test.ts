@@ -1,7 +1,7 @@
 import type { Client } from '@openharness/client'
 import { createFakeClient } from '@openharness/client/testing'
 import { newAgentId, type Agent } from '@openharness/protocol'
-import { makeAgent } from '@openharness/protocol/fixtures'
+import { makeAgent, makeModelEntry } from '@openharness/protocol/fixtures'
 import { describe, expect, it } from 'vitest'
 
 import { listingAgents, listingSessions, pagedAgents, seedAgents } from '../test-support/fake'
@@ -87,36 +87,52 @@ describe('resolveTarget', () => {
     expect(target.kind === 'session' && target.session.id).toBe('sesn_newest')
   })
 
-  it('starts a new session when there is nothing to continue', async () => {
+  it('offers the catalog when neither --agent nor --model is given', async () => {
+    const fake = createFakeClient({
+      models: [makeModelEntry(), makeModelEntry({ id: 'openai/gpt-4.1-mini', provider: 'openai' })],
+    })
+    const target = await resolveTarget(fake, { continue: false })
+
+    expect(target.kind).toBe('choose-model')
+    expect(target.kind === 'choose-model' && target.models.map((model) => model.id)).toEqual([
+      'anthropic/claude-sonnet-5',
+      'openai/gpt-4.1-mini',
+    ])
+  })
+
+  it('says there are no models when the account has no provider keys', async () => {
+    const fake = createFakeClient({ models: [], providers: [] })
+
+    expect(await resolveTarget(fake, { continue: false })).toEqual({ kind: 'no-models' })
+  })
+
+  it('starts a model-first session for --model, without reading the catalog', async () => {
     const fake = createFakeClient()
-    const target = await resolveTarget(listingSessions(fake, []), { continue: true })
+    const client: Client = {
+      ...fake,
+      models: {
+        list: () => Promise.reject(new Error('the catalog should not be read')),
+      },
+    }
+
+    const target = await resolveTarget(client, { continue: false, model: 'openai/gpt-4.1-mini' })
+
+    expect(target.kind).toBe('session')
+    expect(target.kind === 'session' && target.session.model.id).toBe('openai/gpt-4.1-mini')
+    expect(target.kind === 'session' && target.session.agent).toBeNull()
+  })
+
+  it('lets --model override the model of an --agent preset', async () => {
+    const fake = createFakeClient()
+    const target = await resolveTarget(fake, {
+      continue: false,
+      agent: fake.agent.name,
+      model: 'openai/gpt-4.1-mini',
+    })
 
     expect(target.kind).toBe('session')
     expect(target.kind === 'session' && target.session.agent?.id).toBe(fake.agent.id)
-  })
-
-  it('uses the only agent there is', async () => {
-    const fake = createFakeClient()
-    const target = await resolveTarget(fake, { continue: false })
-
-    expect(target.kind === 'session' && target.session.agent?.name).toBe(fake.agent.name)
-  })
-
-  it('asks which agent when there are several', async () => {
-    const fake = createFakeClient()
-    const extra = await fake.agents.create({
-      name: 'Reviewer',
-      model: { id: 'anthropic/claude-opus-5-5' },
-    })
-    const target = await resolveTarget(listingAgents(fake, [fake.agent, extra]), {
-      continue: false,
-    })
-
-    expect(target.kind).toBe('choose')
-    expect(target.kind === 'choose' && target.agents.map((agent) => agent.name)).toEqual([
-      fake.agent.name,
-      'Reviewer',
-    ])
+    expect(target.kind === 'session' && target.session.model.id).toBe('openai/gpt-4.1-mini')
   })
 
   it('uses the agent --agent names, even when there are several', async () => {
@@ -137,13 +153,6 @@ describe('resolveTarget', () => {
     await expect(resolveTarget(fake, { continue: false, agent: 'Nope' })).rejects.toThrow(
       /no agent matches 'Nope'/,
     )
-  })
-
-  it('says there is nothing to chat with when there are no agents', async () => {
-    const fake = createFakeClient()
-    expect(await resolveTarget(listingAgents(fake, []), { continue: false })).toEqual({
-      kind: 'none',
-    })
   })
 
   it('prefers --session to everything else', async () => {
@@ -220,16 +229,6 @@ describe('resolveTarget with a list longer than one page', () => {
     const target = await resolveTarget(client, { continue: false, agent: name })
 
     expect(target.kind === 'session' && target.session.agent?.id).toBe(named.id)
-  })
-
-  it('offers every agent to the picker, not just the first page', async () => {
-    const { client, last } = await thirdPage()
-
-    const target = await resolveTarget(client, { continue: false })
-
-    expect(target.kind).toBe('choose')
-    expect(target.kind === 'choose' && target.agents).toHaveLength(45)
-    expect(target.kind === 'choose' && target.agents.at(-1)?.id).toBe(last.id)
   })
 
   it('reports a name that is nowhere in the list, listing all of it', async () => {

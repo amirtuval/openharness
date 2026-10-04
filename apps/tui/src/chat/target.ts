@@ -1,16 +1,16 @@
 import { ApiError, type Client } from '@openharness/client'
-import { isAgentId, type Agent, type Session } from '@openharness/protocol'
+import { isAgentId, type Agent, type ModelEntry, type Session } from '@openharness/protocol'
 
 import { listAllAgents } from '../paging'
 
 /** What the CLI worked out to do before the chat screen can exist. */
 export type TargetResolution =
   /** Chat in this session — resumed, continued, or freshly created. */
-  | { readonly kind: 'session'; readonly session: Session }
-  /** Several agents and no `--agent`: ask which one. */
-  | { readonly kind: 'choose'; readonly agents: readonly Agent[] }
-  /** No agents at all: there is nothing to chat with. */
-  | { readonly kind: 'none' }
+  | { kind: 'session'; readonly session: Session }
+  /** A new chat from a model the user has not chosen yet: ask, with the catalog. */
+  | { kind: 'choose-model'; readonly models: readonly ModelEntry[] }
+  /** The account has no provider keys, so there is no model to chat with (epic #92). */
+  | { kind: 'no-models' }
 
 /** The flags that decide where a chat starts. */
 export interface TargetOptions {
@@ -20,6 +20,8 @@ export interface TargetOptions {
   readonly continue: boolean
   /** `--agent <id|name>`. */
   readonly agent?: string | undefined
+  /** `--model <provider/model>`. */
+  readonly model?: string | undefined
 }
 
 /**
@@ -30,9 +32,14 @@ export interface TargetOptions {
  * 1. `--session <id>` names one: use it, whatever else the server has.
  * 2. `--continue` takes the newest session the server lists, or falls through to a new one
  *    when there is nothing to continue.
- * 3. Otherwise start a new session — with `--agent` if it was given, with the only agent if
- *    the server has exactly one, by asking if it has several, and by failing with something
- *    to read if it has none.
+ * 3. Otherwise start a new session. Model-first (epic #92): `--agent` presets the session,
+ *    `--model` names the model directly and skips the picker, and with neither the catalog's
+ *    models are offered to choose from — or, when the account has no provider keys, nothing
+ *    is: the caller says how to add one. An account with keys but an empty catalog is the
+ *    same case, because there is nothing to start a chat with either way.
+ *
+ * `--model` with `--agent` is legal and not a contradiction: the session is created from the
+ * agent preset with its model overridden, which is exactly what the protocol allows.
  *
  * Every agent the server has is considered, not just the first page of them: `--agent` reads
  * an id straight from the server, and matches a name against the whole list (`listAllAgents`
@@ -57,39 +64,46 @@ export async function resolveTarget(
     }
   }
 
-  return startNew(client, options.agent)
+  return startNew(client, options)
 }
 
-async function startNew(client: Client, query: string | undefined): Promise<TargetResolution> {
-  if (query !== undefined) {
-    const wanted = query.trim()
+async function startNew(client: Client, options: TargetOptions): Promise<TargetResolution> {
+  const model = options.model?.trim()
+  const agent = options.agent === undefined ? undefined : await resolveAgent(client, options.agent)
 
-    // An id is worth reading directly: one request instead of a walk, and it finds the agent
-    // whatever else the list holds. A value that looks like an id but names nothing falls
-    // through to the name match below, so `--agent <name>` is never narrowed by its shape.
-    if (isAgentId(wanted)) {
-      const direct = await getAgentOrUndefined(client, wanted)
-      if (direct !== undefined) {
-        return { kind: 'session', session: await client.sessions.create({ agent: direct.id }) }
-      }
-    }
-
-    const selection = selectAgent(await listAllAgents(client), query)
-    if (!selection.ok) throw new Error(selection.error)
-    return { kind: 'session', session: await client.sessions.create({ agent: selection.agent.id }) }
+  if (agent !== undefined) {
+    const request =
+      model === undefined ? { agent: agent.id } : { agent: agent.id, model: { id: model } }
+    return { kind: 'session', session: await client.sessions.create(request) }
   }
 
-  const agents = await listAllAgents(client)
-  const only = agents[0]
-  if (agents.length === 1 && only !== undefined) {
-    return { kind: 'session', session: await client.sessions.create({ agent: only.id }) }
+  if (model !== undefined) {
+    return { kind: 'session', session: await client.sessions.create({ model: { id: model } }) }
   }
 
-  if (agents.length === 0) {
-    return { kind: 'none' }
+  const catalog = await client.models.list()
+  if (catalog.data.length === 0) {
+    return { kind: 'no-models' }
   }
 
-  return { kind: 'choose', agents }
+  return { kind: 'choose-model', models: catalog.data }
+}
+
+/** Resolve `--agent` against every agent the server has, or fail with something to read. */
+async function resolveAgent(client: Client, query: string): Promise<Agent> {
+  const wanted = query.trim()
+
+  // An id is worth reading directly: one request instead of a walk, and it finds the agent
+  // whatever else the list holds. A value that looks like an id but names nothing falls
+  // through to the name match below, so `--agent <name>` is never narrowed by its shape.
+  if (isAgentId(wanted)) {
+    const direct = await getAgentOrUndefined(client, wanted)
+    if (direct !== undefined) return direct
+  }
+
+  const selection = selectAgent(await listAllAgents(client), query)
+  if (!selection.ok) throw new Error(selection.error)
+  return selection.agent
 }
 
 /**

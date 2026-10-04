@@ -44,7 +44,12 @@ export async function runAgents(client: Client, io: CommandIo): Promise<number> 
   }
 }
 
-/** One line per session: id, title, status, updated — the columns the issue asks for. */
+/**
+ * One line per session: id, title, status, updated — the columns the issue asks for.
+ *
+ * An untitled session is labelled by the model it runs (issue #95), which is what a
+ * model-first chat has to identify itself with; `(untitled)` said nothing about it.
+ */
 export function formatSessions(sessions: readonly Session[]): readonly string[] {
   if (sessions.length === 0) {
     return ['No sessions yet. Start one with `oh`.']
@@ -53,7 +58,7 @@ export function formatSessions(sessions: readonly Session[]): readonly string[] 
   return sessions.map((session) =>
     [
       session.id,
-      pad(session.title ?? '(untitled)', TITLE_WIDTH),
+      pad(session.title ?? session.model.id, TITLE_WIDTH),
       pad(session.status, 7),
       session.updated_at,
     ].join('  '),

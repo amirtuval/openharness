@@ -33,6 +33,7 @@ const KEYS = {
   up: '\u001B[A',
   down: '\u001B[B',
   backspace: '\u007F',
+  escape: '\u001B',
 } as const
 
 /** Press a named key. */

@@ -127,7 +127,12 @@ server and forgets it locally. Every other command sends the stored token as
 `Authorization: Bearer`.
 
 `oh` starts a new chat against `http://localhost:3000` (override with `--server`, with
-`OPENHARNESS_URL`, or in `~/.config/openharness/config.json`).
+`OPENHARNESS_URL`, or in `~/.config/openharness/config.json`). A new chat asks which model
+to run, from the models **your own provider keys** can use — grouped by provider, with
+context windows, and an "Other model id…" entry for anything the catalog does not know yet.
+Add a key in the web app under **Settings → Model providers**; with none, `oh` says so and
+stops. `--model provider/model` names the model directly, skipping the picker, and `--agent`
+still starts from a saved agent preset (`oh agents` lists them).
 `oh sessions` lists sessions, `oh -c` continues the most recent one, `oh -s <id>` resumes a
 particular one. `apps/tui/AGENTS.md` documents the keys and the exit codes.
 

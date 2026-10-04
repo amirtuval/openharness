@@ -1,5 +1,5 @@
 import type { Client } from '@openharness/client'
-import type { Agent, Session } from '@openharness/protocol'
+import type { ModelEntry, Session } from '@openharness/protocol'
 import { Box, Text, useApp } from 'ink'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
@@ -7,7 +7,7 @@ import type { ChatOptions } from './args'
 import { ChatScreen } from './chat/screen'
 import { createChatSession, type ChatSession } from './chat/session'
 import { resolveTarget } from './chat/target'
-import { AgentPicker } from './components/agent-picker'
+import { ModelPicker } from './components/model-picker'
 import { describeError, type ErrorContext, type ErrorReport } from './errors'
 
 /** What the CLI should do once the app is done, and which session to point at on the way out. */
@@ -20,21 +20,21 @@ export interface ExitPayload {
 
 /** Where the app is in its short life. */
 type Screen =
-  /** Listing agents, resuming, or creating the session. */
+  /** Resuming, continuing, or creating the session. */
   | { readonly kind: 'resolving' }
-  /** Several agents, no `--agent`: asking. */
-  | { readonly kind: 'choose'; readonly agents: readonly Agent[] }
+  /** No `--agent` and no `--model`: asking which catalog model to chat with. */
+  | { readonly kind: 'choose-model'; readonly models: readonly ModelEntry[] }
+  /** The account has no provider keys: there is no model to chat with (epic #92). */
+  | { readonly kind: 'no-models' }
   /** Chatting. */
   | { readonly kind: 'chat'; readonly session: ChatSession }
-  /** No agents: nothing to chat with. */
-  | { readonly kind: 'none' }
   /** Something failed before the chat could start. */
   | { readonly kind: 'failed'; readonly report: ErrorReport }
 
 export interface AppProps {
   /** The client to talk to — the real one, or the fake in dev mode. */
   readonly client: Client
-  /** The parsed `oh` flags: `--session`, `--continue`, `--agent`. */
+  /** The parsed `oh` flags: `--session`, `--continue`, `--agent`, `--model`. */
   readonly options: ChatOptions
   /** Which server this is, and whether to keep stacks: what the error messages need. */
   readonly context: ErrorContext
@@ -78,12 +78,12 @@ export function App({ client, options, context, banner, onExit }: AppProps) {
     [client, context],
   )
 
-  /** The picker answered: open a session on the chosen agent, then chat. */
-  const chooseAgent = useCallback(
-    (agent: Agent): void => {
+  /** The picker answered: open a model-first session on the chosen model, then chat. */
+  const chooseModel = useCallback(
+    (modelId: string): void => {
       void (async () => {
         try {
-          beginChat(await client.sessions.create({ agent: agent.id }))
+          beginChat(await client.sessions.create({ model: { id: modelId } }))
         } catch (error) {
           setScreen({ kind: 'failed', report: describeError(error, context) })
         }
@@ -103,11 +103,11 @@ export function App({ client, options, context, banner, onExit }: AppProps) {
           case 'session':
             beginChat(target.session)
             break
-          case 'choose':
-            setScreen({ kind: 'choose', agents: target.agents })
+          case 'choose-model':
+            setScreen({ kind: 'choose-model', models: target.models })
             break
-          case 'none':
-            setScreen({ kind: 'none' })
+          case 'no-models':
+            setScreen({ kind: 'no-models' })
             break
         }
       } catch (error) {
@@ -119,7 +119,7 @@ export function App({ client, options, context, banner, onExit }: AppProps) {
   }, [])
 
   // The screens that have nothing to offer render once and then give the terminal back.
-  const doneForGood = screen.kind === 'none' || screen.kind === 'failed'
+  const doneForGood = screen.kind === 'no-models' || screen.kind === 'failed'
   useEffect(() => {
     if (doneForGood) leave({ code: 1 })
   }, [doneForGood])
@@ -137,11 +137,11 @@ export function App({ client, options, context, banner, onExit }: AppProps) {
     case 'resolving':
       return <Text dimColor>{`connecting to ${context.server ?? 'the server'}…`}</Text>
 
-    case 'choose':
+    case 'choose-model':
       return (
-        <AgentPicker
-          agents={screen.agents}
-          onSelect={chooseAgent}
+        <ModelPicker
+          models={screen.models}
+          onSelect={chooseModel}
           onCancel={() => {
             leave({ code: 0 })
           }}
@@ -160,23 +160,23 @@ export function App({ client, options, context, banner, onExit }: AppProps) {
         />
       )
 
-    case 'none':
-      return <NoAgents server={context.server} />
+    case 'no-models':
+      return <NoModels server={context.server} />
 
     case 'failed':
       return <ErrorScreen report={screen.report} />
   }
 }
 
-/** What to say when the server has no agents: who can make one, and where. */
-function NoAgents({ server }: { server?: string | undefined }) {
+/** What to say when the account has no provider keys: where a key comes from, and that's it. */
+function NoModels({ server }: { server?: string | undefined }) {
   return (
     <Box flexDirection="column">
-      <Text>No agents yet — there is nothing to chat with.</Text>
+      <Text>No model providers yet — there is no model to chat with.</Text>
       <Text dimColor>
-        {`Create one in the web app${server === undefined ? '' : ` at ${server}`}, then run \`oh\` again.`}
+        {`Add a key in the web app${server === undefined ? '' : ` at ${server}`} under Settings → Model providers, then run \`oh\` again.`}
       </Text>
-      <Text dimColor>This CLI chats with agents; it does not create them.</Text>
+      <Text dimColor>Every model the picker offers is one your own key can use.</Text>
     </Box>
   )
 }

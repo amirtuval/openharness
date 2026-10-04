@@ -27,25 +27,28 @@ repo.
 
 | command                                 | what it does                                       |
 | --------------------------------------- | -------------------------------------------------- |
-| `oh`                                    | start a new chat                                   |
+| `oh`                                    | start a new chat, asking which model to run        |
 | `oh -s <id>` / `--session <id>`         | resume a session, showing its history              |
 | `oh -c` / `--continue`                  | resume the most recent session                     |
 | `oh sessions`                           | list every session: id, title, status, updated     |
-| `oh agents`                             | list every agent: id, name, model                  |
+| `oh agents`                             | list the saved agents (optional presets): id, name |
 | `oh login`                              | sign in through the browser (the device flow)      |
 | `oh logout`                             | revoke the session on the server, forget the token |
 | `oh whoami`                             | print the signed-in email and server               |
 | `oh -v` / `--version`, `oh -h`/`--help` | print and stop                                     |
 
-Global flags: `--server <url>`, `--debug`; `oh login` also takes `--no-browser`.
+Global flags: `--server <url>`, `--debug`; `oh login` also takes `--no-browser`. The chat
+flags are `-s`/`-c`, `--agent` and `--model`; the other commands take none of them.
 
 Exit codes: `0` did what it was asked (including a chat the user ended, and a `logout` whose
 server-side revoke could not be reached — the token is still gone locally); `1` the server,
-the network or the sign-in state said no, so a 401 is the not-signed-in error described under
-"Signing in" below; `2` the command line or the configuration was wrong (including an
-unusable config or credentials file, named in the message) — and also a chat asked for
-without a terminal, since stdin has to be a TTY to read a key; and `130`/`143` when the
-process was signalled, which is also how a running `oh login` is cancelled.
+the network or the sign-in state said no — a 401 is the not-signed-in error described under
+"Signing in" below, and an account with no provider keys ends there too, as "Choosing a
+model" describes; `2`
+the command line or the configuration was wrong (including an unusable config or credentials
+file, named in the message) — and also a chat asked for without a terminal, since stdin has
+to be a TTY to read a key; and `130`/`143` when the process was signalled, which is also how
+a running `oh login` is cancelled.
 
 Unknown flags are errors, not positionals: `node:util`'s `parseArgs` runs in strict mode, the
 message goes to stderr, and the exit code is `2`. `--api-key` was removed (epic #65, A8) and
@@ -102,17 +105,33 @@ goes to stderr; the exit code stays `0`. `oh whoami` prints the same `Logged in 
 `oh: login cancelled.` and exits `130` (`143` for `SIGTERM`). Expired codes and denied
 logins are reported with their own one-liners, exit `1`.
 
-### Choosing an agent
+### Choosing a model
 
-A new chat needs an agent, in this order: `--agent <id|name>`, matched against every agent
-the server has — by id, then exact name, then case-insensitive name, and an ambiguous match
-is an error rather than a guess. A value shaped like an `agent_…` id is read straight from
-the server first (`agents.get`): one request instead of a walk, with a value that misses
-that way still matched by name. Then: the only agent, when the server has exactly one; an
-interactive picker, when it has several; and a message saying to create one in the web app,
-when it has none. This CLI does not create agents.
+Chatting is model-first (epic #92): a new chat picks a **model**, not an agent. In order:
 
-`--session` wins over everything: it names the session to resume, whatever agents exist.
+1. `--model <provider/model>` names the model directly and skips the picker: the catalog is
+   not even read, because the router accepts models the catalog does not know (C5).
+2. `--agent <id|name>` starts from a saved agent preset instead, matched against every agent
+   the server has — by id, then exact name, then case-insensitive name, and an ambiguous
+   match is an error rather than a guess. A value shaped like an `agent_…` id is read
+   straight from the server first (`agents.get`): one request instead of a walk, with a
+   value that misses that way still matched by name. `--model` beside `--agent` overrides
+   the preset's model — the protocol's own combination. This CLI does not create agents.
+3. Otherwise a **model picker**, fed by `client.models.list()`: the chat models the user's
+   own provider keys can use, grouped by provider, each row showing the display name and
+   the context window, and a last row, "Other model id…", that takes a free-text
+   `provider/model` id. Up/down move, Enter picks, the number keys pick directly, Ctrl+C
+   leaves; the list is windowed to ten rows and scrolls with the cursor, and the numbers
+   are positions in the whole list (and are off past nine rows, where "12" would choose 1).
+4. With no provider keys at all — `client.models.list()` answers with no entries — there is
+   nothing to chat with: `oh` prints where to add a key (the web app's Settings → Model
+   providers) and exits `1`, the documented code for the server saying no.
+
+The session is created with `{ model }` (`sessions.create`), so it is agent-less and runs
+the chosen model; `--agent` sessions still name their preset.
+
+`--session` and `--continue` win over everything: they name the session to resume, whatever
+agents or models exist.
 
 ### Reading a list to the end
 
@@ -125,10 +144,10 @@ than returning a list that is silently short, because a short list is how an age
 server has comes to be reported as missing. `--continue` is the exception: `limit: 1`, the
 newest session, which is on the first page by construction.
 
-The picker draws every agent too, ten rows at a time, with the window following the cursor
-and the rows it leaves out counted above and below (`↑ 35 more`). A number key picks only
-while the list is at most nine long; with more, "12" would choose 1, so arrows are the way
-past nine.
+The model picker needs no paging: `GET /v1/models` answers with the whole catalog in one
+response. It draws ten rows at a time, with the window following the cursor and the rows it
+leaves out counted above and below (`↑ 35 more`); a number key picks only while the list is
+at most nine long, with the same "12" rule as before.
 
 ## In the chat
 
@@ -175,10 +194,10 @@ src/
   chat/
     session.ts           the runtime: transcript + stream + send/interrupt/dispose
     screen.tsx           the chat screen (transcript, status line, prompt)
-    target.ts            which session to open, and the agent-selection rules
+    target.ts            which session to open, and the model/agent-selection rules
     ctrl-c.ts            the Ctrl+C rules (interrupt / arm / exit)
   components/            message-view, transcript-view, status-line, prompt-input,
-                         notice-view, agent-picker
+                         notice-view, model-picker
   commands/list.ts       `oh sessions` / `oh agents`
   commands/auth.ts       `oh login` / `oh logout` / `oh whoami`
   dev/fake.ts            OPENHARNESS_FAKE: the fake client, seeded, dev only
@@ -193,9 +212,10 @@ OPENHARNESS_FAKE=1 yarn dev     # or: OPENHARNESS_FAKE=1 node dist/index.js
 
 `OPENHARNESS_FAKE=1` makes `oh` run against `createFakeClient()` from
 `@openharness/client/testing` instead of a server: no network, no model, scripted replies that
-stream in. The fake is seeded with three agents (so the picker comes up unless `--agent` names
-one), a scripted conversation, and a session with history behind it for `--continue` and
-`-s <id>`. It is a development and QA aid — the entry point is loaded lazily, so a normal `oh`
+stream in. The fake is seeded with a three-provider model catalog
+(`DEV_MODELS`) so a new chat's picker has groups and context windows to show, three agents
+for `oh agents` and the `--agent` path, a scripted conversation, and a session with history
+behind it for `--continue` and `-s <id>`. It is a development and QA aid — the entry point is loaded lazily, so a normal `oh`
 never reads it, and nothing in this package enables it on its own. See `src/dev/fake.ts`.
 
 The auth commands run against the fake too: `oh login` asks it for the (deterministic) codes,

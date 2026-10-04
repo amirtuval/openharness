@@ -3,9 +3,11 @@ import { createFakeClient, type FakeClient } from '@openharness/client/testing'
 import { cleanup, render } from 'ink-testing-library'
 import { afterEach, describe, expect, it } from 'vitest'
 
+import { makeModelEntry } from '@openharness/protocol/fixtures'
+
 import { App, type ExitPayload } from './app'
 import type { ChatOptions } from './args'
-import { listingAgents, pagedAgents, seedAgents } from './test-support/fake'
+import { listingAgents } from './test-support/fake'
 import {
   frameOf,
   pressKey,
@@ -56,6 +58,12 @@ async function waitForChat(app: TestApp, sessionId?: string): Promise<void> {
   await waitForScreen(app, / · (idle|running)$/mu)
 }
 
+/** Get past the model picker a new chat starts with: Enter on the model it starts on. */
+async function pickFirstModel(app: TestApp): Promise<void> {
+  await waitForScreen(app, 'Which model?')
+  pressKey(app, 'enter')
+}
+
 /** The session a new chat opened: the fake's newest. */
 async function openedSession(fake: FakeClient): Promise<string> {
   const [newest] = (await fake.sessions.list()).data
@@ -83,6 +91,7 @@ describe('App', () => {
     const fake = createFakeClient()
     const app = renderApp(fake)
 
+    await pickFirstModel(app)
     await waitForChat(app)
     submit(app, 'Hi there.')
 
@@ -124,86 +133,86 @@ describe('App', () => {
     await waitForFrame(app, 'you › From the recent session.')
   })
 
-  it('names the agent, the model and the status in the status line', async () => {
+  it('shows the model and the status in the status line of a model-first chat', async () => {
     const fake = createFakeClient()
     const app = renderApp(fake)
 
-    await waitForFrame(app, `${fake.agent.name} · ${fake.agent.model.id} · sesn_`)
+    // The catalog's only model — the picker's first row — is what the session will run.
+    await waitForScreen(app, '❯ 1. Claude Sonnet 5 · 200k context')
+    pressKey(app, 'enter')
+
+    await waitForFrame(app, 'anthropic/claude-sonnet-5 · sesn_')
     await waitForFrame(app, /sesn_[0-9A-Z]+ · idle/u)
   })
 
-  it('asks which agent when the server has several', async () => {
-    const fake = createFakeClient()
-    const reviewer = await fake.agents.create({
-      name: 'Reviewer',
-      model: { id: 'anthropic/claude-opus-5-5' },
+  it('offers the catalog grouped by provider, and chats on the model Enter picks', async () => {
+    const fake = createFakeClient({
+      models: [
+        makeModelEntry({
+          id: 'anthropic/claude-opus-5-5',
+          provider: 'anthropic',
+          name: 'Claude Opus 5.5',
+          context_window: 200_000,
+        }),
+        makeModelEntry({
+          id: 'openai/gpt-4.1-mini',
+          provider: 'openai',
+          name: 'GPT-4.1 Mini',
+          context_window: 1_000_000,
+        }),
+      ],
     })
+    const app = renderApp(fake)
 
-    const app = renderApp(listingAgents(fake, [fake.agent, reviewer]))
-    await waitForScreen(app, 'Which agent?')
-    await waitForFrame(app, `❯ 1. ${fake.agent.name}`)
+    await waitForScreen(app, 'Which model?')
+    await waitForFrame(app, '❯ 1. Claude Opus 5.5 · 200k context')
+    // Each provider has its heading, and the rows are numbered across the whole list.
+    expect(frameOf(app)).toContain('anthropic')
+    await waitForFrame(app, ' 2. GPT-4.1 Mini · 1M context')
+    expect(frameOf(app)).toContain('openai')
 
     pressKey(app, 'down')
-    await waitForFrame(app, '❯ 2. Reviewer · anthropic/claude-opus-5-5')
-
+    await waitForFrame(app, '❯ 2. GPT-4.1 Mini · 1M context')
     pressKey(app, 'enter')
-    await waitForFrame(app, 'Reviewer · anthropic/claude-opus-5-5 ·')
 
-    const created = (await fake.sessions.list()).data.find(
-      (session) => session.agent?.name === 'Reviewer',
-    )
-    expect(created).toBeDefined()
+    await waitForFrame(app, 'openai/gpt-4.1-mini · sesn_')
+    const created = (await fake.sessions.list()).data[0]
+    expect(created?.model.id).toBe('openai/gpt-4.1-mini')
+    // Model-first: the session has no agent, and is identified by its model.
+    expect(created?.agent).toBeNull()
     expect(app.exits).toEqual([])
   })
 
-  it('picks an agent by number too', async () => {
+  it('starts a chat on a free-text model id typed into the picker', async () => {
     const fake = createFakeClient()
-    const reviewer = await fake.agents.create({
-      name: 'Reviewer',
-      model: { id: 'anthropic/claude-opus-5-5' },
-    })
+    const app = renderApp(fake)
 
-    const app = renderApp(listingAgents(fake, [fake.agent, reviewer]))
-    await waitForScreen(app, 'Which agent?')
-
+    await waitForScreen(app, 'Which model?')
+    // One catalog model, so "Other model id…" is the second row.
     typeText(app, '2')
-    await waitForFrame(app, 'Reviewer · anthropic/claude-opus-5-5 ·')
+    await waitForScreen(app, 'type a model id as provider/model')
+    submit(app, 'meta/llama-4')
+
+    await waitForFrame(app, 'meta/llama-4 · sesn_')
+    expect((await fake.sessions.list()).data[0]?.model.id).toBe('meta/llama-4')
   })
 
-  it('reaches an agent past the first page of the picker', async () => {
+  it('skips the picker with --model', async () => {
     const fake = createFakeClient()
-    const agents = await seedAgents(fake, 45)
-    const app = renderApp(pagedAgents(fake, agents))
+    // A catalog that fails if it is read at all: --model means it is never read.
+    const client: Client = {
+      ...fake,
+      models: {
+        list: () => Promise.reject(new Error('the catalog should not be read')),
+      },
+    }
+    const app = renderApp(client, chatOptions({ model: 'openai/gpt-4.1-mini' }))
 
-    await waitForScreen(app, 'Which agent?')
-    await waitForFrame(app, '❯ 1. Agent 01 · anthropic/claude-sonnet-5')
-
-    // The window follows the cursor down to the agent on the third page of the list.
-    for (let press = 0; press < 44; press += 1) pressKey(app, 'down')
-    await waitForFrame(app, '❯ 45. Agent 45 · anthropic/claude-sonnet-5')
-    // Everything above it is out of the window, and the frame says so rather than growing.
-    expect(frameOf(app)).toContain('↑ 35 more')
-    expect(frameOf(app)).not.toContain('Agent 01 ·')
-
-    pressKey(app, 'enter')
-    await waitForFrame(app, 'Agent 45 · anthropic/claude-sonnet-5 · sesn_')
-
-    expect((await fake.sessions.list()).data[0]?.agent?.name).toBe('Agent 45')
-  })
-
-  it('scrolls back up the picker too', async () => {
-    const fake = createFakeClient()
-    const agents = await seedAgents(fake, 45)
-    const app = renderApp(pagedAgents(fake, agents))
-
-    await waitForScreen(app, 'Which agent?')
-    for (let press = 0; press < 44; press += 1) pressKey(app, 'down')
-    await waitForFrame(app, '❯ 45. Agent 45')
-
-    for (let press = 0; press < 44; press += 1) pressKey(app, 'up')
-    await waitForFrame(app, '❯ 1. Agent 01 · anthropic/claude-sonnet-5')
-    expect(frameOf(app)).toContain('↓ 35 more')
-    expect(frameOf(app)).not.toContain('Agent 45 ·')
+    await waitForFrame(app, 'openai/gpt-4.1-mini · sesn_')
+    expect(frameOf(app)).not.toContain('Which model?')
+    const created = (await fake.sessions.list()).data[0]
+    expect(created?.model.id).toBe('openai/gpt-4.1-mini')
+    expect(created?.agent).toBeNull()
   })
 
   it('starts on the agent --agent names', async () => {
@@ -219,15 +228,16 @@ describe('App', () => {
     )
 
     await waitForFrame(app, 'Reviewer · anthropic/claude-opus-5-5 ·')
-    expect(frameOf(app)).not.toContain('Which agent?')
+    expect(frameOf(app)).not.toContain('Which model?')
   })
 
-  it('says where to create an agent when there are none', async () => {
-    const fake = createFakeClient()
-    const app = renderApp(listingAgents(fake, []))
+  it('says where to add a provider key when the account has no models', async () => {
+    const fake = createFakeClient({ models: [], providers: [] })
+    const app = renderApp(fake)
 
-    await waitForFrame(app, 'No agents yet')
-    await waitForFrame(app, `Create one in the web app at ${CONTEXT.server}`)
+    await waitForFrame(app, 'No model providers yet')
+    await waitForFrame(app, `Add a key in the web app at ${CONTEXT.server}`)
+    await waitForFrame(app, 'Settings → Model providers')
 
     await waitFor(() => app.exits.length === 1)
     expect(app.exits[0]).toEqual({ code: 1 })
@@ -277,6 +287,7 @@ describe('App', () => {
   it('leaves on the second Ctrl+C when idle, pointing at the session', async () => {
     const fake = createFakeClient()
     const app = renderApp(fake)
+    await pickFirstModel(app)
     await waitForChat(app)
     const sessionId = await openedSession(fake)
 
@@ -293,6 +304,7 @@ describe('App', () => {
   it('drops the exit hint once the user types again', async () => {
     const fake = createFakeClient()
     const app = renderApp(fake)
+    await pickFirstModel(app)
     await waitForChat(app)
 
     pressKey(app, 'ctrlC')
@@ -385,6 +397,7 @@ describe('App', () => {
       sendMessage: () => Promise.reject(new Error('the connection dropped')),
     }
     const app = renderApp(failing)
+    await pickFirstModel(app)
     await waitForChat(app)
 
     submit(app, 'Hello.')
