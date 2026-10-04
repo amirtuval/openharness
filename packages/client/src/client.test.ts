@@ -1,4 +1,4 @@
-import { encodeKeyCursor, encodeSeqCursor } from '@openharness/protocol'
+import { CreateSessionRequestSchema, encodeKeyCursor, encodeSeqCursor } from '@openharness/protocol'
 import {
   fixtureTimestamp,
   makeAgent,
@@ -140,6 +140,74 @@ describe('request building', () => {
         { type: 'user.interrupt' },
       ],
     })
+  })
+})
+
+describe('creating a session', () => {
+  it('creates a model-first session: a model, and nothing else', async () => {
+    const session = makeSession({
+      agent: null,
+      model: { id: 'openai/gpt-4.1-mini' },
+      system: null,
+    })
+    const { client, mock } = clientWith(() => jsonResponse(session))
+
+    const created = await client.sessions.create({ model: { id: 'openai/gpt-4.1-mini' } })
+
+    const request = mock.requests[0]
+    expect(request?.url).toBe(`${BASE_URL}/v1/sessions`)
+    expect(request?.init?.method).toBe('POST')
+    // What goes on the wire is the new protocol request (issue #93): the body the client
+    // sends is one `CreateSessionRequestSchema` accepts, agent-less as it is.
+    const body = bodyOf(request?.init)
+    expect(body).toEqual({ model: { id: 'openai/gpt-4.1-mini' } })
+    expect(CreateSessionRequestSchema.safeParse(body).success).toBe(true)
+    // And the response's new fields come back typed: no agent, the model it runs, no system.
+    expect(created).toEqual(session)
+    expect(created.agent).toBeNull()
+    expect(created.model).toEqual({ id: 'openai/gpt-4.1-mini' })
+    expect(created.system).toBeNull()
+  })
+
+  it('creates a session from an agent, overriding its model and its system', async () => {
+    const agent = makeAgent()
+    const { client, mock } = clientWith(() => jsonResponse(makeSession({ system: null })))
+
+    await client.sessions.create({
+      agent: agent.id,
+      model: { id: 'openai/gpt-4.1-mini' },
+      system: null,
+    })
+
+    const body = bodyOf(mock.requests[0]?.init)
+    expect(body).toEqual({
+      agent: agent.id,
+      model: { id: 'openai/gpt-4.1-mini' },
+      system: null,
+    })
+    // A `null` system is a value, not an omission: the request overrides the agent's prompt.
+    expect(CreateSessionRequestSchema.safeParse(body).success).toBe(true)
+  })
+
+  it('sends a title, metadata and initial events beside the model', async () => {
+    const session = makeSession({ agent: null })
+    const { client, mock } = clientWith(() => jsonResponse(session))
+
+    await client.sessions.create({
+      model: { id: 'openai/gpt-4.1-mini' },
+      title: 'A new chat',
+      metadata: { source: 'test' },
+      initial_events: [{ type: 'user.message', content: [{ type: 'text', text: 'hi' }] }],
+    })
+
+    const body = bodyOf(mock.requests[0]?.init)
+    expect(body).toEqual({
+      model: { id: 'openai/gpt-4.1-mini' },
+      title: 'A new chat',
+      metadata: { source: 'test' },
+      initial_events: [{ type: 'user.message', content: [{ type: 'text', text: 'hi' }] }],
+    })
+    expect(CreateSessionRequestSchema.safeParse(body).success).toBe(true)
   })
 })
 

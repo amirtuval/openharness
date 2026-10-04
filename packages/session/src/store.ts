@@ -8,6 +8,7 @@ import type {
   ListOrder,
   ListSessionsResponse,
   Metadata,
+  ModelConfig,
   ModelRequestStartEvent,
   Session,
   SessionId,
@@ -144,20 +145,31 @@ export interface SessionStore {
   // ---------------------------------------------------------------- sessions
 
   /**
-   * Create a session owned by `options.ownerId` that snapshots the agent's
-   * `{ id, name, model, system }`.
+   * Create a session owned by `options.ownerId`, from an agent, a model, or both (issue #93).
    *
-   * The agent the session runs must belong to the same owner: a session is the owner's, and
-   * snapping somebody else's agent into it would hand its configuration over (epic #65, A4).
-   * The stored session carries the owner as `owner_id`, which never changes.
+   * The stored session always carries the configuration it runs — `model` and `system` — and,
+   * when it was created from an agent, the preset it snapshotted (`{ id, name, model,
+   * system }`); a model-first session has `agent: null`. `options.model` and `options.system`
+   * are that effective configuration: an explicit value wins, and what is omitted falls back
+   * to the agent's (`system` to `null` when there is no agent — and `model` is then required,
+   * because there is nothing to fall back to).
+   *
+   * Passing an `agentId` **checks the agent belongs to the same owner** as the session: a
+   * session is the owner's, and snapping somebody else's agent into it would hand its
+   * configuration over (epic #65, A4). The stored session carries the owner as `owner_id`,
+   * which never changes.
    *
    * `initial_events` are appended in the creation transaction, with `seq` starting at `1` and
    * `processed_at: null`. The session is `idle` with no status events.
    *
+   * @param agentId the agent whose configuration the session snapshots, or `null` for a
+   *   model-first session — one created from `options.model` alone
    * @throws AgentNotFoundError when `agentId` names no agent, or one owned by somebody else —
    *   the same answer either way, so the error does not leak that the agent exists
+   * @throws RangeError when there is no agent and no `options.model` either — the protocol
+   *   requires one of the two, and the store refuses to invent a configuration
    */
-  createSession(agentId: AgentId, options: CreateSessionOptions): Promise<Session>
+  createSession(agentId: AgentId | null, options: CreateSessionOptions): Promise<Session>
 
   /**
    * Read a session's header (the log's metadata, not its events), or `null` when it does not
@@ -561,6 +573,17 @@ export interface UpdateSessionRequest {
 export interface CreateSessionOptions {
   /** The `user.id` the session belongs to (epic #65, A4); required — nothing is unowned. */
   readonly ownerId: UserId
+  /**
+   * The effective model the session runs (issue #93): the request's inline model, or a
+   * per-session override of the agent's. Omitted, the agent's model is copied; without an
+   * agent there is nothing to copy and a missing `model` is a `RangeError`.
+   */
+  readonly model?: ModelConfig
+  /**
+   * The effective system prompt (issue #93): the request's override, `null` for none.
+   * Omitted, the agent's `system` is copied — or `null` when the session has no agent.
+   */
+  readonly system?: string | null
   /** The session title, or `null` for none. */
   readonly title?: string | null
   /** Caller metadata, stored with the session. */

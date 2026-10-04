@@ -52,7 +52,9 @@ describe('fixture builders', () => {
     expect(AgentSchema.safeParse(sampleAgent).success).toBe(true)
     expect(SessionSchema.safeParse(makeSession()).success).toBe(true)
     expect(SessionSchema.parse(sampleSession).agent).toEqual(sampleSession.agent)
-    expect(sampleSession.agent.id).toBe(sampleAgent.id)
+    expect(sampleSession.agent?.id).toBe(sampleAgent.id)
+    // Model-first: a session with no agent parses too (issue #93).
+    expect(SessionSchema.safeParse(makeSession({ agent: null })).success).toBe(true)
   })
 
   it('build every stored event type so that it parses against its schema', () => {
@@ -201,7 +203,7 @@ describe('fixture builders', () => {
   })
 
   it('builds a session agent that fits inside a session', () => {
-    expect(SessionSchema.parse(makeSession({ agent: makeSessionAgent() })).agent.name).toBe(
+    expect(SessionSchema.parse(makeSession({ agent: makeSessionAgent() })).agent?.name).toBe(
       'Summarizer',
     )
   })

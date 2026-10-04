@@ -4,7 +4,10 @@ import { Text } from 'ink'
 import type { ChatViewState } from '../chat/session'
 
 export interface StatusLineProps {
-  /** The agent the session runs, as the session snapshotted it. */
+  /**
+   * Who is answering: the name of the agent the session snapshotted, or `Model` for a
+   * model-first session, which has none (issue #93).
+   */
   readonly agentName: string
   /** The model, a `provider/model` router string. */
   readonly model: string

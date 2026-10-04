@@ -51,7 +51,14 @@ import {
   supersessionsOf,
   type SupersessionRecord,
 } from '../events'
-import { assertEventIds, assertTtl, decodeKeyPage, decodeSeqPage, pageSize } from '../inputs'
+import {
+  assertEventIds,
+  assertTtl,
+  decodeKeyPage,
+  decodeSeqPage,
+  effectiveSessionConfig,
+  pageSize,
+} from '../inputs'
 import type {
   AppendableEvent,
   AppendEventsOptions,
@@ -275,22 +282,32 @@ export class PostgresSessionStore implements SessionStore {
 
   // ---------------------------------------------------------------- sessions
 
-  async createSession(agentId: AgentId, options: CreateSessionOptions): Promise<Session> {
+  async createSession(agentId: AgentId | null, options: CreateSessionOptions): Promise<Session> {
     const now = this.#clock()
     const id = newSessionId(now)
     return this.#db.transaction().execute(async (trx) => {
       // The owner is part of the lookup: an agent that belongs to somebody else is "not
       // found" for this session, the same answer an unknown id gets (A4) — otherwise the
       // snapshot would hand the other user's agent configuration over.
-      const agent = await trx
-        .selectFrom('agents')
-        .selectAll()
-        .where('id', '=', agentId)
-        .where('owner_id', '=', options.ownerId)
-        .executeTakeFirst()
-      if (agent === undefined) {
+      const agent =
+        agentId === null
+          ? undefined
+          : await trx
+              .selectFrom('agents')
+              .selectAll()
+              .where('id', '=', agentId)
+              .where('owner_id', '=', options.ownerId)
+              .executeTakeFirst()
+      if (agentId !== null && agent === undefined) {
         throw new AgentNotFoundError(agentId)
       }
+      // What the session runs: the caller's model/system, or the agent's (issue #93). Throws
+      // when neither side names a model — a model-first session needs one. The agent row's
+      // `model_id` is the snapshot's model, not the session's.
+      const config = effectiveSessionConfig(
+        agent === undefined ? null : { model: { id: agent.model_id }, system: agent.system },
+        options,
+      )
       const row: SessionRow = {
         id,
         owner_id: options.ownerId,
@@ -298,10 +315,14 @@ export class PostgresSessionStore implements SessionStore {
         partition: partitionOf(id, this.#partitionCount),
         title: options.title ?? null,
         metadata: { ...options.metadata },
-        agent_id: agent.id,
-        agent_name: agent.name,
-        agent_model_id: agent.model_id,
-        agent_system: agent.system,
+        model: config.model,
+        system: config.system,
+        // The snapshot columns are written together: all four, or none for a model-first
+        // session. What it runs lives in `model`/`system` above, never here.
+        agent_id: agent?.id ?? null,
+        agent_name: agent?.name ?? null,
+        agent_model_id: agent?.model_id ?? null,
+        agent_system: agent?.system ?? null,
         created_at: instant(now),
         updated_at: instant(now),
       }

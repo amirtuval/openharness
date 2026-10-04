@@ -110,6 +110,8 @@ export function makeSession(overrides: Partial<Session> = {}): Session {
     status: 'idle',
     title: null,
     metadata: {},
+    model: { id: 'anthropic/claude-sonnet-5' },
+    system: 'You are a concise technical assistant.',
     agent: makeSessionAgent(),
     created_at: fixtureTimestamp(),
     updated_at: fixtureTimestamp(),

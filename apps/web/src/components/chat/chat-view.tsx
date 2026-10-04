@@ -44,7 +44,12 @@ export function ChatView({ sessionId }: { sessionId: string }) {
             {session === null ? shortId(sessionId) : sessionLabel(session)}
           </h1>
           <p className="truncate text-xs text-muted-foreground">
-            {session === null ? 'Loading…' : `${session.agent.name} · ${session.agent.model.id}`}
+            {session === null
+              ? 'Loading…'
+              : // The agent, when there is one, and the model the session runs — its own
+                // field since #93, always set. The model-first header #91 specifies lands
+                // with the model picker.
+                `${session.agent?.name ?? 'Model'} · ${session.model.id}`}
           </p>
         </div>
         <StatusIndicator status={status} retrying={lastError?.retryStatus === 'retrying'} />

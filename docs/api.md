@@ -1,7 +1,9 @@
 # The API, at a glance
 
-openharness speaks an Anthropic-shaped API: an agent configures a model, a session is the
-durable log that agent works in, and everything that happens is an event in that log. This
+openharness speaks an Anthropic-shaped API: a session is the durable log a conversation
+happens in, it is created from a **model**, and everything that happens is an event in that
+log. An **agent** is an optional preset — a name, a model and a system prompt — that a
+session can be created from instead. This
 page is the map. The shapes themselves live in
 [`packages/protocol`](../packages/protocol/AGENTS.md) — every request and response below is
 validated by a schema from there — and the server's behaviour is in
@@ -24,6 +26,12 @@ curl -X POST localhost:3000/v1/agents \
   -H 'content-type: application/json' \
   -d '{"name":"Summarizer","model":{"id":"anthropic/claude-sonnet-5"},"system":"Be brief."}'
 
+# A session from a model: chatting does not need an agent.
+curl -X POST localhost:3000/v1/sessions \
+  -H 'content-type: application/json' \
+  -d '{"model":{"id":"anthropic/claude-sonnet-5"}}'
+
+# Or from an agent preset, optionally overriding its model or system prompt.
 curl -X POST localhost:3000/v1/sessions \
   -H 'content-type: application/json' \
   -d '{"agent":"agent_01H…"}'
@@ -38,6 +46,15 @@ curl -N localhost:3000/v1/sessions/sesn_01H…/events/stream?event_deltas[]=agen
 The POST stores the message and answers immediately; the brain runs in the background and the
 stream carries what it does. `user.interrupt` is the same call with
 `{"type":"user.interrupt"}`, and it aborts the turn in flight.
+
+**Creating a session.** `POST /v1/sessions` takes a `model`, an `agent`, or both, and at least
+one of the two: a request that names neither is refused with a clear message. What the session
+_runs_ is one model and one system prompt — with an agent, its configuration is copied, and an
+explicit `model` or `system` in the request overrides it; without one, `model` is required and
+`system` defaults to `null`. The session the API answers with carries that effective
+configuration as `model` and `system` (always set), and `agent` — the preset it was created
+from, `{ id, name, model, system }` — or `null` for a model-first session. The snapshot is
+never rewritten: editing an agent changes no session that already exists.
 
 The first `user.message` a session is sent also names it: the session's `title` — `null` until
 then — becomes the message's first non-empty line, whitespace collapsed and cut to
@@ -57,7 +74,7 @@ same way, in the same request.
 | `GET`    | `/v1/agents`                              | list agents, oldest first                                               |
 | `GET`    | `/v1/agents/{agent_id}`                   | read one agent                                                          |
 | `POST`   | `/v1/agents/{agent_id}`                   | update an agent; sessions already created keep their snapshot           |
-| `POST`   | `/v1/sessions`                            | create a session that snapshots an agent                                |
+| `POST`   | `/v1/sessions`                            | create a session from a model and/or an agent (at least one)            |
 | `GET`    | `/v1/sessions`                            | list sessions, newest first (`agent_id` filters)                        |
 | `GET`    | `/v1/sessions/{session_id}`               | read one session                                                        |
 | `POST`   | `/v1/sessions/{session_id}/events`        | append user events; the server owns every other event type              |

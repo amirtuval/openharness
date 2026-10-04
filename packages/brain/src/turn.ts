@@ -244,7 +244,10 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
   if (session === null) {
     throw new SessionNotFoundError(sessionId)
   }
-  const agentModel: ModelConfig = session.agent.model
+  // The session's own effective model and system, not its agent's (issue #93): a session may
+  // have no agent, and the two fields are always set — from the agent when it has one, from
+  // the request's override when it does not, and from the backfill for rows written before it.
+  const sessionModel: ModelConfig = session.model
   const queued = await store.getPendingUserEvents(sessionId)
   const turnState = await store.getTurnState(sessionId)
   if (turnState.state === 'idle' && queued.length === 0) {
@@ -385,7 +388,7 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     // The turn still ends on it, and its idle event claims the messages it could not answer;
     // leaving them queued would make the scheduler that finds work in the log run the same
     // failing turn again, and again (epic #65, A5).
-    const provider = providerOf(agentModel.id)
+    const provider = providerOf(sessionModel.id)
     const credential = await resolveCredential(provider)
     if (!isUsableCredential(credential)) {
       await append([
@@ -398,14 +401,14 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       ])
       return { outcome: 'error' }
     }
-    const [start] = await append([spanStart(claims, agentModel.id)])
+    const [start] = await append([spanStart(claims, sessionModel.id)])
     if (start === undefined) {
       throw new Error('the store did not return the span it was asked to append')
     }
     // Read the log again: the claim just landed, and what this request answers is the log as it
     // stands after it — the messages it consumes, in order, and nothing still queued.
     const answered = contextView(await readLog(store, sessionId))
-    const messages = strategy(answered, { model: agentModel, system: session.agent.system })
+    const messages = strategy(answered, { model: sessionModel, system: session.system })
 
     // The reply's chunks are stored as they arrive, under one pre-minted id: the stored
     // `event_start` announces the id the `agent.message` will be stored under, and every
@@ -419,7 +422,7 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     // One model per request, built with this request's credential: the resolved key lives for
     // exactly this request and is not held on to between them.
     const result = await streamModelRequest({
-      model: model(agentModel.id, credential),
+      model: model(sessionModel.id, credential),
       messages,
       signal,
       onTextDelta: async (text) => {

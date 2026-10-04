@@ -37,12 +37,29 @@ import type { Transport } from '../http'
  *
  * A session is a durable, append-only event log; the resource is its header. The log is the
  * conversation, so the interesting methods are on {@link SessionEventsResource}.
+ *
+ * A session is created from an agent, a model, or both (epic #92, issue #93): chatting does
+ * not require an agent, and an agent — when one is given — is the preset the session
+ * snapshots. Whatever it was created from, the returned session carries the configuration it
+ * runs in `model` and `system`, always set.
  */
 export interface SessionsResource {
   /**
-   * Create a session.
+   * Create a session, from a model, an agent, or both.
    *
-   * @param body the agent to run, and optionally a title, metadata and initial events
+   * ```ts
+   * // Model-first: pick a model and chat. `system` is optional (`null` by default).
+   * await client.sessions.create({ model: { id: 'openai/gpt-4.1-mini' } })
+   *
+   * // From an agent preset, optionally overriding its model or system prompt.
+   * await client.sessions.create({ agent: agent.id, system: 'You are terse.' })
+   * ```
+   *
+   * At least one of `agent` and `model` is required — the protocol's request schema is where
+   * that rule lives — and an explicit `model`/`system` overrides what the agent contributes.
+   *
+   * @param body the model and/or agent to run the session with, and optionally a title,
+   *   metadata and initial events
    * @param options request options (cancellation)
    */
   create(body: CreateSessionRequest, options?: RequestOptions): Promise<Session>

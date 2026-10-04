@@ -56,7 +56,14 @@ import {
   type SupersessionRecord,
 } from './events'
 import { deepFreeze } from './freeze'
-import { assertEventIds, assertTtl, decodeKeyPage, decodeSeqPage, pageSize } from './inputs'
+import {
+  assertEventIds,
+  assertTtl,
+  decodeKeyPage,
+  decodeSeqPage,
+  effectiveSessionConfig,
+  pageSize,
+} from './inputs'
 import type {
   AppendableEvent,
   AppendEventsOptions,
@@ -211,13 +218,16 @@ export class InMemorySessionStore implements SessionStore {
 
   // ---------------------------------------------------------------- sessions
 
-  createSession(agentId: AgentId, options: CreateSessionOptions): Promise<Session> {
-    const agent = this.#agents.get(agentId)
+  createSession(agentId: AgentId | null, options: CreateSessionOptions): Promise<Session> {
+    const agent = agentId === null ? null : (this.#agents.get(agentId) ?? null)
     // Somebody else's agent is not a session this caller may create: the same "not found" as
     // an id nothing names, so the answer does not leak that the agent exists (A4).
-    if (agent === undefined || agent.owner_id !== options.ownerId) {
+    if (agentId !== null && (agent === null || agent.owner_id !== options.ownerId)) {
       throw new AgentNotFoundError(agentId)
     }
+    // What the session runs: the caller's model/system, or the agent's (issue #93). Throws
+    // when neither side names a model — a model-first session needs one.
+    const config = effectiveSessionConfig(agent, options)
     const now = this.#clock()
     const at = timestampAt(now)
     const session: Session = {
@@ -227,12 +237,17 @@ export class InMemorySessionStore implements SessionStore {
       status: 'idle',
       title: options.title ?? null,
       metadata: { ...options.metadata },
-      agent: {
-        id: agent.id,
-        name: agent.name,
-        model: { id: agent.model.id },
-        system: agent.system,
-      },
+      model: config.model,
+      system: config.system,
+      agent:
+        agent === null
+          ? null
+          : {
+              id: agent.id,
+              name: agent.name,
+              model: { id: agent.model.id },
+              system: agent.system,
+            },
       created_at: at,
       updated_at: at,
     }
@@ -263,7 +278,9 @@ export class InMemorySessionStore implements SessionStore {
     const sessions = [...this.#sessions.values()]
       .map((record) => record.session)
       .filter((session) => matchesOwner(session, options))
-      .filter((session) => wanted === undefined || session.agent.id === wanted)
+      // The `agentId` filter narrows to sessions created with that agent; a model-first
+      // session has no agent and no agent id to match (issue #93).
+      .filter((session) => wanted === undefined || session.agent?.id === wanted)
     // Newest first: the list order is `(created_at, id)` descending, which is the order the
     // cursors seek into.
     sessions.sort((left, right) => compareKeys(right, left))
