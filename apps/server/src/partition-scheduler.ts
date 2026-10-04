@@ -41,34 +41,31 @@ import type { SessionScheduler, StopSchedulerOptions, StopSessionOptions } from 
  *
  * ## Balancing
  *
- * The store has no way to list the other instances — the lease table is queryable only one
- * partition at a time — so the balancing is inferred from lease *outcomes*:
+ * Each instance is a member of the scheduler while it keeps heartbeating: every refresh
+ * announces it in `scheduler_instances` and reads the members seen within one lease TTL back
+ * (issue #122), so the space is divided by the *live members* —
+ * `share = ceil(partitions / members)` each — rather than estimated from the leases this
+ * instance failed to take:
  *
- * - An `acquirePartition` that answers `null` is a live lease another instance holds: proof
- *   that a peer exists, and (divided by what this instance holds) an estimate of how many.
- *   `peers = floor(blocked / held)`, at least 1 when anything is blocked; `share =
- *   ceil(partitions / (1 + peers))`.
  * - A scan never steals: it takes free or expired partitions only, so no lease is ever taken
- *   away from a live owner. The one exception to "take everything that is free" is the very
- *   first scan of a fresh instance, which stops at half the space — that is what lets two
- *   instances that boot together end up with a partition set each instead of one of them
- *   taking the lot. Every later scan takes all it can, because an unowned partition is a
- *   session nobody runs.
+ *   away from a live owner, and it stops at the share. An instance that took more would only
+ *   give the excess back at its next heartbeat; stopping at the share divides the space once
+ *   instead of claiming it whole and rebalancing.
  * - An instance holding more than `share` gives the surplus up — finishing the turns running
  *   in it first, then releasing, so the peer that takes it over starts from a closed turn
  *   rather than a half-written one. Released partitions are left alone by this instance for a
  *   heartbeat, so the peer has a chance to take them instead of watching them bounce back.
+ * - The membership ages out on its own: an instance that stops heartbeating is dropped from
+ *   the count at the instant its leases stop being renewed — both windows are one lease TTL —
+ *   so the survivors' shares grow and their scans take over what the dead instance held. An
+ *   instance that stops gracefully deletes its row in `stop()`, so it stops being counted at
+ *   once.
  *
- * The estimate is deliberately coarse and it is not sticky: when a peer dies its leases
- * expire, the survivor takes them, and `blocked` falls back to zero — so the survivor's share
- * grows back to the whole space rather than leaving half of it unowned. What this cannot do is
- * discover a peer that holds *nothing*: an instance that joins a space which is already fully
- * held live will stay idle until a lease is released or expires — with one exception, so that
- * a peer that booted at the same time as this one and simply lost the race for the space is
- * not starved forever: the `#offer` step. An instance that holds the *whole* space, sees no
- * peer and has nothing running offers its partitions back for one heartbeat, so the invisible
- * peer can take its share and become visible; the scan takes back whatever nobody claimed.
- * Releasing — never stealing — is what keeps the promise that a live lease is inviolate.
+ * Explicit membership is what makes a peer that holds *nothing* visible: it heartbeats all
+ * the same, so an instance that lost the race for a fully-held space is one release away from
+ * its share instead of being starved forever behind an estimate that cannot see it. A live
+ * lease is still never taken and the fencing is unchanged; the membership table is
+ * bookkeeping beside the log, like the leases themselves.
  *
  * ## Losing a lease
  *
@@ -82,8 +79,9 @@ import type { SessionScheduler, StopSchedulerOptions, StopSessionOptions } from 
  *
  * `stop()` stops the timers, drains the turns in flight within the drain timeout (they are
  * aborted, so a brain cuts its model request short and writes the partial reply, the closed
- * span and `session.status_idle`), and then *releases* every lease it still holds — so the next
- * instance takes the partitions over at its next heartbeat instead of waiting for the TTL.
+ * span and `session.status_idle`), *deletes its membership row* — so peers stop counting it
+ * at once — and *releases* every lease it still holds, so the next instance takes the
+ * partitions over at its next heartbeat instead of waiting for the TTL.
  */
 
 /** How long a partition lease lasts before it has to be renewed; 30 seconds by default. */
@@ -192,17 +190,12 @@ export class PostgresPartitionScheduler implements SessionScheduler {
   /** When each partition we gave up was released, so a scan leaves it for a peer first. */
   readonly #releasedAt = new Map<number, number>()
 
-  /** This instance's estimate of how many other instances are alive; see "Balancing". */
-  #peers = 0
-
-  /** The earliest time the next offer may be made; see {@link #offer}. */
-  #offerAt = 0
-
-  /** How long until the offer after the next one; doubles from one heartbeat up to the TTL. */
-  #offerDelayMs = 0
-
-  /** Whether the first scan — the one that stops at half the space — has happened. */
-  #claimed = false
+  /**
+   * How many instances the last membership read saw — this one included — and so what the
+   * share divides the space by; see "Balancing" (issue #122). One until the first read, which
+   * is the truth for an instance that has just started announcing itself.
+   */
+  #liveMembers = 1
 
   /** Where a scan starts, so instances do not all walk the space in the same order. */
   #cursor: number
@@ -249,7 +242,6 @@ export class PostgresPartitionScheduler implements SessionScheduler {
       )
     }
     this.#cursor = hashOffset(options.instanceId, this.#partitions)
-    this.#offerDelayMs = this.#heartbeatMs
     this.#queue = new PassQueue({
       runner:
         options.runner ??
@@ -416,6 +408,10 @@ export class PostgresPartitionScheduler implements SessionScheduler {
     if (this.#stopped || this.#paused) {
       return
     }
+    await this.#announce()
+    if (this.#stopped || this.#paused) {
+      return
+    }
     await this.#renewHeld()
     if (this.#stopped || this.#paused) {
       return
@@ -425,56 +421,34 @@ export class PostgresPartitionScheduler implements SessionScheduler {
       return
     }
     await this.#scan()
-    await this.#offer()
   }
 
   /**
-   * When this instance holds the whole space and can see no peer, give half of it back for one
-   * cooling window, so a peer the estimate cannot see can take its share.
+   * Say this instance is alive, and read who else is: the membership row is upserted first, so
+   * the list this instance reads back contains itself (issue #122).
    *
-   * This is the one gap the share-based balancing cannot close. `#learnPeers` infers peers
-   * from leases this instance *failed to take*, and a peer that holds nothing has no lease to
-   * fail on: if its first scan loses the race for the free space (a loaded runner is enough —
-   * the first acquire's round trip overruns the winner's next heartbeat), it is invisible
-   * forever, and the winner holds the whole space forever. Nothing on either side can break
-   * that: the loser has nothing to release and the winner has no surplus to give up.
-   *
-   * Releasing is the way out, and it is safe because it is a *release*, not a steal: the
-   * lease's epoch advances, and at most one cooling window passes before the scan takes back
-   * whatever nobody claimed. It offers the *newest* half — the same half a fresh instance
-   * stops at, which is what makes the handshake work: a peer that is still scanning takes its
-   * half out of it and is visible from then on. It only runs while this instance has nothing
-   * running at all (a busy deployment is not interrupted for the sake of a peer that may not
-   * exist) and backs off from one heartbeat up to one lease TTL, so a deployment that really
-   * is one idle instance pays one heartbeat of one heartbeat's worth of the space, rarely.
+   * That list is what the share is computed from — `ceil(partitions / members)` — and it is
+   * the difference from the old inferred balancing: a peer that holds *nothing* still
+   * heartbeats, so it is counted the moment it starts, and an instance that lost the race for
+   * a fully-held space gets its share at the winner's next release instead of being invisible
+   * forever. A failed announce or read fails the tick and is reported like any other store
+   * failure; the next heartbeat tries again.
    */
-  async #offer(): Promise<void> {
-    if (this.#stopped || this.#paused || this.#held.size < this.#partitions || this.#peers > 0) {
+  async #announce(): Promise<void> {
+    await this.#store.heartbeatInstance(this.#instanceId)
+    if (this.#stopped) {
+      // A stop raced this announce — the refresh that issued it had already begun when the
+      // stop ran, and its write landed after the stop's delete. The row must not outlive the
+      // instance: delete it again, now that the write has committed. (The same shape as
+      // `#adopt` releasing the lease of a stop that raced an acquire.)
+      await this.#store.removeInstance(this.#instanceId)
       return
     }
-    if (this.#queue.activeSessions().length > 0 || Date.now() < this.#offerAt) {
-      return
-    }
-    const half = Math.max(1, Math.floor(this.#partitions / 2))
-    const offered: number[] = []
-    for (const partition of [...this.#order].reverse().slice(0, half)) {
-      const lease = this.#held.get(partition)
-      if (lease === undefined) {
-        continue
-      }
-      this.#forget(partition)?.abort()
-      this.#releasedAt.set(partition, Date.now())
-      offered.push(partition)
-      await this.#store.releasePartition(partition, this.#instanceId, lease.epoch)
-    }
-    if (offered.length === 0) {
-      return
-    }
-    this.#offerAt = Date.now() + this.#offerDelayMs
-    this.#offerDelayMs = Math.min(this.#offerDelayMs * 2, this.#ttlMs)
-    this.#notice(
-      `offered partitions ${describePartitions(offered)} to any peer that cannot be seen`,
-    )
+    const members = await this.#store.listLiveInstances(this.#ttlMs)
+    // The floor of one is paranoia about a store that answered an empty list: this instance
+    // has just announced itself, so the list contains it, and the share divides by at least
+    // the one member there always is.
+    this.#liveMembers = Math.max(1, members.length)
   }
 
   /** Extend every lease; one that cannot be extended is not ours any more. */
@@ -499,39 +473,32 @@ export class PostgresPartitionScheduler implements SessionScheduler {
   }
 
   /**
-   * Walk the partition space and take what nobody holds.
+   * Walk the partition space and take free partitions until this instance holds its share.
    *
-   * Free and expired partitions only: a live lease held by another instance is left alone and
-   * counted, because it is the only evidence this instance has that the other instance exists.
+   * Free and expired partitions only: a live lease held by another instance is left alone — a
+   * lease is never taken away from a live owner. The walk stops at the share, because a
+   * partition taken beyond it would only be given back at the next heartbeat; with the
+   * membership known the space divides once instead of being claimed whole and rebalanced.
    */
   async #scan(): Promise<void> {
-    const heldAtStart = this.#held.size
-    let blocked = 0
     for (let step = 0; step < this.#partitions; step += 1) {
       if (this.#stopped || this.#paused) {
         return
+      }
+      if (this.#held.size >= this.#share()) {
+        break
       }
       const partition = (this.#cursor + step) % this.#partitions
       if (this.#held.has(partition) || this.#cooling(partition)) {
         continue
       }
-      if (!this.#claimed && this.#held.size >= Math.ceil(this.#partitions / 2)) {
-        // The first scan of a fresh instance stops at half the space: two instances that boot
-        // together then meet each other and share, instead of whichever one wins the race
-        // taking everything. Every later scan takes all it can, because a partition nobody
-        // owns is a session nobody runs.
-        break
-      }
       const lease = await this.#store.acquirePartition(partition, this.#instanceId, this.#ttlMs)
       if (lease === null) {
-        blocked += 1
         continue
       }
       await this.#adopt(lease)
     }
-    this.#claimed = true
     this.#cursor = (this.#cursor + 1) % this.#partitions
-    this.#learnPeers(blocked, heldAtStart)
   }
 
   /**
@@ -692,20 +659,9 @@ export class PostgresPartitionScheduler implements SessionScheduler {
     return false
   }
 
-  /** What one scan's blocked count says about how many instances share the space. */
-  #learnPeers(blocked: number, held: number): void {
-    if (blocked === 0) {
-      // Nobody else is holding anything we could see: whatever we thought we knew about peers
-      // is stale (their leases expired), and the space is ours to look after again.
-      this.#peers = 0
-      return
-    }
-    this.#peers = Math.max(1, Math.floor(blocked / Math.max(1, held)))
-  }
-
-  /** How many partitions this instance should hold, given its estimate of the others. */
+  /** How many partitions this instance should hold: the space over the live members (#122). */
   #share(): number {
-    return Math.max(1, Math.ceil(this.#partitions / (1 + this.#peers)))
+    return Math.max(1, Math.ceil(this.#partitions / this.#liveMembers))
   }
 
   /** The fence and stop signal a pass for `sessionId` runs under — right now, not at request. */
@@ -776,6 +732,16 @@ export class PostgresPartitionScheduler implements SessionScheduler {
   async #stop(options: StopSchedulerOptions): Promise<void> {
     this.#stopped = true
     this.#clearTimers()
+    // The membership row goes first: peers stop counting this instance the moment it is
+    // stopping, so the share they divide grows and the partitions released below are taken
+    // over at their next heartbeat instead of after the row ages out (issue #122). A delete
+    // that fails is reported and dropped — the row then ages out after one TTL, exactly as a
+    // crash's would — and it never keeps the shutdown from finishing.
+    try {
+      await this.#store.removeInstance(this.#instanceId)
+    } catch (error: unknown) {
+      this.#report(error, undefined)
+    }
     // The turns in flight are aborted and given the drain timeout to write their last events,
     // exactly like a single-process shutdown.
     await this.#queue.stop({

@@ -84,6 +84,15 @@ export function assertTtl(ttlMs: number): void {
   }
 }
 
+/** A liveness window only makes sense as a positive amount of time, like a lease ttl. */
+export function assertLivenessWindow(withinMs: number): void {
+  if (!Number.isFinite(withinMs) || withinMs <= 0) {
+    throw new RangeError(
+      `withinMs must be a positive, finite number of milliseconds, got ${withinMs}`,
+    )
+  }
+}
+
 /**
  * Check the ids an append is carrying before the store writes anything.
  *

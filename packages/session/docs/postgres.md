@@ -44,7 +44,7 @@ schema.
 
 ## The schema
 
-Thirteen tables, in `migrations/`. Eight are this package's:
+Fourteen tables, in `migrations/`. Nine are this package's:
 
 | table                  | what a row is                                                                                                                              |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -54,6 +54,7 @@ Thirteen tables, in `migrations/`. Eight are this package's:
 | `event_claims`         | one claim of one user event: `event_id` (primary key), the claiming event or `null`, `claimed_at`                                          |
 | `event_supersessions`  | one recorded chunk range: `from_seq`, `to_seq`, `by_event_id` (primary key), `by_seq`, `created_at`                                        |
 | `partition_leases`     | who holds a partition, at which epoch, until when                                                                                          |
+| `scheduler_instances`  | one row per live scheduler instance: `instance_id` (primary key), `last_seen` (#122)                                                       |
 | `provider_credentials` | a user's sealed model-provider key, one per `(user_id, provider)`: the sealed blob, `last4`, timestamps                                    |
 | `user_preferences`     | a user's settings across sessions — today the default `model` a new chat starts with — one row per user (#111)                             |
 
@@ -124,6 +125,14 @@ to_seq)` are the range rules in the schema's own words (see
 - **`partition_leases.owner is null` means free**, and a `check` keeps owner and `expires_at`
   in step: an owned lease always has an expiry, a free one has neither.
 
+- **`scheduler_instances` is one row per live scheduler instance** (#122): `instance_id` is
+  `text collate "C"` — `listLiveInstances` answers in that order — and `last_seen` is written
+  from the injected clock, never `now()`. It is bookkeeping beside the log, like the lease
+  table: `heartbeatInstance` upserts the row, `removeInstance` deletes it on a graceful
+  `stop()`, and a membership that is never refreshed ages out — after one TTL both the row and
+  the instance's leases are gone, so a dead instance is dropped from the count exactly when
+  its partitions become stealable. A lost row costs one heartbeat's announcement.
+
 - **`user_preferences` is one row per user** (#111): `user_id` is the primary key — Better
   Auth's opaque text, so it takes no `collate "C"`, like `owner_id` — and a foreign key
   `on delete cascade` from `"user"`, so a user's preferences go with the user. The store
@@ -168,6 +177,7 @@ databases while applying to new ones. Add a new file instead.
 | `0014_auth_session_revocation.sql` | the `after delete` trigger on `"session"` that announces revoked sessions (#76)                                       |
 | `0015_session_model.sql`           | the effective `model`/`system` on `sessions`, backfilled from the agent snapshot; the snapshot becomes nullable (#93) |
 | `0016_user_preferences.sql`        | `user_preferences`, one row per user: the stored `default_model`, or NULL (#111)                                      |
+| `0017_scheduler_instances.sql`     | `scheduler_instances`, one row per live scheduler instance: `instance_id`, `last_seen` (#122)                         |
 
 To run them outside an application:
 
@@ -253,6 +263,20 @@ user — `user_id` primary key, `on delete cascade` from `"user"` — with `defa
 protocol's default, `{ default_model: null }`. `postgres.test.ts` re-runs the migrations and
 then reads and writes preferences through the store, so the re-run is proved to leave the
 table working.
+
+### The scheduler membership (#122)
+
+`0017_scheduler_instances.sql` (issue #122) creates `scheduler_instances`: one row per live
+scheduler instance — `instance_id text collate "C"` primary key (ordered by
+`listLiveInstances`, hence the collation) and `last_seen timestamptz not null` from the
+injected clock. A single `create table if not exists`, and nothing to backfill: an absent row
+means nobody has announced that id. `heartbeatInstance` upserts (`on conflict (instance_id) do
+update set last_seen = excluded.last_seen`), `listLiveInstances(withinMs)` selects the ids
+with `last_seen > $now - withinMs` in id order — the same inclusive expiry a lease has at
+`expires_at` — and `removeInstance` deletes. The rows are bookkeeping beside the log, like
+`partition_leases`: a lost one costs one heartbeat's announcement. `postgres.test.ts`
+exercises the three calls after a migration re-run, so the re-run is proved to leave the table
+working.
 
 ## `seq`: gap-free, in order, under concurrent appends
 
@@ -588,9 +612,9 @@ DATABASE_URL=postgres://postgres:postgres@localhost:5432/openharness yarn test
 ```
 
 The suites truncate every table this package owns before each test, so they are happy to share
-a database with anything else — but they will empty all eight of them — `agents`, `sessions`,
-`events`, `event_claims`, `event_supersessions`, `partition_leases`, `provider_credentials`
-and `user_preferences` — in whatever database `DATABASE_URL` points at. Better Auth's tables
+a database with anything else — but they will empty all nine of them — `agents`, `sessions`,
+`events`, `event_claims`, `event_supersessions`, `partition_leases`, `scheduler_instances`,
+`provider_credentials` and `user_preferences` — in whatever database `DATABASE_URL` points at. Better Auth's tables
 are left alone apart from the two `"user"` rows the suites insert for their owners (the
 `ensureUsers` hook), so a database that also holds real sign-ins keeps them. Point
 `DATABASE_URL` at a scratch database anyway.

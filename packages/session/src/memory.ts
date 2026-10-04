@@ -58,6 +58,7 @@ import {
 import { deepFreeze } from './freeze'
 import {
   assertEventIds,
+  assertLivenessWindow,
   assertTtl,
   decodeKeyPage,
   decodeSeqPage,
@@ -95,10 +96,10 @@ import type {
  * `store.ts` and `credentials.ts`.
  *
  * The session store holds everything in `Map`s — agents, sessions and their logs, per-user
- * preferences (#111), leases, listeners — and is single-process by construction: two
- * instances share nothing, and a lease in one is invisible to the other. That is the one
- * place it cannot be Postgres-like, so the conformance suite only tests what a shared store
- * can also do.
+ * preferences (#111), leases, scheduler memberships (#122), listeners — and is
+ * single-process by construction: two instances share nothing, and a lease or a membership
+ * in one is invisible to the other. That is the one place it cannot be Postgres-like, so the
+ * conformance suite only tests what a shared store can also do.
  *
  * Four implementation details are worth knowing, because they are choices the contract leaves
  * open and tests may rely on:
@@ -150,6 +151,14 @@ export class InMemorySessionStore implements SessionStore {
   readonly #supersessions = new Map<SessionId, SupersessionRecord[]>()
 
   readonly #leases = new Map<number, LeaseRecord>()
+
+  /**
+   * The scheduler instances that have heartbeated, by id, with the clock instant of their
+   * last announcement — the in-memory `scheduler_instances` table (issue #122). A membership
+   * is live while that instant is within the window a reader asks for; nothing else is kept,
+   * because nothing else is needed.
+   */
+  readonly #instances = new Map<string, number>()
 
   readonly #sessionListeners = new Map<string, Set<SessionEventListener>>()
 
@@ -595,6 +604,28 @@ export class InMemorySessionStore implements SessionStore {
 
   currentEpoch(partition: number): Promise<number> {
     return resolved(this.#leases.get(partition)?.epoch ?? 0)
+  }
+
+  // ------------------------------------------------------ scheduler membership
+
+  heartbeatInstance(instanceId: string): Promise<void> {
+    this.#instances.set(instanceId, this.#clock())
+    return resolved(undefined)
+  }
+
+  listLiveInstances(withinMs: number): Promise<string[]> {
+    assertLivenessWindow(withinMs)
+    const cutoff = this.#clock() - withinMs
+    const live = [...this.#instances.entries()]
+      .filter(([, lastSeenMs]) => lastSeenMs > cutoff)
+      .map(([instanceId]) => instanceId)
+      .sort()
+    return resolved(live)
+  }
+
+  removeInstance(instanceId: string): Promise<void> {
+    this.#instances.delete(instanceId)
+    return resolved(undefined)
   }
 
   // ------------------------------------------------------------------ internals
