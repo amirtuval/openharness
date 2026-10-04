@@ -160,6 +160,8 @@ describe('two people on one server (A4)', () => {
     // sampled: a new route that forgets the guard is the failure this test exists to catch.
     const routes: readonly (readonly [string, string])[] = [
       ['GET', '/v1/me'],
+      ['GET', '/v1/me/preferences'],
+      ['PUT', '/v1/me/preferences'],
       ['GET', '/v1/agents'],
       ['POST', '/v1/agents'],
       ['GET', '/v1/agents/agent_01JZZZZZZZZZZZZZZZZZZZZZZZ'],
@@ -167,6 +169,7 @@ describe('two people on one server (A4)', () => {
       ['GET', '/v1/sessions'],
       ['POST', '/v1/sessions'],
       ['GET', '/v1/sessions/sesn_01JZZZZZZZZZZZZZZZZZZZZZZZ'],
+      ['DELETE', '/v1/sessions/sesn_01JZZZZZZZZZZZZZZZZZZZZZZZ'],
       ['GET', '/v1/sessions/sesn_01JZZZZZZZZZZZZZZZZZZZZZZZ/events'],
       ['POST', '/v1/sessions/sesn_01JZZZZZZZZZZZZZZZZZZZZZZZ/events'],
       ['GET', '/v1/sessions/sesn_01JZZZZZZZZZZZZZZZZZZZZZZZ/events/stream'],

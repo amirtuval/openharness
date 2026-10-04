@@ -2,7 +2,6 @@ import {
   DEFAULT_PARTITION_COUNT,
   EVENT_TYPES,
   partitionOf,
-  type SessionDeletedEvent,
   type StoredEvent,
 } from '@openharness/protocol'
 import { MOCK_SLOW_MARKER } from '@openharness/server'
