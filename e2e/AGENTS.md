@@ -21,8 +21,10 @@ DATABASE_URL=postgres://openharness:openharness@localhost:5432/openharness yarn 
 
 Without `DATABASE_URL` the suite fails with that instruction rather than skipping: an e2e suite
 that quietly passes because nothing ran is worse than one that says what it needs. Two files
-can skip, and both say why in their output: the provider smoke test (needs a provider key), and
-the failover test, which guards against a server without the multi-instance scheduler.
+can skip, and both say why in their output: the provider smoke test (needs a provider key —
+unless `OPENHARNESS_REQUIRE_PROVIDER_SMOKE=1` demands it run, which is how the CI job below
+runs it), and the failover test, which guards against a server without the multi-instance
+scheduler.
 
 ## Commands
 
@@ -137,8 +139,9 @@ Five decisions worth knowing before reading the tests:
   a real provider call to validate, and no seam crosses the process boundary, so the harness
   writes **the row the route writes** — the server's own `sealApiKey`/`credentialUpsert`, the
   same vault key, through a `CredentialStore` — while the route itself is exercised by
-  `provider-smoke.test.ts` when the environment has a real key (`credentials.ts` documents
-  this).
+  `provider-smoke.test.ts`, which PUTs a real key through it (`credentials.ts` documents this).
+  That route's success path is automatic since #120: the CI `provider-smoke` job supplies a
+  repository key, so "the PUT works" is not only true of a hands-on QA pass.
 
 ## Scenarios
 
@@ -159,7 +162,7 @@ Five decisions worth knowing before reading the tests:
 | `harness-ports.test.ts`   | the harness itself (#123): a start on a port another server already holds fails with its own boot log (`EADDRINUSE`) instead of adopting the occupant a `/health`-only readiness check could take for it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `web-assets.test.ts`      | `OPENHARNESS_WEB_DIR`: the built web app at `/`, its hashed assets, deep links, and the API still under `/v1`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `failover.test.ts`        | two instances with `SCHEDULER=postgres`, one killed mid-turn, the other finishing it — see below                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `provider-smoke.test.ts`  | one turn through a real provider, when a provider key is in the environment — the key is stored as the dev user's credential first (A5: the server reads no environment keys)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `provider-smoke.test.ts`  | the provider-credential success path against a real provider (#120): the environment's key is PUT through the route (validated, sealed, stored), listed back metadata-only, and one turn runs on it through the real router — coarse on the reply, exact on "no response, log or log line echoes the key". The model is the provider's default (`openai/gpt-5-mini` for OpenAI, the everyday tier of the server's curated list) or `OPENHARNESS_SMOKE_MODEL`; without a key the file skips, unless `OPENHARNESS_REQUIRE_PROVIDER_SMOKE=1` makes it fail — what the CI job below sets                                                                                                                                                                            |
 
 ### The failover test, and how it decides to skip
 
@@ -178,6 +181,31 @@ Either way the skip message says which check failed and what would make the test
 runs: both instances start with `SCHEDULER=postgres`, the test looks up which one owns the
 session's partition in `partition_leases`, `SIGKILL`s that owner mid-`__slow__`, and the
 survivor has to take the partition over and finish the turn.
+
+### The provider smoke test, and the CI job that runs it
+
+`provider-smoke.test.ts` skips without a provider key, because most laptops and most CI jobs
+have none — but the route it covers (`PUT /v1/provider-credentials`, the one real provider
+call a saved key is validated with) then runs in no automatic test at all (#120). So CI has a
+second job, `provider-smoke` in `.github/workflows/ci.yml`, that runs **only** this file with
+the repository's low-limit `OPENAI_API_KEY` and `OPENHARNESS_REQUIRE_PROVIDER_SMOKE=1`: the
+guard turns a missing key into a failure, never a silent skip, so the job cannot pass without
+the route having run. It runs on pushes to `main`, on the nightly and manual fresh runs, and
+on pull requests from this repository — a fork PR gets no repository secrets, so the job is
+skipped there. The key is that job's alone, is never printed, and is not passed to any other
+job or step.
+
+`OPENHARNESS_SMOKE_MODEL` overrides the model (and with it the provider whose key is needed —
+the credential is stored for the provider the model names). The default, and so the model CI
+runs, is `openai/gpt-5-mini` — the first entry of the server's curated everyday list
+(`RECOMMENDED_DEFAULT_MODELS.openai`, `apps/server/src/default-model.ts`): the capable "mini"
+tier the server itself would pick for a new chat on this key, cheap enough to run for real on
+every CI run. Locally, with a key of your own:
+
+```bash
+OPENAI_API_KEY=sk-… DATABASE_URL=postgres://openharness:openharness@localhost:5432/openharness \
+  yarn vitest run src/provider-smoke.test.ts
+```
 
 ## Testing
 
