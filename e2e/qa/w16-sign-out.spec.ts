@@ -10,6 +10,11 @@ import { BASE_URL, expect, shot, signInWithDevForm, test } from './support'
  * What the scenario proves: the control is in the sidebar, it puts the app back on the
  * sign-in page without moving the URL, the cookie is gone (a reload stays signed out, and the
  * API refuses it), and signing in again comes back to where the person was.
+ *
+ * "Where the person was" is Settings, which is a screen of its own with a heading of its own.
+ * It used to be the Agents screen — that route is gone (#91): an old `#/agents` bookmark now
+ * lands on home, so a scenario that used it as "somewhere not home" was asserting against a
+ * screen the app no longer has.
  */
 test.describe('W16 sign out', () => {
   test('signs out from the sidebar, and the session is gone for real', async ({ browser }) => {
@@ -23,14 +28,14 @@ test.describe('W16 sign out', () => {
       })
 
       // Somewhere that is not the home screen, so "comes back here" means something.
-      await page.goto('/#/agents')
-      await expect(page.getByRole('heading', { name: 'Agents' })).toBeVisible()
+      await page.goto('/#/settings')
+      await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible()
       await shot(page, 'w16-01-signed-in')
 
       await test.step('sign out puts the sign-in page back, at the same URL', async () => {
         await page.getByRole('button', { name: 'Sign out' }).click()
         await expect(page.getByRole('heading', { name: 'Sign in to openharness' })).toBeVisible()
-        expect(new URL(page.url()).hash).toBe('#/agents')
+        expect(new URL(page.url()).hash).toBe('#/settings')
         await shot(page, 'w16-02-signed-out')
       })
 
@@ -47,8 +52,8 @@ test.describe('W16 sign out', () => {
 
       await test.step('signing in again comes back to where the person was', async () => {
         await signInWithDevForm(page)
-        await expect(page.getByRole('heading', { name: 'Agents' })).toBeVisible()
-        expect(page.url()).toBe(`${BASE_URL}/#/agents`)
+        await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible()
+        expect(page.url()).toBe(`${BASE_URL}/#/settings`)
       })
     } finally {
       await context.close()

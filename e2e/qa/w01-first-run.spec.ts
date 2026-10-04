@@ -1,35 +1,54 @@
 import {
   composer,
+  defaultModel,
+  ensureDefaultModel,
   expect,
   expectNoErrorBanner,
   sendFromComposer,
+  setDefaultModel,
   shot,
   test,
   waitForAnswer,
 } from './support'
 
 /**
- * W1 — first run: an empty app, and the first chat it can start.
+ * W1 — first run: an empty app, the default model, and the first chat it starts.
  *
- * Model-first since #91: New chat picks a model from the catalog, and there is no agent form
- * to drive any more — this scenario used to create an agent through the UI first. What the
- * catalog holds depends on the stack: with a provider key stored it lists models and the
- * chat half runs; without one the screen is the empty state pointing at Settings, which is
- * itself a first-run state worth asserting rather than skipping over.
+ * Model-first since #91, immediate since #113 (epic #116, U2): "New chat" is an empty chat
+ * whose composer runs on the account's **default model**, and the session is created with the
+ * first message — there is no picker screen and no agent form to drive any more (this scenario
+ * used to create an agent through the UI first, then pick it).
+ *
+ * The two states a first run can be in are both worth asserting, and which one this stack is
+ * in depends on whether it has a provider key:
+ *
+ * - **no default** (a stack nobody has saved a key on — the mock pass) → "Add a provider key
+ *   to start" and the link to Settings, which is what a first run with nothing configured
+ *   must say. The immediate chat is then driven by storing a default the way Settings does
+ *   (`PUT /v1/me/preferences`), because that is the state the rest of the scenario is about.
+ * - **a default** (a stack where a key was saved, or another scenario set one) → the composer
+ *   straight away.
+ *
+ * Either way the default is put back afterwards: a pass that runs W1 first must not leave the
+ * account configured in a way the scenarios after it did not ask for.
  */
 test.describe('W1 first run', () => {
-  test('W1 empty state, the catalog, and a first chat', async ({
+  test('W1 empty state, the default model, and a first chat', async ({
     page,
     request,
     consoleErrors,
   }) => {
+    const previousDefault = await defaultModel(request)
+
     await test.step('the app opens on the home screen with nothing in it', async () => {
       const sessions = await request.get('/v1/sessions')
       const body = (await sessions.json()) as { data: unknown[] }
 
       await page.goto('/')
+      // The app opens on home: a heading, the sidebar, and — on a stack nobody has used — the
+      // empty-state line. Which heading depends on the viewport (the shell owns it), so this
+      // asserts the app is up rather than a particular word.
       await expect(page.getByRole('heading', { name: 'openharness' })).toBeVisible()
-      await expect(page.getByRole('link', { name: 'New chat' }).first()).toBeVisible()
 
       if (body.data.length > 0) {
         // Not the assertion's fault: this server has been used before. The full first-run
@@ -40,41 +59,56 @@ test.describe('W1 first run', () => {
         })
       } else {
         await expect(page.getByText('No chats yet.')).toBeVisible()
-        await shot(page, 'w1-01-empty-state')
+        await shot(page, 'w1-01-first-run-home')
       }
     })
 
-    // Which first chat is possible depends on whether the pass has a key stored (see
-    // `QA_PROVIDER_KEY` in `e2e/AGENTS.md`): the catalog lists a provider only with one.
-    const modelList = await request.get('/v1/models')
-    const catalog = (await modelList.json()) as { providers: unknown[] }
-
-    await test.step('New chat offers the catalog — or Settings, with no keys at all', async () => {
+    await test.step('New chat is a chat, or a pointer to Settings when nothing can run', async () => {
       await page.getByRole('link', { name: 'New chat' }).first().click()
       await expect(page.getByRole('heading', { name: 'New chat' })).toBeVisible()
 
-      if (catalog.providers.length === 0) {
-        await expect(page.getByText('No model providers yet')).toBeVisible()
+      if (previousDefault === null) {
+        // No key has been saved on this stack and nothing set a default: the one honest thing
+        // the screen can say. (The server's automatic default arrives with the first key, U4 —
+        // see `defaultModel` in `support.ts`.)
+        await expect(page.getByText('Add a provider key to start')).toBeVisible()
         await expect(page.getByRole('link', { name: /Model providers/ })).toBeVisible()
-        await shot(page, 'w1-02-no-providers')
-        return
+        await shot(page, 'w1-02-no-default')
+
+        // Store a default the way Settings does, and reload: the account now has one.
+        await ensureDefaultModel(request)
+        await page.reload()
       }
 
-      // The picker with a default selection — the last model a chat was created with, else
-      // the catalog's first entry — so Create chat works without opening it.
-      await expect(page.getByRole('button', { name: 'Model' })).toBeVisible()
-      await page.getByRole('button', { name: 'Create chat' }).click()
-
-      await expect(page).toHaveURL(/#\/s\/sesn_/)
-      await expect(composer(page)).toBeFocused()
-      await expect(page.getByText('Say something to start the conversation.')).toBeVisible()
-
-      await sendFromComposer(page, 'hello from W1')
-      await waitForAnswer(page, 'hello from W1')
-      await shot(page, 'w1-03-first-chat')
+      // The composer, on the default model — no dialog in between.
+      await expect(composer(page)).toBeVisible()
+      await expect(page.getByText(/the chat is created with your first message/)).toBeVisible()
+      const modelControl = page.getByRole('button', { name: /^Model: / })
+      await expect(modelControl).toBeVisible()
+      await expect(modelControl).not.toHaveAccessibleName(/Choose a model/)
+      await shot(page, 'w1-03-immediate-chat')
     })
 
-    await expectNoErrorBanner(page)
+    await test.step('the first message creates the chat and is answered', async () => {
+      const prompt = 'the first thing anyone said here'
+      await sendFromComposer(page, prompt)
+
+      // The session is created by that send and the app moves to it.
+      await expect(page).toHaveURL(/#\/s\/sesn_/)
+      await expectNoErrorBanner(page)
+      await waitForAnswer(page, prompt)
+      await expectNoErrorBanner(page)
+
+      // It is in the sidebar, named after what was said.
+      await expect(
+        page.locator('#app-sidebar').getByText('the first thing anyone said here'),
+      ).toBeVisible()
+      await shot(page, 'w1-04-first-reply')
+    })
+
+    // Leave the account as it was found, so a pass that runs W1 first does not hand the next
+    // scenario a default model it never asked for.
+    await setDefaultModel(request, previousDefault)
 
     expect(consoleErrors, consoleErrors.join('\n')).toEqual([])
   })

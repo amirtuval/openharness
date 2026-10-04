@@ -440,6 +440,79 @@ export async function createSession(
 }
 
 /**
+ * A chat that exists before the browser opens it: model-first, no agent (epic #92, #94).
+ *
+ * What "New chat" does with the first message, done through the API — the scenarios that need
+ * a session to open, switch models in or delete have no reason to spend a UI pass creating it.
+ */
+export async function createChat(
+  request: APIRequestContext,
+  model = QA_MODEL,
+): Promise<{ id: string }> {
+  const response = await request.post('/v1/sessions', { data: { model: { id: model } } })
+  expect(response.status(), await response.text()).toBe(201)
+  return (await response.json()) as { id: string }
+}
+
+/** Delete a chat, the way the UI's confirm and `oh sessions delete` do. */
+export async function deleteChat(request: APIRequestContext, sessionId: string): Promise<void> {
+  const response = await request.delete(`/v1/sessions/${sessionId}`)
+  expect(response.status(), await response.text()).toBe(204)
+}
+
+/** The account's stored default model — the one a new chat opens with (U1). */
+export async function defaultModel(request: APIRequestContext): Promise<string | null> {
+  const response = await request.get('/v1/me/preferences')
+  expect(response.status(), await response.text()).toBe(200)
+  const body = (await response.json()) as { default_model: string | null }
+  return body.default_model
+}
+
+/**
+ * Store a default model through the API, the way Settings → Default model does.
+ *
+ * The QA stack's mock model needs no provider key, but a *default* is only ever set by a
+ * credential save (U4) or by hand — and a spec that needs "New chat opens on a model" cannot
+ * depend on some other scenario having saved a key first. Written through the real route, so
+ * what it leaves behind is exactly what a person's Settings would.
+ */
+export async function setDefaultModel(
+  request: APIRequestContext,
+  model: string | null,
+): Promise<void> {
+  const response = await request.put('/v1/me/preferences', { data: { default_model: model } })
+  expect(response.status(), await response.text()).toBe(200)
+}
+
+/**
+ * Give the account a default model, and answer which one it now is.
+ *
+ * @returns the stored default; the one passed in when it had to be set
+ */
+export async function ensureDefaultModel(
+  request: APIRequestContext,
+  model = QA_MODEL,
+): Promise<string> {
+  const current = await defaultModel(request)
+  if (current !== null) {
+    return current
+  }
+  await setDefaultModel(request, model)
+  return model
+}
+
+/** The model each of a session's model requests ran, in order — the spans' `model` (U3). */
+export async function requestedModels(
+  request: APIRequestContext,
+  sessionId: string,
+): Promise<(string | null)[]> {
+  const events = await readEvents(request, sessionId)
+  return events
+    .filter((event) => event.type === 'span.model_request_start')
+    .map((event) => (event.model as string | undefined) ?? null)
+}
+
+/**
  * Every agent the server has, oldest first.
  *
  * `next_page` matters here: the API answers one page at a time, and a QA server that has been
@@ -569,6 +642,28 @@ export async function openChat(page: Page, sessionId: string): Promise<void> {
 /** The composer, addressed the way a user does: the box they type in. */
 export function composer(page: Page) {
   return page.locator('#composer-input')
+}
+
+/**
+ * Pick a model in a `ModelPicker`, through its free-text row ("Other model ID…").
+ *
+ * The same control sits in the composer (compact), in Settings → Default model (full) and in
+ * `oh`'s `/model`. The free-text row is the one entry that is always there — the catalog of a
+ * stack with no provider keys is empty, and the ids these scenarios switch to are deliberately
+ * not in any catalog (the router takes models the catalog does not know, C5).
+ *
+ * @param trigger which picker to open; the composer's by default, whose accessible name is
+ *   `Model: <what is selected>`
+ */
+export async function pickModel(
+  page: Page,
+  modelId: string,
+  options: { readonly trigger?: RegExp } = {},
+): Promise<void> {
+  await page.getByRole('button', { name: options.trigger ?? /^Model: / }).click()
+  await page.getByRole('option', { name: 'Other model ID…' }).click()
+  await page.getByLabel('Model ID').fill(modelId)
+  await page.getByRole('button', { name: 'Use model' }).click()
 }
 
 /** Type a message and press Enter, which is how the composer sends. */
