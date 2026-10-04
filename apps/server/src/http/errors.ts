@@ -62,6 +62,14 @@ export function invalidProviderCredential(message: string): HttpError {
 }
 
 /**
+ * The caller is over a rate limit — a `GET /v1/models?refresh=true` inside the once-a-minute
+ * window (C4): 429 `rate_limit_error`.
+ */
+export function rateLimitError(message: string): HttpError {
+  return new HttpError('rate_limit_error', message)
+}
+
+/**
  * One issue of a failed schema parse: the shape both zod and this module's helpers speak.
  *
  * Deliberately structural, so nothing here has to import `zod` to describe a failure the

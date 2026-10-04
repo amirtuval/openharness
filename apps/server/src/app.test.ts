@@ -492,7 +492,9 @@ describe('session titles', () => {
 
 describe('unknown routes', () => {
   it('answer 404 in the protocol envelope', async () => {
-    const response = await setup().request(`${API_VERSION_PREFIX}/models`)
+    // `/v1/models` used to be the example of an unimplemented route; the model catalogue
+    // (epic #92) took it over, so this is some other path the API does not define.
+    const response = await setup().request(`${API_VERSION_PREFIX}/captures`)
 
     expect(response.status).toBe(404)
     const body = ApiErrorBodySchema.parse(await response.json())
@@ -651,6 +653,7 @@ describe('CORS', () => {
         vault: test.vault,
         validate: () => Promise.resolve(),
       },
+      catalog: test.catalog,
       corsOrigins: ['http://localhost:5173'],
     })
 

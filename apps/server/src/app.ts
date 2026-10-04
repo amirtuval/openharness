@@ -19,6 +19,7 @@ import { registerAiSdkRoutes } from './routes/ai-sdk'
 import type { AuthDeps, RouteDeps } from './routes/deps'
 import { registerEventRoutes } from './routes/events'
 import { registerMeRoutes } from './routes/me'
+import { registerModelRoutes } from './routes/models'
 import {
   registerProviderCredentialRoutes,
   type ProviderCredentialDeps,
@@ -73,6 +74,12 @@ export interface AppOptions {
   }
   /** Where sealed provider credentials live, and how a saved key is validated (A5). */
   readonly credentialRoutes: ProviderCredentialDeps
+  /**
+   * The model catalogue (epic #92): what `GET /v1/models` answers, and the per-provider cache
+   * entry the credential PUT/DELETE routes drop (C4). `main.ts` builds it with the real
+   * provider fetch and the bundled `@mastra/core` registry; a test injects its own seams.
+   */
+  readonly catalog: RouteDeps['catalog']
   /**
    * A directory of built web assets to serve at `/`, e.g. `apps/web/dist`.
    *
@@ -164,6 +171,7 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
     scheduler: options.scheduler,
     auth: { enabledProviders: options.auth.enabledProviders, devLogin: options.auth.devLogin },
     credentialRoutes: options.credentialRoutes,
+    catalog: options.catalog,
     revocations,
     revalidateSession,
     ...(options.sseKeepaliveMs === undefined ? {} : { sseKeepaliveMs: options.sseKeepaliveMs }),
@@ -194,6 +202,7 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
   registerEventRoutes(app, deps)
   registerAiSdkRoutes(app, deps)
   registerProviderCredentialRoutes(app, deps)
+  registerModelRoutes(app, deps)
 
   app.onError((error, c) => {
     if (error instanceof HttpError) {

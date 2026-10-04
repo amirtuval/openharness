@@ -333,19 +333,27 @@ parameter bypasses the server's cache (below). The response is `ListModelsRespon
 {
   "data": [
     {
+      "id": "google/gemini-2.5-flash",
+      "provider": "google",
+      "name": "Gemini 2.5 Flash",
+      "context_window": 1048576,
+      "max_output_tokens": 65536,
+      "source": "provider"
+    },
+    {
       "id": "openai/gpt-4.1-mini",
       "provider": "openai",
-      "name": "GPT-4.1 mini",
-      "context_window": 1047576,
-      "max_output_tokens": 32768,
+      "name": "openai/gpt-4.1-mini",
+      "context_window": null,
+      "max_output_tokens": null,
       "source": "provider"
     },
     {
       "id": "anthropic/claude-sonnet-5",
       "provider": "anthropic",
       "name": "Claude Sonnet 5",
-      "context_window": 200000,
-      "max_output_tokens": 64000,
+      "context_window": null,
+      "max_output_tokens": null,
       "source": "registry"
     }
   ],
@@ -354,7 +362,7 @@ parameter bypasses the server's cache (below). The response is `ListModelsRespon
       "provider": "anthropic",
       "status": "fallback",
       "fetched_at": null,
-      "message": "The provider model list timed out."
+      "message": "the anthropic model list did not answer within 5 seconds"
     },
     { "provider": "openai", "status": "ok", "fetched_at": "2026-03-15T10:00:00Z", "message": null }
   ]
@@ -369,15 +377,29 @@ parameter bypasses the server's cache (below). The response is `ListModelsRespon
   list-models endpoint with the caller's credential (`GET /v1/models` for OpenAI and
   Anthropic, `GET /v1beta/models` for Gemini, `GET /api/v1/models` for OpenRouter,
   `GET /models` for the OpenAI-compatible providers), from a fixed, known table — a
-  user-supplied URL is never called, so there is no SSRF surface. The Mastra registry then
-  cleans the result: non-chat models (embeddings, image, TTS, …) are dropped, and display
-  names, context windows and max output tokens are filled in where the provider's own list
-  lacks them. An entry's `source` says which side the listing came from.
+  user-supplied URL is never called, so there is no SSRF surface. Each call has a 5-second
+  deadline; Gemini's key travels in the `x-goog-api-key` header, never in the URL.
+- **The registry join, and how models are filtered.** What the provider's own payload carries
+  is used first: Gemini's `displayName`/`inputTokenLimit`/`outputTokenLimit`, OpenRouter's
+  `name`/`context_length`, Anthropic's `display_name`. The bundled provider registry of the
+  pinned `@mastra/core` (never fetched from the network) is joined for the rest; note that
+  **the installed version's registry carries provider configuration and model ids, not
+  per-model names, context windows or a chat flag** — so on it, an entry keeps `null` limits
+  unless the provider itself reported them, and `name` falls back to the model id. A model is
+  listed when it is a chat model, by this rule: an explicit non-chat verdict drops it (the
+  provider's own capability data, e.g. Gemini's `supportedGenerationMethods` without
+  `generateContent`); an explicit chat verdict keeps it (OpenRouter lists chat models only);
+  otherwise it is dropped only when its id names a known non-chat family (embedding, TTS,
+  whisper, transcription, image, moderation, realtime, audio, search, rerank, video, the
+  legacy completions models) — an id the rule does not recognise is kept, so a usable chat
+  model is never hidden. `apps/server/AGENTS.md` has the exact family list.
 - **Fallback is visible, never silent.** If the provider call fails or times out (5 seconds),
-  or the provider has no known list endpoint, that provider's chat models are served from the
-  registry instead: `status: "fallback"`, `fetched_at: null`, and a `message` saying why —
-  never a key. `status: "ok"` means the provider's own list answered. A provider never hides
-  a usable chat model, and no non-chat model is ever shown.
+  the provider has no known list endpoint, or the stored credential cannot be opened, that
+  provider's chat models are served from the registry instead (through the same chat filter —
+  the registry lists non-chat models too): `status: "fallback"`, `fetched_at: null`, and a
+  `message` saying why — the provider's own status and a bounded snippet of what it said, or
+  the plain reason; never a key. `status: "ok"` means the provider's own list answered. A
+  provider never hides a usable chat model, and no non-chat model is ever shown.
 - **Cache.** The answer is held in memory on the serving instance, per user and provider, for
   one hour; saving or deleting a credential drops that provider's entry. Nothing is stored in
   Postgres. `refresh=true` bypasses the cache and re-fetches — rate-limited to **once a
