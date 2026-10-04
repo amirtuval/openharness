@@ -144,7 +144,7 @@ gone; the picker itself became the app's one model control, in two sizes.
 button (U2); after that the app moves to the chat, where the reply streams like any other. The
 server picks the default itself when the first provider key is saved (U4) — Settings → Default
 model shows that value because it is a read of the same stored field the picker writes, not a
-local choice. A failed create keeps the reader's text in the box; a failure *after* a create
+local choice. A failed create keeps the reader's text in the box; a failure _after_ a create
 keeps the session and retries into it.
 
 **The session is named by the first message** (#35), which this flow stores before the chat
