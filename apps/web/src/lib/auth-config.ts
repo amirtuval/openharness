@@ -25,14 +25,21 @@ export type AuthProvider = (typeof AUTH_PROVIDERS)[number]
 /** The route the server answers the config on. */
 export const AUTH_CONFIG_PATH = '/v1/auth-config'
 
+/** Whether a name the server sent is one of the providers this app can draw a button for. */
+export function isAuthProvider(name: string): name is AuthProvider {
+  return (AUTH_PROVIDERS as readonly string[]).includes(name)
+}
+
 /**
  * The auth config, as a local schema rather than a protocol one.
  *
  * An unknown provider name is dropped rather than fatal: a newer server may add one this app
  * does not know how to sign in with, and the buttons for the ones it does know still work.
+ * The drop is part of the schema — one unknown name must not fail the whole parse — rather
+ * than a filter at a call site, so every reader of the config gets the same list.
  */
 export const AuthConfigSchema = z.object({
-  providers: z.array(z.enum(AUTH_PROVIDERS)),
+  providers: z.array(z.string()).transform((names) => names.filter(isAuthProvider)),
   dev_login: z.boolean(),
 })
 
