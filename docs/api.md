@@ -344,6 +344,17 @@ caller who has never saved any (the absence of a choice, not a 404). `PUT` write
 catalog — and it is what a new chat starts with (epic #116, U1). Both routes are owner-only
 like the rest of `/v1/me`; there is no partial update and no other preference today.
 
+**The automatic default** (epic #116, U4). Saving a provider key when `default_model` is
+`null` sets one, so the first key makes "New chat" usable with no dialog: the server picks the
+first entry of a curated per-provider recommendation list (its everyday tier — mini/flash/fast)
+that the caller's live catalog actually lists, or, when none of them is listed, the newest
+chat model the bundled registry knows for the caller's providers that is neither expensive
+nor reasoning-only. Saving another key never moves a default that exists; deleting the key
+whose provider a default depends on re-picks it from the providers that remain (or clears it
+when none does) — an automatic pick is maintained this way, while a default the user chose
+themselves is only cleared, because silently substituting another model for their choice is
+not a decision the server makes for them.
+
 ### Provider credentials
 
 The server has no model-provider keys of its own — each user stores their own, and the API is

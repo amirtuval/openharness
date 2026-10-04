@@ -43,6 +43,8 @@ protocol's schemas, so the shapes are not repeated here — see
 | `GET`    | `/health`                                 | —                                        | `{ status: 'ok' }`; never needs a session                                          |
 | `GET`    | `/v1/auth-config`                         | —                                        | `{ providers, dev_login }`; never needs a session                                  |
 | `GET`    | `/v1/me`                                  | —                                        | the signed-in `User`                                                               |
+| `GET`    | `/v1/me/preferences`                      | —                                        | the caller's `UserPreferences`, unwrapped                                          |
+| `PUT`    | `/v1/me/preferences`                      | `PutPreferencesRequestSchema`            | the stored preferences; 400 for a malformed `default_model`                        |
 | `POST`   | `/v1/agents`                              | `CreateAgentRequestSchema`               | 201, the `Agent`                                                                   |
 | `GET`    | `/v1/agents`                              | `ListAgentsQuerySchema`                  | `{ data, next_page }`                                                              |
 | `GET`    | `/v1/agents/{agent_id}`                   | —                                        | the `Agent`, or 404                                                                |
@@ -50,6 +52,7 @@ protocol's schemas, so the shapes are not repeated here — see
 | `POST`   | `/v1/sessions`                            | `CreateSessionRequestSchema`             | 201, the `Session`; 404 for an unknown agent; 400 for neither an agent nor a model |
 | `GET`    | `/v1/sessions`                            | `ListSessionsQuerySchema`                | `{ data, next_page }`                                                              |
 | `GET`    | `/v1/sessions/{session_id}`               | —                                        | the `Session`, or 404                                                              |
+| `DELETE` | `/v1/sessions/{session_id}`               | —                                        | 204; hard delete (U5); 404 for another owner's or an unknown session               |
 | `POST`   | `/v1/sessions/{session_id}/events`        | `SendEventsRequestSchema`                | `{ data: user event[] }`; then signals, and a title                                |
 | `GET`    | `/v1/sessions/{session_id}/events`        | `ListEventsQuerySchema`                  | `{ data, next_page }`                                                              |
 | `GET`    | `/v1/sessions/{session_id}/events/stream` | `StreamEventsQuerySchema`                | the SSE stream; 404 for an unknown session                                         |
@@ -192,7 +195,10 @@ Better Auth's own schema check passes on the migrated database.
   and stores it through `CredentialStore`. `createSessionCredentialResolver` — the resolver the
   runner hands the brain, bound to the session — looks up the session's owner (unscoped read:
   a turn acts for a session), opens the sealed row for the one request, and answers the
-  brain's `(provider) => …` question. Nothing caches a plaintext; nothing echoes one.
+  brain's `(provider) => …` question. Nothing caches a plaintext; nothing echoes one. Both
+  credential writes also maintain the caller's automatic default model (epic #116, U4) — see
+  "Preferences and the automatic default" — and `GET`/`PUT /v1/me/preferences` are that
+  default's settings screen.
 - **Dev login** (A7): `OPENHARNESS_DEV_LOGIN=1` seeds `dev@localhost` / `dev`
   (`DEV_LOGIN_EMAIL`). Better Auth's email validation refuses a dotless domain, so the row is
   stored as `dev@localhost.localdomain` and a dev-login-only shim (`rewriteDevLoginRequest`)
@@ -313,12 +319,20 @@ stack trace is never part of a response.
 
 - one message per event, `data: <the JSON StreamEvent>`;
 - every event carries `id: <seq>` — the resume position; every event is a stored one since P4,
-  so the field is never absent;
+  so the field is never absent — except the stream-only `session.deleted`, which carries none;
 - `: ping` comments every 15 seconds when nothing else is happening;
 - `event: error` is the one named event, and it is the goodbye: the session behind the
   connection was revoked or expired, the payload is the protocol's `authentication_error`
   envelope, and the connection closes right after (see "Authentication and ownership" and
   `SESSION_INVALID_MESSAGE` in `sse.ts`).
+
+A hard-deleted session ends its streams differently (epic #116, U5): the store hands every
+subscriber one final `session.deleted` `StreamEvent` naming the session and ends the
+subscription, and the stream delivers that event and closes with it — the event _is_ the
+goodbye, and there is no `event: error` frame after it, because a deletion is not a revocation
+or an expiry. A connection whose replay read finds the session already gone ends the same way.
+The stream never fetches anything for a deleted log: a `SessionNotFoundError` out of the
+replay moves straight to the flush and the end.
 
 The replay position comes from `after_seq` if the query carries it, otherwise from the
 `last-event-id` header a reconnecting client sends back, otherwise from nowhere — and "nowhere"
@@ -410,6 +424,48 @@ and a session whose owner has no key for it ends with the brain's `missing_provi
 derives from the first message, whatever the session was created from) do not read the agent,
 so both already work with `agent: null`.
 
+A model can also be switched mid-chat (epic #116, U3): a `user.message` carrying `model`
+projects onto `sessions.model` in the append transaction (#111), and the brain resolves the
+session's **current** model at every request boundary, so the switch — a different provider
+included — applies from the next message. `POST …/events` and the `initial_events` of
+`POST /v1/sessions` check that id's `provider/model` shape (`model-id.ts`) and answer 400
+otherwise; the check is shared with the session's inline model.
+
+## Preferences and the automatic default (U1/U4)
+
+`GET`/`PUT /v1/me/preferences` are `routes/me.ts` over the store's `getPreferences`/
+`putPreferences`: the caller's `{ default_model }`, read and written whole, owner-only by
+construction (the resource is the caller — there is no id in the path), with a malformed
+`default_model` refused as the protocol's 400. A `PUT` is always the user's own choice, and
+`DefaultModelPicker.markExplicit` is what tells the automatic default so.
+
+`default-model.ts` is the whole of the automatic default (U4), and one instance lives per
+`createApp` — its record of which users the _server_ picked for is in-process, the same
+trade-off the catalog cache makes (the protocol's `UserPreferences` has no field for it), so
+across a restart or another instance an automatic pick reads as an explicit one; the
+behavioural difference is confined to one branch of a credential delete, below.
+
+- **On credential `PUT`** (`routes/provider-credentials.ts`, after the catalogue
+  invalidation): when the user has no `default_model`, one is picked. An existing default is
+  never touched — not the user's own while its provider has a key, and not an automatic one
+  either.
+- **The pick** reads the user's **live catalog** (`catalog.list` — the `GET /v1/models` logic,
+  with the key that was just saved and its cache entry just dropped): the first entry of
+  `RECOMMENDED_DEFAULT_MODELS[provider]` (the curated table in `default-model.ts`, a
+  capable-but-affordable everyday tier — **update it when better everyday models ship**)
+  that the catalog lists, provider-by-provider, the saved provider first; otherwise the
+  registry fallback: the newest model (`newestModelId`, by the version numbers in the id —
+  the registry carries no dates) that `isEverydayModel` accepts, i.e. a chat model per the
+  catalogue's own filter that is neither expensive nor reasoning-only by name. No pick at all
+  leaves the default `null`.
+- **On credential `DELETE`**: a default whose provider (its id's part before the first slash)
+  still has a key is left alone. One whose provider is gone is **re-picked** from the
+  providers that remain (or cleared when none does) **if it was automatic**, and **cleared**
+  if the user chose it — their model can no longer run, and substituting another for their
+  choice is not the server's to do.
+- A pick that fails (a store error, an unreadable catalog) is logged and swallowed: the
+  credential write has already succeeded, and a settings screen is where a user fixes it.
+
 ## Scheduler
 
 ```ts
@@ -417,8 +473,18 @@ interface SessionScheduler {
   start(): Promise<void>
   stop(options?: { drainTimeoutMs?: number }): Promise<void>
   signal(sessionId: SessionId, kind: 'work' | 'interrupt'): void
+  stopSession(sessionId: SessionId, options?: { drainTimeoutMs?: number }): Promise<void>
 }
 ```
+
+`stopSession` is `DELETE /v1/sessions/{id}`'s first half (U5): it aborts the turn running for
+the session **and keeps the pass from starting another** (unlike a plain `interrupt`, which
+ends its turn and then looks for more work — a queued message behind it must not start a turn
+for a session being deleted), and it resolves once the pass has written its last events or the
+drain timeout passed. A `LocalScheduler` stops its own runner; `PostgresPartitionScheduler`
+does the same for a partition it holds, and for one it does not, routes the stop to the owner
+through the partition's channel — where the same tolerance for a vanished session applies
+below, because the delete may commit before the signal is handled.
 
 Routes only ever call `signal`, and nothing else. Whether that reaches a brain in this process
 or in another instance is the scheduler's business, which is what keeps the handlers unchanged
@@ -529,6 +595,13 @@ writes nothing and answers `noop`; one aborted mid-turn lets the turn end the wa
 does and then stops instead of looking for more work. Nothing is lost either way: the work is in
 the log, and the next owner finds it with `findSessionsNeedingWork`.
 
+**A session that vanishes is not a failure** (U5). A hard delete removes the session while a
+pass may still be running for it, so the runner treats `SessionNotFoundError` as an answer
+rather than a rejection throughout: a turn that finds its session gone (the brain re-reads the
+session at each request boundary and throws) ends the pass quietly, `#hasMoreWork` answers
+`false` for a deleted session, and `run` never rejects for one — so a delete can never become
+a crash loop or a retry.
+
 ## The test model hook
 
 `OPENHARNESS_TEST_MODEL=mock` swaps the brain's Mastra router for a deterministic model, so the
@@ -575,15 +648,20 @@ appended, so a turn that starts and finishes while the handler is still running 
 and it is released in a `finally` however the response ended, because a subscription that
 outlives its reader would keep buffering every later event of the session for nobody.
 
-`session.status_idle` is also the only thing in the log that ends the response. A turn that
-dies without writing one (a store failure mid-turn, which the scheduler logs and drops) leaves
-the request open until the client disconnects: the client's own abort signal is what closes
-it. The protocol's SSE stream has the same stay-open-until-disconnected property.
+`session.status_idle` is also the only stored thing in the log that ends the response. A turn
+that dies without writing one (a store failure mid-turn, which the scheduler logs and drops)
+leaves the request open until the client disconnects: the client's own abort signal is what
+closes it. The protocol's SSE stream has the same stay-open-until-disconnected property.
 
 The session can also end the response (A2; issue #76): the adapter registers with the app's
 revocation registry and re-checks the session on a timer, exactly as the SSE stream does, and
 a revoked or expired session ends the response with an `error` chunk carrying
 `SESSION_INVALID_MESSAGE` — the same fact the SSE stream says with a final `event: error`.
+
+And a hard-deleted session ends it too (epic #116, U5): the store sends the subscription one
+final `session.deleted` event, and the adapter's translation ends the response quietly on it
+(any text block in flight is closed) — the UI-message-stream shape of the SSE stream's own
+goodbye.
 
 `trigger: 'regenerate-message'` is treated as "send the last user message again": v1 has no
 regenerate semantics, and answering the same prompt again is the closest honest reading.
@@ -639,6 +717,8 @@ drain.
 | `createProviderFetch()`, `ProviderFetch`, `DEFAULT_PROVIDER_TIMEOUT_MS`                                              | the provider HTTP client: egress-proxy aware, 5 s deadline                           |
 | `CatalogCache`, `RefreshLimiter`, `DEFAULT_CATALOG_TTL_MS`, `DEFAULT_REFRESH_INTERVAL_MS`                            | the in-memory per-(user, provider) cache and the refresh rate limit (C4)             |
 | `adapterFor()`, `adaptedProviders()`, `isChatModel()`, `isNonChatFamily()`                                           | the fixed endpoint table and the chat filter (C1/C2)                                 |
+| `DefaultModelPicker`, `DefaultModelPickerOptions`, `RECOMMENDED_DEFAULT_MODELS`                                      | the automatic default model: the picker, and the curated table it picks from (U4)    |
+| `isEverydayModel()`, `isExpensiveModel()`, `isReasoningModel()`, `newestModelId()`                                   | the registry fallback's rule: everyday chat models, newest first (U4)                |
 | `DEV_LOGIN_EMAIL`, `DEV_LOGIN_PASSWORD`, `DEV_LOGIN_STORED_EMAIL`                                                    | the documented dev user (A7)                                                         |
 | `OPENHARNESS_CLI_CLIENT_ID`, `DEVICE_CODE_EXPIRES_IN`                                                                | the device flow's client id and code lifetime (A6)                                   |
 | `deviceVerificationUri`, `deviceVerificationUriComplete`                                                             | the approval URL the device flow answers with: `#/device` and its `?user_code=` (A6) |
@@ -672,6 +752,8 @@ src/
     cache.ts            CatalogCache (one hour per user+provider) and RefreshLimiter (C4)
     provider-fetch.ts   ProviderFetch: fetch over the egress-proxy env, and the 5 s deadline
   config.ts             the environment, parsed and checked
+  default-model.ts      the automatic default: the recommendation table, and the picker (U4)
+  model-id.ts           the provider/model shape check the routes share (U1/U3)
   model.ts              which model factory the process runs (the router, or the mock)
   mock-model.ts         the deterministic test model and its markers
   runner.ts             SessionRunner: one turn per session, re-run while there is work
@@ -752,9 +834,30 @@ parallel with each other.
   malformed model id) and the 404 for another user's agent; `agent: null` round-tripping
   through GET and the list; and a turn on a model-first session, whose span names the session's
   model and whose request was built with the owner's credential for that model's provider.
+- `preferences.test.ts` — `GET`/`PUT /v1/me/preferences` (U1): the null default, the round
+  trip, the free-text id allowance, the 400s for a malformed `default_model` and a body
+  without one, and isolation between two users.
+- `default-model.test.ts` — the automatic default (U4): the first key setting a
+  recommendation, an explicit choice never overridden, an automatic one re-picked from the
+  remaining providers on a delete and cleared when none remain, an explicit one cleared, the
+  registry fallback choosing the newest non-expensive non-reasoning model (with
+  `newestModelId`’s version comparison), and the same flows over HTTP through the credential
+  routes.
+- `model-switch.test.ts` — U3 over HTTP: `user.message.model` stored on the event and
+  projected onto the session, a 400 for a malformed id in `POST …/events` and in a creation's
+  `initial_events` (nothing appended, no session created), and a message without a model
+  leaving the session's model alone.
 - `scheduler.test.ts` — one turn per session, steering, interrupts (running and idle), a
   message queued behind an interrupt, recovery on start, concurrency, stopping, and the fence
   reaching the store.
+- `session-delete.test.ts` — U5: the 204 and the whole-log cascade (every read of the
+  session throws or 404s), the 404 for another user and for an unknown id, a 400 for a
+  malformed one, a running turn stopped with nothing appended after the delete resolved and
+  no second request, `SessionRunner.stopSession` keeping a queued message from starting
+  another turn, the noop a pass for a deleted session answers (and the `SessionNotFoundError`
+  `runTurn` itself throws), a late signal for a deleted session not disturbing the scheduler,
+  the final `session.deleted` an open SSE stream receives before it closes, and the AI SDK
+  adapter’s response ending on it too.
 - `partition-scheduler.test.ts` — the multi-instance scheduler against real Postgres, several
   instances in one process each with its own store connection: spread and takeover, the offer
   that finds a peer whose first scan lost the race, one turn per session, a crash mid-turn and

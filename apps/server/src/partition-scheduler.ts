@@ -12,7 +12,7 @@ import {
 import type { ResolveSessionCredential } from './credentials'
 import { PassQueue, type PassContext } from './pass-queue'
 import { DEFAULT_DRAIN_TIMEOUT_MS, SessionRunner } from './runner'
-import type { SessionScheduler, StopSchedulerOptions } from './scheduler'
+import type { SessionScheduler, StopSchedulerOptions, StopSessionOptions } from './scheduler'
 
 /**
  * The scheduler for a server that is one of several: the sessions of the protocol's
@@ -339,6 +339,33 @@ export class PostgresPartitionScheduler implements SessionScheduler {
       // latency problem, not a request failure, so it is reported and dropped.
       this.#report(error, sessionId)
     })
+  }
+
+  /**
+   * Stop the turn running for `sessionId` — here, or on the instance that holds its
+   * partition — as the first half of a hard delete (epic #116, U5).
+   *
+   * This instance's own turn is stopped exactly as a `LocalScheduler`'s is, and this resolves
+   * once it has written its last events. A turn on **another** instance is asked to stop
+   * through the partition's channel (`interrupt`, the one signal that cuts a turn short): the
+   * owner aborts it, and if the delete lands before the owner gets to the signal, the owner's
+   * next write is refused — a deleted session reads as `SessionNotFoundError`, which the
+   * runner answers with a quiet end of the pass, never a crash loop (U5). There is nothing to
+   * wait for cross-instance; the store's delete notification is what ends the streams.
+   */
+  async stopSession(sessionId: SessionId, options: StopSessionOptions = {}): Promise<void> {
+    const partition = this.partitionOf(sessionId)
+    if (this.#held.has(partition)) {
+      await this.#queue.runner.stopSession(sessionId, options)
+      return
+    }
+    try {
+      await this.#store.signalPartition(partition, { sessionId, kind: 'interrupt' })
+    } catch (error: unknown) {
+      // The delete proceeds either way; a signal nobody received costs the owner a refused
+      // write, not correctness.
+      this.#report(error, sessionId)
+    }
   }
 
   /**

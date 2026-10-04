@@ -47,6 +47,30 @@ export interface SessionScheduler {
 
   /** The user (or a test) says this session needs something; see {@link PartitionSignalKind}. */
   signal(sessionId: SessionId, kind: PartitionSignalKind): void
+
+  /**
+   * Stop the turn running for `sessionId` — wherever it runs — and wait (bounded) for it to
+   * finish writing.
+   *
+   * This is the first half of a hard delete (epic #116, U5): `DELETE /v1/sessions/{id}` calls
+   * it before `store.deleteSession`, so the brain can cut its model request short, store its
+   * partial reply and close its span *before* the rows go — and nothing lands in the log
+   * after the delete. It differs from {@link signal} with `interrupt` in exactly one way:
+   * the pass in flight ends instead of looking for more work, so a message queued behind the
+   * turn does not start another one for a session that is being removed.
+   *
+   * A `LocalScheduler` stops its own runner; the partitioned scheduler stops its own runner
+   * when it holds the partition, and otherwise routes the stop to the owner through the
+   * partition's channel — where the same tolerance for a vanished session applies, because
+   * the delete may commit before the signal is handled.
+   */
+  stopSession(sessionId: SessionId, options?: StopSessionOptions): Promise<void>
+}
+
+/** Options of {@link SessionScheduler.stopSession}. */
+export interface StopSessionOptions {
+  /** How long to wait for the pass in flight to finish writing; defaults to 5000 ms. */
+  readonly drainTimeoutMs?: number
 }
 
 /** Options of {@link SessionScheduler.stop}. */
@@ -175,6 +199,13 @@ export class LocalScheduler implements SessionScheduler {
       // to claim, so a turn is started for it.
     }
     this.#queue.request(sessionId)
+  }
+
+  async stopSession(sessionId: SessionId, options: StopSessionOptions = {}): Promise<void> {
+    // The runner is the whole of "stop this session's turn here": it aborts the pass in
+    // flight, keeps it from starting another, and resolves once it has written its last
+    // events (or the drain timeout passed). No pass in flight resolves at once.
+    await this.#queue.runner.stopSession(sessionId, options)
   }
 
   /** The sessions with a pass in flight; what the concurrency limit counts. */

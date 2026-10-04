@@ -175,7 +175,17 @@ export {
   type LocalSchedulerOptions,
   type SessionScheduler,
   type StopSchedulerOptions,
+  type StopSessionOptions,
 } from './scheduler'
+export {
+  DefaultModelPicker,
+  RECOMMENDED_DEFAULT_MODELS,
+  isEverydayModel,
+  isExpensiveModel,
+  isReasoningModel,
+  newestModelId,
+  type DefaultModelPickerOptions,
+} from './default-model'
 export {
   VALIDATABLE_PROVIDERS,
   validateProviderApiKey,

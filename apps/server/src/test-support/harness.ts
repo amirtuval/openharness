@@ -30,7 +30,7 @@ import {
   type BetterAuthInstance,
 } from '../auth'
 import { ModelCatalog } from '../catalog/catalog'
-import { emptyRegistry } from '../catalog/registry'
+import { emptyRegistry, type ModelRegistry } from '../catalog/registry'
 import { DEFAULT_DELTA_RETENTION_MS } from '../compaction'
 import type { SchedulerKind, ServerConfig } from '../config'
 import { startServer } from '../main'
@@ -181,6 +181,11 @@ export interface TestOptions {
    */
   readonly catalog?: Pick<ModelCatalog, 'list' | 'invalidate'>
   /**
+   * The registry the automatic default's fallback reads (epic #116, U4). Defaults to the
+   * empty one: a test of the fallback passes a stub, exactly as a catalogue test would.
+   */
+  readonly registry?: ModelRegistry
+  /**
    * Where the app and Better Auth log. Silent by default; a test that asserts on a log line —
    * or on the absence of one — passes a logger that keeps them.
    */
@@ -267,6 +272,7 @@ export function createTestApp(options: TestOptions = {}): TestContext {
       validate: options.validateProviderCredential ?? acceptAnyCredential,
     },
     catalog,
+    ...(options.registry === undefined ? {} : { registry: options.registry }),
     ...(options.webDir === undefined ? {} : { webDir: options.webDir }),
     ...(options.sseKeepaliveMs === undefined ? {} : { sseKeepaliveMs: options.sseKeepaliveMs }),
     ...(options.sessionRecheckMs === undefined
@@ -306,6 +312,7 @@ export async function startTestServer(options: TestOptions = {}): Promise<TestCo
     ...(options.authDatabase === undefined ? {} : { authDatabase: options.authDatabase }),
     validateProviderCredential: options.validateProviderCredential ?? acceptAnyCredential,
     catalog,
+    ...(options.registry === undefined ? {} : { registry: options.registry }),
     logger: silentLogger,
     ...(options.sseKeepaliveMs === undefined ? {} : { sseKeepaliveMs: options.sseKeepaliveMs }),
     ...(options.sessionRecheckMs === undefined

@@ -7,7 +7,7 @@ import {
   type StreamEvent,
   type UserId,
 } from '@openharness/protocol'
-import type { SessionStore, Unsubscribe } from '@openharness/session'
+import { SessionNotFoundError, type SessionStore, type Unsubscribe } from '@openharness/session'
 
 import {
   DEFAULT_SESSION_RECHECK_MS,
@@ -64,6 +64,16 @@ import {
  * whichever instance published; and it re-checks the session every `recheckMs`, which covers
  * expiry and a missed notification. Either way the client gets a final `event: error` frame
  * ({@link SSE_SESSION_INVALID}) before the stream ends.
+ *
+ * ## Ending with the deleted session (epic #116, U5)
+ *
+ * A hard delete (`DELETE /v1/sessions/{id}`) removes the session and its whole log, and the
+ * store hands every subscriber one final `session.deleted` stream event before ending the
+ * subscription — on every instance, through the store's own notification. The stream is what
+ * delivers it: the event goes out like any live event (no `id`, it is not a stored one), the
+ * connection closes with it, and that event *is* the goodbye — there is no `event: error`
+ * after it, because a deletion is not a revocation or an expiry. A connection whose replay
+ * read finds the session already gone ends the same way.
  */
 
 /** How long the stream may be quiet before a `: ping` comment goes out. */
@@ -174,8 +184,11 @@ export interface SessionEventStreamOptions {
  * `disconnect` is the client's own doing — an abort or a cancel — and needs no goodbye.
  * `invalid_session` is a revocation or an expiry (epic #65, A2; issue #76): the client gets
  * {@link SSE_SESSION_INVALID} before the connection closes, so it can route to sign-in.
+ * `session_deleted` is the hard delete (epic #116, U5): the store's own final
+ * `session.deleted` event is the goodbye — there is no frame after it — and the connection
+ * closes with nothing else said.
  */
-type EndReason = 'disconnect' | 'invalid_session'
+type EndReason = 'disconnect' | 'invalid_session' | 'session_deleted'
 
 /**
  * The SSE body of a stream request: the replay, then everything that happens next, until the
@@ -373,13 +386,36 @@ export function createSessionEventStream(
             lastSeq = event.seq
           }
           delivered = write(event) || delivered
+          if (event.type === EVENT_TYPES.sessionDeleted) {
+            // U5: the store ends a deleted session's subscriptions with this one final event,
+            // and the stream delivers it and closes — it is the goodbye, so there is no
+            // `event: error` after it (nothing about the deletion is an authentication
+            // failure), and no keepalive into a session that no longer exists.
+            close('session_deleted')
+          }
         }
         return delivered
       }
 
+      /** Set when the replay found the session gone: there is nothing left to follow. */
+      let vanished = false
+
       try {
-        await replay()
+        try {
+          await replay()
+        } catch (error) {
+          if (!(error instanceof SessionNotFoundError)) {
+            throw error
+          }
+          // The session was deleted while the replay was reading it (U5): the store's
+          // notification is already in the buffer below, and the flush delivers it. The
+          // stream ends the same way either way — this is not an error, it is the deletion.
+          vanished = true
+        }
         flush()
+        if (vanished && !closed) {
+          close('session_deleted')
+        }
         // 4. Follow the session until the client goes away — or the session behind it does.
         while (!closed) {
           const reason = await nextWake()

@@ -1,8 +1,14 @@
 import type { Context, Hono } from 'hono'
-import { API_VERSION_PREFIX, GetMeResponseSchema, type GetMeResponse } from '@openharness/protocol'
+import {
+  API_VERSION_PREFIX,
+  GetMeResponseSchema,
+  PutPreferencesRequestSchema,
+  type GetMeResponse,
+} from '@openharness/protocol'
 
 import type { AuthUser } from '../auth'
 import type { AppEnv } from '../types'
+import { parseBody } from '../http/request'
 import type { RouteDeps } from './deps'
 
 /**
@@ -13,12 +19,32 @@ import type { RouteDeps } from './deps'
  * caller creates is owned by. The identity itself is Better Auth's (A1/A3); this route is
  * only the mapping onto the protocol's shape.
  *
+ * `GET`/`PUT /v1/me/preferences` are the caller's stored settings (epic #116, U1): the
+ * `default_model` a new chat starts with, read and written whole. Both are owner-only — the
+ * resource is the caller, there is no id in the path to get wrong — and the `PUT` body's
+ * `default_model` is shape-checked by the protocol's `DEFAULT_MODEL_PATTERN`, so a malformed
+ * router id is the 400 `invalid_request_error` any bad body is.
+ *
  * `GET /v1/auth-config` is the one unauthenticated `/v1` route, and the interface agreed with
  * the web app (#62): it reads it *before* sign-in to know which buttons to show. It is
  * registered before the auth guard in `app.ts`, so it never runs behind it.
  */
 export function registerMeRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
   app.get(`${API_VERSION_PREFIX}/me`, (c) => c.json(currentUser(c)))
+
+  app.get(`${API_VERSION_PREFIX}/me/preferences`, async (c) =>
+    c.json(await deps.store.getPreferences(c.get('user').id)),
+  )
+
+  app.put(`${API_VERSION_PREFIX}/me/preferences`, async (c) => {
+    const body = await parseBody(c, PutPreferencesRequestSchema)
+    const userId = c.get('user').id
+    const stored = await deps.store.putPreferences(userId, body)
+    // Whatever is stored now is the user's own choice (epic #116, U4), so the automatic
+    // default must never re-pick it out from under them.
+    deps.defaultModel.markExplicit(userId)
+    return c.json(stored)
+  })
 
   app.get(`${API_VERSION_PREFIX}/auth-config`, (c) =>
     c.json({

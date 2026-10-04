@@ -44,6 +44,10 @@ import type { RouteDeps } from './deps'
  * A2; issue #76) exactly as the SSE stream does: a revocation, or the periodic re-check
  * finding the session gone or expired, ends the response with an `error` chunk carrying
  * {@link SESSION_INVALID_MESSAGE} — the adapter's half of "a revoked session stops receiving".
+ *
+ * And a hard-deleted session ends it too (epic #116, U5): the store sends the subscription a
+ * final `session.deleted` event, and the response ends on it — quietly, because a deletion is
+ * not a failure — exactly as the protocol's SSE stream does.
  */
 export function registerAiSdkRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
   const chat = `${API_VERSION_PREFIX}/sessions/:session_id/ai-sdk/chat`
@@ -331,6 +335,12 @@ class TurnTranslator {
         writer.write({ type: 'error', errorText: event.error.message })
         return false
       case EVENT_TYPES.sessionStatusIdle:
+        this.#close(writer)
+        return true
+      case EVENT_TYPES.sessionDeleted:
+        // The session was hard-deleted (epic #116, U5). The store sends this last and ends
+        // the subscription; the response ends with it too — any text in flight is closed, and
+        // no turn can continue because there is no session to continue it.
         this.#close(writer)
         return true
       default:

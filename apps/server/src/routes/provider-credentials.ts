@@ -36,6 +36,11 @@ import type { RouteDeps } from './deps'
  * Both writes also drop that provider's cached catalogue entry for the user (epic #92, C4):
  * the model list `GET /v1/models` answered was fetched with the key that just changed, so it
  * must not outlive it.
+ *
+ * And both writes maintain the user's automatic default model (epic #116, U4): a save picks
+ * one when the user has none, a delete re-picks or clears a default whose provider just lost
+ * its key. The pick is made against the live catalog, so it happens *after* the cache
+ * invalidation above; a pick that fails never fails the credential write (`DefaultModelPicker`).
  */
 
 /** What the credential routes need beyond the store: the vault and the validator. */
@@ -87,17 +92,26 @@ export function registerProviderCredentialRoutes(app: Hono<AppEnv>, deps: RouteD
     // changed, so that cached answer is stale — drop it, here, on the instance that handled
     // the write. Other instances' entries expire by TTL.
     deps.catalog.invalidate(userId, provider)
+    // A user with no default gets one now (epic #116, U4), picked from this provider's live
+    // catalog — "New chat" cannot open without a model to run. An existing default is never
+    // overridden while its provider still has a key.
+    await deps.defaultModel.onCredentialAdded(userId, provider)
     return c.json(credential, 200)
   })
 
   app.delete(`${credentials}/:provider`, async (c) => {
     requireFreshSession(c)
     const provider = providerParam(c)
+    const userId = c.get('user').id
     // Deleting a provider that has no credential is not an error: the caller's state is
     // "no credential for this provider" either way, and 204 says exactly that.
-    await deps.credentialRoutes.credentials.delete({ userId: c.get('user').id, provider })
+    await deps.credentialRoutes.credentials.delete({ userId, provider })
     // The catalogue must stop listing a provider the moment its key is gone (C4/C5).
-    deps.catalog.invalidate(c.get('user').id, provider)
+    deps.catalog.invalidate(userId, provider)
+    // A default the deleted key was carrying is re-picked from the providers that remain, or
+    // cleared (epic #116, U4): the model can no longer run, and a default that cannot run is
+    // worse than none — the client shows "add a key" rather than failing the first message.
+    await deps.defaultModel.onCredentialRemoved(userId, provider)
     return c.body(null, 204)
   })
 }
