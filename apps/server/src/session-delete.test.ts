@@ -5,11 +5,7 @@ import {
   type Session,
   type SessionId,
 } from '@openharness/protocol'
-import {
-  InMemorySessionStore,
-  SessionNotFoundError,
-  type SessionStore,
-} from '@openharness/session'
+import { InMemorySessionStore, SessionNotFoundError, type SessionStore } from '@openharness/session'
 
 import { runTurn } from '@openharness/brain'
 
