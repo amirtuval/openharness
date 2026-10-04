@@ -944,7 +944,7 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@openharness/cli@workspace:apps/tui":
+"@openharness/cli@workspace:*, @openharness/cli@workspace:apps/tui":
   version: 0.0.0-use.local
   resolution: "@openharness/cli@workspace:apps/tui"
   dependencies:
@@ -1011,6 +1011,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@openharness/e2e@workspace:e2e"
   dependencies:
+    "@openharness/cli": "workspace:*"
     "@openharness/client": "workspace:*"
     "@openharness/config": "workspace:*"
     "@openharness/protocol": "workspace:*"

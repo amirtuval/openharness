@@ -127,6 +127,20 @@ describe('page cursors', () => {
     }
   })
 
+  it('refuses a position spelled any way but the canonical one', () => {
+    // Not junk: each of these parses to exactly the position its canonical cursor carries.
+    // The rule is re-encoding, so a reordered key or an extra space — a spelling the encoder
+    // would never write — must not decode to the page the canonical spelling names.
+    for (const payload of [
+      '{"seq":1,"kind":"seq"}',
+      '{"kind": "seq", "seq": 1}',
+      `{"created_at":"${CREATED_AT}","id":"${SESSION_ID}","kind":"key"}`,
+    ]) {
+      expect(tryDecodePageCursor(cursorFor(payload)), payload).toBeNull()
+      expect(PageCursorStringSchema.safeParse(cursorFor(payload)).success).toBe(false)
+    }
+  })
+
   it('rejects a payload that is not a cursor object', () => {
     for (const payload of [
       '"a string"',

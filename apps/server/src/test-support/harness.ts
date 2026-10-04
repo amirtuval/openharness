@@ -644,6 +644,27 @@ export async function signInAt(
 }
 
 /**
+ * Sign in over the dev login and answer the session cookie a browser would hold.
+ *
+ * The cookie a browser attaches to every same-origin request, for the tests that exercise the
+ * cookie-authenticated paths (`signIn()` answers the bearer instead). One shared helper on
+ * purpose: the sign-out and CSRF tests that need it each had their own copy, which is how the
+ * two names (`signInCookie`, `signInWithCookie`) came to exist for one behaviour.
+ */
+export async function signInCookie(test: TestContext): Promise<string> {
+  const response = await test.anonymous('/api/auth/sign-in/email', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email: DEV_LOGIN_EMAIL, password: DEV_LOGIN_PASSWORD }),
+  })
+  const setCookie = response.headers.get('set-cookie')
+  if (setCookie === null) {
+    throw new Error('the sign-in answered no cookie')
+  }
+  return setCookie.split(';')[0] ?? ''
+}
+
+/**
  * A `fetch` that carries a bearer token — the shape `/v1` needs now (A2).
  */
 export function authedFetch(token: string): (url: string, init?: RequestInit) => Promise<Response> {
