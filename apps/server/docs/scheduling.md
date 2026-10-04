@@ -49,6 +49,10 @@ The lease lives in the database (`partition_leases`), not in the process:
 | `epoch`      | the tenure: it advances on every acquire and every release |
 | `expires_at` | when the lease lapses if it is not renewed within the TTL  |
 
+Beside it, `scheduler_instances` holds one row per live instance — `instance_id` and the
+`last_seen` of its last heartbeat, both of which the balancing below is computed from. It is
+bookkeeping like the lease table, not part of the log.
+
 `acquirePartition` is a single conditional upsert: it matches an unleased row, the same owner,
 or an expired lease, and **never a live lease somebody else holds**. Every successful acquire
 opens a new tenure, so the epoch never repeats.
@@ -69,7 +73,7 @@ how the owner hears about it.
 
 ```
 start()
-  refresh: renew · give up what is surplus · take what is free
+  refresh: announce · renew · give up what is surplus · take what is free
   then:    heartbeat every OPENHARNESS_HEARTBEAT_MS
            sweep     every OPENHARNESS_SWEEP_MS
 
@@ -79,9 +83,11 @@ acquiring partition p
   3. queue those sessions; every turn runs under fence {p, epoch}
 
 heartbeat
+  announce this instance        → upsert scheduler_instances, read the live members
   renew every held lease        → a refusal means the lease is gone: drop it at once
   give up the surplus           → finish the turns in it first, then release
-  scan for free/expired leases  → take them, never a live one; recover each as above
+  scan for free/expired leases  → take them up to the share, never a live one;
+                                  recover each as above
 
 signal(sessionId, kind)
   store.signalPartition(partitionOf(sessionId), { sessionId, kind })
@@ -97,43 +103,42 @@ subscription is ended, and nothing more is started for it.
 
 ## Balancing
 
-With no way to list the other instances — the lease table is only reachable one partition at a
-time — balancing is inferred from lease _outcomes_:
+Membership is explicit (issue #122): every instance upserts its row in `scheduler_instances`
+on every heartbeat and deletes it on `stop()`, so a live member is an id seen within one lease
+TTL, and **each instance's fair share is `ceil(partitions / live members)`**. The balancing
+follows from that share:
 
-- **A scan takes what is free, and never steals.** A live lease somebody else holds is left
-  alone and counted: it is the only evidence this instance has that the other instance exists.
-  `blocked` (live leases held elsewhere) over `held` (this instance's own) is how many peers it
-  estimates, and `share = ceil(partitions / (1 + peers))` is what it holds.
-- **The first scan of a fresh instance stops at half the space.** That is what lets two
-  instances that boot together each end up with a set of partitions instead of whichever one
-  won the race taking all of them. Every later scan takes everything free, because a partition
-  nobody owns is a session nobody runs.
+- **A scan takes what is free, and never steals**, up to the share. A live lease somebody else
+  holds is left alone — a lease is never taken away from a live owner. The walk stops once the
+  instance holds its share, because a partition taken beyond it would only be given back a
+  heartbeat later: with the members known, the space divides once instead of being claimed
+  whole and rebalanced. (An instance whose first read of the membership raced its peers' —
+  it booted a moment before them — may claim more first; its next heartbeat counts the truth
+  and gives the surplus back.)
 - **An instance over its share gives the surplus up**, newest tenure first: the turns running
   in those partitions are allowed to finish writing (up to the drain timeout) and only then is
   the lease released, so the peer that takes them over inherits closed turns. Released
   partitions are left alone by this instance for a heartbeat, so the peer gets the chance to
   take them instead of watching them bounce back.
-- **An instance that holds the whole space with nothing running offers its newest half back**
-  for one heartbeat, then takes back whatever nobody claimed. This is the one gap the estimate
-  cannot close: a peer that holds nothing produces no failed acquire, so it is invisible, and
-  if its first scan merely lost the race for the free space (a loaded runner is enough — one
-  slow round trip can let the winner's next heartbeat take everything) the two instances would
-  stand still forever, one holding the whole space and one holding nothing. Nothing on either
-  side can break that stand-off: the loser has nothing to release and the winner has no visible
-  peer to shed surplus for. The offer is a _release_, not a steal — the epoch advances, no
-  live lease is touched, and only partitions with no pass in flight are offered — and it backs
-  off from one heartbeat to one lease TTL, so an instance that really is alone pays one
-  partition's heartbeat, rarely, and never while it is busy serving.
-- **The estimate is not sticky.** When a peer dies its leases expire, the survivor takes them,
-  `blocked` falls back to zero and its share grows back to the whole space — rather than half of
-  it being left unowned because the survivor still remembered a peer that is gone.
+- **The membership ages out with the leases.** Both windows are one lease TTL: a crash stops
+  the heartbeats, so the row is out of every peer's count at the instant the dead instance's
+  leases stop being renewed and start being stealable — the survivors' shares grow back to the
+  whole space and their scans take over what it held. A graceful `stop()` deletes the row, so
+  it stops being counted at once, and the partitions it releases come back at the survivors'
+  next heartbeat.
+- **Nothing is ever released while its owner is alone.** There is no periodic offer and no
+  idle release: an instance whose membership is only itself has the whole space as its share,
+  and keeps it. The offer existed because the old balancing inferred peers from _failed
+  acquires_ — a peer that held nothing produced none, so it was invisible, and the winner had
+  to let half the space go on a timer to give it a door in. Explicit membership sees that
+  newcomer the moment it starts — it heartbeats like everyone else — so the share mechanism
+  hands it its half instead: an instance that boots into a fully-held space gets its share
+  from the holder's next release, however its first scan raced.
 
-What this still cannot do is _discover_ a peer that holds nothing while the holder is busy:
-an instance that joins a space that is fully held live, with work running, stays idle until a
-lease is released or expires. Leases are released on shutdown and expire on a crash, so that
-is a property of when work becomes available, not a dead end — and it is the price of never
-taking a lease away from a live owner. The offer narrows it to exactly that case: an idle
-holder gives the newcomer its door in.
+What membership buys is that the stand-off is gone in both directions: a newcomer **is**
+discovered while the holder is busy (its row is in the count), and an instance that really is
+alone keeps everything it holds — nothing is released, so no session loses its owner even for
+a heartbeat. A live lease is still never taken, and the fencing above is unchanged.
 
 ## Signals
 
@@ -160,17 +165,20 @@ has just changed hands gets the same answer as one that has been running all alo
 
 `stop()` stops the timers, drains the turns in flight (they are aborted, so a brain cuts its
 model request short and writes the partial reply, the closed span and `session.status_idle`
-before it stops), and then **releases every lease it still holds**. The next instance takes the
-partitions over at its next heartbeat rather than waiting out the TTL. An acquire that was
-already in flight when the stop began is included: it cannot be cancelled, so the scan that
-holds it releases it the moment it sees the instance stopped — a stopping instance never
-leaves a live lease behind.
+before it stops), **deletes its membership row** — peers stop counting the instance at once, so
+their shares grow immediately — and then **releases every lease it still holds**. The next
+instance takes the partitions over at its next heartbeat rather than waiting out the TTL. An
+acquire that was already in flight when the stop began is included: it cannot be cancelled, so
+the scan that holds it releases it the moment it sees the instance stopped — a stopping
+instance never leaves a live lease behind.
 
-A crash is the other half of that: nothing is released, so the partitions sit until
-`OPENHARNESS_LEASE_TTL_MS` passes and the survivors' scans find them expired and take them.
-What they find in the log is the turn the dead instance had opened — `getTurnState` says
-`running` or `unfinished` — so the new owner closes the orphaned span with `brain_lost` and runs
-the turn again. Nothing is lost, because nothing was ever held in memory.
+A crash is the other half of that: nothing is released and nothing keeps the membership row
+fresh, so both age out together — after `OPENHARNESS_LEASE_TTL_MS` the row is out of every
+peer's count at the instant the leases lapse, and the survivors' scans find the partitions
+expired and take them. What they find in the log is the turn the dead instance had opened —
+`getTurnState` says `running` or `unfinished` — so the new owner closes the orphaned span with
+`brain_lost` and runs the turn again. Nothing is lost, because nothing was ever held in
+memory.
 
 ## Configuration
 
@@ -210,18 +218,22 @@ it is set, otherwise a container, otherwise the suite is skipped with a note. Th
 short (a few hundred milliseconds) and the heartbeats a tenth of that, so a takeover happens
 inside a test; every wait is a `waitFor` with a bounded timeout rather than a fixed sleep.
 
-| test                                              | what it pins down                                           |
-| ------------------------------------------------- | ----------------------------------------------------------- |
-| spread over instances that boot together          | half each, no overlap, and nothing changes hands afterwards |
-| a first scan that loses the race                  | the offer finds a peer the estimate cannot see              |
-| a live lease cannot be taken, a released one can  | no renewal ever fails, no overlap, a released one moves     |
-| a stop racing an acquire                          | the lease it was taking is released, not left to the TTL    |
-| leases handed back on shutdown                    | takeover well inside a 30-second TTL                        |
-| one turn, in the instance that owns the session   | routed signal, one model request, one reply                 |
-| every write fenced with the lease the owner holds | `{partition, epoch}` on every append and claim              |
-| recovery on acquire, with the signal dropped      | the signal is not the record; the log is                    |
-| the sweep finds work no signal mentioned          | the safety net, with the heartbeat slowed down              |
-| died mid-turn → taken over → turn finished        | `brain_lost`, re-run, correct order, every span closed      |
-| the zombie that wakes up cannot write             | a `FencedError`, nothing stored, the process still alive    |
-| a lease that cannot be renewed is dropped         | the turn is aborted and the partition stops being this work |
-| interrupts routed across instances                | partial reply, closed span, idle, nothing left queued       |
+| test                                              | what it pins down                                                           |
+| ------------------------------------------------- | --------------------------------------------------------------------------- |
+| spread over instances that boot together          | half each, no overlap, and nothing changes hands afterwards                 |
+| a first scan that loses the race                  | the membership gives the loser its share (it takes, or the winner releases) |
+| three instances boot together                     | each at most `ceil(8/3)`, together the whole space, then stable             |
+| an idle instance that is alone                    | no release over five TTLs: the held set and every epoch stay put            |
+| a member that stops heartbeating                  | dropped after about a TTL, its share taken over                             |
+| a stop, then a restart                            | the membership row goes with the stop; the restart re-joins and re-takes    |
+| a live lease cannot be taken, a released one can  | no renewal ever fails, no overlap, a released one moves                     |
+| a stop racing an acquire                          | the lease it was taking is released, not left to the TTL                    |
+| leases handed back on shutdown                    | takeover well inside a 30-second TTL                                        |
+| one turn, in the instance that owns the session   | routed signal, one model request, one reply                                 |
+| every write fenced with the lease the owner holds | `{partition, epoch}` on every append and claim                              |
+| recovery on acquire, with the signal dropped      | the signal is not the record; the log is                                    |
+| the sweep finds work no signal mentioned          | the safety net, with the heartbeat slowed down                              |
+| died mid-turn → taken over → turn finished        | `brain_lost`, re-run, correct order, every span closed                      |
+| the zombie that wakes up cannot write             | a `FencedError`, nothing stored, the process still alive                    |
+| a lease that cannot be renewed is dropped         | the turn is aborted and the partition stops being this work                 |
+| interrupts routed across instances                | partial reply, closed span, idle, nothing left queued                       |

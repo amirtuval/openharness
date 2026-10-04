@@ -171,9 +171,17 @@ export async function ensureTestUser(db: Kysely<PostgresSchema>, userId: UserId)
   `.execute(db)
 }
 
-/** Empty every table the store uses; `session_previews` was dropped in P4 (issue #46). */
+/**
+ * Empty every table the store uses; `session_previews` was dropped in P4 (issue #46).
+ *
+ * `scheduler_instances` is here since #122, so one test's memberships cannot leak into the
+ * next: an instance stopped by the test's `afterEach` removes its row itself, and the
+ * truncate is the backstop for a test that ever left one behind.
+ */
 export async function truncateAll(db: Kysely<PostgresSchema>): Promise<void> {
-  await sql`truncate table events, sessions, agents, partition_leases`.execute(db)
+  await sql`truncate table events, sessions, agents, partition_leases, scheduler_instances`.execute(
+    db,
+  )
 }
 
 /**

@@ -255,10 +255,12 @@ if (SOURCE === null) {
       const second = instance('second', { ttlMs: LONG_TTL_MS })
 
       await Promise.all([first.scheduler.start(), second.scheduler.start()])
-      // Each instance stops at half the space on its first scan, so two that boot together
-      // each end up with a set rather than whichever one won the race having all of them. The
-      // first scans can race for the same partition and land 5/3 for a moment; the instance
-      // above its share then gives the surplus back, so wait for the balance, not the first claim.
+      // Both announce themselves as members before their first scans, so each divides the
+      // space by two and stops at its share — 4 of 8. If one's scan still races ahead of the
+      // other's membership (its first read lands before the peer has announced), it may claim
+      // the whole space for a heartbeat; the next heartbeat counts both members, gives the
+      // surplus back, and the peer's scan takes it. Either way the space settles at half
+      // each, so wait for the balance, not the first claim.
       await waitFor(
         () =>
           first.scheduler.heldPartitions().length === PARTITIONS / 2 &&
@@ -276,15 +278,15 @@ if (SOURCE === null) {
       expect(sorted(second.scheduler.heldPartitions())).toEqual(sorted(heldBySecond))
     })
 
-    it('offers the space to a peer whose first scan lost the race, instead of starving it', async () => {
+    it('gives the instance that lost the first-scan race its share, instead of starving it', async () => {
       // The slow store stands in for a loaded runner: the slow instance's first acquire holds
       // its first scan up past the fast instance's next heartbeat, so the fast one finds the
-      // rest of the space free and takes the whole thing. Nothing on either side could break
-      // the stand-off that leaves: the fast one has no visible peer (the slow one holds no
-      // lease to be blocked on) and the slow one has nothing to release and can never take a
-      // live lease. The offer is the door out: the fast instance, holding everything with
-      // nothing running, releases its newest half for a heartbeat, the slow one takes its half
-      // out of it — and from then on it is visible and the share-based balancing applies.
+      // rest of the space free and takes the whole thing. The membership is what breaks the
+      // stand-off the old inferred estimate left behind — a peer that holds *nothing* failed
+      // no acquire, so the winner saw no peer and never shed surplus, while the loser could
+      // never take a live lease. Now the slow instance has heartbeated all the same: the
+      // winner's next heartbeat counts two members and releases the surplus, and the slow
+      // instance — still behind its one slow round trip — takes its share of what is free.
       const fast = instance('fast', { ttlMs: LONG_TTL_MS })
       const slow = instance('slow', {
         store: db.track(
@@ -303,11 +305,10 @@ if (SOURCE === null) {
           fast.scheduler.heldPartitions().length > 0 && slow.scheduler.heldPartitions().length > 0,
         {
           timeoutMs: WAIT_MS,
-          message: 'the instance that lost the first-scan race was never offered a partition',
+          message: 'the instance that lost the first-scan race was never given a partition',
         },
       )
-      // And the space is whole: every partition is somebody's again once the offer windows
-      // close, with no partition held by both.
+      // And the space is whole once both hold something: nothing free, nothing held by both.
       await waitFor(
         () =>
           fast.scheduler.heldPartitions().length + slow.scheduler.heldPartitions().length ===
@@ -318,6 +319,117 @@ if (SOURCE === null) {
       expect(
         slow.scheduler.heldPartitions().filter((partition) => heldByFast.has(partition)),
       ).toEqual([])
+    })
+
+    it('divides the space over three instances that boot together', async () => {
+      const members = [
+        instance('a', { ttlMs: LONG_TTL_MS }),
+        instance('b', { ttlMs: LONG_TTL_MS }),
+        instance('c', { ttlMs: LONG_TTL_MS }),
+      ]
+      await Promise.all(members.map(async (member) => member.scheduler.start()))
+
+      // ceil(8 / 3) = 3 each. Three whole shares make nine partitions for a space of eight, so
+      // "their shares" means every member at most three and the space whole — one member ends
+      // with two. A member whose first scan raced ahead of the others' membership may hold
+      // more for a heartbeat or two; the surplus is given back and taken like any other.
+      const counts = (): number[] =>
+        members.map((member) => member.scheduler.heldPartitions().length)
+      await waitFor(
+        () =>
+          counts().every((count) => count <= 3) &&
+          counts().reduce((total, count) => total + count, 0) === PARTITIONS,
+        { timeoutMs: WAIT_MS, message: 'three instances never settled at their shares' },
+      )
+      const held = members.map((member) => sorted(member.scheduler.heldPartitions()))
+      expect(overlaps(held)).toEqual([])
+
+      // And it stays settled: nobody is above its share, so nothing is given back, and
+      // nothing is free, so nothing changes hands.
+      await sleep(4 * HEARTBEAT_MS)
+      expect(members.map((member) => sorted(member.scheduler.heldPartitions()))).toEqual(held)
+    })
+
+    it('keeps every partition while it is the only member: an idle instance releases nothing', async () => {
+      // The regression #122 removes: with the inferred estimate, an idle instance holding the
+      // whole space and seeing no peer offered half of it back on a growing backoff — in
+      // `SCHEDULER=postgres` mode scaled to one, or alone during a rolling deploy, sessions
+      // lost their owner for a heartbeat at a time for no reason. The membership says the
+      // instance is alone, so its share is the whole space and nothing is ever released: a
+      // release advances the epoch, and a take-back advances it again, so epochs that stay
+      // put over several short TTLs are exactly "nothing changed hands".
+      const solo = instance('solo', { ttlMs: TTL_MS })
+      await solo.scheduler.start()
+      await waitFor(() => solo.scheduler.heldPartitions().length === PARTITIONS, {
+        timeoutMs: WAIT_MS,
+        message: 'the single instance never claimed the whole space',
+      })
+
+      const reader = db.store()
+      const held = sorted(solo.scheduler.heldPartitions())
+      const epochs = await Promise.all(held.map((partition) => reader.currentEpoch(partition)))
+      for (let sample = 0; sample < 5; sample += 1) {
+        await sleep(TTL_MS)
+        expect(sorted(solo.scheduler.heldPartitions())).toEqual(held)
+        expect(await Promise.all(held.map((partition) => reader.currentEpoch(partition)))).toEqual(
+          epochs,
+        )
+      }
+      expect(solo.notices.filter((line) => line.includes('gave up'))).toEqual([])
+    })
+
+    it('drops a membership that stops heartbeating, and takes its share over within a TTL', async () => {
+      const first = instance('first', { ttlMs: TTL_MS })
+      const second = instance('second', { ttlMs: TTL_MS })
+      const store = db.store()
+      await Promise.all([first.scheduler.start(), second.scheduler.start()])
+      await waitFor(
+        () =>
+          first.scheduler.heldPartitions().length === PARTITIONS / 2 &&
+          second.scheduler.heldPartitions().length === PARTITIONS / 2,
+        { timeoutMs: WAIT_MS, message: 'the two instances never settled at half each' },
+      )
+
+      // The victim stops heartbeating, exactly as a crash does: nothing announces it any more,
+      // its membership ages out after one TTL, and its leases expire on the same clock — so
+      // the survivor's share grows back to the whole space and it takes what the victim held.
+      const pausedAt = Date.now()
+      first.scheduler.pause()
+      await waitFor(() => second.scheduler.heldPartitions().length === PARTITIONS, {
+        timeoutMs: WAIT_MS,
+        message: 'the dead member’s share was never taken over',
+      })
+
+      // One TTL-scale window, not a restart and not "never" — and the row is gone from the
+      // membership too, not merely ignored.
+      expect(Date.now() - pausedAt).toBeLessThan(4 * TTL_MS)
+      expect(await store.listLiveInstances(TTL_MS)).toEqual(['second'])
+    })
+
+    it('removes its membership row on stop, and a restart joins again', async () => {
+      // A long TTL, so the row has to be *deleted* by the stop rather than aged out: the
+      // restart below is a re-join from a table that does not count the old process at all.
+      const store = db.store()
+      const solo = instance('solo', { ttlMs: LONG_TTL_MS })
+      await solo.scheduler.start()
+      await waitFor(() => solo.scheduler.heldPartitions().length === PARTITIONS, {
+        timeoutMs: WAIT_MS,
+        message: 'the single instance never claimed the whole space',
+      })
+      expect(await store.listLiveInstances(LONG_TTL_MS)).toEqual(['solo'])
+
+      await solo.scheduler.stop()
+      expect(await store.listLiveInstances(LONG_TTL_MS)).toEqual([])
+
+      // The same id, a new process: the restart announces itself and takes the space again —
+      // every partition is free, because the stop released the leases.
+      const again = instance('solo', { ttlMs: LONG_TTL_MS })
+      await again.scheduler.start()
+      expect(await store.listLiveInstances(LONG_TTL_MS)).toEqual(['solo'])
+      await waitFor(() => again.scheduler.heldPartitions().length === PARTITIONS, {
+        timeoutMs: WAIT_MS,
+        message: 'the restarted instance did not take the released space back',
+      })
     })
 
     it('releases a lease it was acquiring when it stopped, instead of leaving it live for the TTL', async () => {
@@ -355,9 +467,10 @@ if (SOURCE === null) {
 
       // What the second instance comes to hold, it holds only over partitions the first
       // released first — never one the first still holds, and never one taken from it: a
-      // refused renewal would say "lost partition", and none may. (The first, idle and alone
-      // in the space, *offers* its newest half back for a heartbeat; that offer is the only
-      // door into a fully-held space, and it is a release, not a steal.)
+      // refused renewal would say "lost partition", and none may. (The first had counted
+      // itself alone, so it held the whole space; the second's heartbeat makes the membership
+      // two, the first's share drops to half, and it releases the surplus — a release, not a
+      // steal. That release is the only door into a fully-held space.)
       for (let sample = 0; sample < 4; sample += 1) {
         await sleep(HEARTBEAT_MS)
         const heldByFirst = new Set(first.scheduler.heldPartitions())
@@ -755,12 +868,12 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * How long the losing instance's first acquire takes in the offer test: long past the
+ * How long the losing instance's first acquire takes in the lost-race test: long past the
  * winner's next heartbeat, so the winner's second scan takes the whole space while the
  * loser's first scan is still waiting on its first round trip — the interleaving a loaded
  * runner produces, and the one that used to leave the loser starved forever. Only the first
  * acquire is slowed: the point is the *first* one, and the rest of the loser's attempts at
- * normal speed are what lets it pick up an offered partition once the offer exists.
+ * normal speed are what lets it take its share once the winner gives the surplus back.
  */
 const SLOW_FIRST_ACQUIRE_MS = 150
 
@@ -788,4 +901,19 @@ class SlowFirstAcquireStore extends PostgresSessionStore {
 
 function sorted(partitions: readonly number[]): number[] {
   return [...partitions].sort((left, right) => left - right)
+}
+
+/** The partitions held by more than one of the given instances — must always be empty. */
+function overlaps(heldByEveryone: readonly (readonly number[])[]): number[] {
+  const seen = new Set<number>()
+  const both: number[] = []
+  for (const held of heldByEveryone) {
+    for (const partition of held) {
+      if (seen.has(partition)) {
+        both.push(partition)
+      }
+      seen.add(partition)
+    }
+  }
+  return both
 }

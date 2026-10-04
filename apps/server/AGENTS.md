@@ -467,26 +467,26 @@ only while it holds that partition's lease, writing every turn under `fence: {pa
 - **Acquiring a partition** subscribes to its signals first and then recovers it
   (`findSessionsNeedingWork`), so a partition whose previous owner died is picked up, and
   whatever arrived before the subscription is found rather than lost.
-- **Balancing** is inferred from lease outcomes, because the store cannot list instances: a
-  scan takes free or expired partitions and never a live one, a fresh instance stops its first
-  scan at half the space so instances booting together share it, and an instance holding more
-  than `ceil(partitions / (1 + peers))` gives the surplus up — finishing the turns in it first,
-  then releasing.
-- **A holder of the whole space, with nothing running and no peer visible, offers its newest
-  half back** for one heartbeat and takes back whatever nobody claimed. The estimate cannot
-  see a peer that holds _nothing_ — no failed acquire means no evidence — so without the offer
-  an instance whose first scan lost the race for the space (one slow round trip is enough on a
-  loaded runner, where the winner's next heartbeat arrives first) would starve forever while
-  the winner holds everything. The offer is a release, not a steal: no live lease is touched,
-  and it backs off from one heartbeat to one lease TTL, so an instance that really is alone
-  pays one partition's heartbeat only rarely and never while it is serving.
+- **Balancing is by explicit membership** (issue #122): every heartbeat upserts the instance's
+  row in `scheduler_instances` (`heartbeatInstance`) and reads the members seen within one
+  lease TTL back (`listLiveInstances`), so **share = `ceil(partitions / live members)`** and a
+  scan takes free or expired partitions — never a live one — up to that share. An instance
+  holding more than its share gives the surplus up, finishing the turns in it first and then
+  releasing. There is **no periodic idle release**: an instance whose membership is only
+  itself has the whole space as its share and keeps it; a newcomer is visible the moment it
+  heartbeats, so the holder's next heartbeat releases the surplus for it — a release, not a
+  steal, and never more than the share.
+- **The membership ages out with the leases** — both windows are one lease TTL: a crashed
+  instance stops heartbeating, so after a TTL it is out of every peer's count at the instant
+  its leases stop being renewed, and the survivors' shares grow back to the whole space.
 - **Losing a lease** — a refused renewal, or a `FencedError` out of a turn — aborts that
   partition's turns, ends its subscription and stops it running work for it. It never crashes
   the process.
-- **`stop()`** drains the turns in flight and then releases every lease, so the next instance
-  takes over at its next heartbeat instead of waiting out the TTL. A lease whose acquire was
-  in flight when the stop began is released too, as soon as the scan sees the instance
-  stopped — a stop never leaves a live lease (and so a stranded, unserved partition) behind.
+- **`stop()`** drains the turns in flight, deletes the membership row (so peers stop counting
+  the instance at once) and then releases every lease, so the next instance takes over at its
+  next heartbeat instead of waiting out the TTL. A lease whose acquire was in flight when the
+  stop began is released too, as soon as the scan sees the instance stopped — a stop never
+  leaves a live lease (and so a stranded, unserved partition) behind.
 - **`pause()`/`resume()`** stop and restart the timers without giving anything up: what a
   wedged process looks like from the outside, and what the zombie tests use.
 - **`heldPartitions()`** is what an instance owns right now.
@@ -756,15 +756,18 @@ parallel with each other.
   message queued behind an interrupt, recovery on start, concurrency, stopping, and the fence
   reaching the store.
 - `partition-scheduler.test.ts` — the multi-instance scheduler against real Postgres, several
-  instances in one process each with its own store connection: spread and takeover, the offer
-  that finds a peer whose first scan lost the race, one turn per session, a crash mid-turn and
-  the recovery that finishes it, a zombie that cannot write, a lease that cannot be renewed,
+  instances in one process each with its own store connection: spread and takeover, the
+  membership that gives an instance its share after a lost first-scan race (and three
+  instances settling at theirs), a single idle instance releasing nothing over several TTLs
+  (#122), a member that stops heartbeating dropped after about a TTL, `stop()` deleting the
+  membership row and a restart re-joining, one turn per session, a crash mid-turn and the
+  recovery that finishes it, a zombie that cannot write, a lease that cannot be renewed,
   interrupts routed across instances, the sweep, the fences a turn writes with, and shutdown
   handing its partitions back. Tests that are not _about_ lease loss run with long leases
   (`LONG_TTL_MS`), so a loaded runner cannot make a healthy instance look dead and turn their
-  assertions into crash-recovery ones; only the pause/death/renewal tests keep the short TTL.
-  `DATABASE_URL` when it is set, otherwise a container, otherwise the suite is skipped with a
-  note.
+  assertions into crash-recovery ones; only the pause/death/renewal and idle-release tests
+  keep the short TTL. `DATABASE_URL` when it is set, otherwise a container, otherwise the
+  suite is skipped with a note.
 - `ai-sdk.test.ts` — the adapter through `DefaultChatTransport` and `readUIMessageStream`.
 - `mock-model.test.ts` — the echo, `__slow__`, both failure markers, fixed usage, and that the
   hook cannot activate without the variable.
