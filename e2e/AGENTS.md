@@ -65,19 +65,20 @@ const a = personFor(server, await harness.user(server, { email: 'a@example.com',
 const b = personFor(server, await harness.user(server, { email: 'b@example.com', password: '…' }))
 ```
 
-| module           | what it is                                                                             |
-| ---------------- | -------------------------------------------------------------------------------------- |
-| `index.ts`       | `e2eHarness(label)`: the file's database, its servers, its sessions, its teardown      |
-| `database.ts`    | `createE2eDatabase(label)`: one Postgres database per test file, dropped in `afterAll` |
-| `server.ts`      | `startServerProcess(options)`: the built server as a child process, `/health`-ready    |
-| `users.ts`       | `ensureUser(database, email, password)`: the second account A7 does not seed           |
-| `credentials.ts` | `seedProviderCredential(...)`: a stored key, written the way the `PUT` route writes it |
-| `errors.ts`      | `errorOf(work)`: the `ApiError` a call threw, for the tests that are about refusals    |
-| `events.ts`      | reading a session: `readLog`, `collectStream`, `waitForTurnEnd`, the event filters     |
-| `wait.ts`        | `waitFor`, `sleep` — polling that fails with what it was waiting for                   |
-| `mock.ts`        | `expectedSlowReply()`: the mock model's `__slow__` reply, for exact assertions         |
+| module             | what it is                                                                             |
+| ------------------ | -------------------------------------------------------------------------------------- |
+| `index.ts`         | `e2eHarness(label)`: the file's database, its servers, its sessions, its teardown      |
+| `database.ts`      | `createE2eDatabase(label)`: one Postgres database per test file, dropped in `afterAll` |
+| `server.ts`        | `startServerProcess(options)`: the built server as a child process, `/health`-ready    |
+| `users.ts`         | `ensureUser(database, email, password)`: the second account A7 does not seed           |
+| `credentials.ts`   | `seedProviderCredential(...)`: a stored key, written the way the `PUT` route writes it |
+| `provider-stub.ts` | `startProviderStub()`: a stub provider at the network boundary (the egress proxy)      |
+| `errors.ts`        | `errorOf(work)`: the `ApiError` a call threw, for the tests that are about refusals    |
+| `events.ts`        | reading a session: `readLog`, `collectStream`, `waitForTurnEnd`, the event filters     |
+| `wait.ts`          | `waitFor`, `sleep` — polling that fails with what it was waiting for                   |
+| `mock.ts`          | `expectedSlowReply()`: the mock model's `__slow__` reply, for exact assertions         |
 
-Five decisions worth knowing before reading the tests:
+Six decisions worth knowing before reading the tests:
 
 - **One database per test file.** `createE2eDatabase` creates `openharness_e2e_<label>_<random>`
   on the server `DATABASE_URL` names and drops it in teardown (`with (force)`, so a failed run
@@ -143,6 +144,22 @@ Five decisions worth knowing before reading the tests:
   That route's success path is automatic since #120: the CI `provider-smoke` job supplies a
   repository key, so "the PUT works" is not only true of a hands-on QA pass.
 
+- **Provider calls can be stubbed at the one seam a real process has: the network.**
+  `startProviderStub()` (`provider-stub.ts`) runs an HTTP proxy on loopback that the server
+  under test reaches through the documented **egress-proxy variables** (`HTTPS_PROXY`, read by
+  `catalog/provider-fetch.ts` via undici's `EnvHttpProxyAgent`); the CONNECT tunnel is
+  terminated with a throwaway certificate from `fixtures/provider-stub/` (whose README says
+  how it was made and why it protects nothing — the child is told to trust it with
+  `NODE_EXTRA_CA_CERTS`), and each provider host is answered from a handler the test wrote:
+  `stub.answer('api.anthropic.com', …)`. Pass `stub.env` to `harness.server({ env })` and the
+  whole outbound path — the credential validation and the catalogue's list calls — is the
+  test's, while everything in the process stays real. `default-model.test.ts` is what needs
+  this: the automatic default (U4) is picked when a key is _saved through the route_, and the
+  route validates the key with a real provider call. `stub.requests` is the request log, for
+  asserting which calls were made. Nothing in the product changes for this — a deployment
+  behind a proxy is a documented deployment (`catalog/provider-fetch.ts`), and this is one of
+  those, pointed at loopback.
+
 ## Scenarios
 
 | file                      | what it drives                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
@@ -158,6 +175,12 @@ Five decisions worth knowing before reading the tests:
 | `device-flow.test.ts`     | `oh login` end to end (A6): the code document (`verification_uri_complete` carries the code **inside the fragment**), approve through the API as a signed-in person, poll, use the bearer token; a code redeemed once; deny → `access_denied`; pending → `authorization_pending`; an expired code (`expiresAt` moved into the past) → `expired_token`, and the row is deleted; an unknown code; a code only the person who claimed it may approve                                                                                                                                                                                                                                                                                                               |
 | `cli-device-flow.test.ts` | #119: the CLI half of the same flow, in CI — the **built `oh`**, spawned with an isolated `XDG_CONFIG_HOME` against a harness server: the URL and code it prints are the ones the approval endpoint accepts, the token lands in `credentials.json` with `0600` (dir `0700`) and `oh whoami` reads it back, `oh logout` revokes the session server-side (the token is refused with a 401), a denied login exits non-zero and writes no token, and SIGINT mid-poll exits `130` with nothing written. No tmux; the `qa/` specs stay the UX pass                                                                                                                                                                                                                    |
 | `credentials.test.ts`     | provider credentials (A5): never in any response, event, stream or server log line; sealed at rest (no column holds the plaintext, and a whole-database dump greps clean — `last4` is the deliberate exception); a turn with no key ends `missing_provider_credential` (retry status `exhausted`, the message naming the provider, no model request made); a decoy `OPENAI_API_KEY` in the server's environment changes nothing; a key the provider refuses is refused on save (422) and never stored; deleting one makes the next turn a missing-credential turn                                                                                                                                                                                               |
+| `model-first.test.ts`     | model-first sessions (#93/#94): a session created from a model alone round-trips `agent: null` through GET and the list, a turn on it is attributed to that model by the stored span, an inline model/system overrides an agent's per field, and the 400s (neither an agent nor a model, malformed ids) beside the by-design acceptance of an unknown-but-well-formed id                                                                                                                                                                                                                                                                                                                                                                                        |
+| `model-catalog.test.ts`   | `GET /v1/models` (#90) over the wire, deterministic offline: an account with no stored keys gets an empty catalogue and no provider contact; a stored key for a provider with no list endpoint is answered from the registry as a visible `fallback` (C3), with no part of the key in the response; another account's catalogue stays empty                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `preferences.test.ts`     | `GET`/`PUT /v1/me/preferences` (U1): `null` before anything is saved, the round trip of a choice (a free-text id included), `null` clearing it, the 400s for a malformed or missing `default_model` with the stored value untouched, and owner-only scoping — one person's choice invisible to and untouched by another's writes                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `default-model.test.ts`   | the automatic default (U4), through the credential routes with the provider calls answered by the stub proxy: the first key picks the recommendation table's first entry the live catalog lists (the validation and list calls asserted on the stub); the registry fallback when the provider cannot be listed; a save never moves an existing default, automatic or explicit; a delete re-picks an automatic default from the keys that remain and clears it with the last one, and clears — never substitutes — an explicit choice                                                                                                                                                                                                                            |
+| `model-switch.test.ts`    | switching the model mid-chat (U3): a message naming a model runs it (the span records it, the session's model moves, a later message sticks to it), and a switch sent during a `__slow__` turn applies to the **next** request — the span of the request that claims the steering message — not the one in flight; the folded transcript draws the change marker (and not for a log's first model)                                                                                                                                                                                                                                                                                                                                                              |
+| `session-delete.test.ts`  | deleting a session (U5): 204 and every session-keyed row gone (the tables found from the schema, not a list), every read 404s; another user's delete 404s and the session survives; a running `__slow__` turn is stopped with nothing written after the delete resolves; an open stream receives the final `session.deleted` frame and the body **ends** (no `event: error`, no `id:`); and with two instances on `SCHEDULER=postgres`, the delete through the instance that does **not** own the session's partition still stops the owner's turn and leaves nothing behind                                                                                                                                                                                    |
 | `dev-login-guard.test.ts` | the boot refuses `OPENHARNESS_DEV_LOGIN=1` on a non-localhost `BETTER_AUTH_URL` (A7), and with the flag off nothing about the dev credentials works                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `harness-ports.test.ts`   | the harness itself (#123): a start on a port another server already holds fails with its own boot log (`EADDRINUSE`) instead of adopting the occupant a `/health`-only readiness check could take for it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `web-assets.test.ts`      | `OPENHARNESS_WEB_DIR`: the built web app at `/`, its hashed assets, deep links, and the API still under `/v1`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
@@ -234,6 +257,25 @@ and they spend their time waiting rather than computing.
 - Results of each pass are reported as a comment on the QA issue, not committed.
 - A spec marked `test.fail` documents a known bug; remove the marker once the bug is fixed.
 
+### The default model a new chat starts on (U1/U2/U4)
+
+Since epic #116 a new chat is an **empty composer on the account's default model**
+(`GET /v1/me/preferences`), in the web app and in `oh`, and the session is created by the
+first message — no dialog, and no "Create chat"/"Which agent?" step. A mock stack with **no
+stored provider keys has no default and no catalog**: `#/new` shows "Add a provider key to
+start" and `oh` exits saying where to add one. Scenarios that are about _chatting_ therefore
+call `ensureDefaultModel(request)` (`support.ts`) first — it leaves an existing default alone
+and writes `QA_MODEL` when there is none — and the scenarios that are about the empty state
+(`w01-first-run`, `w19-default-model`) read `getDefaultModel(request)` and assert the state
+they find. `setDefaultModel` is the same `PUT` Settings makes, for a scenario that wants a
+specific value and restores it afterwards.
+
+The specs for the flow itself: `w01` (first run: no agent, the default, the immediate chat),
+`w09b`/`w09d` (a chat created from New chat gets its title), `w10-model-switch` (the
+composer's model switch, U3 — this replaced the agents screen, which #91/#113 deleted),
+`w18-delete` (U5: the sidebar kebab, the header action, and a chat deleted elsewhere), `w19`
+(Settings → Default model, U1). `w16` uses Settings as its "somewhere that is not home".
+
 ### Signing in
 
 Since epic #65 the server is not open, and every spec runs signed in. The stack must have the
@@ -261,6 +303,16 @@ CLI specs give it a config directory of the run's own (`CLI_CONFIG_HOME`, defaul
 there yet, approving it in the browser like a person would. C12–C14 verify the flow itself:
 the printed URL and code, the approval page, `oh whoami`, `oh logout` revoking the session,
 and the "not signed in" errors (with no token, and with a token the server refuses).
+
+A chat in `oh` starts on the account's default model with **no picker** (U2) — the "Which
+agent?" dialog is gone with #91 — so C1–C6 call `ensureDefaultModel(request)` and assert the
+status line opens on it; C1 is where "no dialog appeared" is checked, together with the
+session already being created. C15 is the mid-chat switch (`/model`, U3): the pick is pending
+(`<id> (next message)`), the next message carries it, and a later one without a model still
+runs it; the model is verified against the session's own log, not the screen. C16 is
+`oh default-model` (print, set, and the no-default sentence) and C17 is `oh sessions delete`
+(the `[y/N]` asked and answered, `--yes`, the second delete as `not found`, and a chat deleted
+while `oh` is in it — `This chat was deleted; it is gone.` and no resume hint).
 
 ### What the pass needs on the stack
 
@@ -293,9 +345,11 @@ QA_WITH_CLI=1 yarn qa:web qa/cli.spec.ts   # the CLI pass
 
 ### The model the scenarios run
 
-Every agent the specs create is created on `QA_MODEL` (`support.ts`), which defaults to the id
-the specs have always named — the mock passes set nothing and are unchanged. **A pass against a
-real provider sets it**, to a router id, and runs the stack without `OPENHARNESS_TEST_MODEL`:
+Every agent and model-first session the specs create over the API is created on `QA_MODEL`
+(`support.ts`), and so is the default model `ensureDefaultModel` writes for a chat to start
+on. It defaults to the id the specs have always named — the mock passes set nothing and are
+unchanged. **A pass against a real provider sets it**, to a router id, and runs the stack
+without `OPENHARNESS_TEST_MODEL`:
 
 ```bash
 QA_MODEL=openai/gpt-4.1-mini yarn qa:web
@@ -307,7 +361,9 @@ those, so a scenario that leans on them either adapts — waiting for a reply to
 rather than for particular words, asking for a long reply instead of `__slow__` — or skips with
 `test.skip(isRealModel, …)`. Mock coverage is never removed: the scripted-failure scenarios
 (W11a/W11b) run on the mock and skip on a provider, and the provider-only ones (W11d/W11e/W11f,
-C11) do the reverse.
+C11) do the reverse. The model-switch scenarios (W10, C15) switch to free-text ids on the mock
+— it answers every id — and to catalog entries on a real pass, taken from `GET /v1/models`; a
+pass whose keys list no other model skips them with that reason.
 
 ### What a clean screen does not prove
 
