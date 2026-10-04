@@ -4,13 +4,20 @@ import {
   GetMeResponseSchema,
   SendEventsResponseSchema,
 } from '@openharness/protocol'
-import type { User, UserEvent, UserInterruptEvent, UserMessageEvent } from '@openharness/protocol'
+import type {
+  ModelConfig,
+  User,
+  UserEvent,
+  UserInterruptEvent,
+  UserMessageEvent,
+} from '@openharness/protocol'
 
 import type { DebugHook, FetchLike, ResponseSchema } from './http'
 import { createTransport } from './http'
 import { createAgentsResource, type AgentsResource } from './resources/agents'
 import { createAuthResource, type AuthResource } from './resources/auth'
 import { createModelsResource, type ModelsResource } from './resources/models'
+import { createPreferencesResource, type PreferencesResource } from './resources/preferences'
 import {
   createProviderCredentialsResource,
   type ProviderCredentialsResource,
@@ -51,6 +58,18 @@ import {
 export interface RequestOptions {
   /** Aborts the request; the promise rejects with the abort reason. */
   signal?: AbortSignal | undefined
+}
+
+/**
+ * What {@link Client.sendMessage} takes: the request options, plus the model to run.
+ *
+ * A message that carries a `model` switches what the session runs for the turn it starts
+ * (epic #116, U1): the log records the choice on the `user.message`, and the next model
+ * request serves it.
+ */
+export interface SendMessageOptions extends RequestOptions {
+  /** The model the message's turn should run, e.g. `{ id: 'provider/model' }`. */
+  model?: ModelConfig | undefined
 }
 
 /**
@@ -117,6 +136,16 @@ export interface Client {
   readonly auth: AuthResource
 
   /**
+   * The caller's own preferences (#111, epic #116 U1): the default model a new chat starts
+   * with.
+   *
+   * `preferences.get()` is `GET /v1/me/preferences` and `put` is `PUT /v1/me/preferences`,
+   * which writes the complete value — `{ default_model: null }` clears it. Owner-only, like
+   * `GET /v1/me`.
+   */
+  readonly preferences: PreferencesResource
+
+  /**
    * The signed-in user: `GET /v1/me`.
    *
    * The identity every request is scoped to, and the proof the CLI has a usable token —
@@ -134,11 +163,18 @@ export interface Client {
    * event back with the `id` and `seq` the server assigned. Its `processed_at` stays `null`
    * until the brain folds it into a turn — which is what the transcript shows as pending.
    *
+   * A `model` in the options rides the message (epic #116, U1): the turn the message starts
+   * runs it, and the log records the switch.
+   *
    * @param sessionId the `sesn_` id
    * @param text the message body
-   * @param options request options (cancellation)
+   * @param options request options (cancellation) and the model to run
    */
-  sendMessage(sessionId: string, text: string, options?: RequestOptions): Promise<UserMessageEvent>
+  sendMessage(
+    sessionId: string,
+    text: string,
+    options?: SendMessageOptions,
+  ): Promise<UserMessageEvent>
 
   /**
    * Ask a running session to stop.
@@ -172,6 +208,7 @@ export function createClient(options: ClientOptions): Client {
     providerCredentials: createProviderCredentialsResource(transport),
     models: createModelsResource(transport),
     auth: createAuthResource(transport),
+    preferences: createPreferencesResource(transport),
 
     me(requestOptions) {
       return transport.json(GetMeResponseSchema, {
@@ -181,14 +218,20 @@ export function createClient(options: ClientOptions): Client {
       })
     },
 
-    sendMessage(sessionId, text, requestOptions) {
+    sendMessage(sessionId, text, messageOptions) {
       return transport.json(storedUserEventParser<UserMessageEvent>(EVENT_TYPES.userMessage), {
         method: 'POST',
         path: sessionEventsPath(sessionId),
         body: {
-          events: [{ type: EVENT_TYPES.userMessage, content: [{ type: 'text', text }] }],
+          events: [
+            {
+              type: EVENT_TYPES.userMessage,
+              content: [{ type: 'text', text }],
+              ...(messageOptions?.model === undefined ? {} : { model: messageOptions.model }),
+            },
+          ],
         },
-        signal: requestOptions?.signal,
+        signal: messageOptions?.signal,
       })
     },
 

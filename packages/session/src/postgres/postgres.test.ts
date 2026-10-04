@@ -13,6 +13,7 @@ import {
   type CreateAgentRequest,
   type EventId,
   type Session,
+  type StreamEvent,
   type UserEventInput,
   type UserId,
 } from '@openharness/protocol'
@@ -55,8 +56,10 @@ import {
  * The extras are the ones a shared store can be asked and a single-process fake cannot: two
  * stores appending at once, a supplied event id two of them try to take, fencing across
  * stores, a burst that must be delivered exactly once, catching up after the listening
- * connection is killed, a chunk delivered across stores, idempotent migrations, the #93
- * backfill over a row written before the change, and `close()` leaving a borrowed pool alone.
+ * connection is killed, a chunk delivered across stores, a session deletion's rows really
+ * gone and its `session.deleted` announced across stores (#111), idempotent migrations —
+ * `0016` included — the #93 backfill over a row written before the change, and `close()`
+ * leaving a borrowed pool alone.
  *
  * ## How each test is isolated
  *
@@ -77,6 +80,9 @@ const SECOND = 1000
 
 /** How long a burst test waits for deliveries that may be asynchronous. */
 const DELIVERY_TIMEOUT_MS = 5_000
+
+/** How long a test waits before asserting that nothing more was delivered. */
+const SETTLE_MS = 50
 
 /** How many connections the shared pool opens; enough for the concurrency tests. */
 const POOL_SIZE = 8
@@ -423,15 +429,92 @@ if (target === null) {
       expect(reread?.processed_at).toBe(timestampAt(clock.currentMs))
     })
 
+    it('removes every row a deleted session had, and leaves other sessions alone', async () => {
+      const { store, session } = await seeded()
+      const other = await store.createSession(
+        (await store.createAgent(agentInput('Other'), OWNER_A)).id,
+        { ownerId: OWNER_A, initial_events: [userMessage('theirs')] },
+      )
+      // A session with rows in all three tables the delete reaches: `events` (a message and
+      // the chunks of a reply), `event_claims` (the span that claims the message) and
+      // `event_supersessions` (the range the reply supersedes).
+      const previewed = newEventId()
+      const [queued] = await store.appendEvents(session.id, [userMessage('hi')])
+      const chunks = await store.appendEvents(session.id, [
+        storedEventStart(previewed),
+        storedEventDelta(previewed, 'Hel'),
+      ])
+      await store.appendEvents(session.id, [
+        {
+          type: EVENT_TYPES.modelRequestStart,
+          consumes: [queued?.id ?? ('sevt_00000000000000000000000000' as EventId)],
+          model: 'anthropic/claude-sonnet-5',
+        },
+      ])
+      await store.appendEvents(session.id, [
+        {
+          type: EVENT_TYPES.agentMessage,
+          content: [{ type: 'text', text: 'the whole reply' }],
+          supersedes: { from_seq: chunks[0]?.seq ?? 2, to_seq: chunks[1]?.seq ?? 3 },
+        },
+      ])
+
+      const before = await rowCounts(session.id)
+      const otherBefore = await rowCounts(other.id)
+      expect(before.events).toBeGreaterThan(0)
+      expect(before.claims).toBeGreaterThan(0)
+      expect(before.supersessions).toBeGreaterThan(0)
+
+      expect(await store.deleteSession(session.id, { ownerId: OWNER_A })).toBe(true)
+
+      // The rows are gone — not compacted, not flagged, gone — and the session row with them.
+      expect(await rowCounts(session.id)).toEqual({ events: 0, claims: 0, supersessions: 0 })
+      expect(await store.getSession(session.id, { ownerId: OWNER_A })).toBeNull()
+      // The other session is untouched, row for row, in all three tables.
+      expect(await rowCounts(other.id)).toEqual(otherBefore)
+      expect((await store.getSession(other.id, { ownerId: OWNER_A }))?.id).toBe(other.id)
+    })
+
+    it('announces a session’s deletion to another store’s subscriber', async () => {
+      const { store: subscriber, clock, session } = await seeded()
+      // A second store on the same pool is a second process as far as the database is
+      // concerned: it deletes the session, and the notification reaches this store's
+      // listening connection.
+      const deleter = track(createPostgresSessionStore({ pool }, { now: clock.now }))
+      const received: StreamEvent[] = []
+      await subscriber.subscribe(session.id, (event) => {
+        received.push(event)
+      })
+      await deleter.appendEvents(session.id, [userMessage('before')])
+      await waitFor(() => received.length === 1, 'the event before the delete')
+
+      expect(await deleter.deleteSession(session.id, { ownerId: OWNER_A })).toBe(true)
+
+      await waitFor(() => received.length === 2, 'the session.deleted the other store announced')
+      expect(received[1]).toEqual({ type: EVENT_TYPES.sessionDeleted, session_id: session.id })
+      // The deletion ended the subscription: nothing stored follows it, and the session is
+      // unreadable from both stores.
+      await new Promise((resolve) => setTimeout(resolve, SETTLE_MS))
+      expect(received).toHaveLength(2)
+      expect(await subscriber.getSessionUnscoped(session.id)).toBeNull()
+    })
+
     it('applies its migrations idempotently', async () => {
       // The suite's `beforeAll` has already migrated this database; running again must be a
       // no-op that leaves the schema usable, which is what makes it safe on every deploy.
       const files = await migrate(db)
       expect(files.length).toBeGreaterThan(0)
+      // `0016_user_preferences.sql` is one `create table if not exists` (#111): a re-run has
+      // to leave the table working, which the store calls below prove.
+      expect(files).toContain('0016_user_preferences.sql')
       expect(await migrate(db)).toEqual(files)
 
       const { store, session } = await seeded()
       expect(await store.getSession(session.id, { ownerId: OWNER_A })).toEqual(session)
+      expect(await store.putPreferences(OWNER_A, { default_model: 'openai/gpt-5-mini' })).toEqual({
+        default_model: 'openai/gpt-5-mini',
+      })
+      expect(await store.getPreferences(OWNER_A)).toEqual({ default_model: 'openai/gpt-5-mini' })
     })
 
     it('backfills model and system for a session stored before #93, and reads it back', async () => {
@@ -618,6 +701,26 @@ if (target === null) {
     return new Map(rows.rows.map((row) => [row['id'] as string, row]))
   }
 
+  /**
+   * How many rows each session-keyed table holds for a session, read straight from the tables
+   * — what `deleteSession` has to leave at zero, and what it must not touch for another one.
+   */
+  async function rowCounts(
+    sessionId: string,
+  ): Promise<{ events: number; claims: number; supersessions: number }> {
+    const counts = await sql<{ events: number; claims: number; supersessions: number }>`
+      select
+        (select count(*)::int from events where session_id = ${sessionId}) as events,
+        (select count(*)::int from event_claims where session_id = ${sessionId}) as claims,
+        (select count(*)::int from event_supersessions where session_id = ${sessionId}) as supersessions
+    `.execute(db)
+    const row = counts.rows[0]
+    if (row === undefined) {
+      throw new Error('the row-count query returned no row')
+    }
+    return row
+  }
+
   /** Empty every table of this package's schema, so a test starts where the previous one did. */
   async function truncateAll(): Promise<void> {
     // `event_claims` and `event_supersessions` reference `events`, so they are truncated in the
@@ -627,10 +730,11 @@ if (target === null) {
     // `0010_drop_session_previews.sql` (P4). Better Auth's own tables (`"user"`, `"session"`,
     // `"account"`, `"verification"`, `"deviceCode"`) are *not* truncated: the only rows in
     // them are the ones `ensureUsers` inserts per test, and a `"user"` row carries the
-    // `owner_id`s everything else references.
+    // `owner_id`s everything else references. `user_preferences` is here so one test's
+    // preferences cannot leak into the next (#111).
     await sql`truncate table
       events, event_claims, event_supersessions, sessions, agents, partition_leases,
-      provider_credentials`.execute(db)
+      provider_credentials, user_preferences`.execute(db)
   }
 }
 

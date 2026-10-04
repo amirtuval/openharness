@@ -63,12 +63,12 @@ src/
     model.ts            the model catalog (GET /v1/models) and its entries
     provider-credential.ts  provider credential metadata (write-only) + its endpoints
     session.ts          the session resource + its endpoints
-    user.ts             the signed-in user: GET /v1/me, UserIdSchema (owner_id)
+    user.ts             the signed-in user: GET /v1/me, /v1/me/preferences, UserIdSchema
   events/
     common.ts           the event vocabulary, the fields every stored event carries, supersedes
-    user.ts             user.message, user.interrupt (+ the shapes a client sends)
+    user.ts             user.message (with the #111 model switch), user.interrupt, inputs
     agent.ts            agent.message
-    session.ts          status events, session.error, stop_reason
+    session.ts          status events, session.error, stop_reason, the session.deleted stream event
     span.ts             span.model_request_start / _end, model_usage, claims (consumes/model)
     stream.ts           event_start / event_delta: the stored chunks of a reply
     union.ts            StoredEvent, StreamEvent and isStoredEvent()
@@ -85,31 +85,34 @@ Two entry points, named in `package.json`'s `exports`. Both resolve to built out
 
 **Resources**
 
-| export                                                                                                    | what it is                                                                                    |
-| --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `AgentSchema` / `Agent`                                                                                   | the `agent` resource (carries a read-only `owner_id`)                                         |
-| `CreateAgentRequestSchema`, `UpdateAgentRequestSchema`                                                    | bodies of `POST /v1/agents`, `POST /v1/agents/{agent_id}`                                     |
-| `ListAgentsQuerySchema`, `ListAgentsResponseSchema`                                                       | `GET /v1/agents`                                                                              |
-| `ModelConfigSchema` / `ModelConfig`                                                                       | `{ id }`, where `id` is a Mastra router string `provider/model`                               |
-| `ModelEntrySchema` / `ModelEntry`, `ProviderCatalogStatusSchema` / `ProviderCatalogStatus`                | one `GET /v1/models` entry, and one provider's catalog status (epic #92)                      |
-| `ListModelsResponseSchema` / `ListModelsResponse`, `ListModelsQuerySchema` / `ListModelsQuery`            | `GET /v1/models`; `refresh` bypasses the cache (C4)                                           |
-| `SessionSchema` / `Session`, `SessionAgentSchema` / `SessionAgent`                                        | the `session` resource (read-only `owner_id`), its effective config and its optional snapshot |
-| `SessionStatusSchema`, `StopReasonSchema`                                                                 | `idle`/`running`; `{ type: 'end_turn' }`                                                      |
-| `CreateSessionRequestSchema`, `ListSessionsQuerySchema`, `ListSessionsResponseSchema`                     | the sessions endpoints                                                                        |
-| `UserSchema` / `User`, `GetMeResponseSchema` / `GetMeResponse`                                            | the signed-in user; `GET /v1/me`                                                              |
-| `UserIdSchema` / `UserId`                                                                                 | an opaque Better Auth user id; what `owner_id` holds                                          |
-| `ProviderCredentialSchema` / `ProviderCredential`, `ProviderCredentialTypeSchema`                         | credential metadata (`api_key` only today); never the secret                                  |
-| `ApiKeyProviderCredentialSchema`, `PutProviderCredentialRequestSchema` / `PutProviderCredentialRequest`   | body of `PUT /v1/provider-credentials/{provider}` (write-only)                                |
-| `ListProviderCredentialsResponseSchema` / `ListProviderCredentialsResponse`                               | `GET /v1/provider-credentials`                                                                |
-| `AGENT_NAME_MAX_LENGTH`, `AGENT_DESCRIPTION_MAX_LENGTH`, `SESSION_TITLE_MAX_LENGTH`, `MAX_INITIAL_EVENTS` | limits Anthropic documents                                                                    |
+| export                                                                                                     | what it is                                                                                    |
+| ---------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `AgentSchema` / `Agent`                                                                                    | the `agent` resource (carries a read-only `owner_id`)                                         |
+| `CreateAgentRequestSchema`, `UpdateAgentRequestSchema`                                                     | bodies of `POST /v1/agents`, `POST /v1/agents/{agent_id}`                                     |
+| `ListAgentsQuerySchema`, `ListAgentsResponseSchema`                                                        | `GET /v1/agents`                                                                              |
+| `ModelConfigSchema` / `ModelConfig`                                                                        | `{ id }`, where `id` is a Mastra router string `provider/model`                               |
+| `ModelEntrySchema` / `ModelEntry`, `ProviderCatalogStatusSchema` / `ProviderCatalogStatus`                 | one `GET /v1/models` entry, and one provider's catalog status (epic #92)                      |
+| `ListModelsResponseSchema` / `ListModelsResponse`, `ListModelsQuerySchema` / `ListModelsQuery`             | `GET /v1/models`; `refresh` bypasses the cache (C4)                                           |
+| `SessionSchema` / `Session`, `SessionAgentSchema` / `SessionAgent`                                         | the `session` resource (read-only `owner_id`), its effective config and its optional snapshot |
+| `SessionStatusSchema`, `StopReasonSchema`                                                                  | `idle`/`running`; `{ type: 'end_turn' }`                                                      |
+| `CreateSessionRequestSchema`, `ListSessionsQuerySchema`, `ListSessionsResponseSchema`                      | the sessions endpoints                                                                        |
+| `UserSchema` / `User`, `GetMeResponseSchema` / `GetMeResponse`                                             | the signed-in user; `GET /v1/me`                                                              |
+| `UserIdSchema` / `UserId`                                                                                  | an opaque Better Auth user id; what `owner_id` holds                                          |
+| `UserPreferencesSchema` / `UserPreferences`, `GetPreferencesResponseSchema`, `PutPreferencesRequestSchema` | the per-user default model; `GET`/`PUT /v1/me/preferences` (#111)                             |
+| `DEFAULT_MODEL_PATTERN`                                                                                    | the `provider/model` shape a `default_model` must have                                        |
+| `ProviderCredentialSchema` / `ProviderCredential`, `ProviderCredentialTypeSchema`                          | credential metadata (`api_key` only today); never the secret                                  |
+| `ApiKeyProviderCredentialSchema`, `PutProviderCredentialRequestSchema` / `PutProviderCredentialRequest`    | body of `PUT /v1/provider-credentials/{provider}` (write-only)                                |
+| `ListProviderCredentialsResponseSchema` / `ListProviderCredentialsResponse`                                | `GET /v1/provider-credentials`                                                                |
+| `AGENT_NAME_MAX_LENGTH`, `AGENT_DESCRIPTION_MAX_LENGTH`, `SESSION_TITLE_MAX_LENGTH`, `MAX_INITIAL_EVENTS`  | limits Anthropic documents                                                                    |
 
 **Events**
 
 | export                                                                                                                                                                                                    | what it is                                                                                |
 | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
 | `EVENT_TYPES`, `STORED_EVENT_TYPES`, `EventType`, `StoredEventType`                                                                                                                                       | the vocabulary as constants and types                                                     |
-| `UserMessageEventSchema`, `UserInterruptEventSchema`, `UserEventSchema`                                                                                                                                   | stored user events                                                                        |
+| `UserMessageEventSchema`, `UserInterruptEventSchema`, `UserEventSchema`                                                                                                                                   | stored user events (the message carries the optional `model` switch, #111)                |
 | `UserMessageEventInputSchema`, `UserInterruptEventInputSchema`, `UserEventInputSchema`                                                                                                                    | the same shapes as a client sends them                                                    |
+| `SessionDeletedEventSchema` / `SessionDeletedEvent`                                                                                                                                                       | the stream-only `session.deleted` event (#111): sent last, before a stream closes         |
 | `AgentMessageEventSchema`, `AgentEventSchema`                                                                                                                                                             | stored agent events                                                                       |
 | `SessionStatusRunningEventSchema`, `SessionStatusIdleEventSchema`, `SessionStatusRescheduledEventSchema`, `SessionErrorEventSchema`, `SessionEventSchema`                                                 | stored session events                                                                     |
 | `SessionErrorSchema`, `SessionErrorTypeSchema`, `RetryStatusSchema`, `RetryStatusTypeSchema`                                                                                                              | the typed `session.error` payload                                                         |
@@ -168,7 +171,8 @@ Builders for every resource and event, and one realistic sample session.
 | export                                                                                     | what it is                                                                                                                      |
 | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
 | `makeAgent()`, `makeSessionAgent()`, `makeSession()`                                       | resource builders; each takes `Partial<T>` overrides                                                                            |
-| `makeUser()`, `makeProviderCredential()`                                                   | the signed-in user (a fixed opaque id) and credential metadata; never a secret                                                  |
+| `makeUser()`, `makeUserPreferences()`, `makeProviderCredential()`                          | the signed-in user (a fixed opaque id), their preferences, and credential metadata; never a secret                              |
+| `makeSessionDeleted()`                                                                     | a `session.deleted` stream event (#111) — the last event a stream for a deleted session delivers                                |
 | `makeModelEntry()`, `makeListModelsResponse()`                                             | the model catalog: one entry, and a response of entries plus per-provider statuses (epic #92)                                   |
 | `makeUserMessage()`, `makeUserInterrupt()`, `makeAgentMessage()`                           | message and interrupt builders                                                                                                  |
 | `makeStatusRunning()`, `makeStatusIdle()`, `makeStatusRescheduled()`, `makeSessionError()` | session status builders                                                                                                         |
@@ -245,7 +249,9 @@ the UI for now.
 
 - **`Session.model` and `Session.system` are the configuration the session runs**, always
   set. They are the agent's `model`/`system`, the request's override of either, or the inline
-  model of an agent-less session (`system: null` when nothing named one).
+  model of an agent-less session (`system: null` when nothing named one). Since #111 the
+  model is not frozen: a `user.message` carrying `model` switches it from that message on
+  (epic #116, U3), which is the one way a session's configuration changes after creation.
 - **`Session.agent` is that preset's snapshot — or `null`.** It is where the session came
   from, not what it runs: an edit to the agent still changes nothing, and a session created
   from a model has no snapshot at all.
@@ -315,10 +321,11 @@ makes the types say so. The rules, and where each one lives:
   arrays (`ListEventsResponse.data`, `SendEventsResponse.data`) are hand-written for this
   reason — a schema's inferred type cannot be readonly, and the read a client replays from has
   to be.
-- **`isStoredEvent()` checks `seq`.** Every event a server delivers is stored, so the predicate
-  is `true` for anything that parses; the runtime check stays because it is the honest test
-  against a value that did not come from the schemas (a pre-D9 payload, say). The `StreamEvent`
-  union is the stored one.
+- **`isStoredEvent()` checks `seq`.** Every event a server delivers is stored, with one
+  exception: `session.deleted` (#111), which names a session whose log no longer exists and
+  carries no envelope, so the predicate is `false` for exactly it. The runtime check stays
+  because it is the honest test against a value that did not come from the schemas (a pre-D9
+  payload, say). The `StreamEvent` union is the stored one plus that event.
 
 ## Deviations and extensions
 
@@ -342,6 +349,10 @@ column points at the definition in code; the same list appears in the TSDoc ther
 | `invalid_provider_credential` (422)                                    | `errors.ts`                                             | The one API error type without the `_error` suffix: a credential that failed validation on save (A5).                                                                                                                                                                                                                                  |
 | `model` and `system` on `session`; a nullable `agent` (§93)            | `resources/session.ts`                                  | The configuration a session actually runs, always set, and the optional preset it snapshotted. Anthropic has no equivalent: there a session always has an agent, and the agent carries the model.                                                                                                                                      |
 | `missing_provider_credential` session error                            | `events/session.ts`                                     | The owner has no stored credential for the model's provider, so the turn cannot make a model request. Non-retryable — the schema pins `retry_status` to `exhausted` — and the message names the provider.                                                                                                                              |
+| `model` on `user.message` and its input (#111)                         | `events/user.ts`                                        | Mid-chat model switching (epic #116, U3): a message that carries a `model` also sets the session's current `model` in the same transaction, and the brain uses that for each request. Anthropic's model is the agent's, fixed at session creation.                                                                                     |
+| `session.deleted` — a stream-only event (#111)                         | `events/session.ts`, `events/common.ts`                 | A `DELETE /v1/sessions/{session_id}` removes the session and its log, so the stream that was following it gets one final `session.deleted` (`{ type, session_id }`) before the server closes it — an end state, not an event of the log. The only event type not in `STORED_EVENT_TYPES`.                                              |
+| `GET`/`PUT /v1/me/preferences` (#111)                                  | `resources/user.ts`                                     | A per-user default model (epic #116, U1), stored server-side and shared by the web app and `oh`. `default_model` is `provider/model`-shaped or `null`; the id does not have to be in the catalog. Anthropic has no per-user settings: its API is account-scoped by the caller's key.                                                   |
+| `DELETE /v1/sessions/{session_id}` → 204 (#111)                        | `resources/session.ts`                                  | Hard delete of a chat (epic #116, U5): owner-scoped (another user's session is a 404) and irreversible — it removes the session and its whole log. The explicit exception to the immutable log besides compaction; open streams receive `session.deleted` and close. Anthropic has no session-delete route.                            |
 
 ### Deviations — subsets and changed shapes
 
@@ -378,19 +389,22 @@ places, in this order:
 
 1. **Name it** in `EVENT_TYPES` (`src/events/common.ts`). `{domain}.{action}`, matching
    Anthropic's spelling exactly. Add it to `STORED_EVENT_TYPES` — every event a server emits
-   is stored.
+   is stored, except the stream-only `session.deleted` (#111), which names a log that is
+   already gone; a stream-only event is deliberately left out of that list.
 2. **Define the schema** in the file for its domain (`user.ts`, `agent.ts`, `session.ts`,
    `span.ts`). Build it from `EventIdSchema`, `EventSeqSchema` and the `processed_at` schema
    that matches who writes it — `QueuedProcessedAtSchema` for user events, `ProcessedAtSchema`
-   for anything the server produces. Add `// extension:` to any field Anthropic does not have.
-3. **Add it to the domain union** at the bottom of the same file, then to `StoredEventSchema`
-   and `StreamEventSchema` in `union.ts`. A stored type that reuses a `type` string an
-   existing member already has cannot go _inside_ the discriminated union — zod throws on a
-   duplicate discriminator value when it parses — so it is added to the surrounding
-   `z.union` instead, the way the stored chunks are.
+   for anything the server produces. A stream-only event carries no envelope at all (see
+   `SessionDeletedEventSchema`). Add `// extension:` to any field Anthropic does not have.
+3. **Add it to the domain union** at the bottom of the same file — a stored type goes to the
+   domain's stored union, a stream-only one deliberately does not — then to
+   `StoredEventSchema` (stored) and/or `StreamEventSchema` in `union.ts`. A stored type that
+   reuses a `type` string an existing member already has cannot go _inside_ the discriminated
+   union — zod throws on a duplicate discriminator value when it parses — so it is added to
+   the surrounding `z.union` instead, the way the stored chunks are.
 4. **Add a builder** in `src/fixtures/index.ts` and a valid sample to `storedSamples` in
    `src/events/events.test.ts` — that table is asserted against `STORED_EVENT_TYPES`, so a
-   type without a sample fails the suite.
+   stored type without a sample fails the suite (a stream-only type gets its own test).
 5. **Document it**: the `EVENT_TYPES` entry is the documentation for the wire; put the
    semantics in the schema's TSDoc, and extend the sample history in the fixtures if the new
    type belongs in a realistic turn.

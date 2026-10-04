@@ -11,8 +11,9 @@
  *
  * - **{@link SessionStore}** (`./store`) — the storage and signaling contract the brain and the
  *   server code against: agents, sessions, appending and reading events, live subscriptions,
- *   partition signals, the auth-session revocation channel (epic #65, A2), and the leases that
- *   fence a zombie writer out.
+ *   partition signals, the auth-session revocation channel (epic #65, A2), the per-user
+ *   preferences and the owner-scoped `deleteSession` (#111), and the leases that fence a
+ *   zombie writer out.
  * - **{@link CredentialStore}** (`./credentials`) — the sealed-blob storage contract for
  *   users' provider credentials: metadata in and out, the sealed form only for the one read
  *   the server's model path makes.

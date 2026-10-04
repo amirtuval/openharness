@@ -5,7 +5,8 @@
  *
  * - **the client** — {@link createClient}, and the `Client` interface it and the fake client
  *   both implement: agents, sessions, the session event log, the provider credentials, the
- *   auth helpers, and helpers for sending a message and interrupting a turn;
+ *   caller's preferences, the auth helpers, and helpers for sending a message (optionally
+ *   switching the model) and interrupting a turn;
  * - **streaming** — `client.sessions.events.stream`, an async iterable of `StreamEvent`s that
  *   reconnects and resumes by `seq`, so no stored event is delivered twice or skipped;
  * - **the transcript** — {@link createTranscript}, a pure reducer from those events to UI
@@ -27,12 +28,13 @@
 export const PACKAGE_NAME = '@openharness/client'
 
 export { createClient } from './client'
-export type { Client, ClientOptions, RequestOptions } from './client'
+export type { Client, ClientOptions, RequestOptions, SendMessageOptions } from './client'
 
 export type { AgentsResource } from './resources/agents'
 export type { SessionEventsResource, SessionsResource } from './resources/sessions'
 export type { ProviderCredentialsResource } from './resources/provider-credentials'
 export type { ModelsResource } from './resources/models'
+export type { PreferencesResource } from './resources/preferences'
 
 export { DeviceLoginError, OPENHARNESS_CLI_CLIENT_ID } from './resources/auth'
 export type { AuthResource, DeviceLoginStart, PollDeviceLoginOptions } from './resources/auth'

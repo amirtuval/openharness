@@ -10,14 +10,21 @@ import { UserIdSchema } from './user'
 /**
  * The `session` resource and the endpoints that manage it:
  *
- * - `POST /v1/sessions`
- * - `GET  /v1/sessions`
- * - `GET  /v1/sessions/{session_id}`
+ * - `POST   /v1/sessions`
+ * - `GET    /v1/sessions`
+ * - `GET    /v1/sessions/{session_id}`
+ * - `DELETE /v1/sessions/{session_id}`
  *
  * A session is a durable, append-only event log; the resource here is the header of that log.
  * Its `status` mirrors the last status event in the log, and its `model` and `system` are the
  * configuration it runs, always set — frozen at creation time, along with the `agent` preset
- * it was created from, when there was one.
+ * it was created from, when there was one. The one exception to "frozen": a `user.message`
+ * carrying a `model` switches what the session runs from that message on (#111).
+ *
+ * `DELETE` answers `204` and removes the session and its whole log (epic #116, U5) — an
+ * owner-scoped operation, so another user's session answers `404`. It is the explicit
+ * exception to the append-only rule, alongside compaction, and it is irreversible; open
+ * streams for the session receive a final `session.deleted` event and close.
  */
 
 /** Longest session title Anthropic accepts. */

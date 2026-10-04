@@ -277,8 +277,10 @@ export function describeEvents(events: readonly StreamEvent[]): string {
   }
   return events
     .map((event) => {
-      // Every stream event is a stored one since P4, so the `seq` is always there.
-      const label = `${String(event.seq)} ${event.type}`
+      // Every stream event is a stored one since P4 — except the stream-only `session.deleted`
+      // (#111), which carries no `seq` — so the prefix is optional.
+      const prefix = isStoredEvent(event) ? `${String(event.seq)} ` : ''
+      const label = `${prefix}${event.type}`
       if (event.type === EVENT_TYPES.eventStart) {
         return `${label} ${event.event.id}`
       }

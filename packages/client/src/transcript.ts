@@ -72,6 +72,16 @@ export interface TranscriptMessage {
    * {@link reduceTranscript}.
    */
   readonly position: number
+  /**
+   * The model this message switched the session to, when it switched one (epic #116, U1).
+   *
+   * A `user.message` carrying a `model` whose id differs from the model the log last said
+   * switches the session, and a UI renders this message as the marker. The **first** model a
+   * message carries is not a change — {@link TranscriptState.model} is `null` until then, and
+   * the message sets it silently — and a message naming the model already in effect is not a
+   * change either. Absent on every other message.
+   */
+  readonly modelChangedTo?: string
 }
 
 /** The latest `session.error`, as the UI shows it. */
@@ -100,16 +110,41 @@ export interface TranscriptState {
    * resumes mid-reply.
    */
   readonly lastSeq: number
+  /**
+   * Whether the session was deleted (#111, epic #116 U5).
+   *
+   * A `session.deleted` event — the stream-only last event of a deleted session — sets this
+   * once and for all: it is a terminal end state a UI can react to (close the view, stop
+   * offering to send) rather than the end of an iteration. A log read back from the server
+   * never carries the event, because deletion removes the log.
+   */
+  readonly deleted: boolean
+  /**
+   * The model the session is running, as the log last said it (epic #116, U1).
+   *
+   * The id a `user.message` carrying a `model` switched the session to, or `null` until a
+   * message carries one. It is what tells a model **change** — a message whose id differs
+   * from it, marked with {@link TranscriptMessage.modelChangedTo} — from the first model a
+   * message names.
+   */
+  readonly model: string | null
 }
 
 /**
  * The state for a session with no events yet.
  *
  * `lastSeq` is `0`, the protocol's "from the start": passing it as `afterSeq` replays the
- * whole log.
+ * whole log. `deleted` is `false` and `model` is `null`: nothing has happened yet.
  */
 export function initialTranscriptState(): TranscriptState {
-  return { messages: [], status: 'idle', lastError: null, lastSeq: 0 }
+  return {
+    messages: [],
+    status: 'idle',
+    lastError: null,
+    lastSeq: 0,
+    deleted: false,
+    model: null,
+  }
 }
 
 /**
@@ -124,8 +159,9 @@ export function initialTranscriptState(): TranscriptState {
  * of a reply are stored events too (`event_start` / `event_delta` with a `seq`), so they take
  * the same path: they are deduplicated by `seq`, they advance `lastSeq`, and a client that
  * resumes mid-reply gets the rest of the chunks rather than skipping them. The pre-D9
- * stream-only previews — a chunk with no envelope — were removed in phase P4: every event this
- * reducer takes is a `StoredEvent`.
+ * stream-only previews — a chunk with no envelope — were removed in phase P4: apart from the
+ * stream-only `session.deleted` (handled below), every event this reducer takes is a
+ * `StoredEvent`.
  *
  * The rules, in one place:
  *
@@ -151,11 +187,28 @@ export function initialTranscriptState(): TranscriptState {
  *   (P4). A claim event with no list at all — a log stored before D9 — keeps the old reading:
  *   a span start says everything pending was picked up, and a span end or an idle says
  *   nothing.
+ * - **`session.deleted` is terminal, seq-less and idempotent.** It has no `seq` (it is
+ *   stream-only), so it is folded in *before* the dedupe below — a replayed log has no
+ *   position for it — and the only thing it does is set `deleted` to `true`. The stream ends
+ *   after it, so a UI can react to the state rather than to the end of an iteration, and a
+ *   second one changes nothing.
+ * - **A `user.message` carrying a `model` may switch the session's model.** When its id
+ *   differs from `state.model`, the message carries `modelChangedTo` so a UI can draw the
+ *   marker, and `state.model` becomes the new id. The first model the log shows is not a
+ *   change — `state.model` starts at `null` — so it sets the state silently, and a message
+ *   naming the model already in effect changes nothing. A message with no `model` leaves
+ *   `state.model` alone.
  *
  * @param state the transcript so far
  * @param event the next event, from `iterate`, `stream`, or anywhere else
  */
 export function reduceTranscript(state: TranscriptState, event: StreamEvent): TranscriptState {
+  if (event.type === EVENT_TYPES.sessionDeleted) {
+    // A terminal, stream-only event with no `seq` (#111): folded in before the position
+    // dedupe — which cannot apply to it — and idempotent, so a client that sees it twice
+    // keeps the same state.
+    return state.deleted ? state : { ...state, deleted: true }
+  }
   if (event.seq <= state.lastSeq) {
     // Already folded in: a resumed stream replaying from before where we got to, or the
     // same history loaded twice. A value that did not come from the protocol's schemas and
@@ -188,7 +241,7 @@ export function reduceTranscriptAll(
 function reduceStoredEvent(state: TranscriptState, event: StoredEvent): TranscriptState {
   switch (event.type) {
     case EVENT_TYPES.userMessage:
-      return upsertMessage(state, messageFromUserEvent(event))
+      return fromUserMessage(state, event)
 
     case EVENT_TYPES.agentMessage:
       return {
@@ -319,10 +372,19 @@ function withoutPreviews(messages: readonly TranscriptMessage[]): readonly Trans
   return messages.filter((message) => !message.streaming)
 }
 
-/** The transcript message for a stored `user.message`. */
-function messageFromUserEvent(event: UserMessageEvent): TranscriptMessage {
+/**
+ * Fold a stored `user.message` in, applying the model-switch rule (epic #116, U1).
+ *
+ * A message that carries a `model` switches the session to it: the state's `model` moves to
+ * the new id, and the message carries {@link TranscriptMessage.modelChangedTo} when that id
+ * differs from the one already in effect — a change a UI marks. The first model a message
+ * carries is not a change (the state was `null`), so the marker is left off and the state is
+ * set silently; a message naming the model already in effect is left off too.
+ */
+function fromUserMessage(state: TranscriptState, event: UserMessageEvent): TranscriptState {
+  const model = event.model?.id
   const blocks = event.content.map((block) => block.text)
-  return {
+  const message: TranscriptMessage = {
     id: event.id,
     role: 'user',
     blocks,
@@ -330,7 +392,11 @@ function messageFromUserEvent(event: UserMessageEvent): TranscriptMessage {
     pending: event.processed_at === null,
     streaming: false,
     position: event.seq,
+    ...(model !== undefined && state.model !== null && model !== state.model
+      ? { modelChangedTo: model }
+      : {}),
   }
+  return { ...upsertMessage(state, message), model: model ?? state.model }
 }
 
 /** The transcript message for a stored `agent.message`, reconciled with any preview of it. */

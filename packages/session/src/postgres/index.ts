@@ -38,4 +38,5 @@ export type {
   ProviderCredentialRow,
   ProviderCredentialsTable,
   SessionsTable,
+  UserPreferencesTable,
 } from './schema'

@@ -7,6 +7,7 @@ import type {
   ProviderCredential,
   Session,
   SessionAgent,
+  SessionId,
   SessionStatus,
   StoredEvent,
   Timestamp,
@@ -183,6 +184,23 @@ export interface ProviderCredentialsTable {
   validated_at: Date
 }
 
+/**
+ * `user_preferences`: the settings a user keeps across sessions (#111, epic #116 U1).
+ *
+ * One row per user — `user_id` is the primary key — holding the `provider/model` a new chat
+ * starts with, or `null` when the user has no default. `putPreferences` replaces the row
+ * whole (the store upserts it), so this is a value rather than a log, and `updated_at` is
+ * when that value last changed, from the injected clock. `on delete cascade` from `"user"`
+ * takes a user's preferences with the user.
+ */
+export interface UserPreferencesTable {
+  /** The `user.id` the preferences belong to (Better Auth's opaque text). */
+  user_id: string
+  /** The `provider/model` a new session starts with, or `null` for no default. */
+  default_model: string | null
+  updated_at: Date
+}
+
 /** The database as this package sees it. */
 export interface PostgresSchema {
   agents: AgentsTable
@@ -192,6 +210,7 @@ export interface PostgresSchema {
   event_supersessions: EventSupersessionsTable
   partition_leases: PartitionLeasesTable
   provider_credentials: ProviderCredentialsTable
+  user_preferences: UserPreferencesTable
 }
 
 /** One row of `agents`. */
@@ -211,6 +230,9 @@ export type PartitionLeaseRow = PartitionLeasesTable
 
 /** One row of `provider_credentials`. */
 export type ProviderCredentialRow = ProviderCredentialsTable
+
+/** One row of `user_preferences`. */
+export type UserPreferencesRow = UserPreferencesTable
 
 /** The columns a metadata read selects: every `provider_credentials` column but the sealed blob. */
 export type ProviderCredentialMetadataRow = Pick<
@@ -451,6 +473,35 @@ export function decodeStoredNotification(payload: string): { readonly seq: numbe
     return { seq }
   }
   return null
+}
+
+/**
+ * The payload announcing that a session — and its whole log — was deleted (#111).
+ *
+ * Only the id: there is nothing else to say about a session that is gone, and the payload of
+ * a `NOTIFY` is a short string. It travels on the session's own channel
+ * ({@link sessionChannel}), like a stored-event notification, because that is the channel the
+ * subscribers of that session are already listening on; a subscriber that sees it delivers a
+ * final `session.deleted` event and ends the subscription instead of fetching anything.
+ */
+export function encodeSessionDeletedNotification(sessionId: string): string {
+  return JSON.stringify({ sessionId })
+}
+
+/**
+ * Read a session-deleted notification; `null` means the payload is not one this store wrote,
+ * and it is then handled — or ignored — as the stored-seq hint it may be.
+ *
+ * The payload is `{"sessionId": "sesn_…"}`: a non-empty string under `sessionId`, and nothing
+ * else is required, exactly like the auth-revocation form beside it.
+ */
+export function decodeSessionDeletedNotification(payload: string): SessionId | null {
+  const decoded = asRecord(parseJson(payload))
+  if (decoded === null) {
+    return null
+  }
+  const sessionId = decoded.sessionId
+  return typeof sessionId === 'string' && sessionId.length > 0 ? (sessionId as SessionId) : null
 }
 
 /** Read a partition-channel notification, or `null` when it is not a signal this store sent. */

@@ -3,6 +3,7 @@ import { z } from 'zod'
 import type { DeepReadonly } from '../readonly'
 import { AgentMessageEventSchema } from './agent'
 import {
+  SessionDeletedEventSchema,
   SessionErrorEventSchema,
   SessionStatusIdleEventSchema,
   SessionStatusRescheduledEventSchema,
@@ -19,10 +20,11 @@ import { UserInterruptEventSchema, UserMessageEventSchema } from './user'
  * log, {@link StreamEventSchema} for anything read off a stream, and
  * {@link UserEventInputSchema} (in `events/user.ts`) for anything a client sends.
  *
- * Since D9 (issue #46) a streamed reply is stored chunk by chunk, so a stream and the log
- * carry the same events: {@link StreamEvent} is {@link StoredEvent}. The pre-D9 stream-only
- * previews — `event_start` / `event_delta` with no envelope, never stored — were removed in
- * phase P4, when nothing wrote them any more.
+ * Since D9 (issue #46) a streamed reply is stored chunk by chunk, so a stream carries the
+ * log's events; the one exception is `session.deleted` (#111), which is stream-only because
+ * the log it would belong to has just been deleted. The pre-D9 stream-only previews —
+ * `event_start` / `event_delta` with no envelope, never stored — were removed in phase P4,
+ * when nothing wrote them any more.
  *
  * Every event type is deep-readonly: the log is immutable, and the types say so — `event.seq
  * = …` is a compile error, and the stores hand out deep-frozen events so it would throw at
@@ -67,17 +69,21 @@ export type StoredEvent = DeepReadonly<z.infer<typeof StoredEventSchema>>
 export type ImmutableStoredEvent = StoredEvent
 
 /**
- * Every event a stream can deliver: the stored events, and nothing else.
+ * Every event a stream can deliver: the stored events, and one that is not.
  *
  * Before phase P4 this union also held the stream-only previews of `event_start` /
  * `event_delta`; the brain stores its chunks since P3, so there is no second form left. A
  * payload from a pre-P4 server that carries a seq-less chunk does not parse and is skipped by
  * a reader, the way any event a reader does not know is.
+ *
+ * `session.deleted` is the one member that is **not** stored (#111): it announces that the
+ * session — and its log with it — is gone, so it can never be a `StoredEvent`. A server
+ * sends it as the last event on every open stream for the session, before the stream closes.
  */
-export const StreamEventSchema = StoredEventSchema
+export const StreamEventSchema = z.union([StoredEventSchema, SessionDeletedEventSchema])
 
-/** A stream event, deep-readonly (D9, issue #46). The stream carries the log, so this is {@link StoredEvent}. */
-export type StreamEvent = StoredEvent
+/** A stream event, deep-readonly (D9, issue #46): a {@link StoredEvent}, or `session.deleted`. */
+export type StreamEvent = DeepReadonly<z.infer<typeof StreamEventSchema>>
 
 /** @deprecated The plain name is deep-readonly now (D9, issue #46); use {@link StreamEvent}. */
 export type ImmutableStreamEvent = StreamEvent
@@ -85,10 +91,10 @@ export type ImmutableStreamEvent = StreamEvent
 /**
  * Whether a stream event was persisted, i.e. whether it is a {@link StoredEvent}.
  *
- * Every event a P4 server delivers is stored, so this is `true` for anything that parses; the
- * `seq` test stays because it is the honest runtime check against a value that did not come
- * from the schemas — a seq-less `event_start` from a pre-D9 server, for one — and because it
- * is what told the two chunk forms apart before P4.
+ * True for everything but `session.deleted`, which names a session whose log no longer
+ * exists. The `seq` test is what tells them apart — the stored envelope is exactly what
+ * `session.deleted` does not have — so it is honest both for a value from the schemas and for
+ * a value that did not come from them (a seq-less `event_start` from a pre-D9 server, say).
  */
 export function isStoredEvent(event: StreamEvent): event is StoredEvent {
   return 'seq' in event

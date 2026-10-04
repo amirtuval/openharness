@@ -27,12 +27,13 @@ import type { Transport } from '../http'
  * The session endpoints, and the events that belong to a session.
  *
  * ```
- * POST /v1/sessions                          create  -> session
- * GET  /v1/sessions                          list    -> { data: session[], next_page }
- * GET  /v1/sessions/{id}                     get     -> session
- * POST /v1/sessions/{id}/events              send    -> { data: user event[] }
- * GET  /v1/sessions/{id}/events              list    -> { data: stored event[], next_page }
- * GET  /v1/sessions/{id}/events/stream       stream  -> a live event stream
+ * POST   /v1/sessions                        create  -> session
+ * GET    /v1/sessions                        list    -> { data: session[], next_page }
+ * GET    /v1/sessions/{id}                   get     -> session
+ * DELETE /v1/sessions/{id}                   delete  -> (204, no body)
+ * POST   /v1/sessions/{id}/events            send    -> { data: user event[] }
+ * GET    /v1/sessions/{id}/events            list    -> { data: stored event[], next_page }
+ * GET    /v1/sessions/{id}/events/stream     stream  -> a live event stream
  * ```
  *
  * A session is a durable, append-only event log; the resource is its header. The log is the
@@ -80,6 +81,19 @@ export interface SessionsResource {
    * @param options request options (cancellation)
    */
   list(params?: ListSessionsQuery, options?: RequestOptions): Promise<ListSessionsResponse>
+
+  /**
+   * Delete a session and its whole log.
+   *
+   * The wire answers `204` with no body, so there is nothing to return. Owner-scoped: another
+   * user's session is answered as if it did not exist, which is also what an unknown or
+   * already-deleted id gets (`not_found_error`). A stream that was following the session
+   * receives one final `session.deleted` event and ends.
+   *
+   * @param sessionId the `sesn_` id
+   * @param options request options (cancellation)
+   */
+  delete(sessionId: string, options?: RequestOptions): Promise<void>
 
   /** The session's event log: read it, append to it, follow it. */
   readonly events: SessionEventsResource
@@ -173,6 +187,14 @@ export function createSessionsResource(transport: Transport): SessionsResource {
         method: 'GET',
         path,
         query: { limit: params?.limit, page: params?.page, agent_id: params?.agent_id },
+        signal: options?.signal,
+      })
+    },
+
+    delete(sessionId, options) {
+      return transport.noContent({
+        method: 'DELETE',
+        path: `${path}/${sessionId}`,
         signal: options?.signal,
       })
     },

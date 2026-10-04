@@ -3,9 +3,11 @@ import { z } from 'zod'
 import { TimestampSchema } from '../common'
 
 /**
- * The `user` resource, and the one endpoint that returns it:
+ * The `user` resource and the endpoints around it:
  *
  * - `GET /v1/me`
+ * - `GET /v1/me/preferences`
+ * - `PUT /v1/me/preferences`
  *
  * // extension: Anthropic's Managed Agents API has no user resource. Authentication itself is
  * also not part of this protocol: sign-in and the session/bearer credentials that prove who
@@ -51,3 +53,54 @@ export type User = z.infer<typeof UserSchema>
 export const GetMeResponseSchema = UserSchema
 
 export type GetMeResponse = User
+
+/**
+ * // extension: the shape of a `default_model`: a Mastra router string, `provider/model`
+ * (epic #116, U1).
+ *
+ * The first path segment names the provider; the rest is the model, so a provider's own id
+ * may itself contain a slash. Whitespace and empty segments are refused. The id does not
+ * have to be in the caller's catalog — a free-text id for a model the provider list has not
+ * caught up with is allowed, exactly like an agent's `model.id`.
+ */
+export const DEFAULT_MODEL_PATTERN = /^[^\s/]+\/[^\s/]+(?:\/[^\s/]+)*$/
+
+/**
+ * // extension: a user's stored preferences (epic #116, U1).
+ *
+ * `default_model` is the `provider/model` a new chat starts with — the free-text router id
+ * described above, validated for shape only — or `null` when the user has not set one (and
+ * none was chosen automatically from their provider keys). Anthropic has no equivalent: its
+ * API is account-scoped by the caller's key, with no per-user settings.
+ */
+export const UserPreferencesSchema = z.object({
+  default_model: z
+    .string()
+    .regex(DEFAULT_MODEL_PATTERN, { error: 'default_model must be a provider/model router id' })
+    .nullable(),
+})
+
+export type UserPreferences = z.infer<typeof UserPreferencesSchema>
+
+/**
+ * Response of `GET /v1/me/preferences`: the caller's preferences, unwrapped.
+ *
+ * Owner-only, like `GET /v1/me`: the route answers for the authenticated caller and nobody
+ * else. A caller who has never saved any preferences gets `{ default_model: null }` — the
+ * absence of a choice, not a 404.
+ */
+export const GetPreferencesResponseSchema = UserPreferencesSchema
+
+export type GetPreferencesResponse = UserPreferences
+
+/**
+ * Body of `PUT /v1/me/preferences`: the caller's preferences, written whole. Response:
+ * {@link GetPreferencesResponseSchema}.
+ *
+ * `default_model` is required and `null` clears the stored default; there is no partial
+ * update, so a caller always sets the complete value it wants. The shape is validated
+ * (`provider/model` or `null`); whether the model exists is not — the catalog answers that.
+ */
+export const PutPreferencesRequestSchema = UserPreferencesSchema
+
+export type PutPreferencesRequest = UserPreferences

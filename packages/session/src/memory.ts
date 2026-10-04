@@ -25,11 +25,11 @@ import {
   type Session,
   type SessionId,
   type StoredEvent,
-  type StreamEvent,
   type Timestamp,
   type UpdateAgentRequest,
   type UserEvent,
   type UserId,
+  type UserPreferences,
 } from '@openharness/protocol'
 
 import { type Clock, systemClock, timestampAt } from './clock'
@@ -94,12 +94,13 @@ import type {
  * the test fakes for every other package, and the reference behaviour for the contracts in
  * `store.ts` and `credentials.ts`.
  *
- * The session store holds everything in `Map`s — agents, sessions and their logs, leases,
- * listeners — and is single-process by construction: two instances share nothing, and a lease
- * in one is invisible to the other. That is the one place it cannot be Postgres-like, so the
- * conformance suite only tests what a shared store can also do.
+ * The session store holds everything in `Map`s — agents, sessions and their logs, per-user
+ * preferences (#111), leases, listeners — and is single-process by construction: two
+ * instances share nothing, and a lease in one is invisible to the other. That is the one
+ * place it cannot be Postgres-like, so the conformance suite only tests what a shared store
+ * can also do.
  *
- * Three implementation details are worth knowing, because they are choices the contract leaves
+ * Four implementation details are worth knowing, because they are choices the contract leaves
  * open and tests may rely on:
  *
  * - **Time is injectable** ({@link InMemorySessionStoreOptions.now}). Timestamps, event ids and
@@ -109,6 +110,10 @@ import type {
  *   `LISTEN`/`NOTIFY` store will have. Awaiting the call that appended an event is enough for
  *   the listener to have seen it, but the contract does not promise that: read state, do not
  *   assume a listener ran.
+ * - **A deleted session is announced.** `deleteSession` removes the session's state first and
+ *   then hands each of its listeners one final `session.deleted` event, in a microtask like
+ *   every other delivery, and forgets the subscription — a subscriber learns the session is
+ *   gone instead of waiting for events that can never come.
  * - **Everything handed out is a copy, and events are deep-frozen.** Read a session, an agent
  *   or an event and you own it; mutating a session or an agent cannot reach into the store.
  *   Events go further, because the log is immutable (D9, issue #46): what is stored is frozen
@@ -156,6 +161,13 @@ export class InMemorySessionStore implements SessionStore {
    * revocation has no channel to key on — the notification names the session itself.
    */
   readonly #revocationListeners = new Set<AuthSessionRevocationListener>()
+
+  /**
+   * The settings each user has saved, keyed by user id — the in-memory `user_preferences`
+   * table (#111, epic #116 U1). One entry per user who ever wrote one; a user who never did
+   * is absent, and reads as the protocol's default rather than as an error.
+   */
+  readonly #preferences = new Map<UserId, PreferencesRecord>()
 
   constructor(options: InMemorySessionStoreOptions = {}) {
     this.#clock = options.now ?? systemClock
@@ -300,6 +312,57 @@ export class InMemorySessionStore implements SessionStore {
     return resolved(clone(record.session))
   }
 
+  deleteSession(sessionId: SessionId, options: OwnerScope): Promise<boolean> {
+    const record = this.#sessions.get(sessionId)
+    // Somebody else's session is not this caller's to delete: `false`, exactly as for an id
+    // nothing has, so the answer does not leak that the session exists (A4).
+    if (record === undefined || !matchesOwner(record.session, options)) {
+      return resolved(false)
+    }
+    // The second deletion in this store, beside compaction: the whole log goes, so the state
+    // a reader could reach goes with it — the events, the ids they held, their claims and
+    // their supersessions — and nothing is left to find. `nextSeq` goes with the record; a
+    // later session has a new id, and an id the deleted session held is free again.
+    for (const entry of record.events) {
+      this.#eventIds.delete(entry.event.id)
+      this.#claims.delete(entry.event.id)
+    }
+    this.#supersessions.delete(sessionId)
+    this.#sessions.delete(sessionId)
+    // Announced after the state is gone, so a listener that runs cannot read a session that
+    // no longer exists — and every subscription for the session ends with this delivery.
+    const listeners = this.#sessionListeners.get(sessionId)
+    this.#sessionListeners.delete(sessionId)
+    if (listeners !== undefined) {
+      const event = deepFreeze({
+        type: EVENT_TYPES.sessionDeleted,
+        session_id: sessionId,
+      })
+      for (const listener of [...listeners]) {
+        queueMicrotask(() => void listener(event))
+      }
+    }
+    return resolved(true)
+  }
+
+  // ------------------------------------------------------------- preferences
+
+  getPreferences(userId: UserId): Promise<UserPreferences> {
+    const stored = this.#preferences.get(userId)
+    // A user who never saved one reads the protocol's default: no row, no error, one shape.
+    return resolved(deepFreeze({ default_model: stored?.defaultModel ?? null }))
+  }
+
+  putPreferences(userId: UserId, preferences: UserPreferences): Promise<UserPreferences> {
+    // One value per user: a second put replaces the first rather than accumulating, exactly
+    // as the `user_preferences` row's `on conflict` decides in Postgres.
+    this.#preferences.set(userId, {
+      defaultModel: preferences.default_model,
+      updatedAtMs: this.#clock(),
+    })
+    return resolved(deepFreeze({ default_model: preferences.default_model }))
+  }
+
   // ----------------------------------------------------------------- events
 
   appendEvents(
@@ -392,9 +455,9 @@ export class InMemorySessionStore implements SessionStore {
       const kept: EventRecord[] = []
       for (const entry of record.events) {
         if (isSupersededChunk(entry.event, ranges) && entry.createdAtMs < cutoffMs) {
-          // The one deletion in this store. The id goes back into the free pool with the row,
-          // exactly as deleting the row does in Postgres — and no reader is affected, because
-          // replay already skipped the chunk.
+          // One of this store's two deletions, beside `deleteSession`. The id goes back into
+          // the free pool with the row, exactly as deleting the row does in Postgres — and no
+          // reader is affected, because replay already skipped the chunk.
           this.#eventIds.delete(entry.event.id)
           deleted += 1
         } else {
@@ -603,6 +666,11 @@ export class InMemorySessionStore implements SessionStore {
         record.session.status = 'running'
       } else if (event.type === EVENT_TYPES.sessionStatusIdle) {
         record.session.status = 'idle'
+      } else if (event.type === EVENT_TYPES.userMessage && event.model !== undefined) {
+        // The model projection (#111): a message that carries a model switches the session to
+        // it, in the same append, and a message without one leaves the session's model alone.
+        // Within a batch the later message wins, because this walks the events in order.
+        record.session.model = { id: event.model.id }
       }
     }
     if (stored.length > 0) {
@@ -703,7 +771,7 @@ export class InMemorySessionStore implements SessionStore {
    * The payload is a deep-frozen copy — derived the way a read derives it — so no listener can
    * write to what another listener of the same event holds.
    */
-  #deliver(sessionId: SessionId, event: StreamEvent): void {
+  #deliver(sessionId: SessionId, event: StoredEvent): void {
     const listeners = this.#sessionListeners.get(sessionId)
     if (listeners === undefined || listeners.size === 0) {
       return
@@ -892,6 +960,14 @@ interface LeaseRecord {
   owner: string | null
   epoch: number
   expiresAtMs: number
+}
+
+/** One user's stored preferences, as the in-memory `user_preferences` row keeps them (#111). */
+interface PreferencesRecord {
+  /** The `provider/model` a new session starts with, or `null` for none. */
+  readonly defaultModel: string | null
+  /** When `putPreferences` last wrote it, as the injected clock read it. */
+  readonly updatedAtMs: number
 }
 
 /** The fields the store assigns to an appended event. */

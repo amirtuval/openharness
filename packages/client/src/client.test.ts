@@ -1,4 +1,9 @@
-import { CreateSessionRequestSchema, encodeKeyCursor, encodeSeqCursor } from '@openharness/protocol'
+import {
+  CreateSessionRequestSchema,
+  PutPreferencesRequestSchema,
+  encodeKeyCursor,
+  encodeSeqCursor,
+} from '@openharness/protocol'
 import {
   fixtureTimestamp,
   makeAgent,
@@ -8,6 +13,7 @@ import {
   makeSession,
   makeUser,
   makeUserMessage,
+  makeUserPreferences,
 } from '@openharness/protocol/fixtures'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -141,6 +147,29 @@ describe('request building', () => {
       ],
     })
   })
+
+  it('carries a model on a user.message through sessions.events.send', async () => {
+    // `UserEventInput` grew an optional `model` (#111): whatever a caller puts on an input
+    // must reach the wire body unchanged.
+    const stored = makeUserMessage('switch', { seq: 1, model: { id: 'openai/gpt-4.1-mini' } })
+    const { client, mock } = clientWith(() => jsonResponse({ data: [stored] }))
+
+    await client.sessions.events.send('sesn_1', {
+      type: 'user.message',
+      content: [{ type: 'text', text: 'switch' }],
+      model: { id: 'openai/gpt-4.1-mini' },
+    })
+
+    expect(bodyOf(mock.requests[0]?.init)).toEqual({
+      events: [
+        {
+          type: 'user.message',
+          content: [{ type: 'text', text: 'switch' }],
+          model: { id: 'openai/gpt-4.1-mini' },
+        },
+      ],
+    })
+  })
 })
 
 describe('creating a session', () => {
@@ -208,6 +237,25 @@ describe('creating a session', () => {
       initial_events: [{ type: 'user.message', content: [{ type: 'text', text: 'hi' }] }],
     })
     expect(CreateSessionRequestSchema.safeParse(body).success).toBe(true)
+  })
+})
+
+describe('deleting a session (#111)', () => {
+  it('sends DELETE and resolves void on the 204', async () => {
+    const { client, mock } = clientWith(() => new Response(null, { status: 204 }))
+
+    await expect(client.sessions.delete('sesn_1')).resolves.toBeUndefined()
+    expect(mock.requests[0]?.init?.method).toBe('DELETE')
+    expect(mock.urlOf(0)).toBe(`${BASE_URL}/v1/sessions/sesn_1`)
+  })
+
+  it('rejects an unknown or someone else’s session as a not_found_error', async () => {
+    const { client } = clientWith(() => errorResponse(404, 'not_found_error', 'No such session.'))
+
+    await expect(client.sessions.delete('sesn_missing')).rejects.toMatchObject({
+      status: 404,
+      type: 'not_found_error',
+    })
   })
 })
 
@@ -401,6 +449,66 @@ describe('provider credentials', () => {
   })
 })
 
+describe('preferences (#111)', () => {
+  it('reads GET /v1/me/preferences and parses the value', async () => {
+    const preferences = makeUserPreferences({ default_model: 'anthropic/claude-sonnet-5' })
+    const { client, mock } = clientWith(() => jsonResponse(preferences))
+
+    const response = await client.preferences.get()
+
+    expect(response).toEqual(preferences)
+    expect(mock.requests[0]?.init?.method).toBe('GET')
+    expect(mock.urlOf(0)).toBe(`${BASE_URL}/v1/me/preferences`)
+  })
+
+  it('reads the absence of a default model as null, not a 404', async () => {
+    const { client } = clientWith(() => jsonResponse({ default_model: null }))
+
+    await expect(client.preferences.get()).resolves.toEqual({ default_model: null })
+  })
+
+  it('puts the whole value to PUT /v1/me/preferences and reads back the stored one', async () => {
+    const stored = makeUserPreferences({ default_model: 'openai/gpt-4.1-mini' })
+    const { client, mock } = clientWith(() => jsonResponse(stored))
+
+    const response = await client.preferences.put({ default_model: 'openai/gpt-4.1-mini' })
+
+    expect(response).toEqual(stored)
+    expect(mock.requests[0]?.init?.method).toBe('PUT')
+    expect(mock.urlOf(0)).toBe(`${BASE_URL}/v1/me/preferences`)
+    const body = bodyOf(mock.requests[0]?.init)
+    expect(body).toEqual({ default_model: 'openai/gpt-4.1-mini' })
+    expect(PutPreferencesRequestSchema.safeParse(body).success).toBe(true)
+  })
+
+  it('clears the default with null, which is a value the request schema accepts', async () => {
+    const { client, mock } = clientWith(() => jsonResponse({ default_model: null }))
+
+    await client.preferences.put({ default_model: null })
+
+    const body = bodyOf(mock.requests[0]?.init)
+    expect(body).toEqual({ default_model: null })
+    expect(PutPreferencesRequestSchema.safeParse(body).success).toBe(true)
+  })
+
+  it('surfaces a refused value as an ApiError', async () => {
+    const { client } = clientWith(() =>
+      errorResponse(400, 'invalid_request_error', 'default_model: invalid shape'),
+    )
+
+    await expect(client.preferences.put({ default_model: 'not a model' })).rejects.toMatchObject({
+      status: 400,
+      type: 'invalid_request_error',
+    })
+  })
+
+  it('propagates the 401 as an AuthenticationError', async () => {
+    const { client } = clientWith(() => errorResponse(401, 'authentication_error', 'Expired.'))
+
+    await expect(client.preferences.get()).rejects.toBeInstanceOf(AuthenticationError)
+  })
+})
+
 describe('the model catalog', () => {
   it('lists from GET /v1/models and parses the response', async () => {
     const catalog = makeListModelsResponse()
@@ -460,6 +568,26 @@ describe('helpers', () => {
     expect(mock.urlOf(0)).toBe(`${BASE_URL}/v1/sessions/sesn_1/events`)
     expect(bodyOf(mock.requests[0]?.init)).toEqual({
       events: [{ type: 'user.message', content: [{ type: 'text', text: 'Hello agent' }] }],
+    })
+  })
+
+  it('sendMessage posts the model beside the text when one is given (#111)', async () => {
+    const stored = makeUserMessage('switch model', { seq: 7, model: { id: 'openai/gpt-4.1-mini' } })
+    const { client, mock } = clientWith(() => jsonResponse({ data: [stored] }))
+
+    const message = await client.sendMessage('sesn_1', 'switch model', {
+      model: { id: 'openai/gpt-4.1-mini' },
+    })
+
+    expect(message).toEqual(stored)
+    expect(bodyOf(mock.requests[0]?.init)).toEqual({
+      events: [
+        {
+          type: 'user.message',
+          content: [{ type: 'text', text: 'switch model' }],
+          model: { id: 'openai/gpt-4.1-mini' },
+        },
+      ],
     })
   })
 

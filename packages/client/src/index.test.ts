@@ -51,6 +51,8 @@ describe('@openharness/client', () => {
       status: 'idle',
       lastError: null,
       lastSeq: 0,
+      deleted: false,
+      model: null,
     })
   })
 

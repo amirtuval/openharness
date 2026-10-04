@@ -13,6 +13,7 @@ import type {
   ProviderCredential,
   Session,
   SessionAgent,
+  SessionDeletedEvent,
   SessionError,
   SessionErrorEvent,
   SessionStatusIdleEvent,
@@ -24,6 +25,7 @@ import type {
   User,
   UserInterruptEvent,
   UserMessageEvent,
+  UserPreferences,
 } from '../index'
 
 /**
@@ -136,6 +138,17 @@ export function makeUser(overrides: Partial<User> = {}): User {
     created_at: fixtureTimestamp(),
   }
   return { ...user, ...overrides }
+}
+
+/**
+ * A user's preferences, as `GET /v1/me/preferences` returns them: a default model, unless
+ * the overrides clear it.
+ *
+ * @param overrides fields to replace on the default preferences
+ */
+export function makeUserPreferences(overrides: Partial<UserPreferences> = {}): UserPreferences {
+  const preferences: UserPreferences = { default_model: 'anthropic/claude-sonnet-5' }
+  return { ...preferences, ...overrides }
 }
 
 /**
@@ -305,6 +318,22 @@ export function makeStatusRescheduled(
     type: 'session.status_rescheduled',
     seq: takeSeq(),
     processed_at: fixtureTimestamp(),
+  }
+  return { ...event, ...overrides }
+}
+
+/**
+ * A `session.deleted` stream event (#111): the last event a stream for a deleted session
+ * delivers. Not a stored event — it carries no `seq` and never lands in a log.
+ *
+ * @param overrides fields to replace on the event
+ */
+export function makeSessionDeleted(
+  overrides: Partial<SessionDeletedEvent> = {},
+): SessionDeletedEvent {
+  const event: SessionDeletedEvent = {
+    type: 'session.deleted',
+    session_id: newSessionId(),
   }
   return { ...event, ...overrides }
 }

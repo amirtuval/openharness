@@ -36,6 +36,11 @@ import { parseSseStream } from './sse'
  * replaces a preview arrives either way — so a preview in flight when the connection dies is
  * simply cut short; the transcript reducer handles that by keeping the partial preview until
  * the stored event replaces it.
+ *
+ * One event ends the iteration instead of reconnecting (#111): `session.deleted`, the
+ * stream-only last event of a deleted session. It is delivered, and then the loop returns
+ * quietly — a session that is gone can never answer again, so a reconnect could only churn
+ * through 404s.
  */
 
 /** How long to wait before the first reconnect; doubles per attempt. */
@@ -113,14 +118,21 @@ export async function* followSessionEvents(
         if (event === null) {
           continue
         }
-        if (isStoredEvent(event)) {
-          if (lastSeq !== undefined && event.seq <= lastSeq) {
-            // Already delivered — the server replayed from a point at or before where the
-            // client got to. Dropping it is what keeps a resume free of duplicates.
-            continue
-          }
-          lastSeq = event.seq
+        if (!isStoredEvent(event)) {
+          // `session.deleted` (#111): the last event a stream for a deleted session
+          // delivers. The session and its log are gone, so there is nothing left to
+          // reconnect to — deliver the end state and end the iteration quietly, the way an
+          // aborted signal does, rather than churn through 404s for a session that can
+          // never answer again.
+          yield event
+          return
         }
+        if (lastSeq !== undefined && event.seq <= lastSeq) {
+          // Already delivered — the server replayed from a point at or before where the
+          // client got to. Dropping it is what keeps a resume free of duplicates.
+          continue
+        }
+        lastSeq = event.seq
         yield event
       }
       transport.debug('the event stream ended; reconnecting')

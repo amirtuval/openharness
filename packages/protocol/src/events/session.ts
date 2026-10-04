@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-import { EventIdSchema } from '../ids'
+import { EventIdSchema, SessionIdSchema } from '../ids'
 import type { DeepReadonly } from '../readonly'
 import { EVENT_TYPES, EventSeqSchema, ProcessedAtSchema } from './common'
 
@@ -181,6 +181,28 @@ export type SessionErrorEvent = DeepReadonly<z.infer<typeof SessionErrorEventSch
 
 /** @deprecated The plain name is deep-readonly now (D9, issue #46); use {@link SessionErrorEvent}. */
 export type ImmutableSessionErrorEvent = SessionErrorEvent
+
+/**
+ * // extension: the session this stream was following was deleted (#111, epic #116 U5).
+ *
+ * **Stream-only.** A `DELETE /v1/sessions/{session_id}` removes the session and its whole
+ * log, so there is nowhere to store this event: it names the session that is gone and is
+ * never in it. A server sends it as the **last** event on every open stream for the session
+ * and closes the stream after it, so a subscriber learns the session was deleted — an end
+ * state — instead of reconnecting to a session that no longer exists. It carries no `seq`
+ * and no envelope: it is not a position in a log.
+ *
+ * Anthropic has no equivalent: session deletion is an openharness extension. Note it is the
+ * one event type in {@link EVENT_TYPES} that is not in {@link STORED_EVENT_TYPES}.
+ */
+export const SessionDeletedEventSchema = z.object({
+  type: z.literal(EVENT_TYPES.sessionDeleted),
+  /** The deleted session's id — the one the stream was following. */
+  session_id: SessionIdSchema,
+})
+
+/** A `session.deleted` stream event, deep-readonly like every event. */
+export type SessionDeletedEvent = DeepReadonly<z.infer<typeof SessionDeletedEventSchema>>
 
 /** Any stored session event. */
 export const SessionEventSchema = z.discriminatedUnion('type', [

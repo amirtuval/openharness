@@ -16,14 +16,17 @@ import {
   type ListAgentsResponse,
   type ListEventsResponse,
   type ListSessionsResponse,
+  type ModelConfig,
   type ModelRequestStartEvent,
   type Session,
   type SessionId,
   type SessionStatus,
   type StoredEvent,
+  type StreamEvent,
   type UpdateAgentRequest,
   type UserEvent,
   type UserId,
+  type UserPreferences,
 } from '@openharness/protocol'
 import {
   Kysely,
@@ -51,6 +54,7 @@ import {
   supersessionsOf,
   type SupersessionRecord,
 } from '../events'
+import { deepFreeze } from '../freeze'
 import {
   assertEventIds,
   assertTtl,
@@ -90,11 +94,13 @@ import {
   decodeAuthSessionRevocationNotification,
   encodeAuthSessionRevocationNotification,
   encodePartitionNotification,
+  encodeSessionDeletedNotification,
   encodeStoredNotification,
   eventFromRow,
   isPartitionChannel,
   partitionChannel,
   decodePartitionNotification,
+  decodeSessionDeletedNotification,
   decodeStoredNotification,
   sessionChannel,
   sessionFromRow,
@@ -118,7 +124,10 @@ import {
  *   (see `listen.ts`); appends notify on the session's channel inside the append
  *   transaction, so a subscriber hears about an event when it commits. Notifications carry
  *   the event's `seq`, not the event, and the subscriber fetches the range — which is what
- *   makes coalesced, repeated or missed notifications harmless.
+ *   makes coalesced, repeated or missed notifications harmless. A session's deletion is
+ *   announced on the same channel, in the delete transaction: a subscriber delivers one final
+ *   `session.deleted` event and ends the subscription instead of fetching anything after it
+ *   (see {@link PostgresSessionStore.deleteSession}).
  * - **Signals are process-wide.** A partition's signal is a notification on that partition's
  *   channel, so every server instance listening for that partition hears it, not just the one
  *   that sent it.
@@ -329,8 +338,12 @@ export class PostgresSessionStore implements SessionStore {
       await trx.insertInto('sessions').values(row).execute()
       // `initial_events` belong to the creation transaction: they are in the log before this
       // returns, so nothing can observe the session without them.
-      await this.#append(trx, id, options.initial_events ?? [], now)
-      return sessionFromRow(row)
+      const initial = options.initial_events ?? []
+      await this.#append(trx, id, initial, now)
+      // The append projects a model-carrying `user.message` onto the session row (#111), so
+      // when there were events the answer is the row as it is now, not the one inserted above.
+      const created = initial.length === 0 ? row : ((await readSession(trx, id)) ?? row)
+      return sessionFromRow(created)
     })
   }
 
@@ -369,6 +382,64 @@ export class PostgresSessionStore implements SessionStore {
       await trx.updateTable('sessions').set(updated).where('id', '=', sessionId).execute()
       return sessionFromRow(updated)
     })
+  }
+
+  async deleteSession(sessionId: SessionId, options: OwnerScope): Promise<boolean> {
+    return this.#db.transaction().execute(async (trx) => {
+      // The session's row lock, exactly as an append takes it: an append in flight either
+      // commits before this and its events are deleted with the rest, or starts afterwards
+      // and finds no session. Somebody else's session is not this caller's to delete, and it
+      // answers `false` — the same answer an id nothing has gets, so nothing leaks (A4).
+      const session = await lockSession(trx, sessionId)
+      if (session === undefined || !ownsRow(session, options)) {
+        return false
+      }
+      // Every table with a session column, in one transaction. The events would cascade from
+      // `sessions`, but are named anyway so the delete says what it removes; `event_claims`
+      // and `event_supersessions` carry no foreign key on purpose (see `0007_event_claims.sql`),
+      // so nothing else would ever remove their rows.
+      await trx.deleteFrom('events').where('session_id', '=', sessionId).execute()
+      await trx.deleteFrom('event_claims').where('session_id', '=', sessionId).execute()
+      await trx.deleteFrom('event_supersessions').where('session_id', '=', sessionId).execute()
+      await trx.deleteFrom('sessions').where('id', '=', sessionId).execute()
+      // Announced on the session's own channel, inside the transaction: Postgres delivers the
+      // notification when this commits, so a subscriber hears that the session is gone only
+      // once it really is — whichever store, or process, deleted it.
+      await sql`select pg_notify(${sessionChannel(sessionId)}, ${encodeSessionDeletedNotification(
+        sessionId,
+      )})`.execute(trx)
+      return true
+    })
+  }
+
+  // ------------------------------------------------------------- preferences
+
+  async getPreferences(userId: UserId): Promise<UserPreferences> {
+    const row = await this.#db
+      .selectFrom('user_preferences')
+      .select('default_model')
+      .where('user_id', '=', userId)
+      .executeTakeFirst()
+    // No row is "no stored default", not an error and not a null: the protocol's one shape.
+    return deepFreeze({ default_model: row?.default_model ?? null })
+  }
+
+  async putPreferences(userId: UserId, preferences: UserPreferences): Promise<UserPreferences> {
+    const at = instant(this.#clock())
+    // One statement, like the credential upsert: `user_id` is the primary key, so a second
+    // put replaces the row rather than accumulating, and the replacement is atomic against a
+    // concurrent one.
+    await this.#db
+      .insertInto('user_preferences')
+      .values({ user_id: userId, default_model: preferences.default_model, updated_at: at })
+      .onConflict((conflict) =>
+        conflict.column('user_id').doUpdateSet({
+          default_model: preferences.default_model,
+          updated_at: at,
+        }),
+      )
+      .execute()
+    return deepFreeze({ default_model: preferences.default_model })
   }
 
   async listSessions(options: ListSessionsOptions): Promise<ListSessionsResponse> {
@@ -834,8 +905,9 @@ export class PostgresSessionStore implements SessionStore {
 
   /**
    * Append events to a session's log inside an open transaction, assign `seq` from the log's
-   * own end, record the claims and supersessions the batch carries, follow the status events
-   * onto the session row, and announce what was written.
+   * own end, record the claims and supersessions the batch carries, follow the batch's
+   * projections onto the session row — its status events, and a model-carrying
+   * `user.message` (#111) — and announce what was written.
    *
    * The caller has already taken the session's row lock and checked the fence, so this is
    * where the append actually happens: one multi-row insert, one claim insert, one
@@ -899,9 +971,18 @@ export class PostgresSessionStore implements SessionStore {
       await this.#recordSupersessions(trx, sessionId, supersessions, at)
     }
     const status = statusAfter(events)
+    const model = modelAfter(events)
     await trx
       .updateTable('sessions')
-      .set(status === null ? { updated_at: at } : { status, updated_at: at })
+      .set({
+        // The projections of the batch onto the session row, in the append's transaction: the
+        // status the last status event implies, and the model the last model-carrying
+        // `user.message` switches to (#111). Either is left alone when the batch does not
+        // speak about it.
+        ...(status === null ? {} : { status }),
+        ...(model === null ? {} : { model }),
+        updated_at: at,
+      })
       .where('id', '=', sessionId)
       .execute()
     // Inside the transaction on purpose: Postgres delivers the notification when it commits,
@@ -1142,12 +1223,39 @@ export class PostgresSessionStore implements SessionStore {
     if (sessionId === undefined) {
       return
     }
+    // A deleted session is announced on its own channel, in place of a stored-seq hint: the
+    // payload names the session the channel belongs to, and it is the last thing that
+    // subscription hears (#111). Anything else on the channel is a stored-seq hint.
+    const deleted = decodeSessionDeletedNotification(payload)
+    if (deleted !== null && deleted === sessionId) {
+      this.#endSubscription(sessionId, sessionDeletedEvent(sessionId))
+      return
+    }
     if (decodeStoredNotification(payload) === null) {
       return
     }
     // The payload named a `seq`, not an event: fetch everything this session's listeners have
     // not seen. Repeated or coalesced notifications cost one empty query each.
     await this.#flush(sessionId)
+  }
+
+  /**
+   * Hand a session's listeners one last `session.deleted` event and forget the subscription:
+   * the session is gone, so nothing is fetched for it afterwards.
+   *
+   * The stored position goes with the subscription — a later queued flush finds no
+   * subscription and returns — and the `UNLISTEN` is best effort, like every other: a channel
+   * that stays listened to until it lands only costs a notification nobody routes.
+   */
+  #endSubscription(sessionId: SessionId, event: StreamEvent): void {
+    const subscription = this.#sessions.get(sessionId)
+    if (subscription === undefined) {
+      return
+    }
+    this.#sessions.delete(sessionId)
+    this.#channels.delete(subscription.channel)
+    void this.#listen?.unlisten(subscription.channel).catch(() => undefined)
+    deliverTo(subscription.listeners.keys(), event)
   }
 
   /**
@@ -1394,6 +1502,30 @@ function statusAfter(events: readonly AppendableEvent[]): SessionStatus | null {
     }
   }
   return status
+}
+
+/**
+ * The model a batch leaves on the session: the one its last model-carrying `user.message`
+ * names, or `null` when the batch says nothing about the model at all (#111).
+ *
+ * The projection is one value rather than a rewrite of history: the message's `model` is
+ * stored on the event either way, and the session row follows the last one in the batch. A
+ * message without a `model` contributes nothing, so a batch that carries none leaves the
+ * session's current model alone.
+ */
+function modelAfter(events: readonly AppendableEvent[]): ModelConfig | null {
+  let model: ModelConfig | null = null
+  for (const event of events) {
+    if (event.type === EVENT_TYPES.userMessage && event.model !== undefined) {
+      model = { id: event.model.id }
+    }
+  }
+  return model
+}
+
+/** The final stream event a deleted session's subscribers receive (#111). */
+function sessionDeletedEvent(sessionId: SessionId): StreamEvent {
+  return deepFreeze({ type: EVENT_TYPES.sessionDeleted, session_id: sessionId })
 }
 
 /** Whether a stored event is a user event. */

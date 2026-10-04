@@ -6,9 +6,11 @@ import {
   AgentEventSchema,
   AgentMessageEventSchema,
   ContentDeltaSchema,
+  EVENT_TYPES,
   ModelRequestEndEventSchema,
   ModelRequestStartEventSchema,
   STORED_EVENT_TYPES,
+  SessionDeletedEventSchema,
   SessionEventSchema,
   SessionErrorEventSchema,
   SessionErrorSchema,
@@ -197,6 +199,93 @@ describe('stored event schemas', () => {
         processed_at: '2026-03-15T10:00:00Z',
       }).success,
     ).toBe(true)
+  })
+})
+
+describe('session.deleted (stream-only, #111)', () => {
+  const deleted = { type: 'session.deleted', session_id: 'sesn_01JQZ8R6X9M4V0W7Y2B3C5D6E7' }
+
+  it('is in the event vocabulary but not among the stored event types', () => {
+    expect(EVENT_TYPES.sessionDeleted).toBe('session.deleted')
+    expect(STORED_EVENT_TYPES).not.toContain('session.deleted')
+  })
+
+  it('parses as a stream event and carries the session id', () => {
+    const parsed = StreamEventSchema.parse(deleted)
+    expect(parsed.type === 'session.deleted' && parsed.session_id).toBe(deleted.session_id)
+    expect(SessionDeletedEventSchema.parse(deleted)).toEqual(deleted)
+  })
+
+  it('is not a stored event: there is no log left to store it in', () => {
+    expect(StoredEventSchema.safeParse(deleted).success).toBe(false)
+    expect(isStoredEvent(StreamEventSchema.parse(deleted))).toBe(false)
+    // It carries no envelope at all — no `seq`, no `id`, no `processed_at`.
+    expect('seq' in deleted).toBe(false)
+    expect(
+      StoredEventSchema.safeParse({
+        ...deleted,
+        id: eventId(),
+        seq: 1,
+        processed_at: '2026-03-15T10:00:00Z',
+      }).success,
+    ).toBe(false)
+  })
+
+  it('requires a session_id and rejects a well-shaped event with a bad one', () => {
+    expect(SessionDeletedEventSchema.safeParse({ type: 'session.deleted' }).success).toBe(false)
+    for (const sessionId of ['', 'sevt_01JQZ8R6X9M4V0W7Y2B3C5D6E7', 'sesn_nope', 42]) {
+      expect(
+        SessionDeletedEventSchema.safeParse({ ...deleted, session_id: sessionId }).success,
+        String(sessionId),
+      ).toBe(false)
+    }
+  })
+
+  it('rejects an unknown stream-only event type', () => {
+    expect(
+      StreamEventSchema.safeParse({ type: 'session.terminated', session_id: deleted.session_id })
+        .success,
+    ).toBe(false)
+  })
+})
+
+describe('user.message model switch (#111)', () => {
+  it('is optional on a stored message: every pre-#111 message still parses', () => {
+    const parsed = UserMessageEventSchema.parse(storedSamples['user.message'])
+    expect(parsed.model).toBeUndefined()
+  })
+
+  it('carries a model when the message switches it', () => {
+    const parsed = UserMessageEventSchema.parse({
+      ...storedSamples['user.message'],
+      model: { id: 'openai/gpt-5-mini' },
+    })
+    expect(parsed.model).toEqual({ id: 'openai/gpt-5-mini' })
+  })
+
+  it('travels on the input form and round-trips to the stored event', () => {
+    const input = UserMessageEventInputSchema.parse({
+      type: 'user.message',
+      content: text('switch it up'),
+      model: { id: 'openai/gpt-5-mini' },
+    })
+    expect(input.model).toEqual({ id: 'openai/gpt-5-mini' })
+    const stored = UserMessageEventSchema.parse({
+      id: eventId(),
+      seq: 1,
+      processed_at: null,
+      ...input,
+    })
+    expect(stored.model).toEqual({ id: 'openai/gpt-5-mini' })
+  })
+
+  it('requires a non-empty id inside the model', () => {
+    for (const model of [{}, { id: '' }, { id: 42 }, 'openai/gpt-5-mini']) {
+      expect(
+        UserMessageEventSchema.safeParse({ ...storedSamples['user.message'], model }).success,
+        JSON.stringify(model),
+      ).toBe(false)
+    }
   })
 })
 
