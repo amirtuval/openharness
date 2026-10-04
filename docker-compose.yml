@@ -74,6 +74,9 @@ services:
       OPENHARNESS_TEST_MODEL: ${OPENHARNESS_TEST_MODEL:-}
       OPENHARNESS_DELTA_RETENTION_MS: ${OPENHARNESS_DELTA_RETENTION_MS:-}
       OPENHARNESS_COMPACT_INTERVAL_MS: ${OPENHARNESS_COMPACT_INTERVAL_MS:-}
+      # This file passes the variables above only. The rest of the server's environment — the
+      # multi-instance scheduler and its partitions, the drain timeout, OPENHARNESS_WEB_DIR
+      # (set in the image) — is documented in `.env.example`.
     ports:
       - '3000:3000'
     healthcheck:

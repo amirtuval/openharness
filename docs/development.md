@@ -10,15 +10,22 @@ corepack enable          # provides yarn from the "packageManager" field
 yarn install --immutable # exact install from yarn.lock
 ```
 
+## Configuration
+
+The server reads its environment in one place (`apps/server/src/config.ts`), and
+[`.env.example`](../.env.example) is the reference: every server variable with its default
+and purpose — the three required ones (`BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`,
+`OPENHARNESS_SECRETS_KEY`), the OAuth providers, the dev login, CORS, compaction and the
+multi-instance scheduler. `BETTER_AUTH_SECRET` and `OPENHARNESS_SECRETS_KEY` want
+`openssl rand -base64 32`; a variable that is set but empty counts as unset. For a local run
+with the dev login, see [the README](../README.md#running-it-from-source).
+
 ## Repository layout
 
-```
-apps/      server, web, tui      (things you run)
-packages/  config, protocol, vault, session, hands, brain, client
-e2e/       cross-package tests
-docs/      high level docs, this file included
-scripts/   repo scripts (check-deps.mjs)
-```
+`apps/` (server, web, tui) and `packages/` (config, protocol, vault, session, hands, brain,
+client) hold the packages — the map, and the dependency rules between them, are in
+[`architecture.md`](./architecture.md) — with `e2e/` for the cross-package tests and
+`scripts/` for the repo scripts.
 
 Every package and app has its own `AGENTS.md` (with `CLAUDE.md` symlinked to it) describing its
 purpose, commands, public API and allowed dependencies. **Read the one in the folder you are
@@ -45,8 +52,9 @@ before type-checking, linting or testing it, so imports of `@openharness/*` alwa
 
 ### Tests that want a real database
 
-Two suites test against Postgres rather than a fake: `packages/session`'s store tests, and all
-of [`e2e/`](../e2e/AGENTS.md), which runs the built server in its own process. Point them at a
+Some suites test against Postgres rather than a fake: `packages/session`'s store tests,
+`apps/server`'s Postgres suites (the partition scheduler, SSE replay, revocation), and all of
+[`e2e/`](../e2e/AGENTS.md), which runs the built server in its own process. Point them at a
 database with `DATABASE_URL`:
 
 ```bash
@@ -57,10 +65,9 @@ docker run --rm -d --name oh-postgres -p 5432:5432 \
 DATABASE_URL=postgres://openharness:openharness@localhost:5432/openharness yarn test
 ```
 
-Without it the session tests start their own container with testcontainers — and skip, with a
-note, when there is no Docker either. The e2e suite fails and says what it needs: it is the
-proof that the pieces work together, and passing without having run is the worst thing it
-could do.
+Without it those suites start their own container with testcontainers — and skip, with a note,
+when there is no Docker either. The e2e suite fails and says what it needs: it is the proof
+that the pieces work together, and passing without having run is the worst thing it could do.
 
 ## Working inside one package
 
@@ -108,6 +115,8 @@ Notes:
 ## CI
 
 `.github/workflows/ci.yml` runs on pull requests and on pushes to `main`: Node 24, corepack,
-`yarn install --immutable`, `yarn check:deps`, then
-`yarn turbo run build typecheck lint format:check test`. Turbo's local cache is restored
-between runs; there is no remote cache.
+`yarn install --immutable`, `yarn check:deps`, `yarn format:check:repo`, then
+`yarn turbo run build typecheck lint format:check test` against a Postgres service. Pull
+requests run turbo with `--affected` (the packages a change touches, and their dependents);
+pushes to `main` run everything. Turbo's local cache is restored between runs; there is no
+remote cache.
