@@ -2,6 +2,7 @@ import {
   QA_MODEL,
   createAgent,
   createSession,
+  ensureDefaultModel,
   expect,
   expectNoErrorBanner,
   isRealModel,
@@ -13,11 +14,11 @@ import {
 } from './support'
 import {
   AGENT_LINE,
-  CLI_COMMAND,
-  CLI_SERVER,
   Terminal,
+  ensureCliSignedIn,
   expectNoErrorNotice,
   occurrences,
+  ohCommand,
   sendAndAwaitAnswer,
 } from './tmux'
 
@@ -44,23 +45,19 @@ test.describe('C10 cross-client', () => {
     page,
     request,
   }) => {
-    // A session per run, so `oh -s` below names something this test made.
+    // An agent for the *browser* half below: a chat created from an agent still opens and
+    // works (#93), which is worth one scenario. The terminal half starts on the account's
+    // default model, the way a bare `oh` does since #114.
     const agent = await createAgent(request, {
       name: `QA C10 ${Date.now().toString(36)}`,
       model: QA_MODEL,
       system: 'Answer briefly.',
     })
 
-    // `oh` skips the picker when the server has exactly one agent, and the first thing this
-    // test does is choose from it — so make sure there is a choice to make.
-    const agents = await request.get('/v1/agents', { params: { limit: 100 } })
-    if (((await agents.json()) as { data: unknown[] }).data.length < 2) {
-      await createAgent(request, {
-        name: `QA C10 decoy ${Date.now().toString(36)}`,
-        model: QA_MODEL,
-        system: 'Answer briefly.',
-      })
-    }
+    // The CLI needs a token of its own, and this file runs before `cli.spec.ts` in a pass that
+    // names both (its name sorts first): it must not depend on another scenario having signed
+    // in — C14 signs *out* on its way through.
+    await ensureCliSignedIn(page)
 
     const terminal = new Terminal('oh-qa-c10', 100, 30)
     terminal.start()
@@ -68,12 +65,10 @@ test.describe('C10 cross-client', () => {
     try {
       let startedInChat = ''
 
-      await test.step('oh starts a new chat', async () => {
-        terminal.run(`${CLI_COMMAND} --server ${CLI_SERVER}`)
-        await terminal.waitFor(/Which agent\?/)
-        // Enter takes the row the cursor starts on: the picker does not offer number keys
-        // once the server has more than nine agents.
-        terminal.send('Enter')
+      await test.step('oh starts a new chat on the default model', async () => {
+        await ensureDefaultModel(request)
+        terminal.run(ohCommand())
+        await terminal.waitFor(/sesn_[A-Z0-9]+/, 30_000)
         await terminal.waitForIdle()
         startedInChat = (await terminal.waitFor(/sesn_[A-Z0-9]+/))[0]
         expectNoErrorNotice(terminal.capture())
@@ -111,7 +106,7 @@ test.describe('C10 cross-client', () => {
         await quit(terminal)
         await terminal.waitForShellPrompt()
 
-        terminal.run(`${CLI_COMMAND} --server ${CLI_SERVER} -s ${startedInChat}`)
+        terminal.run(ohCommand('-s', startedInChat))
         await terminal.waitFor(/sent from the browser/)
         await terminal.waitForIdle()
         const screen = terminal.capture(400)
@@ -131,7 +126,7 @@ test.describe('C10 cross-client', () => {
 
     terminal.start()
     try {
-      terminal.run(`${CLI_COMMAND} --server ${CLI_SERVER} -s ${webSession.id}`)
+      terminal.run(ohCommand('-s', webSession.id))
       await terminal.waitFor(/started in the browser/)
       expect(terminal.capture()).toContain('started in the browser')
       expectNoErrorNotice(terminal.capture())

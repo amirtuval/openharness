@@ -184,6 +184,14 @@ export interface StreamCollector {
   readonly stored: readonly StoredEvent[]
   /** What ended the stream, when something did; `undefined` while it is running. */
   readonly error: unknown
+  /**
+   * Whether the iteration has ended — the server closed the stream, or {@link stop} did.
+   *
+   * A stream that ends because the session behind it was deleted ends *quietly*: the last
+   * event is the `session.deleted` goodbye, there is no error, and the only way to tell "it
+   * closed" from "it is idle" is this flag.
+   */
+  readonly closed: boolean
   /** Resolve once `predicate` holds over what has arrived so far. */
   waitFor(
     predicate: (events: readonly StreamEvent[]) => boolean,
@@ -214,6 +222,7 @@ export function collectStream(
   const events: StreamEvent[] = []
   let error: unknown
   let stopped = false
+  let closed = false
 
   const reading = (async () => {
     try {
@@ -230,6 +239,8 @@ export function collectStream(
       if (!stopped) {
         error = thrown
       }
+    } finally {
+      closed = true
     }
   })()
 
@@ -242,6 +253,9 @@ export function collectStream(
     },
     get error(): unknown {
       return error
+    },
+    get closed(): boolean {
+      return closed
     },
     waitFor: async (predicate, what, options = {}) => {
       await waitFor(

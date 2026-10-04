@@ -94,11 +94,16 @@ test.describe('W13 layout and keyboard', () => {
       expect(order[0]).toContain('openharness')
       expect(order[1]).toContain('New chat')
 
-      // And the composer hands the keyboard to the buttons next to it.
+      // And the composer hands the keyboard to the controls next to it: the model selector
+      // first — it sits between the box and Send since #113 (U3) — and then Send.
       await composer(page).click()
       await composer(page).fill('something to enable Send')
       await page.keyboard.press('Tab')
-      expect(await focusedNow(), 'Tab from the composer reaches Send').toContain('Send message')
+      expect(await focusedNow(), 'Tab from the composer reaches the model control').toContain(
+        'Model:',
+      )
+      await page.keyboard.press('Tab')
+      expect(await focusedNow(), 'and then Send').toContain('Send message')
       await composer(page).fill('')
     })
 

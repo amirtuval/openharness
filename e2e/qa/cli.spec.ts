@@ -9,9 +9,13 @@ import {
   LONG_REPLY_PROMPT,
   QA_MODEL,
   createAgent,
+  createChat,
   eventTypes,
+  ensureDefaultModel,
   expect,
   isRealModel,
+  requestedModels,
+  setDefaultModel,
   test,
   uniqueName,
 } from './support'
@@ -124,6 +128,32 @@ async function allAgents(request: APIRequestContext): Promise<{ id: string; name
 }
 
 /**
+ * Start `oh` in the terminal and wait for the chat it opens.
+ *
+ * Since #114 (epic #116, U2) a bare `oh` starts on the account's **default model** — there is
+ * no "Which agent?" picker any more — so the scenario just waits for the status line, which
+ * names the model it is running and the session it created. Without a default and without a
+ * provider key the CLI says so instead (`no-models`), which is why the account is given one
+ * first: the same `PUT /v1/me/preferences` Settings → Default model makes.
+ *
+ * @returns the session the chat was created on
+ */
+async function startChat(
+  terminal: Terminal,
+  request: APIRequestContext,
+  args: readonly string[] = [],
+): Promise<string> {
+  const model = await ensureDefaultModel(request)
+  terminal.run(ohCommand(...args))
+  await terminal.waitFor(/sesn_[A-Z0-9]+/, 30_000)
+  await terminal.waitForIdle()
+  // The status line names the model the chat runs, so "it started on the default" is a
+  // reading rather than an assumption.
+  expect(terminal.capture()).toContain(model)
+  return (await terminal.waitFor(/sesn_[A-Z0-9]+/))[0] ?? ''
+}
+
+/**
  * The `oh` scenarios, driven through a real pseudo-terminal.
  *
  * Opt-in with `QA_WITH_CLI=1`, because it needs `tmux` and a built CLI:
@@ -139,22 +169,25 @@ test.describe('cli scenarios', () => {
   // sized for the browser scenarios.
   test.setTimeout(240_000)
 
-  test('C1 new chat: pick an agent, send, stream, prompt back', async ({ context }) => {
+  test('C1 new chat: start on the default model, send, stream, prompt back', async ({
+    context,
+    request,
+  }) => {
     const terminal = new Terminal('oh-qa-c1')
     const shot = await context.newPage()
     await ensureCliSignedIn(shot)
     terminal.start()
 
     try {
+      const model = await ensureDefaultModel(request)
       terminal.run(ohCommand())
-      await terminal.waitFor(/Which agent\?/)
-      await terminal.screenshot(shot, 'c1-01-agent-picker')
 
-      // Enter takes the row the cursor starts on — the first agent. Every pick in this file
-      // is made that way: the picker only offers the number keys for a list of at most nine
-      // agents (a bare `12` would otherwise choose 1), and a QA server has more.
-      terminal.send('Enter')
+      // The chat opens on the account's default model — the status line names it and the
+      // session it just created (U2). No picker is in the way.
+      await terminal.waitFor(/sesn_[A-Z0-9]+/, 30_000)
       await terminal.waitForIdle()
+      expect(terminal.capture()).toContain(model)
+      await terminal.screenshot(shot, 'c1-01-started-on-the-default')
 
       // Wait for the reply, not just for "idle": the status line says idle before the turn
       // starts too, so an `idle` that was already on screen is not the end of anything.
@@ -176,17 +209,14 @@ test.describe('cli scenarios', () => {
     }
   })
 
-  test('C2 a long reply at 80x24 and at 200x50', async ({ context }) => {
+  test('C2 a long reply at 80x24 and at 200x50', async ({ context, request }) => {
     const terminal = new Terminal('oh-qa-c2', 80, 24)
     const shot = await context.newPage()
     await ensureCliSignedIn(shot)
     terminal.start()
 
     try {
-      terminal.run(ohCommand())
-      await terminal.waitFor(/Which agent\?/)
-      terminal.send('Enter')
-      await terminal.waitForIdle()
+      await startChat(terminal, request)
 
       const longPrompt = isRealModel ? LONG_REPLY_PROMPT : '__slow__ a long reply please'
       await sendAndAwaitAnswer(terminal, longPrompt, { slow: !isRealModel })
@@ -232,17 +262,14 @@ test.describe('cli scenarios', () => {
     }
   })
 
-  test('C3 resume: the printed hint, and -c', async ({ context }) => {
+  test('C3 resume: the printed hint, and -c', async ({ context, request }) => {
     const terminal = new Terminal('oh-qa-c3', 100, 30)
     const shot = await context.newPage()
     await ensureCliSignedIn(shot)
     terminal.start()
 
     try {
-      terminal.run(ohCommand())
-      await terminal.waitFor(/Which agent\?/)
-      terminal.send('Enter')
-      await terminal.waitForIdle()
+      await startChat(terminal, request)
 
       await sendAndAwaitAnswer(terminal, 'a message worth resuming')
       await terminal.waitForIdle()
@@ -280,17 +307,17 @@ test.describe('cli scenarios', () => {
     }
   })
 
-  test('C4 a message sent while a reply streams is queued and answered', async ({ context }) => {
+  test('C4 a message sent while a reply streams is queued and answered', async ({
+    context,
+    request,
+  }) => {
     const terminal = new Terminal('oh-qa-c4', 100, 30)
     const shot = await context.newPage()
     await ensureCliSignedIn(shot)
     terminal.start()
 
     try {
-      terminal.run(ohCommand())
-      await terminal.waitFor(/Which agent\?/)
-      terminal.send('Enter')
-      await terminal.waitForIdle()
+      await startChat(terminal, request)
 
       const firstQuestion = isRealModel ? LONG_REPLY_PROMPT : '__slow__ first question'
       await sendAndAwaitAnswer(terminal, firstQuestion, { slow: !isRealModel })
@@ -317,7 +344,10 @@ test.describe('cli scenarios', () => {
     }
   })
 
-  test('C5 Ctrl+C stops a stream and a second Ctrl+C exits cleanly', async ({ context }) => {
+  test('C5 Ctrl+C stops a stream and a second Ctrl+C exits cleanly', async ({
+    context,
+    request,
+  }) => {
     // A terminal of its own: an earlier `__slow__` reply would still be on screen and its
     // "part 3/40" would satisfy the wait below before this turn had started.
     const terminal = new Terminal('oh-qa-c5', 100, 30)
@@ -326,10 +356,7 @@ test.describe('cli scenarios', () => {
     terminal.start()
 
     try {
-      terminal.run(ohCommand())
-      await terminal.waitFor(/Which agent\?/)
-      terminal.send('Enter')
-      await terminal.waitForIdle()
+      await startChat(terminal, request)
 
       await test.step('Ctrl+C stops the stream and keeps the partial reply', async () => {
         const prompt = isRealModel ? LONG_REPLY_PROMPT : '__slow__ interrupt me'
@@ -385,17 +412,14 @@ test.describe('cli scenarios', () => {
     }
   })
 
-  test('C6 Ctrl+J and Alt+Enter insert a newline', async ({ context }) => {
+  test('C6 Ctrl+J and Alt+Enter insert a newline', async ({ context, request }) => {
     const terminal = new Terminal('oh-qa-c6', 100, 30)
     const shot = await context.newPage()
     await ensureCliSignedIn(shot)
     terminal.start()
 
     try {
-      terminal.run(ohCommand())
-      await terminal.waitFor(/Which agent\?/)
-      terminal.send('Enter')
-      await terminal.waitForIdle()
+      await startChat(terminal, request)
 
       terminal.type('first line')
       terminal.send('C-j')
@@ -428,7 +452,7 @@ test.describe('cli scenarios', () => {
     }
   })
 
-  test('C7 commands and bad arguments', async ({ page }) => {
+  test('C7 commands and bad arguments', async ({ page, request }) => {
     await ensureCliSignedIn(page)
     await test.step('--version and --help', () => {
       const version = oh(['--version'])
@@ -455,7 +479,18 @@ test.describe('cli scenarios', () => {
       expect(missing.stdout).toContain('argument missing')
     })
 
-    await test.step('oh agents and oh sessions are readable', () => {
+    await test.step('oh agents and oh sessions are readable', async () => {
+      // The two listings say "No agents yet." / "No sessions yet." on an account that has
+      // none, and the agents screen is gone from the UI (#91) — so a fresh stack has no agent
+      // until something creates one through the API (C7b does, 21 of them, but it runs after
+      // this). Make sure both exist rather than depend on what ran before.
+      await createAgent(request, {
+        name: uniqueName('QA C7'),
+        model: QA_MODEL,
+        system: 'Answer briefly.',
+      })
+      await createChat(request, QA_MODEL)
+
       const agents = oh(['agents', '--server', CLI_SERVER])
       expect(agents.status).toBe(0)
       const firstAgentLine = agents.stdout.split('\n').filter((line) => line.trim() !== '')[0] ?? ''
@@ -687,6 +722,166 @@ test.describe('cli scenarios', () => {
       expect(again.userCode.length).toBeGreaterThan(0)
     } finally {
       terminal.kill()
+    }
+  })
+
+  // --- the chat's model, from the terminal (epic #116, U1/U3) -------------------------------
+
+  test('C15 /model switches the chat, and --model overrides the default', async ({
+    context,
+    request,
+  }) => {
+    // The picker's free-text row is reached by the number key only while the list is short
+    // enough for numbers to be unambiguous (the TUI picker's own rule): an empty catalog is
+    // one row, and the mock pass is what this drives. With a real catalog the row sits behind
+    // hundreds of arrow presses, and the same switch is covered in the browser (W10a).
+    test.skip(isRealModel, 'the free-text row is not reachable by keystroke in a long catalog')
+
+    const terminal = new Terminal('oh-qa-c15', 100, 30)
+    const shot = await context.newPage()
+    await ensureCliSignedIn(shot)
+    terminal.start()
+
+    try {
+      const sessionId = await startChat(terminal, request)
+      const switched = 'acme/qa-cli-switched'
+
+      await test.step('/model takes a free-text id the catalog does not know', async () => {
+        terminal.type('/model')
+        terminal.send('Enter')
+        // The catalog of a stack with no provider keys is empty, and the free-text row is the
+        // last one — position 1 in a list of one (the number keys pick a row outright).
+        await terminal.waitFor(/Other model id/)
+        await terminal.screenshot(shot, 'c15-01-model-picker')
+        terminal.send('1')
+        terminal.type(switched)
+        terminal.send('Enter')
+
+        // The status line names the model the next message will run (U3: the pick is held
+        // until a message carries it), and nothing has been sent yet.
+        await terminal.waitFor(new RegExp(`${switched} \\(next message\\)`), 30_000)
+        await terminal.screenshot(shot, 'c15-02-picked')
+      })
+
+      await test.step('the next message runs it, and the session keeps it', async () => {
+        await sendAndAwaitAnswer(terminal, 'answered on the switched model')
+        await terminal.waitForIdle()
+        expect(terminal.capture()).toContain(switched)
+        expectNoErrorNotice(terminal.capture())
+
+        // The same evidence the web scenario reads (W10a): the spans name the model that ran.
+        expect((await requestedModels(request, sessionId)).at(-1)).toBe(switched)
+      })
+
+      await test.step('--model starts a chat on it without touching the default', async () => {
+        const defaultBefore = await ensureDefaultModel(request)
+        await quit(terminal)
+
+        terminal.run(ohCommand('--model', switched))
+        await terminal.waitFor(/sesn_[A-Z0-9]+/, 30_000)
+        await terminal.waitForIdle()
+        expect(terminal.capture()).toContain(switched)
+
+        // The override is this chat's, not the account's: the stored default is untouched.
+        const stored = await request.get('/v1/me/preferences')
+        expect(((await stored.json()) as { default_model: string | null }).default_model).toBe(
+          defaultBefore,
+        )
+        expectNoErrorNotice(terminal.capture())
+        await quit(terminal)
+      })
+    } finally {
+      terminal.kill()
+      await shot.close()
+    }
+  })
+
+  test('C16 oh sessions delete: the confirmation, --yes, and a chat that is really gone', async ({
+    context,
+    request,
+  }) => {
+    const terminal = new Terminal('oh-qa-c16', 100, 30)
+    const shot = await context.newPage()
+    await ensureCliSignedIn(shot)
+    terminal.start()
+
+    try {
+      const sessionId = await startChat(terminal, request)
+      await quit(terminal)
+
+      await test.step('answering no leaves it alone', async () => {
+        terminal.run(ohCommand('sessions', 'delete', sessionId))
+        await terminal.waitFor(new RegExp(`Delete chat ${sessionId}\\? This cannot be undone`))
+        await terminal.screenshot(shot, 'c16-01-confirm')
+        terminal.type('n')
+        terminal.send('Enter')
+        await terminal.waitFor(/Not deleted\./)
+
+        const stillThere = await request.get(`/v1/sessions/${sessionId}`)
+        expect(stillThere.status()).toBe(200)
+      })
+
+      await test.step('answering yes deletes it, and the server has nothing left', async () => {
+        terminal.run(ohCommand('sessions', 'delete', sessionId))
+        await terminal.waitFor(new RegExp(`Delete chat ${sessionId}\\?`))
+        terminal.type('y')
+        terminal.send('Enter')
+        // The sentence wraps at the pane's width — the id included — so the wait is for the
+        // words and the id is read off the capture with the wrapping taken out.
+        await terminal.waitFor(/Deleted chat/)
+        expect(terminal.capture().replace(/\s+/gu, '')).toContain(`Deletedchat${sessionId}.`)
+
+        // Gone for real, log and all — the same 404s the web scenario checks (W18).
+        expect((await request.get(`/v1/sessions/${sessionId}`)).status()).toBe(404)
+        expect((await request.get(`/v1/sessions/${sessionId}/events`)).status()).toBe(404)
+        await terminal.screenshot(shot, 'c16-02-deleted')
+      })
+    } finally {
+      terminal.kill()
+      await shot.close()
+    }
+
+    await test.step('--yes deletes without asking', async () => {
+      const session = await createChat(request, QA_MODEL)
+      const deleted = oh(['sessions', 'delete', session.id, '--yes', '--server', CLI_SERVER])
+      expect(deleted.status, deleted.stdout).toBe(0)
+      expect(deleted.stdout).toContain(`Deleted chat ${session.id}.`)
+      const gone = await request.get(`/v1/sessions/${session.id}`)
+      expect(gone.status()).toBe(404)
+    })
+  })
+
+  test('C17 oh default-model reads and writes the account default', async ({ request, page }) => {
+    await ensureCliSignedIn(page)
+    const previous = await ensureDefaultModel(request)
+    const chosen = 'acme/qa-cli-default'
+
+    try {
+      const read = oh(['default-model', '--server', CLI_SERVER])
+      expect(read.status, read.stdout).toBe(0)
+      expect(read.stdout).toContain(`Default model: ${previous}`)
+
+      const written = oh(['default-model', chosen, '--server', CLI_SERVER])
+      expect(written.status, written.stdout).toBe(0)
+      expect(written.stdout).toContain(`Default model set to ${chosen}.`)
+
+      // The same value the web app's Settings shows: the API is the one copy (U1).
+      const stored = await request.get('/v1/me/preferences')
+      expect(((await stored.json()) as { default_model: string | null }).default_model).toBe(chosen)
+
+      // And a chat started with no flags runs it — `--model` is the only thing that overrides.
+      const terminal = new Terminal('oh-qa-c17', 100, 30)
+      terminal.start()
+      try {
+        terminal.run(ohCommand())
+        await terminal.waitFor(/sesn_[A-Z0-9]+/, 30_000)
+        await terminal.waitForIdle()
+        expect(terminal.capture()).toContain(chosen)
+      } finally {
+        terminal.kill()
+      }
+    } finally {
+      await setDefaultModel(request, previous)
     }
   })
 })
