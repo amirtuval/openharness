@@ -99,6 +99,7 @@ src/
 | `createFakeClient(options?)`                                                | an in-memory `Client` with a scriptable brain and device flow                              |
 | `FakeClient`, `FakeClientOptions`, `FakeReplyOptions`, `FakeFailureOptions` | the fake's interface and the options its scripting takes                                   |
 | `FakeDeviceFlowOptions`                                                     | the script `scriptDeviceLogin` takes                                                       |
+| `FakeReply`, `FakeFailure`, `FakeScript`                                    | one scripted reply, one scripted failure, and the queue entry they compose                 |
 | `ModelListCall`                                                             | one `models.list` call the fake answered, and its `refresh` flag                           |
 | `FAKE_MODEL_USAGE`, `FAKE_SESSION_TOKEN`                                    | the token usage every fake model request reports; the token the fake's device flow returns |
 
@@ -166,8 +167,7 @@ Notes worth knowing before reading the code:
   percent-encoded; the keys are constants and are written verbatim.
 - **Auth** is the two ways the API accepts (epic #65, A2). Every request is sent with
   `credentials: 'include'`, so a browser carries the web app's session cookie, and a client
-  built with a `token` sends `Authorization: Bearer <token>` — the CLI. The static
-  `x-api-key` option is gone (A8).
+  built with a `token` sends `Authorization: Bearer <token>` — the CLI.
 - **`options.signal`** cancels any request; the promise then rejects with the abort reason.
 - A failed `fetch` (no network, DNS, TLS, an abort) rejects with the original error — only an
   answer from the server becomes an `ApiError`.
@@ -197,7 +197,7 @@ try {
 ### The signed-in user
 
 `client.me()` is `GET /v1/me`, the identity every request is scoped to; the CLI prints
-`Logged in as <email>` from it and uses it as `oh whoami`.
+`Logged in as <email> on <server>` from it and uses it as `oh whoami`.
 
 ### Provider credentials
 
@@ -269,10 +269,12 @@ await client.auth.signOut() // revokes the session the client's token stands for
 
 ### Unknown events
 
-Event types are a closed union, and the protocol grows. An event a client does not know is
-**skipped, not thrown**: the stream drops it and calls `onDebug`, so an older client keeps
-working against a newer server. `events.list` does the same thing, so the same unknown event in
-history cannot break a transcript rebuild.
+Event types are a closed union, and the protocol grows. On the **stream**, an event a client
+does not know is **skipped, not thrown**: it is dropped and reported through `onDebug`, so an
+older client keeps working against a newer server. `events.list` (and `iterate`) does not
+skip: the response is validated against the protocol's schema, and an event the schema
+rejects fails the request with `ResponseValidationError`. The transcript reducer itself
+tolerates an event it does not know when one is handed to it, and still advances `lastSeq`.
 
 ## Streaming and resume
 
@@ -283,9 +285,7 @@ the `Authorization` header the CLI authenticates with.
 - **`deltas`** opts in per connection with `event_deltas[]=agent.message`, which is what makes
   the server send the `event_start` and `event_delta` chunks of a reply. The chunks are stored
   events (D9), so they take the stored-event path below and the connection needs nothing else:
-  a reply in flight is replayed like any other range of the log, and a pre-P4 server's
-  envelope-less preview does not parse and is skipped like any event this client does not
-  know.
+  a reply in flight is replayed like any other range of the log.
 - **`afterSeq`** is where to start. Omitted means _live only_: the stream delivers what happens
   next, not the history. Load history with `events.iterate`, fold it into the transcript, and
   pass `transcript.getState().lastSeq` to continue exactly where it stopped. `afterSeq: 0`
@@ -344,13 +344,11 @@ The rules it implements, in one place:
   `{ from_seq, to_seq }` chunk range D9 adds); a user message sits at its `seq`. A reply
   interleaved with a steering message therefore renders identically for a client that followed
   its chunks and one that only ever saw the stored message, live or after a reload. Every
-  event is a stored one since P4, so every position is a real `seq` — the `lastSeq + 0.5`
-  placement of stream-only previews went with them.
-- **A reply's chunks are stored events.** Since D9 (phase P3 on the server) the chunks are
-  `event_start` / `event_delta` with an `id` and a `seq`, so they flow through the
-  `seq <= lastSeq` dedupe, advance `lastSeq`, and make `Last-Event-ID` resume work mid-reply.
-  P4 removed the envelope-less form: a seq-less chunk from a pre-P4 server does not parse and
-  is skipped like any event this client does not know.
+  event is a stored one, so every position is a real `seq`.
+- **A reply's chunks are stored events.** Since D9 the chunks are `event_start` /
+  `event_delta` with an `id` and a `seq`, so they flow through the `seq <= lastSeq` dedupe,
+  advance `lastSeq`, and make `Last-Event-ID` resume work mid-reply. A chunk without the
+  stored envelope does not parse and is skipped like any event this client does not know.
 - **The chunks accumulate.** `event_start` opens an empty `agent` message with `streaming:
 true`, keyed by the id of the event it previews; `event_delta`s extend it (per content-block
   `index`, so a multi-block message accumulates correctly). A delta for a message that is
@@ -404,9 +402,10 @@ await fake.sendMessage(fake.session.id, 'Hi') // starts a turn
 await fake.waitForIdle() // the whole turn, retries included
 ```
 
-`fake.session`, `fake.agent` and `fake.user` are the seeded trio; all are the fake's live
-objects, so `fake.session.status` reads the current state and an update through `fake.agents`
-shows up in `fake.agent` at once. `createFakeClient({ session, agent, user, authenticated, delayMs, now })`
+`fake.session`, `fake.agent` and `fake.user` are the seeded trio. `fake.session` is the fake's
+live object — `fake.session.status` reads the current state — and `fake.user` is what `me()`
+answers. `fake.agent` is seeded by reference and, as of today, does _not_ follow an update
+through `fake.agents` (issue #106). `createFakeClient({ session, agent, user, authenticated, delayMs, now })`
 seeds your own, sets how slowly the stream runs, and fixes the clock. The seeded session runs
 the seeded agent's configuration, the way one created from that agent would.
 
@@ -518,8 +517,10 @@ Only these (see the table in `docs/architecture.md`):
 
 `@openharness/config` is additionally allowed as a **devDependency**.
 
-Packages consume each other through built output only (`exports` → `dist/`), never through
-relative paths. `yarn check:deps` at the repo root enforces this.
+Packages consume each other through built output only (`exports` → `dist/`); ESLint's
+`import-x/no-relative-packages` (in the shared config) rejects a relative import that leaves
+the package, and `yarn check:deps` at the repo root enforces the allowed `@openharness/*`
+dependency table.
 
 ## Rules
 

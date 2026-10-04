@@ -29,7 +29,7 @@ const store = createPostgresSessionStore({ pool }) // or { connectionString }
 await store.close() // ends the listening connection
 ```
 
-- `createPostgresSessionStore({ connectionString } | { pool }, { clock?, partitionCount?, onError? })`
+- `createPostgresSessionStore({ connectionString } | { pool }, { now?, partitionCount?, onError? })`
   builds the store. With `connectionString` it opens its own pool and ends it on `close()`;
   with `pool` it borrows one and leaves it alone.
 - `migrate(db, { migrationsDir? })` applies the SQL migrations and returns the files it ran.
@@ -43,7 +43,7 @@ schema.
 
 ## The schema
 
-Sixteen tables, in `migrations/`. Ten are this package's:
+Twelve tables, in `migrations/`. Seven are this package's:
 
 | table                  | what a row is                                                                                                                              |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -55,14 +55,11 @@ Sixteen tables, in `migrations/`. Ten are this package's:
 | `partition_leases`     | who holds a partition, at which epoch, until when                                                                                          |
 | `provider_credentials` | a user's sealed model-provider key, one per `(user_id, provider)`: the sealed blob, `last4`, timestamps                                    |
 
-and six are **Better Auth's**, created by the same migrations and read and written by Better
+and five are **Better Auth's**, created by the same migrations and read and written by Better
 Auth itself (epic #65, decision A1): `user`, `session`, `account`, `verification` and
 `deviceCode`. They are the generator's schema, not this package's design — camelCase columns
 and all — because the server mounts Better Auth against them with its own migrator disabled.
 See [Better Auth's tables](#better-auths-tables) below.
-
-`session_previews`, the table of pre-D9 previews in flight, was dropped by
-`0010_drop_session_previews.sql` (P4); the chunks of a reply are rows of `events` since D9.
 
 Details that matter:
 
@@ -103,8 +100,8 @@ references "user" (id) on delete cascade`, written once at creation and never up
 nothing`, so two writers racing for the same event cannot both win, and nothing here is ever
   written a second time or deleted (see [claims](#claims-are-rows-not-columns)). A claim names
   the user event it takes and the event whose `consumes` made it — a
-  `span.model_request_start`, a `span.model_request_end` or a `session.status_idle` (P4); the
-  column is nullable only for rows the pre-P4 `markProcessed` wrote.
+  `span.model_request_start`, a `span.model_request_end` or a `session.status_idle`; the
+  column is nullable only on pre-P4 rows.
 - **`event_supersessions` is insert-only too**, and `by_event_id` is its primary key: one
   event carries one `supersedes` range. `check (to_seq >= from_seq)` and `check (by_seq >
 to_seq)` are the range rules in the schema's own words (see
@@ -150,11 +147,11 @@ databases while applying to new ones. Add a new file instead.
 | `0003_events.sql`                  | `events`, its uniqueness constraint and its two secondary indexes                                                     |
 | `0004_partition_leases.sql`        | `partition_leases`                                                                                                    |
 | `0005_events_id_unique.sql`        | the `unique` index that states the id guarantee (`events_id_key`) by name                                             |
-| `0006_session_previews.sql`        | `session_previews`, the `unlogged` table of previews in flight                                                        |
+| `0006_session_previews.sql`        | a previews table, dropped again by `0010` before release                                                              |
 | `0007_event_claims.sql`            | `event_claims`, the insert-only record of which events a turn claimed (D9)                                            |
 | `0008_event_claims_backfill.sql`   | the one-time copy of the pre-D9 `processed_at` values into claim rows (D9)                                            |
 | `0009_event_supersessions.sql`     | `event_supersessions`, the insert-only record of the ranges events replace                                            |
-| `0010_drop_session_previews.sql`   | drops `session_previews`, the pre-D9 preview table (P4)                                                               |
+| `0010_drop_session_previews.sql`   | drops `session_previews`; the chunks of a reply are rows of `events` since D9                                         |
 | `0011_better_auth.sql`             | Better Auth's tables: `user`, `session`, `account`, `verification`, `deviceCode` (epic #65, A1)                       |
 | `0012_ownership.sql`               | deletes the v1 data once, then `owner_id` on `agents` and `sessions` and the per-owner indexes (A4)                   |
 | `0013_provider_credentials.sql`    | `provider_credentials`, the sealed-blob table (epic #65, A5)                                                          |
@@ -327,9 +324,7 @@ writers racing for the same event both insert while only one commits — exactly
 conditional write decided. This is an assertion, not a best-effort claim: the event states
 what it answers, so an id the insert produces no row for — foreign, non-user, already claimed,
 or named twice in one batch — fails the store's check, the append throws `ClaimConflictError`,
-and the transaction rolls back with the events it had already written. (The pre-P4
-`markProcessed`, removed in this phase, was the weaker counterpart: a caller taking whatever
-of a list was still there, recording `claimed_by_event_id: null`. Its rows stay as they are.)
+and the transaction rolls back with the events it had already written.
 
 **Reading `processed_at`.** Every read that can return a user event joins the claim:
 `listEvents` and the subscription fetch `left join event_claims`; `getPendingUserEvents` is
@@ -387,17 +382,6 @@ deleted — so `seq` is never reused, and the gaps a compaction leaves are the n
 a compacted log. `src/postgres/no-updates.test.ts` scans this package's source for the two
 spellings a write back to `events` would use, so "written once, read forever" cannot break
 unnoticed.
-
-## The in-flight preview is gone (P4)
-
-A reply's chunks are rows of `events` since D9, so this store never needed a second place to
-keep a preview: the `event_start` and `event_delta`s are delivered to a subscriber like any
-other event, and a connection that opens mid-reply replays them by `seq`. P4 removed the
-contract's `publishEphemeral`, `getPreview` and `SessionPreview`, and
-`0010_drop_session_previews.sql` drops the `unlogged` table that held the accumulation — the
-table whose `event_id` and `text` a late connection used to be told about. There is nothing
-left to read or write, and the `(session_id, seq)` log is the one source of an in-flight
-reply.
 
 ## Fencing and leases
 

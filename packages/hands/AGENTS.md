@@ -1,6 +1,9 @@
 # @openharness/hands
 
-Pluggable hands: sandboxes and tools behind `execute(name, input)`. Placeholder, implemented in the v1 epic.
+Placeholder for pluggable _hands_: the sandboxes and tools behind `execute(name, input)`. It
+is **not implemented yet** — this package ships no tools, no sandbox and no `execute()`.
+Today it exports only `PACKAGE_NAME` and a constant proving the `@openharness/protocol` edge
+resolves; the real hands land in the v1 chat epic.
 
 ## Commands
 
@@ -23,7 +26,10 @@ repo.
 
 ## Public API
 
-| `@openharness/hands` | `PACKAGE_NAME`, `PROTOCOL_DEPENDENCY` |
+| export                | what it is                                                             |
+| --------------------- | ---------------------------------------------------------------------- |
+| `PACKAGE_NAME`        | `'@openharness/hands'`                                                 |
+| `PROTOCOL_DEPENDENCY` | `@openharness/protocol`'s `PACKAGE_NAME`; proves the built-output edge |
 
 ## Allowed `@openharness/*` dependencies
 
@@ -33,12 +39,16 @@ Only these (see the table in `docs/architecture.md`):
 
 `@openharness/config` is additionally allowed as a **devDependency**.
 
-Packages consume each other through built output only (`exports` → `dist/`), never through
-relative paths. `yarn check:deps` at the repo root enforces this.
+Packages consume each other through built output only (`exports` → `dist/`); ESLint's
+`import-x/no-relative-packages` (in the shared config) rejects a relative import that leaves
+the package, and `yarn check:deps` at the repo root enforces the allowed `@openharness/*`
+dependency table.
 
 ## Testing
 
-`src/**/*.test.ts` with Vitest (node environment). The placeholder test re-exports a constant from `@openharness/protocol`, which proves the dist-based protocol edge.
+`src/**/*.test.ts` with Vitest (node environment). The placeholder test imports the two
+constants and asserts their values; what the protocol edge proves is that `src/index.ts`
+resolves `@openharness/protocol` through its `exports` → `dist/`.
 
 ## Rules
 

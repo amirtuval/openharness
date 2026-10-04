@@ -105,30 +105,27 @@ Two entry points, named in `package.json`'s `exports`. Both resolve to built out
 
 **Events**
 
-| export                                                                                                                                                                                                    | what it is                                                         |
-| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| `EVENT_TYPES`, `STORED_EVENT_TYPES`, `EventType`, `StoredEventType`                                                                                                                                       | the vocabulary as constants and types                              |
-| `UserMessageEventSchema`, `UserInterruptEventSchema`, `UserEventSchema`                                                                                                                                   | stored user events                                                 |
-| `UserMessageEventInputSchema`, `UserInterruptEventInputSchema`, `UserEventInputSchema`                                                                                                                    | the same shapes as a client sends them                             |
-| `AgentMessageEventSchema`, `AgentEventSchema`                                                                                                                                                             | stored agent events                                                |
-| `SessionStatusRunningEventSchema`, `SessionStatusIdleEventSchema`, `SessionStatusRescheduledEventSchema`, `SessionErrorEventSchema`, `SessionEventSchema`                                                 | stored session events                                              |
-| `SessionErrorSchema`, `SessionErrorTypeSchema`, `RetryStatusSchema`, `RetryStatusTypeSchema`                                                                                                              | the typed `session.error` payload                                  |
-| `ModelRequestStartEventSchema`, `ModelRequestEndEventSchema`, `ModelUsageSchema`, `SpanEventSchema`, `SpanErrorSchema`, `SpanErrorTypeSchema`                                                             | span events, usage, and the span error extension                   |
-| `StoredEventStartSchema` / `StoredEventStart`, `StoredEventDeltaSchema` / `StoredEventDelta`, `ContentDeltaSchema`, `DeltaTypeSchema`                                                                     | the stored chunks of a reply (D9)                                  |
-| `SupersedesSchema` / `Supersedes`                                                                                                                                                                         | the `{ from_seq, to_seq }` a stored event replaces (D9)            |
-| `StoredEventSchema` / `StoredEvent`, `StreamEventSchema` / `StreamEvent`, `isStoredEvent()`                                                                                                               | the unions everything else codes against                           |
-| one `Immutable<Member>` per type above, `ImmutableStoredEvent`, `ImmutableStreamEvent`                                                                                                                    | **deprecated** aliases; the plain names are deep-readonly now (P4) |
-| `DeepReadonly<T>`                                                                                                                                                                                         | the mapped type every event type is built with (D9)                |
-| `EventSeqSchema`, `AfterSeqSchema`, `ProcessedAtSchema`, `QueuedProcessedAtSchema`                                                                                                                        | the fields every stored event carries                              |
-| `SendEventsRequestSchema`, `SendEventsResponseSchema`, `ListEventsQuerySchema`, `ListEventsResponseSchema`, `StreamEventsQuerySchema`, `StoredEventTypeSchema`, `DEFAULT_EVENT_ORDER`, `MAX_EVENT_DELTAS` | the events endpoints                                               |
-| `TextBlockSchema`, `ContentBlockSchema`, `ContentBlocksSchema`                                                                                                                                            | message content                                                    |
+| export                                                                                                                                                                                                    | what it is                                                                                |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `EVENT_TYPES`, `STORED_EVENT_TYPES`, `EventType`, `StoredEventType`                                                                                                                                       | the vocabulary as constants and types                                                     |
+| `UserMessageEventSchema`, `UserInterruptEventSchema`, `UserEventSchema`                                                                                                                                   | stored user events                                                                        |
+| `UserMessageEventInputSchema`, `UserInterruptEventInputSchema`, `UserEventInputSchema`                                                                                                                    | the same shapes as a client sends them                                                    |
+| `AgentMessageEventSchema`, `AgentEventSchema`                                                                                                                                                             | stored agent events                                                                       |
+| `SessionStatusRunningEventSchema`, `SessionStatusIdleEventSchema`, `SessionStatusRescheduledEventSchema`, `SessionErrorEventSchema`, `SessionEventSchema`                                                 | stored session events                                                                     |
+| `SessionErrorSchema`, `SessionErrorTypeSchema`, `RetryStatusSchema`, `RetryStatusTypeSchema`                                                                                                              | the typed `session.error` payload                                                         |
+| `ModelRequestStartEventSchema`, `ModelRequestEndEventSchema`, `ModelUsageSchema`, `SpanEventSchema`, `SpanErrorSchema`, `SpanErrorTypeSchema`                                                             | span events, usage, and the span error extension                                          |
+| `StoredEventStartSchema` / `StoredEventStart`, `StoredEventDeltaSchema` / `StoredEventDelta`, `ContentDeltaSchema`, `DeltaTypeSchema`                                                                     | the stored chunks of a reply (D9)                                                         |
+| `SupersedesSchema` / `Supersedes`                                                                                                                                                                         | the `{ from_seq, to_seq }` a stored event replaces (D9)                                   |
+| `StoredEventSchema` / `StoredEvent`, `StreamEventSchema` / `StreamEvent`, `isStoredEvent()`                                                                                                               | the unions everything else codes against                                                  |
+| one `Immutable<EventName>` per event type, plus `ImmutableStoredEvent` and `ImmutableStreamEvent`                                                                                                         | **deprecated** aliases of the readonly event types; the plain names are deep-readonly now |
+| `DeepReadonly<T>`                                                                                                                                                                                         | the mapped type every event type is built with (D9)                                       |
+| `EventSeqSchema`, `AfterSeqSchema`, `ProcessedAtSchema`, `QueuedProcessedAtSchema`                                                                                                                        | the fields every stored event carries                                                     |
+| `SendEventsRequestSchema`, `SendEventsResponseSchema`, `ListEventsQuerySchema`, `ListEventsResponseSchema`, `StreamEventsQuerySchema`, `StoredEventTypeSchema`, `DEFAULT_EVENT_ORDER`, `MAX_EVENT_DELTAS` | the events endpoints                                                                      |
+| `TextBlockSchema`, `ContentBlockSchema`, `ContentBlocksSchema`                                                                                                                                            | message content                                                                           |
 
-P4 removed the stream-only half of the chunk vocabulary: `EventStartSchema`, `EventDeltaSchema`,
-`StreamOnlyEventSchema`, `StreamOnlyEvent` and `STREAM_ONLY_EVENT_TYPES` are gone, and
-`event_start` / `event_delta` exist only in the stored form (`StoredEventStartSchema` /
-`StoredEventDeltaSchema`). The `z.infer`-shaped types stay inside the schemas; every exported
-event **type** (`StoredEvent`, `StreamEvent`, the members, the domain sub-unions) is
-`DeepReadonly<…>` now, so mutating a stored event is a compile error.
+The `z.infer`-shaped types stay inside the schemas; every exported event **type**
+(`StoredEvent`, `StreamEvent`, the members, the domain sub-unions) is `DeepReadonly<…>`, so
+mutating a stored event is a compile error.
 
 **Errors**
 
@@ -160,9 +157,8 @@ save. It is the one API error type that does not end in `_error`.
 | `TimestampSchema`, `MetadataSchema`, `PageLimitSchema`, `ListOrderSchema`, `DEFAULT_PAGE_LIMIT`, `MAX_PAGE_LIMIT`, `METADATA_MAX_PAIRS`, `METADATA_MAX_KEY_LENGTH`, `METADATA_MAX_VALUE_LENGTH` | shared scalars and limits |
 | `PACKAGE_NAME` | the package name; lets a dependent prove the import resolved |
 
-There is **no static-key header** any more: `API_KEY_HEADER` (`x-api-key`) was deleted in
-#61, once its last importers were gone (epic #65, A8). Sign-in is Better Auth's, and the
-headers that carry a session (a cookie for the web app, a bearer token for the CLI) are the
+There is **no static-key header**: sign-in is Better Auth's (epic #65, A8), and the headers
+that carry a session — a cookie for the web app, a bearer token for the CLI — are the
 server's business, not this package's.
 
 ### `@openharness/protocol/fixtures`
@@ -173,6 +169,7 @@ Builders for every resource and event, and one realistic sample session.
 | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
 | `makeAgent()`, `makeSessionAgent()`, `makeSession()`                                       | resource builders; each takes `Partial<T>` overrides                                                                            |
 | `makeUser()`, `makeProviderCredential()`                                                   | the signed-in user (a fixed opaque id) and credential metadata; never a secret                                                  |
+| `makeModelEntry()`, `makeListModelsResponse()`                                             | the model catalog: one entry, and a response of entries plus per-provider statuses (epic #92)                                   |
 | `makeUserMessage()`, `makeUserInterrupt()`, `makeAgentMessage()`                           | message and interrupt builders                                                                                                  |
 | `makeStatusRunning()`, `makeStatusIdle()`, `makeStatusRescheduled()`, `makeSessionError()` | session status builders                                                                                                         |
 | `makeModelRequestStart()`, `makeModelRequestEnd()`                                         | span builders; the end builder takes the start it closes                                                                        |
@@ -292,9 +289,7 @@ accepts either kind. Which kind an endpoint expects is the server's business.
 ## The immutable log (D9, #46)
 
 The log is append-only, and [D9](https://github.com/amirtuval/openharness/issues/46) is what
-makes the types say so. D9 ran in four phases and this package finished in P4: what is
-described here is the contract the packages code against today, not a transition. The rules,
-and where each one lives:
+makes the types say so. The rules, and where each one lives:
 
 - **Claims are events.** Three event types carry `consumes` — a `span.model_request_start`
   claims the `user.message`s its request folds in (and `model`, the `provider/model` that
@@ -305,8 +300,7 @@ and where each one lives:
   an update rewrites.
 - **Streamed chunks are stored events.** `event_start` and `event_delta` keep their names and
   shapes (D2) and carry the stored envelope (`id`, `seq`, `processed_at`), so a reply in flight
-  is resumable by `seq` like anything else. There is no stream-only form: the schemas and the
-  `StreamOnlyEvent` union went with P4.
+  is resumable by `seq` like anything else. The stored form is the only one.
 - **The event that finishes a reply supersedes its chunks.** The stored `agent.message` — and,
   for a request that ends without one (an interrupt, a `brain_lost` recovery, a reply that
   streamed no text), the `span.model_request_end` — carries `supersedes: { from_seq, to_seq }`,
@@ -321,11 +315,10 @@ and where each one lives:
   arrays (`ListEventsResponse.data`, `SendEventsResponse.data`) are hand-written for this
   reason — a schema's inferred type cannot be readonly, and the read a client replays from has
   to be.
-- **`isStoredEvent()` still checks `seq`.** Every event a P4 server delivers is stored, so the
-  predicate is `true` for anything that parses; the runtime check stays because it is the
-  honest test against a value that did not come from the schemas (a pre-D9 payload, say), and
-  because it is what told the two chunk forms apart before P4. The `StreamEvent` union is the
-  stored one.
+- **`isStoredEvent()` checks `seq`.** Every event a server delivers is stored, so the predicate
+  is `true` for anything that parses; the runtime check stays because it is the honest test
+  against a value that did not come from the schemas (a pre-D9 payload, say). The `StreamEvent`
+  union is the stored one.
 
 ## Deviations and extensions
 
@@ -342,7 +335,7 @@ column points at the definition in code; the same list appears in the TSDoc ther
 | `consumes` and `model` on `span.model_request_start`                   | `events/span.ts`                                        | Anthropic marks a user event processed out of band; openharness records the claim in the log: `consumes` lists the `user.message`/`user.interrupt` ids the request answers, `model` is the `provider/model` that served it (per request, so a mid-session model change stays visible). Optional only so a pre-D9 log keeps validating. |
 | `consumes` on `span.model_request_end` and `session.status_idle`       | `events/span.ts`, `events/session.ts`                   | P4: an interrupt is answered by the event that ends the work it stopped — the open request's span end, or the turn's idle event when nothing was running — so the claim rides on that event instead of on a request opened for the interrupt. Optional, likewise, for pre-P4 logs.                                                     |
 | `supersedes` on `agent.message` and `span.model_request_end`           | `events/common.ts`, `events/agent.ts`, `events/span.ts` | The `{ from_seq, to_seq }` chunk range the event replaces (D9): replay skips the range and a compaction job deletes it later. No Anthropic equivalent — Anthropic never stores the chunks.                                                                                                                                             |
-| stored `event_start` / `event_delta`                                   | `events/stream.ts`                                      | Anthropic only streams the previews. openharness stores each chunk as a normal event (same `type` strings, plus `id`/`seq`/`processed_at`), which is what makes a reply in flight resumable by `seq`; `supersedes` compacts them away. Since P4 this is the only form.                                                                 |
+| stored `event_start` / `event_delta`                                   | `events/stream.ts`                                      | Anthropic only streams the previews. openharness stores each chunk as a normal event (same `type` strings, plus `id`/`seq`/`processed_at`), which is what makes a reply in flight resumable by `seq`; `supersedes` compacts them away. The stored form is the only form.                                                               |
 | `user` resource and `GET /v1/me`                                       | `resources/user.ts`                                     | Anthropic has no user resource: its API is account-scoped by the key that calls it. openharness has real users (epic #65), and everything a caller does is scoped to the one `/v1/me` names.                                                                                                                                           |
 | `owner_id` on `agent` and `session`                                    | `resources/agent.ts`, `resources/session.ts`            | Every agent and session belongs to exactly one user (A4): nothing is shared, another user's resource is a 404, and no request carries the field. **Required** since #61: the server sets it on everything it creates.                                                                                                                  |
 | provider credentials (`pcred_`, the `/v1/provider-credentials` routes) | `resources/provider-credential.ts`, `ids.ts`            | Anthropic holds the model-provider keys; openharness users bring their own (A5). The API is write-only: the secret goes up, metadata comes back, and the credential store's other forms (`aws`, …) become new members of the request union.                                                                                            |
@@ -385,7 +378,7 @@ places, in this order:
 
 1. **Name it** in `EVENT_TYPES` (`src/events/common.ts`). `{domain}.{action}`, matching
    Anthropic's spelling exactly. Add it to `STORED_EVENT_TYPES` — every event a server emits
-   is stored; the stream-only list was removed in P4.
+   is stored.
 2. **Define the schema** in the file for its domain (`user.ts`, `agent.ts`, `session.ts`,
    `span.ts`). Build it from `EventIdSchema`, `EventSeqSchema` and the `processed_at` schema
    that matches who writes it — `QueuedProcessedAtSchema` for user events, `ProcessedAtSchema`
@@ -409,8 +402,10 @@ up automatically through `StoredEventTypeSchema`.
 
 None. This package must stay free of `@openharness/*` dependencies.
 
-Packages consume each other through built output only (`exports` → `dist/`), never through
-relative paths. `yarn check:deps` at the repo root enforces this.
+Packages consume each other through built output only (`exports` → `dist/`); ESLint's
+`import-x/no-relative-packages` (in the shared config) rejects a relative import that leaves
+the package, and `yarn check:deps` at the repo root enforces the allowed `@openharness/*`
+dependency table.
 
 ## Testing
 

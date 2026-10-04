@@ -32,7 +32,8 @@ Every `seal(plaintext, aad)`:
    binding string — the server passes `userId|provider`) as associated data;
 3. **wraps** (encrypts) the data key with the **master key** from the server environment,
    through a `KeyEncryptionKeyProvider`;
-4. returns `{ ciphertext, nonce, wrappedKey, kekVersion }` — base64 strings, one database row.
+4. returns `{ ciphertext, nonce, wrappedKey, kekVersion }` — the three secrets as base64
+   strings plus the wrapping key's version, one database row.
 
 `open(sealed, aad)` is the exact reverse. The data key is zeroed after use, in both
 directions, as far as Node lets go of it.
@@ -44,17 +45,17 @@ for all of them, so a caller cannot use the error to tell "wrong user" from "cor
 
 ## Keys
 
-`envKeyProvider(base64Key)` reads the master key from `OPENHARNESS_SECRETS_KEY`: 32 bytes,
-base64. Generate one with:
+The master key is `OPENHARNESS_SECRETS_KEY`: 32 bytes, base64. Generate one with:
 
 ```bash
 openssl rand -base64 32
 ```
 
-The value is rejected at construction — at server boot, in practice — when it is missing, is
-not base64 or does not decode to exactly 32 bytes. The error names the variable and, at most,
-how many bytes the value decoded to; it never echoes the key. The variable is never read by
-this package itself: the server passes it to `envKeyProvider` (issue #61).
+The server reads the variable from its environment and passes its value to
+`envKeyProvider(base64Key)` (issue #61) — nothing in this package touches `process.env`. The
+value is rejected at construction — at server boot, in practice — when it is missing, is not
+base64 or does not decode to exactly 32 bytes. The error names the variable and, at most, how
+many bytes the value decoded to; it never echoes the key.
 
 ## Threat model
 
@@ -65,8 +66,9 @@ this package itself: the server passes it to `envKeyProvider` (issue #61).
 - **The master key lives only in the server environment.** It is never written to the
   database, never committed, never logged and never echoed in an error message. Nothing in
   this package logs anything at all, and the tests assert that no message, `String()`,
-  `JSON.stringify()` or `util.inspect()` of the vault, the provider, a sealed secret or an
-  error contains the plaintext or the master key.
+  `JSON.stringify()` or `util.inspect()` of the vault, the provider or an error contains the
+  plaintext or the master key — and that a JSON dump of a sealed secret carries neither it
+  nor the plaintext base64-encoded.
 - **The `aad` binds the ciphertext to what it describes.** The server passes `userId|provider`
   as the associated data, so a sealed secret copied to another user's account — or to another
   provider's record — fails to open even with the master key in hand.
@@ -79,15 +81,15 @@ this package itself: the server passes it to `envKeyProvider` (issue #61).
 
 ## Public API
 
-| `@openharness/vault`        | what it is                                                                     |
-| --------------------------- | ------------------------------------------------------------------------------ |
-| `KeyEncryptionKeyProvider`  | interface: `{ version, wrap(dataKey), unwrap(wrapped, version) }`              |
-| `envKeyProvider(base64Key)` | the `OPENHARNESS_SECRETS_KEY` provider: AES-256-GCM wrapping, version `'v1'`   |
-| `createVault(kek)`          | → `Vault`: `seal(plaintext, aad)` / `open(sealed, aad)`                        |
-| `SealedSecret`              | `{ ciphertext, nonce, wrappedKey, kekVersion }`, base64 strings, JSON-ready    |
-| `Vault`, `VaultError`       | the vault interface; the base error class                                      |
-| `VaultKeyError`             | an unusable master key or an unknown key version                               |
-| `VaultDecryptionError`      | `open` failed: wrong `aad`, tampered bytes, malformed field or unknown version |
+| `@openharness/vault`        | what it is                                                                            |
+| --------------------------- | ------------------------------------------------------------------------------------- |
+| `KeyEncryptionKeyProvider`  | interface: `{ version, wrap(dataKey), unwrap(wrapped, version) }`                     |
+| `envKeyProvider(base64Key)` | the `OPENHARNESS_SECRETS_KEY` provider: AES-256-GCM wrapping, version `'v1'`          |
+| `createVault(kek)`          | → `Vault`: `seal(plaintext, aad)` / `open(sealed, aad)`                               |
+| `SealedSecret`              | `{ ciphertext, nonce, wrappedKey, kekVersion }`, the three secrets base64, JSON-ready |
+| `Vault`, `VaultError`       | the vault interface; the base error class                                             |
+| `VaultKeyError`             | an unusable master key or an unknown key version                                      |
+| `VaultDecryptionError`      | `open` failed: wrong `aad`, tampered bytes, malformed field or unknown version        |
 
 ## Allowed `@openharness/*` dependencies
 
@@ -95,8 +97,10 @@ None (see the table in `docs/architecture.md`): this package depends on nothing,
 `@openharness/server` may depend on it. `@openharness/config` is additionally allowed as a
 **devDependency**.
 
-Packages consume each other through built output only (`exports` → `dist/`), never through
-relative paths. `yarn check:deps` at the repo root enforces this.
+Packages consume each other through built output only (`exports` → `dist/`); ESLint's
+`import-x/no-relative-packages` (in the shared config) rejects a relative import that leaves
+the package, and `yarn check:deps` at the repo root enforces the allowed `@openharness/*`
+dependency table.
 
 ## Testing
 
