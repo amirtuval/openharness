@@ -38,30 +38,30 @@ Everything under `API_VERSION_PREFIX` (`/v1`). Bodies and queries are validated 
 protocol's schemas, so the shapes are not repeated here — see
 [`packages/protocol/AGENTS.md`](../../packages/protocol/AGENTS.md).
 
-| method   | path                                      | body / query                             | answers                                              |
-| -------- | ----------------------------------------- | ---------------------------------------- | ---------------------------------------------------- |
-| `GET`    | `/health`                                 | —                                        | `{ status: 'ok' }`; never needs a session            |
-| `GET`    | `/v1/auth-config`                         | —                                        | `{ providers, dev_login }`; never needs a session    |
-| `GET`    | `/v1/me`                                  | —                                        | the signed-in `User`                                 |
-| `POST`   | `/v1/agents`                              | `CreateAgentRequestSchema`               | 201, the `Agent`                                     |
-| `GET`    | `/v1/agents`                              | `ListAgentsQuerySchema`                  | `{ data, next_page }`                                |
-| `GET`    | `/v1/agents/{agent_id}`                   | —                                        | the `Agent`, or 404                                  |
-| `POST`   | `/v1/agents/{agent_id}`                   | `UpdateAgentRequestSchema`               | the updated `Agent`, or 404                          |
-| `POST`   | `/v1/sessions`                            | `CreateSessionRequestSchema`             | 201, the `Session`; 404 for an unknown agent         |
-| `GET`    | `/v1/sessions`                            | `ListSessionsQuerySchema`                | `{ data, next_page }`                                |
-| `GET`    | `/v1/sessions/{session_id}`               | —                                        | the `Session`, or 404                                |
-| `POST`   | `/v1/sessions/{session_id}/events`        | `SendEventsRequestSchema`                | `{ data: user event[] }`; then signals, and a title  |
-| `GET`    | `/v1/sessions/{session_id}/events`        | `ListEventsQuerySchema`                  | `{ data, next_page }`                                |
-| `GET`    | `/v1/sessions/{session_id}/events/stream` | `StreamEventsQuerySchema`                | the SSE stream; 404 for an unknown session           |
-| `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`   | the AI SDK `useChat` request (see below) | an AI SDK UI message stream — an **extension**       |
-| `PUT`    | `/v1/provider-credentials/{provider}`     | `PutProviderCredentialRequestSchema`     | the credential's metadata; 422 if the key is refused |
-| `GET`    | `/v1/provider-credentials`                | —                                        | `{ data: ProviderCredential[] }`, metadata only      |
-| `DELETE` | `/v1/provider-credentials/{provider}`     | —                                        | 204; never an error for one that is not there        |
+| method   | path                                      | body / query                             | answers                                                    |
+| -------- | ----------------------------------------- | ---------------------------------------- | ---------------------------------------------------------- |
+| `GET`    | `/health`                                 | —                                        | `{ status: 'ok' }`; never needs a session                  |
+| `GET`    | `/v1/auth-config`                         | —                                        | `{ providers, dev_login }`; never needs a session          |
+| `GET`    | `/v1/me`                                  | —                                        | the signed-in `User`                                       |
+| `POST`   | `/v1/agents`                              | `CreateAgentRequestSchema`               | 201, the `Agent`                                           |
+| `GET`    | `/v1/agents`                              | `ListAgentsQuerySchema`                  | `{ data, next_page }`                                      |
+| `GET`    | `/v1/agents/{agent_id}`                   | —                                        | the `Agent`, or 404                                        |
+| `POST`   | `/v1/agents/{agent_id}`                   | `UpdateAgentRequestSchema`               | the updated `Agent`, or 404                                |
+| `POST`   | `/v1/sessions`                            | `CreateSessionRequestSchema`             | 201, the `Session`; 404 for an unknown agent               |
+| `GET`    | `/v1/sessions`                            | `ListSessionsQuerySchema`                | `{ data, next_page }`                                      |
+| `GET`    | `/v1/sessions/{session_id}`               | —                                        | the `Session`, or 404                                      |
+| `POST`   | `/v1/sessions/{session_id}/events`        | `SendEventsRequestSchema`                | `{ data: user event[] }`; then signals, and a title        |
+| `GET`    | `/v1/sessions/{session_id}/events`        | `ListEventsQuerySchema`                  | `{ data, next_page }`                                      |
+| `GET`    | `/v1/sessions/{session_id}/events/stream` | `StreamEventsQuerySchema`                | the SSE stream; 404 for an unknown session                 |
+| `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`   | the AI SDK `useChat` request (see below) | an AI SDK UI message stream — an **extension**             |
+| `GET`    | `/v1/models`                              | `ListModelsQuerySchema` (`refresh`)      | `{ data, providers }`; 429 for a refresh inside the minute |
+| `PUT`    | `/v1/provider-credentials/{provider}`     | `PutProviderCredentialRequestSchema`     | the credential's metadata; 422 if the key is refused       |
+| `GET`    | `/v1/provider-credentials`                | —                                        | `{ data: ProviderCredential[] }`, metadata only            |
+| `DELETE` | `/v1/provider-credentials/{provider}`     | —                                        | 204; never an error for one that is not there              |
 
 Every `/v1` route except `auth-config` requires a session (see "Authentication"), and every
 resource is scoped to its owner. `/api/auth/*` is Better Auth's own surface: sign-in, sign-out,
-the device flow, `/api/auth/error`. There is no `GET /v1/models`: it is out of scope for v1
-(the epic tracks it separately). Anything else answers 404 in the protocol's error envelope.
+the device flow, `/api/auth/error`. Anything else answers 404 in the protocol's error envelope.
 
 `POST …/events` is the only way user input enters the system, and it does two things in a
 fixed order: it **stores** the events (`processed_at: null`, which is what makes them queued)
@@ -199,22 +199,108 @@ Better Auth's own schema check passes on the migrated database.
   maps the documented spelling onto it; sign-up stays disabled, so those are the only password
   credentials that exist. The boot refuses the flag unless `BETTER_AUTH_URL` is localhost.
 
+## The model catalogue (epic #92)
+
+`GET /v1/models` answers **the chat models the caller's own provider credentials can use**,
+one entry per model and one status per provider — the list the agent form picks from, and the
+context windows the per-model context budget will use later. `catalog/` is the whole of it;
+the route (`routes/models.ts`) only parses the query and maps the one error it can raise.
+
+- **C1 — the list comes from the provider, with the caller's key.** Per provider the server
+  calls that provider's own list endpoint with the credential stored for the caller, decrypted
+  for that call only (`openApiKey`, the same vault path the brain's resolver uses). The
+  endpoints are a fixed table in `catalog/adapters.ts` — OpenAI `GET /v1/models`, Anthropic
+  `GET /v1/models` (`x-api-key` + `anthropic-version`), Gemini `GET /v1beta/models` (the key in
+  the `x-goog-api-key` header, never the URL), OpenRouter `GET /api/v1/models`, and the
+  OpenAI-compatible family (`GET <base>/models`, bearer) for Groq, DeepSeek, Fireworks,
+  Mistral, Together, xAI and Cerebras. Every URL is a constant of that module: **no request
+  ever supplies a URL**, so there is no SSRF surface. Each call has a 5-second deadline
+  (`AbortSignal.timeout`), shared by all pages of one provider. The catalogue asks for a page
+  size of 1000 and follows Anthropic's `has_more`/`last_id` and Gemini's `nextPageToken`;
+  OpenRouter and the OpenAI-compatible family answer in one page. A provider that pages
+  forever stops at `MAX_PAGES`.
+- **C2 — the registry join and the filter.** `catalog/registry.ts` reads the provider registry
+  bundled in `@mastra/core` through the API that version exports (`getProviderConfig` /
+  `PROVIDER_REGISTRY` from `@mastra/core/llm`) — never from the network. **The exact rule**,
+  per provider-listed model:
+  1. **An explicit non-chat verdict drops it** — the registry's classification, or the
+     provider's own capability data (Gemini's `supportedGenerationMethods` without
+     `generateContent`).
+  2. **An explicit chat verdict keeps it** — the registry's classification, OpenRouter's
+     chat-only catalogue, Gemini with `generateContent`.
+  3. **Otherwise the conservative name filter decides** (`catalog/filter.ts`): an id naming a
+     known non-chat family is dropped, every other id is kept. The families are `embed`,
+     `tts`, `whisper`, `transcri*`, `speech`, `dall-e`/`dalle`, `gpt-image`, `image`, `imagen`,
+     `moderation`, `realtime`, `audio`, `search`, `rerank`, `sora`, `babbage`/`davinci`, and
+     `instruct` — word-like patterns, so `gpt-4o-search-preview` goes and `o3-deep-research`
+     stays. The principle is asymmetric on purpose: an unfamiliar id is **kept**, because
+     hiding a usable chat model is the failure the epic is about.
+
+  The name, context window and max output of an entry come from the provider's own payload
+  where it has them (Gemini's `displayName`/`inputTokenLimit`/`outputTokenLimit`, OpenRouter's
+  `name`/`context_length`/`top_provider.max_completion_tokens`), from the registry where it
+  has them, and from the model id otherwise; `null` is a legitimate value for the two limits.
+  **What the installed registry actually carries** — verified against `@mastra/core@1.71.0`,
+  not assumed: provider configuration (display name, base URL, API-key variable) and **model
+  ids**, plus the `attachment`/`temperature`/`structuredOutput` capability lists. It has no
+  per-model names, context windows or chat flag (the models.dev payload it is generated from
+  does; the package reduces it). So on this version the join contributes the id knowledge and
+  the fallback lists, the provider's own payload supplies the limits where there are any, and
+  step 3 is what classifies. `RegistryModel` carries `name`/`contextWindow`/`maxOutput`/`chat`
+  so that a registry version which attaches them is a one-place change; the tests inject a
+  registry stub with them to pin the join itself.
+
+- **C3 — fallback is visible, never silent.** A provider that times out (5 s), fails (non-2xx,
+  an unreadable body, a transport error), cannot have its credential opened, or has no adapter
+  at all is answered from the registry instead: `status: "fallback"`, `fetched_at: null`, and a
+  `message` saying why — the provider's status and a bounded snippet of what it said, or the
+  plain reason. The registry's own list goes through the same C2 filter (it lists embeddings
+  too), and its entries carry `source: "registry"`.
+- **C4 — the cache.** `catalog/cache.ts` holds one entry per (user, provider) in this process
+  for an hour (`CatalogCache`, `DEFAULT_CATALOG_TTL_MS`), nothing in Postgres. Saving or
+  deleting a credential calls `ModelCatalog.invalidate(userId, provider)` from the
+  PUT/DELETE routes — this instance only; other instances expire by TTL. `refresh=true`
+  bypasses the cache for every provider the caller has a key for and is rate-limited to once a
+  minute per user (`RefreshLimiter`): inside the window the request is the protocol's 429
+  `rate_limit_error`, raised as `CatalogRefreshLimitedError` inside the catalogue and mapped
+  in the route.
+- **C5 — only providers with a key are listed.** The providers come from
+  `credentials.list({ userId })`; a caller with none gets `{ data: [], providers: [] }` and not
+  one outbound request. Another user's keys are never read: the owner is `c.get('user').id`,
+  always, and `model-catalog.test.ts` has the case — two callers, one key each, every recorded
+  provider request carrying the right one.
+- **Security.** The key is opened per provider call and lives for that call; nothing caches a
+  plaintext. Anything the provider said is scrubbed with `redactSecret` (the brain's redaction:
+  the whole key, minus four leading or trailing characters) before it reaches a `message` or a
+  log line. `provider-validation.ts` gained the family's providers (Mistral, Together, xAI,
+  Cerebras) so a key that can be stored can also be listed — `model-catalog.test.ts` pins the
+  invariant that every `VALIDATABLE_PROVIDERS` entry has an adapter.
+- **The egress proxy.** Provider calls go through `catalog/provider-fetch.ts`: Node's `fetch`
+  over undici's `EnvHttpProxyAgent`, which reads `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` —
+  the documented egress-proxy variables (`e2e/AGENTS.md`) — so a deployment behind a proxy
+  works without also remembering `NODE_USE_ENV_PROXY=1`, which plain `fetch` would need. With
+  no proxy configured it is an ordinary direct connection. `provider-validation.ts` (the call
+  a saved key is checked with) goes through the same client: one outbound path for the whole
+  server. `ProviderFetch` is the one seam the tests replace: no test reaches a provider, and
+  the harness's default catalogue is inert (an empty registry and a fetch that refuses).
+
 ## Errors
 
 Every failure is the protocol's envelope — `{ type: 'error', error: { type, message } }` with
 the status `API_ERROR_STATUS_BY_TYPE` gives that type — and every response carries a
 `request-id` header the body repeats as `request_id`.
 
-| what happened                                          | type                          | status |
-| ------------------------------------------------------ | ----------------------------- | ------ |
-| a body, query or path id that does not match a schema  | `invalid_request_error`       | 400    |
-| a store cursor that is valid but not for this endpoint | `invalid_request_error`       | 400    |
-| no session, or an invalid, expired or revoked one      | `authentication_error`        | 401    |
-| a cookie-authenticated write from an untrusted origin  | `permission_error`            | 403    |
-| a provider key the provider refused on save (A5)       | `invalid_provider_credential` | 422    |
-| an id that names no agent or session                   | `not_found_error`             | 404    |
-| a route that does not exist                            | `not_found_error`             | 404    |
-| anything else                                          | `api_error`                   | 500    |
+| what happened                                               | type                          | status |
+| ----------------------------------------------------------- | ----------------------------- | ------ |
+| a body, query or path id that does not match a schema       | `invalid_request_error`       | 400    |
+| a store cursor that is valid but not for this endpoint      | `invalid_request_error`       | 400    |
+| no session, or an invalid, expired or revoked one           | `authentication_error`        | 401    |
+| a cookie-authenticated write from an untrusted origin       | `permission_error`            | 403    |
+| a provider key the provider refused on save (A5)            | `invalid_provider_credential` | 422    |
+| a `?refresh=true` inside the minute since the last one (C4) | `rate_limit_error`            | 429    |
+| an id that names no agent or session                        | `not_found_error`             | 404    |
+| a route that does not exist                                 | `not_found_error`             | 404    |
+| anything else                                               | `api_error`                   | 500    |
 
 A malformed path id is a 400 rather than a 404: it could not name a resource even if one
 existed. Anything unrecognised is logged server-side and answered with a fixed message — a
@@ -516,6 +602,11 @@ drain.
 | `startSessionRecheck(options)`, `DEFAULT_SESSION_RECHECK_MS`                                                         | the periodic session re-check of a long-lived response (#76)                         |
 | `SESSION_INVALID_MESSAGE`, `SSE_SESSION_INVALID`                                                                     | what a stream says when its session is revoked or expires (#76)                      |
 | `validateProviderApiKey`, `VALIDATABLE_PROVIDERS`                                                                    | the one cheap provider call a saved key is checked with                              |
+| `ModelCatalog`, `ModelCatalogOptions`, `CatalogRefreshLimitedError`                                                  | the model catalogue: provider lists, registry join, cache, fallback (#90)            |
+| `createMastraRegistry()`, `emptyRegistry`, `ModelRegistry`, `RegistryModel`                                          | the registry join's seam, over the bundled `@mastra/core` data                       |
+| `createProviderFetch()`, `ProviderFetch`, `DEFAULT_PROVIDER_TIMEOUT_MS`                                              | the provider HTTP client: egress-proxy aware, 5 s deadline                           |
+| `CatalogCache`, `RefreshLimiter`, `DEFAULT_CATALOG_TTL_MS`, `DEFAULT_REFRESH_INTERVAL_MS`                            | the in-memory per-(user, provider) cache and the refresh rate limit (C4)             |
+| `adapterFor()`, `adaptedProviders()`, `isChatModel()`, `isNonChatFamily()`                                           | the fixed endpoint table and the chat filter (C1/C2)                                 |
 | `DEV_LOGIN_EMAIL`, `DEV_LOGIN_PASSWORD`, `DEV_LOGIN_STORED_EMAIL`                                                    | the documented dev user (A7)                                                         |
 | `OPENHARNESS_CLI_CLIENT_ID`, `DEVICE_CODE_EXPIRES_IN`                                                                | the device flow's client id and code lifetime (A6)                                   |
 | `deviceVerificationUri`, `deviceVerificationUriComplete`                                                             | the approval URL the device flow answers with: `#/device` and its `?user_code=` (A6) |
@@ -524,7 +615,7 @@ drain.
 | `createMockModelFactory()`                                                                                           | the deterministic test model, for a host that wires its own                          |
 | `defaultInstanceId()`                                                                                                | hostname + pid + random suffix: the id a server leases partitions under              |
 | `readServerConfig(env)`, `ServerConfig`, `ENV_VARS`                                                                  | the environment, parsed                                                              |
-| `HttpError`, `PACKAGE_NAME`, `Logger`                                                                                | the error type, the package name and the logging seam                                |
+| `HttpError`, `rateLimitError`, `PACKAGE_NAME`, `Logger`                                                              | the error types, the package name and the logging seam                               |
 
 `node dist/index.js` runs `main()`, which reads the environment and starts the server.
 
@@ -533,7 +624,7 @@ drain.
 ```
 src/
   index.ts              the barrel; `node dist/index.js` starts the server
-  main.ts               env → store (migrations) → auth → credentials → model → scheduler → listener → shutdown
+  main.ts               env → store (migrations) → auth → credentials → model → catalog → scheduler → listener → shutdown
   app.ts                createApp: middleware, the /api/auth mount, routes, error mapping, static fallback
   auth.ts               createAuth: Better Auth for this server (providers, plugins, sessions, dev login)
   auth-profile.ts       the A3 identity rules, and the provider options that enforce them
@@ -541,6 +632,13 @@ src/
   session-watch.ts      revocation registry + periodic re-check for long-lived responses (#76)
   credentials.ts        sealing, opening and the session-bound credential resolver (A5)
   provider-validation.ts the one cheap provider call a saved key is checked with
+  catalog/
+    catalog.ts          ModelCatalog: per-provider fetch, join, filter, cache, fallback (#90)
+    adapters.ts         the fixed provider endpoint table and each provider's payload shape
+    registry.ts         ModelRegistry over @mastra/core's bundled provider registry (C2)
+    filter.ts           isChatModel: the never-hide/never-show rule, and the name families
+    cache.ts            CatalogCache (one hour per user+provider) and RefreshLimiter (C4)
+    provider-fetch.ts   ProviderFetch: fetch over the egress-proxy env, and the 5 s deadline
   config.ts             the environment, parsed and checked
   model.ts              which model factory the process runs (the router, or the mock)
   mock-model.ts         the deterministic test model and its markers
@@ -556,7 +654,7 @@ src/
   http/
     errors.ts           HttpError and the protocol's error envelope
     request.ts          body/query/path reading, through the protocol's schemas
-  routes/               agents.ts, sessions.ts, events.ts, ai-sdk.ts, me.ts, provider-credentials.ts
+  routes/               agents.ts, sessions.ts, events.ts, ai-sdk.ts, me.ts, models.ts, provider-credentials.ts
   test-support/         test-only: scripted model, SSE reader, the server harness, Postgres
 docs/scheduling.md      the multi-instance scheduler: partitions, leases, epochs, recovery
 ```
@@ -642,6 +740,23 @@ delete each other's sessions. Packages still run in parallel with each other.
 - `config.test.ts`, `main.test.ts` — the environment (including the three required variables
   and the dev-login guard), startup, recovery and shutdown, and `SCHEDULER=postgres` wiring
   the partitioned scheduler.
+- `model-catalog.test.ts` — `GET /v1/models` (issue #90) over a **scripted fetch** and a
+  registry stub: only the caller's providers are listed and only their URLs called, OpenAI's
+  list filtered of embeddings/tts/whisper/dall-e/moderation, Gemini filtered by
+  `supportedGenerationMethods` (both pages read), the registry joined for names and limits,
+  a timeout and a 5xx answered from the registry as `fallback`, the cache hit / one-hour TTL /
+  credential-write invalidation, `refresh=true` bypassing the cache and its 429 inside the
+  minute, one user's keys never used for another's request, an unknown provider served from
+  the registry without dialing anything, a tampered credential degrading to a fallback, and
+  the key absent from every response, `message` and captured log line. No test ever reaches a
+  provider: the catalogue's `fetch` seam is the only way out, and the harness's default
+  catalogue refuses.
+- `catalog/filter.test.ts`, `catalog/adapters.test.ts`, `catalog/registry.test.ts`,
+  `catalog/cache.test.ts` — the pieces on their own: the name families and the verdict
+  precedence, the endpoint table (constant URLs, each provider's header and payload shape,
+  the `VALIDATABLE_PROVIDERS` ⊆ adapters invariant), the bundled registry read through
+  `@mastra/core` (including that this installed version carries ids only), and the TTL /
+  invalidation / rate-limit rules on an injected clock.
 
 ## Rules
 

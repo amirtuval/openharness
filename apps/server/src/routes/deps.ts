@@ -1,6 +1,7 @@
 import type { SessionStore } from '@openharness/session'
 
 import type { SocialProviderName } from '../auth-profile'
+import type { ModelCatalog } from '../catalog/catalog'
 import type { SessionScheduler } from '../scheduler'
 import type { SessionRevocations } from '../session-watch'
 import type { ProviderCredentialDeps } from './provider-credentials'
@@ -22,6 +23,11 @@ export interface RouteDeps {
   readonly auth: AuthDeps
   /** The vault, the sealed-credential store and the validator the credential routes use. */
   readonly credentialRoutes: ProviderCredentialDeps
+  /**
+   * The model catalogue (epic #92): `GET /v1/models`, and the hook a saved or deleted
+   * credential drops that provider's cached answer with (C4).
+   */
+  readonly catalog: Pick<ModelCatalog, 'list' | 'invalidate'>
   /** The SSE keepalive interval; tests shorten it. */
   readonly sseKeepaliveMs?: number
   /** The re-check interval of the long-lived routes (A2/#76); tests shorten it. */

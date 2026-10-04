@@ -28,6 +28,8 @@ import {
   type AuthUser,
   type BetterAuthInstance,
 } from '../auth'
+import { ModelCatalog } from '../catalog/catalog'
+import { emptyRegistry } from '../catalog/registry'
 import { DEFAULT_DELTA_RETENTION_MS } from '../compaction'
 import type { SchedulerKind, ServerConfig } from '../config'
 import { startServer } from '../main'
@@ -84,6 +86,12 @@ export interface TestContext {
   readonly model: ScriptedModel
   /** The scheduler running the brains. */
   readonly scheduler: SessionScheduler
+  /**
+   * The model catalogue the app serves `GET /v1/models` with. Inert unless the test built
+   * one ({@link TestOptions.catalog}): its registry knows nothing and its fetch refuses, so a
+   * test that does not mean to reach a provider cannot.
+   */
+  readonly catalog: Pick<ModelCatalog, 'list' | 'invalidate'>
   /** The Hono app, called in-process. */
   readonly app: Hono<AppEnv>
   /**
@@ -166,6 +174,12 @@ export interface TestOptions {
   /** The validator a `PUT /v1/provider-credentials` uses; a fake, by default. */
   readonly validateProviderCredential?: ProviderCredentialValidator
   /**
+   * The model catalogue `GET /v1/models` serves. Defaults to an inert one — an empty registry
+   * and a fetch that throws — so a test never reaches a provider by accident; a test of the
+   * catalogue builds `new ModelCatalog({ …, registry, fetch })` over its own stubs.
+   */
+  readonly catalog?: Pick<ModelCatalog, 'list' | 'invalidate'>
+  /**
    * Where the app and Better Auth log. Silent by default; a test that asserts on a log line —
    * or on the absence of one — passes a logger that keeps them.
    */
@@ -228,6 +242,7 @@ export function createTestApp(options: TestOptions = {}): TestContext {
     onError: () => {},
   })
   const auth = buildTestAuth(options, store, logger)
+  const catalog = options.catalog ?? inertCatalog(credentials, vault)
   const app = createApp({
     store,
     scheduler,
@@ -244,6 +259,7 @@ export function createTestApp(options: TestOptions = {}): TestContext {
       vault,
       validate: options.validateProviderCredential ?? acceptAnyCredential,
     },
+    catalog,
     ...(options.webDir === undefined ? {} : { webDir: options.webDir }),
     ...(options.sseKeepaliveMs === undefined ? {} : { sseKeepaliveMs: options.sseKeepaliveMs }),
     ...(options.sessionRecheckMs === undefined
@@ -258,6 +274,7 @@ export function createTestApp(options: TestOptions = {}): TestContext {
     auth,
     model,
     scheduler,
+    catalog,
     app,
     url: null,
     options,
@@ -271,6 +288,7 @@ export async function startTestServer(options: TestOptions = {}): Promise<TestCo
   const credentials = options.credentials ?? new InMemoryCredentialStore()
   const vault = options.vault ?? createVault(envKeyProvider(TEST_SECRETS_KEY))
   const model = createScriptedModel(...(options.replies ?? []))
+  const catalog = options.catalog ?? inertCatalog(credentials, vault)
   const started = await startServer({
     config: testConfig(options),
     store,
@@ -280,6 +298,7 @@ export async function startTestServer(options: TestOptions = {}): Promise<TestCo
     vault,
     ...(options.authDatabase === undefined ? {} : { authDatabase: options.authDatabase }),
     validateProviderCredential: options.validateProviderCredential ?? acceptAnyCredential,
+    catalog,
     logger: silentLogger,
     ...(options.sseKeepaliveMs === undefined ? {} : { sseKeepaliveMs: options.sseKeepaliveMs }),
     ...(options.sessionRecheckMs === undefined
@@ -294,10 +313,29 @@ export async function startTestServer(options: TestOptions = {}): Promise<TestCo
     auth: started.auth,
     model,
     scheduler: started.scheduler,
+    catalog,
     app: started.app,
     url: baseUrl,
     options,
     send: (path, init) => fetch(`${baseUrl}${path}`, init),
+  })
+}
+
+/**
+ * The catalogue a test app gets unless it builds one: an empty registry and a fetch that
+ * refuses. `GET /v1/models` still answers — `{ data: [], providers: [] }` for a caller with
+ * no credentials — but nothing can leave the process, so a test that did not mean to reach a
+ * provider fails loudly instead of making a network call.
+ */
+export function inertCatalog(
+  credentials: CredentialStore,
+  vault: Vault,
+): Pick<ModelCatalog, 'list' | 'invalidate'> {
+  return new ModelCatalog({
+    credentials,
+    vault,
+    registry: emptyRegistry,
+    fetch: () => Promise.reject(new Error('this catalogue has no provider fetch')),
   })
 }
 
@@ -350,6 +388,7 @@ function context(base: {
   auth: Auth
   model: ScriptedModel
   scheduler: SessionScheduler
+  catalog: Pick<ModelCatalog, 'list' | 'invalidate'>
   app: Hono<AppEnv>
   url: string | null
   options: TestOptions
@@ -384,6 +423,7 @@ function context(base: {
     auth: base.auth,
     model: base.model,
     scheduler: base.scheduler,
+    catalog: base.catalog,
     app: base.app,
     url: base.url,
     request: authedRequest,

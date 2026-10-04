@@ -32,6 +32,10 @@ import type { RouteDeps } from './deps'
  * `PUT` and `DELETE` are the sensitive actions of A2 and require a **fresh** session — one
  * created within `freshAge` — so a stolen long-lived session cannot be used to replace a
  * user's credentials; a stale one is answered 401, the same refusal as no session at all.
+ *
+ * Both writes also drop that provider's cached catalogue entry for the user (epic #92, C4):
+ * the model list `GET /v1/models` answered was fetched with the key that just changed, so it
+ * must not outlive it.
  */
 
 /** What the credential routes need beyond the store: the vault and the validator. */
@@ -79,6 +83,10 @@ export function registerProviderCredentialRoutes(app: Hono<AppEnv>, deps: RouteD
     const credential: ProviderCredential = await deps.credentialRoutes.credentials.upsert(
       credentialUpsert({ userId, provider, apiKey: body.api_key }, sealed, now.toISOString()),
     )
+    // The model catalogue caches this provider's list for an hour (C4); the key behind it just
+    // changed, so that cached answer is stale — drop it, here, on the instance that handled
+    // the write. Other instances' entries expire by TTL.
+    deps.catalog.invalidate(userId, provider)
     return c.json(credential, 200)
   })
 
@@ -88,6 +96,8 @@ export function registerProviderCredentialRoutes(app: Hono<AppEnv>, deps: RouteD
     // Deleting a provider that has no credential is not an error: the caller's state is
     // "no credential for this provider" either way, and 204 says exactly that.
     await deps.credentialRoutes.credentials.delete({ userId: c.get('user').id, provider })
+    // The catalogue must stop listing a provider the moment its key is gone (C4/C5).
+    deps.catalog.invalidate(c.get('user').id, provider)
     return c.body(null, 204)
   })
 }

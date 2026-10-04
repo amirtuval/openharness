@@ -9,12 +9,30 @@
  *
  * The validator never logs, echoes or includes the key in an error message: a rejected
  * credential answers with the provider's status, not with what was sent.
+ *
+ * The call goes through the same provider HTTP client the model catalogue uses
+ * (`catalog/provider-fetch.ts`): the one outbound path that honors the egress-proxy variables
+ * a deployment sets, so saving a key works behind a proxy exactly as listing models does.
  */
+
+import {
+  createProviderFetch,
+  type ProviderFetch,
+  type ProviderResponse,
+} from './catalog/provider-fetch'
+
+/** The provider HTTP client, built once: one outbound path for validation and listing. */
+const providerFetch: ProviderFetch = createProviderFetch()
 
 /**
  * The providers this server can validate — the Mastra router ids whose one-key providers have
  * a cheap authenticated read. The protocol stores any provider string; a key for one outside
  * this set is refused on save because it cannot be validated, rather than stored unchecked.
+ *
+ * Every one of these has a model-list adapter in `catalog/adapters.ts` — the catalogue could
+ * not list a provider whose key cannot be stored, and saving a key for a provider the
+ * catalogue cannot list would be a dead end. `model-catalog.test.ts` pins the invariant: the
+ * two tables grow together.
  */
 export const VALIDATABLE_PROVIDERS = [
   'anthropic',
@@ -24,6 +42,10 @@ export const VALIDATABLE_PROVIDERS = [
   'groq',
   'deepseek',
   'fireworks',
+  'mistral',
+  'together',
+  'xai',
+  'cerebras',
 ] as const
 
 /** A provider id {@link VALIDATABLE_PROVIDERS} knows. */
@@ -50,10 +72,9 @@ export const validateProviderApiKey: ProviderCredentialValidator = async (provid
         VALIDATABLE_PROVIDERS.join(', '),
     )
   }
-  let response: Response
+  let response: ProviderResponse
   try {
-    response = await fetch(request.url, {
-      method: 'GET',
+    response = await providerFetch(request.url, {
       headers: request.headers,
       signal: AbortSignal.timeout(VALIDATION_TIMEOUT_MS),
     })
@@ -71,7 +92,7 @@ export const validateProviderApiKey: ProviderCredentialValidator = async (provid
     )
   }
   // The body is drained so the connection can be reused; nothing in it is read or stored.
-  await response.arrayBuffer()
+  await response.text()
 }
 
 /** The one cheap, authenticated read that proves a key: `GET <url>` with these headers. */
@@ -114,6 +135,26 @@ function requestFor(
     case 'fireworks':
       return {
         url: 'https://api.fireworks.ai/inference/v1/models',
+        headers: { authorization: `Bearer ${apiKey}` },
+      }
+    case 'mistral':
+      return {
+        url: 'https://api.mistral.ai/v1/models',
+        headers: { authorization: `Bearer ${apiKey}` },
+      }
+    case 'together':
+      return {
+        url: 'https://api.together.xyz/v1/models',
+        headers: { authorization: `Bearer ${apiKey}` },
+      }
+    case 'xai':
+      return {
+        url: 'https://api.x.ai/v1/models',
+        headers: { authorization: `Bearer ${apiKey}` },
+      }
+    case 'cerebras':
+      return {
+        url: 'https://api.cerebras.ai/v1/models',
         headers: { authorization: `Bearer ${apiKey}` },
       }
     default:

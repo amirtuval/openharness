@@ -105,7 +105,40 @@ export {
   invalidRequest,
   notFoundError,
   permissionError,
+  rateLimitError,
 } from './http/errors'
+export {
+  DEFAULT_CATALOG_TTL_MS,
+  DEFAULT_REFRESH_INTERVAL_MS,
+  CatalogCache,
+  RefreshLimiter,
+  type CachedProviderCatalog,
+  type CatalogCacheKey,
+} from './catalog/cache'
+export {
+  CatalogRefreshLimitedError,
+  ModelCatalog,
+  type ModelCatalogOptions,
+} from './catalog/catalog'
+export {
+  adapterFor,
+  adaptedProviders,
+  type ProviderAdapter,
+  type ProviderModel,
+} from './catalog/adapters'
+export { isChatModel, isNonChatFamily, type ChatVerdicts } from './catalog/filter'
+export {
+  DEFAULT_PROVIDER_TIMEOUT_MS,
+  createProviderFetch,
+  type ProviderFetch,
+  type ProviderResponse,
+} from './catalog/provider-fetch'
+export {
+  createMastraRegistry,
+  emptyRegistry,
+  type ModelRegistry,
+  type RegistryModel,
+} from './catalog/registry'
 export { main, startServer, type StartServerOptions, type StartedServer } from './main'
 export {
   createMockModelFactory,

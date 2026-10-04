@@ -34,6 +34,7 @@ const V1_ROUTES: readonly (readonly [string, string])[] = [
   ['GET', `${API_VERSION_PREFIX}/sessions/sesn_01HZZZZZZZZZZZZZZZZZZZZZZZ/events/stream`],
   ['POST', `${API_VERSION_PREFIX}/sessions/sesn_01HZZZZZZZZZZZZZZZZZZZZZZZ/ai-sdk/chat`],
   ['GET', `${API_VERSION_PREFIX}/me`],
+  ['GET', `${API_VERSION_PREFIX}/models`],
   ['GET', `${API_VERSION_PREFIX}/provider-credentials`],
   ['PUT', `${API_VERSION_PREFIX}/provider-credentials/anthropic`],
   ['DELETE', `${API_VERSION_PREFIX}/provider-credentials/anthropic`],
