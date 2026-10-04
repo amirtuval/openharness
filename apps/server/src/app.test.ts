@@ -19,7 +19,6 @@ import {
 } from '@openharness/protocol'
 
 import { createApp } from './app'
-import { DEV_LOGIN_EMAIL, DEV_LOGIN_PASSWORD } from './auth'
 import {
   createTestApp,
   TEST_PUBLIC_URL,
@@ -27,6 +26,7 @@ import {
   httpCreateSession,
   httpSendMessage,
   readHistory,
+  signInCookie,
   waitForIdle,
   type TestContext,
 } from './test-support'
@@ -613,20 +613,6 @@ describe('auth', () => {
     expect(response.status).toBe(201)
   })
 })
-
-/** Sign in over the dev login and answer the session cookie a browser would hold. */
-async function signInCookie(test: TestContext): Promise<string> {
-  const response = await test.anonymous('/api/auth/sign-in/email', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ email: DEV_LOGIN_EMAIL, password: DEV_LOGIN_PASSWORD }),
-  })
-  const setCookie = response.headers.get('set-cookie')
-  if (setCookie === null) {
-    throw new Error('the sign-in answered no cookie')
-  }
-  return setCookie.split(';')[0] ?? ''
-}
 
 describe('CORS', () => {
   it('is off by default', async () => {
