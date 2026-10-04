@@ -34,6 +34,7 @@ import type {
 import type { StreamOptions } from '../events/stream'
 import { AsyncQueue, sleep } from '../internal/async'
 import { deepFreeze } from './freeze'
+import { deriveFakeSessionTitle } from './titles'
 
 /**
  * The in-memory brain behind one fake session: its log, its script and its turn loop.
@@ -153,8 +154,16 @@ export function isChunk(event: StreamEvent): event is StoredEventStart | StoredE
 
 /** The in-memory brain of one fake session. */
 export class FakeBrain {
-  /** The session header this brain keeps up to date; the real object, not a copy. */
-  readonly session: Session
+  /**
+   * The session header this brain keeps up to date.
+   *
+   * **Replaced, never mutated** when the brain names the session (the way the real server's
+   * row changes without touching a copy a client already holds): a caller that fetched the
+   * session earlier keeps its stale copy — `title: null` — until it re-reads, which is the
+   * behaviour the frontends' one-re-read flow (#35) exists to handle. A mutated-in-place
+   * object would make the client's stale copy silently fresh and skip that flow entirely.
+   */
+  session: Session
 
   readonly #log: StoredEvent[] = []
   readonly #scripts: FakeScript[] = []
@@ -230,6 +239,15 @@ export class FakeBrain {
           }
     deepFreeze(stored)
     this.#log.push(stored)
+    // A session is named by the first message it is sent, in the same request that stores it
+    // (`apps/server/src/titles.ts`); the fake keeps the same promise so a frontend test about
+    // titles is a test against the behaviour, not against a workaround.
+    if (stored.type === EVENT_TYPES.userMessage && this.session.title === null) {
+      const title = deriveFakeSessionTitle(stored.content.map((block) => block.text).join('\n'))
+      if (title !== null) {
+        this.session = { ...this.session, title }
+      }
+    }
     // A message that carries a model switches what the session runs (epic #116, U1): the
     // event stores the choice, and the session header — the live projection a reader sees —
     // moves with it, so the next `span.model_request_start` carries the new id.

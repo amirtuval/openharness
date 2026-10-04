@@ -1,9 +1,13 @@
 import {
   AgentSchema,
+  CreateAgentRequestSchema,
   CreateSessionRequestSchema,
   ListModelsResponseSchema,
   ProviderCredentialSchema,
+  SendEventsRequestSchema,
   SessionSchema,
+  UpdateAgentRequestSchema,
+  UserMessageEventInputSchema,
   UserPreferencesSchema,
   encodeKeyCursor,
   newAgentId,
@@ -30,7 +34,6 @@ import type {
   StreamEvent,
   User,
   UserEvent,
-  UserEventInput,
   UserInterruptEvent,
   UserMessageEvent,
   UserPreferences,
@@ -39,8 +42,9 @@ import type {
 import { ApiError, AuthenticationError } from '../errors'
 import type { Client, RequestOptions } from '../client'
 import type { StreamOptions } from '../events/stream'
+import { isEventList } from '../internal/events'
 import { sleep } from '../internal/async'
-import { DeviceLoginError } from '../resources/auth'
+import { DeviceLoginError, SLOW_DOWN_INCREMENT_SECONDS } from '../resources/auth'
 import type { DeviceLoginStart, PollDeviceLoginOptions } from '../resources/auth'
 import { FakeBrain, clampLimit, type FakeScript } from './fake-brain'
 
@@ -147,6 +151,14 @@ export interface FakeDeviceFlowOptions {
   outcome?: 'approved' | 'denied' | 'expired'
   /** How many polls answer `authorization_pending` before the outcome; defaults to 1. */
   pendingPolls?: number
+  /**
+   * How many polls answer `slow_down` after the pending ones; defaults to 0.
+   *
+   * The real server answers `slow_down` when a client polls faster than its interval, and the
+   * real client adds five seconds to its interval on each answer (RFC 8628); the fake's poll
+   * loop does the same, so a frontend test runs the whole flow through a 429.
+   */
+  slowDownPolls?: number
   /**
    * The interval the flow reports and polls at, in seconds; defaults to 0, so tests never
    * wait. The fake sleeps between polls the way the real client does.
@@ -424,16 +436,23 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       if (!authenticated) {
         return unauthenticated()
       }
+      // The route parses the body with `CreateAgentRequestSchema` before the store sees it, so
+      // the fake refuses what the server refuses — and stores what the schema parsed, which is
+      // what keeps an unknown field the server would strip out of the fake's store.
+      const request = CreateAgentRequestSchema.safeParse(body)
+      if (!request.success) {
+        return Promise.reject(badRequestFor(request.error.issues))
+      }
       const timestamp = now().toISOString()
       const created = AgentSchema.parse({
         id: newAgentId(),
         type: 'agent',
         // Required since #61 (A4): every agent belongs to the signed-in user.
         owner_id: user.id,
-        name: body.name,
-        description: body.description ?? null,
-        model: body.model,
-        system: body.system ?? null,
+        name: request.data.name,
+        description: request.data.description ?? null,
+        model: request.data.model,
+        system: request.data.system ?? null,
         created_at: timestamp,
         updated_at: timestamp,
       })
@@ -454,6 +473,10 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       if (!authenticated) {
         return unauthenticated()
       }
+      const cursorError = requirePageCursor(params?.page, 'key')
+      if (cursorError !== undefined) {
+        return Promise.reject(cursorError)
+      }
       const all = [...agents.values()].sort(byCreatedAtThenId)
       return Promise.resolve(pageByKey(all, params?.limit, params?.page, 'asc'))
     },
@@ -463,13 +486,21 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       if (!authenticated) {
         return unauthenticated()
       }
+      // The server parses the update before it looks the agent up, so a malformed body is the
+      // 400 even for an unknown id.
+      const request = UpdateAgentRequestSchema.safeParse(body)
+      if (!request.success) {
+        throw badRequestFor(request.error.issues)
+      }
       const existing = await requireAgent(agentId)
       const updated: Agent = {
         ...existing,
-        ...(body.name === undefined ? {} : { name: body.name }),
-        ...(body.description === undefined ? {} : { description: body.description }),
-        ...(body.model === undefined ? {} : { model: body.model }),
-        ...(body.system === undefined ? {} : { system: body.system }),
+        ...(request.data.name === undefined ? {} : { name: request.data.name }),
+        ...(request.data.description === undefined
+          ? {}
+          : { description: request.data.description }),
+        ...(request.data.model === undefined ? {} : { model: request.data.model }),
+        ...(request.data.system === undefined ? {} : { system: request.data.system }),
         updated_at: now().toISOString(),
       }
       agents.set(agentId, updated)
@@ -483,9 +514,21 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       if (!authenticated) {
         return unauthenticated()
       }
+      // The server checks the session before it parses the body (A4), so an unknown session is
+      // the 404 even when the events are malformed too.
       const brain = await requireBrain(sessionId)
-      const inputs = isEventList(events) ? events : [events]
-      const stored: UserEvent[] = inputs.map((input) => brain.appendUserEvent(input))
+      // `SendEventsRequestSchema` is the body the route validates — the events list, at least
+      // one, every member a user event. Validating here rather than storing the caller's value
+      // is what keeps a `raw ZodError`, an empty batch or an event the protocol does not know
+      // from reaching the fake's log; the parsed value is what is stored, unknown fields
+      // stripped, exactly as the server stores what its parser produced.
+      const request = SendEventsRequestSchema.safeParse({
+        events: isEventList(events) ? events : [events],
+      })
+      if (!request.success) {
+        throw badRequestFor(request.error.issues)
+      }
+      const stored: UserEvent[] = request.data.events.map((input) => brain.appendUserEvent(input))
       brain.startTurn()
       return Promise.resolve({ data: stored })
     },
@@ -494,6 +537,12 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       throwIfAborted(requestOptions)
       if (!authenticated) {
         return unauthenticated()
+      }
+      // The query is parsed before the store is asked (the server's route order), so the
+      // cursor is checked before the session is looked up.
+      const cursorError = requirePageCursor(params?.page, 'seq')
+      if (cursorError !== undefined) {
+        return Promise.reject(cursorError)
       }
       const brain = await requireBrain(sessionId)
       return brain.pageEvents(params ?? {})
@@ -532,17 +581,21 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       }
       // The server parses the body with the protocol's request schema — an agent and/or a
       // model, at least one — and answers 400 when it does not match, so the fake refuses the
-      // same body the same way rather than storing a session that cannot run. `issue.message`
-      // is what the server's error carries too, and what a UI shows: a readable sentence.
+      // same body the same way rather than storing a session that cannot run.
       const request = CreateSessionRequestSchema.safeParse(body)
       if (!request.success) {
-        const issue = request.error.issues[0]
-        const where =
-          issue === undefined || issue.path.length === 0 ? '' : `${issue.path.join('.')}: `
+        return Promise.reject(badRequestFor(request.error.issues))
+      }
+      // The inline model id gets the same shape check the server applies on top of the
+      // schema (issue #94): the router's `provider/model`, at least two non-empty parts. A
+      // shape check, not a catalogue lookup — the router takes models no catalogue knows.
+      if (request.data.model !== undefined && !isModelId(request.data.model.id)) {
         return Promise.reject(
-          new ApiError(400, `${where}${issue?.message ?? 'the request is not valid'}`, {
-            type: 'invalid_request_error',
-          }),
+          new ApiError(
+            400,
+            `model.id must be a "provider/model" id with non-empty parts, got ${JSON.stringify(request.data.model.id)}`,
+            { type: 'invalid_request_error' },
+          ),
         )
       }
       // The agent the session snapshots, when the request named one: an unknown id — or one
@@ -584,7 +637,10 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       if (initialEvents.length > 0) {
         brain.startTurn()
       }
-      return Promise.resolve(session)
+      // `brain.session`, not the local: an `initial_events` message names the session in the
+      // same request, and the creation response carries the title it just set (server
+      // behaviour, #29) — the brain's named copy is the one that has it.
+      return Promise.resolve(brain.session)
     },
 
     async get(sessionId, requestOptions): Promise<Session> {
@@ -600,6 +656,10 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       throwIfAborted(requestOptions)
       if (!authenticated) {
         return unauthenticated()
+      }
+      const cursorError = requirePageCursor(params?.page, 'key')
+      if (cursorError !== undefined) {
+        return Promise.reject(cursorError)
       }
       const all = [...brains.values()]
         // A deleted session (#111) is gone, log and all: it is not listed any more.
@@ -731,11 +791,19 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       if (flow === undefined || deviceCode !== flow.deviceCode) {
         throw new DeviceLoginError('invalid_grant', 'There is no such device login.')
       }
+      let interval = pollOptions?.interval ?? flow.interval
       for (;;) {
-        await sleep((pollOptions?.interval ?? flow.interval) * 1000, pollOptions?.signal)
+        await sleep(interval * 1000, pollOptions?.signal)
         pollOptions?.signal?.throwIfAborted()
         flow.polls += 1
         if (flow.polls <= flow.pendingPolls) {
+          continue
+        }
+        if (flow.polls <= flow.pendingPolls + flow.slowDownPolls) {
+          // RFC 8628: `slow_down` means the client waited too little, so it adds five seconds
+          // to its interval and polls again — the exact increment the real client applies
+          // (`resources/auth.ts`), and the reason the constant is shared, not restated.
+          interval += SLOW_DOWN_INCREMENT_SECONDS
           continue
         }
         if (flow.outcome === 'denied') {
@@ -792,13 +860,20 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
         return unauthenticated()
       }
       const brain = await requireBrain(sessionId)
-      const stored = brain.appendUserEvent({
+      // The same body `POST …/events` would carry, through the same schema — so a message the
+      // server's parser would refuse (an empty text, say) is refused here too, instead of an
+      // event the protocol cannot hold reaching the fake's log.
+      const input = UserMessageEventInputSchema.safeParse({
         type: 'user.message',
         content: [{ type: 'text', text }],
         ...(messageOptions?.model === undefined ? {} : { model: messageOptions.model }),
       })
+      if (!input.success) {
+        throw badRequestFor(input.error.issues)
+      }
+      const stored = brain.appendUserEvent(input.data) as UserMessageEvent
       brain.startTurn()
-      return stored as UserMessageEvent
+      return stored
     },
 
     async interrupt(sessionId, requestOptions): Promise<UserInterruptEvent> {
@@ -861,24 +936,34 @@ interface FakeDeviceFlow {
   readonly expiresIn: number
   readonly outcome: 'approved' | 'denied' | 'expired'
   readonly pendingPolls: number
-  /** How many polls have happened; the first {@link pendingPolls} answer `authorization_pending`. */
+  readonly slowDownPolls: number
+  /**
+   * How many polls have happened; the first {@link pendingPolls} answer `authorization_pending`
+   * and the next {@link slowDownPolls} answer `slow_down`.
+   */
   polls: number
 }
 
 /** Build a device flow from a script, filling in deterministic defaults. */
 function makeDeviceFlow(options: FakeDeviceFlowOptions): FakeDeviceFlow {
   const userCode = options.userCode ?? 'FAKE-CODE'
-  const verificationUri = options.verificationUri ?? 'http://localhost:3000/device'
+  // The server's URIs are the web app's hash route, with the code inside the fragment — the
+  // router reads the hash, and a query before the `#` never reaches it (A6; the same shape
+  // `apps/server/src/auth.ts` rewrites Better Auth's field to). Encoded the way the web app
+  // parses it, `URLSearchParams`.
+  const verificationUri = options.verificationUri ?? 'http://localhost:3000/#/device'
   return {
     deviceCode: options.deviceCode ?? 'fake_device_code',
     userCode,
     verificationUri,
     verificationUriComplete:
-      options.verificationUriComplete ?? `${verificationUri}?user_code=${userCode}`,
+      options.verificationUriComplete ??
+      `${verificationUri}?user_code=${encodeURIComponent(userCode)}`,
     interval: options.interval ?? 0,
     expiresIn: options.expiresIn ?? 600,
     outcome: options.outcome ?? 'approved',
     pendingPolls: options.pendingPolls ?? 1,
+    slowDownPolls: options.slowDownPolls ?? 0,
     polls: 0,
   }
 }
@@ -918,11 +1003,75 @@ async function* streamFromBrain(
   }
 }
 
-/** One user event or a list of them, without guessing from the contents of one. */
-function isEventList(
-  events: UserEventInput | readonly UserEventInput[],
-): events is readonly UserEventInput[] {
-  return Array.isArray(events)
+/**
+ * One issue of a failed schema parse, as this module reads it.
+ *
+ * Structural, like the server's own `ValidationIssue` (`apps/server/src/http/errors.ts`): the
+ * fake never imports `zod` directly, only the protocol schemas' `safeParse`.
+ */
+interface ValidationIssue {
+  readonly path: readonly PropertyKey[]
+  readonly message: string
+}
+
+/**
+ * The 400 the server answers a body that does not match the protocol's schema.
+ *
+ * The message is composed exactly the way the server composes it — the first issue's path and
+ * message, and how many issues followed — so an error a UI shows in a test is the error it
+ * would show against the server. One helper for every body the fake parses, because the
+ * inconsistency this replaced (#105) was three routes each doing their own thing.
+ */
+function badRequestFor(issues: readonly ValidationIssue[]): ApiError {
+  const first = issues[0]
+  if (first === undefined) {
+    return new ApiError(400, 'the request is not valid', { type: 'invalid_request_error' })
+  }
+  const path = first.path.map((segment) => String(segment)).join('.')
+  const where = path.length === 0 ? '' : `${path}: `
+  const rest = issues.length > 1 ? ` (and ${issues.length - 1} more)` : ''
+  return new ApiError(400, `${where}${first.message}${rest}`, { type: 'invalid_request_error' })
+}
+
+/**
+ * The 400 for a `page` the server cannot use on this list, or `undefined` for one it can.
+ *
+ * The server refuses a string that is not a cursor at all (its query schema) and a valid
+ * cursor of the wrong kind (its store) — both 400 `invalid_request_error`. The fake used to
+ * ignore an unusable cursor and serve page 1, a page the caller did not ask for; answering
+ * the 400 instead is what keeps a frontend test from passing on a page the server would
+ * never send.
+ */
+function requirePageCursor(page: string | undefined, kind: 'key' | 'seq'): ApiError | undefined {
+  if (page === undefined) {
+    return undefined
+  }
+  const cursor = tryDecodePageCursor(page)
+  if (cursor === null) {
+    return new ApiError(400, 'page: must be a `page_` pagination cursor', {
+      type: 'invalid_request_error',
+    })
+  }
+  if (cursor.kind !== kind) {
+    const list = kind === 'seq' ? 'listEvents' : 'this list'
+    return new ApiError(400, `${list} takes a ${kind} cursor, but got a ${cursor.kind} cursor`, {
+      type: 'invalid_request_error',
+    })
+  }
+  return undefined
+}
+
+/**
+ * Whether an inline model id has the router's `provider/model` shape (issue #94).
+ *
+ * The server checks the inline id of `sessions.create` on top of the protocol's schema, where
+ * it is only a non-empty string; the fake mirrors it so a UI tested here cannot ship ids the
+ * server answers 400 for. Agent bodies are deliberately not checked — the server does not
+ * check them there either.
+ */
+function isModelId(id: string): boolean {
+  const parts = id.split('/')
+  return parts.length >= 2 && parts.every((part) => part.length > 0)
 }
 
 /** Reject the way `fetch` does when the caller has already aborted. */

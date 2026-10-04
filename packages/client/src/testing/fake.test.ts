@@ -1,23 +1,33 @@
 import {
+  CreateAgentRequestSchema,
   EVENT_TYPES,
+  SESSION_TITLE_MAX_LENGTH,
+  SendEventsRequestSchema,
   StoredEventSchema,
   StreamEventSchema,
+  UpdateAgentRequestSchema,
+  UserMessageEventInputSchema,
   isStoredEvent,
   newAgentId,
 } from '@openharness/protocol'
-import type { StoredEvent, StreamEvent } from '@openharness/protocol'
+import type { StoredEvent, StreamEvent, UserEventInput } from '@openharness/protocol'
 import {
   fixtureTimestamp,
   makeModelEntry,
   makeUserPreferences,
 } from '@openharness/protocol/fixtures'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createClient, type SendMessageOptions } from '../client'
 import { ApiError, AuthenticationError } from '../errors'
 import { initialTranscriptState, reduceTranscriptAll, type TranscriptState } from '../transcript'
 import { createMockFetch, sseLines, sseResponse } from '../test-support/mock-fetch'
 import { FAKE_SESSION_TOKEN, createFakeClient, type FakeClient } from './index'
+
+afterEach(() => {
+  // The device-flow timing test runs on fake timers; nothing else may inherit them.
+  vi.useRealTimers()
+})
 
 describe('the fake client', () => {
   it('implements the client interface', () => {
@@ -514,6 +524,54 @@ describe('the fake resources', () => {
     expect(second.next_page).toBeNull()
   })
 
+  it('answers a cursor of the wrong kind with the server’s 400, never a silent page 1', async () => {
+    const fake = createFakeClient()
+    fake.respondWith('ok')
+    await sendAndSettle(fake, 'hello')
+    await fake.agents.create({ name: 'Second', model: { id: 'anthropic/claude-sonnet-5' } })
+
+    // A `seq` cursor is the events log's resume position; a `key` cursor is an agent or
+    // session list's keyset position. Each one carries what the other endpoint cannot use.
+    const events = await fake.sessions.events.list(fake.session.id, { limit: 1 })
+    const seqCursor = events.next_page
+    const agents = await fake.agents.list({ limit: 1 })
+    const keyCursor = agents.next_page
+    expect(seqCursor).not.toBeNull()
+    expect(keyCursor).not.toBeNull()
+
+    // The server answers 400 `invalid_request_error` for either mix-up — its query schema
+    // refuses a string that is no cursor at all, its store refuses a cursor of the wrong
+    // kind — and the fake answers the same instead of serving page 1.
+    await expect(fake.sessions.list({ page: seqCursor ?? undefined })).rejects.toMatchObject({
+      status: 400,
+      type: 'invalid_request_error',
+    })
+    await expect(fake.agents.list({ page: seqCursor ?? undefined })).rejects.toMatchObject({
+      status: 400,
+      type: 'invalid_request_error',
+    })
+    await expect(
+      fake.sessions.events.list(fake.session.id, { page: keyCursor ?? undefined }),
+    ).rejects.toMatchObject({ status: 400, type: 'invalid_request_error' })
+    await expect(fake.sessions.list({ page: 'page_not-a-cursor' })).rejects.toMatchObject({
+      status: 400,
+      type: 'invalid_request_error',
+    })
+    await expect(
+      fake.sessions.events.list(fake.session.id, { page: 'nonsense' }),
+    ).rejects.toMatchObject({ status: 400, type: 'invalid_request_error' })
+
+    // The refusal names what the server's refusal names.
+    await expect(
+      fake.sessions.events.list(fake.session.id, { page: keyCursor ?? undefined }),
+    ).rejects.toThrow('listEvents takes a seq cursor, but got a key cursor')
+
+    // And the cursor of the right kind still pages, so the check refuses only what it must.
+    const rest = await fake.agents.list({ limit: 1, page: keyCursor ?? undefined })
+    expect(rest.data).toHaveLength(1)
+    expect(rest.next_page).toBeNull()
+  })
+
   it('rejects an unknown agent or session the way the server does', async () => {
     const fake = createFakeClient()
 
@@ -601,6 +659,76 @@ describe('the fake resources', () => {
     })
   })
 
+  it('refuses an inline model id that is not provider/model, like the server (#94)', async () => {
+    const fake = createFakeClient()
+
+    // `gpt-4.1-mini`, `openai/`, `/gpt-4.1-mini` and `openai//gpt-4.1-mini` all fail the
+    // server's shape check; the fake has to refuse them too, or a picker tested here can
+    // ship ids the server answers 400 for.
+    for (const id of ['gpt-4.1-mini', 'openai/', '/gpt-4.1-mini', 'openai//gpt-4.1-mini']) {
+      await expect(fake.sessions.create({ model: { id } })).rejects.toMatchObject({
+        status: 400,
+        type: 'invalid_request_error',
+      })
+    }
+
+    // A shape check, not a catalogue lookup: an unknown but well-formed id is accepted.
+    const session = await fake.sessions.create({ model: { id: 'acme/unknown' } })
+    expect(session.model).toEqual({ id: 'acme/unknown' })
+  })
+
+  it('names a session after its first message, once, as the server does (#29)', async () => {
+    const fake = createFakeClient()
+    fake.respondWith('ok')
+
+    const session = await fake.sessions.create({ model: { id: 'openai/gpt-4.1-mini' } })
+    expect(session.title).toBeNull()
+
+    await fake.sendMessage(session.id, '  Fix the SSE reload bug\nand then explain')
+    // The title is the first non-empty line, whitespace collapsed — and the same read
+    // (`sessions.get`) the web app's header and sidebar use shows it.
+    await expect(fake.sessions.get(session.id)).resolves.toMatchObject({
+      title: 'Fix the SSE reload bug',
+    })
+
+    await fake.sendMessage(session.id, 'a second message')
+    await expect(fake.sessions.get(session.id)).resolves.toMatchObject({
+      title: 'Fix the SSE reload bug',
+    })
+
+    // A title supplied at creation is never replaced.
+    const titled = await fake.sessions.create({
+      title: 'Already named',
+      model: { id: 'openai/gpt-4.1-mini' },
+    })
+    await fake.sendMessage(titled.id, 'this must not rename it')
+    await expect(fake.sessions.get(titled.id)).resolves.toMatchObject({ title: 'Already named' })
+
+    // A session created with a message is named in the creating request, so the creation
+    // response — not just a later read — carries the title.
+    const born = await fake.sessions.create({
+      model: { id: 'openai/gpt-4.1-mini' },
+      initial_events: [{ type: 'user.message', content: [{ type: 'text', text: 'name me' }] }],
+    })
+    expect(born.title).toBe('name me')
+
+    // A first line longer than the protocol's limit is cut with the ellipsis, exactly as the
+    // server cuts it — the length is the protocol's, never over it.
+    const long = await fake.sessions.create({ model: { id: 'openai/gpt-4.1-mini' } })
+    await fake.sendMessage(long.id, 'x'.repeat(SESSION_TITLE_MAX_LENGTH + 50))
+    const longTitle = (await fake.sessions.get(long.id)).title
+    expect(longTitle).toHaveLength(SESSION_TITLE_MAX_LENGTH)
+    expect(longTitle?.endsWith('…')).toBe(true)
+
+    // A message with no text to name it after leaves the title null.
+    const blank = await fake.sessions.create({ model: { id: 'openai/gpt-4.1-mini' } })
+    await fake.sessions.events.send(blank.id, {
+      type: 'user.message',
+      content: [{ type: 'text', text: '   ' }],
+    })
+    await expect(fake.sessions.get(blank.id)).resolves.toMatchObject({ title: null })
+  })
+
   it('lists a model-first session, and never under an agent filter', async () => {
     const fake = createFakeClient()
 
@@ -660,6 +788,93 @@ describe('the fake resources', () => {
     })
 
     expect(page.data.map((event) => event.type)).toEqual([EVENT_TYPES.agentMessage])
+  })
+})
+
+describe('the fake answers the server’s validation envelope (#121)', () => {
+  it('refuses an agent body the protocol rejects, instead of a raw parse error', async () => {
+    const fake = createFakeClient()
+
+    const badCreate = { name: '', model: { id: 'anthropic/claude-sonnet-5' } }
+    // The protocol's schema is the server's check; the fake must answer its 400.
+    expect(CreateAgentRequestSchema.safeParse(badCreate).success).toBe(false)
+    await expect(fake.agents.create(badCreate)).rejects.toMatchObject({
+      status: 400,
+      type: 'invalid_request_error',
+    })
+    // A refused create stores nothing.
+    expect((await fake.agents.list()).data.map((agent) => agent.name)).toEqual(['Summarizer'])
+
+    // An update goes through the update schema — and a refused one leaves the agent alone.
+    const badUpdate = { name: '' }
+    expect(UpdateAgentRequestSchema.safeParse(badUpdate).success).toBe(false)
+    await expect(fake.agents.update(fake.agent.id, badUpdate)).rejects.toMatchObject({
+      status: 400,
+      type: 'invalid_request_error',
+    })
+    expect((await fake.agents.get(fake.agent.id)).name).toBe(fake.agent.name)
+
+    // The server parses the body before it looks the agent up, so a malformed body on an
+    // unknown id is the 400, not the 404.
+    await expect(fake.agents.update(newAgentId(), { name: '' })).rejects.toMatchObject({
+      status: 400,
+      type: 'invalid_request_error',
+    })
+  })
+
+  it('refuses events the protocol rejects, and stores what the schema parsed', async () => {
+    const fake = createFakeClient()
+
+    // A text block the protocol refuses — statically fine, empty at runtime.
+    const emptyText = {
+      type: 'user.message' as const,
+      content: [{ type: 'text' as const, text: '' }],
+    }
+    expect(UserMessageEventInputSchema.safeParse(emptyText).success).toBe(false)
+    await expect(fake.sessions.events.send(fake.session.id, emptyText)).rejects.toMatchObject({
+      status: 400,
+      type: 'invalid_request_error',
+    })
+
+    // An empty batch: `SendEventsRequestSchema` requires at least one event.
+    expect(SendEventsRequestSchema.safeParse({ events: [] }).success).toBe(false)
+    await expect(fake.sessions.events.send(fake.session.id, [])).rejects.toMatchObject({
+      status: 400,
+      type: 'invalid_request_error',
+    })
+
+    // An event type the protocol does not accept on this route.
+    const unknownType = { type: 'agent.message' } as unknown as UserEventInput
+    await expect(fake.sessions.events.send(fake.session.id, unknownType)).rejects.toMatchObject({
+      status: 400,
+      type: 'invalid_request_error',
+    })
+
+    // None of the refusals reached the log, so none of them started a turn.
+    expect(fake.history()).toEqual([])
+
+    // A body the schema accepts is stored as the schema parsed it: a field the server would
+    // strip is stripped here too, not stored as the caller wrote it.
+    const noisy = {
+      type: 'user.message' as const,
+      content: [{ type: 'text' as const, text: 'hello' }],
+      surprise: 'not in the protocol',
+    }
+    const response = await fake.sessions.events.send(fake.session.id, noisy)
+    expect('surprise' in (response.data[0] ?? {})).toBe(false)
+    await fake.waitForIdle()
+  })
+
+  it('refuses a message the server would refuse, before it reaches the log', async () => {
+    const fake = createFakeClient()
+
+    // `sendMessage` builds the body `POST …/events` would carry, and the server parses it
+    // with the same schema: an empty text is a 400 there, and now here too.
+    await expect(fake.sendMessage(fake.session.id, '')).rejects.toMatchObject({
+      status: 400,
+      type: 'invalid_request_error',
+    })
+    expect(fake.history()).toEqual([])
   })
 })
 
@@ -855,17 +1070,47 @@ describe("the fake's authentication", () => {
     fake.scriptDeviceLogin({ pendingPolls: 2, outcome: 'approved' })
 
     const start = await fake.auth.startDeviceLogin()
+    // The server's URI shape (A6): the web app's hash route, the code inside the fragment.
     expect(start).toEqual({
       deviceCode: 'fake_device_code',
       userCode: 'FAKE-CODE',
-      verificationUri: 'http://localhost:3000/device',
-      verificationUriComplete: 'http://localhost:3000/device?user_code=FAKE-CODE',
+      verificationUri: 'http://localhost:3000/#/device',
+      verificationUriComplete: 'http://localhost:3000/#/device?user_code=FAKE-CODE',
       interval: 0,
       expiresIn: 600,
     })
 
     const token = await fake.auth.pollDeviceLogin(start.deviceCode)
     expect(token).toBe(FAKE_SESSION_TOKEN)
+    await expect(fake.me()).resolves.toEqual(fake.user)
+  })
+
+  it('polls through a scripted slow_down the way the real client does', async () => {
+    vi.useFakeTimers()
+    const fake = createFakeClient({ authenticated: false })
+    fake.scriptDeviceLogin({ interval: 1, pendingPolls: 1, slowDownPolls: 1, outcome: 'approved' })
+
+    let settled = false
+    const polling = fake.auth.pollDeviceLogin('fake_device_code')
+    void polling.then(
+      () => {
+        settled = true
+      },
+      () => {
+        settled = true
+      },
+    )
+
+    // Poll 1 answers `authorization_pending`; poll 2 answers `slow_down`, which is where the
+    // client adds RFC 8628's five seconds to the interval — so the third poll is due at
+    // 2s + 6s, not at 2s + 1s.
+    await vi.advanceTimersByTimeAsync(1_000)
+    await vi.advanceTimersByTimeAsync(1_000)
+    await vi.advanceTimersByTimeAsync(5_999)
+    expect(settled).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(1)
+    await expect(polling).resolves.toBe(FAKE_SESSION_TOKEN)
     await expect(fake.me()).resolves.toEqual(fake.user)
   })
 

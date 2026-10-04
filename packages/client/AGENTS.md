@@ -65,8 +65,10 @@ src/
   events/sse.ts         the SSE parser over a ReadableStream
   events/stream.ts      the reconnect/resume loop around it
   internal/async.ts     sleep and a small async queue (the fake's plumbing)
+  internal/events.ts    isEventList: one user event or a list, shared by the client and the fake
   testing/index.ts      createFakeClient
   testing/fake-brain.ts the fake's turn loop: log, scripts, subscribers
+  testing/titles.ts     the server's session-naming rule, restated for the fake
   testing/freeze.ts     deepFreeze: the fakes hand out frozen events (D9)
   test-support/         test-only helpers (mock fetch, response builders)
 ```
@@ -455,8 +457,21 @@ the seeded agent's configuration, the way one created from that agent would.
 model-first session — `agent: null`, the model it runs, `system: null` unless given — and
 `{ agent }` for one snapshotted from a preset, with `model`/`system` overriding what the
 preset contributes. A body that matches neither is refused with the server's 400
-`invalid_request_error`, and the created session runs the model it was created from, so a
-turn's `span.model_request_start` carries that model.
+`invalid_request_error`; an inline `model.id` that is not the router's `provider/model` shape
+is refused the same way, exactly where the server checks it (issue #94, `sessions.create`
+only — agent bodies are not shape-checked, because the server does not check them either);
+and the created session runs the model it was created from, so a turn's
+`span.model_request_start` carries that model.
+
+**A session is named by its first message, in the fake too** (#29, #105). The request that
+stores the first `user.message` — `sendMessage`, `events.send` and the `initial_events` of
+`sessions.create` alike — derives the title from it with the server's rule (the first
+non-empty line, whitespace collapsed, cut to `SESSION_TITLE_MAX_LENGTH` with an ellipsis;
+`src/testing/titles.ts` restates `apps/server/src/titles.ts` for the fake), and never over a
+title that exists. The naming _replaces_ the brain's session object rather than mutating it,
+so a caller holding an earlier read keeps its stale `title: null` until it re-reads — the
+one-re-read flow the frontends have (#35) — while `fake.session` and later reads carry the
+title immediately.
 
 `sessions.delete(id)` deletes a session the way the route does (#111): one final
 `session.deleted` event is delivered to that session's subscribers — the streams close behind
@@ -466,22 +481,37 @@ answer the 404 `not_found_error` an unknown id gets, as does deleting it a secon
 session's live `model`, so the next turn's `span.model_request_start` carries it — while a
 session created with a model still runs the model it was created with.
 
-| scripting                  | what it does                                                                                         |
-| -------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `respondWith(text, opts?)` | queue a reply for the next model request; `chunks` a count or the exact fragments, `delayMs` a pace  |
-| `failWith(opts?)`          | queue a failure: `type`, `message`, `retryStatus` (`retrying` keeps the turn alive, the rest end it) |
-| `scriptDeviceLogin(opts?)` | script the device flow `oh login` runs: `pendingPolls`, `outcome`, and the codes it reports          |
-| `waitForIdle(sessionId?)`  | resolve when the session's turn — retries included — has finished                                    |
-| `history(sessionId?)`      | the session's stored event log, in order                                                             |
+**The fake refuses what the server refuses, the way the server refuses it** (#121). Bodies go
+through the same protocol schemas the routes parse them with — `agents.create` and
+`agents.update` with their request schemas, `events.send` (and `sendMessage`) with
+`SendEventsRequestSchema` / `UserMessageEventInputSchema`, `sessions.create` with
+`CreateSessionRequestSchema` plus the model-id shape check — and what the schema parsed is
+what is stored, so an unknown field is stripped rather than kept. Every refusal is the
+server's 400: `invalid_request_error`, the message composed exactly as
+`apps/server/src/http/errors.ts` composes it. And a `page` cursor is checked for kind:
+`agents`/`sessions` lists take a `key` cursor and the events list takes a `seq` cursor, and
+the other kind — or a string that is no cursor at all — is the same 400 the server answers,
+never a silent page 1.
+
+| scripting                  | what it does                                                                                                 |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `respondWith(text, opts?)` | queue a reply for the next model request; `chunks` a count or the exact fragments, `delayMs` a pace          |
+| `failWith(opts?)`          | queue a failure: `type`, `message`, `retryStatus` (`retrying` keeps the turn alive, the rest end it)         |
+| `scriptDeviceLogin(opts?)` | script the device flow `oh login` runs: `pendingPolls`, `slowDownPolls`, `outcome`, and the codes it reports |
+| `waitForIdle(sessionId?)`  | resolve when the session's turn — retries included — has finished                                            |
+| `history(sessionId?)`      | the session's stored event log, in order                                                                     |
 
 **Authentication is simulated too.** The fake is signed in unless `authenticated: false`, in
 which case every `/v1` method — `me`, the credentials, the catalog, the streams — rejects with
 `AuthenticationError`, the way a 401 answers. `fake.auth` implements the device flow with the
 same contract as the real one (it sleeps between polls, so `interval` defaults to 0 in the
-script to keep tests instant): `startDeviceLogin()` reports deterministic codes,
-`pollDeviceLogin` answers `authorization_pending` for `pendingPolls` polls and then resolves
-with `FAKE_SESSION_TOKEN` — signing the fake in — or throws a `DeviceLoginError` for `denied`
-and `expired`. `signOut()` signs it out again.
+script to keep tests instant): `startDeviceLogin()` reports deterministic codes — the server's
+URI shape, `<base>/#/device` with `?user_code=…` inside the fragment (A6), not a query before
+the hash — `pollDeviceLogin` answers `authorization_pending` for `pendingPolls` polls and
+`slow_down` for the next `slowDownPolls`, adding five seconds to its interval on each
+`slow_down` exactly as the real client does (the constant is shared with `resources/auth.ts`,
+not restated), and then resolves with `FAKE_SESSION_TOKEN` — signing the fake in — or throws a
+`DeviceLoginError` for `denied` and `expired`. `signOut()` signs it out again.
 
 ```ts
 const fake = createFakeClient({ authenticated: false })
@@ -547,6 +577,20 @@ Details that follow the server and can surprise a test:
   derives it from `event_claims`. A test that tries to rewrite an emitted event fails at the
   attempt instead of corrupting what other readers see.
 
+Deliberate differences, so a test does not read more into the fake than is there:
+
+- **No network, and no pace-based limits.** A request never fails for transport reasons, and
+  the server's guards that exist because of how fast a caller is going are not simulated:
+  `models.list` never answers the 429 its once-a-minute refresh limit produces, and the device
+  flow's `slow_down` is scripted by position (`slowDownPolls`) rather than decided from the
+  pace of the polls. What the scripted answers _make the client do_ — the interval the poll
+  loop grows to — is the real client's behaviour, because the constant is shared.
+- **One user, one process.** There is no second account to prove isolation against and no
+  cross-instance ordering to worry about, so the fake never answers the 404 an
+  ownership-scoped route gives another user's resource.
+- **A malformed path id is a 404, not the 400 the server's id schemas give it.** The fake
+  looks an id up as given; only bodies and cursors go through the protocol's schemas.
+
 ## Testing
 
 `src/**/*.test.ts` with Vitest: `node` everywhere except `src/browser.test.ts`, which declares
@@ -561,10 +605,12 @@ polling with fake timers (`src/auth.test.ts`), the SSE parser's edge cases, reco
 without a reconnect), every transcript rule (the model-switch marker and the deleted flag
 included), one scripted D9 session folded from five different client views that must all
 converge on the same conversation, frozen events through the reducer, the fake's own auth
-(signed-out 401s, credentials, preferences, the scripted device flow), a deleted fake
-session's final event and the 404s that follow it, and the fake against the real client on the
-same scripted scenario (the fake's events are replayed to the real client as an SSE body, and
-the two transcripts must be equal).
+(signed-out 401s, credentials, preferences, the scripted device flow — `slow_down` included),
+the fake's naming of a session from its first message, its 400s and cursor kinds (each case
+asserted against the protocol schema that refuses it), a deleted fake session's final event
+and the 404s that follow it, and the fake against the real client on the same scripted
+scenario (the fake's events are replayed to the real client as an SSE body, and the two
+transcripts must be equal).
 
 ## Allowed `@openharness/*` dependencies
 
