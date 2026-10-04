@@ -1,5 +1,5 @@
 import { ApiError, createClient } from '@openharness/client'
-import { ApiErrorBodySchema } from '@openharness/protocol'
+import { ApiErrorBodySchema, isStoredEvent } from '@openharness/protocol'
 import { DEV_LOGIN_EMAIL, DEV_LOGIN_PASSWORD, SESSION_INVALID_MESSAGE } from '@openharness/server'
 import { describe, expect, it } from 'vitest'
 
@@ -359,7 +359,7 @@ describe('a server that authenticates', () => {
     const stream = collectStream(client, session.id)
     const before = await client.sendMessage(session.id, 'before the sign-out')
     await stream.waitFor(
-      (events) => events.some((event) => event.seq === before.seq),
+      (events) => events.some((event) => isStoredEvent(event) && event.seq === before.seq),
       'the stream to deliver a turn while the session is valid',
     )
     await stream.stop()
