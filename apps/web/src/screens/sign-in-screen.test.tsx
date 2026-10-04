@@ -31,13 +31,14 @@ describe('SignInScreen', () => {
     serveAuthConfig({ providers: ['github'], dev_login: false })
     const fake = makeFake({ authenticated: false })
 
-    renderApp(fake, { hash: '#/agents' })
+    renderApp(fake, { hash: '#/settings' })
 
     expect(
       await screen.findByRole('heading', { name: 'Sign in to openharness' }),
     ).toBeInTheDocument()
-    // The app itself is not behind it: no sidebar, no agents screen.
-    expect(screen.queryByRole('link', { name: 'Agents' })).not.toBeInTheDocument()
+    // The app itself is not behind it: no sidebar, no screens.
+    expect(screen.queryByRole('link', { name: 'Settings' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'New chat' })).not.toBeInTheDocument()
   })
 
   it('draws one button per enabled provider, with a mark and a spoken label', async () => {
@@ -107,7 +108,7 @@ describe('SignInScreen', () => {
       password: 'dev',
     })
     // Back on the chat the reader was trying to open — the same hash, now with a session.
-    expect(await screen.findByRole('heading', { name: 'Summarizer' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Claude Sonnet 5' })).toBeInTheDocument()
     expect(window.location.hash).toBe(`#/s/${fake.session.id}`)
   })
 
@@ -163,8 +164,8 @@ describe('SignInScreen', () => {
     serveAuthConfig({ providers: ['github'], dev_login: false })
     const fake = makeFake()
 
-    renderApp(fake, { hash: '#/agents' })
-    expect(await screen.findByRole('link', { name: 'Agents' })).toBeInTheDocument()
+    renderApp(fake, { hash: '#/settings' })
+    expect(await screen.findByRole('link', { name: 'Settings' })).toBeInTheDocument()
     expect(screen.getByText(fake.user.email)).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Sign out' }))
@@ -180,14 +181,14 @@ describe('SignInScreen', () => {
     serveAuthConfig({ providers: ['github'], dev_login: false })
     const fake = makeFake()
 
-    renderApp(fake, { hash: '#/agents' })
-    await user.type(await screen.findByLabelText('Name'), 'Later')
-    await user.type(screen.getByLabelText('Model'), 'anthropic/claude-sonnet-5')
+    renderApp(fake, { hash: '#/new' })
+    // The catalog is loaded while the session is still good; the write that follows is not.
+    await screen.findByRole('button', { name: 'Create chat' })
 
     // The session is revoked behind the app's back — a sign-out in another tab, an expired
     // cookie. The next write answers 401, and that is the whole trigger.
     await fake.auth.signOut()
-    await user.click(screen.getByRole('button', { name: 'Create agent' }))
+    await user.click(screen.getByRole('button', { name: 'Create chat' }))
 
     expect(
       await screen.findByRole('heading', { name: 'Sign in to openharness' }),

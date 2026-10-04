@@ -30,7 +30,51 @@ export async function createDevFakeClient(): Promise<Client | null> {
   }
 
   const { createFakeClient } = await import('@openharness/client/testing')
-  const fake = createFakeClient()
+  // A small catalog across two providers — one of them fallen back to the registry — so the
+  // New chat picker's grouping, context windows and fallback note are all visible in fake
+  // mode (#91), not just a single row.
+  const fake = createFakeClient({
+    models: [
+      {
+        id: 'anthropic/claude-sonnet-5',
+        provider: 'anthropic',
+        name: 'Claude Sonnet 5',
+        context_window: 200_000,
+        max_output_tokens: 64_000,
+        source: 'provider',
+      },
+      {
+        id: 'openai/gpt-5.1',
+        provider: 'openai',
+        name: 'GPT-5.1',
+        context_window: 400_000,
+        max_output_tokens: 128_000,
+        source: 'registry',
+      },
+      {
+        id: 'openai/gpt-5.1-mini',
+        provider: 'openai',
+        name: 'GPT-5.1 mini',
+        context_window: 400_000,
+        max_output_tokens: 128_000,
+        source: 'registry',
+      },
+    ],
+    providers: [
+      {
+        provider: 'anthropic',
+        status: 'ok',
+        fetched_at: '2026-10-04T10:00:00.000Z',
+        message: null,
+      },
+      {
+        provider: 'openai',
+        status: 'fallback',
+        fetched_at: null,
+        message: 'The provider timed out.',
+      },
+    ],
+  })
   await seedFakeScenario(fake)
 
   // Handy while clicking through the UI: `__openharnessFake.history()` in the console.
@@ -42,10 +86,11 @@ export async function createDevFakeClient(): Promise<Client | null> {
 /**
  * The scenario the fake starts with.
  *
- * The smallest one that exercises the UI: a second agent so the new-chat picker has a choice,
- * a second session with a turn already in its log so the sidebar is not empty, and two
- * scripted replies so the first messages stream instead of arriving whole. When the scripts
- * run out the fake answers `Fake reply: <your message>` on its own.
+ * The smallest one that exercises the UI: a second agent, a second session created from it —
+ * an agent-created session still has to open and work (#91) — a turn already in its log so
+ * the sidebar is not empty, and two scripted replies so the first messages stream instead of
+ * arriving whole. When the scripts run out the fake answers `Fake reply: <your message>` on
+ * its own.
  *
  * Exported so a test can seed one and read the scenario back.
  */
@@ -53,7 +98,8 @@ export async function seedFakeScenario(fake: FakeClient): Promise<void> {
   const assistant = await fake.agents.create({
     name: 'Assistant',
     description: 'A second agent, so the new-chat picker has something to pick.',
-    model: { id: 'anthropic/claude-opus-5-5' },
+    // A catalog model, so the seeded session's label is a display name, not an id.
+    model: { id: 'openai/gpt-5.1-mini' },
     system: 'You are a helpful assistant.',
   })
 

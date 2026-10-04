@@ -14,7 +14,7 @@ import type { BrowserAuthClient } from './auth-client'
  * panels.
  *
  * It is a module-level store rather than React state because the callers are not components:
- * `use-session`, `use-sessions`, `use-agents` and the credentials hook catch errors, and they
+ * `use-session`, `use-sessions`, `use-models` and the credentials hook catch errors, and they
  * are the ones that know a 401 when they see one.
  *
  * The state is **per client instance**. A test (or a settings change) builds a new client,

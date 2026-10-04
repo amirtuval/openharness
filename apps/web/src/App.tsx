@@ -9,13 +9,14 @@ import { ClientProvider, useClient } from './components/client-provider'
 import { SIDEBAR_ID, Sidebar } from './components/sidebar'
 import { Button } from './components/ui/button'
 import { useAuthState } from './hooks/use-auth'
+import { useModels } from './hooks/use-models'
 import { useRoute } from './hooks/use-route'
 import { useSessions } from './hooks/use-sessions'
 import { useSettings } from './hooks/use-settings'
 import { createBrowserAuthClient } from './lib/auth-client'
 import { beginSessionCheck, signOutSession } from './lib/auth-store'
+import { modelNameLookup } from './lib/models'
 import { navigate, routeToHash, type Route } from './lib/router'
-import { AgentsScreen } from './screens/agents-screen'
 import { DeviceScreen } from './screens/device-screen'
 import { HomeScreen } from './screens/home-screen'
 import { NewChatScreen } from './screens/new-chat-screen'
@@ -165,6 +166,10 @@ function AppFrame({
 }) {
   const client = useClient()
   const { sessions, loading, error, truncated, create } = useSessions(client)
+  // The catalog is loaded once here, for the whole shell: the New chat picker offers it, and
+  // the sidebar and the chat header label untitled sessions with its display names (#91).
+  const catalog = useModels(client)
+  const nameOf = useMemo(() => modelNameLookup(catalog.models), [catalog.models])
 
   const [drawerOpen, setDrawerOpen] = useState(false)
   const panelRef = useRef<HTMLElement>(null)
@@ -232,6 +237,7 @@ function AppFrame({
           open={drawerOpen}
           onNavigate={closeDrawer}
           panelRef={panelRef}
+          nameOf={nameOf}
         />
         <main className="flex min-h-0 min-w-0 flex-1 flex-col">
           <div className="flex items-center gap-2 border-b px-3 py-2 md:hidden">
@@ -255,11 +261,9 @@ function AppFrame({
           {route.name === 'chat' ? (
             // Keyed by session: opening another chat mounts a fresh transcript and stream
             // rather than mutating one in place.
-            <ChatView key={route.sessionId} sessionId={route.sessionId} />
+            <ChatView key={route.sessionId} sessionId={route.sessionId} nameOf={nameOf} />
           ) : route.name === 'new' ? (
-            <NewChatScreen createSession={create} />
-          ) : route.name === 'agents' ? (
-            <AgentsScreen />
+            <NewChatScreen createSession={create} catalog={catalog} />
           ) : route.name === 'settings' ? (
             <SettingsScreen />
           ) : route.name === 'device' ? (

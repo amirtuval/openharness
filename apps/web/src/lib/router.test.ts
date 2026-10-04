@@ -7,7 +7,6 @@ describe('parseRoute', () => {
     expect(parseRoute('')).toEqual({ name: 'home' })
     expect(parseRoute('#/')).toEqual({ name: 'home' })
     expect(parseRoute('#/new')).toEqual({ name: 'new' })
-    expect(parseRoute('#/agents')).toEqual({ name: 'agents' })
     expect(parseRoute('#/settings')).toEqual({ name: 'settings' })
     expect(parseRoute('#/s/sesn_01H')).toEqual({ name: 'chat', sessionId: 'sesn_01H' })
   })
@@ -16,6 +15,8 @@ describe('parseRoute', () => {
     expect(parseRoute('#/nonsense')).toEqual({ name: 'home' })
     expect(parseRoute('#/s/')).toEqual({ name: 'home' })
     expect(parseRoute('#/s')).toEqual({ name: 'home' })
+    // #91: agents are hidden from the UI, so the route is gone — an old link lands home.
+    expect(parseRoute('#/agents')).toEqual({ name: 'home' })
   })
 
   it('decodes a session id from the hash', () => {
@@ -29,7 +30,6 @@ describe('parseRoute', () => {
     const routes: Route[] = [
       { name: 'home' },
       { name: 'new' },
-      { name: 'agents' },
       { name: 'settings' },
       { name: 'chat', sessionId: 'sesn_01H' },
     ]

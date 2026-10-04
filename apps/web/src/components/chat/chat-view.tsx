@@ -3,6 +3,7 @@ import { useEffect, useRef } from 'react'
 import { useClient } from '../client-provider'
 import { useSession } from '../../hooks/use-session'
 import { shortId, sessionLabel } from '../../lib/format'
+import type { ModelNameLookup } from '../../lib/models'
 import { settingsHash } from '../../lib/router'
 import { Composer } from './composer'
 import { ErrorBanner } from './error-banner'
@@ -15,7 +16,18 @@ import { StatusIndicator } from './status-indicator'
  * All of it is `useSession(client, sessionId)` — the hook loads the history, follows the live
  * stream, and owns the transcript; this screen only decides what it looks like.
  */
-export function ChatView({ sessionId }: { sessionId: string }) {
+export function ChatView({
+  sessionId,
+  nameOf,
+}: {
+  sessionId: string
+  /**
+   * The catalog lookup behind the label (#91): an untitled session is headed by its model's
+   * display name, or by the `provider/model` id when the catalog does not know it. The agent
+   * is never named — a chat is started from a model now (epic #92).
+   */
+  nameOf?: ModelNameLookup | undefined
+}) {
   const client = useClient()
   const {
     session,
@@ -41,15 +53,10 @@ export function ChatView({ sessionId }: { sessionId: string }) {
       <header className="flex items-center justify-between gap-4 border-b px-4 py-3">
         <div className="min-w-0">
           <h1 className="truncate text-sm font-medium">
-            {session === null ? shortId(sessionId) : sessionLabel(session)}
+            {session === null ? shortId(sessionId) : sessionLabel(session, nameOf)}
           </h1>
           <p className="truncate text-xs text-muted-foreground">
-            {session === null
-              ? 'Loading…'
-              : // The agent, when there is one, and the model the session runs — its own
-                // field since #93, always set. The model-first header #91 specifies lands
-                // with the model picker.
-                `${session.agent?.name ?? 'Model'} · ${session.model.id}`}
+            {session === null ? 'Loading…' : session.model.id}
           </p>
         </div>
         <StatusIndicator status={status} retrying={lastError?.retryStatus === 'retrying'} />

@@ -14,7 +14,8 @@ Everything the chat shows comes from `@openharness/client`:
 
 There is deliberately no second store: no message cache, no "optimistic" layer, no
 per-session state in a context. The app is a renderer for one transcript plus two questions —
-"which session?" (the route) and "which agents exist?" (a list).
+"which session?" (the route) and "which models can these keys use?" (the catalog, loaded once
+in the shell — #91, below).
 
 `useSession(client, sessionId)` is the whole of that. It is also why a reload works: the log
 is the state, so opening a session after a reload is the same code path as opening it the
@@ -86,6 +87,59 @@ as they arrive, Stop next to Send).
 `react-markdown` + `remark-gfm`, with the elements styled by hand in `markdown.tsx` instead
 of pulling in a typography plugin. No `rehype-raw`: a message cannot inject HTML, so no
 sanitizer is needed.
+
+## Model-first New chat, and why agents are hidden (#91)
+
+The maintainer decision behind epic #92: **chatting must not require an agent**. New chat is
+one screen with one question — which model? — and the answer comes from the account's own
+keys, not from a hardcoded list. The old `MODEL_SUGGESTIONS` (five ids, blind to which
+providers the user had keys for) is deleted; the only model list the app offers is the one
+`GET /v1/models` answers, plus the picker's free-text escape hatch, because the router accepts
+`provider/model` ids the catalog may not know.
+
+**One catalog for the shell.** `useModels(client)` lives in `AppFrame`, not in the screen, and
+that is the whole sharing story: the picker offers the entries, and the sidebar rows and the
+chat header label untitled sessions with the same entries' display names. One `GET /v1/models`
+per app load — the server caches it for an hour per user and provider — and a `refresh: true`
+call when the reader asks, which replaces the list in place so every surface updates at once.
+
+**The picker is the app's own listbox, not a `<select>`.** #87 was exactly this: a native
+popup ignores the theme and came up unreadable in dark mode. `ModelPicker` renders with the
+shadcn popover tokens (`bg-popover`, themed in both schemes) and follows the combobox pattern:
+the search field keeps focus; `aria-activedescendant` names the active option; ArrowUp/Down,
+Home/End, Enter and Escape do what they should, with Escape returning focus to the trigger.
+Every row carries the display name, the `provider/model` id, and the context window when the
+catalog has one (`formatContextWindow`: `200000` → "200K context"). Rows are grouped by
+provider in the server's order, and "Other model ID…" is always the last one: it swaps the
+panel for a `provider/model` text field instead of closing over a selection.
+
+**The states the issue names are states, not afterthoughts:**
+
+- only providers with keys — structural: the server lists models for exactly the providers
+  the caller has credentials for (C5), so the picker's groups _are_ those providers; there is
+  no client-side provider table left to disagree with it;
+- a `fallback` provider (the provider call failed or timed out and the registry stood in, C3)
+  shows "from the built-in list; the provider couldn't be reached" under its group header,
+  with the server's `message` as the `title`;
+- refresh's 429 (once a minute per user, C4) is not an error state: `refresh()` answers with
+  `{ ok: false, kind: 'rate_limit' }`, the screen shows the server's sentence inline
+  (`role="status"`) and the list that is already on screen stays exactly as it was;
+- no keys at all → an empty state that links to Settings → Model providers, and no Create
+  button to press;
+- the last model a chat was created with is the next New chat's default
+  (`lib/last-model.ts`, `localStorage`, `try`/`catch`-guarded like the settings store); with
+  nothing remembered, the catalog's first entry stands in.
+
+**Labels.** `sessionLabel(session, nameOf)` is the title, else the catalog's display name for
+`session.model.id`, else the id itself. It used to fall back to the agent's name — for
+agent-created sessions it still doesn't, on purpose (the issue says the label is the model);
+the header shows the model's id under the label so the model is always visible on a chat.
+
+**Agents: deleted from the UI, kept in the API.** The screen, the form, `useAgents`, the
+`#/agents` route and their tests are gone rather than hidden behind a flag — unreachable code
+rots, and the API still has agents as optional presets. The compatibility requirement is about
+_sessions_: one created from an agent still opens and works, because `Session.agent` is
+nullable (#93) and nothing in the chat renders it.
 
 ## Auto-scroll
 

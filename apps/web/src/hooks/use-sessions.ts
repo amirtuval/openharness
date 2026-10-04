@@ -1,5 +1,5 @@
 import type { Client } from '@openharness/client'
-import type { AgentId, Session } from '@openharness/protocol'
+import type { Session } from '@openharness/protocol'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { describeError } from '../lib/errors'
@@ -19,13 +19,13 @@ export interface SessionsView {
   readonly truncated: boolean
   /** A failed list or create, as shown inline. */
   readonly error: string | null
-  /** Create a session on `agentId`, refresh the list, and return it (`null` on failure). */
-  readonly create: (agentId: AgentId) => Promise<Session | null>
+  /** Create a model-first session on `modelId`, refresh the list, and return it (`null` on failure). */
+  readonly create: (modelId: string) => Promise<Session | null>
   /** Load the list again. */
   readonly refresh: () => void
 }
 
-/** The session list, and creating a session on an agent. */
+/** The session list, and creating a model-first session. */
 export function useSessions(client: Client): SessionsView {
   const [listed, setSessions] = useState<readonly Session[]>([])
   const [loading, setLoading] = useState(true)
@@ -94,9 +94,10 @@ export function useSessions(client: Client): SessionsView {
   }, [])
 
   const create = useCallback(
-    async (agentId: AgentId): Promise<Session | null> => {
+    async (modelId: string): Promise<Session | null> => {
       try {
-        const session = await client.sessions.create({ agent: agentId })
+        // Model-first (epic #92, #93): a session is created from a model, with no agent.
+        const session = await client.sessions.create({ model: { id: modelId } })
         setSessions((current) => [session, ...current])
         setError(null)
         return session

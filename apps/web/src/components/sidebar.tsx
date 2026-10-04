@@ -1,8 +1,9 @@
 import type { Session, User } from '@openharness/protocol'
-import { Bot, LogOut, Plus, Settings } from 'lucide-react'
+import { LogOut, Plus, Settings } from 'lucide-react'
 import type { Ref } from 'react'
 
 import { relativeTime, sessionLabel } from '../lib/format'
+import type { ModelNameLookup } from '../lib/models'
 import { MAX_PAGE_ITEMS } from '../lib/paging'
 import { chatHash } from '../lib/router'
 import { cn } from '../lib/utils'
@@ -40,6 +41,7 @@ export function Sidebar({
   open = false,
   onNavigate,
   panelRef,
+  nameOf,
 }: {
   sessions: readonly Session[]
   loading: boolean
@@ -60,6 +62,11 @@ export function Sidebar({
   onNavigate?: (() => void) | undefined
   /** The panel itself, so the shell can move focus into it when the drawer opens. */
   panelRef?: Ref<HTMLElement> | undefined
+  /**
+   * The catalog lookup a row's label uses for a session with no title yet: the model's
+   * display name, or the id when the catalog does not know it (#91). Omitted, ids show.
+   */
+  nameOf?: ModelNameLookup | undefined
 }) {
   return (
     <aside
@@ -119,7 +126,7 @@ export function Sidebar({
                     active ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/60',
                   )}
                 >
-                  <span className="truncate text-sm">{sessionLabel(session)}</span>
+                  <span className="truncate text-sm">{sessionLabel(session, nameOf)}</span>
                   <span className="truncate text-xs text-muted-foreground">
                     {session.model.id} · {relativeTime(session.created_at)}
                   </span>
@@ -137,10 +144,6 @@ export function Sidebar({
       </nav>
 
       <div className="flex flex-col gap-0.5 border-t p-2">
-        <a href="#/agents" className={NAV_LINK_CLASS} onClick={onNavigate}>
-          <Bot aria-hidden="true" className="size-4" />
-          Agents
-        </a>
         <a href="#/settings" className={NAV_LINK_CLASS} onClick={onNavigate}>
           <Settings aria-hidden="true" className="size-4" />
           Settings

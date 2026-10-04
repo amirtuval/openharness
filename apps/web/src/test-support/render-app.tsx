@@ -11,8 +11,8 @@ import { App } from '../App'
  * Render the app against a fake server.
  *
  * The hash is set before the render, because that is the app's route: `#/s/<id>` opens a
- * chat, `#/new`, `#/agents` and `#/settings` open the others. Changing it later and letting
- * the `hashchange` event do the rest is how a test navigates.
+ * chat, `#/new` and `#/settings` open the others. Changing it later and letting the
+ * `hashchange` event do the rest is how a test navigates.
  */
 export function renderApp(
   fake: FakeClient,

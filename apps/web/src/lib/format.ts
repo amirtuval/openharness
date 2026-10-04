@@ -1,16 +1,44 @@
 import type { Session } from '@openharness/protocol'
 
+import { type ModelNameLookup } from './models'
+
 /**
- * A session's label in the sidebar: its title, or the agent it runs.
+ * A session's label in the sidebar and the chat header: its title, else its model.
  *
- * A model-first session has no agent to name (issue #93), so it falls back to its model —
- * the display-name rule #91 brings to the header replaces this.
+ * Since #91 the fallback is the **model's** display name — never the agent's, now that a
+ * chat is started from a model (epic #92): the catalog's name when the catalog knows the id
+ * (`nameOf`), and the `provider/model` id itself otherwise.
  */
-export function sessionLabel(session: Session): string {
+export function sessionLabel(session: Session, nameOf?: ModelNameLookup): string {
   if (session.title !== null && session.title.trim() !== '') {
     return session.title
   }
-  return session.agent?.name ?? session.model.id
+  return nameOf?.(session.model.id) ?? session.model.id
+}
+
+/**
+ * A model id as a reader sees it: the catalog's display name, or the id when unknown.
+ */
+export function modelLabel(modelId: string, nameOf?: ModelNameLookup): string {
+  return nameOf?.(modelId) ?? modelId
+}
+
+/**
+ * A context window in tokens, short: `128K`, `1M`, `512`.
+ *
+ * The picker shows it as "128K context" next to the model id (issue #91); values that are not
+ * whole millions get one decimal (`1048576` → `1.0M`), and anything under a thousand stays
+ * itself.
+ */
+export function formatContextWindow(tokens: number): string {
+  if (tokens >= 1_000_000) {
+    const millions = tokens / 1_000_000
+    return `${Number.isInteger(millions) ? millions : millions.toFixed(1)}M`
+  }
+  if (tokens >= 1_000) {
+    return `${Math.round(tokens / 1_000)}K`
+  }
+  return `${tokens}`
 }
 
 /**

@@ -1,4 +1,5 @@
 import { AuthenticationError } from '@openharness/client'
+import type { ModelEntry } from '@openharness/protocol'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
@@ -33,8 +34,10 @@ describe('App', () => {
     const fake = makeFake()
     renderApp(fake)
 
-    expect(await screen.findByRole('heading', { name: 'Summarizer' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /Summarizer/ })).toHaveAttribute(
+    // The seeded session has no title, so it is labelled by its model's display name from
+    // the catalog (the fake's default entry) — never by the agent it was created from (#91).
+    expect(await screen.findByRole('heading', { name: 'Claude Sonnet 5' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /Claude Sonnet 5/ })).toHaveAttribute(
       'href',
       `#/s/${fake.session.id}`,
     )
@@ -226,13 +229,17 @@ describe('App', () => {
     })
   })
 
-  it('creates a chat from the new-chat screen and focuses the composer', async () => {
+  it('creates a model-first chat from the new-chat screen and focuses the composer', async () => {
     const user = userEvent.setup({ delay: null })
     const fake = makeFake()
     renderApp(fake, { hash: '#/new' })
 
-    const agentPicker = await screen.findByLabelText('Agent')
-    expect(agentPicker).toHaveValue(fake.agent.id)
+    // The picker's default is the catalog's first entry — the fake's one model — and no
+    // agent is involved anywhere on the screen.
+    const modelPicker = await screen.findByRole('button', { name: /Model/ })
+    expect(modelPicker).toHaveTextContent('Claude Sonnet 5')
+    // The old "create an agent first" onboarding is gone with the agents screen.
+    expect(screen.queryByText(/create one on the/i)).not.toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Create chat' }))
 
@@ -243,6 +250,9 @@ describe('App', () => {
 
     const listed = await fake.sessions.list()
     expect(listed.data).toHaveLength(2)
+    const created = listed.data.find((session) => session.id !== fake.session.id)
+    expect(created?.model.id).toBe('anthropic/claude-sonnet-5')
+    expect(created?.agent).toBeNull()
   })
 
   it('shows the new title in the sidebar and the header without a reload', async () => {
@@ -258,9 +268,9 @@ describe('App', () => {
       expect(window.location.hash).toMatch(/^#\/s\/sesn_/)
     })
     const sessionId = window.location.hash.replace('#/s/', '')
-    // The bug of #35: a new chat is listed and headed by the agent's name, because nothing
-    // has named the session yet.
-    expect(screen.getByRole('heading', { name: 'Summarizer' })).toBeInTheDocument()
+    // The bug of #35: a new chat is listed and headed by a fallback name, because nothing has
+    // named the session yet — since #91, the model's display name.
+    expect(screen.getByRole('heading', { name: 'Claude Sonnet 5' })).toBeInTheDocument()
 
     await user.type(await screen.findByLabelText('Message'), 'a chat about the release checklist')
     await user.click(screen.getByRole('button', { name: 'Send message' }))
@@ -280,7 +290,7 @@ describe('App', () => {
     const fake = makeFake()
     deriveSessionTitles(fake)
     renderApp(fake)
-    expect(await screen.findByRole('heading', { name: 'Summarizer' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Claude Sonnet 5' })).toBeInTheDocument()
 
     // Another writer — the CLI, a second tab — says the first thing in the open session: the
     // stream delivers the message, and the title it produced has to reach this tab too.
@@ -344,6 +354,62 @@ describe('App', () => {
   })
 })
 
+/**
+ * #91: a session is labelled by its title, else its model — never its agent — and the
+ * agents screen is gone from the UI (the API keeps it).
+ */
+describe('model-first labels, hidden agents', () => {
+  it('shows the title, else the model display name, in the sidebar and the header', async () => {
+    const fake = makeFake()
+    renderApp(fake)
+
+    // The seeded session has no title: its label is the catalog's name for its model, and the
+    // header shows the model's id under it. The agent it was created from is not named.
+    expect(await screen.findByRole('heading', { name: 'Claude Sonnet 5' })).toBeInTheDocument()
+    expect(
+      within(screen.getByRole('banner')).getByText('anthropic/claude-sonnet-5'),
+    ).toBeInTheDocument()
+    const row = sessionRows()[0] as HTMLElement
+    expect(row).toHaveTextContent('Claude Sonnet 5')
+    expect(row).toHaveTextContent('anthropic/claude-sonnet-5')
+    expect(screen.queryByText('Summarizer')).not.toBeInTheDocument()
+  })
+
+  it('falls back to the model id when the catalog does not know the model', async () => {
+    const other: ModelEntry = {
+      id: 'openai/gpt-4.1-mini',
+      provider: 'openai',
+      name: 'GPT-4.1 mini',
+      context_window: 128_000,
+      max_output_tokens: null,
+      source: 'provider',
+    }
+    // The seeded session runs anthropic/claude-sonnet-5; this catalog does not list it.
+    const fake = makeFake({ models: [other] })
+    renderApp(fake)
+
+    expect(
+      await screen.findByRole('heading', { name: 'anthropic/claude-sonnet-5' }),
+    ).toBeInTheDocument()
+  })
+
+  it('keeps the agents screen out of navigation, and its old route lands home', async () => {
+    const fake = makeFake()
+    renderApp(fake, { hash: '#/' })
+
+    const sidebar = await screen.findByRole('complementary', { name: 'Navigation' })
+    expect(within(sidebar).queryByRole('link', { name: /Agents/ })).not.toBeInTheDocument()
+    expect(within(sidebar).getByRole('link', { name: /Settings/ })).toBeInTheDocument()
+
+    // An old bookmark to the screen: the route is gone, so it opens the home screen.
+    window.location.hash = '#/agents'
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: 'openharness' })).toBeInTheDocument()
+    })
+    expect(screen.queryByRole('heading', { name: 'Agents' })).not.toBeInTheDocument()
+  })
+})
+
 /** The backdrop that covers the screen while the drawer is open. */
 function backdrop(): HTMLElement {
   const element = document.querySelector<HTMLElement>('[data-slot="sidebar-backdrop"]')
@@ -398,7 +464,7 @@ describe('the sidebar below md', () => {
 
     const sidebar = await screen.findByRole('complementary', { name: 'Navigation' })
     await user.click(screen.getByRole('button', { name: 'Navigation' }))
-    await user.click(within(sidebar).getByRole('link', { name: /Summarizer/ }))
+    await user.click(within(sidebar).getByRole('link', { name: /Claude Sonnet 5/ }))
 
     expect(sidebar).toHaveClass('max-md:hidden')
     await waitFor(() => {
@@ -432,7 +498,6 @@ describe('the sidebar below md', () => {
 
     const screens: ReadonlyArray<readonly [hash: string, heading: string]> = [
       ['#/new', 'New chat'],
-      ['#/agents', 'Agents'],
       ['#/settings', 'Settings'],
     ]
 
