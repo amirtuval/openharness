@@ -12,6 +12,7 @@ import {
   type ServerProcessOptions,
 } from './server'
 import { ensureUser } from './users'
+import { sleep } from './wait'
 
 /**
  * What one e2e test file gets: a database of its own, servers it can kill, and a client.
@@ -66,37 +67,76 @@ export interface Person {
 }
 
 /**
+ * How long a rate-limited sign-in keeps waiting the window out before it gives up.
+ *
+ * The window is ten seconds (A2), so this is three chances' worth.
+ */
+const SIGN_IN_WAIT_BUDGET_MS = 30_000
+
+/**
+ * The wait a 429 asked for, in milliseconds.
+ *
+ * Better Auth's rate limiter names the remaining window in the `X-Retry-After` header
+ * (seconds); a proxy in front of a deployment may send `Retry-After` instead. A second is
+ * added because the header is rounded to the window's edge and the retry must land inside
+ * the new window, not on the boundary.
+ */
+function rateLimitWaitMs(response: Response): number {
+  const raw = response.headers.get('x-retry-after') ?? response.headers.get('retry-after')
+  const seconds = raw === null ? Number.NaN : Number(raw)
+  return Number.isFinite(seconds) && seconds >= 0 ? (seconds + 1) * 1000 : 11_000
+}
+
+/**
  * Sign in over the dev login (A7), the way `oh login` would end up: a session token.
  *
  * Every server the harness starts is seeded with the same dev user, so a token minted by one
  * of them keeps working after the failover suite kills it and starts another on the same
  * database — the sessions live in Postgres, not in the process.
+ *
+ * Sign-in is rate-limited (A2: three attempts per ten seconds per address — the brute-force
+ * rule). The per-file session cache keeps a well-behaved file inside that budget, but a test
+ * that signs in several people of its own can trip its own limit, and a 429 is not a failure
+ * of the credentials: this waits the window the server named out and tries again, the way the
+ * QA fixtures do (`qa/support.ts`). Every other refusal is thrown at once, never retried.
  */
 export async function signIn(
   server: ServerProcess,
   options: ClientOptions = {},
 ): Promise<SignedIn> {
-  const response = await fetch(`${server.baseUrl}/api/auth/sign-in/email`, {
-    method: 'POST',
-    // The Origin a browser would send, and the one Better Auth trusts: the servers run with
-    // `NODE_ENV=production` (#79), where Better Auth's Fetch-Metadata CSRF check is on — and
-    // Node's `fetch` sends `sec-fetch-mode: cors`, which makes a sign-in without this header
-    // a `MISSING_OR_NULL_ORIGIN` refusal on a real deployment. The harness's servers are
-    // deployed at their listener address (`BETTER_AUTH_URL` defaults to exactly it), so that
-    // is the trusted origin.
-    headers: { 'content-type': 'application/json', origin: server.baseUrl },
-    body: JSON.stringify({
-      email: options.email ?? DEV_LOGIN_EMAIL,
-      password: options.password ?? DEV_LOGIN_PASSWORD,
-    }),
-  })
-  const body = (await response.json()) as { token?: string; user?: SignedIn['user'] }
-  if (!response.ok || typeof body.token !== 'string' || body.user === undefined) {
-    throw new Error(
-      `signing in at ${server.baseUrl} failed: ${response.status} ${JSON.stringify(body)}`,
-    )
+  const deadline = Date.now() + SIGN_IN_WAIT_BUDGET_MS
+  for (;;) {
+    const response = await fetch(`${server.baseUrl}/api/auth/sign-in/email`, {
+      method: 'POST',
+      // The Origin a browser would send, and the one Better Auth trusts: the servers run with
+      // `NODE_ENV=production` (#79), where Better Auth's Fetch-Metadata CSRF check is on — and
+      // Node's `fetch` sends `sec-fetch-mode: cors`, which makes a sign-in without this header
+      // a `MISSING_OR_NULL_ORIGIN` refusal on a real deployment. The harness's servers are
+      // deployed at their listener address (`BETTER_AUTH_URL` defaults to exactly it), so that
+      // is the trusted origin.
+      headers: { 'content-type': 'application/json', origin: server.baseUrl },
+      body: JSON.stringify({
+        email: options.email ?? DEV_LOGIN_EMAIL,
+        password: options.password ?? DEV_LOGIN_PASSWORD,
+      }),
+    })
+    if (response.status === 429) {
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `signing in at ${server.baseUrl} stayed rate-limited for ${String(SIGN_IN_WAIT_BUDGET_MS)}ms`,
+        )
+      }
+      await sleep(rateLimitWaitMs(response))
+      continue
+    }
+    const body = (await response.json()) as { token?: string; user?: SignedIn['user'] }
+    if (!response.ok || typeof body.token !== 'string' || body.user === undefined) {
+      throw new Error(
+        `signing in at ${server.baseUrl} failed: ${response.status} ${JSON.stringify(body)}`,
+      )
+    }
+    return { token: body.token, user: body.user }
   }
-  return { token: body.token, user: body.user }
 }
 
 // The documented dev credentials (A7), taken from the server itself so the harness and the
