@@ -1,10 +1,18 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, rmSync, statSync } from 'node:fs'
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import path from 'node:path'
 
-import { expect, type Page } from '@playwright/test'
+import { expect, type Page, type Response } from '@playwright/test'
 
-import { isRealModel } from './support'
+import { isRealModel, retryAfterMs, signInDevToken } from './support'
 
 /** The mode bits of a directory, or `null` when it is not there. */
 export function modeOf(directory: string): number | null {
@@ -285,7 +293,7 @@ function escapeHtml(text: string): string {
  *
  * `apps/tui/src/commands/auth.ts` writes it when no browser was opened — with `--no-browser`,
  * or on a machine with no display. The URL is the web app's approval route
- * (`<server>/#/device?user_code=…`), which is what {@link approveInBrowser} opens.
+ * (`<server>/#/device?user_code=…`), which is what {@link openDevicePage} opens.
  *
  * The whitespace between the words is deliberate: a pane narrower than the line breaks it
  * across two rows, and `capture-pane` reports that as a newline.
@@ -294,37 +302,73 @@ export const CLI_LOGIN_HINT = /Open (\S+) in your browser and enter the code\s+(
 const CLI_LOGGED_IN = /Logged in as (\S+) on (\S+)/
 
 /**
- * Approve a device code the way a person does: open the URL `oh login` printed and press
- * Approve on the page.
+ * How long a device page keeps being reloaded while its verify stays rate-limited.
+ *
+ * The window it may be waiting on is the code's lifetime (ten minutes), so this cannot
+ * always cover it — see {@link openDevicePage} for why that wait is not this helper's to
+ * make in full.
+ */
+const DEVICE_WAIT_BUDGET_MS = 120_000
+
+/**
+ * Open the device-approval page for a code, waiting out a rate-limited verify.
+ *
+ * The page's first call is `GET /api/auth/device` — the verify that claims the code for the
+ * signed-in reader — and the device-authorization plugin limits exactly that endpoint to
+ * **five requests per ten minutes** (the window is the code's lifetime, `DEVICE_CODE_EXPIRES_IN`).
+ * The scenarios that are about the device page (W26a/d/e, W27b, C12) spend that budget, so a
+ * repeat run against a stack whose counters are still warm can meet a 429 for the sixth.
+ * This makes that a wait rather than a failure: the server names the remaining window in
+ * `X-Retry-After` on the page's own refusal, this waits it out and reloads — the same
+ * pattern the sign-in helpers use for their limit. A refusal that names too long a wait for
+ * a scenario's timeout fails with a message saying so; nothing here can shorten the window.
+ *
+ * Any other state the page settles into — the code is not one the server issued, a code
+ * that lapsed, an approval already decided — is handed back for the caller to assert on.
  *
  * The page has to be signed in already (the device approval is a signed-in action, A6); the
  * specs hand this the session-carrying page the fixtures built.
  */
-export async function approveInBrowser(page: Page, url: string): Promise<void> {
-  await page.goto(url)
-  await expect(page.getByRole('heading', { name: 'Approve a CLI login' })).toBeVisible()
-  await page.getByRole('button', { name: 'Approve' }).click()
-  await expect(page.getByText('Approved')).toBeVisible()
-}
-
-/**
- * Run a full `oh login --no-browser`, approved in the browser, and wait for it to finish.
- *
- * @returns the printed URL and the user code, for a spec that wants to assert on them
- */
-export async function loginCli(
-  terminal: Terminal,
-  page: Page,
-): Promise<{ url: string; userCode: string }> {
-  terminal.run(ohCommand('login', '--no-browser'))
-  const hint = await terminal.waitFor(CLI_LOGIN_HINT, 30_000)
-  const [, url, userCode] = hint
-  if (url === undefined || userCode === undefined) {
-    throw new Error(`the login hint was not readable: ${hint[0]}`)
+export async function openDevicePage(page: Page, url: string): Promise<void> {
+  const deadline = Date.now() + DEVICE_WAIT_BUDGET_MS
+  /** The wait the last refusal named, or `null` when the last load was not refused. */
+  let retryMs: number | null
+  const noteRefusal = (response: Response): void => {
+    if (response.status() !== 429 || !response.url().includes('/api/auth/device')) {
+      return
+    }
+    retryMs = retryAfterMs(response.headers())
   }
-  await approveInBrowser(page, url)
-  await terminal.waitFor(CLI_LOGGED_IN, 60_000)
-  return { url, userCode }
+  page.on('response', noteRefusal)
+  try {
+    for (;;) {
+      retryMs = null
+      await page.goto(url)
+      // The page has settled when it offers a decision, shows a failure (the rate limit's own
+      // or a code the server refused), or reports one already made — everything but the
+      // "Checking the code…" moment.
+      const settled = page
+        .getByRole('button', { name: /^(Approve|Deny)$/ })
+        .or(page.getByRole('alert'))
+        .or(page.getByText(/^(Approved|Denied)$/))
+      await expect(settled.first()).toBeVisible({ timeout: 15_000 })
+      const refusal = page.getByRole('alert').filter({ hasText: /Too many requests/i })
+      if (!(await refusal.isVisible().catch(() => false))) {
+        return
+      }
+      const waitMs = retryMs ?? 11_000
+      if (Date.now() + waitMs > deadline) {
+        throw new Error(
+          `the device page stayed rate-limited: the server asks for ${String(Math.ceil(waitMs / 1000))} more ` +
+            'seconds and its `/device` window is the code lifetime (ten minutes). Restart the QA stack ' +
+            '(`docker compose up --build -d`) to reset its counters, or wait the window out, then run again.',
+        )
+      }
+      await page.waitForTimeout(waitMs)
+    }
+  } finally {
+    page.off('response', noteRefusal)
+  }
 }
 
 /** The email `oh` reported, once it has signed in. */
@@ -334,26 +378,53 @@ export async function loggedInAs(terminal: Terminal): Promise<string> {
 }
 
 /**
- * Make sure `oh` has a token for the server under test, signing in through the device flow if
- * it does not.
+ * Write the token for a server exactly where `oh login` writes it: `{ "servers": { … } }` in
+ * `$XDG_CONFIG_HOME/openharness/credentials.json`, file `0600`, directory `0700`.
+ */
+function storeCliToken(server: string, token: string): void {
+  const file = cliCredentialsPath()
+  const directory = path.dirname(file)
+  mkdirSync(directory, { recursive: true, mode: 0o700 })
+  let servers: Record<string, string> = {}
+  if (existsSync(file)) {
+    try {
+      const parsed = JSON.parse(readFileSync(file, 'utf8')) as {
+        servers?: Record<string, string>
+      }
+      servers = parsed.servers ?? {}
+    } catch {
+      // A file even `oh` could not read is replaced rather than layered onto.
+    }
+  }
+  servers[server] = token
+  writeFileSync(file, `${JSON.stringify({ servers }, null, 2)}\n`, { mode: 0o600 })
+  // `writeFileSync`'s mode only applies when the file is created; an existing one is fixed here.
+  chmodSync(file, 0o600)
+  chmodSync(directory, 0o700)
+}
+
+/**
+ * Make sure `oh` has a token for the server under test — **without** another device login.
  *
- * The scenario specs are not about signing in, and a device login takes a browser and a poll:
- * this checks with one cheap `oh whoami` and runs the flow only when the answer is "not signed
- * in" — which is also what makes it correct after a spec has signed out. The token lands in
- * the QA run's own config directory, where every `ohCommand` finds it.
+ * The scenario specs are not about signing in; they just need a signed-in CLI. The device
+ * flow's verify endpoint (`GET /api/auth/device`) allows **five requests per ten minutes**,
+ * and one full CLI pass runs more device logins than that — the scenarios that are about the
+ * flow (W26a/d/e, W27b, C12) spend the budget by themselves. Every additional login — the
+ * ones this helper would otherwise run after each scenario that signed out — would be
+ * refused until the window passed, and no scenario's timeout has room to wait ten minutes.
+ * The token therefore comes from the dev login (A7), the same door the browser fixture
+ * uses, and is stored exactly where `oh login` stores one; the device flow itself stays
+ * covered where it is the point (C12, W26a/d/e, W27b).
+ *
+ * This checks with one cheap `oh whoami` and signs in only when the answer is "not signed
+ * in" — which is also what makes it correct after a spec has signed out.
  */
 export async function ensureCliSignedIn(page: Page): Promise<void> {
   if (cliIsSignedIn()) {
     return
   }
-  // Wide on purpose: the login line names a URL and a code, and a narrow pane wraps it.
-  const terminal = new Terminal('oh-qa-login', 120, 24)
-  terminal.start()
-  try {
-    await loginCli(terminal, page)
-  } finally {
-    terminal.kill()
-  }
+  const token = await signInDevToken(page.context().request, CLI_SERVER)
+  storeCliToken(CLI_SERVER, token)
 }
 
 /** Whether `oh` holds a token the server still accepts — asked with a real request. */

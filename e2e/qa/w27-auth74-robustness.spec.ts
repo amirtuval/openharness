@@ -21,6 +21,7 @@ import {
   occurrences,
   ohCommand,
   ohCommandIn,
+  openDevicePage,
   scratchConfigHome,
   sendAndAwaitAnswer,
 } from './tmux'
@@ -132,7 +133,7 @@ test.describe('W27 §11 cross-client and robustness', () => {
     try {
       terminal.run(ohCommandIn(home, 'login', '--no-browser'))
       const hint = await terminal.waitFor(CLI_LOGIN_HINT, 30_000)
-      await devicePage.goto(hint[1] ?? '')
+      await openDevicePage(devicePage, hint[1] ?? '')
       await expect(devicePage.getByRole('heading', { name: 'Approve a CLI login' })).toBeVisible()
       await expect(devicePage.locator('[data-slot="device-user-code"]')).toBeVisible()
       await expect(devicePage.getByRole('button', { name: 'Approve' })).toBeVisible()

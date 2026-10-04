@@ -134,4 +134,26 @@ describe('the automatic default model (U4)', () => {
     await expect(client.preferences.get()).resolves.toEqual({ default_model: EXPLICIT_DEFAULT })
     expect(await listedProviders(client)).toEqual([FIRST_PROVIDER])
   })
+
+  it('leaves a default naming a keyless provider alone when its delete removes nothing (#139)', async () => {
+    const server = await harness.server()
+    const person = personFor(
+      server,
+      await harness.user(server, { email: 'ghost@default-model.test', password: 'g-password' }),
+    )
+    const { client } = person
+
+    // A default naming a provider this account has no key for at all — a hand-written
+    // preference, or a default another instance picked before its key went away. The delete
+    // removes no row, so it is not "the credential the default depends on was deleted", and
+    // the preferences must be exactly as they were: before #139 the re-pick/clear ran
+    // unconditionally and this cleared the stored default.
+    await client.preferences.put({ default_model: `${SECOND_PROVIDER}/never-saved` })
+
+    await expect(client.providerCredentials.delete(SECOND_PROVIDER)).resolves.toBeUndefined()
+    await expect(client.preferences.get()).resolves.toEqual({
+      default_model: `${SECOND_PROVIDER}/never-saved`,
+    })
+    expect(await listedProviders(client)).toEqual([])
+  })
 })
