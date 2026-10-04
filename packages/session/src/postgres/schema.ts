@@ -159,6 +159,24 @@ export interface PartitionLeasesTable {
 }
 
 /**
+ * `scheduler_instances`: which scheduler instances are alive, and when each was last seen
+ * (issue #122).
+ *
+ * One row per running instance, upserted by the instance's own heartbeat and deleted by its
+ * `stop()`. A membership is live while `last_seen` is within one lease TTL of now — the
+ * window in which the instance's leases are still being renewed — so the members a reader
+ * lists are exactly the instances whose partitions it should count when dividing the space,
+ * and a dead instance drops out at the instant its leases become stealable. Bookkeeping beside
+ * the log, like `partition_leases`: losing a row costs one heartbeat's announcement.
+ */
+export interface SchedulerInstancesTable {
+  /** The instance id — the same id `partition_leases.owner` carries; ordered, hence `collate "C"`. */
+  instance_id: string
+  /** The clock instant of the instance's last heartbeat. */
+  last_seen: Date
+}
+
+/**
  * `provider_credentials`: one user's sealed model-provider key, per provider (epic #65, A5).
  *
  * The row is a sealed blob and the metadata around it — there is no plaintext column, and
@@ -209,6 +227,7 @@ export interface PostgresSchema {
   event_claims: EventClaimsTable
   event_supersessions: EventSupersessionsTable
   partition_leases: PartitionLeasesTable
+  scheduler_instances: SchedulerInstancesTable
   provider_credentials: ProviderCredentialsTable
   user_preferences: UserPreferencesTable
 }
@@ -227,6 +246,9 @@ export type EventClaimRow = EventClaimsTable
 
 /** One row of `partition_leases`. */
 export type PartitionLeaseRow = PartitionLeasesTable
+
+/** One row of `scheduler_instances`. */
+export type SchedulerInstanceRow = SchedulerInstancesTable
 
 /** One row of `provider_credentials`. */
 export type ProviderCredentialRow = ProviderCredentialsTable

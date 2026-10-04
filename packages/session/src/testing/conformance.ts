@@ -120,6 +120,8 @@ import { type TestClock, createTestClock } from './clock'
  * - **partition signals** — delivery, fan-out to a partition's listeners, and dropping.
  * - **findSessionsNeedingWork** — pending events and open turns, scoped to partitions.
  * - **partition leases** — acquire, renew, expiry at `expires_at`, steal after expiry, release.
+ * - **scheduler membership** (#122) — a heartbeat recording an instance, the window that keeps
+ *   it live (and drops it, inclusively, at the edge), removal, and the window's argument check.
  * - **fencing** — a stale, expired, released or never-leased epoch is refused, and an unfenced
  *   write never is.
  */
@@ -2264,6 +2266,68 @@ export function runSessionStoreConformance(
         expect(
           await thrownBy(() => store.renewPartition(3, 'owner-1', lease.epoch, Number.NaN)),
         ).toBeInstanceOf(RangeError)
+      })
+    })
+
+    // ------------------------------------------------------ scheduler membership
+
+    describe('scheduler membership', () => {
+      it('records a heartbeat and lists the instance as live', async () => {
+        const { store } = await setup()
+        await store.heartbeatInstance('instance-a')
+        expect(await store.listLiveInstances(30 * SECOND)).toEqual(['instance-a'])
+      })
+
+      it('lists only the memberships seen within the window, in instance-id order', async () => {
+        const { store, clock } = await setup()
+        await store.heartbeatInstance('instance-b')
+        await store.heartbeatInstance('instance-a')
+        await store.heartbeatInstance('instance-c')
+        clock.advance(20 * SECOND)
+        await store.heartbeatInstance('instance-c')
+        // A and b were last seen exactly one window ago: at the edge a membership is gone,
+        // the same inclusive expiry a lease has at `expires_at`. C is 10 s fresh, and the
+        // answer is ordered by instance id.
+        clock.advance(10 * SECOND)
+        expect(await store.listLiveInstances(30 * SECOND)).toEqual(['instance-c'])
+      })
+
+      it('refreshes the window on a new heartbeat', async () => {
+        const { store, clock } = await setup()
+        await store.heartbeatInstance('instance-a')
+        clock.advance(20 * SECOND)
+        expect(await store.listLiveInstances(30 * SECOND)).toEqual(['instance-a'])
+        await store.heartbeatInstance('instance-a')
+        clock.advance(20 * SECOND)
+        // 40 s since the first heartbeat, 20 since the second.
+        expect(await store.listLiveInstances(30 * SECOND)).toEqual(['instance-a'])
+      })
+
+      it('drops a membership that stops heartbeating, and re-adds it when it does again', async () => {
+        const { store, clock } = await setup()
+        await store.heartbeatInstance('instance-a')
+        clock.advance(30 * SECOND + 1)
+        expect(await store.listLiveInstances(30 * SECOND)).toEqual([])
+        await store.heartbeatInstance('instance-a')
+        expect(await store.listLiveInstances(30 * SECOND)).toEqual(['instance-a'])
+      })
+
+      it('removes a membership, and removing one that is not there is a no-op', async () => {
+        const { store } = await setup()
+        await store.heartbeatInstance('instance-a')
+        await store.heartbeatInstance('instance-b')
+        await store.removeInstance('instance-a')
+        expect(await store.listLiveInstances(30 * SECOND)).toEqual(['instance-b'])
+        await store.removeInstance('instance-a')
+        await store.removeInstance('never-heartbeated')
+        expect(await store.listLiveInstances(30 * SECOND)).toEqual(['instance-b'])
+      })
+
+      it('rejects a window that is not a positive number of milliseconds', async () => {
+        const { store } = await setup()
+        expect(await thrownBy(() => store.listLiveInstances(0))).toBeInstanceOf(RangeError)
+        expect(await thrownBy(() => store.listLiveInstances(-1))).toBeInstanceOf(RangeError)
+        expect(await thrownBy(() => store.listLiveInstances(Number.NaN))).toBeInstanceOf(RangeError)
       })
     })
 

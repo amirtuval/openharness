@@ -57,6 +57,7 @@ import {
 import { deepFreeze } from '../freeze'
 import {
   assertEventIds,
+  assertLivenessWindow,
   assertTtl,
   decodeKeyPage,
   decodeSeqPage,
@@ -870,6 +871,38 @@ export class PostgresSessionStore implements SessionStore {
       .where('partition', '=', partition)
       .executeTakeFirst()
     return row?.epoch ?? 0
+  }
+
+  // ------------------------------------------------------ scheduler membership
+
+  async heartbeatInstance(instanceId: string): Promise<void> {
+    const now = this.#clock()
+    // An upsert, so the first heartbeat of an instance inserts its row and every later one
+    // only moves `last_seen` forward.
+    await sql`
+      insert into scheduler_instances (instance_id, last_seen)
+      values (${instanceId}, ${instant(now)})
+      on conflict (instance_id) do update set last_seen = excluded.last_seen
+    `.execute(this.#db)
+  }
+
+  async listLiveInstances(withinMs: number): Promise<string[]> {
+    assertLivenessWindow(withinMs)
+    const now = this.#clock()
+    // Live is `last_seen > now - withinMs`: at exactly the edge a membership is gone, the
+    // same inclusive expiry a lease has at `expires_at`, and the comparison is against the
+    // injected clock's instant, never the database's.
+    const live = await this.#db
+      .selectFrom('scheduler_instances')
+      .select('instance_id')
+      .where('last_seen', '>', instant(now - withinMs))
+      .orderBy('instance_id')
+      .execute()
+    return live.map((row) => row.instance_id)
+  }
+
+  async removeInstance(instanceId: string): Promise<void> {
+    await this.#db.deleteFrom('scheduler_instances').where('instance_id', '=', instanceId).execute()
   }
 
   // ------------------------------------------------------------------ lifecycle

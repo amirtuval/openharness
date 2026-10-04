@@ -84,6 +84,14 @@ export type { UserPreferences } from '@openharness/protocol'
  *   ({@link SessionStore.notifyAuthSessionRevoked}, epic #65, issue #76): it is what makes a
  *   revocation prompt across instances, and a holder of an open response still re-validates
  *   the session periodically in case the notification was missed.
+ * - **Membership is bookkeeping** (#122). {@link SessionStore.heartbeatInstance},
+ *   {@link SessionStore.listLiveInstances} and {@link SessionStore.removeInstance} are the
+ *   explicit membership the partition scheduler's fair share is computed from: an instance
+ *   announces itself on every heartbeat, a membership is live while `last_seen` is within the
+ *   window the reader asks for, and a graceful `stop()` removes its row. Like
+ *   {@link SessionStore.signalPartition} this is liveness, not durability — losing a row costs
+ *   one heartbeat's announcement — and like the leases it is bookkeeping beside the log, never
+ *   part of it.
  * - **Ownership** (epic #65, A4). Every agent and session belongs to exactly one user:
  *   {@link SessionStore.createAgent} and {@link SessionStore.createSession} take the owner's
  *   `user.id` and the stored resource carries it as `owner_id`. The reads a user-facing route
@@ -626,6 +634,43 @@ export interface SessionStore {
    * match it: an epoch has to have been handed out by a successful acquire.
    */
   currentEpoch(partition: number): Promise<number>
+
+  // ------------------------------------------------------ scheduler membership
+
+  /**
+   * Announce this instance as alive: upsert its row in `scheduler_instances` with `last_seen`
+   * at the clock's current instant (issue #122).
+   *
+   * Part of the partition scheduler's explicit membership: an instance heartbeats on every
+   * tick, so a live member is a row seen within one lease TTL, and "how many instances share
+   * the space?" is answered by {@link SessionStore.listLiveInstances} instead of being
+   * inferred from the leases an instance failed to take. Announcing again only moves
+   * `last_seen` forward, so the call is idempotent.
+   */
+  heartbeatInstance(instanceId: string): Promise<void>
+
+  /**
+   * The ids of the instances seen within `withinMs` of the clock's current instant, in
+   * instance-id order — this instance included once it has announced itself.
+   *
+   * A membership is live while `last_seen` is strictly after `now - withinMs`; at exactly the
+   * edge it is gone, the same inclusive expiry a lease has at `expires_at`. A caller that
+   * passes its lease TTL therefore counts exactly the instances whose leases are being
+   * renewed, and an instance that stops heartbeating — or dies — drops out at the instant its
+   * held leases stop being live.
+   *
+   * @throws RangeError when `withinMs` is not a positive, finite number
+   */
+  listLiveInstances(withinMs: number): Promise<string[]>
+
+  /**
+   * Remove this instance's membership row — a graceful `stop()` says goodbye, so peers stop
+   * counting the instance at once instead of after its last heartbeat ages out.
+   *
+   * Removing a membership that is not there is a no-op, so a shutdown path can call it
+   * unconditionally; a removed instance is live again the moment it heartbeats.
+   */
+  removeInstance(instanceId: string): Promise<void>
 }
 
 /**

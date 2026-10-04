@@ -504,9 +504,11 @@ if (target === null) {
       // no-op that leaves the schema usable, which is what makes it safe on every deploy.
       const files = await migrate(db)
       expect(files.length).toBeGreaterThan(0)
-      // `0016_user_preferences.sql` is one `create table if not exists` (#111): a re-run has
-      // to leave the table working, which the store calls below prove.
+      // `0016_user_preferences.sql` and `0017_scheduler_instances.sql` are each one
+      // `create table if not exists` (#111, #122): a re-run has to leave the tables working,
+      // which the store calls below prove.
       expect(files).toContain('0016_user_preferences.sql')
+      expect(files).toContain('0017_scheduler_instances.sql')
       expect(await migrate(db)).toEqual(files)
 
       const { store, session } = await seeded()
@@ -515,6 +517,10 @@ if (target === null) {
         default_model: 'openai/gpt-5-mini',
       })
       expect(await store.getPreferences(OWNER_A)).toEqual({ default_model: 'openai/gpt-5-mini' })
+      await store.heartbeatInstance('after-a-re-run')
+      expect(await store.listLiveInstances(30_000)).toEqual(['after-a-re-run'])
+      await store.removeInstance('after-a-re-run')
+      expect(await store.listLiveInstances(30_000)).toEqual([])
     })
 
     it('backfills model and system for a session stored before #93, and reads it back', async () => {
@@ -731,10 +737,11 @@ if (target === null) {
     // `"account"`, `"verification"`, `"deviceCode"`) are *not* truncated: the only rows in
     // them are the ones `ensureUsers` inserts per test, and a `"user"` row carries the
     // `owner_id`s everything else references. `user_preferences` is here so one test's
-    // preferences cannot leak into the next (#111).
+    // preferences cannot leak into the next (#111), and `scheduler_instances` so one test's
+    // memberships cannot (#122).
     await sql`truncate table
       events, event_claims, event_supersessions, sessions, agents, partition_leases,
-      provider_credentials, user_preferences`.execute(db)
+      scheduler_instances, provider_credentials, user_preferences`.execute(db)
   }
 }
 
