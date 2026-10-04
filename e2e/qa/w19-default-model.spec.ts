@@ -39,7 +39,8 @@ test.describe('W19 the default model in Settings', () => {
       await test.step('the card shows what the server holds', async () => {
         await page.goto('/#/settings')
         await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible()
-        await expect(page.getByText('Default model')).toBeVisible()
+        // Exact: the card's loading line says "Loading your default model…" too.
+        await expect(page.getByText('Default model', { exact: true })).toBeVisible()
         await expect(page.getByRole('button', { name: settingsTrigger })).toBeVisible()
         await shot(page, 'w19-01-settings')
       })
