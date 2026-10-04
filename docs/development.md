@@ -120,3 +120,12 @@ Notes:
 requests run turbo with `--affected` (the packages a change touches, and their dependents);
 pushes to `main` run everything. Turbo's local cache is restored between runs; there is no
 remote cache.
+
+A second job, `provider-smoke`, runs **only** `e2e/src/provider-smoke.test.ts` with the
+repository's low-limit `OPENAI_API_KEY` and `OPENHARNESS_REQUIRE_PROVIDER_SMOKE=1`. Saving a
+provider key is a real provider call, so no other automatic run exercises the route's success
+path ([#120](https://github.com/amirtuval/openharness/issues/120)); the guard makes a missing
+key a failure rather than a skip, so the job cannot pass without the test having run. It runs
+on pushes to `main`, on the nightly and manual fresh runs, and on pull requests from this
+repository — a fork PR receives no repository secrets, so the job is skipped there. The key is
+that job's alone and is never printed.
