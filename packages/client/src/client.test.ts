@@ -3,6 +3,7 @@ import {
   fixtureTimestamp,
   makeAgent,
   makeAgentMessage,
+  makeListModelsResponse,
   makeProviderCredential,
   makeSession,
   makeUser,
@@ -329,6 +330,54 @@ describe('provider credentials', () => {
     await expect(
       client.providerCredentials.put('anthropic', { type: 'api_key', api_key: 'wrong' }),
     ).rejects.toMatchObject({ status: 422, type: 'invalid_provider_credential' })
+  })
+})
+
+describe('the model catalog', () => {
+  it('lists from GET /v1/models and parses the response', async () => {
+    const catalog = makeListModelsResponse()
+    const { client, mock } = clientWith(() => jsonResponse(catalog))
+
+    const response = await client.models.list()
+
+    expect(response).toEqual(catalog)
+    expect(mock.requests[0]?.init?.method).toBe('GET')
+    expect(mock.urlOf(0)).toBe(`${BASE_URL}/v1/models`)
+    // No `refresh`, no query at all: a plain read is the cached one (C4).
+    expect(new URL(mock.urlOf(0)).search).toBe('')
+  })
+
+  it('sends refresh=true only when a refresh was asked for', async () => {
+    const { client, mock } = clientWith(() => jsonResponse(makeListModelsResponse()))
+
+    await client.models.list()
+    await client.models.list({})
+    await client.models.list({ refresh: false })
+    await client.models.list({ refresh: true })
+
+    for (const request of mock.requests.slice(0, 3)) {
+      expect(new URL(request.url).searchParams.has('refresh')).toBe(false)
+    }
+    expect(new URL(mock.urlOf(3)).searchParams.get('refresh')).toBe('true')
+  })
+
+  it('throws a validation error when the answer is not a catalog', async () => {
+    const { client } = clientWith(() => jsonResponse({ data: [makeListModelsResponse().data[0]] }))
+
+    await expect(client.models.list()).rejects.toBeInstanceOf(ResponseValidationError)
+  })
+
+  it('surfaces a too-frequent refresh as a retryable rate_limit_error', async () => {
+    const { client } = clientWith(() =>
+      errorResponse(429, 'rate_limit_error', 'Refreshed too recently; try again in a minute.'),
+    )
+
+    const failure = client.models.list({ refresh: true })
+    await expect(failure).rejects.toMatchObject({
+      status: 429,
+      type: 'rate_limit_error',
+      retryable: true,
+    })
   })
 })
 

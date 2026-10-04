@@ -6,6 +6,7 @@ import {
   newAgentId,
 } from '@openharness/protocol'
 import type { StoredEvent, StreamEvent } from '@openharness/protocol'
+import { fixtureTimestamp, makeModelEntry } from '@openharness/protocol/fixtures'
 import { describe, expect, it } from 'vitest'
 
 import { createClient } from '../client'
@@ -24,6 +25,7 @@ describe('the fake client', () => {
     expect(typeof fake.agents.create).toBe('function')
     expect(typeof fake.sessions.events.stream).toBe('function')
     expect(typeof fake.providerCredentials.put).toBe('function')
+    expect(typeof fake.models.list).toBe('function')
     expect(typeof fake.auth.startDeviceLogin).toBe('function')
     expect(fake.session.type).toBe('session')
     expect(fake.agent.type).toBe('agent')
@@ -534,6 +536,63 @@ describe('the fake resources', () => {
   })
 })
 
+describe('the fake catalog', () => {
+  it('lists the configured models sorted by provider then name, with the configured statuses', async () => {
+    const fake = createFakeClient({
+      models: [
+        makeModelEntry({ id: 'openai/gpt-5.1', provider: 'openai', name: 'GPT-5.1' }),
+        makeModelEntry({ id: 'anthropic/claude-opus-5-5', name: 'Claude Opus 5.5' }),
+        makeModelEntry({ id: 'anthropic/claude-sonnet-5', name: 'Claude Sonnet 5' }),
+      ],
+      providers: [
+        {
+          provider: 'anthropic',
+          status: 'fallback',
+          fetched_at: null,
+          message: 'The provider model list timed out.',
+        },
+        {
+          provider: 'openai',
+          status: 'ok',
+          fetched_at: fixtureTimestamp(),
+          message: null,
+        },
+      ],
+    })
+
+    const response = await fake.models.list()
+
+    expect(response.data.map((entry) => entry.id)).toEqual([
+      'anthropic/claude-opus-5-5',
+      'anthropic/claude-sonnet-5',
+      'openai/gpt-5.1',
+    ])
+    expect(response.providers.map((status) => status.provider)).toEqual(['anthropic', 'openai'])
+    expect(response.providers[0]?.status).toBe('fallback')
+  })
+
+  it('defaults to one anthropic entry with an ok status', async () => {
+    const fake = createFakeClient()
+
+    const response = await fake.models.list()
+
+    expect(response.data.map((entry) => entry.id)).toEqual(['anthropic/claude-sonnet-5'])
+    expect(response.data[0]?.source).toBe('provider')
+    expect(response.providers).toHaveLength(1)
+    expect(response.providers[0]).toMatchObject({ provider: 'anthropic', status: 'ok' })
+  })
+
+  it('records every call, so a test can see which reads asked for a refresh', async () => {
+    const fake = createFakeClient()
+
+    await fake.models.list()
+    await fake.models.list({})
+    await fake.models.list({ refresh: true })
+
+    expect(fake.modelListCalls).toEqual([{ refresh: false }, { refresh: false }, { refresh: true }])
+  })
+})
+
 describe("the fake's authentication", () => {
   it('signs in by default and answers me with its user', async () => {
     const fake = createFakeClient()
@@ -552,6 +611,7 @@ describe("the fake's authentication", () => {
       AuthenticationError,
     )
     await expect(fake.providerCredentials.list()).rejects.toBeInstanceOf(AuthenticationError)
+    await expect(fake.models.list()).rejects.toBeInstanceOf(AuthenticationError)
     await expect(fake.auth.signOut()).rejects.toBeInstanceOf(AuthenticationError)
 
     const streaming = (async () => {

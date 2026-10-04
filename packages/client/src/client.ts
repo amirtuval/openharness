@@ -10,6 +10,7 @@ import type { DebugHook, FetchLike, ResponseSchema } from './http'
 import { createTransport } from './http'
 import { createAgentsResource, type AgentsResource } from './resources/agents'
 import { createAuthResource, type AuthResource } from './resources/auth'
+import { createModelsResource, type ModelsResource } from './resources/models'
 import {
   createProviderCredentialsResource,
   type ProviderCredentialsResource,
@@ -104,6 +105,14 @@ export interface Client {
   /** The caller's model-provider credentials (epic #65, A5); write-only. */
   readonly providerCredentials: ProviderCredentialsResource
 
+  /**
+   * The model catalog (epic #92): the chat models the caller's stored provider keys can use.
+   *
+   * `models.list()` is `GET /v1/models`; `list({ refresh: true })` bypasses the server's
+   * one-hour cache and re-fetches, rate-limited to once a minute per user.
+   */
+  readonly models: ModelsResource
+
   /** Signing in (the CLI's device flow) and signing out (epic #65, A6). */
   readonly auth: AuthResource
 
@@ -161,6 +170,7 @@ export function createClient(options: ClientOptions): Client {
     agents: createAgentsResource(transport),
     sessions: createSessionsResource(transport),
     providerCredentials: createProviderCredentialsResource(transport),
+    models: createModelsResource(transport),
     auth: createAuthResource(transport),
 
     me(requestOptions) {

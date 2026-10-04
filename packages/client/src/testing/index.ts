@@ -1,5 +1,6 @@
 import {
   AgentSchema,
+  ListModelsResponseSchema,
   ProviderCredentialSchema,
   SessionSchema,
   encodeKeyCursor,
@@ -8,13 +9,16 @@ import {
   newSessionId,
   tryDecodePageCursor,
 } from '@openharness/protocol'
-import { makeAgent, makeSession, makeUser } from '@openharness/protocol/fixtures'
+import { makeAgent, makeModelEntry, makeSession, makeUser } from '@openharness/protocol/fixtures'
 import type {
   Agent,
   ListAgentsResponse,
   ListEventsResponse,
+  ListModelsResponse,
   ListProviderCredentialsResponse,
   ListSessionsResponse,
+  ModelEntry,
+  ProviderCatalogStatus,
   ProviderCredential,
   SendEventsResponse,
   Session,
@@ -110,6 +114,16 @@ export interface FakeClientOptions {
    * Pass a counter to make a test's timestamps deterministic.
    */
   now?: () => Date
+  /**
+   * The model catalog {@link Client.models} lists, in place of the default one-entry catalog
+   * (`makeModelEntry()`); served sorted by provider, then name, the way the server sorts it.
+   */
+  models?: readonly ModelEntry[]
+  /**
+   * The per-provider catalog statuses {@link Client.models} reports; defaults to an `ok`
+   * status for every provider the configured {@link models} name.
+   */
+  providers?: readonly ProviderCatalogStatus[]
 }
 
 /** A device flow, as {@link FakeClient.scriptDeviceLogin} takes it. */
@@ -172,6 +186,12 @@ export interface FakeFailureOptions {
   delayMs?: number
 }
 
+/** One `models.list` call the fake answered, as {@link FakeClient.modelListCalls} records it. */
+export interface ModelListCall {
+  /** Whether the call asked to bypass the server's cache: `refresh: true`. */
+  readonly refresh: boolean
+}
+
 /**
  * The fake client: a {@link Client} plus the scripting it needs to be a test double.
  *
@@ -197,6 +217,18 @@ export interface FakeClient extends Client {
    * A test can assert on exactly what the CLI would print, e.g. `fake.user.email`.
    */
   readonly user: User
+
+  /**
+   * Every {@link Client.models} call the fake has answered, in order, with its `refresh` flag.
+   *
+   * A component test asserts what the catalog asked the server for:
+   *
+   * ```ts
+   * await fake.models.list({ refresh: true })
+   * expect(fake.modelListCalls).toEqual([{ refresh: true }])
+   * ```
+   */
+  readonly modelListCalls: readonly ModelListCall[]
 
   /**
    * Script the device flow `oh login` runs.
@@ -272,6 +304,16 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
   const brains = new Map<string, FakeBrain>()
   const credentials = new Map<string, ProviderCredential>()
   const user = options.user ?? makeUser()
+  const models: readonly ModelEntry[] = options.models ?? [makeModelEntry()]
+  const providers: readonly ProviderCatalogStatus[] =
+    options.providers ??
+    [...new Set(models.map((entry) => entry.provider))].map((provider) => ({
+      provider,
+      status: 'ok' as const,
+      fetched_at: now().toISOString(),
+      message: null,
+    }))
+  const modelListCalls: ModelListCall[] = []
   let authenticated = options.authenticated ?? true
   let deviceFlow: FakeDeviceFlow | undefined
 
@@ -563,6 +605,22 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
     },
   }
 
+  const modelsResource: Client['models'] = {
+    async list(params, requestOptions): Promise<ListModelsResponse> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      modelListCalls.push({ refresh: params?.refresh === true })
+      // The server answers sorted by provider, then name, and validates its own wire shape;
+      // the fake does the same, so a catalog UI tested here meets what the server sends.
+      return ListModelsResponseSchema.parse({
+        data: [...models].sort(byProviderThenName),
+        providers: [...providers],
+      })
+    },
+  }
+
   const authResource: Client['auth'] = {
     startDeviceLogin(requestOptions): Promise<DeviceLoginStart> {
       throwIfAborted(requestOptions)
@@ -613,9 +671,11 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
     agent: seedAgent,
     session: seedSession,
     user,
+    modelListCalls,
     agents: agentsResource,
     sessions: sessionsResource,
     providerCredentials: providerCredentialsResource,
+    models: modelsResource,
     auth: authResource,
 
     me(requestOptions): Promise<User> {
@@ -800,6 +860,14 @@ function byCreatedAtThenId(a: Keyed, b: Keyed): number {
 /** `(created_at, id)`, newest first, the way sessions are listed. */
 function byCreatedAtThenIdDescending(a: Keyed, b: Keyed): number {
   return compareKeys(b, a)
+}
+
+/** The model catalog's order: provider, then display name. */
+function byProviderThenName(a: ModelEntry, b: ModelEntry): number {
+  if (a.provider !== b.provider) {
+    return a.provider < b.provider ? -1 : 1
+  }
+  return a.name < b.name ? -1 : a.name > b.name ? 1 : 0
 }
 
 /** One page of a `(created_at, id)`-ordered list, with the cursor to carry on from. */

@@ -58,6 +58,7 @@ src/
   transcript.ts         TranscriptState, reduceTranscript, selectors, createTranscript
   resources/agents.ts   agents.create/get/list/update
   resources/auth.ts     auth.startDeviceLogin/pollDeviceLogin/signOut, DeviceLoginError
+  resources/models.ts   models.list: the model catalog (epic #92)
   resources/provider-credentials.ts  providerCredentials.list/put/delete
   resources/sessions.ts sessions.create/get/list + sessions.events.send/list/iterate/stream
   events/sse.ts         the SSE parser over a ReadableStream
@@ -79,6 +80,7 @@ src/
 | `Client`, `ClientOptions`, `RequestOptions`                                                     | the interface both the real and the fake client implement            |
 | `AgentsResource`, `SessionsResource`, `SessionEventsResource`                                   | the resource interfaces                                              |
 | `ProviderCredentialsResource`                                                                   | `providerCredentials.list/put/delete`                                |
+| `ModelsResource`                                                                                | `models.list`: the chat models the caller's keys can use (epic #92)  |
 | `AuthResource`                                                                                  | `auth.startDeviceLogin/pollDeviceLogin/signOut`                      |
 | `OPENHARNESS_CLI_CLIENT_ID`                                                                     | the `client_id` the device flow presents: `'openharness-cli'`        |
 | `DeviceLoginError`, `DeviceLoginStart`, `PollDeviceLoginOptions`                                | the device flow's error, its start result and its poll options       |
@@ -97,6 +99,7 @@ src/
 | `createFakeClient(options?)`                                                | an in-memory `Client` with a scriptable brain and device flow                              |
 | `FakeClient`, `FakeClientOptions`, `FakeReplyOptions`, `FakeFailureOptions` | the fake's interface and the options its scripting takes                                   |
 | `FakeDeviceFlowOptions`                                                     | the script `scriptDeviceLogin` takes                                                       |
+| `ModelListCall`                                                             | one `models.list` call the fake answered, and its `refresh` flag                           |
 | `FAKE_MODEL_USAGE`, `FAKE_SESSION_TOKEN`                                    | the token usage every fake model request reports; the token the fake's device flow returns |
 
 ## The client
@@ -120,28 +123,29 @@ for await (const event of client.sessions.events.stream(session.id, { deltas: tr
 }
 ```
 
-| method                                           | wire                                         | returns                               |
-| ------------------------------------------------ | -------------------------------------------- | ------------------------------------- |
-| `me(options?)`                                   | `GET /v1/me`                                 | `User`                                |
-| `agents.create(body, options?)`                  | `POST /v1/agents`                            | `Agent`                               |
-| `agents.get(id, options?)`                       | `GET /v1/agents/{id}`                        | `Agent`                               |
-| `agents.list(params?, options?)`                 | `GET /v1/agents`                             | `{ data, next_page }`                 |
-| `agents.update(id, body, options?)`              | `POST /v1/agents/{id}`                       | `Agent`                               |
-| `sessions.create(body, options?)`                | `POST /v1/sessions`                          | `Session`                             |
-| `sessions.get(id, options?)`                     | `GET /v1/sessions/{id}`                      | `Session`                             |
-| `sessions.list(params?, options?)`               | `GET /v1/sessions`                           | `{ data, next_page }`                 |
-| `sessions.events.send(id, events, options?)`     | `POST /v1/sessions/{id}/events`              | `{ data: user event[] }`              |
-| `sessions.events.list(id, params?, options?)`    | `GET /v1/sessions/{id}/events`               | `{ data: stored event[], next_page }` |
-| `sessions.events.iterate(id, params?, options?)` | the same, page after page                    | `AsyncIterable<StoredEvent>`          |
-| `sessions.events.stream(id, options?)`           | `GET /v1/sessions/{id}/events/stream`        | `AsyncIterable<StreamEvent>`          |
-| `providerCredentials.list(options?)`             | `GET /v1/provider-credentials`               | `{ data: credential metadata[] }`     |
-| `providerCredentials.put(provider, body, …)`     | `PUT /v1/provider-credentials/{provider}`    | `ProviderCredential` (metadata only)  |
-| `providerCredentials.delete(provider, options?)` | `DELETE /v1/provider-credentials/{provider}` | `void` (the wire answers `204`)       |
-| `auth.startDeviceLogin(options?)`                | `POST /api/auth/device/code`                 | `DeviceLoginStart`                    |
-| `auth.pollDeviceLogin(code, options?)`           | `POST /api/auth/device/token`, polled        | the session token (`string`)          |
-| `auth.signOut(options?)`                         | `POST /api/auth/sign-out`                    | `void`                                |
-| `sendMessage(id, text, options?)`                | `POST …/events` with one `user.message`      | the stored `UserMessageEvent`         |
-| `interrupt(id, options?)`                        | `POST …/events` with one `user.interrupt`    | the stored `UserInterruptEvent`       |
+| method                                           | wire                                         | returns                                                      |
+| ------------------------------------------------ | -------------------------------------------- | ------------------------------------------------------------ |
+| `me(options?)`                                   | `GET /v1/me`                                 | `User`                                                       |
+| `agents.create(body, options?)`                  | `POST /v1/agents`                            | `Agent`                                                      |
+| `agents.get(id, options?)`                       | `GET /v1/agents/{id}`                        | `Agent`                                                      |
+| `agents.list(params?, options?)`                 | `GET /v1/agents`                             | `{ data, next_page }`                                        |
+| `agents.update(id, body, options?)`              | `POST /v1/agents/{id}`                       | `Agent`                                                      |
+| `sessions.create(body, options?)`                | `POST /v1/sessions`                          | `Session`                                                    |
+| `sessions.get(id, options?)`                     | `GET /v1/sessions/{id}`                      | `Session`                                                    |
+| `sessions.list(params?, options?)`               | `GET /v1/sessions`                           | `{ data, next_page }`                                        |
+| `sessions.events.send(id, events, options?)`     | `POST /v1/sessions/{id}/events`              | `{ data: user event[] }`                                     |
+| `sessions.events.list(id, params?, options?)`    | `GET /v1/sessions/{id}/events`               | `{ data: stored event[], next_page }`                        |
+| `sessions.events.iterate(id, params?, options?)` | the same, page after page                    | `AsyncIterable<StoredEvent>`                                 |
+| `sessions.events.stream(id, options?)`           | `GET /v1/sessions/{id}/events/stream`        | `AsyncIterable<StreamEvent>`                                 |
+| `providerCredentials.list(options?)`             | `GET /v1/provider-credentials`               | `{ data: credential metadata[] }`                            |
+| `providerCredentials.put(provider, body, …)`     | `PUT /v1/provider-credentials/{provider}`    | `ProviderCredential` (metadata only)                         |
+| `providerCredentials.delete(provider, options?)` | `DELETE /v1/provider-credentials/{provider}` | `void` (the wire answers `204`)                              |
+| `models.list(params?, options?)`                 | `GET /v1/models`                             | `{ data: ModelEntry[], providers: ProviderCatalogStatus[] }` |
+| `auth.startDeviceLogin(options?)`                | `POST /api/auth/device/code`                 | `DeviceLoginStart`                                           |
+| `auth.pollDeviceLogin(code, options?)`           | `POST /api/auth/device/token`, polled        | the session token (`string`)                                 |
+| `auth.signOut(options?)`                         | `POST /api/auth/sign-out`                    | `void`                                                       |
+| `sendMessage(id, text, options?)`                | `POST …/events` with one `user.message`      | the stored `UserMessageEvent`                                |
+| `interrupt(id, options?)`                        | `POST …/events` with one `user.interrupt`    | the stored `UserInterruptEvent`                              |
 
 Notes worth knowing before reading the code:
 
@@ -198,6 +202,21 @@ stored **metadata** — the key itself is never in a response, an error or a typ
 reads the metadata array; `delete` answers `204`, so it resolves `void`. `put` requires a fresh
 session server-side, and a key the provider rejects comes back as a 422
 `invalid_provider_credential`.
+
+### The model catalog
+
+`client.models.list()` is `GET /v1/models` (epic #92): the chat models the caller's stored
+provider keys can use, sorted by provider then name. `data` carries the entries — `<provider>/<model>`
+`id`, display `name`, `context_window` and `max_output_tokens` (nullable), and `source`,
+`'provider'` or `'registry'` — and `providers` one status per provider the caller has a key
+for: `ok`, or `fallback` when the provider's own list failed or timed out and the registry's
+chat models stood in.
+
+The server caches the answer in memory per user and provider for an hour;
+`list({ refresh: true })` is the one spelling that bypasses the cache (the parameter is left
+off the wire otherwise). Refreshing is rate-limited to once a minute per user, so a
+too-frequent one is answered `429 rate_limit_error` — an `ApiError` with `retryable: true`,
+which a Refresh button should surface to the user rather than retry in a loop.
 
 ### The device flow (`oh login`)
 
@@ -379,7 +398,7 @@ seeds your own, sets how slowly the stream runs, and fixes the clock.
 | `history(sessionId?)`      | the session's stored event log, in order                                                             |
 
 **Authentication is simulated too.** The fake is signed in unless `authenticated: false`, in
-which case every `/v1` method — `me`, the credentials, the streams — rejects with
+which case every `/v1` method — `me`, the credentials, the catalog, the streams — rejects with
 `AuthenticationError`, the way a 401 answers. `fake.auth` implements the device flow with the
 same contract as the real one (it sleeps between polls, so `interval` defaults to 0 in the
 script to keep tests instant): `startDeviceLogin()` reports deterministic codes,
@@ -400,6 +419,16 @@ The credential routes are an in-memory store: `put` keeps the metadata (`last4` 
 and never the key, replacing keeps `id` and `created_at`, `delete` is idempotent, and an empty
 key answers 422 `invalid_provider_credential` — the one provider rejection a test can spell
 without a provider.
+
+The model catalog is configurable too: `createFakeClient({ models, providers })` seeds what
+`models.list` answers — one `anthropic/claude-sonnet-5` entry with an `ok` status by default —
+served sorted by provider then name, the way the server sorts it. Every call is recorded, so a
+component test can assert what the picker asked for:
+
+```ts
+await fake.models.list({ refresh: true })
+expect(fake.modelListCalls).toEqual([{ refresh: true }])
+```
 
 Calls queue up, so a retry is "fail once, then succeed":
 
@@ -442,7 +471,7 @@ Details that follow the server and can surprise a test:
 `src/**/*.test.ts` with Vitest: `node` everywhere except `src/browser.test.ts`, which declares
 `@vitest-environment jsdom`. The suite drives a mock `fetch` (`src/test-support/mock-fetch.ts`)
 rather than a server: request building and response parsing (cookie and bearer, `me`, the
-credential routes), the 401 → `AuthenticationError` mapping, the device flow's polling with
+credential routes, the model catalog), the 401 → `AuthenticationError` mapping, the device flow's polling with
 fake timers (`src/auth.test.ts`), the SSE parser's edge cases, reconnect/resume (including a
 resume mid-reply, from a stored chunk), every transcript rule, one scripted D9 session folded
 from five different client views that must all converge on the same conversation, frozen events
