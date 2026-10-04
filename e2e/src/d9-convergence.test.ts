@@ -111,22 +111,34 @@ async function waitForReplyText(view: View, chars = MID_REPLY_CHARS): Promise<vo
   })
 }
 
-/** Wait until every view has folded a turn that ended: the transcripts are settled. */
+/**
+ * Wait until every view has folded a turn that ended: the transcripts are settled.
+ *
+ * `afterSeq` is what keeps the wait honest: a transcript that has folded nothing is already
+ * `idle` with nothing streaming, so a view whose subscription quietly failed would satisfy
+ * the idle check alone and let the test's later assertions fail somewhere confusing. Passing
+ * the `seq` of the turn's message makes "settled" mean "settled *after this turn*".
+ */
 async function waitForSettled(
   views: readonly View[],
-  timeoutMs = MOCK_SLOW_TOTAL_MS * 3,
+  options: { readonly afterSeq?: number; readonly timeoutMs?: number } = {},
 ): Promise<void> {
+  const afterSeq = options.afterSeq ?? 0
   await waitFor(
-    'every view to settle on an idle session',
+    `every view to settle on an idle session past seq ${String(afterSeq)}`,
     () => {
       return views.every((view) => {
         const state = view.transcript.getState()
-        return state.status === 'idle' && selectStreamingMessage(state) === null
+        return state.status === 'idle' &&
+          selectStreamingMessage(state) === null &&
+          state.lastSeq >= afterSeq
+          ? true
+          : undefined
       })
         ? true
         : undefined
     },
-    { timeoutMs },
+    { timeoutMs: options.timeoutMs ?? MOCK_SLOW_TOTAL_MS * 3 },
   )
 }
 
@@ -168,7 +180,7 @@ describe('clients that join a reply in flight (D9)', () => {
     // and this is that resume, continued into the same transcript.
     const dropping = follow(client, session.id, { afterSeq: 0 })
 
-    await client.sendMessage(session.id, prompt)
+    const message = await client.sendMessage(session.id, prompt)
     await waitForReply(reference)
 
     // (2) A client that opens mid-reply: it loads what the log holds — the chunks so far — and
@@ -185,7 +197,7 @@ describe('clients that join a reply in flight (D9)', () => {
       transcript: dropping.transcript,
     })
 
-    await waitForSettled([reference, joiner, resumed])
+    await waitForSettled([reference, joiner, resumed], { afterSeq: message.seq })
     await Promise.all([reference.stop(), joiner.stop(), resumed.stop()])
 
     // The reply was the slow one, and the steering-free conversation is one user turn.
@@ -228,13 +240,13 @@ describe('clients that join a reply in flight (D9)', () => {
     // `afterSeq: 0` (as in the test above): the log is empty now, and the replay covers a
     // connection that lands after the message below instead of racing it.
     const reference = follow(client, session.id, { afterSeq: 0 })
-    await client.sendMessage(session.id, prompt)
+    const message = await client.sendMessage(session.id, prompt)
     await waitForReply(reference)
 
     const joiner = await attachFromHistory(client, session.id)
     await waitForReplyText(joiner)
 
-    await waitForSettled([reference, joiner])
+    await waitForSettled([reference, joiner], { afterSeq: message.seq })
     await Promise.all([reference.stop(), joiner.stop()])
     await waitForTurnEnd(client, session.id, { timeoutMs: MOCK_SLOW_TOTAL_MS * 3 })
 
@@ -271,9 +283,9 @@ describe('clients that join a reply in flight (D9)', () => {
 
     // Sent while the reply is streaming: it is not part of the request in flight, and the
     // request that answers it comes second.
-    await client.sendMessage(session.id, steering)
+    const steeringEvent = await client.sendMessage(session.id, steering)
 
-    await waitForSettled([live])
+    await waitForSettled([live], { afterSeq: steeringEvent.seq })
     await live.stop()
 
     // A reload: a client that only reads the log, nothing live.
