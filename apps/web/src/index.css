@@ -35,6 +35,10 @@
 }
 
 :root {
+  /* Native controls (select popups, option lists, datalists, scrollbars, date inputs)
+   * follow the app theme. Without this the browser paints the option list with its own
+   * light colors while the app renders dark, i.e. white text on a white list (#87). */
+  color-scheme: light;
   --radius: 0.625rem;
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
@@ -59,6 +63,7 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
+    color-scheme: dark;
     --background: oklch(0.145 0 0);
     --foreground: oklch(0.985 0 0);
     --card: oklch(0.205 0 0);
@@ -94,5 +99,14 @@
 
   body {
     @apply bg-background text-foreground antialiased;
+  }
+
+  /* The fallback for browsers that ignore `color-scheme` for the option list: the
+   * popup tokens are the app's own colors, so a closed select, its options and a
+   * datalist's suggestions stay readable in either scheme. Utility classes on a
+   * select (e.g. `bg-transparent`) still win over these. */
+  select,
+  option {
+    @apply bg-popover text-popover-foreground;
   }
 }

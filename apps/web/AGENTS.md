@@ -62,7 +62,9 @@ src/
   main.tsx                     bootstrap: resolve the client (fake in dev mode), render <App>
   App.tsx                      the client from the settings, the routes, the app shell:
                                sidebar (column or drawer), the top bar, the routed screen
-  index.css                    Tailwind + the shadcn design tokens (dark follows the system)
+  index.css                    Tailwind + the shadcn design tokens (dark follows the system;
+                               `color-scheme` + the popover tokens keep the native controls —
+                               select popups, datalists, scrollbars — in the same scheme)
   components/
     client-provider.tsx        the client in context, so screens can use it
     auth-provider.tsx          the Better Auth browser client in context
