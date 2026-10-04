@@ -4,6 +4,18 @@ on:
   pull_request:
   push:
     branches: [main]
+  # The fresh run: the whole suite with turbo `--force`, so nothing is answered from the
+  # cache — the same tasks the push job runs, but proving main on a cold cache. Nightly, and
+  # on demand: `force` (default true) runs it uncached; a dispatch with `force: false` is the
+  # ordinary cached full run, for "did main go red?" without waiting for a rebuild.
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Run the full suite with turbo --force (no cache)
+        type: boolean
+        default: true
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -87,9 +99,23 @@ jobs:
           DATABASE_URL: postgres://openharness:openharness@localhost:5432/openharness
         run: yarn turbo run build typecheck lint format:check test --affected --cache-dir=.turbo/cache
 
-      # main: everything (unchanged packages are turbo cache hits).
+      # main: everything (unchanged packages are turbo cache hits). Unchanged behaviour;
+      # a manual dispatch with `force: false` takes this path too.
       - name: Build, typecheck, lint, test (all)
-        if: github.event_name != 'pull_request'
+        if: >-
+          github.event_name == 'push' ||
+          (github.event_name == 'workflow_dispatch' && inputs.force == false)
         env:
           DATABASE_URL: postgres://openharness:openharness@localhost:5432/openharness
         run: yarn turbo run build typecheck lint format:check test --cache-dir=.turbo/cache
+
+      # The fresh run: the whole suite, every task executed, the cache neither consulted nor
+      # trusted — the nightly schedule, and a manual dispatch unless `force: false`. This is
+      # what proves main on a cold cache; a cached green run proves less.
+      - name: Build, typecheck, lint, test (all, uncached)
+        if: >-
+          github.event_name == 'schedule' ||
+          (github.event_name == 'workflow_dispatch' && inputs.force == true)
+        env:
+          DATABASE_URL: postgres://openharness:openharness@localhost:5432/openharness
+        run: yarn turbo run build typecheck lint format:check test --force --cache-dir=.turbo/cache
