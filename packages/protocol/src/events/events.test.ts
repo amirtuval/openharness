@@ -140,8 +140,9 @@ describe('stored event schemas', () => {
 
   it.each(Object.entries(storedSamples))('parses a %s event', (_type, sample) => {
     const parsed = StoredEventSchema.safeParse(sample)
-    expect(parsed.error?.issues ?? []).toEqual([])
-    expect(parsed.success).toBe(true)
+    // `safeParse` sets `success` and `error` together, so one assertion says both — and the
+    // issues are what a failure has to show to be diagnosable.
+    expect(parsed.error?.issues ?? [], JSON.stringify(sample)).toEqual([])
   })
 
   it.each(Object.entries(storedSamples))('keeps the %s discriminant', (type, sample) => {

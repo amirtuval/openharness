@@ -8,7 +8,7 @@ import {
   deviceVerificationUri,
   deviceVerificationUriComplete,
 } from './auth'
-import { TEST_PUBLIC_URL, createTestApp, type TestContext } from './test-support'
+import { TEST_PUBLIC_URL, createTestApp, signInCookie, type TestContext } from './test-support'
 
 /**
  * The authentication surface (epic #65, A1/A2/A6/A7): what `/v1` accepts, what Better Auth
@@ -396,17 +396,3 @@ describe('rate limiting (A2)', () => {
     }
   })
 })
-
-/** Sign in over the dev login and answer the session cookie a browser would hold. */
-async function signInCookie(test: TestContext): Promise<string> {
-  const response = await test.anonymous('/api/auth/sign-in/email', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ email: DEV_LOGIN_EMAIL, password: DEV_LOGIN_PASSWORD }),
-  })
-  const setCookie = response.headers.get('set-cookie')
-  if (setCookie === null) {
-    throw new Error('the sign-in answered no cookie')
-  }
-  return setCookie.split(';')[0] ?? ''
-}
