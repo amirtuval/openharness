@@ -179,16 +179,18 @@ describe('SignInScreen', () => {
   it('routes to sign-in when a later call 401s, not only the startup read', async () => {
     const user = userEvent.setup({ delay: null })
     serveAuthConfig({ providers: ['github'], dev_login: false })
-    const fake = makeFake()
+    // New chat is immediate (U2): the default is loaded while the session is still good; the
+    // create-and-send that follows is not.
+    const fake = makeFake({ preferences: { default_model: 'anthropic/claude-sonnet-5' } })
 
     renderApp(fake, { hash: '#/new' })
-    // The catalog is loaded while the session is still good; the write that follows is not.
-    await screen.findByRole('button', { name: 'Create chat' })
+    await screen.findByLabelText('Message')
 
     // The session is revoked behind the app's back — a sign-out in another tab, an expired
     // cookie. The next write answers 401, and that is the whole trigger.
     await fake.auth.signOut()
-    await user.click(screen.getByRole('button', { name: 'Create chat' }))
+    await user.type(screen.getByLabelText('Message'), 'hello?')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
 
     expect(
       await screen.findByRole('heading', { name: 'Sign in to openharness' }),

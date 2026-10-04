@@ -1,4 +1,4 @@
-import { AuthenticationError } from '@openharness/client'
+import { ApiError, AuthenticationError } from '@openharness/client'
 import type { ModelEntry } from '@openharness/protocol'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { App } from './App'
 import { saveSettings } from './lib/settings'
+import { TWO_PROVIDERS, WITH_DEFAULT } from './test-support/catalog'
 import {
   agentText,
   deriveSessionTitles,
@@ -17,14 +18,18 @@ import {
   sessionRows,
   visibleText,
 } from './test-support/render-app'
+import { gateStream } from './test-support/stream'
 
 /**
  * The chat, end to end, against `createFakeClient()`.
  *
  * Nothing here reaches into the app: the tests type, click and read the screen the way a user
- * would, and check the fake server's log for the events the UI should have sent. The delays
- * are what make streaming observable — with the fake's default pace a reply can be finished
- * before the first assertion runs.
+ * would, and check the fake server's log for the events the UI should have sent.
+ *
+ * The streaming tests drive the fake's stream **event by event** (`gateStream`), rather than
+ * racing a wall-clock `delayMs` (#105, P2): the fake still produces the whole turn, but the
+ * app only sees the events the test releases, so "the reply is on screen as a prefix" is an
+ * assertion about state, not about being fast enough.
  */
 
 const REPLY = 'Hello there, friend!'
@@ -46,52 +51,64 @@ describe('App', () => {
 
   it('sends a message and renders the reply as it streams in', async () => {
     const user = userEvent.setup({ delay: null })
-    const fake = makeFake({ delayMs: 200 })
-    fake.respondWith(REPLY, { chunks: 4 })
+    const fake = makeFake()
+    fake.respondWith(REPLY, { chunks: ['Hello ', 'there, ', 'friend!'] })
+    const stream = gateStream(fake)
     renderApp(fake)
 
     await user.type(await screen.findByLabelText('Message'), 'Hi there')
     await user.click(screen.getByRole('button', { name: 'Send message' }))
 
+    // The message shows before any streamed event is released: the POST's own copy is folded
+    // in, so the reader never waits on the stream to echo their own message.
     expect(await screen.findByText('Hi there')).toBeInTheDocument()
-    expect(await screen.findByLabelText('Status: Running')).toBeInTheDocument()
+    // The stream follows the history with deltas on (#91's rule, pinned here).
+    expect(stream.calls).toHaveLength(1)
+    expect(stream.calls[0]?.deltas).toBe(true)
+
+    await stream.until(
+      () => screen.queryByLabelText('Status: Running') !== null,
+      'the running status',
+    )
 
     // Deltas: the reply is on screen while it is still a strict prefix of the whole thing,
-    // which is what "streamed" means here — not a finished message appearing at once.
-    await waitFor(() => {
-      expect(isStreaming()).toBe(true)
-      const partial = agentText()
-      expect(partial.length).toBeGreaterThan(0)
-      expect(REPLY).toContain(partial)
-      expect(partial).not.toBe(REPLY)
-    })
+    // which is what "streamed" means here — not a finished message appearing at once. The
+    // gate released exactly the events up to the first delta; nothing can arrive behind it.
+    await stream.until(() => agentText().length > 0, 'the first delta')
+    expect(isStreaming()).toBe(true)
+    const partial = agentText()
+    expect(partial.length).toBeGreaterThan(0)
+    expect(REPLY).toContain(partial)
+    expect(partial).not.toBe(REPLY)
 
-    expect(await screen.findByText(REPLY, {}, { timeout: 5000 })).toBeInTheDocument()
-    await waitFor(() => {
-      expect(screen.getByLabelText('Status: Idle')).toBeInTheDocument()
-    })
+    await stream.until(() => agentText() === REPLY, 'the complete reply')
+    await stream.until(() => screen.queryByLabelText('Status: Idle') !== null, 'idle')
+    expect(isStreaming()).toBe(false)
   })
 
   it('stops a running reply with user.interrupt and keeps what was written', async () => {
     const user = userEvent.setup({ delay: null })
-    const fake = makeFake({ delayMs: 200 })
-    const long = 'One two three four five six seven eight nine ten'
-    fake.respondWith(long, { chunks: 8 })
+    const fake = makeFake()
+    const long =
+      'One two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen ' +
+      'sixteen seventeen eighteen nineteen twenty twenty-one twenty-two twenty-three twenty-four'
+    // A deliberately slow fake reply — 40 fragments at 100ms, four seconds in all — so the
+    // Stop lands while the turn is genuinely running. The test does not wait those four
+    // seconds: the interrupt cuts the reply within one fragment, and the gate releases what
+    // the turn wrote before it stopped.
+    fake.respondWith(long, { chunks: 40, delayMs: 100 })
+    const stream = gateStream(fake)
     renderApp(fake)
 
     await user.type(await screen.findByLabelText('Message'), 'go')
     await user.click(screen.getByRole('button', { name: 'Send message' }))
+    await stream.until(() => agentText().length > 0, 'the first delta')
 
     const stop = await screen.findByRole('button', { name: 'Stop' })
-    await waitFor(() => {
-      expect(agentText().length).toBeGreaterThan(0)
-    })
     await user.click(stop)
 
     await fake.waitForIdle()
-    await waitFor(() => {
-      expect(screen.getByLabelText('Status: Idle')).toBeInTheDocument()
-    })
+    await stream.until(() => screen.queryByLabelText('Status: Idle') !== null, 'idle')
 
     expect(fake.history().some((event) => event.type === 'user.interrupt')).toBe(true)
     const partial = agentText()
@@ -126,54 +143,64 @@ describe('App', () => {
 
   it('keeps the input enabled while running, queues a steering message, and answers it', async () => {
     const user = userEvent.setup({ delay: null })
-    const fake = makeFake({ delayMs: 200 })
-    fake.respondWith('Answer one.', { chunks: 6 })
+    const fake = makeFake()
+    fake.respondWith('Answer one.', { chunks: ['Answer ', 'one.'] })
+    const stream = gateStream(fake)
     renderApp(fake)
 
     await user.type(await screen.findByLabelText('Message'), 'first')
     await user.click(screen.getByRole('button', { name: 'Send message' }))
-    await screen.findByRole('button', { name: 'Stop' })
+    // Release the first turn up to the reply, deliberately leaving its end events unsent: the
+    // app is mid-request — that is the moment a steering message happens in.
+    await stream.until(() => agentText() === 'Answer one.', 'the first reply')
+    await stream.until(
+      () => document.querySelector('[data-role="user"][data-pending="true"]') === null,
+      'the first message to be picked up',
+    )
 
     // Steering: the box stays usable while the agent is working.
     const input = screen.getByLabelText('Message')
     expect(input).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Stop' })).toBeInTheDocument()
     await user.type(input, 'also this')
     await user.click(screen.getByRole('button', { name: 'Send message' }))
 
-    // It shows as queued — the brain has not reached it yet…
-    await waitFor(() => {
-      const queued = document.querySelector('[data-role="user"][data-pending="true"]')
-      expect(visibleText(queued)).toContain('also this')
-    })
+    // It shows as queued — the model request is still open, so nothing has reached it.
+    const queued = document.querySelector('[data-role="user"][data-pending="true"]')
+    expect(visibleText(queued)).toContain('also this')
 
-    // …then the reply lands, the queued message follows it, and the next turn answers it.
-    // Both waits cover a slow reply, not just a slow query: the fake is still streaming.
-    expect(await screen.findByText('Answer one.', {}, { timeout: 5000 })).toBeInTheDocument()
-    expect(
-      await screen.findByText('Fake reply: also this', {}, { timeout: 5000 }),
-    ).toBeInTheDocument()
+    // …then the queued message's turn is answered, right behind the first reply.
+    await stream.until(
+      () => screen.queryByText('Fake reply: also this') !== null,
+      'the answer to the steering message',
+    )
     expect(messageElement('user')).not.toBeNull()
     expect(fake.history().filter((event) => event.type === 'user.message')).toHaveLength(2)
   })
 
   it('shows a retrying error, then clears it when the retry succeeds', async () => {
     const user = userEvent.setup({ delay: null })
-    const fake = makeFake({ delayMs: 200 })
+    const fake = makeFake()
     fake.failWith({ retryStatus: 'retrying' })
     fake.respondWith('Second time lucky.')
+    const stream = gateStream(fake)
     renderApp(fake)
 
     await user.type(await screen.findByLabelText('Message'), 'hello')
     await user.click(screen.getByRole('button', { name: 'Send message' }))
 
-    const alert = await screen.findByRole('alert')
+    await stream.until(() => screen.queryByRole('alert') !== null, 'the retry error')
+    const alert = screen.getByRole('alert')
     expect(alert).toHaveTextContent('model_overloaded_error')
     expect(alert).toHaveTextContent('retrying')
 
-    expect(await screen.findByText('Second time lucky.', {}, { timeout: 5000 })).toBeInTheDocument()
-    await waitFor(() => {
-      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
-    })
+    await stream.until(
+      () => screen.queryByText('Second time lucky.') !== null,
+      'the successful retry',
+    )
+    // The reply that superseded the error took the banner with it (the stored `agent.message`
+    // is what clears it, not the preview's last delta).
+    await stream.until(() => screen.queryByRole('alert') === null, 'the error to clear')
   })
 
   it('turns a missing provider credential into a way to fix it', async () => {
@@ -201,79 +228,78 @@ describe('App', () => {
 
   it('keeps a terminal error on screen until something replaces it', async () => {
     const user = userEvent.setup({ delay: null })
-    const fake = makeFake({ delayMs: 150 })
+    const fake = makeFake()
     fake.failWith({
       type: 'model_request_failed_error',
       message: 'The model request failed.',
       retryStatus: 'terminal',
     })
+    const stream = gateStream(fake)
     renderApp(fake)
 
     await user.type(await screen.findByLabelText('Message'), 'nope')
     await user.click(screen.getByRole('button', { name: 'Send message' }))
 
-    const alert = await screen.findByRole('alert')
+    await stream.until(() => screen.queryByRole('alert') !== null, 'the terminal error')
+    const alert = screen.getByRole('alert')
     expect(alert).toHaveTextContent('model_request_failed_error')
     expect(alert).toHaveTextContent('The model request failed.')
-    await waitFor(() => {
-      expect(screen.getByLabelText('Status: Idle')).toBeInTheDocument()
-    })
+    await stream.until(() => screen.queryByLabelText('Status: Idle') !== null, 'idle')
 
     // The turn is over; the error stays, and the box is live again — the next turn clears it.
     fake.respondWith('Trying again.')
     await user.type(screen.getByLabelText('Message'), 'again')
     await user.click(screen.getByRole('button', { name: 'Send message' }))
-    expect(await screen.findByText('Trying again.')).toBeInTheDocument()
-    await waitFor(() => {
-      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
-    })
+    await stream.until(() => screen.queryByText('Trying again.') !== null, 'the next reply')
+    await stream.until(() => screen.queryByRole('alert') === null, 'the error to clear')
   })
 
-  it('creates a model-first chat from the new-chat screen and focuses the composer', async () => {
+  it('switches the model from the composer, sends it with the next message, and marks it', async () => {
     const user = userEvent.setup({ delay: null })
-    const fake = makeFake()
-    renderApp(fake, { hash: '#/new' })
+    const fake = makeFake(TWO_PROVIDERS)
+    fake.respondWith('ok')
+    // The log already says which model the session runs: the first model a message carries
+    // merely sets it (U3, silently), so a *change* needs one in effect first.
+    await fake.sendMessage(fake.session.id, 'hi', { model: { id: 'anthropic/claude-sonnet-5' } })
+    await fake.waitForIdle()
+    renderApp(fake)
 
-    // The picker's default is the catalog's first entry — the fake's one model — and no
-    // agent is involved anywhere on the screen.
-    const modelPicker = await screen.findByRole('button', { name: /Model/ })
-    expect(modelPicker).toHaveTextContent('Claude Sonnet 5')
-    // The old "create an agent first" onboarding is gone with the agents screen.
-    expect(screen.queryByText(/create one on the/i)).not.toBeInTheDocument()
+    const selector = await screen.findByRole('button', { name: 'Model: Claude Sonnet 5' })
+    await user.click(selector)
+    await user.click(screen.getByRole('option', { name: /GPT-4.1 mini/ }))
+    expect(screen.getByRole('button', { name: 'Model: GPT-4.1 mini' })).toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: 'Create chat' }))
+    await user.type(screen.getByLabelText('Message'), 'switch please')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
 
+    // The switch rode the message — `user.message.model` — and the transcript marks where the
+    // conversation changed engines, with the catalog's display name.
+    expect(await screen.findByText('Switched to GPT-4.1 mini')).toBeInTheDocument()
+    const messages = fake.history().filter((event) => event.type === 'user.message')
+    const last = messages.at(-1)
+    expect(last?.type === 'user.message' ? last.model?.id : null).toBe('openai/gpt-4.1-mini')
+
+    // The selector now shows the session's model — the log's, not a leftover pick.
     await waitFor(() => {
-      expect(window.location.hash).toMatch(/^#\/s\/sesn_/)
+      expect(screen.getByRole('button', { name: /Model:/ })).toHaveTextContent('GPT-4.1 mini')
     })
-    expect(await screen.findByLabelText('Message')).toHaveFocus()
-
-    const listed = await fake.sessions.list()
-    expect(listed.data).toHaveLength(2)
-    const created = listed.data.find((session) => session.id !== fake.session.id)
-    expect(created?.model.id).toBe('anthropic/claude-sonnet-5')
-    expect(created?.agent).toBeNull()
   })
 
   it('shows the new title in the sidebar and the header without a reload', async () => {
     const user = userEvent.setup({ delay: null })
-    const fake = makeFake()
+    const fake = makeFake(WITH_DEFAULT)
     // The fake does not name sessions the way the server does; this is that half.
     deriveSessionTitles(fake)
     const lists = recordListRequests(fake)
     renderApp(fake, { hash: '#/new' })
 
-    await user.click(await screen.findByRole('button', { name: 'Create chat' }))
+    // New chat is immediate (U2): the chat is created by the first message, in place.
+    await user.type(await screen.findByLabelText('Message'), 'a chat about the release checklist')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
     await waitFor(() => {
       expect(window.location.hash).toMatch(/^#\/s\/sesn_/)
     })
     const sessionId = window.location.hash.replace('#/s/', '')
-    // The bug of #35: a new chat is listed and headed by a fallback name, because nothing has
-    // named the session yet — since #91, the model's display name.
-    expect(screen.getByRole('heading', { name: 'Claude Sonnet 5' })).toBeInTheDocument()
-
-    await user.type(await screen.findByLabelText('Message'), 'a chat about the release checklist')
-    await user.click(screen.getByRole('button', { name: 'Send message' }))
 
     // The server named the session inside the request that stored the message; both surfaces
     // pick the title up from the one re-read, with no reload and no second walk of the list.
@@ -407,6 +433,127 @@ describe('model-first labels, hidden agents', () => {
       expect(screen.getByRole('heading', { name: 'openharness' })).toBeInTheDocument()
     })
     expect(screen.queryByRole('heading', { name: 'Agents' })).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * Epic #116, U5: deleting a chat — from its sidebar row or the chat header, with an in-page
+ * confirmation — and the stream event that tells an open chat it was deleted somewhere else.
+ */
+describe('deleting chats', () => {
+  /** The sidebar row whose link points at `sessionId`. */
+  function rowFor(sessionId: string): HTMLElement {
+    const row = sessionRows().find(
+      (element) => element.querySelector('a')?.getAttribute('href') === `#/s/${sessionId}`,
+    )
+    if (row === undefined) {
+      throw new Error(`no sidebar row for ${sessionId}`)
+    }
+    return row
+  }
+
+  it('deletes the open chat from the header, after confirming in the page', async () => {
+    const user = userEvent.setup({ delay: null })
+    const fake = makeFake(WITH_DEFAULT)
+    renderApp(fake)
+    expect(await screen.findByRole('heading', { name: 'Claude Sonnet 5' })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Delete chat' }))
+    // In the page, not a `window.confirm`: the question is an element, and so are the answers.
+    expect(screen.getByText('Delete this chat and all its messages?')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByText('Delete this chat and all its messages?')).not.toBeInTheDocument()
+    expect((await fake.sessions.list()).data).toHaveLength(1)
+
+    await user.click(screen.getByRole('button', { name: 'Delete chat' }))
+    await user.click(screen.getByRole('button', { name: 'Delete' }))
+
+    // After deleting the open chat: New chat (U5) — and the session is gone from the fake.
+    await waitFor(() => {
+      expect(window.location.hash).toBe('#/new')
+    })
+    expect((await fake.sessions.list()).data).toEqual([])
+    expect(sessionRows()).toHaveLength(0)
+    // New chat is immediate: the composer, on the default, not a picker screen.
+    expect(
+      await screen.findByRole('button', { name: 'Model: Claude Sonnet 5' }),
+    ).toBeInTheDocument()
+  })
+
+  it('deletes chats from their sidebar rows, leaving the open one when it is not the target', async () => {
+    const user = userEvent.setup({ delay: null })
+    const fake = makeFake(WITH_DEFAULT)
+    const other = await fake.sessions.create({ model: { id: 'openai/gpt-4.1-mini' } })
+    renderApp(fake)
+    await waitFor(() => {
+      expect(sessionRows()).toHaveLength(2)
+    })
+
+    // A row carries a kebab menu with the delete action (U5).
+    const otherRow = rowFor(other.id)
+    await user.click(within(otherRow).getByRole('button', { name: 'Chat actions' }))
+    await user.click(within(otherRow).getByRole('menuitem', { name: 'Delete chat' }))
+    expect(within(otherRow).getByText('Delete this chat?')).toBeInTheDocument()
+    await user.click(within(otherRow).getByRole('button', { name: 'Delete' }))
+
+    await waitFor(() => {
+      expect(sessionRows()).toHaveLength(1)
+    })
+    expect((await fake.sessions.list()).data.map((session) => session.id)).toEqual([
+      fake.session.id,
+    ])
+    // Deleting a chat that was not open leaves the reader where they were.
+    expect(window.location.hash).toBe(`#/s/${fake.session.id}`)
+
+    // And the same action on the *open* chat leaves it for New chat.
+    const openRow = rowFor(fake.session.id)
+    await user.click(within(openRow).getByRole('button', { name: 'Chat actions' }))
+    await user.click(within(openRow).getByRole('menuitem', { name: 'Delete chat' }))
+    await user.click(within(openRow).getByRole('button', { name: 'Delete' }))
+
+    await waitFor(() => {
+      expect(window.location.hash).toBe('#/new')
+    })
+    expect((await fake.sessions.list()).data).toEqual([])
+  })
+
+  it('keeps the chat and says why when a delete fails', async () => {
+    const user = userEvent.setup({ delay: null })
+    const fake = makeFake()
+    fake.sessions.delete = () => Promise.reject(new ApiError(500, 'Delete is unavailable.'))
+    renderApp(fake)
+    await waitFor(() => {
+      expect(sessionRows()).toHaveLength(1)
+    })
+
+    const row = rowFor(fake.session.id)
+    await user.click(within(row).getByRole('button', { name: 'Chat actions' }))
+    await user.click(within(row).getByRole('menuitem', { name: 'Delete chat' }))
+    await user.click(within(row).getByRole('button', { name: 'Delete' }))
+
+    const alert = await within(row).findByRole('alert')
+    expect(alert).toHaveTextContent('Delete is unavailable.')
+    // Nothing was deleted: the row, the chat and the open screen are all still there.
+    expect(sessionRows()).toHaveLength(1)
+    expect((await fake.sessions.list()).data).toHaveLength(1)
+    expect(window.location.hash).toBe(`#/s/${fake.session.id}`)
+  })
+
+  it('leaves the chat with a notice when it is deleted somewhere else', async () => {
+    const fake = makeFake(WITH_DEFAULT)
+    const stream = gateStream(fake)
+    renderApp(fake)
+    expect(await screen.findByRole('heading', { name: 'Claude Sonnet 5' })).toBeInTheDocument()
+
+    // Another writer — `oh`, a second tab — deletes it. The stream's last event is
+    // `session.deleted`, which is all this tab gets; it has to act on exactly that.
+    await fake.sessions.delete(fake.session.id)
+    await stream.until(() => window.location.hash === '#/new', 'the app to leave the chat')
+
+    // A notice, on the screen the reader lands on, and no stale row for a chat that is gone.
+    expect(screen.getByText('This chat was deleted.')).toBeInTheDocument()
+    expect(sessionRows()).toHaveLength(0)
   })
 })
 

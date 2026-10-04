@@ -1,7 +1,8 @@
 import type { Session, User } from '@openharness/protocol'
-import { LogOut, Plus, Settings } from 'lucide-react'
-import type { Ref } from 'react'
+import { LogOut, MoreHorizontal, Plus, Settings } from 'lucide-react'
+import { useEffect, useRef, useState, type Ref } from 'react'
 
+import type { DeleteSessionResult } from '../hooks/use-sessions'
 import { relativeTime, sessionLabel } from '../lib/format'
 import type { ModelNameLookup } from '../lib/models'
 import { MAX_PAGE_ITEMS } from '../lib/paging'
@@ -28,6 +29,11 @@ export const SIDEBAR_ID = 'app-sidebar'
  * opens from its top bar and overlays with a backdrop. Both are the same list, the same
  * links; only the positioning differs, which is why a chat opened from either one is the
  * same chat.
+ *
+ * Since epic #116 (U5) each row also carries a kebab menu with **Delete chat**: the kebab
+ * shows on hover or focus (it stays in the DOM and reachable by keyboard either way), and
+ * the delete itself asks in the page — a `window.confirm` would block and cannot be themed.
+ * Deleting the open chat is the shell's call, not this list's: it navigates to New chat.
  */
 export function Sidebar({
   sessions,
@@ -42,6 +48,7 @@ export function Sidebar({
   onNavigate,
   panelRef,
   nameOf,
+  onDelete,
 }: {
   sessions: readonly Session[]
   loading: boolean
@@ -67,7 +74,58 @@ export function Sidebar({
    * display name, or the id when the catalog does not know it (#91). Omitted, ids show.
    */
   nameOf?: ModelNameLookup | undefined
+  /**
+   * Delete a session, after the in-page confirmation. Omitted, the rows have no delete
+   * action (the sidebar tests render the list on its own).
+   */
+  onDelete?: ((sessionId: string) => Promise<DeleteSessionResult>) | undefined
 }) {
+  // Which row's kebab menu is open, which row is confirming, and which delete is in flight.
+  const [menuFor, setMenuFor] = useState<string | null>(null)
+  const [confirming, setConfirming] = useState<string | null>(null)
+  const [deleting, setDeleting] = useState<string | null>(null)
+  const [deleteError, setDeleteError] = useState<{ id: string; message: string } | null>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+
+  // A menu closes the way any overlay does: a pointer outside it, or Escape.
+  useEffect(() => {
+    if (menuFor === null) {
+      return
+    }
+    const onPointerDown = (event: PointerEvent): void => {
+      if (event.target instanceof Node && !menuRef.current?.contains(event.target)) {
+        setMenuFor(null)
+      }
+    }
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        setMenuFor(null)
+      }
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [menuFor])
+
+  const confirmDelete = async (sessionId: string): Promise<void> => {
+    if (onDelete === undefined) {
+      return
+    }
+    setDeleting(sessionId)
+    setDeleteError(null)
+    const result = await onDelete(sessionId)
+    setDeleting(null)
+    if (result.ok) {
+      setConfirming(null)
+      return
+    }
+    // The row stays, with what went wrong next to it.
+    setDeleteError({ id: sessionId, message: result.message })
+  }
+
   return (
     <aside
       ref={panelRef}
@@ -116,21 +174,103 @@ export function Sidebar({
           {sessions.map((session) => {
             const active = session.id === activeSessionId
             return (
-              <li key={session.id}>
-                <a
-                  href={chatHash(session.id)}
-                  onClick={onNavigate}
-                  aria-current={active ? 'page' : undefined}
-                  className={cn(
-                    'flex flex-col gap-0.5 rounded-md px-2 py-1.5',
-                    active ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/60',
-                  )}
-                >
-                  <span className="truncate text-sm">{sessionLabel(session, nameOf)}</span>
-                  <span className="truncate text-xs text-muted-foreground">
-                    {session.model.id} · {relativeTime(session.created_at)}
-                  </span>
-                </a>
+              <li key={session.id} className="group relative">
+                {confirming === session.id && onDelete !== undefined ? (
+                  <div className="flex flex-wrap items-center gap-2 rounded-md border border-destructive/40 bg-destructive/5 px-2 py-1.5">
+                    <p className="text-xs">Delete this chat?</p>
+                    <div className="ml-auto flex items-center gap-1">
+                      <Button
+                        type="button"
+                        variant="destructive"
+                        size="sm"
+                        disabled={deleting !== null}
+                        onClick={() => void confirmDelete(session.id)}
+                      >
+                        {deleting === session.id ? 'Deleting…' : 'Delete'}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        disabled={deleting !== null}
+                        onClick={() => {
+                          setConfirming(null)
+                          setDeleteError(null)
+                        }}
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-1">
+                    <a
+                      href={chatHash(session.id)}
+                      onClick={onNavigate}
+                      aria-current={active ? 'page' : undefined}
+                      className={cn(
+                        'flex min-w-0 flex-1 flex-col gap-0.5 rounded-md px-2 py-1.5',
+                        active ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/60',
+                      )}
+                    >
+                      <span className="truncate text-sm">{sessionLabel(session, nameOf)}</span>
+                      <span className="truncate text-xs text-muted-foreground">
+                        {session.model.id} · {relativeTime(session.created_at)}
+                      </span>
+                    </a>
+                    {onDelete === undefined ? null : (
+                      <div
+                        ref={menuFor === session.id ? menuRef : undefined}
+                        className="relative shrink-0"
+                      >
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-xs"
+                          aria-label="Chat actions"
+                          aria-haspopup="menu"
+                          aria-expanded={menuFor === session.id}
+                          // On hover or focus: the action is there when the row is, and a
+                          // keyboard user tabs straight into it.
+                          className="opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+                          onClick={() => {
+                            setMenuFor((current) => (current === session.id ? null : session.id))
+                            setDeleteError(null)
+                          }}
+                        >
+                          <MoreHorizontal aria-hidden="true" />
+                        </Button>
+                        {menuFor === session.id ? (
+                          <div
+                            role="menu"
+                            aria-label="Chat actions"
+                            className="absolute right-0 z-20 mt-1 w-40 rounded-md border bg-popover p-1 shadow-md"
+                          >
+                            <Button
+                              type="button"
+                              role="menuitem"
+                              variant="ghost"
+                              size="sm"
+                              className="w-full justify-start text-destructive"
+                              onClick={() => {
+                                setMenuFor(null)
+                                setConfirming(session.id)
+                                setDeleteError(null)
+                              }}
+                            >
+                              Delete chat
+                            </Button>
+                          </div>
+                        ) : null}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {deleteError !== null && deleteError.id === session.id ? (
+                  <p role="alert" className="px-2 py-1 text-xs text-destructive">
+                    {deleteError.message}
+                  </p>
+                ) : null}
               </li>
             )
           })}

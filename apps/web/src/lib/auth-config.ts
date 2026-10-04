@@ -30,9 +30,18 @@ export const AUTH_CONFIG_PATH = '/v1/auth-config'
  *
  * An unknown provider name is dropped rather than fatal: a newer server may add one this app
  * does not know how to sign in with, and the buttons for the ones it does know still work.
+ * That is a filter, not a validation — `z.array(z.enum(AUTH_PROVIDERS))` would fail the
+ * whole parse on one unknown name, and the sign-in page would show an error instead of the
+ * providers it does know (the bug this schema had until the #105 review).
  */
 export const AuthConfigSchema = z.object({
-  providers: z.array(z.enum(AUTH_PROVIDERS)),
+  providers: z
+    .array(z.string())
+    .transform((names): AuthProvider[] =>
+      names.filter((name): name is AuthProvider =>
+        (AUTH_PROVIDERS as readonly string[]).includes(name),
+      ),
+    ),
   dev_login: z.boolean(),
 })
 

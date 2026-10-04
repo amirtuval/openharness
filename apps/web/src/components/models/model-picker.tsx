@@ -2,6 +2,7 @@ import type { ModelEntry, ProviderCatalogStatus } from '@openharness/protocol'
 import { ChevronsUpDown } from 'lucide-react'
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 
+import type { RefreshOutcome } from '../../hooks/use-models'
 import { formatContextWindow } from '../../lib/format'
 import { groupModelsByProvider } from '../../lib/models'
 import { cn } from '../../lib/utils'
@@ -22,6 +23,11 @@ import { Label } from '../ui/label'
  *
  * The picker only ever offers what the server sent (providers the caller has a key for, C5);
  * it does not know provider names of its own.
+ *
+ * Since epic #116 it is the app's one model control, in two sizes: `full` in Settings
+ * (Default model), and `compact` as the composer's inline selector — "gpt-4.1-mini ▾" in the
+ * input area, with its panel opening upward. Refresh lives in the panel's foot so every
+ * surface that offers the catalog can rebuild it where the list is.
  */
 
 /** One navigable row: a catalog model, or the escape hatch at the end of the list. */
@@ -38,15 +44,39 @@ export interface ModelPickerProps {
   value: string | null
   /** A model was chosen — from the list, or typed as a free-text id. */
   onChange: (modelId: string) => void
+  /** `full` is the form-width trigger; `compact` is the composer's inline control. */
+  variant?: 'full' | 'compact'
+  /** Where the panel opens. `below` by default; `above` for a control at the screen's foot. */
+  placement?: 'below' | 'above'
+  /** Whether a refresh is in flight; only meaningful with {@link onRefresh}. */
+  refreshing?: boolean
+  /**
+   * When given, the panel carries a Refresh control: a deliberate bypass of the server's
+   * per-user catalog cache (a refresh inside its window answers 429, shown as a note, not an
+   * error — the list on screen is still the one the server last sent).
+   */
+  onRefresh?: (() => Promise<RefreshOutcome>) | undefined
 }
 
-export function ModelPicker({ models, providers, value, onChange }: ModelPickerProps) {
+export function ModelPicker({
+  models,
+  providers,
+  value,
+  onChange,
+  variant = 'full',
+  placement = 'below',
+  refreshing = false,
+  onRefresh,
+}: ModelPickerProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [activeIndex, setActiveIndex] = useState(0)
   // The list, or the free-text form "Other model ID…" opens.
   const [mode, setMode] = useState<'list' | 'custom'>('list')
   const [customId, setCustomId] = useState('')
+  // The refresh's outcome, shown in the panel: a rate-limited refresh is a "come back later",
+  // not an error state — the list stays exactly as it was.
+  const [refreshNote, setRefreshNote] = useState<string | null>(null)
 
   const triggerRef = useRef<HTMLButtonElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
@@ -96,8 +126,24 @@ export function ModelPicker({ models, providers, value, onChange }: ModelPickerP
     const selectedIndex = models.findIndex((entry) => entry.id === value)
     setQuery('')
     setMode('list')
+    setRefreshNote(null)
     setActiveIndex(selectedIndex === -1 ? 0 : selectedIndex)
     setOpen(true)
+  }
+
+  const runRefresh = async (): Promise<void> => {
+    if (onRefresh === undefined) {
+      return
+    }
+    setRefreshNote(null)
+    const outcome = await onRefresh()
+    if (!outcome.ok) {
+      setRefreshNote(
+        outcome.kind === 'rate_limit'
+          ? outcome.message
+          : `The catalog could not be refreshed. ${outcome.message}`,
+      )
+    }
   }
 
   const choose = (option: PickerOption): void => {
@@ -183,42 +229,69 @@ export function ModelPicker({ models, providers, value, onChange }: ModelPickerP
     }
   }
 
+  const toggle = (): void => {
+    if (open) {
+      close(false)
+    } else {
+      openPicker()
+    }
+  }
+  const compactLabel = selected?.name ?? value ?? 'Choose a model'
+
   return (
     <div ref={wrapperRef} className="relative">
-      <Button
-        ref={triggerRef}
-        type="button"
-        variant="outline"
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        aria-controls={open ? listId : undefined}
-        onClick={() => {
-          if (open) {
-            close(false)
-          } else {
-            openPicker()
-          }
-        }}
-        className="h-auto min-h-9 w-full justify-between py-2 text-left font-normal"
-      >
-        <span className="sr-only">Model</span>
-        <span className="flex min-w-0 flex-col items-start gap-0.5">
-          {selected === null ? (
-            <span className={cn('truncate', value === null && 'text-muted-foreground')}>
-              {value ?? 'Choose a model'}
-            </span>
-          ) : (
-            <>
-              <span className="truncate">{selected.name}</span>
-              <span className="truncate text-xs text-muted-foreground">{selected.id}</span>
-            </>
-          )}
-        </span>
-        <ChevronsUpDown aria-hidden="true" className="shrink-0 text-muted-foreground" />
-      </Button>
+      {variant === 'compact' ? (
+        <Button
+          ref={triggerRef}
+          type="button"
+          variant="ghost"
+          size="sm"
+          aria-label={`Model: ${compactLabel}`}
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          aria-controls={open ? listId : undefined}
+          onClick={toggle}
+          className="h-8 max-w-64 gap-1 px-2 font-normal text-muted-foreground"
+        >
+          <span className={cn('min-w-0 truncate', value === null && 'italic')}>{compactLabel}</span>
+          <ChevronsUpDown aria-hidden="true" className="shrink-0" />
+        </Button>
+      ) : (
+        <Button
+          ref={triggerRef}
+          type="button"
+          variant="outline"
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          aria-controls={open ? listId : undefined}
+          onClick={toggle}
+          className="h-auto min-h-9 w-full justify-between py-2 text-left font-normal"
+        >
+          <span className="sr-only">Model</span>
+          <span className="flex min-w-0 flex-col items-start gap-0.5">
+            {selected === null ? (
+              <span className={cn('truncate', value === null && 'text-muted-foreground')}>
+                {value ?? 'Choose a model'}
+              </span>
+            ) : (
+              <>
+                <span className="truncate">{selected.name}</span>
+                <span className="truncate text-xs text-muted-foreground">{selected.id}</span>
+              </>
+            )}
+          </span>
+          <ChevronsUpDown aria-hidden="true" className="shrink-0 text-muted-foreground" />
+        </Button>
+      )}
 
       {open ? (
-        <div className="absolute inset-x-0 z-30 mt-1 rounded-md border bg-popover p-2 text-popover-foreground shadow-md">
+        <div
+          className={cn(
+            'absolute z-30 rounded-md border bg-popover p-2 text-popover-foreground shadow-md',
+            variant === 'compact' ? 'right-0 w-80 max-w-[90vw]' : 'inset-x-0',
+            placement === 'above' ? 'bottom-full mb-1' : 'mt-1',
+          )}
+        >
           {mode === 'list' ? (
             <>
               <Input
@@ -315,6 +388,24 @@ export function ModelPicker({ models, providers, value, onChange }: ModelPickerP
                   </span>
                 </div>
               </div>
+              {onRefresh === undefined ? null : (
+                <div className="mt-2 flex items-center justify-between gap-2 border-t pt-2">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    disabled={refreshing}
+                    onClick={() => void runRefresh()}
+                  >
+                    {refreshing ? 'Refreshing…' : 'Refresh models'}
+                  </Button>
+                  {refreshNote === null ? null : (
+                    <p role="status" className="min-w-0 text-xs text-muted-foreground">
+                      {refreshNote}
+                    </p>
+                  )}
+                </div>
+              )}
             </>
           ) : (
             /* A div, not a form: the picker lives inside the New chat screen's form, and a

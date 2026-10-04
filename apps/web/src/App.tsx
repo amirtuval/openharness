@@ -1,6 +1,6 @@
 import { createClient, type Client } from '@openharness/client'
 import type { User } from '@openharness/protocol'
-import { Menu } from 'lucide-react'
+import { Menu, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 
 import { AuthProvider, useBrowserAuth } from './components/auth-provider'
@@ -10,9 +10,11 @@ import { SIDEBAR_ID, Sidebar } from './components/sidebar'
 import { Button } from './components/ui/button'
 import { useAuthState } from './hooks/use-auth'
 import { useModels } from './hooks/use-models'
+import { useNotice } from './hooks/use-notice'
 import { useRoute } from './hooks/use-route'
-import { useSessions } from './hooks/use-sessions'
+import { useSessions, type DeleteSessionResult } from './hooks/use-sessions'
 import { useSettings } from './hooks/use-settings'
+import { dismissNotice } from './lib/notice'
 import { createBrowserAuthClient } from './lib/auth-client'
 import { beginSessionCheck, signOutSession } from './lib/auth-store'
 import { modelNameLookup } from './lib/models'
@@ -165,11 +167,41 @@ function AppFrame({
   onSignOut: () => void
 }) {
   const client = useClient()
-  const { sessions, loading, error, truncated, create } = useSessions(client)
-  // The catalog is loaded once here, for the whole shell: the New chat picker offers it, and
-  // the sidebar and the chat header label untitled sessions with its display names (#91).
+  const { sessions, loading, error, truncated, create, remove, forget } = useSessions(client)
+  // The catalog is loaded once here, for the whole shell: the composer's model selector and
+  // Settings' default-model picker offer it, and the sidebar and the chat header label
+  // untitled sessions with its display names (#91).
   const catalog = useModels(client)
   const nameOf = useMemo(() => modelNameLookup(catalog.models), [catalog.models])
+  // The shell's notice (epic #116, U5): "This chat was deleted." lands here after the chat it
+  // was about is gone, so it outlives the screen that raised it.
+  const notice = useNotice()
+
+  // Deleting from wherever the action was: the row or the header goes away with the session,
+  // and deleting the *open* chat leaves it — New chat is where a reader without a chat
+  // belongs (U5).
+  const deleteSession = useCallback(
+    async (sessionId: string): Promise<DeleteSessionResult> => {
+      const result = await remove(sessionId)
+      if (result.ok && route.name === 'chat' && route.sessionId === sessionId) {
+        navigate('#/new')
+      }
+      return result
+    },
+    [remove, route],
+  )
+
+  // A chat deleted somewhere else: its stream says so (U5). The row goes without a call of
+  // our own, and an open chat leaves for New chat — the ChatView raises the notice.
+  const forgetSession = useCallback(
+    (sessionId: string): void => {
+      forget(sessionId)
+      if (route.name === 'chat' && route.sessionId === sessionId) {
+        navigate('#/new')
+      }
+    },
+    [forget, route],
+  )
 
   const [drawerOpen, setDrawerOpen] = useState(false)
   const panelRef = useRef<HTMLElement>(null)
@@ -238,6 +270,7 @@ function AppFrame({
           onNavigate={closeDrawer}
           panelRef={panelRef}
           nameOf={nameOf}
+          onDelete={deleteSession}
         />
         <main className="flex min-h-0 min-w-0 flex-1 flex-col">
           <div className="flex items-center gap-2 border-b px-3 py-2 md:hidden">
@@ -258,14 +291,39 @@ function AppFrame({
             <span className="truncate text-sm font-medium">openharness</span>
           </div>
 
+          {notice === null ? null : (
+            <div
+              role="status"
+              className="flex items-center justify-between gap-2 border-b bg-muted/40 px-3 py-2 text-sm"
+            >
+              <span>{notice}</span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label="Dismiss notice"
+                onClick={dismissNotice}
+              >
+                <X aria-hidden="true" />
+              </Button>
+            </div>
+          )}
+
           {route.name === 'chat' ? (
             // Keyed by session: opening another chat mounts a fresh transcript and stream
             // rather than mutating one in place.
-            <ChatView key={route.sessionId} sessionId={route.sessionId} nameOf={nameOf} />
+            <ChatView
+              key={route.sessionId}
+              sessionId={route.sessionId}
+              nameOf={nameOf}
+              catalog={catalog}
+              onDelete={deleteSession}
+              onDeleted={forgetSession}
+            />
           ) : route.name === 'new' ? (
             <NewChatScreen createSession={create} catalog={catalog} />
           ) : route.name === 'settings' ? (
-            <SettingsScreen />
+            <SettingsScreen catalog={catalog} />
           ) : route.name === 'device' ? (
             <DeviceScreen userCode={route.userCode} />
           ) : route.name === 'signin' ? (

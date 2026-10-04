@@ -45,8 +45,21 @@ export interface SessionView {
   readonly loadingHistory: boolean
   /** A failed request — history, send or interrupt — as shown inline. */
   readonly requestError: string | null
-  /** Send a message. While the agent is running this is a steering message. */
-  readonly send: (text: string) => Promise<void>
+  /** Whether the session was deleted (#111, epic #116, U5): its stream ended, its log is gone. */
+  readonly deleted: boolean
+  /**
+   * The model the log last said the session runs (epic #116, U1), or `null` until a message
+   * carries one — a session created with a model shows it through {@link SessionView.session}
+   * instead.
+   */
+  readonly model: string | null
+  /**
+   * Send a message. While the agent is running this is a steering message.
+   *
+   * `options.model` (`{ id }`) switches the session's model from this message on (U3). The
+   * answer says whether the message was stored, so a composer can keep the text on a failure.
+   */
+  readonly send: (text: string, options?: { model?: string }) => Promise<boolean>
   /** Ask the running session to stop. */
   readonly interrupt: () => Promise<void>
   /** Clear {@link requestError}. */
@@ -150,21 +163,27 @@ export function useSession(client: Client, sessionId: string): SessionView {
   }, [saidSomething, titled, refresh, sessionId])
 
   const send = useCallback(
-    async (text: string): Promise<void> => {
+    async (text: string, options?: { model?: string }): Promise<boolean> => {
       const body = text.trim()
       if (body === '') {
-        return
+        return false
       }
       setRequestError(null)
       try {
-        const stored = await client.sendMessage(sessionId, body)
+        const stored = await client.sendMessage(
+          sessionId,
+          body,
+          options?.model === undefined ? undefined : { model: { id: options.model } },
+        )
         // Show the message at once instead of waiting for the stream to echo it: the client
         // returns the stored event, and the reducer drops the stream's copy of it (same `seq`).
         transcript.apply(stored)
+        return true
       } catch (caught) {
         if (!noteAuthenticationError(client, caught)) {
           setRequestError(describeError(caught, { serverUrl }))
         }
+        return false
       }
     },
     [client, sessionId, transcript, serverUrl],
@@ -193,6 +212,8 @@ export function useSession(client: Client, sessionId: string): SessionView {
     lastSeq: state.lastSeq,
     loadingHistory,
     requestError,
+    deleted: state.deleted,
+    model: state.model,
     send,
     interrupt,
     dismissError,

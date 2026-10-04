@@ -1,64 +1,21 @@
 import { ApiError } from '@openharness/client'
-import type { ModelEntry, ProviderCatalogStatus } from '@openharness/protocol'
-import { screen, waitFor, within } from '@testing-library/react'
+import type { FakeClient } from '@openharness/client/testing'
+import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 
-import { makeFake, renderApp, sessionRows } from '../test-support/render-app'
+import { OPENAI, WITH_DEFAULT } from '../test-support/catalog'
+import { makeFake, renderApp } from '../test-support/render-app'
 
 /**
- * New chat: pick a model (#91, epic #92).
- *
- * The screen is driven against `createFakeClient()` with a configured catalog, so the tests
- * click and type the way a reader does: open the picker, search, pick, create. The session
- * the app creates is asserted on the fake's own record of the request.
+ * New chat is a chat, immediately (epic #116, U2): an empty composer on the account's default
+ * model, the session created on the first send — no picker screen in the way. Driven against
+ * `createFakeClient()`, so the session the app creates is asserted on the fake's own record
+ * of the request, and the no-default and failure states are states a test renders.
  */
 
-/** A catalog entry with the fields a test does not care about filled in. */
-function entry(
-  overrides: Partial<ModelEntry> & Pick<ModelEntry, 'id' | 'provider' | 'name'>,
-): ModelEntry {
-  return {
-    context_window: null,
-    max_output_tokens: null,
-    source: 'provider',
-    ...overrides,
-  }
-}
-
-const ANTHROPIC: ModelEntry = entry({
-  id: 'anthropic/claude-sonnet-5',
-  provider: 'anthropic',
-  name: 'Claude Sonnet 5',
-  context_window: 200_000,
-})
-const OPENAI: ModelEntry = entry({
-  id: 'openai/gpt-4.1-mini',
-  provider: 'openai',
-  name: 'GPT-4.1 mini',
-  context_window: 128_000,
-})
-
-function status(
-  provider: string,
-  overrides: Partial<ProviderCatalogStatus> = {},
-): ProviderCatalogStatus {
-  return {
-    provider,
-    status: 'ok',
-    fetched_at: '2026-10-04T10:00:00.000Z',
-    message: null,
-    ...overrides,
-  }
-}
-
-const TWO_PROVIDERS = {
-  models: [ANTHROPIC, OPENAI],
-  providers: [status('anthropic'), status('openai')],
-}
-
 /** The `create` bodies the app sent, in order. */
-function recordCreates(fake: ReturnType<typeof makeFake>): Array<Record<string, unknown>> {
+function recordCreates(fake: FakeClient): Array<Record<string, unknown>> {
   const calls: Array<Record<string, unknown>> = []
   const create = fake.sessions.create.bind(fake.sessions)
   fake.sessions.create = (body, options) => {
@@ -68,259 +25,144 @@ function recordCreates(fake: ReturnType<typeof makeFake>): Array<Record<string, 
   return calls
 }
 
-/** The group inside the open listbox for one provider. */
-function group(provider: string): HTMLElement {
-  return within(screen.getByRole('listbox', { name: 'Models' })).getByRole('group', {
-    name: provider,
-  })
-}
-
-/** The picker's trigger button. */
-function trigger(): HTMLElement {
-  return screen.getByRole('button', { name: /Model/ })
-}
-
-describe('New chat: pick a model', () => {
-  it('groups the catalog by provider, with display names, ids and context windows', async () => {
+describe('New chat', () => {
+  it('opens on the default model and creates the session with the first message', async () => {
     const user = userEvent.setup({ delay: null })
-    const fake = makeFake(TWO_PROVIDERS)
-    renderApp(fake, { hash: '#/new' })
-
-    // Before anything is chosen, the first catalog entry stands in — no empty picker.
-    const button = await screen.findByRole('button', { name: /Model/ })
-    expect(button).toHaveTextContent('Claude Sonnet 5')
-
-    await user.click(button)
-
-    const anthropic = group('anthropic')
-    expect(within(anthropic).getByText('Claude Sonnet 5')).toBeInTheDocument()
-    expect(within(anthropic).getByText(/anthropic\/claude-sonnet-5/)).toBeInTheDocument()
-    expect(within(anthropic).getByText(/200K context/)).toBeInTheDocument()
-
-    const openai = group('openai')
-    expect(within(openai).getByText('GPT-4.1 mini')).toBeInTheDocument()
-    expect(within(openai).getByText(/openai\/gpt-4\.1-mini/)).toBeInTheDocument()
-    expect(within(openai).getByText(/128K context/)).toBeInTheDocument()
-
-    // A provider the account has no key for is not there at all — the catalog decides the
-    // list, not a hardcoded provider table.
-    expect(
-      within(screen.getByRole('listbox', { name: 'Models' })).queryByRole('group', {
-        name: 'google',
-      }),
-    ).not.toBeInTheDocument()
-  })
-
-  it('offers only the providers with keys, and nothing hardcoded', async () => {
-    const user = userEvent.setup({ delay: null })
-    const fake = makeFake({ models: [OPENAI], providers: [status('openai')] })
-    renderApp(fake, { hash: '#/new' })
-
-    await user.click(await screen.findByRole('button', { name: /Model/ }))
-
-    expect(group('openai')).toBeInTheDocument()
-    expect(
-      within(screen.getByRole('listbox', { name: 'Models' })).queryByRole('group', {
-        name: 'anthropic',
-      }),
-    ).not.toBeInTheDocument()
-    // The old MODEL_SUGGESTIONS list is gone: no provider it named leaks into the screen.
-    expect(screen.queryByText(/claude-opus-5-5|gemini-3-pro/)).not.toBeInTheDocument()
-  })
-
-  it('creates the session with the chosen model and opens it', async () => {
-    const user = userEvent.setup({ delay: null })
-    const fake = makeFake(TWO_PROVIDERS)
+    const fake = makeFake(WITH_DEFAULT)
     const creates = recordCreates(fake)
     renderApp(fake, { hash: '#/new' })
 
-    await user.click(await screen.findByRole('button', { name: /Model/ }))
-    await user.click(within(group('openai')).getByRole('option', { name: /GPT-4.1 mini/ }))
-    expect(trigger()).toHaveTextContent('GPT-4.1 mini')
-
-    await user.click(screen.getByRole('button', { name: 'Create chat' }))
-
-    await waitFor(() => {
-      expect(window.location.hash).toMatch(/^#\/s\/sesn_/)
-    })
-    expect(creates).toEqual([{ model: { id: 'openai/gpt-4.1-mini' } }])
-    // The chat opens on it: the header is headed by the model and shows its id.
-    expect(await screen.findByRole('heading', { name: 'GPT-4.1 mini' })).toBeInTheDocument()
-    expect(within(screen.getByRole('banner')).getByText('openai/gpt-4.1-mini')).toBeInTheDocument()
-  })
-
-  it('takes a free-text model id through "Other model ID…"', async () => {
-    const user = userEvent.setup({ delay: null })
-    const fake = makeFake(TWO_PROVIDERS)
-    const creates = recordCreates(fake)
-    renderApp(fake, { hash: '#/new' })
-
-    await user.click(await screen.findByRole('button', { name: /Model/ }))
-    await user.click(screen.getByRole('option', { name: /Other model ID/ }))
-    await user.type(screen.getByLabelText('Model ID'), 'deepseek/deepseek-chat')
-    await user.click(screen.getByRole('button', { name: 'Use model' }))
-
-    expect(trigger()).toHaveTextContent('deepseek/deepseek-chat')
-    await user.click(screen.getByRole('button', { name: 'Create chat' }))
-
-    await waitFor(() => {
-      expect(creates).toEqual([{ model: { id: 'deepseek/deepseek-chat' } }])
-    })
-  })
-
-  it('is keyboard driven: arrows move, Enter picks, Escape closes', async () => {
-    const user = userEvent.setup({ delay: null })
-    const fake = makeFake(TWO_PROVIDERS)
-    renderApp(fake, { hash: '#/new' })
-
-    const button = await screen.findByRole('button', { name: /Model/ })
-    button.focus()
-    await user.keyboard('{Enter}')
-
-    // The combobox pattern: focus stays in the search field, the active option is announced.
-    const search = screen.getByRole('combobox', { name: 'Search models' })
-    expect(search).toHaveFocus()
-    expect(search).toHaveAttribute('aria-activedescendant')
-    expect(screen.getByRole('option', { name: /Claude Sonnet 5/ })).toHaveAttribute(
-      'data-active',
-      'true',
-    )
-
-    await user.keyboard('{ArrowDown}')
-    await user.keyboard('{Enter}')
-
-    expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
-    expect(button).toHaveTextContent('GPT-4.1 mini')
-    expect(button).toHaveFocus()
-
-    await user.click(button)
-    await user.keyboard('{Escape}')
-    expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
-    expect(button).toHaveFocus()
-  })
-
-  it('searches by name and by id', async () => {
-    const user = userEvent.setup({ delay: null })
-    const fake = makeFake(TWO_PROVIDERS)
-    renderApp(fake, { hash: '#/new' })
-
-    await user.click(await screen.findByRole('button', { name: /Model/ }))
-    await user.type(screen.getByRole('combobox', { name: 'Search models' }), 'gpt-4.1')
-
-    expect(group('openai')).toBeInTheDocument()
+    // The default from the server, in the composer's selector, before anything is sent.
     expect(
-      within(screen.getByRole('listbox', { name: 'Models' })).queryByRole('group', {
-        name: 'anthropic',
-      }),
-    ).not.toBeInTheDocument()
-  })
-
-  it('shows the fallback note on a provider that came from the built-in list', async () => {
-    const user = userEvent.setup({ delay: null })
-    const fake = makeFake({
-      models: [OPENAI],
-      providers: [
-        status('openai', {
-          status: 'fallback',
-          fetched_at: null,
-          message: 'The provider timed out.',
-        }),
-      ],
-    })
-    renderApp(fake, { hash: '#/new' })
-
-    await user.click(await screen.findByRole('button', { name: /Model/ }))
-
-    expect(
-      within(group('openai')).getByText("from the built-in list; the provider couldn't be reached"),
+      await screen.findByRole('button', { name: 'Model: Claude Sonnet 5' }),
     ).toBeInTheDocument()
-  })
+    // Nothing exists until the reader says something.
+    expect((await fake.sessions.list()).data).toHaveLength(1)
 
-  it('refreshes with refresh: true', async () => {
-    const user = userEvent.setup({ delay: null })
-    const fake = makeFake(TWO_PROVIDERS)
-    renderApp(fake, { hash: '#/new' })
+    const input = await screen.findByLabelText('Message')
+    expect(input).toHaveFocus()
+    await user.type(input, 'hello there')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
 
-    await user.click(await screen.findByRole('button', { name: 'Refresh models' }))
-
-    await waitFor(() => {
-      expect(fake.modelListCalls).toEqual([{ refresh: false }, { refresh: true }])
-    })
-  })
-
-  it('answers a rate-limited refresh with a note, not an error', async () => {
-    const user = userEvent.setup({ delay: null })
-    const fake = makeFake(TWO_PROVIDERS)
-    const list = fake.models.list.bind(fake.models)
-    fake.models.list = (params, options) =>
-      params?.refresh === true
-        ? Promise.reject(new ApiError(429, 'Refreshed too recently; try again in a minute.'))
-        : list(params, options)
-    renderApp(fake, { hash: '#/new' })
-
-    await user.click(await screen.findByRole('button', { name: 'Refresh models' }))
-
-    expect(await screen.findByRole('status')).toHaveTextContent(
-      'Refreshed too recently; try again in a minute.',
-    )
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
-    // The list it already had is still there and still usable.
-    expect(trigger()).toHaveTextContent('Claude Sonnet 5')
-  })
-
-  it('remembers the last model used as the default for the next chat', async () => {
-    const user = userEvent.setup({ delay: null })
-    const fake = makeFake(TWO_PROVIDERS)
-    renderApp(fake, { hash: '#/new' })
-
-    await user.click(await screen.findByRole('button', { name: /Model/ }))
-    await user.click(within(group('openai')).getByRole('option', { name: /GPT-4.1 mini/ }))
-    await user.click(screen.getByRole('button', { name: 'Create chat' }))
     await waitFor(() => {
       expect(window.location.hash).toMatch(/^#\/s\/sesn_/)
     })
+    // Created for the send, with the default model, and the message is in the new chat's log.
+    expect(creates).toEqual([{ model: { id: 'anthropic/claude-sonnet-5' } }])
+    const sessionId = window.location.hash.replace('#/s/', '')
+    expect(fake.history(sessionId).filter((event) => event.type === 'user.message')).toHaveLength(1)
+    // The chat opens on it: a model-first chat, labelled by its model, with the cursor in the box.
+    expect(await screen.findByRole('heading', { name: 'Claude Sonnet 5' })).toBeInTheDocument()
+    expect(await screen.findByLabelText('Message')).toHaveFocus()
+  })
 
-    window.location.hash = '#/new'
+  it('creates the session with a model picked in the composer, not the default', async () => {
+    const user = userEvent.setup({ delay: null })
+    const fake = makeFake(WITH_DEFAULT)
+    const creates = recordCreates(fake)
+    renderApp(fake, { hash: '#/new' })
 
-    // Not the catalog's first entry (Claude Sonnet 5): the one the last chat was made with.
+    await user.click(await screen.findByRole('button', { name: 'Model: Claude Sonnet 5' }))
+    await user.click(screen.getByRole('option', { name: /GPT-4.1 mini/ }))
+    expect(screen.getByRole('button', { name: 'Model: GPT-4.1 mini' })).toBeInTheDocument()
+
+    await user.type(screen.getByLabelText('Message'), 'hello')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
+
     await waitFor(() => {
-      expect(trigger()).toHaveTextContent('GPT-4.1 mini')
+      expect(creates).toEqual([{ model: { id: OPENAI.id } }])
     })
   })
 
-  it('points at Settings when there are no keys at all', async () => {
-    const fake = makeFake({ models: [] })
+  it('says to add a provider key when there is no default, and links to Settings', async () => {
+    const fake = makeFake() // the fake's default: an account that never saved one
     renderApp(fake, { hash: '#/new' })
 
-    expect(await screen.findByText('No model providers yet')).toBeInTheDocument()
+    expect(await screen.findByText('Add a provider key to start')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Settings → Model providers' })).toHaveAttribute(
       'href',
       '#/settings',
     )
-    expect(screen.queryByRole('button', { name: 'Create chat' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
+    // Nothing to type into: there is no model a message could run on.
+    expect(screen.queryByLabelText('Message')).not.toBeInTheDocument()
   })
 
-  it('labels the new session with its model in the sidebar too', async () => {
+  it('keeps the message and shows why when the session could not be created', async () => {
     const user = userEvent.setup({ delay: null })
-    const fake = makeFake(TWO_PROVIDERS)
+    const fake = makeFake(WITH_DEFAULT)
+    fake.sessions.create = () => Promise.reject(new ApiError(400, 'The model id is not valid.'))
     renderApp(fake, { hash: '#/new' })
 
-    await user.click(await screen.findByRole('button', { name: /Model/ }))
-    await user.click(within(group('openai')).getByRole('option', { name: /GPT-4.1 mini/ }))
-    await user.click(screen.getByRole('button', { name: 'Create chat' }))
+    await user.type(await screen.findByLabelText('Message'), 'hello?')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
+
+    // Two things went wrong at once — the create failed, and the sidebar's list error shows
+    // it too — so this asserts the composer's own banner, by its words.
+    const banner = await screen.findByText('The chat could not be created.')
+    expect(banner.closest('[role="alert"]')).toBeInTheDocument()
+    // Still on New chat, with the text: the retry is one more click.
+    expect(window.location.hash).toBe('#/new')
+    expect(screen.getByLabelText('Message')).toHaveValue('hello?')
+  })
+
+  it('reuses the session it already created when only the message failed', async () => {
+    const user = userEvent.setup({ delay: null })
+    const fake = makeFake(WITH_DEFAULT)
+    const creates = recordCreates(fake)
+    const send = fake.sendMessage.bind(fake)
+    let failNext = true
+    fake.sendMessage = (sessionId, text, options) => {
+      if (!failNext) {
+        return send(sessionId, text, options)
+      }
+      failNext = false
+      return Promise.reject(new ApiError(500, 'The message store is down.'))
+    }
+    renderApp(fake, { hash: '#/new' })
+
+    await user.type(await screen.findByLabelText('Message'), 'hello')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('The message store is down.')
+
+    // The retry goes to the chat that exists — not a second create, not a second empty chat.
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
     await waitFor(() => {
       expect(window.location.hash).toMatch(/^#\/s\/sesn_/)
     })
-    const sessionId = window.location.hash.replace('#/s/', '')
+    expect(creates).toHaveLength(1)
+    expect((await fake.sessions.list()).data).toHaveLength(2)
+  })
 
-    await waitFor(() => {
-      const row = sessionRows().find(
-        (element) => element.querySelector('a')?.getAttribute('href') === `#/s/${sessionId}`,
-      )
-      expect(row).toBeDefined()
-      expect(row).toHaveTextContent('GPT-4.1 mini')
-      expect(row).toHaveTextContent('openai/gpt-4.1-mini')
-    })
+  it('shows a failed catalog load without blocking the composer', async () => {
+    const fake = makeFake(WITH_DEFAULT)
+    fake.models.list = () => Promise.reject(new ApiError(500, 'The catalog is unavailable.'))
+    renderApp(fake, { hash: '#/new' })
+
+    const banner = await screen.findByText('Could not load models')
+    expect(banner.closest('[role="alert"]')).toHaveTextContent('The catalog is unavailable.')
+    // The default is still known and the chat can still start; the catalog is a convenience,
+    // and without it the selector falls back to the id it was handed.
+    expect(
+      screen.getByRole('button', { name: 'Model: anthropic/claude-sonnet-5' }),
+    ).toBeInTheDocument()
+    expect(screen.getByLabelText('Message')).toBeInTheDocument()
+  })
+
+  it('shows a failed preferences load, and still lets a model be picked by hand', async () => {
+    const fake = makeFake(WITH_DEFAULT)
+    fake.preferences.get = () => Promise.reject(new ApiError(500, 'The preferences store is down.'))
+    renderApp(fake, { hash: '#/new' })
+
+    const banner = await screen.findByText('Could not load your default model')
+    expect(banner.closest('[role="alert"]')).toHaveTextContent('The preferences store is down.')
+    // No default is known, so the selector starts on nothing — but the catalog is there, and
+    // a pick is enough to start a chat.
+    const trigger = screen.getByRole('button', { name: 'Model: Choose a model' })
+    expect(trigger).toBeInTheDocument()
+
+    const user = userEvent.setup({ delay: null })
+    await user.click(trigger)
+    await user.click(screen.getByRole('option', { name: /GPT-4.1 mini/ }))
+    expect(screen.getByRole('button', { name: 'Model: GPT-4.1 mini' })).toBeInTheDocument()
   })
 })

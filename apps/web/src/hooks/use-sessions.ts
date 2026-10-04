@@ -9,7 +9,11 @@ import { withFreshSessions } from '../lib/session-refresh'
 import { useSessionRefresh } from './use-session-refresh'
 import { useSettings } from './use-settings'
 
-/** Everything the session list needs, plus creating one. */
+/** Why a delete did not happen. */
+export type DeleteSessionResult =
+  { readonly ok: true } | { readonly ok: false; readonly message: string }
+
+/** Everything the session list needs, plus creating one and deleting one. */
 export interface SessionsView {
   /** The sessions, newest first. */
   readonly sessions: readonly Session[]
@@ -21,6 +25,18 @@ export interface SessionsView {
   readonly error: string | null
   /** Create a model-first session on `modelId`, refresh the list, and return it (`null` on failure). */
   readonly create: (modelId: string) => Promise<Session | null>
+  /**
+   * Delete a session and everything in it (epic #116, U5), removing its row.
+   *
+   * The failure is returned rather than put on the list error: the list is fine — one
+   * delete failed — and the screen that asked shows it next to the row it was about.
+   */
+  readonly remove: (sessionId: string) => Promise<DeleteSessionResult>
+  /**
+   * Drop a session from the list without calling the server: another writer deleted it and
+   * the stream said so (`session.deleted`), so the row has to go too (U5).
+   */
+  readonly forget: (sessionId: string) => void
   /** Load the list again. */
   readonly refresh: () => void
 }
@@ -111,5 +127,26 @@ export function useSessions(client: Client): SessionsView {
     [client, serverUrl],
   )
 
-  return { sessions, loading, truncated, error, create, refresh }
+  const remove = useCallback(
+    async (sessionId: string): Promise<DeleteSessionResult> => {
+      try {
+        await client.sessions.delete(sessionId)
+        setSessions((current) => current.filter((session) => session.id !== sessionId))
+        return { ok: true }
+      } catch (caught) {
+        // A 401 still signs the app out; the message is what a caller shows if it does not.
+        if (noteAuthenticationError(client, caught)) {
+          return { ok: false, message: 'Your session ended. Sign in again to continue.' }
+        }
+        return { ok: false, message: describeError(caught, { serverUrl }) }
+      }
+    },
+    [client, serverUrl],
+  )
+
+  const forget = useCallback((sessionId: string): void => {
+    setSessions((current) => current.filter((session) => session.id !== sessionId))
+  }, [])
+
+  return { sessions, loading, truncated, error, create, remove, forget, refresh }
 }

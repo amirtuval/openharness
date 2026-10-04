@@ -71,35 +71,45 @@ src/
     auth-provider.tsx          the Better Auth browser client in context
     provider-icon.tsx          the Google / GitHub / Microsoft marks, inline
     sidebar.tsx                session list (newest first), New chat, Settings,
+                               the row's kebab menu (Delete chat, in-page confirm),
                                and the signed-in user with Sign out at the foot;
                                the column from `md` up, the overlay drawer below it
     settings/
       model-providers.tsx      Settings -> Model providers: the list, add/replace, delete
+      default-model.tsx        Settings -> Default model: the picker, saved to preferences
     chat/
-      chat-view.tsx            the chat screen: header, messages, errors, composer
+      chat-view.tsx            the chat screen: header (+ delete), messages, errors,
+                               composer with the model selector, the model-change marker
       message-list.tsx         the scrolling conversation + stick-to-bottom
-      message-item.tsx         one message (user right / agent left, markdown)
+      message-item.tsx         one message (user right / agent left, markdown), and the
+                               "Switched to …" marker when it changed the model
       markdown.tsx             react-markdown + remark-gfm, styled element by element
-      composer.tsx             the input; Enter sends, Stop appears while running
+      composer.tsx             the input; Enter sends, Stop appears while running, and
+                               the model control sits in its bottom row
       status-indicator.tsx     running / idle / retrying
       error-banner.tsx         inline errors (from the log, or from a failed request)
     models/
-      model-picker.tsx         the New chat picker: grouped, searchable, free text (#91)
+      model-picker.tsx         THE model control: grouped, searchable, free text, refresh;
+                               `full` in Settings, `compact` in the composer (#91, #113)
     ui/                        shadcn/ui primitives, copied from the registry
   screens/
     home-screen.tsx            no chat open
-    new-chat-screen.tsx        pick a model from the catalog, create the session, go
-    settings-screen.tsx        the server URL (localStorage), then Model providers
+    new-chat-screen.tsx        an empty composer on the default model; the session is
+                               created with the first message (#113), or the
+                               "add a provider key" state when there is no default
+    settings-screen.tsx        the server URL (localStorage), Default model, Model providers
     sign-in-screen.tsx         one button per provider, the dev form when offered
     device-screen.tsx          the device-approval page `oh login` opens
   hooks/
-    use-session.ts             THE session hook: history, live stream, send, interrupt
-    use-sessions.ts            the sidebar's list, plus create
+    use-session.ts             THE session hook: history, live stream, send (with a model), interrupt
+    use-sessions.ts            the sidebar's list, plus create and remove (and forget)
     use-session-refresh.ts     the re-read after a first message, shared by both of those
     use-models.ts              the catalog (GET /v1/models), once for the whole shell
+    use-preferences.ts         GET/PUT /v1/me/preferences: the default model
     use-auth.ts                the auth store's React binding
     use-auth-config.ts         GET /v1/auth-config for the sign-in page
     use-provider-credentials.ts  the credentials list, plus save and delete
+    use-notice.ts              the shell's one-line notice (a chat deleted elsewhere)
     use-stick-to-bottom.ts     auto-scroll that stays put when the reader scrolls up
     use-route.ts, use-settings.ts   thin React bindings over the two small stores
   lib/
@@ -109,7 +119,7 @@ src/
     auth-client.ts             Better Auth's browser client, narrowed to the calls we make
     auth-store.ts              who we are signed in as, and "a 401 means sign in again"
     settings.ts                localStorage settings, a stable snapshot for React
-    last-model.ts              the model the last chat was created with (localStorage)
+    notice.ts                  the shell's notice, a one-line store
     providers.ts               the provider names the *credentials* form offers
     session-refresh.ts         the one re-read of a session whose first message named it
     dev-fake-client.ts         dev-only fake client + the seeded scenario
@@ -117,18 +127,20 @@ src/
     paging.ts                  walking `next_page` for the two lists, with a safety cap
     errors.ts, format.ts, utils.ts
   test-support/render-app.tsx  render the app against a fake client; DOM readers
+  test-support/stream.ts       gate the fake's stream, one event at a time
+  test-support/catalog.ts      the two-provider catalog fixtures the picker tests share
 ```
 
 ### Routes
 
-| route                       | screen                                      |
-| --------------------------- | ------------------------------------------- |
-| `#/`                        | home (no chat open)                         |
-| `#/s/<sessionId>`           | the chat                                    |
-| `#/new`                     | new chat: pick a model                      |
-| `#/settings`                | server URL, and Settings -> Model providers |
-| `#/signin`                  | sign in (`?next=<hash>` to return there)    |
-| `#/device?user_code=<code>` | the device-approval page `oh login` opens   |
+| route                       | screen                                           |
+| --------------------------- | ------------------------------------------------ |
+| `#/`                        | home (no chat open)                              |
+| `#/s/<sessionId>`           | the chat                                         |
+| `#/new`                     | new chat: an empty composer on the default model |
+| `#/settings`                | server URL, Default model, Model providers       |
+| `#/signin`                  | sign in (`?next=<hash>` to return there)         |
+| `#/device?user_code=<code>` | the device-approval page `oh login` opens        |
 
 There is no `#/agents` route since #91: chatting is model-first, agents are hidden from the
 UI, and an old bookmark to that screen lands on home.
@@ -265,17 +277,17 @@ is the button.
 The tests in `src/App.test.tsx` assert the switch and the behaviour, not the pixels: jsdom has
 no layout. What 390px looks like is a browser question.
 
-## Model-first New chat (#91)
+## Model-first chat (#91, #113)
 
-Chatting does not need an agent (epic #92): New chat picks a **model**, and the picker is fed
-by `client.models.list()` — the chat models the reader's own keys can use, and nothing else.
-There is no hardcoded suggestion list.
+Chatting does not need an agent (epic #92): a chat is started from a **model**, and the model
+list is fed by `client.models.list()` — the chat models the reader's own keys can use, and
+nothing else. There is no hardcoded suggestion list.
 
-`useModels(client)` loads the catalog **once, in the shell** (`AppFrame`), so the New chat
-picker, the chat header and the sidebar rows all read the same copy. `refresh()` calls
-`list({ refresh: true })` to bypass the server's cache; a 429 (`rate_limit_error`) is
-answered as an outcome, not an error state — the screen shows the server's sentence inline and
-keeps the list it had.
+`useModels(client)` loads the catalog **once, in the shell** (`AppFrame`), so the composer's
+model selector, Settings' default-model picker, the chat header and the sidebar rows all read
+the same copy. `refresh()` calls `list({ refresh: true })` to bypass the server's cache; a 429
+(`rate_limit_error`) is answered as an outcome, not an error state — the picker shows the
+server's sentence inline and keeps the list it had.
 
 `ModelPicker` (`src/components/models/model-picker.tsx`) is the app's own listbox, not a
 native `<select>` (#87: native popups could not be themed); it uses the popover tokens and is
@@ -285,12 +297,48 @@ picks, Escape closes and returns focus to the trigger. Each row shows the displa
 are the providers the server sent, in its order; a provider in `fallback` status carries a
 small note ("from the built-in list; the provider couldn't be reached"). The last row is
 "Other model ID…": it swaps the panel for a free-text `provider/model` field, because the
-router accepts models the catalog may not know yet.
+router accepts models the catalog may not know yet. Refresh lives in the panel's foot, so
+every surface that offers the catalog can rebuild it where the list is. It has two sizes:
+`full` (Settings) and `compact` — the composer's quiet "gpt-4.1-mini ▾" control, whose panel
+opens upward.
 
-Creating the chat is `client.sessions.create({ model: { id } })` — no agent — and the model is
-remembered (`localStorage`, `lib/last-model.ts`, `try`/`catch`-guarded) as the next New chat's
-default. With no keys at all, the screen shows an empty state linking to Settings → Model
-providers instead of a picker.
+### New chat is immediate (#113, epic #116 U2)
+
+`#/new` is an empty chat, not a picker screen: `NewChatScreen` renders the composer with the
+account's **default model** from `client.preferences.get()`, and the session is created on the
+first send — `sessions.create({ model })`, then `sendMessage` — after which the app moves to
+the chat. With no default (an account with no keys at all) it shows "Add a provider key to
+start" and links to Settings. A failed create keeps the text in the box; a failed send keeps
+the session it already created and retries into that, not a second empty chat. The first
+message is what names the session (#35), so a successful send asks `lib/session-refresh` for
+its one re-read itself — the sidebar row was added by the create, before the name existed.
+
+### The composer's model control (#113, U3)
+
+The selector shows the session's current model: the transcript's `model` (the id the log last
+said), else the model the session was created with. Picking another one **holds it until the
+next message** — that message carries `{ model }` and the session's model moves with it — and
+after a successful send the selector reads the log again, so what is shown is the log's answer,
+not a local leftover. A switch is visible in the transcript: `TranscriptMessage.modelChangedTo`
+draws a "Switched to <display name>" marker above that message. (The _first_ model a message
+carries only sets the state, silently — there is nothing it changed from.)
+
+### Default model in Settings (#113, U1/U4)
+
+`DefaultModelCard` (Settings → Default model) is the same picker, `full` size, over
+`usePreferences` — `GET`/`PUT /v1/me/preferences`. It shows whatever the server holds,
+including a default the **server picked by itself** when the first provider key was saved (U4),
+and saves a pick immediately (`preferences.put`), with the failure shown inline while the
+stored value stays in effect.
+
+### Deleting a chat (#113, U5)
+
+Each sidebar row carries a kebab menu (revealed on hover or focus, always reachable by
+keyboard) with **Delete chat**, and the chat header has a delete action; both confirm **in the
+page** — never `window.confirm` — and deleting the open chat navigates to New chat. A chat
+deleted _elsewhere_ announces itself through the stream's `session.deleted`: the open chat
+raises the shell's notice (`lib/notice.ts`), the sidebar drops its row without a call of its
+own (`useSessions.forget`), and the app lands on New chat.
 
 ### Agents are hidden — the code is gone, not dormant
 
@@ -334,21 +382,25 @@ social sign-in leaves the page and cannot be run in a test. The app code is unto
 tests drive the same calls it makes, and assert their arguments. `GET /v1/auth-config` — the
 one request outside `@openharness/client` — is stubbed at `fetch` where a test needs it.
 
-| file                                     | covers                                                                                                                                                                                                                                                                                                               |
-| ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/App.test.tsx`                       | open a session, send → streamed reply, Stop → interrupted, reload → history, steering, retry → success, terminal error, new chat, a title arriving without a reload, request error, a 401 sending the reader to sign in, the missing-provider-credential message, model-first labels, no agent-first onboarding left |
-| `src/screens/new-chat-screen.test.tsx`   | the picker (#91): grouping by provider, only providers with keys, search, the free-text model id, the empty state, the fallback note, refresh (and its 429), the session created with the chosen model, the last-model default                                                                                       |
-| `src/screens/settings-screen.test.tsx`   | settings round-trip, an empty URL as same-origin, the confirmation surviving a client rebuild (#81), credentials add/replace/delete, no key in the DOM, the rejected-key and fresh-session errors                                                                                                                    |
-| `src/screens/sign-in-screen.test.tsx`    | the 401 landing, provider buttons per auth-config, the dev form gating and sign-in, returning to the route, sign-out, a later 401                                                                                                                                                                                    |
-| `src/screens/device-screen.test.tsx`     | approve, deny, an invalid code, an expired code, a rate-limited one and the server's other error bodies (#80), an already-decided code, signing in first, the code through a social sign-in                                                                                                                          |
-| `src/hooks/use-session.test.tsx`         | the hook's own contract: a failed load, and no duplicated message                                                                                                                                                                                                                                                    |
-| `src/hooks/use-stick-to-bottom.test.tsx` | the auto-scroll rule, with a scroll geometry jsdom does not have                                                                                                                                                                                                                                                     |
-| `src/components/sidebar.test.tsx`        | the session list follows `next_page`, and the cap note                                                                                                                                                                                                                                                               |
-| `src/lib/*.test.ts`                      | routes, the settings store, the fake-mode scenario, the paging walk, the session re-read, the label rules and the context-window formatting                                                                                                                                                                          |
+| file                                          | covers                                                                                                                                                                                                                                                                                                                                                                           |
+| --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/App.test.tsx`                            | open a session, send → streamed reply, Stop → interrupted, reload → history, steering, retry → success, terminal error, the composer model switch + its marker, a title arriving without a reload, request error, a 401 sending the reader to sign in, the missing-provider-credential message, model-first labels, deleting chats (header, sidebar, failure, deleted elsewhere) |
+| `src/screens/new-chat-screen.test.tsx`        | New chat is immediate (#113): the default shown and created with the first message, a pick before the first send, the no-default state, a failed create (keeping the text) and a failed send (reusing the session), a failed catalog and preferences load                                                                                                                        |
+| `src/screens/settings-screen.test.tsx`        | settings round-trip, an empty URL as same-origin, the confirmation surviving a client rebuild (#81), credentials add/replace/delete, a failed keys load, no key in the DOM, the rejected-key and fresh-session errors, and the default model (server-chosen, saved, failed load/save)                                                                                            |
+| `src/screens/sign-in-screen.test.tsx`         | the 401 landing, provider buttons per auth-config, the dev form gating and sign-in, returning to the route, sign-out, a later 401                                                                                                                                                                                                                                                |
+| `src/screens/device-screen.test.tsx`          | approve, deny, an invalid code, an expired code, a rate-limited one and the server's other error bodies (#80), an already-decided code, signing in first, the code through a social sign-in                                                                                                                                                                                      |
+| `src/components/chat/composer.test.tsx`       | the keyboard rules (#105, P1): Enter sends, Shift+Enter newlines, empty/whitespace sends nothing, Send disabled while empty, a failed send keeps the text                                                                                                                                                                                                                        |
+| `src/components/models/model-picker.test.tsx` | the picker itself: grouping, search, the keyboard rule, free text, the fallback note, refresh (429 and failure), the compact trigger                                                                                                                                                                                                                                             |
+| `src/hooks/use-session.test.tsx`              | the hook's own contract: a failed load, and no duplicated message                                                                                                                                                                                                                                                                                                                |
+| `src/hooks/use-stick-to-bottom.test.tsx`      | the auto-scroll rule, with a scroll geometry jsdom does not have                                                                                                                                                                                                                                                                                                                 |
+| `src/components/sidebar.test.tsx`             | the session list: first page then the rest, the cap note, and the row's delete action (in-page confirm, cancel, Escape, failure)                                                                                                                                                                                                                                                 |
+| `src/lib/*.test.ts`                           | routes, the settings store, the fake-mode scenario, the paging walk, the session re-read, the label rules, the context-window formatting, the auth store's rules, and the auth-config schema's unknown-provider filter                                                                                                                                                           |
 
-Timing matters: the fake streams with `delayMs: 0` by default, so a test that wants to observe
-a reply _while it streams_ passes a larger `delayMs` (and enough `chunks`) — otherwise the
-reply can be finished before the first assertion runs.
+Timing: streaming tests do not race the clock. `src/test-support/stream.ts` gates the fake's
+stream so the test releases **one event at a time** and asserts between events — the fake
+still produces the whole turn at `delayMs: 0`, and nothing can arrive while an assertion runs.
+The one test that needs a turn genuinely in flight (Stop) gives the scripted reply a slow,
+explicit `delayMs` and interrupts well inside it.
 
 ## Allowed `@openharness/*` dependencies
 

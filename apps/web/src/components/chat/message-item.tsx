@@ -1,5 +1,7 @@
 import type { TranscriptMessage } from '@openharness/client'
 
+import { modelLabel } from '../../lib/format'
+import type { ModelNameLookup } from '../../lib/models'
 import { cn } from '../../lib/utils'
 import { Badge } from '../ui/badge'
 import { Markdown } from './markdown'
@@ -10,8 +12,19 @@ import { Markdown } from './markdown'
  * The `data-*` attributes are the transcript's state made visible — `data-streaming` while a
  * reply is still arriving as deltas, `data-pending` for a message the brain has not reached
  * yet (a steering message waiting its turn). The tests read them; a stylesheet could too.
+ *
+ * A `user.message` that switched the session's model carries `modelChangedTo` (epic #116,
+ * U3); the marker above the bubble is what says so — "Switched to Claude Sonnet" — so a
+ * reader can see where the conversation changed engines without opening the log.
  */
-export function MessageItem({ message }: { message: TranscriptMessage }) {
+export function MessageItem({
+  message,
+  nameOf,
+}: {
+  message: TranscriptMessage
+  /** The catalog lookup for the marker's display name; the id when the catalog does not know it. */
+  nameOf?: ModelNameLookup | undefined
+}) {
   const isUser = message.role === 'user'
 
   return (
@@ -19,8 +32,13 @@ export function MessageItem({ message }: { message: TranscriptMessage }) {
       data-role={message.role}
       data-streaming={message.streaming}
       data-pending={message.pending}
-      className={cn('flex flex-col gap-1', isUser ? 'items-end' : 'items-start')}
+      className={cn('flex w-full flex-col gap-1', isUser ? 'items-end' : 'items-start')}
     >
+      {message.modelChangedTo === undefined ? null : (
+        <p data-slot="model-change" className="self-center text-xs text-muted-foreground">
+          Switched to {modelLabel(message.modelChangedTo, nameOf)}
+        </p>
+      )}
       <div
         className={cn(
           'max-w-[85%] min-w-0 rounded-lg px-3.5 py-2.5',

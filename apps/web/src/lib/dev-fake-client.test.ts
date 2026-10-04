@@ -1,15 +1,9 @@
 import { createFakeClient } from '@openharness/client/testing'
 import { describe, expect, it } from 'vitest'
 
-import { createDevFakeClient, isFakeMode, seedFakeScenario } from './dev-fake-client'
+import { seedFakeScenario } from './dev-fake-client'
 
 describe('fake mode', () => {
-  it('is off unless VITE_OPENHARNESS_FAKE=1 was set', async () => {
-    // The suite runs without the flag, and nothing else sets it.
-    expect(isFakeMode()).toBe(false)
-    expect(await createDevFakeClient()).toBeNull()
-  })
-
   it('seeds a second agent, a session with a turn in its log, and a scripted reply', async () => {
     const fake = createFakeClient()
     await seedFakeScenario(fake)

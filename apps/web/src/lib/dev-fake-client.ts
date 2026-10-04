@@ -34,6 +34,10 @@ export async function createDevFakeClient(): Promise<Client | null> {
   // New chat picker's grouping, context windows and fallback note are all visible in fake
   // mode (#91), not just a single row.
   const fake = createFakeClient({
+    // New chat opens on the default (epic #116): without one, fake mode would always land on
+    // the "add a provider key" empty state, and the composer — the thing there is to click
+    // through — would never be reached.
+    preferences: { default_model: 'openai/gpt-5.1-mini' },
     models: [
       {
         id: 'anthropic/claude-sonnet-5',
