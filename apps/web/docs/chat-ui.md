@@ -39,7 +39,8 @@ A session has no title at creation, and the server derives one from the first `u
 inside the request that stores it (`apps/server/src/titles.ts`, PR #32). That request answers
 with the stored events, the stream carries log events, and there is no `session.updated` — so
 nothing tells a client which already loaded the session that it has just been named. The chat
-header and the sidebar row kept showing the agent's name until something reloaded the page.
+header and the sidebar row kept showing the session's model name until something reloaded the
+page.
 
 `src/lib/session-refresh.ts` is the fix, and it is deliberately one mechanism rather than two
 refetches:
@@ -92,10 +93,9 @@ sanitizer is needed.
 
 The maintainer decision behind epic #92: **chatting must not require an agent**. New chat is
 one screen with one question — which model? — and the answer comes from the account's own
-keys, not from a hardcoded list. The old `MODEL_SUGGESTIONS` (five ids, blind to which
-providers the user had keys for) is deleted; the only model list the app offers is the one
-`GET /v1/models` answers, plus the picker's free-text escape hatch, because the router accepts
-`provider/model` ids the catalog may not know.
+keys, not from a hardcoded list that can go stale against them. The only model list the app
+offers is the one `GET /v1/models` answers, plus the picker's free-text escape hatch, because
+the router accepts `provider/model` ids the catalog may not know yet (C5).
 
 **One catalog for the shell.** `useModels(client)` lives in `AppFrame`, not in the screen, and
 that is the whole sharing story: the picker offers the entries, and the sidebar rows and the
@@ -131,9 +131,9 @@ panel for a `provider/model` text field instead of closing over a selection.
   nothing remembered, the catalog's first entry stands in.
 
 **Labels.** `sessionLabel(session, nameOf)` is the title, else the catalog's display name for
-`session.model.id`, else the id itself. It used to fall back to the agent's name — for
-agent-created sessions it still doesn't, on purpose (the issue says the label is the model);
-the header shows the model's id under the label so the model is always visible on a chat.
+`session.model.id`, else the id itself. The agent's name is never used — not even for a
+session created from an agent, on purpose (the issue says the label is the model); the header
+shows the model's id under the label so the model is always visible on a chat.
 
 **Agents: deleted from the UI, kept in the API.** The screen, the form, `useAgents`, the
 `#/agents` route and their tests are gone rather than hidden behind a flag — unreachable code
@@ -170,8 +170,7 @@ save is noticed.
 
 ## Fake mode
 
-The server does not exist yet, so the app can run entirely on
-`@openharness/client/testing`:
+The app can run entirely on `@openharness/client/testing`, with no server:
 
 ```bash
 VITE_OPENHARNESS_FAKE=1 yarn dev

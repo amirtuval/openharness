@@ -88,10 +88,11 @@ Five decisions worth knowing before reading the tests:
   free port, with `OPENHARNESS_TEST_MODEL=mock`, the dev login on (`OPENHARNESS_DEV_LOGIN=1`,
   so `harness.client(server)` can sign in as the documented dev user) and fixed
   `BETTER_AUTH_SECRET`/`OPENHARNESS_SECRETS_KEY` values. The child's environment starts from the
-  test process's, minus every `OPENHARNESS_*`/`BETTER_AUTH_*` variable and
-  `PORT`/`DATABASE_URL`: a leftover variable in a developer's shell must not change what a test
-  runs. Provider keys pass through deliberately — the smoke test is what needs them, and it
-  stores the key as a credential rather than expecting the server to read it (A5). The process is detached (its own group) and
+  test process's, minus every `OPENHARNESS_*`/`BETTER_AUTH_*` variable, `PORT`/`DATABASE_URL`
+  and the test-runner markers (`NODE_ENV`, `TEST`; see below): a leftover variable in a
+  developer's shell must not change what a test runs. Provider keys pass through deliberately —
+  the smoke test is what needs them, and it stores the key as a credential rather than
+  expecting the server to read it (A5). The process is detached (its own group) and
   killed with `SIGKILL` by default, so nothing it spawned outlives it.
 - **The server runs with `NODE_ENV=production`** (#79), always — only the spawned process;
   vitest keeps its own `NODE_ENV=test`. Better Auth skips its whole origin check when
@@ -156,24 +157,21 @@ Five decisions worth knowing before reading the tests:
 
 ### The failover test, and how it decides to skip
 
-The test needs the multi-instance scheduler (`SCHEDULER=postgres`, issue #11). On a tree
-without it, `SCHEDULER=postgres` would simply be an unknown variable: the server ignores it, comes up on
-`LocalScheduler`, and two instances believe they each own every session — which is not
-something the server can report, and not something this test can assert against. So the test
-**detects** the capability and skips with an explanation instead of guessing. Two checks, in
-order:
+The test needs the multi-instance scheduler (`SCHEDULER=postgres`, issue #11), so it
+**detects** the capability instead of assuming it: on a server that ignores `SCHEDULER`, two
+instances would each come up on `LocalScheduler` believing they own every session — not
+something this test can assert against. Two checks, in order:
 
 1. the built server's code never mentions `SCHEDULER` — a variable nothing reads cannot change
    what the process does, so there is nothing to test;
 2. an instance started with `SCHEDULER=postgres` and short lease timings
    (`OPENHARNESS_LEASE_TTL_MS`, `OPENHARNESS_HEARTBEAT_MS`) holds no partition lease: a running
-   partition scheduler is one with `partition_leases.owner` set, and if nothing claims
-   partitions, ownership is recorded some other way than this test assumes.
+   partition scheduler is one with `partition_leases.owner` set.
 
-Either way the skip message says which check failed and what would make the test run. With
-#11 in the tree the test runs: both instances start with `SCHEDULER=postgres`, the test looks
-up which one owns the session's partition in `partition_leases`, `SIGKILL`s that owner
-mid-`__slow__`, and the survivor has to take the partition over and finish the turn.
+Either way the skip message says which check failed and what would make the test run. When it
+runs: both instances start with `SCHEDULER=postgres`, the test looks up which one owns the
+session's partition in `partition_leases`, `SIGKILL`s that owner mid-`__slow__`, and the
+survivor has to take the partition over and finish the turn.
 
 ## Testing
 
@@ -211,8 +209,7 @@ in **once per worker** as `dev@localhost` / `dev` (`QA_DEV_EMAIL` / `QA_DEV_PASS
 the pair):
 
 - the bearer token of that session becomes the `request` fixture's `authorization` header, so
-  every API call a spec makes is authenticated (`authHeaders` and `QA_API_KEY` are gone with
-  the `x-api-key` scheme, A8);
+  every API call a spec makes is authenticated;
 - the session's cookie is put on the browser context, so the page is signed in before the
   first `goto` and the app never shows its sign-in page to a scenario that is not about it.
 

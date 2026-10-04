@@ -202,9 +202,10 @@ Better Auth's own schema check passes on the migrated database.
 ## The model catalogue (epic #92)
 
 `GET /v1/models` answers **the chat models the caller's own provider credentials can use**,
-one entry per model and one status per provider — the list the agent form picks from, and the
-context windows the per-model context budget will use later. `catalog/` is the whole of it;
-the route (`routes/models.ts`) only parses the query and maps the one error it can raise.
+one entry per model and one status per provider — the list the clients' model pickers offer
+(#91/#92, model-first chat), and the context windows the per-model context budget will use
+later. `catalog/` is the whole of it; the route (`routes/models.ts`) only parses the query and
+maps the one error it can raise.
 
 - **C1 — the list comes from the provider, with the caller's key.** Per provider the server
   calls that provider's own list endpoint with the credential stored for the caller, decrypted
@@ -352,9 +353,7 @@ The AI SDK adapter follows the same rules with an `error` chunk carrying
 Since D9 (issue #46) the brain stores each chunk as it streams, so a reply in flight **is** the
 log: a connection that opens mid-reply — a reloaded page, a second tab — replays the chunks
 already written under `seq` like any other event, and the stored `agent.message` supersedes
-them at the end of the turn. There is no preview snapshot to keep: the text that used to live
-in `session_previews`, and the text-overlap de-duplication it needed, went with it in P3, and
-the table itself was dropped in P4. A client resuming from inside a reply's chunks gets the
+them at the end of the turn. A client resuming from inside a reply's chunks gets the
 remaining chunks and then the message; after compaction has deleted the chunks it gets the
 message alone, which is the same conversation (the message's position is where its range
 started).
@@ -677,7 +676,9 @@ src/
   http/
     errors.ts           HttpError and the protocol's error envelope
     request.ts          body/query/path reading, through the protocol's schemas
-  routes/               agents.ts, sessions.ts, events.ts, ai-sdk.ts, me.ts, models.ts, provider-credentials.ts
+  routes/               agents.ts, sessions.ts, events.ts, ai-sdk.ts, me.ts, models.ts,
+                        provider-credentials.ts, plus deps.ts (RouteDeps) and signals.ts
+                        (what a stored user event tells the scheduler)
   test-support/         test-only: scripted model, SSE reader, the server harness, Postgres
 docs/scheduling.md      the multi-instance scheduler: partitions, leases, epochs, recovery
 ```
@@ -704,10 +705,11 @@ scripted model. Route tests call the Hono app in-process (`app.request()`); the 
 tests start a real listener on an ephemeral port, because what they assert — frames on a
 socket, the client transport's own request shape — only exists over one.
 
-Test **files** run one at a time (`fileParallelism: false` in `vitest.config.ts`): the two
-suites that run against the same Postgres — `partition-scheduler.test.ts` and
-`sse-postgres.test.ts` — each empty the tables they use, so two of them in flight at once would
-delete each other's sessions. Packages still run in parallel with each other.
+Test **files** run one at a time (`fileParallelism: false` in `vitest.config.ts`): the three
+suites that run against the same Postgres — `partition-scheduler.test.ts`,
+`sse-postgres.test.ts` and `sse-revocation-postgres.test.ts` — each empty the tables they use,
+so two of them in flight at once would delete each other's data. Packages still run in
+parallel with each other.
 
 - `app.test.ts` — every route, the error envelopes, auth, CORS, static assets, and the title a
   session gets from its first message.

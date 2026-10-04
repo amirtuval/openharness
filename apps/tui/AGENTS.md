@@ -51,8 +51,7 @@ to be a TTY to read a key; and `130`/`143` when the process was signalled, which
 a running `oh login` is cancelled.
 
 Unknown flags are errors, not positionals: `node:util`'s `parseArgs` runs in strict mode, the
-message goes to stderr, and the exit code is `2`. `--api-key` was removed (epic #65, A8) and
-is one of them.
+message goes to stderr, and the exit code is `2`.
 
 ### Configuration precedence
 
@@ -66,8 +65,7 @@ Highest first:
 
 A missing config file is fine. A file that exists and does not parse, holds the wrong types,
 or names a key that does not exist is an error (exit `2`) naming the file and the problem. An
-empty environment variable counts as unset. There is no API key setting any more: `oh login`
-is the only way in.
+empty environment variable counts as unset. `oh login` is the only way in.
 
 ### Signing in
 
@@ -104,6 +102,11 @@ goes to stderr; the exit code stays `0`. `oh whoami` prints the same `Logged in 
 <server>` line, or the not-signed-in error. Ctrl+C during `oh login` aborts the poll, prints
 `oh: login cancelled.` and exits `130` (`143` for `SIGTERM`). Expired codes and denied
 logins are reported with their own one-liners, exit `1`.
+
+A chat is not exempt once it is open: a session revoked while `oh` is in it — `oh logout`
+from another terminal, a sign-out in the browser — closes the server's stream within about a
+second; the client's reconnect is then refused with a 401, which ends the stream loop rather
+than retrying. The chat shows the not-signed-in error, the same one any 401 gets.
 
 ### Choosing a model
 
@@ -247,9 +250,27 @@ tested without Ink at all.
 The auth side is tested at both levels: `src/credentials.ts` against a temp directory (the
 atomic write, `0600`/`0700`, per-server tokens, the errors a broken file produces),
 `src/browser.ts` with an injected spawn (the CI / SSH / no-display skips and the per-platform
-command), `src/commands/auth.ts` against the fake's scripted device flow (approval, expiry,
-denial, cancellation, revoke failures), and `src/index.test.ts` drives `run()` all the way
-through `login` / `whoami` / `logout` with `XDG_CONFIG_HOME` pointed at a temp directory.
+command), and `src/commands/auth.ts` against the fake's scripted device flow (approval, expiry,
+denial, cancellation, revoke failures); `src/index.test.ts` drives `run()` all the way through
+`login` / `whoami` / `logout` with `XDG_CONFIG_HOME` pointed at a temp directory.
+
+| file                                              | covers                                                                      |
+| ------------------------------------------------- | --------------------------------------------------------------------------- |
+| `src/index.test.ts`                               | `run()` end to end: the exit codes, login / whoami / logout, signals        |
+| `src/args.test.ts`                                | `parseArgs` and `readVersion`: every command, unknown and conflicting flags |
+| `src/config.test.ts`                              | the precedence chain, and the errors a bad config file produces             |
+| `src/credentials.test.ts`                         | the credentials file: atomic write, `0600`/`0700`, per-server tokens        |
+| `src/browser.test.ts`                             | the skip rules and the per-platform command, with an injected spawn         |
+| `src/commands/auth.test.ts`                       | `oh login` / `logout` / `whoami` against the fake's scripted device flow    |
+| `src/commands/list.test.ts`, `src/paging.test.ts` | the two listings, their formatting, and the `next_page` walk                |
+| `src/chat/session.test.ts`                        | the runtime: transcript, stream, send, interrupt, dispose                   |
+| `src/chat/target.test.ts`                         | session/model/agent selection, and the paging it needs                      |
+| `src/chat/ctrl-c.test.ts`                         | the Ctrl+C rules: interrupt, arm, exit                                      |
+| `src/components/model-picker.test.tsx`            | the picker: windowing, number keys, the free-text row                       |
+| `src/app.test.tsx`                                | the Ink screens through `ink-testing-library` and `createFakeClient()`      |
+| `src/errors.test.ts`                              | `describeError`: the 401 line, the connection hints, `--debug`              |
+| `src/signals.test.ts`, `src/terminal.test.ts`     | the signal handlers and `restoreTerminal`                                   |
+| `src/dev/fake.test.ts`                            | the fake-mode gate and the seeded dev client                                |
 
 Two things worth knowing before writing a test here:
 
