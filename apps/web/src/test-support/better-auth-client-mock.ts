@@ -52,8 +52,27 @@ export const mockAuthClient = {
   device: Object.assign(vi.fn(), { approve: vi.fn(), deny: vi.fn() }),
 }
 
+/** The options one `createAuthClient()` call was made with. */
+export interface AuthClientOptions {
+  /** The server the sign-in surface points at; absent means the page's own origin. */
+  readonly baseURL?: string | undefined
+  /** The plugin factories the client was built with. */
+  readonly plugins?: readonly unknown[]
+}
+
+/**
+ * What every `createAuthClient()` call was constructed with, oldest first, reset with the
+ * rest of the double.
+ *
+ * The double used to ignore its argument, which left "sign-in and the API point at the same
+ * server" (`App.tsx`) unasserted — the app passes the same `settings.serverUrl` to both, and
+ * this is where a test can see what it actually handed Better Auth (#105, P2).
+ */
+export const authClientCalls: AuthClientOptions[] = []
+
 /** Put every scripted behavior back to its default. */
 export function resetAuthClientMock(): void {
+  authClientCalls.length = 0
   mockAuthClient.signIn.social.mockReset().mockResolvedValue({ data: {}, error: null })
   mockAuthClient.signIn.email.mockReset().mockResolvedValue({ data: {}, error: null })
   mockAuthClient.signOut.mockReset().mockResolvedValue({ data: { success: true }, error: null })
@@ -70,9 +89,11 @@ resetAuthClientMock()
  * What `better-auth/client` exports, with the plugin entry's `deviceAuthorizationClient`.
  *
  * The plugin factory is a stand-in: nothing in the app reads the plugin object, only the
- * methods it registers — and those are on {@link mockAuthClient}.
+ * methods it registers — and those are on {@link mockAuthClient}. The construction options are
+ * recorded on {@link authClientCalls} rather than interpreted.
  */
-export function createAuthClient(): typeof mockAuthClient {
+export function createAuthClient(options: AuthClientOptions = {}): typeof mockAuthClient {
+  authClientCalls.push(options)
   return mockAuthClient
 }
 
