@@ -9,6 +9,7 @@ import type {
   UserEventInput,
 } from '@openharness/protocol'
 import { InMemorySessionStore } from '@openharness/session'
+import type { Clock } from '@openharness/session'
 import { createTestClock } from '@openharness/session/testing'
 import type { TestClock } from '@openharness/session/testing'
 
@@ -45,18 +46,33 @@ export interface TestSession {
   readonly clock: TestClock
 }
 
+/** What {@link newSession} lets a test override. */
+export interface NewSessionOptions {
+  /** The agent's system prompt; the fixture's default when omitted, `null` for none. */
+  readonly system?: string | null
+  /** The clock the store runs on; a fresh test clock when omitted. */
+  readonly clock?: TestClock
+  /**
+   * Build the session's store on the clock given, instead of the plain in-memory one — for a
+   * test that needs a store which refuses, records or paces something the turn appends.
+   */
+  readonly makeStore?: (now: Clock) => InMemorySessionStore
+}
+
 /**
  * Create a session with an agent, and optionally some events already in its log.
  *
  * @param initialEvents the events the session starts with, as a client would send them
- * @param options overrides: the agent's system prompt, and the store's clock
+ * @param options overrides: the agent's system prompt, the store's clock, and the store
+ *   itself — a test that needs one which refuses or records an append builds a subclass and
+ *   passes it through {@link NewSessionOptions.makeStore}
  */
 export async function newSession(
   initialEvents: UserEventInput[] = [],
-  options: { readonly system?: string | null; readonly clock?: TestClock } = {},
+  options: NewSessionOptions = {},
 ): Promise<TestSession> {
   const clock = options.clock ?? createTestClock()
-  const store = new InMemorySessionStore({ now: clock.now })
+  const store = options.makeStore?.(clock.now) ?? new InMemorySessionStore({ now: clock.now })
   // Every agent and session belongs to one user (epic #65, A4). The brain never looks at
   // ownership — it acts for a session — so the fixture's owner is just a valid id; the real
   // one comes from Better Auth once the server wires it (#61).

@@ -30,6 +30,7 @@ import { isClaimConflictError } from './errors'
 import type { ModelFactory } from './model'
 import { routerModelFactory } from './model'
 import { REDACTED_PLACEHOLDER } from './redact'
+import type { Sleep } from './retry'
 import {
   apiCallError,
   misdeclaredSpec,
@@ -55,6 +56,7 @@ import {
   textOf,
 } from './testing/harness'
 import { runTurn } from './turn'
+import { EventValidationError } from './validate'
 
 /**
  * The turn loop, driven end to end: a real `InMemorySessionStore`, a scripted mock model, and
@@ -155,6 +157,48 @@ function spanEndRange(log: readonly StoredEvent[], n: number): Supersedes | unde
     (event): event is ModelRequestEndEvent => event.type === EVENT_TYPES.modelRequestEnd,
   )
   return ends[n]?.supersedes
+}
+
+/**
+ * A `Sleep` that records every delay it was asked for and returns at once.
+ *
+ * The retry ladder is asserted through both halves of this: the count says how many retries
+ * happened, and the delays say which attempt each one was and where the policy's ceiling bit
+ * — a wrong attempt index or a missing clamp moves a number here (issue #105, P2).
+ */
+function recordingSleep(): { readonly sleep: Sleep; readonly delays: number[] } {
+  const delays: number[] = []
+  return {
+    sleep: (ms) => {
+      delays.push(ms)
+      return Promise.resolve()
+    },
+    delays,
+  }
+}
+
+/**
+ * A store that refuses the `agent.message` append the way the loop's own protocol check
+ * refuses an event the model's report shaped wrong (see `validate.ts`).
+ *
+ * That refusal is the one branch no scripted model can reach: `toModelUsage` sanitises every
+ * model-reported value that flows into the events, so through the public seams nothing the
+ * loop builds ever fails `StoredEventSchema`. The test hands the loop the failure directly —
+ * a `EventValidationError` out of `appendEvents`, exactly where the loop's `assertValidEvents`
+ * sits in front of the store call — and the loop cannot tell the difference.
+ */
+class RefusingMessageStore extends InMemorySessionStore {
+  override async appendEvents(
+    sessionId: SessionId,
+    events: AppendableEvent[],
+    options: AppendEventsOptions = {},
+  ): Promise<StoredEvent[]> {
+    const refusal = events.find((event) => event.type === EVENT_TYPES.agentMessage)
+    if (refusal !== undefined) {
+      throw new EventValidationError(refusal, 'content.0.text: not the protocol shape')
+    }
+    return await super.appendEvents(sessionId, events, options)
+  }
 }
 
 /**
@@ -683,7 +727,7 @@ describe('runTurn', () => {
 
   it('retries a retryable failure and finishes the turn', async () => {
     const { store, sessionId } = await newSession([message('Hello')])
-    const sleep = vi.fn(async () => {})
+    const { sleep, delays } = recordingSleep()
     const { factory, calls } = mockModel({ failWith: rateLimited() }, { text: ['Recovered'] })
 
     const outcome = await runTurn(sessionId, {
@@ -736,7 +780,9 @@ describe('runTurn', () => {
         retry_status: { type: 'retrying' },
       },
     })
-    expect(sleep).toHaveBeenCalledTimes(1)
+    // One retry, at the first rung of the default ladder: base 500 ms, half fixed and half
+    // jittered, with the jitter pinned at 0.5 — 250 + 0.5 × 250.
+    expect(delays).toEqual([375])
     expect(calls).toHaveLength(2)
     await expectClean(store, sessionId)
   })
@@ -794,21 +840,24 @@ describe('runTurn', () => {
 
   it('gives up after the three loop retries on repeated 503s', async () => {
     const { store, sessionId } = await newSession([message('Hello')])
-    const sleep = vi.fn(async () => {})
+    const { sleep, delays } = recordingSleep()
     const { factory, calls } = mockModel({ failWith: overloaded() })
 
     const outcome = await runTurn(sessionId, {
       store,
       model: factory,
       resolveCredential: resolveTestCredential,
-      retry: { sleep },
+      retry: { sleep, jitter: () => 0.5 },
     })
 
     expect(outcome).toEqual({ outcome: 'error' })
     // One provider call per attempt — the initial one plus the loop's three retries — and one
     // sleep between each: the SDK added none of its own.
     expect(calls).toHaveLength(4)
-    expect(sleep).toHaveBeenCalledTimes(3)
+    // The default ladder, deliberately small to suit a test: 500 ms doubling, with the jitter
+    // pinned at 0.5. The delays are the ladder — a wrong attempt index or a missing ceiling
+    // moves a number here.
+    expect(delays).toEqual([375, 750, 1500])
     const raw = await rawLogOf(store, sessionId)
     expect(raw.filter((event) => event.type === EVENT_TYPES.sessionError).at(-1)).toMatchObject({
       error: {
@@ -853,13 +902,13 @@ describe('runTurn', () => {
 
   it('gives up after the retries are exhausted', async () => {
     const { store, sessionId } = await newSession([message('Hello')])
-    const sleep = vi.fn(async () => {})
+    const { sleep, delays } = recordingSleep()
     const { factory, calls } = mockModel({ failWith: rateLimited() })
 
     const outcome = await runTurn(sessionId, {
       store,
       model: factory,
-      retry: { sleep },
+      retry: { sleep, jitter: () => 0.5 },
       resolveCredential: resolveTestCredential,
     })
 
@@ -878,7 +927,7 @@ describe('runTurn', () => {
     expect(raw.filter((event) => event.type === EVENT_TYPES.sessionError).at(-1)).toMatchObject({
       error: { retry_status: { type: 'exhausted' } },
     })
-    expect(sleep).toHaveBeenCalledTimes(3)
+    expect(delays).toEqual([375, 750, 1500])
     expect(await store.getTurnState(sessionId)).toMatchObject({ state: 'idle' })
     await expectClean(store, sessionId)
   })
@@ -919,6 +968,65 @@ describe('runTurn', () => {
         retry_status: { type: 'terminal' },
       },
     })
+    await expectClean(store, sessionId)
+  })
+
+  it('ends the turn when an append the loop built is not a protocol event', async () => {
+    // The `endInvalidEvent` branch, exercised directly: the model streams a normal reply, and
+    // the store refuses the `agent.message` with the `EventValidationError` the loop's own
+    // check raises before the store call. Nothing malformed may be stored, and the turn ends
+    // the documented way: the span closes with zero usage over the range it announced,
+    // `session.error { unknown_error, terminal }` says why, and the session goes idle.
+    const { store, sessionId } = await newSession([message('Hello')], {
+      makeStore: (now) => new RefusingMessageStore({ now }),
+    })
+    const { factory, calls } = mockModel({ text: ['a reply that will be refused'] })
+
+    const outcome = await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+    })
+
+    expect(outcome).toEqual({ outcome: 'error' })
+    expect(calls).toHaveLength(1)
+    const raw = await rawLogOf(store, sessionId)
+    expect(eventTypes(raw)).toEqual([
+      EVENT_TYPES.userMessage,
+      EVENT_TYPES.sessionStatusRunning,
+      EVENT_TYPES.modelRequestStart,
+      EVENT_TYPES.eventStart,
+      EVENT_TYPES.eventDelta,
+      EVENT_TYPES.modelRequestEnd,
+      EVENT_TYPES.sessionError,
+      EVENT_TYPES.sessionStatusIdle,
+    ])
+    // No agent.message, and the failed one is not retried: rebuilding it would fail the same
+    // way.
+    expect(raw.some((event) => event.type === EVENT_TYPES.agentMessage)).toBe(false)
+    expect(raw[5]).toMatchObject({
+      is_error: true,
+      error: { type: 'model_error' },
+      model_usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      },
+      supersedes: { from_seq: 4, to_seq: 5 },
+    })
+    expect(raw[6]).toMatchObject({
+      type: EVENT_TYPES.sessionError,
+      error: {
+        type: 'unknown_error',
+        retry_status: { type: 'terminal' },
+      },
+    })
+    // The message is the schema's own complaint about what the model's reply would have made.
+    expect(raw[6]?.type === EVENT_TYPES.sessionError ? raw[6].error.message : '').toContain(
+      'not a valid protocol event',
+    )
+    expect(await store.getTurnState(sessionId)).toMatchObject({ state: 'idle' })
     await expectClean(store, sessionId)
   })
 
@@ -1550,19 +1658,42 @@ describe('runTurn', () => {
 
   it('keeps the configurable retry budget', async () => {
     const { store, sessionId } = await newSession([message('Hello')])
-    const sleep = vi.fn(async () => {})
+    const { sleep, delays } = recordingSleep()
     const { factory, calls } = mockModel({ failWith: rateLimited() } satisfies MockModelScript)
 
     const outcome = await runTurn(sessionId, {
       store,
       model: factory,
       resolveCredential: resolveTestCredential,
-      retry: { maxRetries: 1, sleep },
+      retry: { maxRetries: 1, sleep, jitter: () => 0.5 },
     })
 
     expect(outcome).toEqual({ outcome: 'error' })
     expect(calls).toHaveLength(2)
-    expect(sleep).toHaveBeenCalledTimes(1)
+    // The budget is the only retry: one delay, the default base.
+    expect(delays).toEqual([375])
+    const log = await rawLogOf(store, sessionId)
+    expect((log[log.length - 1] as StoredEvent).type).toBe(EVENT_TYPES.sessionStatusIdle)
+  })
+
+  it('backs off along the policy’s ladder and clamps at its ceiling', async () => {
+    const { store, sessionId } = await newSession([message('Hello')])
+    const { sleep, delays } = recordingSleep()
+    const { factory, calls } = mockModel({ failWith: overloaded() } satisfies MockModelScript)
+
+    const outcome = await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+      retry: { maxRetries: 4, baseDelayMs: 100, maxDelayMs: 300, sleep, jitter: () => 0.5 },
+    })
+
+    expect(outcome).toEqual({ outcome: 'error' })
+    expect(calls).toHaveLength(5)
+    // 100 ms doubling, clamped at 300, with the jitter pinned at 0.5 so each delay is
+    // floor(ceiling × 3/4): 75, 150, then 225 twice, the last two rungs at the ceiling. An
+    // attempt index off by one, or a missing clamp (the last delay would be 1200), fails here.
+    expect(delays).toEqual([75, 150, 225, 225])
     const log = await rawLogOf(store, sessionId)
     expect((log[log.length - 1] as StoredEvent).type).toBe(EVENT_TYPES.sessionStatusIdle)
   })
