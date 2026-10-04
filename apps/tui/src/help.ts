@@ -2,11 +2,13 @@
 export const HELP_TEXT = `openharness — chat with an agent from the terminal
 
 Usage:
-  oh [options]                 start a new chat (picks a model)
+  oh [options]                 start a new chat on your default model
   oh -s <id>                   resume a session
   oh -c                        resume the most recent session
   oh sessions                  list sessions
+  oh sessions delete <id>      delete a chat and everything in it
   oh agents                    list the saved agents (optional presets)
+  oh default-model [id]        print or set the default model for new chats
   oh login                     sign in through the browser (the device flow)
   oh logout                    end the session and forget the token
   oh whoami                    print the signed-in user
@@ -16,8 +18,9 @@ Usage:
 Options:
   -s, --session <id>           resume the session with this id
   -c, --continue               resume the most recent session
-      --agent <id|name>        start from a saved agent instead of picking a model
+      --agent <id|name>        start from a saved agent instead of the default model
       --model <provider/model> the model to run, skipping the picker
+      --yes                    with \`oh sessions delete\`: do not ask to confirm
       --server <url>           server root (default http://localhost:3000)
       --no-browser             with \`oh login\`: print the URL and code instead of
                                opening a browser
@@ -37,11 +40,13 @@ Signing in:
   \`Authorization: Bearer\` by every other command. oh logout revokes it.
 
 New chats:
-  oh asks which model to run, from the models your own provider keys can use
-  (add a key in the web app under Settings → Model providers). --model names one
+  oh starts on your default model (oh default-model sets it). Without one it asks,
+  from the models your own provider keys can use (add a key in the web app under
+  Settings → Model providers), and offers to save the answer. --model names one
   directly; --agent starts from a saved agent preset instead.
 
 In the chat:
+  /model                       pick a model; it applies from the next message
   Enter                        send (works while the agent is replying — steering)
   Ctrl+J / Alt+Enter           insert a newline
   Ctrl+C                       interrupt the reply; press twice when idle to exit

@@ -5,9 +5,30 @@ import { join } from 'node:path'
 import { FAKE_SESSION_TOKEN } from '@openharness/client/testing'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { Readable } from 'node:stream'
+
 import { run, type RunOptions } from './index'
 
-/** Run the CLI with its output captured, without touching the real terminal. */
+/**
+ * A fresh config directory for the test at hand.
+ *
+ * Every `run()` here must read *its own* config and credentials, never the developer's real
+ * `~/.config/openharness` (the review of #105, P1): a hand-written config.json there flips
+ * the server a command talks to, and a mangled credentials.json makes unrelated commands
+ * exit 2. The environment `runCaptured` passes always carries this, and a test that wants a
+ * directory of its own (the auth describe does) passes `XDG_CONFIG_HOME` and wins.
+ */
+let configHome: string
+
+beforeEach(() => {
+  configHome = mkdtempSync(join(tmpdir(), 'oh-run-config-'))
+})
+
+afterEach(() => {
+  rmSync(configHome, { recursive: true, force: true })
+})
+
+/** Run the CLI with its output captured, without touching the real terminal or real config. */
 async function runCaptured(
   argv: readonly string[],
   env: Record<string, string> = {},
@@ -17,7 +38,7 @@ async function runCaptured(
   const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
 
   try {
-    const code = await run(argv, { env, ...options })
+    const code = await run(argv, { env: { XDG_CONFIG_HOME: configHome, ...env }, ...options })
     return { code, out: stdoutText(stdout), err: stderrText(stderr) }
   } finally {
     stdout.mockRestore()
@@ -27,6 +48,11 @@ async function runCaptured(
 
 /** A stdin that is not a terminal, the way a pipe or a CI runner looks. */
 const PIPED_STDIN = { isTTY: false } as unknown as NodeJS.ReadStream
+
+/** A stdin that answers one line, the way a shell pipe with `echo y |` does. */
+function pipedAnswer(answer: string): NodeJS.ReadStream {
+  return Readable.from([`${answer}\n`]) as unknown as NodeJS.ReadStream
+}
 
 function stdoutText(spy: { mock: { calls: unknown[][] } }): string {
   return spy.mock.calls.map((call) => String(call[0])).join('')
@@ -149,6 +175,95 @@ describe('run', () => {
 
     expect(code).toBe(2)
     expect(err).toContain('--api-key')
+  })
+})
+
+describe('run: default-model (#114)', () => {
+  const fakeEnv = { OPENHARNESS_FAKE: '1' }
+
+  it('prints the stored default', async () => {
+    const { code, out, err } = await runCaptured(['default-model'], fakeEnv)
+
+    expect(code).toBe(0)
+    expect(err).toBe('')
+    expect(out.trim()).toBe('Default model: anthropic/claude-sonnet-5')
+  })
+
+  it('sets the default', async () => {
+    const { code, out, err } = await runCaptured(['default-model', 'openai/gpt-4.1-mini'], fakeEnv)
+
+    expect(code).toBe(0)
+    expect(err).toBe('')
+    expect(out.trim()).toBe('Default model set to openai/gpt-4.1-mini.')
+  })
+
+  it('exits 2 on a model id it cannot read', async () => {
+    const { code, err } = await runCaptured(['default-model', 'a/b', 'c/d'], fakeEnv)
+
+    expect(code).toBe(2)
+    expect(err).toContain('at most one model id')
+  })
+
+  it('is the not-signed-in error against a real server', async () => {
+    const { code, err } = await runCaptured(['default-model'], {
+      OPENHARNESS_URL: 'http://127.0.0.1:1',
+    })
+
+    expect(code).toBe(1)
+    expect(err).toContain('could not reach the server')
+  })
+})
+
+describe('run: sessions delete (#114)', () => {
+  const fakeEnv = { OPENHARNESS_FAKE: '1' }
+
+  it('asks and deletes nothing on a piped no', async () => {
+    const { code, out, err } = await runCaptured(['sessions', 'delete', 'sesn_missing'], fakeEnv, {
+      stdin: pipedAnswer('n'),
+    })
+
+    expect(code).toBe(0)
+    expect(err).toBe('')
+    expect(out).toContain('Delete chat sesn_missing? This cannot be undone [y/N]')
+    expect(out).toContain('Not deleted.')
+  })
+
+  it('takes a piped yes to the question, and then fails on the id it was given', async () => {
+    // The id names nothing in the fresh fake, so the delete itself reports not-found —
+    // which is the proof the answer was read and acted on.
+    const { code, out, err } = await runCaptured(['sessions', 'delete', 'sesn_missing'], fakeEnv, {
+      stdin: pipedAnswer('y'),
+    })
+
+    expect(code).toBe(1)
+    expect(out).toContain('[y/N]')
+    expect(err).toContain('not found')
+    expect(err).toContain('oh sessions')
+  })
+
+  it('skips the question with --yes', async () => {
+    const { code, out, err } = await runCaptured(
+      ['sessions', 'delete', 'sesn_missing', '--yes'],
+      fakeEnv,
+    )
+
+    expect(code).toBe(1)
+    expect(out).not.toContain('[y/N]')
+    expect(err).toContain('not found')
+  })
+
+  it('exits 2 on a delete with no id', async () => {
+    const { code, err } = await runCaptured(['sessions', 'delete'], fakeEnv)
+
+    expect(code).toBe(2)
+    expect(err).toContain('needs the session id')
+  })
+
+  it('still lists with no argument', async () => {
+    const { code, out } = await runCaptured(['sessions'], fakeEnv)
+
+    expect(code).toBe(0)
+    expect(out).toContain('A session with history')
   })
 })
 

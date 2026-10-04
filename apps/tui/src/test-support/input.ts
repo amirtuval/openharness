@@ -3,6 +3,8 @@ import { vi } from 'vitest'
 /** The part of `ink-testing-library`'s stdin these helpers need. */
 export interface TestStdin {
   write(data: string): void
+  /** `ink-testing-library`'s stdin is an EventEmitter; Ink 7 attaches its listener to it. */
+  listenerCount?(event: string): number
 }
 
 /** The part of an `ink-testing-library` instance these helpers need. */
@@ -82,6 +84,14 @@ export async function waitForFrame(
  * React runs passive effects — which is where `useInput` subscribes — after the frame is
  * written, so a key pressed the instant a screen shows up is a key nobody is listening for.
  * A person cannot type that fast; a test can.
+ *
+ * The wait for keys is a condition, not a fixed sleep (the review of #105, P1). Ink's App
+ * attaches a `readable` listener to stdin when `useInput`'s effect enables raw mode and
+ * detaches it when the last one unmounts, so a non-zero listener count is the observable
+ * proof that the current screen has subscribed. The one `tick()` first is what gives a
+ * scheduled passive flush — the frame is written during React's commit, before it — the
+ * event-loop turn it needs; it is a yield, not a timeout, so a loaded machine pays the same
+ * nothing a fast one does.
  */
 export async function waitForScreen(
   instance: TestInstance,
@@ -89,7 +99,19 @@ export async function waitForScreen(
   timeoutMs = 2000,
 ): Promise<void> {
   await waitForFrame(instance, expected, timeoutMs)
-  await tick(50)
+  await tick(0)
+  await waitFor(() => inputReady(instance), {
+    timeoutMs,
+    describe: () => 'the screen appeared but never subscribed for keys',
+  })
+}
+
+/** Whether the mounted screen's `useInput` effect has run, as far as the mock can tell. */
+function inputReady(instance: TestInstance): boolean {
+  const { stdin } = instance
+  // A stdin that cannot report listeners is not one of ours; waiting for a frame is all
+  // that can be done.
+  return typeof stdin.listenerCount !== 'function' || stdin.listenerCount('readable') > 0
 }
 
 /** Wait until `check` holds, for state that is not on screen. */

@@ -1,11 +1,13 @@
 import { randomBytes } from 'node:crypto'
 import {
+  chmodSync,
   closeSync,
   mkdirSync,
   openSync,
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeSync,
 } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
@@ -187,7 +189,8 @@ function serialize(tokens: ReadonlyMap<string, string>): string {
  * a temp file in the same directory with mode `0600`, then a rename over the target.
  *
  * The directory is created `0700` when it does not exist yet — a home directory that only
- * the user may read.
+ * the user may read — and one that already exists but is more open is tightened the same
+ * way: the token inside is worth no more than the directory holding it.
  */
 function writeAtomically(path: string, contents: string): void {
   const directory = dirname(path)
@@ -195,6 +198,7 @@ function writeAtomically(path: string, contents: string): void {
 
   try {
     mkdirSync(directory, { recursive: true, mode: 0o700 })
+    tightenDirectory(directory)
     try {
       const handle = openSync(temporary, 'wx', 0o600)
       try {
@@ -209,6 +213,13 @@ function writeAtomically(path: string, contents: string): void {
     }
   } catch (error) {
     throw new Error(`could not write ${path}: ${detailOf(error)}`, { cause: error })
+  }
+}
+
+/** Drop group and other access from `directory`, when it has any: `0700` again. */
+function tightenDirectory(directory: string): void {
+  if ((statSync(directory).mode & 0o077) !== 0) {
+    chmodSync(directory, 0o700)
   }
 }
 

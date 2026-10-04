@@ -1,6 +1,7 @@
+import type { Client } from '@openharness/client'
 import { createFakeClient } from '@openharness/client/testing'
 import { MAX_PAGE_LIMIT } from '@openharness/protocol'
-import { makeAgent, makeSession } from '@openharness/protocol/fixtures'
+import { makeAgent } from '@openharness/protocol/fixtures'
 import { describe, expect, it, vi } from 'vitest'
 
 import { listAll, listAllAgents, listAllSessions, MAX_LIST_PAGES, type ListPage } from './paging'
@@ -77,58 +78,55 @@ describe('listAll', () => {
 /** The `limit` and `page` a list request was made with. */
 type ListParams = { readonly limit?: number | undefined; readonly page?: string | undefined }
 
+/**
+ * A fake whose list is served in two pages, and the walk over it.
+ *
+ * `listAllAgents` and `listAllSessions` are the same walk with a different resource swapped
+ * in, so their tests share this one body (the review of #105, P3): what matters to either is
+ * the parameters and the cursor, not the rows.
+ */
+async function twoPagesThrough(walk: (client: Client) => Promise<readonly unknown[]>): Promise<{
+  readonly asked: readonly (ListParams | undefined)[]
+  readonly rows: readonly unknown[]
+}> {
+  const fake = createFakeClient()
+  const asked: (ListParams | undefined)[] = []
+  const list = (params?: ListParams) => {
+    asked.push(params)
+    return Promise.resolve({
+      data: [makeAgent({ name: 'A row' })],
+      next_page: asked.length === 1 ? 'next' : null,
+    })
+  }
+  const client: Client = {
+    ...fake,
+    agents: { ...fake.agents, list },
+    // The same scripted answer, which the rows' type does not change the meaning of.
+    sessions: { ...fake.sessions, list: list as unknown as Client['sessions']['list'] },
+  }
+  return { asked, rows: await walk(client) }
+}
+
 describe('listAllAgents', () => {
   it('asks for the largest page the protocol allows, and follows the cursor', async () => {
-    const fake = createFakeClient()
-    const asked: (ListParams | undefined)[] = []
-    const client = {
-      ...fake,
-      agents: {
-        ...fake.agents,
-        list: (params?: ListParams) => {
-          asked.push(params)
-          return Promise.resolve({
-            data: [makeAgent({ name: 'Summarizer' })],
-            next_page: asked.length === 1 ? 'next' : null,
-          })
-        },
-      },
-    }
-
-    const agents = await listAllAgents(client)
+    const { asked, rows } = await twoPagesThrough(listAllAgents)
 
     expect(asked).toEqual([
       { limit: MAX_PAGE_LIMIT, page: undefined },
       { limit: MAX_PAGE_LIMIT, page: 'next' },
     ])
-    expect(agents).toHaveLength(2)
+    expect(rows).toHaveLength(2)
   })
 })
 
 describe('listAllSessions', () => {
   it('asks for the largest page the protocol allows, and follows the cursor', async () => {
-    const fake = createFakeClient()
-    const asked: (ListParams | undefined)[] = []
-    const client = {
-      ...fake,
-      sessions: {
-        ...fake.sessions,
-        list: (params?: ListParams) => {
-          asked.push(params)
-          return Promise.resolve({
-            data: [makeSession({ title: 'A chat' })],
-            next_page: asked.length === 1 ? 'next' : null,
-          })
-        },
-      },
-    }
-
-    const sessions = await listAllSessions(client)
+    const { asked, rows } = await twoPagesThrough(listAllSessions)
 
     expect(asked).toEqual([
       { limit: MAX_PAGE_LIMIT, page: undefined },
       { limit: MAX_PAGE_LIMIT, page: 'next' },
     ])
-    expect(sessions).toHaveLength(2)
+    expect(rows).toHaveLength(2)
   })
 })

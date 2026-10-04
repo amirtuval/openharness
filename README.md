@@ -142,14 +142,20 @@ server and forgets it locally. Every other command sends the stored token as
 `Authorization: Bearer`.
 
 `oh` starts a new chat against `http://localhost:3000` (override with `--server`, with
-`OPENHARNESS_URL`, or in `~/.config/openharness/config.json`). A new chat asks which model
-to run, from the models **your own provider keys** can use — grouped by provider, with
-context windows, and an "Other model id…" entry for anything the catalog does not know yet.
-Add a key in the web app under **Settings → Model providers**; with none, `oh` says so and
-stops. `--model provider/model` names the model directly, skipping the picker, and `--agent`
-still starts from a saved agent preset (`oh agents` lists them).
-`oh sessions` lists sessions, `oh -c` continues the most recent one, `oh -s <id>` resumes a
-particular one. `apps/tui/AGENTS.md` documents the keys and the exit codes.
+`OPENHARNESS_URL`, or in `~/.config/openharness/config.json`). A new chat opens **your
+default model** immediately, with no picker: `oh default-model` prints it, `oh
+default-model provider/model` sets it (`--model` overrides it for one run). Without a
+default, `oh` asks once — from the models **your own provider keys** can use, grouped by
+provider, with context windows, and an "Other model id…" entry for anything the catalog does
+not know yet — and offers to save the answer as the default. Add a key in the web app under
+**Settings → Model providers**; with none, `oh` says so and stops. `--agent` still starts
+from a saved agent preset (`oh agents` lists them).
+
+Inside a chat, `/model` opens the same picker: the choice rides the next message, and the
+status line shows the model the session runs. `oh sessions` lists sessions, `oh sessions
+delete <id>` deletes one (it asks first; `--yes` skips the question), `oh -c` continues the
+most recent one, and `oh -s <id>` resumes a particular one — a chat deleted elsewhere says
+so and exits. `apps/tui/AGENTS.md` documents the keys and the exit codes.
 
 The web app and `oh` speak to the server through the same client
 ([`packages/client`](./packages/client/AGENTS.md)), so a behaviour one of them has, the other

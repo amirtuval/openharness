@@ -141,15 +141,86 @@ describe('createChatSession', () => {
     session.dispose()
   })
 
-  it('drops the exit hint as soon as the user types', () => {
+  it('drops the exit hint on dismiss, and only the hint', () => {
     const fake = createFakeClient()
     const session = createChatSession({ client: fake, session: fake.session })
 
     session.pressCtrlC()
-    expect(session.getState().notice).not.toBeNull()
+    expect(session.getState().notice?.kind).toBe('hint')
 
     session.dismissHint()
     expect(session.getState().notice).toBeNull()
+
+    // An error is not a hint: the next keystroke must not sweep it away.
+    session.reportError(new Error('the connection dropped'))
+    session.dismissHint()
+    expect(session.getState().notice?.kind).toBe('error')
+    session.dispose()
+  })
+
+  it('sends a model picked with /model on the next message, and clears it', async () => {
+    const fake = createFakeClient()
+    fake.respondWith('Switched.', { sessionId: fake.session.id })
+    const session = createChatSession({ client: fake, session: fake.session })
+    await session.start()
+
+    session.setModel('openai/gpt-4.1-mini')
+    expect(session.getState().pendingModel).toBe('openai/gpt-4.1-mini')
+
+    await session.send('Now with another model.')
+    await fake.waitForIdle()
+
+    const sent = fake.history(fake.session.id).find((event) => event.type === 'user.message')
+    expect(sent?.type === 'user.message' && sent.model?.id).toBe('openai/gpt-4.1-mini')
+    // The choice sticks through the log, so the transcript's current model follows.
+    expect(session.getState().transcript.model).toBe('openai/gpt-4.1-mini')
+    // And it is not re-sent by later messages: the session runs it now.
+    expect(session.getState().pendingModel).toBeNull()
+
+    await session.send('And again.')
+    await fake.waitForIdle()
+    const messages = fake.history(fake.session.id).filter((event) => event.type === 'user.message')
+    expect(messages[1]?.type === 'user.message' && messages[1].model).toBeUndefined()
+
+    session.dispose()
+  })
+
+  it('leaves the transcript model alone for a message sent without a pick', async () => {
+    const fake = createFakeClient()
+    fake.respondWith('Hello.')
+    const session = createChatSession({ client: fake, session: fake.session })
+    await session.start()
+
+    await session.send('Plain.')
+    await fake.waitForIdle()
+
+    // The transcript only tracks what a `user.message` said (U1); a session's own model
+    // stands until a message names another, which is what the status line falls back to.
+    expect(session.getState().transcript.model).toBeNull()
+    expect(session.getState().pendingModel).toBeNull()
+    session.dispose()
+  })
+
+  it('reads the catalog for the in-chat picker', async () => {
+    const fake = createFakeClient()
+    const session = createChatSession({ client: fake, session: fake.session })
+
+    const models = await session.listModels()
+
+    expect(models.map((model) => model.id)).toContain('anthropic/claude-sonnet-5')
+    session.dispose()
+  })
+
+  it('shows a session deleted elsewhere as a terminal notice (#114, U5)', async () => {
+    const fake = createFakeClient()
+    const session = createChatSession({ client: fake, session: fake.session })
+    await session.start()
+
+    await fake.sessions.delete(fake.session.id)
+
+    await waitFor(() => session.getState().transcript.deleted)
+    expect(session.getState().phase).toBe('closed')
+    expect(session.getState().notice?.text).toContain('deleted')
     session.dispose()
   })
 

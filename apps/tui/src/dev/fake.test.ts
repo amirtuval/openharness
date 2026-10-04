@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { createDevClient, DEV_REPLIES, FAKE_MODE_ENV, isFakeMode } from './fake'
+import { createDevClient, DEV_DEFAULT_MODEL, DEV_REPLIES, FAKE_MODE_ENV, isFakeMode } from './fake'
 
 describe('isFakeMode', () => {
   it('is on for the values a person would set', () => {
@@ -18,7 +18,7 @@ describe('isFakeMode', () => {
 })
 
 describe('createDevClient', () => {
-  it('seeds several agents, so the picker has something to pick', async () => {
+  it('seeds several agents, so `oh agents` and --agent have something to show', async () => {
     const fake = await createDevClient()
 
     expect((await fake.agents.list()).data.map((agent) => agent.name)).toEqual([
@@ -26,6 +26,14 @@ describe('createDevClient', () => {
       'Reviewer',
       'Namer',
     ])
+  })
+
+  it('seeds a default model, so a new chat starts without the picker (#114)', async () => {
+    const fake = await createDevClient()
+
+    expect((await fake.preferences.get()).default_model).toBe(DEV_DEFAULT_MODEL)
+    // And the catalog it names is the one the fake serves, so `/model` has rows.
+    expect((await fake.models.list()).data.map((model) => model.id)).toContain(DEV_DEFAULT_MODEL)
   })
 
   it('scripts the replies the seeded session gives', async () => {

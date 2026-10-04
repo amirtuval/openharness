@@ -31,14 +31,25 @@ export interface LoginOptions extends GlobalOptions {
 /**
  * What the command line asked for.
  *
- * Only the commands the v1 CLI has: a chat, the two listings, the three auth commands, and
- * the two that print something and stop. Anything else is a usage error (see
- * {@link parseArgs}).
+ * Only the commands the v1 CLI has: a chat, the two listings (plus `sessions delete`), the
+ * three auth commands, `default-model`, and the two that print something and stop. Anything
+ * else is a usage error (see {@link parseArgs}).
  */
 export type CliCommand =
   | { readonly kind: 'chat'; readonly options: ChatOptions }
   | { readonly kind: 'sessions'; readonly options: GlobalOptions }
+  | {
+      readonly kind: 'sessions-delete'
+      readonly id: string
+      readonly yes: boolean
+      readonly options: GlobalOptions
+    }
   | { readonly kind: 'agents'; readonly options: GlobalOptions }
+  | {
+      readonly kind: 'default-model'
+      readonly model?: string | undefined
+      readonly options: GlobalOptions
+    }
   | { readonly kind: 'login'; readonly options: LoginOptions }
   | { readonly kind: 'logout'; readonly options: GlobalOptions }
   | { readonly kind: 'whoami'; readonly options: GlobalOptions }
@@ -56,14 +67,15 @@ export type ParseOutcome =
   | { readonly ok: false; readonly error: string }
 
 /** The commands that are words rather than flags, e.g. `oh sessions`. */
-const SUBCOMMANDS = ['sessions', 'agents', 'login', 'logout', 'whoami'] as const
+const SUBCOMMANDS = ['sessions', 'agents', 'default-model', 'login', 'logout', 'whoami'] as const
 
 type Subcommand = (typeof SUBCOMMANDS)[number]
 
 /** What each subcommand does, for the message a flag it does not take gets. */
 const SUBCOMMAND_BLURBS: Record<Subcommand, string> = {
-  sessions: 'it lists what the server has',
+  sessions: 'it lists what the server has, or deletes one with `delete <id>`',
   agents: 'it lists what the server has',
+  'default-model': 'it gets or sets the default model',
   login: 'it signs you in through the browser',
   logout: 'it ends the session and forgets the token',
   whoami: 'it prints the signed-in user',
@@ -77,6 +89,7 @@ const OPTIONS = {
   agent: { type: 'string' },
   model: { type: 'string' },
   server: { type: 'string' },
+  yes: { type: 'boolean' },
   'no-browser': { type: 'boolean' },
   debug: { type: 'boolean' },
 } as const satisfies ParseArgsConfig['options']
@@ -124,6 +137,14 @@ export function parseArgs(argv: readonly string[]): ParseOutcome {
       }
     }
 
+    if (subcommand === 'sessions') {
+      return parseSessions(extra, values, global)
+    }
+
+    if (subcommand === 'default-model') {
+      return parseDefaultModel(extra, values, global)
+    }
+
     if (extra.length > 0) {
       return {
         ok: false,
@@ -156,6 +177,10 @@ export function parseArgs(argv: readonly string[]): ParseOutcome {
     return { ok: false, error: '--no-browser only makes sense with `oh login`.' }
   }
 
+  if (values.yes === true) {
+    return { ok: false, error: '--yes only makes sense with `oh sessions delete <id>`.' }
+  }
+
   if (values.model !== undefined && values.model.trim() === '') {
     return {
       ok: false,
@@ -186,6 +211,107 @@ export function parseArgs(argv: readonly string[]): ParseOutcome {
 }
 
 /**
+ * `oh sessions` in both shapes: a bare listing, and `oh sessions delete <id> [--yes]`.
+ *
+ * The bare listing takes no argument at all; `delete` takes exactly one, the session id, and
+ * `--yes` is the only flag either shape accepts (plus the global ones).
+ */
+function parseSessions(
+  extra: readonly string[],
+  values: ReturnType<typeof parseOptions>['values'],
+  global: GlobalOptions,
+): ParseOutcome {
+  const [action, ...rest] = extra
+
+  if (action === undefined) {
+    if (values.yes === true) {
+      return {
+        ok: false,
+        error: '--yes only makes sense with `oh sessions delete <id>`.',
+      }
+    }
+    const conflicting = wrongFlagFor('sessions', values)
+    if (conflicting !== undefined) {
+      return {
+        ok: false,
+        error: `\`oh sessions\` does not take ${conflicting}; ${SUBCOMMAND_BLURBS.sessions}.`,
+      }
+    }
+    return { ok: true, command: { kind: 'sessions', options: global } }
+  }
+
+  if (action !== 'delete') {
+    return {
+      ok: false,
+      error: `unknown \`oh sessions\` argument '${action}'. \`oh sessions\` lists the sessions; \`oh sessions delete <id>\` deletes one.`,
+    }
+  }
+
+  const [id, ...overflow] = rest
+  if (id === undefined) {
+    return {
+      ok: false,
+      error: '`oh sessions delete` needs the session id: oh sessions delete <id>.',
+    }
+  }
+  if (overflow.length > 0) {
+    return {
+      ok: false,
+      error: `\`oh sessions delete\` takes one session id, got '${[id, ...overflow].join(' ')}'.`,
+    }
+  }
+
+  const conflicting = wrongFlagFor('sessions', values)
+  if (conflicting !== undefined) {
+    return {
+      ok: false,
+      error: `\`oh sessions delete\` does not take ${conflicting}; it deletes one chat.`,
+    }
+  }
+
+  return {
+    ok: true,
+    command: { kind: 'sessions-delete', id, yes: values.yes === true, options: global },
+  }
+}
+
+/**
+ * `oh default-model [provider/model]`: no argument prints the stored default, one sets it.
+ *
+ * The id is not validated here beyond being non-empty — the server owns the shape rule (a
+ * `provider/model` router id), and it answers a bad one with a message worth printing.
+ */
+function parseDefaultModel(
+  extra: readonly string[],
+  values: ReturnType<typeof parseOptions>['values'],
+  global: GlobalOptions,
+): ParseOutcome {
+  const [model, ...overflow] = extra
+  if (overflow.length > 0) {
+    return {
+      ok: false,
+      error: `\`oh default-model\` takes at most one model id, got '${extra.join(' ')}'.`,
+    }
+  }
+  if (model !== undefined && model.trim() === '') {
+    return {
+      ok: false,
+      error: '`oh default-model` needs a model id, like anthropic/claude-sonnet-5.',
+    }
+  }
+
+  const conflicting = wrongFlagFor('default-model', values)
+  if (conflicting !== undefined) {
+    return {
+      ok: false,
+      error: `\`oh default-model\` does not take ${conflicting}; ${SUBCOMMAND_BLURBS['default-model']}.`,
+    }
+  }
+
+  return { ok: true, command: { kind: 'default-model', model, options: global } }
+}
+
+/**
  * `parseArgs` in strict mode, over this CLI's flag table. A named function so the inferred
  * value types survive: an annotated `ReturnType<...>` would widen the string flags back into
  * `string | boolean`.
@@ -206,8 +332,9 @@ function wrongFlagFor(
 ): string | undefined {
   if (values.session !== undefined) return `--session <id>`
   if (values.continue === true) return '--continue'
-  if (values.agent !== undefined) return '--agent <id|name>'
-  if (values.model !== undefined) return '--model <provider/model>'
+  if (values.agent !== undefined) return `--agent <id|name>`
+  if (values.model !== undefined) return `--model <provider/model>`
+  if (values.yes === true && subcommand !== 'sessions') return '--yes'
   if (values['no-browser'] === true && subcommand !== 'login') return '--no-browser'
   return undefined
 }

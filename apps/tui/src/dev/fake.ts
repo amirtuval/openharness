@@ -67,6 +67,9 @@ export const DEV_REPLIES: readonly string[] = [
   'Ctrl+C interrupts a reply in flight and keeps what it has produced. Press it twice when idle to leave — the CLI then prints the exact `oh -s <id>` that resumes this session.',
 ]
 
+/** The default model the dev fake stores, so a new chat starts without the picker (#114). */
+export const DEV_DEFAULT_MODEL = 'anthropic/claude-sonnet-5'
+
 /**
  * The dev-mode client: the fake client from `@openharness/client/testing`, seeded so the
  * CLI has something to show.
@@ -74,10 +77,12 @@ export const DEV_REPLIES: readonly string[] = [
  * It is loaded lazily, so a normal `oh` never even reads the testing entry point. What it
  * seeds is what a session needs to exercise the interesting paths:
  *
- * - a three-provider model catalog ({@link DEV_MODELS}), so a new chat's picker has
- *   groups and context windows to show;
+ * - a three-provider model catalog ({@link DEV_MODELS}), so the model picker — `/model` in
+ *   a chat, and a new chat whose default is cleared — has groups and context windows;
+ * - the stored default model ({@link DEV_DEFAULT_MODEL}), the way a real account that has
+ *   saved one looks: `oh` starts chatting on it, no picker;
  * - three agents, for `oh agents` and the `--agent` preset path — a new chat without
- *   `--agent` picks a model, not an agent;
+ *   `--agent` runs a model, not an agent;
  * - a scripted conversation, so replies stream in visibly;
  * - a second session with history in it, so `oh --continue` and `oh -s <id>` have something
  *   to resume.
@@ -86,7 +91,11 @@ export const DEV_REPLIES: readonly string[] = [
  */
 export async function createDevClient(): Promise<FakeClient> {
   const { createFakeClient } = await import('@openharness/client/testing')
-  const fake = createFakeClient({ delayMs: 12, models: DEV_MODELS })
+  const fake = createFakeClient({
+    delayMs: 12,
+    models: DEV_MODELS,
+    preferences: { default_model: DEV_DEFAULT_MODEL },
+  })
 
   await fake.agents.create({
     name: 'Reviewer',
