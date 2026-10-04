@@ -174,6 +174,7 @@ describe('two people on one server (A4)', () => {
       ['GET', '/v1/provider-credentials'],
       ['PUT', '/v1/provider-credentials/anthropic'],
       ['DELETE', '/v1/provider-credentials/anthropic'],
+      ['GET', '/v1/models'],
     ]
 
     for (const [method, path] of routes) {
