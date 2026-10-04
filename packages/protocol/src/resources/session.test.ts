@@ -18,6 +18,8 @@ const session = {
   status: 'idle',
   title: 'README summary',
   metadata: { source: 'test' },
+  model: { id: 'anthropic/claude-sonnet-5' },
+  system: 'Be concise.',
   agent: {
     id: newAgentId(),
     name: 'Summarizer',
@@ -38,8 +40,8 @@ describe('SessionSchema', () => {
     // cannot change what an existing session replays to.
     const snapshot = SessionSchema.parse(session).agent
     expect(snapshot).toEqual(session.agent)
-    expect(Object.keys(snapshot).sort()).toEqual(['id', 'model', 'name', 'system'])
-    expect(snapshot.model).toEqual({ id: 'anthropic/claude-sonnet-5' })
+    expect(Object.keys(snapshot ?? {}).sort()).toEqual(['id', 'model', 'name', 'system'])
+    expect(snapshot?.model).toEqual({ id: 'anthropic/claude-sonnet-5' })
   })
 
   it('rejects a snapshot that is missing one of its fields', () => {
@@ -50,6 +52,32 @@ describe('SessionSchema', () => {
         `agent without ${field}`,
       ).toBe(false)
     }
+  })
+
+  it('carries the effective model and system, always set', () => {
+    // These are what the session runs (issue #93), not what its agent happens to hold: a
+    // request may override either, and a model-first session has no agent at all.
+    expect(SessionSchema.parse(session)).toMatchObject({
+      model: { id: 'anthropic/claude-sonnet-5' },
+      system: 'Be concise.',
+    })
+    for (const field of ['model', 'system'] as const) {
+      const { [field]: _dropped, ...partial } = session
+      expect(SessionSchema.safeParse(partial).success, `session without ${field}`).toBe(false)
+    }
+    expect(SessionSchema.safeParse({ ...session, model: { id: '' } }).success).toBe(false)
+  })
+
+  it('accepts a model-first session: agent null, model set, system possibly null', () => {
+    const modelFirst = SessionSchema.parse({
+      ...session,
+      agent: null,
+      model: { id: 'openai/gpt-4.1-mini' },
+      system: null,
+    })
+    expect(modelFirst.agent).toBeNull()
+    expect(modelFirst.model).toEqual({ id: 'openai/gpt-4.1-mini' })
+    expect(modelFirst.system).toBeNull()
   })
 
   it('accepts an untitled session with empty metadata', () => {
@@ -95,6 +123,35 @@ describe('CreateSessionRequestSchema', () => {
   it('accepts an agent id and nothing else', () => {
     const agentId = newAgentId()
     expect(CreateSessionRequestSchema.parse({ agent: agentId })).toEqual({ agent: agentId })
+  })
+
+  it('accepts a model and nothing else: a model-first session', () => {
+    expect(CreateSessionRequestSchema.parse({ model: { id: 'openai/gpt-4.1-mini' } })).toEqual({
+      model: { id: 'openai/gpt-4.1-mini' },
+    })
+  })
+
+  it('accepts a system override, with an agent or a model', () => {
+    const agentId = newAgentId()
+    expect(CreateSessionRequestSchema.parse({ agent: agentId, system: 'Be terse.' })).toMatchObject(
+      { system: 'Be terse.' },
+    )
+    expect(
+      CreateSessionRequestSchema.parse({ model: { id: 'openai/gpt-4.1-mini' }, system: null }),
+    ).toMatchObject({ system: null })
+  })
+
+  it('rejects a request that names neither an agent nor a model, with a clear message', () => {
+    const result = CreateSessionRequestSchema.safeParse({ title: 'A chat' })
+    expect(result.success).toBe(false)
+    expect(result.error?.issues[0]?.message).toMatch(/agent or a model/)
+  })
+
+  it('rejects a model that is not a provider/model id', () => {
+    expect(CreateSessionRequestSchema.safeParse({ model: { id: '' } }).success).toBe(false)
+    expect(
+      CreateSessionRequestSchema.safeParse({ model: 'anthropic/claude-sonnet-5' }).success,
+    ).toBe(false)
   })
 
   it('accepts a title, metadata and initial events', () => {

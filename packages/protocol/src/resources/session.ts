@@ -15,8 +15,9 @@ import { UserIdSchema } from './user'
  * - `GET  /v1/sessions/{session_id}`
  *
  * A session is a durable, append-only event log; the resource here is the header of that log.
- * Its `status` mirrors the last status event in the log, and its `agent` block is the
- * configuration the session was created with, frozen at creation time.
+ * Its `status` mirrors the last status event in the log, and its `model` and `system` are the
+ * configuration it runs, always set — frozen at creation time, along with the `agent` preset
+ * it was created from, when there was one.
  */
 
 /** Longest session title Anthropic accepts. */
@@ -40,10 +41,13 @@ export const SessionStatusSchema = z.enum(['idle', 'running'])
 export type SessionStatus = z.infer<typeof SessionStatusSchema>
 
 /**
- * The agent a session runs, snapshotted when the session was created.
+ * The agent a session runs, snapshotted when the session was created — or `null` for a
+ * session created from a model alone.
  *
  * Editing the agent afterwards does not change existing sessions: a session replays to the
- * same conversation forever, which is what makes the log the source of truth.
+ * same conversation forever, which is what makes the log the source of truth. The snapshot is
+ * the preset the session was created *from*, not the configuration it runs: what it runs is
+ * {@link SessionSchema}'s `model` and `system`, which the request may have overridden.
  *
  * Anthropic's `BetaManagedAgentsSessionAgent` also carries `description`, `mcp_servers`,
  * `skills`, `tools` and `version`; v1 keeps the four fields the brain needs (see
@@ -77,7 +81,29 @@ export const SessionSchema = z.object({
   status: SessionStatusSchema,
   title: z.string().max(SESSION_TITLE_MAX_LENGTH).nullable(),
   metadata: MetadataSchema,
-  agent: SessionAgentSchema,
+  /**
+   * // extension: the configuration the session actually runs, always set (issue #93).
+   *
+   * A session no longer has to be created from an agent: it is created from a model, and an
+   * agent — when there is one — is the preset it snapshotted. `model` is that effective
+   * model: the agent's, the request's override of it, or the inline model of an agent-less
+   * session. Anthropic has no equivalent field; there the session's `agent` always carries
+   * the model.
+   */
+  model: ModelConfigSchema,
+  /**
+   * // extension: the effective system prompt, always present (issue #93).
+   *
+   * The agent's `system`, the request's override of it, or `null` — for an agent-less session
+   * whose request named no `system`. Like `model`, an Anthropic session has no field of its
+   * own for it.
+   */
+  system: z.string().nullable(),
+  /**
+   * The preset the session was created from, snapshotted — or `null` for a model-first
+   * session. `model` and `system` above are what the session runs; this is where it came from.
+   */
+  agent: SessionAgentSchema.nullable(),
   created_at: TimestampSchema,
   updated_at: TimestampSchema,
 })
@@ -87,21 +113,41 @@ export type Session = z.infer<typeof SessionSchema>
 /**
  * Body of `POST /v1/sessions`. Response: {@link SessionSchema}.
  *
- * `agent` is an `agent_` id: the session snapshots the current agent configuration, so
- * there is nothing else for a client to say about it. Anthropic additionally accepts an
- * inline agent reference with a `version`, or one with per-session model overrides;
- * openharness has neither agent versioning nor overrides (see `AGENTS.md`).
+ * A session is created from an agent, a model, or both, and **at least one of the two is
+ * required** — the refinement below is where the requirement is stated, so a request naming
+ * neither fails with a clear message rather than creating a session that cannot run.
+ *
+ * - **From an agent.** `agent` is an `agent_` id: the session snapshots the current agent
+ *   configuration (its name, model and system) and runs it. An explicit `model` or `system`
+ *   in the request overrides what the agent contributes.
+ * - **From a model.** Without an `agent`, `model` is required and `system` defaults to
+ *   `null`: this is model-first chat, where the user picks a model and the agent is an
+ *   optional preset (epic #92).
+ *
+ * Anthropic additionally accepts an inline agent reference with a `version`, or one with
+ * per-session model overrides; openharness has neither agent versioning nor overrides in that
+ * shape (see `AGENTS.md`) — its overrides are these top-level `model` and `system` fields.
  */
-export const CreateSessionRequestSchema = z.object({
-  agent: AgentIdSchema,
-  title: z.string().max(SESSION_TITLE_MAX_LENGTH).nullable().optional(),
-  metadata: MetadataSchema.optional(),
-  /**
-   * Events to append to the new session's log, in order, before it starts running. They are
-   * stored exactly as events sent later to the events endpoint would be.
-   */
-  initial_events: z.array(UserEventInputSchema).max(MAX_INITIAL_EVENTS).optional(),
-})
+export const CreateSessionRequestSchema = z
+  .object({
+    /** The agent whose configuration the session snapshots. Required unless `model` is given. */
+    agent: AgentIdSchema.optional(),
+    /** The model the session runs, `provider/model`. Overrides the agent's; required without one. */
+    model: ModelConfigSchema.optional(),
+    /** The system prompt the session runs with. Overrides the agent's; `null` without one. */
+    system: z.string().nullable().optional(),
+    title: z.string().max(SESSION_TITLE_MAX_LENGTH).nullable().optional(),
+    metadata: MetadataSchema.optional(),
+    /**
+     * Events to append to the new session's log, in order, before it starts running. They are
+     * stored exactly as events sent later to the events endpoint would be.
+     */
+    initial_events: z.array(UserEventInputSchema).max(MAX_INITIAL_EVENTS).optional(),
+  })
+  .refine((request) => request.agent !== undefined || request.model !== undefined, {
+    message:
+      'a session needs an agent or a model: pass "agent", or "model" for a model-first session',
+  })
 
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequestSchema>
 
