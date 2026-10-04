@@ -2,6 +2,7 @@ import type { TranscriptMessage } from '@openharness/client'
 import { ArrowDown } from 'lucide-react'
 
 import { useStickToBottom } from '../../hooks/use-stick-to-bottom'
+import type { ModelNameLookup } from '../../lib/models'
 import { Button } from '../ui/button'
 import { MessageItem } from './message-item'
 
@@ -16,9 +17,12 @@ import { MessageItem } from './message-item'
 export function MessageList({
   messages,
   loading,
+  nameOf,
 }: {
   messages: readonly TranscriptMessage[]
   loading: boolean
+  /** The catalog lookup for a model-change marker's display name. */
+  nameOf?: ModelNameLookup | undefined
 }) {
   const last = messages.at(-1)
   const { ref, onScroll, isStuck, scrollToLatest } = useStickToBottom(
@@ -40,7 +44,9 @@ export function MessageList({
               {loading ? 'Loading the conversation…' : 'Say something to start the conversation.'}
             </p>
           ) : (
-            messages.map((message) => <MessageItem key={message.id} message={message} />)
+            messages.map((message) => (
+              <MessageItem key={message.id} message={message} nameOf={nameOf} />
+            ))
           )}
         </div>
       </div>

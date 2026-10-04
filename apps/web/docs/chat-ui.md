@@ -50,7 +50,10 @@ refetches:
 - **`useSession` decides when**: once the transcript holds a `user.message` and the session it
   has still shows no title, it asks for one re-read. That covers both the local case — the
   message this tab just sent, whose title the POST had already written — and a first message
-  that arrived from another writer over the stream;
+  that arrived from another writer over the stream. One case is not the chat's to notice at
+  all: a message sent from **New chat** (#113) names the session before the chat opens, so its
+  header's mount read already has the title and the sidebar row does not; the New-chat screen
+  asks the store for that one re-read itself, on the send that stored the message;
 - **the store decides whether**: one read in flight at a time, an answered read marks the
   session done (so nothing polls, and a session the server declined to name is not read
   again), and a failed read is not a banner — the row simply keeps the name it had;
@@ -89,13 +92,15 @@ as they arrive, Stop next to Send).
 of pulling in a typography plugin. No `rehype-raw`: a message cannot inject HTML, so no
 sanitizer is needed.
 
-## Model-first New chat, and why agents are hidden (#91)
+## Model-first chat, and why agents are hidden (#91, #113)
 
-The maintainer decision behind epic #92: **chatting must not require an agent**. New chat is
-one screen with one question — which model? — and the answer comes from the account's own
-keys, not from a hardcoded list that can go stale against them. The only model list the app
-offers is the one `GET /v1/models` answers, plus the picker's free-text escape hatch, because
-the router accepts `provider/model` ids the catalog may not know yet (C5).
+The maintainer decision behind epic #92: **chatting must not require an agent**. The model
+comes from the account's own keys, not from a hardcoded list that can go stale against them.
+The only model list the app offers is the one `GET /v1/models` answers, plus the picker's
+free-text escape hatch, because the router accepts `provider/model` ids the catalog may not
+know yet (C5). Since epic #116 the list is offered where a model is actually chosen — in the
+composer, mid-chat, and in Settings as the default — rather than on a picker screen in front
+of New chat; that change and its rules are below.
 
 **One catalog for the shell.** `useModels(client)` lives in `AppFrame`, not in the screen, and
 that is the whole sharing story: the picker offers the entries, and the sidebar rows and the
@@ -122,13 +127,52 @@ panel for a `provider/model` text field instead of closing over a selection.
   shows "from the built-in list; the provider couldn't be reached" under its group header,
   with the server's `message` as the `title`;
 - refresh's 429 (once a minute per user, C4) is not an error state: `refresh()` answers with
-  `{ ok: false, kind: 'rate_limit' }`, the screen shows the server's sentence inline
+  `{ ok: false, kind: 'rate_limit' }`, the picker shows the server's sentence inline
   (`role="status"`) and the list that is already on screen stays exactly as it was;
-- no keys at all → an empty state that links to Settings → Model providers, and no Create
-  button to press;
-- the last model a chat was created with is the next New chat's default
-  (`lib/last-model.ts`, `localStorage`, `try`/`catch`-guarded like the settings store); with
-  nothing remembered, the catalog's first entry stands in.
+- no keys at all → New chat shows the "Add a provider key to start" state that links to
+  Settings → Model providers, and there is nothing to type into.
+
+## New chat is immediate, the model is switched from the composer (#113)
+
+The maintainer decision behind epic #116: chatting should be immediate — **New chat opens an
+empty chat on your default model, with no dialog in the way**. The picker screen of #91 is
+gone; the picker itself became the app's one model control, in two sizes.
+
+**The default is server state** (`GET /v1/me/preferences` → `{ default_model }`), shared with
+`oh` (U1). New chat shows it in the composer's selector, and the session is created with the
+**first message** (`sessions.create({ model })`, then `sendMessage`) instead of by a Create
+button (U2); after that the app moves to the chat, where the reply streams like any other. The
+server picks the default itself when the first provider key is saved (U4) — Settings → Default
+model shows that value because it is a read of the same stored field the picker writes, not a
+local choice. A failed create keeps the reader's text in the box; a failure *after* a create
+keeps the session and retries into it.
+
+**The session is named by the first message** (#35), which this flow stores before the chat
+opens — so the header's mount read already sees the title, while the sidebar row (added by the
+create, before the name existed) does not. That is why `NewChatScreen` asks
+`lib/session-refresh` for the session's one re-read itself on a successful send: the store is
+keyed by client, so the row the list holds and the header update together, still without a
+second walk of the list.
+
+**Switching mid-chat applies from the next message** (U3). The composer's selector shows the
+session's current model — the transcript's `model`, the id the log last said, else the model
+the session was created with — and a pick is held locally until a send carries it
+(`sendMessage(text, { model })`). The server moves `sessions.model` in the same transaction as
+the append, the transcript marks that message with `modelChangedTo`, and the UI draws the
+subtle "Switched to <name>" marker above it. After the message is stored, the selector drops
+the local pick and reads the log again: what is shown is always the log's answer. Switching
+the provider works the same way, because the history is rebuilt per request server-side. A
+message naming the model already in effect is not a change (no marker); neither is the first
+model a message carries — the state starts at `null`, so there is nothing it changed from.
+
+**Deleting a chat is irreversible, so the UI asks first, in the page** (U5). The sidebar row's
+kebab menu (shown on hover or focus, always in the tab order) and the chat header both offer
+Delete chat; both swap to an inline "Delete this chat?" with Delete/Cancel — no
+`window.confirm`, which would block the page and cannot be themed or tested like the rest.
+Deleting the open chat lands on New chat. A chat deleted **elsewhere** tells this tab through
+the stream's final `session.deleted`: the chat raises the shell's one-line notice
+(`lib/notice.ts` — it has to outlive the screen it was raised on), the sidebar forgets the row
+without a call of its own, and the app leaves for New chat.
 
 **Labels.** `sessionLabel(session, nameOf)` is the title, else the catalog's display name for
 `session.model.id`, else the id itself. The agent's name is never used — not even for a

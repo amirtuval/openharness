@@ -1,4 +1,4 @@
-import { AuthenticationError } from '@openharness/client'
+import { ApiError, AuthenticationError } from '@openharness/client'
 import { createFakeClient } from '@openharness/client/testing'
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest'
 
 import { App } from '../App'
 import { SETTINGS_STORAGE_KEY, getSettings } from '../lib/settings'
+import { TWO_PROVIDERS } from '../test-support/catalog'
 import { makeFake, renderApp } from '../test-support/render-app'
 
 /** The settings screen: the server URL, and the model-provider keys this account runs on. */
@@ -57,7 +58,7 @@ describe('SettingsScreen', () => {
     expect(screen.getByText('Saved — the next request uses it.')).toBeInTheDocument()
   })
 
-  it('saves the server URL to localStorage, and no key anywhere', async () => {
+  it('saves the server URL to localStorage under the settings key', async () => {
     const user = userEvent.setup({ delay: null })
     const fake = makeFake()
     renderApp(fake, { hash: '#/settings' })
@@ -95,7 +96,7 @@ describe('SettingsScreen', () => {
     })
   })
 
-  it('says there are no keys yet, and lists what is saved as metadata only', async () => {
+  it('lists a saved key as metadata only, never the key itself', async () => {
     const fake = makeFake()
     await fake.providerCredentials.put('anthropic', {
       type: 'api_key',
@@ -213,6 +214,16 @@ describe('SettingsScreen', () => {
     expect(screen.getByLabelText('Server URL')).toBeInTheDocument()
   })
 
+  it('shows a failed provider-keys load as a banner with what went wrong', async () => {
+    const fake = makeFake()
+    fake.providerCredentials.list = () =>
+      Promise.reject(new ApiError(500, 'The key store is down.'))
+    renderApp(fake, { hash: '#/settings' })
+
+    const title = await screen.findByText('Could not load your provider keys')
+    expect(title.closest('[role="alert"]')).toHaveTextContent('The key store is down.')
+  })
+
   it('deletes a key after confirming in the page, not in a window.confirm', async () => {
     const user = userEvent.setup({ delay: null })
     const fake = makeFake()
@@ -238,5 +249,75 @@ describe('SettingsScreen', () => {
       expect((await fake.providerCredentials.list()).data).toEqual([])
     })
     expect(list.queryByText('openai')).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * Settings → Default model (epic #116, U1/U4): the account's one default, as the server holds
+ * it — including a default the server chose itself — changed through `preferences.put`.
+ */
+describe('Settings: the default model', () => {
+  it('shows the default the server chose, and saves a new one', async () => {
+    const user = userEvent.setup({ delay: null })
+    const fake = makeFake({
+      ...TWO_PROVIDERS,
+      preferences: { default_model: 'anthropic/claude-sonnet-5' },
+    })
+    renderApp(fake, { hash: '#/settings' })
+
+    // The automatic pick of U4 is a value like any other: the card reads it, it does not
+    // decide it, so what is in effect is what is shown.
+    const picker = await screen.findByRole('button', { name: /Model/ })
+    expect(picker).toHaveTextContent('Claude Sonnet 5')
+
+    await user.click(picker)
+    await user.click(screen.getByRole('option', { name: /GPT-4.1 mini/ }))
+
+    expect(await screen.findByText('Saved the default model.')).toBeInTheDocument()
+    await waitFor(async () => {
+      expect((await fake.preferences.get()).default_model).toBe('openai/gpt-4.1-mini')
+    })
+    expect(picker).toHaveTextContent('GPT-4.1 mini')
+  })
+
+  it('shows a default the catalog does not list as its id', async () => {
+    const fake = makeFake({
+      ...TWO_PROVIDERS,
+      preferences: { default_model: 'deepseek/deepseek-chat' },
+    })
+    renderApp(fake, { hash: '#/settings' })
+
+    // Free-text ids are allowed (U1): a default may be a model the catalog has never heard of.
+    expect(await screen.findByRole('button', { name: /Model/ })).toHaveTextContent(
+      'deepseek/deepseek-chat',
+    )
+  })
+
+  it('shows a failed save inline, with the stored default still in effect', async () => {
+    const user = userEvent.setup({ delay: null })
+    const fake = makeFake({
+      ...TWO_PROVIDERS,
+      preferences: { default_model: 'anthropic/claude-sonnet-5' },
+    })
+    fake.preferences.put = () => Promise.reject(new ApiError(500, 'The preferences store is down.'))
+    renderApp(fake, { hash: '#/settings' })
+
+    await user.click(await screen.findByRole('button', { name: /Model/ }))
+    await user.click(screen.getByRole('option', { name: /GPT-4.1 mini/ }))
+
+    const title = await screen.findByText('Could not save the default model')
+    expect(title.closest('[role="alert"]')).toHaveTextContent('The preferences store is down.')
+    // The write never landed, so the server's default is still the one on screen.
+    expect(screen.getByRole('button', { name: /Model/ })).toHaveTextContent('Claude Sonnet 5')
+  })
+
+  it('shows a failed load, and the picker still lets a default be chosen', async () => {
+    const fake = makeFake(TWO_PROVIDERS)
+    fake.preferences.get = () => Promise.reject(new ApiError(500, 'The preferences store is down.'))
+    renderApp(fake, { hash: '#/settings' })
+
+    const title = await screen.findByText('Could not load your default model')
+    expect(title.closest('[role="alert"]')).toHaveTextContent('The preferences store is down.')
+    expect(screen.getByRole('button', { name: /Model/ })).toBeInTheDocument()
   })
 })

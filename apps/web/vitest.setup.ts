@@ -14,9 +14,14 @@ vi.mock('better-auth/client/plugins', () => import('./src/test-support/better-au
 
 // Testing Library only registers its automatic cleanup when the test runner's globals are on;
 // this suite imports from `vitest` instead, so it unmounts what it rendered here.
+//
+// `localStorage` is cleared in the same place, for every test, rather than in `makeFake()`:
+// not every test builds its fake through that helper (one seeds storage first, on purpose),
+// and a reset that only some paths take is a reset the next test cannot rely on.
 afterEach(() => {
   cleanup()
   window.location.hash = ''
+  localStorage.clear()
   resetAuthClientMock()
 })
 

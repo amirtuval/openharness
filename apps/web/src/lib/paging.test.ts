@@ -1,7 +1,7 @@
 import { MAX_PAGE_LIMIT } from '@openharness/protocol'
 import { describe, expect, it } from 'vitest'
 
-import { MAX_PAGE_ITEMS, appendUnseen, listAllPages, type Page, type PageQuery } from './paging'
+import { appendUnseen, listAllPages, type Page, type PageQuery } from './paging'
 
 /** A list endpoint that answers from a script of pages, and records what it was asked for. */
 function scriptedPages(items: readonly string[], pageSize: number) {
@@ -118,11 +118,5 @@ describe('appendUnseen', () => {
     const current = [{ id: 'a' }]
 
     expect(appendUnseen(current, [{ id: 'a' }])).toBe(current)
-  })
-})
-
-describe('MAX_PAGE_ITEMS', () => {
-  it('is the documented cap', () => {
-    expect(MAX_PAGE_ITEMS).toBe(1000)
   })
 })

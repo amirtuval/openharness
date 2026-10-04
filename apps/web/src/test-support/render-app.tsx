@@ -22,9 +22,15 @@ export function renderApp(
   return render(<App client={fake} fakeClient={options.fakeClient} />)
 }
 
-/** A fake server with a clean `localStorage`, so one test's settings never reach the next. */
+/**
+ * A fake server.
+ *
+ * `localStorage` is cleared for every test by `vitest.setup.ts`'s global `afterEach`, not
+ * here: this is not the only way a test builds a client (`createFakeClient()` directly, to
+ * keep what a previous visit stored), and leaving the reset where it is never missed is the
+ * point.
+ */
 export function makeFake(options: FakeClientOptions = {}): FakeClient {
-  localStorage.clear()
   return createFakeClient(options)
 }
 
@@ -90,31 +96,23 @@ export function deriveSessionTitles(fake: FakeClient): void {
 }
 
 /**
- * Wrap a fake's two list endpoints so a test can see what the app asked them for.
+ * Wrap the fake's session-list endpoint so a test can see what the app asked it for.
  *
  * Paging is invisible from the rendered DOM — a list that followed `next_page` and one that
  * happened to fit in a single page look the same — so the assertion "the requests carried the
- * cursor" needs the requests themselves.
+ * cursor" needs the requests themselves. (The agents list was the second caller until #91
+ * deleted the agents screen; a wrapper for it outlived its consumer and is gone with it.)
  */
-export function recordListRequests(fake: FakeClient): {
-  readonly agents: ListRequest[]
-  readonly sessions: ListRequest[]
-} {
-  const agents: ListRequest[] = []
+export function recordListRequests(fake: FakeClient): { readonly sessions: ListRequest[] } {
   const sessions: ListRequest[] = []
-  const listAgents = fake.agents.list.bind(fake.agents)
   const listSessions = fake.sessions.list.bind(fake.sessions)
 
-  fake.agents.list = (params, options) => {
-    agents.push({ limit: params?.limit, page: params?.page })
-    return listAgents(params, options)
-  }
   fake.sessions.list = (params, options) => {
     sessions.push({ limit: params?.limit, page: params?.page })
     return listSessions(params, options)
   }
 
-  return { agents, sessions }
+  return { sessions }
 }
 
 /** The sidebar's list of chats, as the elements it renders. */

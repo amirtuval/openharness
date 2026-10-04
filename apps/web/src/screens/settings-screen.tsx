@@ -1,15 +1,18 @@
 import { useState } from 'react'
 
+import { DefaultModelCard } from '../components/settings/default-model'
 import { ModelProvidersCard } from '../components/settings/model-providers'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
 import { Label } from '../components/ui/label'
+import type { ModelsView } from '../hooks/use-models'
 import { useSettings } from '../hooks/use-settings'
 import { SETTINGS_STORAGE_KEY, saveSettings } from '../lib/settings'
 
 /**
- * Where the server is, and the model-provider keys this account runs on.
+ * Where the server is, the default model new chats run on, and the model-provider keys this
+ * account runs on.
  *
  * There used to be a second field here — the static `x-api-key` — and it is gone (epic #65,
  * A8): signing in is Better Auth's job now (the sign-in page, the device-approval page), and
@@ -19,9 +22,10 @@ import { SETTINGS_STORAGE_KEY, saveSettings } from '../lib/settings'
  * the API both want.
  *
  * The provider keys live on the server (A5), encrypted, write-only; {@link ModelProvidersCard}
- * is where they are managed.
+ * is where they are managed. The default model ({@link DefaultModelCard}) is server state
+ * too, and its picker reads the shell's one catalog rather than fetching its own.
  */
-export function SettingsScreen() {
+export function SettingsScreen({ catalog }: { catalog: ModelsView }) {
   const settings = useSettings()
   const [serverUrl, setServerUrl] = useState(settings.serverUrl)
   const [saved, setSaved] = useState(false)
@@ -84,6 +88,8 @@ export function SettingsScreen() {
             </form>
           </CardContent>
         </Card>
+
+        <DefaultModelCard catalog={catalog} />
 
         <ModelProvidersCard />
       </div>
