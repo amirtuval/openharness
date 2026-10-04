@@ -58,7 +58,7 @@ test.describe('W9 session list', () => {
     await test.step('each entry shows what the chat is about and the model', async () => {
       const newest = links.first()
       // The label is the session's title — derived from the first message since #29 — and the
-      // agent's name only when there is no title to show (`apps/web/src/lib/format.ts`).
+      // model's name only when there is no title to show (`apps/web/src/lib/format.ts`).
       await expect(newest).toContainText(made[2]!.text)
       await expect(newest).toContainText(QA_MODEL)
     })
@@ -88,7 +88,7 @@ test.describe('W9 session list', () => {
   // title from the first `user.message` and never overwrites one that exists.
   test('W9b a chat gets a title to tell it apart', async ({ page, request }) => {
     await page.goto('/#/new')
-    // Whatever agent the picker offers first: which one it is has nothing to do with the
+    // Whatever model the picker offers first: which one it is has nothing to do with the
     // title this test is about.
     await page.getByRole('button', { name: 'Create chat' }).click()
     await expect(page).toHaveURL(/#\/s\/sesn_/)
@@ -114,7 +114,7 @@ test.describe('W9 session list', () => {
 
   // Was `test.fail` as the reproduction of issue #35: the title is derived on the server when
   // the first message is stored and nothing told the client, so the sidebar row — and the
-  // chat header — kept the agent's name until something reloaded the page. Fixed by PR #37:
+  // chat header — kept the label they had until something reloaded the page. Fixed by PR #37:
   // the open chat re-reads the session once after its first message and both surfaces merge
   // that copy in.
   test('W9d the sidebar shows a new title without a reload', async ({ page }) => {
@@ -132,7 +132,7 @@ test.describe('W9 session list', () => {
       'a chat about the release checklist',
     )
     // The header reads the same re-read: a user who opens a chat, sends the first message and
-    // stays there must not be left looking at the agent's name either.
+    // stays there must not be left looking at the model's name either.
     await expect(
       page.getByRole('heading', { name: 'a chat about the release checklist' }),
     ).toBeVisible()

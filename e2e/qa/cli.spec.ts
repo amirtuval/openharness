@@ -601,8 +601,7 @@ test.describe('cli scenarios', () => {
     expect(none.stdout, 'no stack trace').not.toMatch(/\n\s+at /)
 
     // A token the server does not accept — revoked, expired, or another server's — is the 401
-    // path, and `oh` answers it with the same sentence (the `x-api-key` scheme this scenario
-    // used to exercise is gone, A8).
+    // path, and `oh` answers it with the same sentence.
     const stale = oh(['agents', '--server', CLI_SERVER], { configHome: staleConfigHome() })
     expect(stale.status).toBe(1)
     expect(stale.stdout).toContain(`not signed in to ${CLI_SERVER}. Run \`oh login\`.`)

@@ -27,7 +27,7 @@ Two consequences run through everything below:
 > sign-in page in place of whatever was on screen.
 
 It is a module-level store rather than React state because the callers are not components. The
-four places that catch errors — `use-session`, `use-sessions`, `use-agents` and
+four places that catch errors — `use-session`, `use-sessions`, `use-models` and
 `use-provider-credentials` — each do the same one-line thing, and the shell re-renders. That is
 why a revoked session cannot leave the reader on a screen of broken panels: the first request
 that fails replaces the screen.
@@ -50,6 +50,14 @@ _credential write_ itself, because the server wants a **fresh** session there (B
 `freshAge`) and "your session is too old" is a different message from "you are signed out" —
 the card shows it with a link to sign in again and leaves the reader where they were. And a
 failed _transport_ is not a session problem at all.
+
+**A chat ends when its session is revoked, not just the next request.** A sign-out elsewhere
+— another tab, `oh logout`, an operator deleting the session row — closes the server's stream
+behind an open chat within about a second (A2; the stream watches its own session, see
+`apps/server/AGENTS.md` "SSE"). The client then reconnects with its `last-event-id` and is
+answered 401, which is not retryable and stops its stream loop — so the reader lands on the
+sign-in page through the same 401 rule as above, instead of watching a stream that can never
+deliver again.
 
 ## Sign-in (`src/screens/sign-in-screen.tsx`, `#/signin`)
 
@@ -146,9 +154,10 @@ Two failures get words of their own, because they are the two a reader can act o
 A model resolves only if its provider has a key, and the app says so before the first turn
 instead of letting the server say it after:
 
-- **The agent form** (`src/components/agents/agent-form.tsx`) marks each suggestion whose
-  provider has no saved credential ("no key"), and a typed model whose provider has none gets a
-  line linking to Settings → Model providers.
+- **The New chat picker** is fed by `GET /v1/models`, which answers for exactly the providers
+  the caller has credentials for (C5) — a model whose provider has no key is never offered.
+  With no keys at all, the screen shows an empty state linking to Settings → Model providers
+  instead of a picker.
 - **A chat** whose turn ended with `session.error` of type `missing_provider_credential` (A5)
   renders that error with the same link — the one error in the log the reader can fix
   themselves, and no retry will help until they do.
