@@ -37,8 +37,21 @@ export function baseUrlFor(port: number): string {
   return `http://127.0.0.1:${port}`
 }
 
-/** How long to wait for a server to answer `/health` before giving up on it. */
+/** How long to wait for a server to report listening and answer `/health` before giving up. */
 const DEFAULT_READY_TIMEOUT_MS = 30_000
+
+/**
+ * How many times an auto-picked port is retried when the child given it loses the port first.
+ *
+ * {@link freePort} cannot reserve what it returns — it binds `0`, reads the port back and
+ * closes, and the child binds it a whole boot later. Another test's probe can be handed the
+ * same port in that window, so a lost race is expected occasionally under parallel runs,
+ * never exceptional.
+ */
+const PORT_ATTEMPTS = 5
+
+/** How long a failure path waits for the child's stdout/stderr to drain before reading them. */
+const OUTPUT_DRAIN_TIMEOUT_MS = 1_000
 
 /** How long a killed process is given to be reaped. */
 const KILL_TIMEOUT_MS = 10_000
@@ -82,7 +95,10 @@ export interface ServerProcessOptions {
    * timings.
    */
   readonly env?: Readonly<Record<string, string>>
-  /** How long to wait for `/health`; {@link DEFAULT_READY_TIMEOUT_MS} by default. */
+  /**
+   * How long to wait for the child to report listening and answer `/health`;
+   * {@link DEFAULT_READY_TIMEOUT_MS} by default.
+   */
   readonly readyTimeoutMs?: number
 }
 
@@ -96,6 +112,14 @@ export interface ServerProcess {
   readonly pid: number
   /** Everything the process has written to stdout and stderr so far, uncut. */
   output(): string
+  /**
+   * Resolve when the child's stdout and stderr have been read to the end.
+   *
+   * `exit` can fire before the last `data` events arrive, so anything that reads `output()`
+   * to explain a failure awaits this first — a boot-failure message must carry the line that
+   * says why.
+   */
+  readonly outputClosed: Promise<void>
   /** Whether the process is still running. */
   isRunning(): boolean
   /** Resolve when the process has written something matching `pattern`. */
@@ -115,31 +139,48 @@ export async function stopAllServerProcesses(): Promise<void> {
 }
 
 /**
- * Start the built server on a free port and wait until it answers `/health`.
+ * Start the built server on a free port and wait until it is listening and answers `/health`.
+ *
+ * The port comes from a probe, not a reservation — {@link freePort} binds `0`, reads the port
+ * back and closes, and the child binds it a whole boot later — so another test's probe can be
+ * handed the same port in between (#123). Readiness is therefore the child's **own**
+ * `listening on …` line, which a foreign server on the port cannot fake, and a child that
+ * lost the race dies of `EADDRINUSE` and is retried on a fresh port. (`PORT=0` cannot replace
+ * the probe: `BETTER_AUTH_URL` has to name the real port before the child boots, or sign-in
+ * and the CSRF origin check break.)
  *
  * @param options the database to run against, and anything else to configure
  * @throws Error when the server exits before becoming ready, carrying the whole log
  */
 export async function startServerProcess(options: ServerProcessOptions): Promise<ServerProcess> {
-  const port = options.port ?? (await freePort())
-  const baseUrl = `http://127.0.0.1:${port}`
-  const child = spawn(process.execPath, [serverEntryPath()], {
-    env: serverEnvironment(options, port),
-    stdio: ['ignore', 'pipe', 'pipe'],
-    // Its own process group: killing the server takes down anything it spawned, and a
-    // `SIGKILL` to the group cannot be missed by a child that is mid-fork.
-    detached: true,
-  })
+  // A caller-chosen port is used as-is and never retried: a collision on it is the caller's
+  // business, and a silent second attempt would hide it.
+  const attempts = options.port === undefined ? PORT_ATTEMPTS : 1
+  for (let attempt = 1; ; attempt += 1) {
+    const port = options.port ?? (await freePort())
+    const baseUrl = `http://127.0.0.1:${port}`
+    const child = spawn(process.execPath, [serverEntryPath()], {
+      env: serverEnvironment(options, port),
+      stdio: ['ignore', 'pipe', 'pipe'],
+      // Its own process group: killing the server takes down anything it spawned, and a
+      // `SIGKILL` to the group cannot be missed by a child that is mid-fork.
+      detached: true,
+    })
 
-  const server = createServerProcess(child, port, baseUrl)
-  runningProcesses.add(server)
-  try {
-    await waitForHealth(server, options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS)
-  } catch (error) {
-    await server.kill()
-    throw error
+    const server = createServerProcess(child, port, baseUrl)
+    runningProcesses.add(server)
+    try {
+      await waitForReady(server, options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS)
+      return server
+    } catch (error) {
+      await server.kill()
+      if (!(error instanceof PortTakenError) || attempt >= attempts) {
+        throw error
+      }
+      // The port probe's answer was stale: the child never bound, somebody else did. Try
+      // again on a fresh port.
+    }
   }
-  return server
 }
 
 /** The path of the built server, resolved through the `@openharness/server` package. */
@@ -218,6 +259,25 @@ function createServerProcess(child: ChildProcess, port: number, baseUrl: string)
     log += chunk.toString()
   })
 
+  // Both pipes read to the end: `exit` alone can beat the last `data` events, and a failure
+  // message built too early would be missing the line that says why the boot died.
+  const outputClosed = new Promise<void>((resolve) => {
+    const streams = [child.stdout, child.stderr].filter((stream) => stream !== null)
+    let open = streams.length
+    if (open === 0) {
+      resolve()
+      return
+    }
+    for (const stream of streams) {
+      stream.once('close', () => {
+        open -= 1
+        if (open === 0) {
+          resolve()
+        }
+      })
+    }
+  })
+
   let exited = false
   const exit = new Promise<ProcessExit>((resolve) => {
     child.once('exit', (code, signal) => {
@@ -231,6 +291,7 @@ function createServerProcess(child: ChildProcess, port: number, baseUrl: string)
     baseUrl,
     pid,
     output: () => log,
+    outputClosed,
     isRunning: () => !exited && child.exitCode === null && child.signalCode === null,
     waitForOutput: async (pattern, options = {}) => {
       const deadline = Date.now() + (options.timeoutMs ?? DEFAULT_READY_TIMEOUT_MS)
@@ -269,22 +330,59 @@ function createServerProcess(child: ChildProcess, port: number, baseUrl: string)
   return server
 }
 
+/** The line the built server logs once its listener is up, with the port it is really on. */
+const LISTENING_LINE = /@openharness\/server listening on http:\/\/localhost:(\d+)/gu
+
+/** The port a server's boot log says it is listening on, or `null` when it has not said yet. */
+function listeningPort(output: string): number | null {
+  let port: number | null = null
+  for (const match of output.matchAll(LISTENING_LINE)) {
+    port = Number(match[1])
+  }
+  return port
+}
+
+/** A boot that failed because the port it was given belonged to somebody else. */
+class PortTakenError extends Error {}
+
 /**
- * Poll `/health` until the server answers, or fail with what it logged.
+ * Wait until the child is listening on **its own** port and `/health` answers.
  *
- * `/health` is the readiness signal on purpose: it is the one route that never needs a key,
- * and the server answers it after the store is open, the migrations are applied and the
- * scheduler has started — the point at which the rest of the API is worth talking to.
+ * The child's boot log is the identity check: the port probe is not a reservation (see
+ * {@link startServerProcess}), so another server — another file's, in the same run — can take
+ * the port first, answer `/health`, and pass for ours; only the `listening on …` line
+ * printed by *this* child proves the socket is its. After the line, `/health` is polled the
+ * way it always was: the readiness signal that the store is open, the migrations are applied
+ * and the scheduler has started — the point at which the rest of the API is worth talking to.
  */
-async function waitForHealth(server: ServerProcess, timeoutMs: number): Promise<void> {
+async function waitForReady(server: ServerProcess, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs
+
+  for (;;) {
+    const port = listeningPort(server.output())
+    if (port !== null) {
+      if (port !== server.port) {
+        throw new Error(
+          `the server reported listening on port ${port}, not the ${server.port} it was ` +
+            `started on. Its output was:\n${server.output()}`,
+        )
+      }
+      break
+    }
+    if (!server.isRunning()) {
+      throw await bootFailure(server)
+    }
+    if (Date.now() > deadline) {
+      throw new Error(
+        `the server did not report listening within ${timeoutMs}ms. Its output was:\n${server.output()}`,
+      )
+    }
+    await sleep(OUTPUT_POLL_MS)
+  }
+
   for (;;) {
     if (!server.isRunning()) {
-      const { code, signal } = await server.exit
-      throw new Error(
-        `the server exited before it answered /health (code ${String(code)}, signal ${String(signal)}). ` +
-          `Its output was:\n${server.output()}`,
-      )
+      throw await bootFailure(server)
     }
     try {
       const response = await fetch(`${server.baseUrl}/health`)
@@ -292,7 +390,7 @@ async function waitForHealth(server: ServerProcess, timeoutMs: number): Promise<
         return
       }
     } catch {
-      // Not listening yet, or listening but not answering: try again until the deadline.
+      // Listening, but not answering yet: try again until the deadline.
     }
     if (Date.now() > deadline) {
       throw new Error(
@@ -301,6 +399,22 @@ async function waitForHealth(server: ServerProcess, timeoutMs: number): Promise<
     }
     await sleep(OUTPUT_POLL_MS)
   }
+}
+
+/**
+ * The error for a child that exited before it could serve — carrying its whole log.
+ *
+ * `exit` can fire before the last `data` events, so the pipes are drained first (bounded: a
+ * grandchild holding one open must not hang the report). A boot that died on `EADDRINUSE` is
+ * a {@link PortTakenError}, which {@link startServerProcess} retries on a fresh port.
+ */
+async function bootFailure(server: ServerProcess): Promise<Error> {
+  const { code, signal } = await server.exit
+  await Promise.race([server.outputClosed, sleep(OUTPUT_DRAIN_TIMEOUT_MS)])
+  const message =
+    `the server exited before it answered /health (code ${String(code)}, signal ${String(signal)}). ` +
+    `Its output was:\n${server.output()}`
+  return server.output().includes('EADDRINUSE') ? new PortTakenError(message) : new Error(message)
 }
 
 /** Whether a `/health` answer says the server is up. */

@@ -402,6 +402,12 @@ still produces the whole turn at `delayMs: 0`, and nothing can arrive while an a
 The one test that needs a turn genuinely in flight (Stop) gives the scripted reply a slow,
 explicit `delayMs` and interrupts well inside it.
 
+Interactions have to wait for the screen to be ready for them (#123): a click on a control the
+screen is still disabling is a silent no-op (`user.click` dispatches nothing on a disabled
+button), and a `getBy*` right after a `waitFor` on the hash can beat the render the hash
+caused — wait for the button to be enabled before clicking it, and for the UI a navigation
+produces with `findBy*`.
+
 ## Allowed `@openharness/*` dependencies
 
 Only these (see the table in `docs/architecture.md`):

@@ -299,7 +299,15 @@ describe('App', () => {
 
     // New chat is immediate (U2): the chat is created by the first message, in place.
     await user.type(await screen.findByLabelText('Message'), 'a chat about the release checklist')
-    await user.click(screen.getByRole('button', { name: 'Send message' }))
+    // Send is disabled until the text is in the box, and a click on a disabled button
+    // dispatches nothing — the send would never run and the hash would never move (#123).
+    // Wait for the control to be actionable the way a reader would.
+    const send = screen.getByRole('button', { name: 'Send message' })
+    await waitFor(() => {
+      expect(send).toBeEnabled()
+    })
+    await user.click(send)
+
     await waitFor(() => {
       expect(window.location.hash).toMatch(/^#\/s\/sesn_/)
     })
