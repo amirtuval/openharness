@@ -8,6 +8,7 @@ import {
   setDefaultModel,
   shot,
   test,
+  uniqueName,
   waitForAnswer,
 } from './support'
 
@@ -90,7 +91,9 @@ test.describe('W1 first run', () => {
     })
 
     await test.step('the first message creates the chat and is answered', async () => {
-      const prompt = 'the first thing anyone said here'
+      // Unique per run: a session is named after its first message (#35), and a stack that has
+      // been used before still holds the row an earlier run's identical sentence made.
+      const prompt = uniqueName('the first thing anyone said here')
       await sendFromComposer(page, prompt)
 
       // The session is created by that send and the app moves to it.
@@ -100,9 +103,7 @@ test.describe('W1 first run', () => {
       await expectNoErrorBanner(page)
 
       // It is in the sidebar, named after what was said.
-      await expect(
-        page.locator('#app-sidebar').getByText('the first thing anyone said here'),
-      ).toBeVisible()
+      await expect(page.locator('#app-sidebar').getByText(prompt)).toBeVisible()
       await shot(page, 'w1-04-first-reply')
     })
 

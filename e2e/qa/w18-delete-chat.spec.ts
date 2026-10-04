@@ -11,6 +11,7 @@ import {
   sendMessage,
   shot,
   test,
+  uniqueName,
   waitForIdle,
 } from './support'
 
@@ -28,14 +29,23 @@ import {
  * list dropping the row.
  */
 
-/** A chat with one finished turn in it, opened in the page. */
-async function chatWithATurn(page: Page, request: APIRequestContext, text: string) {
+/**
+ * A chat with one finished turn in it, opened in the page.
+ *
+ * The text is unique per run: a session is named after its first message (#35) and the QA
+ * stack is a used one, so a fixed sentence collides with the rows earlier runs left behind —
+ * the sidebar then holds two identical rows, which is a locator problem, not a finding.
+ */
+async function chatWithATurn(page: Page, request: APIRequestContext, label: string) {
+  const text = uniqueName(label)
   const session = await createChat(request, QA_MODEL)
   await sendMessage(request, session.id, text)
   await waitForIdle(request, session.id)
   await openChat(page, session.id)
-  await expect(page.getByText(text)).toBeVisible()
-  return session
+  // The message in the transcript — the same words are also the session's title in the
+  // sidebar and the heading, so this addresses the message itself.
+  await expect(page.locator('article[data-role="user"]').last()).toContainText(text)
+  return { ...session, text }
 }
 
 test.describe('W18 deleting a chat', () => {
@@ -44,7 +54,7 @@ test.describe('W18 deleting a chat', () => {
     request,
     consoleErrors,
   }) => {
-    const session = await chatWithATurn(page, request, 'delete me from the header')
+    const { id: sessionId, text } = await chatWithATurn(page, request, 'delete me from the header')
 
     await test.step('the confirmation is in the page, and Cancel leaves it alone', async () => {
       await page.getByRole('button', { name: 'Delete chat' }).click()
@@ -53,9 +63,9 @@ test.describe('W18 deleting a chat', () => {
 
       await page.getByRole('button', { name: 'Cancel' }).click()
       await expect(page.getByText('Delete this chat and all its messages?')).toHaveCount(0)
-      await expect(page.getByText('delete me from the header')).toBeVisible()
+      await expect(page.locator('article[data-role="user"]').last()).toContainText(text)
       // Nothing was deleted by a cancel.
-      const stillThere = await request.get(`/v1/sessions/${session.id}`)
+      const stillThere = await request.get(`/v1/sessions/${sessionId}`)
       expect(stillThere.status()).toBe(200)
     })
 
@@ -67,12 +77,11 @@ test.describe('W18 deleting a chat', () => {
       await expect(page.getByRole('heading', { name: 'New chat' })).toBeVisible()
       await expectNoErrorBanner(page)
 
-      // Gone from the sidebar without a reload, and gone from the API.
-      await expect(page.locator('#app-sidebar').getByText('delete me from the header')).toHaveCount(
-        0,
-      )
-      expect((await request.get(`/v1/sessions/${session.id}`)).status()).toBe(404)
-      expect((await request.get(`/v1/sessions/${session.id}/events`)).status()).toBe(404)
+      // Gone from the sidebar without a reload, and gone from the API. The text is this run's
+      // own, so a row an earlier run left behind cannot answer for it.
+      await expect(page.locator('#app-sidebar').getByText(text)).toHaveCount(0)
+      expect((await request.get(`/v1/sessions/${sessionId}`)).status()).toBe(404)
+      expect((await request.get(`/v1/sessions/${sessionId}/events`)).status()).toBe(404)
       await shot(page, 'w18-02-deleted')
     })
 
@@ -80,12 +89,12 @@ test.describe('W18 deleting a chat', () => {
   })
 
   test('W18b the sidebar row’s menu deletes it too', async ({ page, request, consoleErrors }) => {
-    const session = await chatWithATurn(page, request, 'delete me from the sidebar')
+    const { id: sessionId, text } = await chatWithATurn(page, request, 'delete me from the sidebar')
     await page.goto('/')
     await expect(page.getByRole('heading', { name: 'openharness' })).toBeVisible()
 
     await test.step('the row is deleted from its own menu, with its own confirmation', async () => {
-      const row = page.locator('#app-sidebar').getByText('delete me from the sidebar')
+      const row = page.locator('#app-sidebar').getByText(text)
       await expect(row).toBeVisible()
       await page.getByRole('button', { name: 'Chat actions' }).first().click()
       await page.getByRole('menuitem', { name: 'Delete chat' }).click()
@@ -95,7 +104,7 @@ test.describe('W18 deleting a chat', () => {
       await page.getByRole('button', { name: 'Delete', exact: true }).click()
 
       await expect(row).toHaveCount(0)
-      expect((await request.get(`/v1/sessions/${session.id}`)).status()).toBe(404)
+      expect((await request.get(`/v1/sessions/${sessionId}`)).status()).toBe(404)
     })
 
     await expectNoErrorBanner(page)
@@ -110,7 +119,8 @@ test.describe('W18 deleting a chat', () => {
     // The second tab is the API, not a page: what the open chat has to notice is the stream's
     // `session.deleted`, which is the same event a second browser gets.
     const session = await createChat(request, QA_MODEL)
-    await sendMessage(request, session.id, 'a chat that will vanish')
+    const text = uniqueName('a chat that will vanish')
+    await sendMessage(request, session.id, text)
     await waitForIdle(request, session.id)
     await openChat(page, session.id)
 

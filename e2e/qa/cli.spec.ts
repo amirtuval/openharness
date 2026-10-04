@@ -452,7 +452,7 @@ test.describe('cli scenarios', () => {
     }
   })
 
-  test('C7 commands and bad arguments', async ({ page }) => {
+  test('C7 commands and bad arguments', async ({ page, request }) => {
     await ensureCliSignedIn(page)
     await test.step('--version and --help', () => {
       const version = oh(['--version'])
@@ -479,7 +479,18 @@ test.describe('cli scenarios', () => {
       expect(missing.stdout).toContain('argument missing')
     })
 
-    await test.step('oh agents and oh sessions are readable', () => {
+    await test.step('oh agents and oh sessions are readable', async () => {
+      // The two listings say "No agents yet." / "No sessions yet." on an account that has
+      // none, and the agents screen is gone from the UI (#91) — so a fresh stack has no agent
+      // until something creates one through the API (C7b does, 21 of them, but it runs after
+      // this). Make sure both exist rather than depend on what ran before.
+      await createAgent(request, {
+        name: uniqueName('QA C7'),
+        model: QA_MODEL,
+        system: 'Answer briefly.',
+      })
+      await createChat(request, QA_MODEL)
+
       const agents = oh(['agents', '--server', CLI_SERVER])
       expect(agents.status).toBe(0)
       const firstAgentLine = agents.stdout.split('\n').filter((line) => line.trim() !== '')[0] ?? ''
@@ -815,7 +826,10 @@ test.describe('cli scenarios', () => {
         await terminal.waitFor(new RegExp(`Delete chat ${sessionId}\\?`))
         terminal.type('y')
         terminal.send('Enter')
-        await terminal.waitFor(new RegExp(`Deleted chat ${sessionId}\\.`))
+        // The sentence wraps at the pane's width — the id included — so the wait is for the
+        // words and the id is read off the capture with the wrapping taken out.
+        await terminal.waitFor(/Deleted chat/)
+        expect(terminal.capture().replace(/\s+/gu, '')).toContain(`Deletedchat${sessionId}.`)
 
         // Gone for real, log and all — the same 404s the web scenario checks (W18).
         expect((await request.get(`/v1/sessions/${sessionId}`)).status()).toBe(404)
