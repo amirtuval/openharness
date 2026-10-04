@@ -7,7 +7,7 @@ plan between phases.
 For a survey of what other harnesses offer (Claude Code, Managed Agents, OpenCode, Codex, pi),
 see the [harness feature inventory](./research/harness-features.md).
 
-_Last updated: 2026-10-01._
+_Last updated: 2026-10-04._
 
 ## Where we are
 
@@ -38,8 +38,9 @@ CI.
 ## 2. Authentication (built: [epic #65](https://github.com/amirtuval/openharness/issues/65), awaiting the maintainer's check of real OAuth sign-in)
 
 **Status:** implemented and through a hands-on QA pass (#74) with no security defects; its
-three minor findings are fixed. What remains is checking real Google, GitHub and Microsoft
-sign-in with registered OAuth apps.
+three minor findings are fixed. Google sign-in has been verified by the maintainer. GitHub is
+still to confirm. Microsoft is to be checked from a personal device (a managed work laptop
+blocks personal Microsoft accounts through tenant restrictions).
 
 **Decided** (details and the sub-issues are on the epic):
 
@@ -87,11 +88,28 @@ Today there is CI (lint, typecheck and tests with turbo `--affected`) and `docke
   partition-lease test must be confirmed as timing-only, because it covers multi-instance
   safety.
 
+- **one GCP project per environment** (discussed 2026-10-04): `openharness-shared` (Artifact
+  Registry, DNS, the CI identity through Workload Identity Federation, no service-account
+  keys), `openharness-staging` and `openharness-prod`, each with its own VPC, GKE cluster
+  (Autopilot is the likely fit), Cloud SQL for Postgres and Secret Manager. Separate projects
+  rather than one project with two clusters, because IAM, quotas, the Google OAuth consent
+  screen and the GKE Workload Identity pool are per project. In one shared project, a staging
+  pod with the same namespace and service-account name as production would get production's
+  GCP permissions ("identity sameness"). Build each image once and promote it by digest;
+- **OAuth apps per environment** (dev on localhost, staging and production), each with its own
+  secrets:
+  - **GitHub** allows one callback URL per OAuth app;
+  - the **Google** consent screen is per project, so dev and staging stay in Testing with
+    listed users, and production is published (it needs an authorized domain, a homepage and a
+    privacy-policy URL);
+  - **Microsoft:** configure the `email` and `xms_edov` optional claims (our verified-email
+    guard needs them for work accounts) and track secret expiry; publisher verification avoids
+    the "unverified" warning and admin-consent blocks.
+
 **Open:**
 
-- **Deployment target:** a simple platform (Fly.io, Render, Railway), Kubernetes with Helm, or a
-  VM with Compose.
-- **Postgres:** a managed service (Neon, RDS, Supabase) or self-run.
+- **Postgres in production:** Cloud SQL is the default assumption with GCP; confirm it when
+  the phase starts.
 
 ## 4. Model selection
 
@@ -108,13 +126,22 @@ Today there is CI (lint, typecheck and tests with turbo `--affected`) and `docke
   The credential store keeps a type plus an encrypted payload, so these are new types rather
   than a new design;
 
-- a **model catalog**: the models each configured provider offers, with their context windows;
+- the **model catalog** and **model-first chat** were pulled forward into
+  [epic #92](https://github.com/amirtuval/openharness/issues/92) (2026-10-04):
+  - New chat means picking a model from the models the user's own keys can use, read live from
+    each provider's API and joined with Mastra's registry for filtering and context windows;
+  - sessions carry their own model, and agents are optional;
+  - customizable agents are hidden from the UI until they return as an advanced feature
+    ([#96](https://github.com/amirtuval/openharness/issues/96)).
+
+  What remains in this phase is below;
+
 - **modes** (an idea from Amp): a named preset that bundles a model, a reasoning effort, a
   system prompt addition and a tool set behind a stable name such as `smart`, `fast` or
   `deep`. Users and agents pick a mode instead of a raw `provider/model` id, and an operator can
   change what a mode maps to without touching every agent. A raw model id stays available for
   those who want it;
-- choosing the mode or model per agent, per session, and **switching mid-session**;
+- **switching the model mid-session** (sessions already carry their own model after #92), and modes;
 - usage and cost per user, from the token counts the spans already store, and
   possibly budgets that stop a session at a limit, with usage events so clients can show
   spending live (as Managed Agents' `session.usage` does).
