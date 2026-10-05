@@ -62,8 +62,8 @@ touching:
 | `APIS`                        | the APIs to enable                                            |
 | `DEPLOY_PROJECT_ROLES`        | project roles for `deploy@` — `roles/owner` by default        |
 | `DEPLOY_PROJECT_ROLES_NARROW` | the narrower alternative, chosen with `--deploy-roles=narrow` |
-| `PLAN_PROJECT_ROLES`          | project roles for `plan@`                                     |
-| `PLAN_STATE_BUCKET_ROLES`     | `plan@`'s roles on the state bucket                           |
+| `PLAN_PROJECT_ROLES`          | project roles for `tf-plan@`                                     |
+| `PLAN_STATE_BUCKET_ROLES`     | `tf-plan@`'s roles on the state bucket                           |
 
 To need a new API, role or service: add a line, re-run the script. The run converges —
 it creates what is missing and updates what exists (pool, provider, service accounts). A
@@ -83,7 +83,7 @@ Per project, in `us-central1` except where noted:
 | Workload Identity  | pool `github` (global)                                                                                                                                                                                                                                 |
 | OIDC provider      | `github`, issuer `https://token.actions.githubusercontent.com`, attribute condition `assertion.repository == 'amirtuval/openharness'`; the mapping exposes `attribute.repository`, `attribute.environment`, `attribute.ref` and `attribute.event_name` |
 | Service account    | `deploy@<project>` — Terraform apply, role `roles/owner` on the project                                                                                                                                                                                |
-| Service account    | `plan@<project>` — `terraform plan` on PRs, `roles/viewer` + `roles/iam.securityReviewer`, and `roles/storage.objectAdmin` on the state bucket only                                                                                                    |
+| Service account    | `tf-plan@<project>` — `terraform plan` on PRs, `roles/viewer` + `roles/iam.securityReviewer`, and `roles/storage.objectAdmin` on the state bucket only                                                                                                    |
 | Terraform state    | bucket `gs://<project>-tfstate` with versioning, uniform bucket-level access and public access prevention                                                                                                                                              |
 | GitHub environment | `staging` or `production`, with the variables below                                                                                                                                                                                                    |
 
@@ -115,7 +115,7 @@ repository level with a `_STAGING` / `_PRODUCTION` suffix:
 | `GCP_PROJECT_NUMBER` | the project number                                                                 |
 | `GCP_WIF_PROVIDER`   | `projects/<number>/locations/global/workloadIdentityPools/github/providers/github` |
 | `GCP_DEPLOY_SA`      | `deploy@<project>.iam.gserviceaccount.com`                                         |
-| `GCP_PLAN_SA`        | `plan@<project>.iam.gserviceaccount.com`                                           |
+| `GCP_PLAN_SA`        | `tf-plan@<project>.iam.gserviceaccount.com`                                           |
 | `TF_STATE_BUCKET`    | `<project>-tfstate`                                                                |
 
 Variables only — the script creates no secrets anywhere (D5: the only Actions secret stays
@@ -172,7 +172,7 @@ Safe, by design. A re-run converges the project to the lists at the top of the s
 The default run is **additive**: a role removed from a list stays granted. `--prune`
 removes the rest, printing each removal:
 
-- project roles of `deploy@` and `plan@` that are not in the active lists;
+- project roles of `deploy@` and `tf-plan@` that are not in the active lists;
 - their bindings on the state bucket that are not declared — `deploy@` is declared none
   there, so any of its bucket bindings goes;
 - `roles/iam.workloadIdentityUser` members on the two accounts other than the declared
@@ -219,11 +219,11 @@ gh api --method DELETE repos/amirtuval/openharness/environments/staging   # only
 gcloud projects remove-iam-policy-binding openharness-dev \
   --member="serviceAccount:deploy@openharness-dev.iam.gserviceaccount.com" --role=roles/owner
 gcloud projects remove-iam-policy-binding openharness-dev \
-  --member="serviceAccount:plan@openharness-dev.iam.gserviceaccount.com" --role=roles/viewer
+  --member="serviceAccount:tf-plan@openharness-dev.iam.gserviceaccount.com" --role=roles/viewer
 gcloud projects remove-iam-policy-binding openharness-dev \
-  --member="serviceAccount:plan@openharness-dev.iam.gserviceaccount.com" --role=roles/iam.securityReviewer
+  --member="serviceAccount:tf-plan@openharness-dev.iam.gserviceaccount.com" --role=roles/iam.securityReviewer
 gcloud iam service-accounts delete deploy@openharness-dev.iam.gserviceaccount.com
-gcloud iam service-accounts delete plan@openharness-dev.iam.gserviceaccount.com
+gcloud iam service-accounts delete tf-plan@openharness-dev.iam.gserviceaccount.com
 gcloud iam workload-identity-pools providers delete github \
   --workload-identity-pool=github --location=global --project=openharness-dev
 gcloud iam workload-identity-pools delete github --location=global --project=openharness-dev

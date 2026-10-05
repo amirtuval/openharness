@@ -9,8 +9,8 @@
 #      regression here fails the run itself);
 #   2. a changed attribute mapping is applied by update-oidc — no recreate — and the
 #      next default run converges it back;
-#   3. --prune removes a stale project role and a stale bucket binding of plan@ and a
-#      foreign impersonator on plan@, while an unrelated member's binding and every
+#   3. --prune removes a stale project role and a stale bucket binding of tf-plan@ and a
+#      foreign impersonator on tf-plan@, while an unrelated member's binding and every
 #      declared binding stay;
 #   4. --dry-run makes no gcloud/gh call and leaves the state byte-identical.
 #
@@ -188,7 +188,7 @@ first="$(cat "$CALLS")"
 assert_contains "$first" "iam workload-identity-pools create github" "staging: first run creates the pool"
 assert_contains "$first" "iam workload-identity-pools providers create-oidc github" "staging: first run creates the OIDC provider"
 assert_contains "$first" "iam service-accounts create deploy" "staging: first run creates deploy@"
-assert_contains "$first" "iam service-accounts create plan" "staging: first run creates plan@"
+assert_contains "$first" "iam service-accounts create tf-plan" "staging: first run creates tf-plan@"
 assert_contains "$first" "storage buckets create gs://$DEV-tfstate" "staging: first run creates the state bucket"
 assert_contains "$first" "gh api --method PUT repos/amirtuval/openharness/environments/staging" "staging: first run creates the GitHub environment"
 assert_contains "$first" "gh variable set GCP_WIF_PROVIDER" "staging: first run sets the GitHub variables"
@@ -202,7 +202,7 @@ assert_not_contains "$second" "create" "staging: second run makes no create call
 assert_contains "$second" "iam workload-identity-pools update github" "staging: second run converges the pool"
 assert_contains "$second" "iam workload-identity-pools providers update-oidc github" "staging: second run converges the provider"
 assert_contains "$second" "iam service-accounts update deploy@$DEV.iam.gserviceaccount.com" "staging: second run converges deploy@"
-assert_contains "$second" "iam service-accounts update plan@$DEV.iam.gserviceaccount.com" "staging: second run converges plan@"
+assert_contains "$second" "iam service-accounts update tf-plan@$DEV.iam.gserviceaccount.com" "staging: second run converges tf-plan@"
 assert_contains "$second" "storage buckets update gs://$DEV-tfstate" "staging: second run re-applies the bucket settings"
 assert_not_contains "$second" "--method PUT" "staging: second run leaves the GitHub environment alone"
 
@@ -245,7 +245,7 @@ assert_not_contains "$(calls_since "$before")" "attribute.workflow=assertion.wor
 echo
 echo "== 3. --prune removes only the managed accounts' stale bindings"
 deploy_member="serviceAccount:deploy@$DEV.iam.gserviceaccount.com"
-plan_member="serviceAccount:plan@$DEV.iam.gserviceaccount.com"
+plan_member="serviceAccount:tf-plan@$DEV.iam.gserviceaccount.com"
 outsider="user:someone@example.com"
 deploy_ps="principalSet://iam.googleapis.com/projects/111111111111/locations/global/workloadIdentityPools/github/attribute.environment/staging"
 plan_ps="principalSet://iam.googleapis.com/projects/111111111111/locations/global/workloadIdentityPools/github/attribute.event_name/pull_request"
@@ -254,7 +254,7 @@ foreign_ps="principalSet://iam.googleapis.com/projects/999999999999/locations/gl
 project_policy="$STATE/policies/project-$DEV.json"
 bucket_policy="$STATE/policies/bucket-$DEV-tfstate.json"
 deploy_sa_policy="$STATE/policies/sa-deploy@$DEV.iam.gserviceaccount.com.json"
-plan_sa_policy="$STATE/policies/sa-plan@$DEV.iam.gserviceaccount.com.json"
+plan_sa_policy="$STATE/policies/sa-tf-plan@$DEV.iam.gserviceaccount.com.json"
 
 policy_inject "$project_policy" "$plan_member" "roles/editor"
 policy_inject "$project_policy" "$outsider" "roles/editor"
@@ -266,25 +266,25 @@ before="$(calls_count)"
 run_capture staging --prune
 assert_rc "$RUN_RC" "prune: run exits 0"
 pruned="$(calls_since "$before")"
-assert_contains "$pruned" "projects remove-iam-policy-binding $DEV --member=$plan_member --role=roles/editor --all" "prune removes plan@'s stale project role"
-assert_contains "$pruned" "remove-iam-policy-binding gs://$DEV-tfstate --member=$plan_member --role=roles/storage.objectViewer --all" "prune removes plan@'s stale bucket role"
+assert_contains "$pruned" "projects remove-iam-policy-binding $DEV --member=$plan_member --role=roles/editor --all" "prune removes tf-plan@'s stale project role"
+assert_contains "$pruned" "remove-iam-policy-binding gs://$DEV-tfstate --member=$plan_member --role=roles/storage.objectViewer --all" "prune removes tf-plan@'s stale bucket role"
 assert_contains "$pruned" "remove-iam-policy-binding gs://$DEV-tfstate --member=$deploy_member --role=roles/storage.objectViewer --all" "prune removes deploy@'s bucket binding (deploy@ declares none)"
-assert_contains "$pruned" "iam service-accounts remove-iam-policy-binding plan@$DEV.iam.gserviceaccount.com" "prune removes the foreign impersonator from plan@"
+assert_contains "$pruned" "iam service-accounts remove-iam-policy-binding tf-plan@$DEV.iam.gserviceaccount.com" "prune removes the foreign impersonator from tf-plan@"
 assert_not_contains "$pruned" "$outsider" "prune never touches another member's binding"
-assert_never_removed "$pruned" "$plan_ps" "prune removes nothing from plan@'s declared principalSet"
+assert_never_removed "$pruned" "$plan_ps" "prune removes nothing from tf-plan@'s declared principalSet"
 assert_never_removed "$pruned" "$deploy_ps" "prune removes nothing from deploy@'s declared principalSet"
 assert_contains "$RUN_OUT" "remove roles/editor from $plan_member" "prune prints each removal"
 
-assert_no_binding "$project_policy" "$plan_member" "roles/editor" "prune dropped plan@'s stale project role"
-assert_binding "$project_policy" "$plan_member" "roles/viewer" "plan@ keeps roles/viewer"
-assert_binding "$project_policy" "$plan_member" "roles/iam.securityReviewer" "plan@ keeps roles/iam.securityReviewer"
+assert_no_binding "$project_policy" "$plan_member" "roles/editor" "prune dropped tf-plan@'s stale project role"
+assert_binding "$project_policy" "$plan_member" "roles/viewer" "tf-plan@ keeps roles/viewer"
+assert_binding "$project_policy" "$plan_member" "roles/iam.securityReviewer" "tf-plan@ keeps roles/iam.securityReviewer"
 assert_binding "$project_policy" "$outsider" "roles/editor" "another member's binding is untouched"
 assert_binding "$project_policy" "$deploy_member" "roles/owner" "deploy@ keeps roles/owner"
-assert_no_binding "$bucket_policy" "$plan_member" "roles/storage.objectViewer" "prune dropped plan@'s stale bucket role"
-assert_binding "$bucket_policy" "$plan_member" "roles/storage.objectAdmin" "plan@ keeps its declared bucket role"
+assert_no_binding "$bucket_policy" "$plan_member" "roles/storage.objectViewer" "prune dropped tf-plan@'s stale bucket role"
+assert_binding "$bucket_policy" "$plan_member" "roles/storage.objectAdmin" "tf-plan@ keeps its declared bucket role"
 assert_no_binding "$bucket_policy" "$deploy_member" "roles/storage.objectViewer" "prune dropped deploy@'s undeclared bucket role"
 assert_no_binding "$plan_sa_policy" "$foreign_ps" "roles/iam.workloadIdentityUser" "prune dropped the foreign impersonator"
-assert_binding "$plan_sa_policy" "$plan_ps" "roles/iam.workloadIdentityUser" "plan@ keeps its declared principalSet"
+assert_binding "$plan_sa_policy" "$plan_ps" "roles/iam.workloadIdentityUser" "tf-plan@ keeps its declared principalSet"
 assert_binding "$deploy_sa_policy" "$deploy_ps" "roles/iam.workloadIdentityUser" "deploy@'s declared principalSet is untouched"
 
 # --- 4. --dry-run executes nothing ------------------------------------------
