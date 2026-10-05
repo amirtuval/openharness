@@ -85,9 +85,9 @@ variable "db_tier" {
 }
 
 variable "db_availability_type" {
-  description = "Cloud SQL availability. Production runs a regional (HA) instance."
+  description = "Cloud SQL availability. ZONAL: production runs a single zone. REGIONAL (HA) was deferred deliberately (#153) because it roughly doubles the Cloud SQL cost; set it back with -var db_availability_type=REGIONAL when HA is wanted."
   type        = string
-  default     = "REGIONAL"
+  default     = "ZONAL"
 }
 
 variable "db_backup_enabled" {

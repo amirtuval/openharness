@@ -143,6 +143,13 @@ The environment-scoped copies are what the deploy workflows (#155) read: they ru
 environment, so its protection rules apply. The `_STAGING` / `_PRODUCTION` copies are for
 `terraform-pr.yml`, which runs outside any environment and plans both projects.
 
+These six are not the only variables the workflows read. Two more are values Terraform needs
+and this script cannot know — the production zone's resource name, and staging's name
+servers — and the OAuth client IDs have an `OAUTH_`-prefixed copy for the same
+outside-an-environment reason. All of them, with the scopes and the fallbacks:
+[`docs/DEPLOYMENT.md`](../DEPLOYMENT.md#variables-the-workflows-read). They are set by hand,
+by the maintainer; a re-run of this script does not create or touch them.
+
 ## Deploy roles: least privilege
 
 `deploy` never gets `roles/owner` (#167). It holds exactly the roles Terraform (wave 2,
