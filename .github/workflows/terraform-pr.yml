@@ -112,10 +112,14 @@ jobs:
             project_id: ${{ vars.GCP_PROJECT_ID_STAGING }}
             wif_provider: ${{ vars.GCP_WIF_PROVIDER_STAGING }}
             plan_sa: ${{ vars.GCP_PLAN_SA_STAGING }}
-            # staging declares neither variable; leaving them empty keeps them off the
-            # command line, where Terraform would reject them as undeclared.
+            # staging declares neither of production's variables, so an empty value keeps
+            # them off the command line, where Terraform would reject them as undeclared.
             existing_zone_name: ''
             staging_name_servers: ''
+            # staging *does* declare this one — it is the registry's production-node
+            # reader grant. Empty (its default) grants nothing, which is what a first
+            # staging plan sees; set it after production's first deploy.
+            production_node_service_account: ${{ vars.TF_PRODUCTION_NODE_SA }}
             # `OAUTH_`, not the Terraform variable's own name: GitHub rejects a
             # configuration variable whose name starts with `GITHUB_`, so
             # `github_client_id` cannot be spelled that way here.
@@ -129,6 +133,8 @@ jobs:
             plan_sa: ${{ vars.GCP_PLAN_SA_PRODUCTION }}
             existing_zone_name: ${{ vars.TF_EXISTING_ZONE_NAME_PRODUCTION }}
             staging_name_servers: ${{ vars.TF_STAGING_NAME_SERVERS }}
+            # production does not declare it — the grant lives in staging's root.
+            production_node_service_account: ''
             google_client_id: ${{ vars.OAUTH_GOOGLE_CLIENT_ID_PRODUCTION }}
             github_client_id: ${{ vars.OAUTH_GITHUB_CLIENT_ID_PRODUCTION }}
             microsoft_client_id: ${{ vars.OAUTH_MICROSOFT_CLIENT_ID_PRODUCTION }}
@@ -222,6 +228,7 @@ jobs:
           IMAGE_TAG: ${{ steps.state.outputs.tag }}
           EXISTING_ZONE_NAME: ${{ matrix.existing_zone_name }}
           STAGING_NAME_SERVERS: ${{ matrix.staging_name_servers }}
+          PRODUCTION_NODE_SERVICE_ACCOUNT: ${{ matrix.production_node_service_account }}
           GOOGLE_CLIENT_ID: ${{ matrix.google_client_id }}
           GITHUB_CLIENT_ID: ${{ matrix.github_client_id }}
           MICROSOFT_CLIENT_ID: ${{ matrix.microsoft_client_id }}
@@ -251,6 +258,12 @@ jobs:
           fi
           if [[ -n "$STAGING_NAME_SERVERS" ]]; then
             args+=(-var "staging_name_servers=$STAGING_NAME_SERVERS")
+          fi
+          # Only staging declares this one, and empty means "grant nothing" — the account
+          # does not exist until production's first deploy, so an empty variable is simply
+          # left off the command line (see docs/DEPLOYMENT.md, "The first deploy").
+          if [[ -n "$PRODUCTION_NODE_SERVICE_ACCOUNT" ]]; then
+            args+=(-var "production_node_service_account=$PRODUCTION_NODE_SERVICE_ACCOUNT")
           fi
 
           status=ok

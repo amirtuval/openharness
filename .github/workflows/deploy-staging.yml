@@ -145,10 +145,17 @@ jobs:
         working-directory: infra/envs/staging
         env:
           IMAGE_TAG: ${{ steps.commit.outputs.sha }}
+          # Production's node service account, granted read on this project's registry. Empty
+          # on a first deploy — the account does not exist until production's Terraform creates
+          # it, and GCP rejects an IAM member that does not exist. Set TF_PRODUCTION_NODE_SA
+          # after the first production deploy and re-run this workflow to turn the grant on:
+          # docs/DEPLOYMENT.md, "The first deploy".
+          PRODUCTION_NODE_SA: ${{ vars.TF_PRODUCTION_NODE_SA }}
         run: |
           set -euo pipefail
           terraform apply -auto-approve -input=false -no-color -lock-timeout=10m \
             -var "image_tag=$IMAGE_TAG" \
+            -var "production_node_service_account=${PRODUCTION_NODE_SA:-}" \
             -target=google_project_service.services \
             -target=module.network \
             -target=module.gke \
@@ -201,10 +208,14 @@ jobs:
         working-directory: infra/envs/staging
         env:
           IMAGE_TAG: ${{ steps.commit.outputs.sha }}
+          # Same value as the targeted apply above; on a first deploy the first stage already
+          # granted it, and this apply is the one that adds it on every re-run after that.
+          PRODUCTION_NODE_SA: ${{ vars.TF_PRODUCTION_NODE_SA }}
         run: |
           set -euo pipefail
           terraform apply -auto-approve -input=false -no-color -lock-timeout=10m \
-            -var "image_tag=$IMAGE_TAG"
+            -var "image_tag=$IMAGE_TAG" \
+            -var "production_node_service_account=${PRODUCTION_NODE_SA:-}"
 
       - name: Print the staging name servers
         # Production delegates staging.oharness.dev to these. It cannot read this state
