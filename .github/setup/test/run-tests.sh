@@ -406,6 +406,7 @@ assert_no_binding "$dev_policy" "$deploy_member" "roles/owner" "prune dropped de
 assert_no_binding "$dev_policy" "$plan_member" "roles/editor" "prune dropped tf-plan@'s stale project role"
 assert_binding "$dev_policy" "$plan_member" "roles/viewer" "tf-plan@ keeps roles/viewer"
 assert_binding "$dev_policy" "$plan_member" "roles/iam.securityReviewer" "tf-plan@ keeps roles/iam.securityReviewer"
+assert_binding "$dev_policy" "$plan_member" "roles/secretmanager.secretAccessor" "tf-plan@ keeps roles/secretmanager.secretAccessor"
 assert_binding "$dev_policy" "$outsider" "roles/editor" "another member's binding is untouched"
 assert_binding "$dev_policy" "$deploy_member" "roles/cloudsql.admin" "deploy@ keeps a declared role"
 assert_binding "$dev_policy" "$deploy_member" "roles/artifactregistry.admin" "deploy@ keeps the staging-only role"

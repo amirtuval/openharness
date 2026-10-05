@@ -122,10 +122,15 @@ PROJECT_IAM_ADMIN_DESCRIPTION="Roles deploy@ may grant or revoke (issue #167)"
 
 # Project roles for the plan account (tf-plan@). Viewer reads most of the project;
 # securityReviewer adds read-only IAM policy reads, which a plan that refreshes IAM
-# resources needs. Both are read-only.
+# resources needs; secretAccessor adds secretmanager.versions.access — reading a secret's
+# payload — which neither of the others carries and which refreshing a
+# google_secret_manager_secret_version needs (#153). All three are read-only: none grants
+# a create, an update or a delete. The payloads it can read are the ones the plan job
+# already reads out of the state bucket, where Terraform keeps them in the clear.
 PLAN_PROJECT_ROLES=(
   roles/viewer
   roles/iam.securityReviewer
+  roles/secretmanager.secretAccessor # refresh google_secret_manager_secret_version (#153)
 )
 
 # deploy@'s roles on the state bucket (#167): Terraform's GCS backend reads and writes
