@@ -9,7 +9,14 @@ import { describe, expect, it } from 'vitest'
 
 import type { Client } from '@openharness/client'
 
-import { e2eHarness, errorOf, readLog, userMessages, waitForTurnEnd } from './harness'
+import {
+  e2eHarness,
+  errorOf,
+  readLog,
+  userMessages,
+  waitForModelRequestStart,
+  waitForTurnEnd,
+} from './harness'
 
 /**
  * Switching a session's model mid-chat, end to end (epic #116, U3).
@@ -105,6 +112,15 @@ describe('switching the model mid-chat (U3)', () => {
     // finishes the request in flight on the model it started with and builds the next one from
     // the session — which is the switch.
     const firstSeq = await send(client, session.id, `${MOCK_SLOW_MARKER} a long first answer`)
+
+    // The switch can only mean "the next request" once the first one is open: a request's
+    // model is resolved before its `span.model_request_start` is appended, so this wait is
+    // what tells the test the request in flight is already committed to the old model — send
+    // the steering message earlier and the switch is simply the model of the only request
+    // there is. (The slow reply streams for about ten seconds, so the switch still lands well
+    // inside that first request.)
+    const firstRequest = await waitForModelRequestStart(client, session.id, { afterSeq: firstSeq })
+    expect(firstRequest.model).toBe(FIRST_MODEL)
 
     // The steering message is accepted while the turn runs: the reply's own request is already
     // past its model lookup, so this one cannot change it — only the request after it.
