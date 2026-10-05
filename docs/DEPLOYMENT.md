@@ -23,7 +23,12 @@ gcloud credentials, creates the Workload Identity pool, the OIDC provider, the `
 `plan` service accounts, the Terraform state bucket and the GitHub environments and
 variables. It converges on re-run: what it owns is declared in lists at the top of the
 script, so after an edit a re-run creates what is missing, updates what exists, and
-`--prune` removes bindings the lists no longer declare. Everything else — Artifact
-Registry, GKE, Cloud SQL, Secret Manager — is Terraform. Prerequisites, usage, role
-choices, how to run the test and how to undo it:
+`--prune` removes bindings the lists no longer declare. `deploy` holds exactly the roles
+Terraform needs — never Owner — and the one role it may hand out is pinned by an IAM
+condition (#167). Everything else — Artifact Registry, GKE, Cloud SQL, Secret Manager — is
+Terraform. Prerequisites, usage, the role list, how to run the test and how to undo it:
 [`.github/setup/README.md`](../.github/setup/README.md).
+
+The billing budget is the one grant this cannot carry: budgets live on the billing
+account, so `roles/billing.costsManager` on the billing account is granted separately, by
+hand — no project-level role reaches it.
