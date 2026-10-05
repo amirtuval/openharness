@@ -275,6 +275,7 @@ export {
   textOf,
   typesOf,
   userMessages,
+  waitForModelRequestStart,
   waitForTurnEnd,
 } from './events'
 export type { StreamCollector } from './events'

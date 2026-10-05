@@ -4,6 +4,7 @@ import {
   isStoredEvent,
   type AgentMessageEvent,
   type ModelRequestEndEvent,
+  type ModelRequestStartEvent,
   type StoredEvent,
   type StoredEventDelta,
   type StreamEvent,
@@ -85,6 +86,41 @@ async function statusEventsAfter(
     limit: 100,
   })
   return response.data
+}
+
+/**
+ * Wait until the log holds a `span.model_request_start` after `afterSeq`, and return it.
+ *
+ * The span start is the brain's record that a request was opened, and the model it names is
+ * the one that request runs: a request's model is resolved *before* its span start is appended
+ * (U3), so once one is in the log, a switch appended after it can only reach the request after
+ * it. That makes this the fact a test that steers a reply "mid-stream" has to see before it
+ * sends its steering message: until the span start is there, the switch is still an edit the
+ * request in flight would pick up, and the two-models-in-one-turn premise would never exist.
+ */
+export async function waitForModelRequestStart(
+  client: Client,
+  sessionId: string,
+  options: { readonly afterSeq?: number; readonly timeoutMs?: number } = {},
+): Promise<ModelRequestStartEvent> {
+  const afterSeq = options.afterSeq ?? 0
+  return await waitFor(
+    `a model request to start after seq ${String(afterSeq)}`,
+    async () => {
+      const response = await client.sessions.events.list(sessionId, {
+        types: [EVENT_TYPES.modelRequestStart],
+        after_seq: afterSeq,
+        limit: 100,
+      })
+      return response.data.find(
+        (event): event is ModelRequestStartEvent => event.type === EVENT_TYPES.modelRequestStart,
+      )
+    },
+    {
+      timeoutMs: options.timeoutMs ?? DEFAULT_WAIT_MS,
+      describe: () => `no span.model_request_start after seq ${String(afterSeq)}`,
+    },
+  )
 }
 
 /** The text of a stored message event: its text blocks, joined. */
