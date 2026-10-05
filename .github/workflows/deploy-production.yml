@@ -1,0 +1,170 @@
+name: deploy-production
+
+# Promote a commit that has already been built and deployed to staging, by moving the
+# `production` tag (issue #155, epic #148):
+#
+#   git tag -f production <sha> && git push -f origin production
+#
+# **Production never builds an image.** It resolves the tag's commit, verifies that staging
+# already pushed an image for that exact commit, and fails if it did not — so the only thing
+# that can reach production is a build staging has already run and someone has looked at.
+# Rolling back is the same command with an earlier SHA: the tag is a pointer, not a marker.
+on:
+  push:
+    tags: [production]
+
+# One production apply at a time, and a queue rather than a cancellation: interrupting an
+# apply is how an environment ends up half-changed.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  TF_IN_AUTOMATION: 'true'
+  TERRAFORM_VERSION: '1.9.8'
+  # Constants of the epic, matching the defaults in infra/modules/gke/variables.tf and
+  # infra/modules/registry's layout — not per-environment settings.
+  CLUSTER_NAME: openharness
+  REGION: us-central1
+  # The registry production pulls from: staging's, in the staging project. This is the one
+  # cross-project read deploy@openharness-510710 holds (DEPLOY_CROSS_PROJECT_ROLES).
+  REGISTRY_PROJECT_ID: ${{ vars.GCP_PROJECT_ID_STAGING }}
+  REGISTRY_HOST: us-central1-docker.pkg.dev
+  IMAGE_REPOSITORY: openharness/server
+
+jobs:
+  deploy:
+    name: verify, deploy and smoke test
+    runs-on: ubuntu-latest
+    # Matches deploy@openharness-510710's impersonation binding, which admits only jobs
+    # running in this GitHub environment.
+    environment: production
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # The tag's commit. `git rev-parse HEAD` in the checked-out tree is the commit the tag
+      # points at, whether the tag is annotated or not, and it is what every later step uses.
+      - name: Resolve the tag's commit
+        id: commit
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error title=Cannot resolve a SHA::'$sha' is not a commit SHA."
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          {
+            echo "Promoting $sha to production."
+            echo
+            echo "Tag: \`${GITHUB_REF_NAME}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: google-github-actions/auth@v2
+        with:
+          # The environment-scoped copies, from the `production` environment.
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SA }}
+
+      # The gate. Production deploys an image someone else built, and this is where that is
+      # proved: `roles/artifactregistry.reader` on the staging project is the only reason
+      # deploy@openharness-510710 can run this command at all.
+      - name: Verify the image exists in the staging registry
+        env:
+          SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          set -euo pipefail
+          image="$REGISTRY_HOST/$REGISTRY_PROJECT_ID/$IMAGE_REPOSITORY:$SHA"
+          if ! gcloud artifacts docker images describe "$image" --format='value(image_summary.digest)' >/dev/null 2>&1; then
+            echo "::error title=No image for this commit::$image does not exist. Production never builds: deploy this commit to staging first (merge it to main and let CI and deploy-staging run), then move the tag."
+            exit 1
+          fi
+          echo "::notice::$image exists — staging built it."
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Is this the first deploy?
+        id: cluster
+        env:
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          if gcloud container clusters describe "$CLUSTER_NAME" \
+            --region "$REGION" --project "$PROJECT_ID" >/dev/null 2>&1; then
+            echo "first=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Cluster $CLUSTER_NAME exists — a single apply."
+          else
+            echo "first=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::No cluster yet — first deploy, so a targeted apply followed by the full one."
+          fi
+
+      - name: terraform init
+        working-directory: infra/envs/production
+        run: terraform init -input=false -no-color
+
+      # The two applies #153 requires on a fresh project: the helm and kubernetes providers
+      # come from module.gke's endpoint and CA, which do not exist until the cluster does.
+      - name: terraform apply (first deploy — the cluster and its prerequisites)
+        if: steps.cluster.outputs.first == 'true'
+        working-directory: infra/envs/production
+        env:
+          IMAGE_TAG: ${{ steps.commit.outputs.sha }}
+          EXISTING_ZONE_NAME: ${{ vars.TF_EXISTING_ZONE_NAME || vars.TF_EXISTING_ZONE_NAME_PRODUCTION }}
+          STAGING_NAME_SERVERS: ${{ vars.TF_STAGING_NAME_SERVERS }}
+        run: |
+          set -euo pipefail
+          terraform apply -auto-approve -input=false -no-color -lock-timeout=10m \
+            -var "image_tag=$IMAGE_TAG" \
+            -var "existing_zone_name=$EXISTING_ZONE_NAME" \
+            -var "staging_name_servers=${STAGING_NAME_SERVERS:-[]}" \
+            -target=google_project_service.services \
+            -target=module.network \
+            -target=module.gke
+
+      - name: terraform apply
+        working-directory: infra/envs/production
+        env:
+          IMAGE_TAG: ${{ steps.commit.outputs.sha }}
+          EXISTING_ZONE_NAME: ${{ vars.TF_EXISTING_ZONE_NAME || vars.TF_EXISTING_ZONE_NAME_PRODUCTION }}
+          STAGING_NAME_SERVERS: ${{ vars.TF_STAGING_NAME_SERVERS }}
+        run: |
+          set -euo pipefail
+
+          # Production's zone is created by hand and adopted with an import block, so the
+          # variable has no default. Say so in a sentence rather than letting Terraform
+          # report a missing variable.
+          if [[ -z "$EXISTING_ZONE_NAME" ]]; then
+            echo "::error title=Missing variable::Neither TF_EXISTING_ZONE_NAME (production) nor TF_EXISTING_ZONE_NAME_PRODUCTION (repository) is set. It is the resource name of the existing oharness.dev zone — see docs/DEPLOYMENT.md, 'Variables the workflows read'."
+            exit 1
+          fi
+
+          terraform apply -auto-approve -input=false -no-color -lock-timeout=10m \
+            -var "image_tag=$IMAGE_TAG" \
+            -var "existing_zone_name=$EXISTING_ZONE_NAME" \
+            -var "staging_name_servers=${STAGING_NAME_SERVERS:-[]}"
+
+      - name: Wait for the rollout
+        env:
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          gcloud container clusters get-credentials "$CLUSTER_NAME" \
+            --region "$REGION" --project "$PROJECT_ID"
+          kubectl -n openharness rollout status deployment/openharness --timeout=10m
+
+      # `output url` is `https://<var.host>` — production's hostname, from the state that
+      # was just applied, rather than a second copy of it here.
+      - name: Smoke test
+        working-directory: infra/envs/production
+        run: |
+          set -euo pipefail
+          "$GITHUB_WORKSPACE/.github/scripts/smoke-test.sh" "$(terraform output -no-color -raw url)"
