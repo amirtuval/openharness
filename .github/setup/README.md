@@ -7,11 +7,16 @@ cannot create its own Workload Identity, so the maintainer runs
 credentials. It is the one piece of the deployment that is not Terraform; Artifact Registry,
 GKE, Cloud SQL, secrets and everything else come later, as Terraform.
 
+The script is idempotent: everything it owns is declared in lists at the top of the script,
+and a re-run converges the project to them — see [Re-running](#re-running-convergent-additive-or-pruning).
+
 ## Prerequisites
 
 - `gcloud` installed and logged in (`gcloud auth login`), with **Owner** on the project.
 - `gh` installed and logged in (`gh auth login`), with **admin** on the repository —
   creating environments and variables asks for it.
+- `jq` — `--prune` reads the current IAM policies with `gcloud ... get-iam-policy
+--format=json` and parses them with it. A run without `--prune` does not need it.
 - The project exists and has **billing linked**. Both projects (`openharness-dev` for
   staging, `openharness` for production) are created by hand; the script creates nothing
   itself.
@@ -32,9 +37,41 @@ Then for production (project `openharness`):
 ./.github/setup/workload-identity.sh production
 ```
 
-Run staging before production — that is the epic's order (D7). `--repo OWNER/REPO` overrides
-the default `amirtuval/openharness`. `--dry-run` needs no gcloud, gh or login at all; the
-project number, which only gcloud can resolve, appears as `<project-number>` in its output.
+Run staging before production — that is the epic's order (D7).
+
+| Flag                           | Effect                                                                                                                                                         |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--repo OWNER/REPO`            | this repository (default `amirtuval/openharness`)                                                                                                              |
+| `--deploy-roles=owner\|narrow` | which deploy project-roles list the run applies — the default `roles/owner`, or the narrower alternative (see [Role choices and risk](#role-choices-and-risk)) |
+| `--prune`                      | additionally remove the managed accounts' bindings the lists no longer declare (see [Re-running](#re-running-convergent-additive-or-pruning))                  |
+| `--dry-run`                    | print every gcloud and gh command, execute nothing                                                                                                             |
+
+`--dry-run` needs no gcloud, gh or login at all; the project number, which only gcloud can
+resolve, appears as `<project-number>` in its output. Because it executes nothing, it also
+cannot list the exact bindings `--prune` would remove — reading those needs the live
+policies — so it prints the prune rules instead.
+
+## The lists: edit, then re-run
+
+What the script owns is declared in bash arrays at the top of `workload-identity.sh` —
+adding an API or a permission is a one-line change, and nothing else in the script needs
+touching:
+
+| List                          | What it holds                                                 |
+| ----------------------------- | ------------------------------------------------------------- |
+| `APIS`                        | the APIs to enable                                            |
+| `DEPLOY_PROJECT_ROLES`        | project roles for `deploy@` — `roles/owner` by default        |
+| `DEPLOY_PROJECT_ROLES_NARROW` | the narrower alternative, chosen with `--deploy-roles=narrow` |
+| `PLAN_PROJECT_ROLES`          | project roles for `plan@`                                     |
+| `PLAN_STATE_BUCKET_ROLES`     | `plan@`'s roles on the state bucket                           |
+
+To need a new API, role or service: add a line, re-run the script. The run converges —
+it creates what is missing and updates what exists (pool, provider, service accounts). A
+role that is _removed_ from a list stays granted until a run with `--prune`.
+
+The provider's claim mapping and attribute condition are the two exceptions: they are
+computed from `--repo`, with `WIF_ATTRIBUTE_MAPPING` and `WIF_ATTRIBUTE_CONDITION` as the
+override seam (the test drives them; a one-off migration can too).
 
 ## What it creates
 
@@ -49,6 +86,11 @@ Per project, in `us-central1` except where noted:
 | Service account    | `plan@<project>` — `terraform plan` on PRs, `roles/viewer` + `roles/iam.securityReviewer`, and `roles/storage.objectAdmin` on the state bucket only                                                                                                    |
 | Terraform state    | bucket `gs://<project>-tfstate` with versioning, uniform bucket-level access and public access prevention                                                                                                                                              |
 | GitHub environment | `staging` or `production`, with the variables below                                                                                                                                                                                                    |
+
+On a re-run, the pool's, the provider's and the two accounts' display names and
+descriptions are applied to the existing resources (`workload-identity-pools update`,
+`providers update-oidc`, `service-accounts update`) — they converge instead of staying at
+whatever they were created with.
 
 The pool's attribute condition admits only this repository's runs into the pool; a token from
 any other repository fails its exchange. Impersonation bindings (`roles/iam.workloadIdentityUser`):
@@ -89,10 +131,11 @@ environment, so its protection rules apply. The `_STAGING` / `_PRODUCTION` copie
 accounts, GKE, Cloud SQL, Secret Manager, KMS, DNS, Artifact Registry — and Owner is the one
 role that keeps up with that without a list to maintain. Its blast radius is one project, and
 only a job running in this repository's matching GitHub environment can impersonate it. The
-script carries a commented list of narrower admin roles as the alternative. Two caveats: that
-list has to stay in sync as Terraform grows, and it cannot cover the billing budgets (D4) —
-they live on the billing account, so whichever identity creates them needs a grant there,
-which project-level Owner does not give either.
+narrower admin roles are `DEPLOY_PROJECT_ROLES_NARROW` in the script; `--deploy-roles=narrow`
+applies them instead (with `--prune`, that also drops Owner). Two caveats: that list has to
+stay in sync as Terraform grows, and it cannot cover the billing budgets (D4) — they live on
+the billing account, so whichever identity creates them needs a grant there, which
+project-level Owner does not give either.
 
 **`plan` gets `roles/viewer`, `roles/iam.securityReviewer` and `roles/storage.objectAdmin` on
 the state bucket only.** Viewer reads the project; securityReviewer adds read-only IAM policy
@@ -110,16 +153,55 @@ repository-scoped `attribute.repository/amirtuval/openharness` binding — would
 event of this repository, pushes included, so `event_name` is the tighter of the two.
 
 **Renames.** The attribute condition pins `assertion.repository == 'amirtuval/openharness'`.
-If the repository is renamed or transferred, re-run the script with `--repo OWNER/REPO`; the
-provider is only created when missing, so also update its condition
-(`gcloud iam workload-identity-pools providers update-oidc … --attribute-condition …`) or
-delete the provider and run again.
+If the repository is renamed or transferred, re-run the script with `--repo OWNER/REPO`:
+the provider exists already, so the run applies the new condition and mapping through
+`providers update-oidc`. (Before #161 the provider was create-only; the README used to ask
+for a manual `update-oidc` or a delete-and-recreate.)
 
-## Re-running
+## Re-running: convergent, additive, or pruning
 
-Safe, by design: every step checks for the resource first, or re-applies an idempotent
-update (APIs, bucket settings, IAM bindings, variables). A re-run never modifies protection
-rules on an existing GitHub environment and never touches a resource it did not create.
+Safe, by design. A re-run converges the project to the lists at the top of the script:
+
+- it creates what is missing;
+- it **updates** what exists: the pool, the OIDC provider (the declared mapping, condition
+  and issuer are re-applied with `update-oidc` on every run) and the two service accounts'
+  display names and descriptions;
+- it re-applies the settings it owns as idempotent updates: the APIs, the bucket settings,
+  the IAM bindings and the GitHub variables.
+
+The default run is **additive**: a role removed from a list stays granted. `--prune`
+removes the rest, printing each removal:
+
+- project roles of `deploy@` and `plan@` that are not in the active lists;
+- their bindings on the state bucket that are not declared — `deploy@` is declared none
+  there, so any of its bucket bindings goes;
+- `roles/iam.workloadIdentityUser` members on the two accounts other than the declared
+  principalSet.
+
+Only bindings whose member is one of those two accounts are ever considered: another
+member's bindings are never touched. Removals use the CLI's `--all`, so a stale role goes
+whether its binding is conditional or not. And a run — pruned or not — never touches a
+resource it did not create:
+
+- an existing GitHub environment is not re-PUT, so its **protection rules are never
+  modified**;
+- another member's IAM bindings are never removed, by a normal run or by `--prune`.
+
+## Test
+
+`.github/setup/test/run-tests.sh` proves all of the above — converge-on-re-run, the
+provider update, `--prune` selectivity, dry-run purity — without gcloud, gh, a login or
+network:
+
+```bash
+./.github/setup/test/run-tests.sh
+```
+
+It runs the real script against stateful fakes (`test/bin/gcloud.sh`, `test/bin/gh.sh`)
+that keep what they are told to create in a temp directory, fail on creating what already
+exists the way the real CLIs do, and log every call. bash and `jq` are all it needs. CI
+runs it, plus `shellcheck` on every script in this folder, in
+`.github/workflows/setup-script.yml` whenever `.github/setup/**` changes.
 
 ## Undo
 
