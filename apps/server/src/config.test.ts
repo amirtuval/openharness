@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest'
 
 import { DEFAULT_PARTITION_COUNT } from '@openharness/protocol'
+import { DEFAULT_KEY_CACHE_TTL_MS } from '@openharness/vault'
 
 import { DEFAULT_COMPACT_INTERVAL_MS, DEFAULT_DELTA_RETENTION_MS } from './compaction'
 import { DEFAULT_HEARTBEAT_MS, DEFAULT_LEASE_TTL_MS, DEFAULT_SWEEP_MS } from './partition-scheduler'
 import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
 import { DEFAULT_DRAIN_TIMEOUT_MS } from './runner'
 import {
+  DEFAULT_KEY_PROVIDER,
   DEFAULT_PORT,
   DEFAULT_SCHEDULER,
   defaultInstanceId,
@@ -26,6 +28,10 @@ const REQUIRED = {
   BETTER_AUTH_URL: 'http://localhost:3000',
   OPENHARNESS_SECRETS_KEY: 'b3Blbmhhcm5lc3MtdGVzdC1zZWNyZXRzLWtleS0zMmI=',
 }
+
+/** A Cloud KMS key resource name, the shape `OPENHARNESS_KMS_KEY` takes (#150). Not a secret. */
+const KMS_KEY =
+  'projects/openharness-dev/locations/global/keyRings/openharness/cryptoKeys/credentials'
 
 /**
  * {@link REQUIRED} plus whatever the test is about, with the dev login on: every boot needs a
@@ -47,7 +53,10 @@ describe('readServerConfig', () => {
       scheduler: DEFAULT_SCHEDULER,
       betterAuthSecret: REQUIRED.BETTER_AUTH_SECRET,
       betterAuthUrl: REQUIRED.BETTER_AUTH_URL,
+      keyProvider: DEFAULT_KEY_PROVIDER,
       secretsKey: REQUIRED.OPENHARNESS_SECRETS_KEY,
+      kmsKey: undefined,
+      keyCacheTtlMs: DEFAULT_KEY_CACHE_TTL_MS,
       devLogin: true,
       google: undefined,
       github: undefined,
@@ -100,6 +109,8 @@ describe('readServerConfig', () => {
         OPENHARNESS_SWEEP_MS: '450',
         OPENHARNESS_DELTA_RETENTION_MS: '120000',
         OPENHARNESS_COMPACT_INTERVAL_MS: '60000',
+        OPENHARNESS_KEY_PROVIDER: 'local',
+        OPENHARNESS_KEY_CACHE_TTL_MS: '120000',
       }),
     )
 
@@ -109,7 +120,10 @@ describe('readServerConfig', () => {
       scheduler: 'postgres',
       betterAuthSecret: REQUIRED.BETTER_AUTH_SECRET,
       betterAuthUrl: REQUIRED.BETTER_AUTH_URL,
+      keyProvider: 'local',
       secretsKey: REQUIRED.OPENHARNESS_SECRETS_KEY,
+      kmsKey: undefined,
+      keyCacheTtlMs: 120_000,
       devLogin: true,
       google: { clientId: 'g-id', clientSecret: 'g-secret' },
       github: { clientId: 'gh-id', clientSecret: 'gh-secret' },
@@ -242,6 +256,68 @@ describe('readServerConfig', () => {
     ).toThrow(/OPENHARNESS_SECRETS_KEY/)
   })
 
+  it('defaults the vault key provider to local, with the environment key', () => {
+    const config = readServerConfig(env())
+    expect(config.keyProvider).toBe('local')
+    expect(config.secretsKey).toBe(REQUIRED.OPENHARNESS_SECRETS_KEY)
+    expect(config.kmsKey).toBeUndefined()
+  })
+
+  it('takes the gcp-kms provider with a Cloud KMS key, and without OPENHARNESS_SECRETS_KEY', () => {
+    // #150, D6: in staging and production the master key lives in Cloud KMS, so the
+    // environment key is not required — and a leftover one in the environment is ignored.
+    const config = readServerConfig(
+      env({
+        OPENHARNESS_KEY_PROVIDER: 'gcp-kms',
+        OPENHARNESS_KMS_KEY: KMS_KEY,
+        OPENHARNESS_SECRETS_KEY: '',
+      }),
+    )
+    expect(config.keyProvider).toBe('gcp-kms')
+    expect(config.secretsKey).toBeUndefined()
+    expect(config.kmsKey).toBe(KMS_KEY)
+
+    const withLeftoverKey = readServerConfig(
+      env({ OPENHARNESS_KEY_PROVIDER: 'gcp-kms', OPENHARNESS_KMS_KEY: KMS_KEY }),
+    )
+    expect(withLeftoverKey.secretsKey).toBeUndefined()
+  })
+
+  it('refuses gcp-kms without a Cloud KMS key', () => {
+    expect(() =>
+      readServerConfig(env({ OPENHARNESS_KEY_PROVIDER: 'gcp-kms', OPENHARNESS_SECRETS_KEY: '' })),
+    ).toThrow(/OPENHARNESS_KMS_KEY/)
+  })
+
+  it('refuses a Cloud KMS key that does not name a key', () => {
+    for (const kmsKey of [
+      'credentials',
+      'projects/p/locations/l/keyRings/r',
+      // A key *version*: rotation would then need a data migration.
+      `${KMS_KEY}/cryptoKeyVersions/1`,
+    ]) {
+      expect(() =>
+        readServerConfig(env({ OPENHARNESS_KEY_PROVIDER: 'gcp-kms', OPENHARNESS_KMS_KEY: kmsKey })),
+      ).toThrow(/OPENHARNESS_KMS_KEY/)
+    }
+  })
+
+  it('refuses a key provider it does not have', () => {
+    expect(() => readServerConfig(env({ OPENHARNESS_KEY_PROVIDER: 'vault' }))).toThrow(
+      /OPENHARNESS_KEY_PROVIDER/,
+    )
+  })
+
+  it('takes a key-cache TTL of zero and refuses one that is not a count of milliseconds', () => {
+    expect(readServerConfig(env({ OPENHARNESS_KEY_CACHE_TTL_MS: '0' })).keyCacheTtlMs).toBe(0)
+    expect(() => readServerConfig(env({ OPENHARNESS_KEY_CACHE_TTL_MS: '-1' }))).toThrow(
+      /OPENHARNESS_KEY_CACHE_TTL_MS/,
+    )
+    expect(() => readServerConfig(env({ OPENHARNESS_KEY_CACHE_TTL_MS: 'soon' }))).toThrow(
+      /OPENHARNESS_KEY_CACHE_TTL_MS/,
+    )
+  })
+
   it('enables the dev login only on a localhost public URL', () => {
     // A7: a fixed password on a well-known address is for a laptop.
     for (const url of [
@@ -348,6 +424,21 @@ describe('describeConfig', () => {
     // No providers only comes up when the dev login is the way in.
     expect(lines.join('\n')).toContain('sign-in: no social providers configured')
     expect(lines.join('\n')).toContain('dev login: ENABLED')
+    expect(lines.join('\n')).toContain('vault keys: local')
+  })
+
+  it('names the Cloud KMS key, and never the local key value', () => {
+    const gcp = describeConfig(
+      readServerConfig(env({ OPENHARNESS_KEY_PROVIDER: 'gcp-kms', OPENHARNESS_KMS_KEY: KMS_KEY })),
+    ).join('\n')
+    expect(gcp).toContain('vault keys: Cloud KMS key')
+    expect(gcp).toContain(KMS_KEY)
+
+    // The local provider's line says which variable the key comes from — a key value must
+    // never reach a log line.
+    const local = describeConfig(readServerConfig(env())).join('\n')
+    expect(local).toContain('vault keys: local')
+    expect(local).not.toContain(REQUIRED.OPENHARNESS_SECRETS_KEY)
   })
 
   it('names postgres, the providers and no dev login when they are configured', () => {

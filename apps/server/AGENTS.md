@@ -79,31 +79,34 @@ a `user.interrupt` signals `interrupt` — exactly what the same events would do
 
 ## Environment variables
 
-| variable                              | default                        | what it does                                                                                  |
-| ------------------------------------- | ------------------------------ | --------------------------------------------------------------------------------------------- |
-| `DATABASE_URL`                        | —                              | run on Postgres, migrating on boot; unset means in-memory                                     |
-| `SCHEDULER`                           | `local`                        | `local`, or `postgres` for the multi-instance scheduler                                       |
-| `BETTER_AUTH_SECRET`                  | — (**required**)               | signs sessions and cookies                                                                    |
-| `BETTER_AUTH_URL`                     | — (**required**)               | the public URL: Better Auth's base, the one trusted origin (CSRF)                             |
-| `OPENHARNESS_SECRETS_KEY`             | — (**required**)               | base64 32-byte master key the vault seals credentials with                                    |
-| `OPENHARNESS_DEV_LOGIN`               | off                            | `1` enables the local dev login; localhost URLs only (A7); the way in when no provider is set |
-| `GOOGLE_CLIENT_ID`/`_SECRET`          | —                              | enable Google sign-in (both, or neither; one provider or the dev login is required)           |
-| `GITHUB_CLIENT_ID`/`_SECRET`          | —                              | enable GitHub sign-in                                                                         |
-| `MICROSOFT_CLIENT_ID`/`_SECRET`       | —                              | enable Microsoft sign-in                                                                      |
-| `MICROSOFT_TENANT_ID`                 | `common`                       | the Entra tenant the Microsoft provider authenticates against                                 |
-| `PORT`                                | `3000`                         | the port to listen on                                                                         |
-| `OPENHARNESS_TEST_MODEL`              | —                              | `mock` swaps in the deterministic test model                                                  |
-| `OPENHARNESS_WEB_DIR`                 | —                              | a built web app to serve at `/`                                                               |
-| `OPENHARNESS_CORS_ORIGINS`            | —                              | comma-separated origins to allow; unset means no CORS headers                                 |
-| `OPENHARNESS_MAX_CONCURRENT_SESSIONS` | `4`                            | how many sessions may be running at once                                                      |
-| `OPENHARNESS_DRAIN_TIMEOUT_MS`        | `5000`                         | how long shutdown waits for a turn in flight                                                  |
-| `OPENHARNESS_INSTANCE_ID`             | hostname + pid + random suffix | this instance's id in the lease table                                                         |
-| `OPENHARNESS_PARTITIONS`              | `64` (the protocol's)          | how many partitions the session space has                                                     |
-| `OPENHARNESS_LEASE_TTL_MS`            | `30000`                        | how long a partition lease lasts before it must be renewed                                    |
-| `OPENHARNESS_HEARTBEAT_MS`            | `10000`                        | how often leases are renewed and free partitions taken                                        |
-| `OPENHARNESS_SWEEP_MS`                | `60000`                        | how often owned partitions are re-scanned for missed work                                     |
-| `OPENHARNESS_DELTA_RETENTION_MS`      | `3600000`                      | how long superseded chunks are kept before compaction deletes them                            |
-| `OPENHARNESS_COMPACT_INTERVAL_MS`     | `300000`                       | how often the compaction job runs; `0` disables it                                            |
+| variable                              | default                          | what it does                                                                                   |
+| ------------------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `DATABASE_URL`                        | —                                | run on Postgres, migrating on boot; unset means in-memory                                      |
+| `SCHEDULER`                           | `local`                          | `local`, or `postgres` for the multi-instance scheduler                                        |
+| `BETTER_AUTH_SECRET`                  | — (**required**)                 | signs sessions and cookies                                                                     |
+| `BETTER_AUTH_URL`                     | — (**required**)                 | the public URL: Better Auth's base, the one trusted origin (CSRF)                              |
+| `OPENHARNESS_SECRETS_KEY`             | — (**required** under `local`)   | base64 32-byte master key the vault seals credentials with; not needed under `gcp-kms`         |
+| `OPENHARNESS_KEY_PROVIDER`            | `local`                          | `local` (the environment key) or `gcp-kms` (Cloud KMS): who wraps the vault's data keys (#150) |
+| `OPENHARNESS_KMS_KEY`                 | — (**required** under `gcp-kms`) | the Cloud KMS `projects/…/cryptoKeys/…` key; unused under `local`                              |
+| `OPENHARNESS_KEY_CACHE_TTL_MS`        | `300000`                         | how long unwrapped data keys stay cached in memory; `0` disables the cache                     |
+| `OPENHARNESS_DEV_LOGIN`               | off                              | `1` enables the local dev login; localhost URLs only (A7); the way in when no provider is set  |
+| `GOOGLE_CLIENT_ID`/`_SECRET`          | —                                | enable Google sign-in (both, or neither; one provider or the dev login is required)            |
+| `GITHUB_CLIENT_ID`/`_SECRET`          | —                                | enable GitHub sign-in                                                                          |
+| `MICROSOFT_CLIENT_ID`/`_SECRET`       | —                                | enable Microsoft sign-in                                                                       |
+| `MICROSOFT_TENANT_ID`                 | `common`                         | the Entra tenant the Microsoft provider authenticates against                                  |
+| `PORT`                                | `3000`                           | the port to listen on                                                                          |
+| `OPENHARNESS_TEST_MODEL`              | —                                | `mock` swaps in the deterministic test model                                                   |
+| `OPENHARNESS_WEB_DIR`                 | —                                | a built web app to serve at `/`                                                                |
+| `OPENHARNESS_CORS_ORIGINS`            | —                                | comma-separated origins to allow; unset means no CORS headers                                  |
+| `OPENHARNESS_MAX_CONCURRENT_SESSIONS` | `4`                              | how many sessions may be running at once                                                       |
+| `OPENHARNESS_DRAIN_TIMEOUT_MS`        | `5000`                           | how long shutdown waits for a turn in flight                                                   |
+| `OPENHARNESS_INSTANCE_ID`             | hostname + pid + random suffix   | this instance's id in the lease table                                                          |
+| `OPENHARNESS_PARTITIONS`              | `64` (the protocol's)            | how many partitions the session space has                                                      |
+| `OPENHARNESS_LEASE_TTL_MS`            | `30000`                          | how long a partition lease lasts before it must be renewed                                     |
+| `OPENHARNESS_HEARTBEAT_MS`            | `10000`                          | how often leases are renewed and free partitions taken                                         |
+| `OPENHARNESS_SWEEP_MS`                | `60000`                          | how often owned partitions are re-scanned for missed work                                      |
+| `OPENHARNESS_DELTA_RETENTION_MS`      | `3600000`                        | how long superseded chunks are kept before compaction deletes them                             |
+| `OPENHARNESS_COMPACT_INTERVAL_MS`     | `300000`                         | how often the compaction job runs; `0` disables it                                             |
 
 Provider credentials (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) are **not read at all**
 (epic #65, A5), and the server keeps none of its own: every model request is made with the
@@ -111,6 +114,20 @@ credential the session-bound resolver answered — the owner's stored, sealed ke
 request (`credentials.ts`). A session whose owner has no key for the model's provider ends the
 turn with the brain's `missing_provider_credential` `session.error`; the environment is never
 a fallback. The mock kind resolves a placeholder the deterministic model ignores.
+
+**The vault's key provider** (#150, deployment epic #148 decision D6) is
+`OPENHARNESS_KEY_PROVIDER`. `local` — the default — wraps each credential's data key with
+`OPENHARNESS_SECRETS_KEY`, so dev, docker compose and CI are unchanged; `gcp-kms` wraps it
+with a Cloud KMS key (`OPENHARNESS_KMS_KEY`), authenticated by Application Default
+Credentials — Workload Identity on GKE — and keeps no key material in the environment at all.
+`main.ts` builds the one vault every credential path shares from the configuration
+(`createConfigVault`), and the Cloud KMS client is loaded on the _first wrap or unwrap_: a
+`local` server never loads `@google-cloud/kms`. Unwrapped data keys are cached in memory for
+`OPENHARNESS_KEY_CACHE_TTL_MS` (`0` disables) so a model request does not always make a KMS
+round trip; the cache is bounded, nothing else is cached — never a plaintext, never the
+master key — and a cached key is zeroed when it expires or is evicted. Each stored row
+records which provider wrapped it, so a secret is refused by a provider that did not wrap it
+with an error naming both — switching providers means re-saving credentials.
 
 A variable that is set but empty counts as unset. A value that cannot be what it claims — a
 `PORT` that is not a port, an `OPENHARNESS_TEST_MODEL` that is not `mock` — fails the boot
@@ -729,6 +746,7 @@ drain.
 | `createMockModelFactory()`                                                                                           | the deterministic test model, for a host that wires its own                          |
 | `defaultInstanceId()`                                                                                                | hostname + pid + random suffix: the id a server leases partitions under              |
 | `readServerConfig(env)`, `ServerConfig`, `ENV_VARS`                                                                  | the environment, parsed                                                              |
+| `createConfigVault(config)`, `KeyProviderKind`                                                                       | the vault the config asks for: the env key or Cloud KMS (#150)                       |
 | `HttpError`, `rateLimitError`, `PACKAGE_NAME`, `Logger`                                                              | the error types, the package name and the logging seam                               |
 
 `node dist/index.js` runs `main()`, which reads the environment and starts the server.
@@ -754,6 +772,7 @@ src/
     cache.ts            CatalogCache (one hour per user+provider) and RefreshLimiter (C4)
     provider-fetch.ts   ProviderFetch: fetch over the egress-proxy env, and the 5 s deadline
   config.ts             the environment, parsed and checked
+  key-provider.ts       the vault the configuration asks for: the env key or Cloud KMS (#150)
   default-model.ts      the automatic default: the recommendation table, and the picker (U4)
   model-id.ts           the provider/model shape check the routes share (U1/U3)
   model.ts              which model factory the process runs (the router, or the mock)

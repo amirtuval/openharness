@@ -64,7 +64,8 @@ remaining step.
   organizations or teams yet.
 - **Users bring their own model keys.** The server has no provider keys of its own:
   - keys are stored in Postgres with envelope encryption (a new `@openharness/vault` package,
-    with the master key in `OPENHARNESS_SECRETS_KEY`; a KMS can replace it later);
+    with the master key in `OPENHARNESS_SECRETS_KEY`; a pluggable key provider since #150 —
+    Cloud KMS in staging and production);
   - they are write-only and validated on save;
   - they are decrypted only for one model request.
   - Supported now: any provider that takes a single API key (OpenAI, Anthropic, Google,
