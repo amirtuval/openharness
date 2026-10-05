@@ -505,10 +505,12 @@ if (target === null) {
       const files = await migrate(db)
       expect(files.length).toBeGreaterThan(0)
       // `0016_user_preferences.sql` and `0017_scheduler_instances.sql` are each one
-      // `create table if not exists` (#111, #122): a re-run has to leave the tables working,
-      // which the store calls below prove.
+      // `create table if not exists` (#111, #122), and `0018_credential_key_provider.sql`
+      // one `add column if not exists` (#150): a re-run has to leave the tables and the
+      // column working, which the store calls below prove.
       expect(files).toContain('0016_user_preferences.sql')
       expect(files).toContain('0017_scheduler_instances.sql')
+      expect(files).toContain('0018_credential_key_provider.sql')
       expect(await migrate(db)).toEqual(files)
 
       const { store, session } = await seeded()

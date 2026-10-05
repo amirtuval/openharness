@@ -91,8 +91,10 @@ least one OAuth provider, or the localhost-only dev login (`OPENHARNESS_DEV_LOGI
 Everything under `/v1` is scoped to the signed-in user. Agents and sessions carry an owner,
 another user's resource is answered 404 rather than 403, and there is no static server API
 key. Model-provider keys are each user's own: a key is validated on save, sealed with
-envelope encryption from `@openharness/vault` under `OPENHARNESS_SECRETS_KEY`, and never
-returned. [`docs/api.md`](./api.md#authentication) has the routes and rules;
+envelope encryption from `@openharness/vault` under a master key that comes from
+`OPENHARNESS_SECRETS_KEY` (`OPENHARNESS_KEY_PROVIDER=local`, the default) or from Cloud KMS
+(`gcp-kms`, #150), and never returned.
+[`docs/api.md`](./api.md#authentication) has the routes and rules;
 [`apps/server/AGENTS.md`](../apps/server/AGENTS.md) has the implementation.
 
 ## Package map

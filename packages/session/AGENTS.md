@@ -79,7 +79,8 @@ migrations/             the SQL the Postgres stores need, applied by `migrate()`
                         0014 the auth-session revocation trigger (#76),
                         0015 the effective session model/system (#93),
                         0016 the per-user preferences (#111),
-                        0017 the scheduler-instance membership (#122)
+                        0017 the scheduler-instance membership (#122),
+                        0018 the credential key provider (#150)
 docs/postgres.md        the Postgres stores: schema, migrations, delivery, local setup
 ```
 
@@ -424,10 +425,13 @@ one exception, and only to be _stricter_: it rebuilds each appended event throug
 `CredentialStore` in `src/credentials.ts` is the second contract: where a user's
 model-provider keys live. It stores **only sealed blobs**. The server seals a plaintext with
 `@openharness/vault` and hands the store a `SealedSecret` — `{ ciphertext, nonce, wrappedKey,
-kekVersion }`, base64 strings — which the store writes down as given; it never sees a
-plaintext, never opens a blob, and this package deliberately does **not** depend on
+kekVersion, keyProvider? }`, all strings — which the store writes down as given; it never sees
+a plaintext, never opens a blob, and this package deliberately does **not** depend on
 `@openharness/vault` (the sealed shape is restated here so the two are structurally
-interchangeable without one importing the other).
+interchangeable without one importing the other). `keyProvider` names the key provider that
+wrapped the data key (`local` or `gcp-kms`, #150) and is **optional**: a blob stored before
+the field existed simply does not have it, and the vault is what reads an absent provider as
+`local`. The store writes and reads it faithfully either way — it knows no provider names.
 
 | method                         | what it does                                                                                                                                |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -473,7 +477,8 @@ recorded `{ from_seq, to_seq }` range: `by_event_id` primary key, `by_seq`, and 
 (by_seq > to_seq)`), `partition_leases` (`partition`, `owner`, `epoch`, `expires_at`),
 `scheduler_instances` (one row per live scheduler instance: `instance_id` primary key and the
 `last_seen` of its last heartbeat; see `0017`), `provider_credentials` (a sealed credential per
-`(user_id, provider)`; see `0013`) and
+`(user_id, provider)`, with the key provider that wrapped its data key — NULL meaning `local`;
+see `0013` and `0018`) and
 `user_preferences` (one row per user: the stored `default_model`, or NULL; `on delete cascade`
 from `"user"`; see `0016`). Five are
 **Better Auth's**, created by the same migrations and read and written by Better Auth itself
@@ -574,7 +579,7 @@ Wave 1 of the chat-UX epic (#111) added one more:
   protocol's default, `{ default_model: null }`. `putPreferences` upserts the row
   (`on conflict (user_id) do update`), so the table is a value rather than a log.
 
-The partition scheduler's membership (issue #122) added the latest one:
+The partition scheduler's membership (issue #122) added another:
 
 - **`0017_scheduler_instances.sql` — the scheduler membership** (#122): the
   `scheduler_instances` table, one row per live scheduler instance — `instance_id text collate
@@ -584,6 +589,19 @@ The partition scheduler's membership (issue #122) added the latest one:
   `last_seen > now - withinMs`) and deleted by `removeInstance` on a graceful `stop()`. There
   is nothing to backfill — an absent row means nobody has announced that id — and a lost row
   costs one heartbeat's announcement rather than anything durable.
+
+The vault's key provider (issue #150, deployment epic #148 decision D6) added the latest one:
+
+- **`0018_credential_key_provider.sql` — which provider wrapped a credential** (#150): one
+  `add column if not exists key_provider text` on `provider_credentials`, holding `local` or
+  `gcp-kms` — a provider name, never key material. **NULL is legitimate and means `local`**:
+  every row written before the column holds it, when `local` was the only provider, and the
+  vault reads an absent provider as `local` — so there is nothing to backfill and a re-run of
+  the migrator leaves every row (and every sealed blob) exactly as it was. The column is what
+  lets `@openharness/vault` refuse a secret under a provider that did not wrap it with a clear
+  error — a deployment that switches `OPENHARNESS_KEY_PROVIDER` cannot read its old rows,
+  which is exactly what should be said loudly. `runCredentialStoreConformance` pins the round
+  trip of the field and that an absent one stays absent, in both stores.
 
 **Appending.** `seq` is assigned inside the append transaction, under `select … for update` on
 the session row, so concurrent appends — from any number of connections, stores or processes —
@@ -725,8 +743,8 @@ dependency table.
   chunk another store appended delivered to this store's subscriber, a deleted session's rows
   really gone from `events`, `event_claims` and `event_supersessions` while another session's
   are untouched, its `session.deleted` announced to a different store's subscriber,
-  idempotent migrations (`0016` and `0017` included — the tables they add are exercised after
-  a re-run),
+  idempotent migrations (`0016`, `0017` and `0018` included — the tables and the column they
+  add are exercised after a re-run),
   the #93 backfill over a session row written the pre-#93 way (the agent's model and system
   copied into the new columns, the row read back as the protocol's session), `close()` leaving
   a borrowed pool alone, the raw `events.processed_at` column staying `NULL`

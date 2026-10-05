@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { hostname } from 'node:os'
 
 import { DEFAULT_PARTITION_COUNT } from '@openharness/protocol'
-import { envKeyProvider } from '@openharness/vault'
+import { DEFAULT_KEY_CACHE_TTL_MS, envKeyProvider, gcpKmsKeyProvider } from '@openharness/vault'
 
 import { DEFAULT_COMPACT_INTERVAL_MS, DEFAULT_DELTA_RETENTION_MS } from './compaction'
 import { MOCK_MODEL_ENV_VALUE } from './mock-model'
@@ -24,7 +24,10 @@ import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
  * | `SCHEDULER`                         | `local` (default) or `postgres`, the multi-instance scheduler    |
  * | `BETTER_AUTH_SECRET`                | **required**: signs sessions and cookies (epic #65, A2)          |
  * | `BETTER_AUTH_URL`                   | **required**: the public URL; Better Auth's base and the only trusted origin |
- * | `OPENHARNESS_SECRETS_KEY`           | **required**: the base64 32-byte vault key for provider credentials (A5) |
+ * | `OPENHARNESS_SECRETS_KEY`           | **required** under the default local key provider: the base64 32-byte vault key for provider credentials (A5) |
+ * | `OPENHARNESS_KEY_PROVIDER`          | `local` (default) or `gcp-kms`: who wraps the vault's data keys (#150, D6) |
+ * | `OPENHARNESS_KMS_KEY`               | **required** when the provider is `gcp-kms`: the Cloud KMS `cryptoKeys/…` key; unused otherwise |
+ * | `OPENHARNESS_KEY_CACHE_TTL_MS`      | how long unwrapped data keys stay cached in memory; `300000` (`0` disables) |
  * | `OPENHARNESS_DEV_LOGIN`             | `1` enables the local dev login; localhost public URLs only (A7); with no provider, the only way in |
  * | `GOOGLE_CLIENT_ID`/`_SECRET`        | enable Google sign-in (A1)                                       |
  * | `GITHUB_CLIENT_ID`/`_SECRET`        | enable GitHub sign-in (A1)                                       |
@@ -61,6 +64,9 @@ export const ENV_VARS = {
   betterAuthSecret: 'BETTER_AUTH_SECRET',
   betterAuthUrl: 'BETTER_AUTH_URL',
   secretsKey: 'OPENHARNESS_SECRETS_KEY',
+  keyProvider: 'OPENHARNESS_KEY_PROVIDER',
+  kmsKey: 'OPENHARNESS_KMS_KEY',
+  keyCacheTtlMs: 'OPENHARNESS_KEY_CACHE_TTL_MS',
   devLogin: 'OPENHARNESS_DEV_LOGIN',
   googleClientId: 'GOOGLE_CLIENT_ID',
   googleClientSecret: 'GOOGLE_CLIENT_SECRET',
@@ -102,8 +108,14 @@ export interface ServerConfig {
   readonly betterAuthSecret: string
   /** `BETTER_AUTH_URL`: required, the public URL Better Auth is based at. */
   readonly betterAuthUrl: string
-  /** `OPENHARNESS_SECRETS_KEY`: required, the base64 32-byte vault master key. */
-  readonly secretsKey: string
+  /** `OPENHARNESS_KEY_PROVIDER`: which key provider wraps the vault's data keys (#150, D6). */
+  readonly keyProvider: KeyProviderKind
+  /** `OPENHARNESS_SECRETS_KEY`: the base64 32-byte vault master key; required under `local`. */
+  readonly secretsKey: string | undefined
+  /** `OPENHARNESS_KMS_KEY`: the Cloud KMS key; required when the provider is `gcp-kms`. */
+  readonly kmsKey: string | undefined
+  /** `OPENHARNESS_KEY_CACHE_TTL_MS`: how long unwrapped data keys stay cached in memory. */
+  readonly keyCacheTtlMs: number
   /** `OPENHARNESS_DEV_LOGIN`: the local email/password login, localhost only (A7). */
   readonly devLogin: boolean
   /** Google sign-in, when `GOOGLE_CLIENT_ID` and `_SECRET` are set. */
@@ -146,11 +158,17 @@ export interface ServerConfig {
 /** Which {@link SessionScheduler} the server runs. */
 export type SchedulerKind = 'local' | 'postgres'
 
+/** Which key provider wraps the vault's data keys (#150): the env key, or Cloud KMS. */
+export type KeyProviderKind = 'local' | 'gcp-kms'
+
 /** The port a server listens on when `PORT` does not say. */
 export const DEFAULT_PORT = 3000
 
 /** The scheduler a server runs when `SCHEDULER` does not say. */
 export const DEFAULT_SCHEDULER: SchedulerKind = 'local'
+
+/** The key provider a server uses when `OPENHARNESS_KEY_PROVIDER` does not say. */
+export const DEFAULT_KEY_PROVIDER: KeyProviderKind = 'local'
 
 /** The Entra tenant a Microsoft sign-in uses when `MICROSOFT_TENANT_ID` does not say. */
 export const DEFAULT_MICROSOFT_TENANT_ID = 'common'
@@ -172,10 +190,12 @@ export function defaultInstanceId(): string {
  * A variable that is set but empty counts as unset: `PORT=` in a shell or a compose file is a
  * variable someone meant to leave alone, not a request to listen on port zero.
  *
- * `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL` and `OPENHARNESS_SECRETS_KEY` are **required**
- * (epic #65, A2/A5): without the first two there is no way to sign anyone in, and without the
- * third no provider credential could ever be stored. A missing one is a boot failure with a
- * message naming the variable, not a server that comes up half-configured.
+ * `BETTER_AUTH_SECRET` and `BETTER_AUTH_URL` are **required** (epic #65, A2), and so is the
+ * key of the vault's key provider (#150, D6): `OPENHARNESS_SECRETS_KEY` under the default
+ * `local`, `OPENHARNESS_KMS_KEY` under `gcp-kms` — a key for the other mode is simply not
+ * read. Without the first two there is no way to sign anyone in, and without the key no
+ * provider credential could ever be stored. A missing one is a boot failure with a message
+ * naming the variable, not a server that comes up half-configured.
  *
  * There also has to be a **way to sign in**: at least one social provider (both of its
  * variables set), or the dev login on a localhost URL. With neither, every request would be
@@ -210,10 +230,26 @@ export function readServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
   }
   const betterAuthSecret = requireString(env, ENV_VARS.betterAuthSecret)
   const betterAuthUrl = requireString(env, ENV_VARS.betterAuthUrl)
-  const secretsKey = requireString(env, ENV_VARS.secretsKey)
-  // Checked here, at boot, so a bad key fails immediately with the vault's own message —
-  // naming the variable and the decoded length, never the value.
-  envKeyProvider(secretsKey)
+  // The vault's key provider (#150, D6), and the one variable that provider needs. Each is
+  // checked here, at boot, with the vault's own validation — so a bad key fails immediately
+  // with a message naming the variable (and never echoing a key), instead of at the first
+  // credential saved. Constructing the Cloud KMS provider reads no credential and loads no
+  // client: that happens on the first wrap or unwrap, which a `local` server never reaches.
+  const keyProvider = readChoice(
+    env,
+    ENV_VARS.keyProvider,
+    ['local', 'gcp-kms'] as const,
+    DEFAULT_KEY_PROVIDER,
+  )
+  let secretsKey: string | undefined
+  let kmsKey: string | undefined
+  if (keyProvider === 'gcp-kms') {
+    kmsKey = requireString(env, ENV_VARS.kmsKey)
+    gcpKmsKeyProvider({ key: kmsKey })
+  } else {
+    secretsKey = requireString(env, ENV_VARS.secretsKey)
+    envKeyProvider(secretsKey)
+  }
   const devLogin = readFlag(env, ENV_VARS.devLogin)
   if (devLogin && !isLocalUrl(betterAuthUrl)) {
     // A7: the dev login is a fixed password on a well-known address. It is for a laptop.
@@ -242,7 +278,11 @@ export function readServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
     scheduler,
     betterAuthSecret,
     betterAuthUrl,
+    keyProvider,
     secretsKey,
+    kmsKey,
+    // Zero is meaningful: no cache at all, so every open goes to the key provider.
+    keyCacheTtlMs: readInteger(env, ENV_VARS.keyCacheTtlMs, DEFAULT_KEY_CACHE_TTL_MS, { min: 0 }),
     devLogin,
     google,
     github,
@@ -296,6 +336,13 @@ export function describeConfig(config: ServerConfig): string[] {
           `${config.partitions} partitions, lease ${config.leaseTtlMs}ms, ` +
           `heartbeat ${config.heartbeatMs}ms, sweep ${config.sweepMs}ms)`
       : 'scheduler: local (this process owns every session)',
+  )
+  // Which key provider wraps users' credentials (#150): a name, and for Cloud KMS the key's
+  // resource name — never the local key's value, which is a secret.
+  lines.push(
+    config.keyProvider === 'gcp-kms'
+      ? `vault keys: Cloud KMS key ${config.kmsKey ?? '(unset)'} (${ENV_VARS.keyProvider}=gcp-kms)`
+      : `vault keys: local (${ENV_VARS.secretsKey}; value never printed)`,
   )
   lines.push(`public URL: ${config.betterAuthUrl}`)
   const providers = [
