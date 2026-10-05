@@ -19,8 +19,11 @@ import {
 } from '@openharness/session/postgres'
 import type { Vault } from '@openharness/vault'
 
-import { type AppEnv, type Logger, consoleLogger } from './types'
+import { type AppEnv, type Logger } from './types'
 import { createApp } from './app'
+import { loggerFor } from './observability/logging'
+import { SessionTraces, withSessionTraces } from './observability/session-traces'
+import { initTracing, type Tracer } from './observability/tracing'
 import { createAuth, createDevLoginUser, type Auth, type AuthDatabase } from './auth'
 import { ModelCatalog } from './catalog/catalog'
 import { createProviderFetch } from './catalog/provider-fetch'
@@ -65,6 +68,8 @@ export interface StartedServer {
   readonly auth: Auth
   /** The vault that seals and opens provider credentials. */
   readonly vault: Vault
+  /** Where spans go (#158): Cloud Trace when configured, and a no-op otherwise. */
+  readonly tracer: Tracer
   /** The port the server is listening on; a real one even when `PORT=0`. */
   readonly port: number
   /** Stop the server: no new requests, no new turns, no open store. Idempotent. */
@@ -132,9 +137,24 @@ export interface StartServerOptions {
  * scheduler, so no turn can run before the credentials it needs can be read.
  */
 export async function startServer(options: StartServerOptions = {}): Promise<StartedServer> {
-  const logger = options.logger ?? consoleLogger
   const config = options.config ?? readServerConfig()
+  // The log format is the configuration's (#158): the readable console format by default, the
+  // Cloud Logging JSON one when the deployment asks for it. A caller that passes a logger
+  // (a test capturing output) keeps it, whatever the format says.
+  const logger = options.logger ?? loggerFor(config.logFormat, config.gcpProjectId)
   const opened = await openStore(config, options, logger)
+  // Tracing (#158): off unless `OPENHARNESS_TRACING` says otherwise, and lazy either way — an
+  // untraced server never loads the SDK. When it is on, the store is wrapped so every appended
+  // session event also becomes a span (the turn and model-request spans of the session log).
+  const tracer = await initTracing({
+    mode: config.tracing,
+    sampleRate: config.traceSampleRate,
+    projectId: config.gcpProjectId,
+    logger,
+  })
+  const store = tracer.enabled
+    ? withSessionTraces(opened.store, new SessionTraces(tracer, logger))
+    : opened.store
   // `/ready` flips to 503 the instant `shutdown()` is called — before the listener closes and
   // before the turns in flight are drained — so a load balancer stops sending new requests
   // while the ones in flight finish (#151). The closure keeps answering this flag for the
@@ -160,7 +180,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
       // channel, which closes that session's open streams — here and on every other
       // instance. Only the id travels; the store never sees the token.
       onSessionRevoked: (authSessionId) => {
-        void opened.store.notifyAuthSessionRevoked(authSessionId).catch((error: unknown) => {
+        void store.notifyAuthSessionRevoked(authSessionId).catch((error: unknown) => {
           logger.error('announcing a revoked session failed', error)
         })
       },
@@ -179,17 +199,17 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     (resolvedModel.kind === 'mock'
       ? resolveMockCredential
       : createSessionCredentialResolver({
-          store: opened.store,
+          store,
           credentials,
           vault,
           logger,
         }))
 
-  const scheduler = createScheduler(config, opened.store, model, resolveCredential, logger)
+  const scheduler = createScheduler(config, store, model, resolveCredential, logger)
   // Compaction is the store's, not a scheduler's: it deletes superseded chunks whoever ran the
   // turn that superseded them, so every instance runs it in either scheduler mode.
   const compactor = new DeltaCompactor({
-    store: opened.store,
+    store,
     retentionMs: config.deltaRetentionMs,
     intervalMs: config.compactIntervalMs,
     logger,
@@ -212,7 +232,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     })
 
   const app = createApp({
-    store: opened.store,
+    store,
     scheduler,
     auth: {
       instance: auth.auth,
@@ -232,6 +252,8 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     // the probes see — the store's own `select 1` and this process's drain flag.
     trustedProxyHops: config.trustedProxyHops,
     readiness: { isDraining: () => draining, check: opened.checkReady },
+    // #158: one server span per request, and the trace context every JSON log line carries.
+    tracer,
     ...(config.webDir === undefined ? {} : { webDir: config.webDir }),
     ...(config.corsOrigins.length === 0 ? {} : { corsOrigins: config.corsOrigins }),
     ...(options.sseKeepaliveMs === undefined ? {} : { sseKeepaliveMs: options.sseKeepaliveMs }),
@@ -254,6 +276,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     await scheduler.stop()
     server.close()
     await opened.close()
+    await tracer.shutdown()
     throw error
   }
   const address = server.address()
@@ -263,18 +286,19 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   let stopping: Promise<void> | null = null
   return {
     app,
-    store: opened.store,
+    store,
     scheduler,
     compactor,
     auth,
     vault,
+    tracer,
     port,
     shutdown: () => {
       // Draining starts here, not when the listener closes: the load balancer is told "not
       // ready" first and the requests that were already on their way are the ones this drain
       // is for (#151).
       draining = true
-      stopping ??= stop(server, scheduler, compactor, opened.close, config, logger)
+      stopping ??= stop(server, scheduler, compactor, opened.close, config, tracer, logger)
       return stopping
     },
   }
@@ -290,8 +314,8 @@ export async function main(
   env: NodeJS.ProcessEnv = process.env,
   options: { readonly logger?: Logger } = {},
 ): Promise<StartedServer> {
-  const logger = options.logger ?? consoleLogger
   const config = readServerConfig(env)
+  const logger = options.logger ?? loggerFor(config.logFormat, config.gcpProjectId)
   for (const line of describeConfig(config)) {
     logger.info(`  ${line}`)
   }
@@ -534,7 +558,9 @@ async function listening(server: ReturnType<typeof serve>): Promise<void> {
  * then stopped — it deletes, so it must not outlive the store — and the scheduler drained (its
  * turns are aborted, and given a timeout to write their last events); only then are the
  * remaining connections — the SSE streams, which would otherwise never end — cut off. The
- * store is closed last, because everything above it may still be writing to it.
+ * store is closed last, because everything above it may still be writing to it. The tracer is
+ * shut down after everything else, so the spans this process opened are flushed to Cloud Trace
+ * before it exits (#158).
  */
 async function stop(
   server: ReturnType<typeof serve>,
@@ -542,6 +568,7 @@ async function stop(
   compactor: DeltaCompactor,
   closeStore: () => Promise<void>,
   config: ServerConfig,
+  tracer: Tracer,
   logger: Logger,
 ): Promise<void> {
   const closed = new Promise<void>((resolve) => {
@@ -558,5 +585,6 @@ async function stop(
   }
   await closed
   await closeStore()
+  await tracer.shutdown()
   logger.info('stopped')
 }

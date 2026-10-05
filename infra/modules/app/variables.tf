@@ -102,6 +102,17 @@ variable "microsoft_tenant_id" {
   default     = ""
 }
 
+variable "trace_sample_rate" {
+  description = "OPENHARNESS_TRACE_SAMPLE_RATE (#158): the fraction of traces exported to Cloud Trace. A tenth by default — enough to see what a deployment is doing without paying to store every turn's spans."
+  type        = number
+  default     = 0.1
+
+  validation {
+    condition     = var.trace_sample_rate >= 0 && var.trace_sample_rate <= 1
+    error_message = "The trace sample rate is a fraction between 0 and 1."
+  }
+}
+
 variable "chart_path" {
   description = "Path to the Helm chart. Defaults to ../../../charts/openharness, relative to this module."
   type        = string

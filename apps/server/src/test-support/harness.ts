@@ -37,7 +37,16 @@ import {
 import { ModelCatalog } from '../catalog/catalog'
 import { emptyRegistry, type ModelRegistry } from '../catalog/registry'
 import { DEFAULT_DELTA_RETENTION_MS } from '../compaction'
-import { DEFAULT_TRUSTED_PROXY_HOPS, type SchedulerKind, type ServerConfig } from '../config'
+import {
+  DEFAULT_LOG_FORMAT,
+  DEFAULT_TRACE_SAMPLE_RATE,
+  DEFAULT_TRACING,
+  DEFAULT_TRUSTED_PROXY_HOPS,
+  type LogFormat,
+  type SchedulerKind,
+  type ServerConfig,
+} from '../config'
+import type { Tracer, TracingMode } from '../observability/tracing'
 import { startServer } from '../main'
 import {
   DEFAULT_HEARTBEAT_MS,
@@ -248,6 +257,17 @@ export interface TestOptions {
   readonly deltaRetentionMs?: number
   /** How often the compaction job runs; `0` disables it. */
   readonly compactIntervalMs?: number
+  /** `OPENHARNESS_LOG_FORMAT` (#158); `text` unless a test asks for `json`. */
+  readonly logFormat?: LogFormat
+  /** `OPENHARNESS_TRACING` (#158); `off` unless a test asks for `cloud-trace`. */
+  readonly tracing?: TracingMode
+  /** `OPENHARNESS_TRACE_SAMPLE_RATE` (#158). */
+  readonly traceSampleRate?: number
+  /**
+   * Where the app's request spans go (#158). {@link noopTracer} by default; a test that
+   * asserts on a server span passes a recorder. `createTestApp` only.
+   */
+  readonly tracer?: Tracer
 }
 
 /** Build an app, a store and a scheduler in-process; nothing listens. */
@@ -292,6 +312,7 @@ export function createTestApp(options: TestOptions = {}): TestContext {
       ? {}
       : { trustedProxyHops: options.trustedProxyHops }),
     readiness: options.readiness ?? alwaysReady,
+    ...(options.tracer === undefined ? {} : { tracer: options.tracer }),
     ...(options.corsOrigins === undefined ? {} : { corsOrigins: options.corsOrigins }),
     ...(options.sseKeepaliveMs === undefined ? {} : { sseKeepaliveMs: options.sseKeepaliveMs }),
     ...(options.sessionRecheckMs === undefined
@@ -593,6 +614,12 @@ export function testConfig(options: TestOptions = {}): ServerConfig {
     // Off unless a test asks: a compaction timer running under every test's feet would make
     // "the chunks are still there" assertions a race. The job's own suite turns it on.
     compactIntervalMs: options.compactIntervalMs ?? 0,
+    // Observability (#158) is off in a test by default: the readable log format, and no
+    // exporter to load. The suites that assert on the JSON shape call `jsonLogger` directly.
+    logFormat: options.logFormat ?? DEFAULT_LOG_FORMAT,
+    tracing: options.tracing ?? DEFAULT_TRACING,
+    traceSampleRate: options.traceSampleRate ?? DEFAULT_TRACE_SAMPLE_RATE,
+    gcpProjectId: undefined,
   }
 }
 

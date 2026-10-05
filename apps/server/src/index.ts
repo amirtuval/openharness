@@ -97,8 +97,11 @@ export {
 export {
   ENV_VARS,
   DEFAULT_KEY_PROVIDER,
+  DEFAULT_LOG_FORMAT,
   DEFAULT_PORT,
   DEFAULT_SCHEDULER,
+  DEFAULT_TRACE_SAMPLE_RATE,
+  DEFAULT_TRACING,
   DEFAULT_TRUSTED_PROXY_HOPS,
   defaultInstanceId,
   describeConfig,
@@ -107,6 +110,7 @@ export {
   secretFileVar,
   usesTestModel,
   type KeyProviderKind,
+  type LogFormat,
   type SchedulerKind,
   type ServerConfig,
 } from './config'
@@ -231,6 +235,36 @@ export {
   type SessionRevocationsOptions,
 } from './session-watch'
 export { consoleLogger, silentLogger, type AppEnv, type Logger } from './types'
+// Observability (issue #158): the Cloud Logging JSON logger and its redaction, the trace
+// context logs and spans share, the tracer seam (a no-op when tracing is off), and the
+// session log as spans.
+export {
+  REDACTED,
+  SessionTraces,
+  activeTraceContext,
+  detailFields,
+  initTracing,
+  isSensitiveKey,
+  jsonLogger,
+  loggerFor,
+  noopTracer,
+  parseCloudTraceContext,
+  parseTraceContext,
+  parseTraceparent,
+  redact,
+  redactError,
+  runWithTraceContext,
+  withSessionTraces,
+  type AttributeValue,
+  type JsonLoggerOptions,
+  type Span,
+  type SpanKind,
+  type StartSpanOptions,
+  type TraceContext,
+  type Tracer,
+  type TracingMode,
+  type TracingOptions,
+} from './observability'
 
 // `node dist/index.js` starts the server; importing this module never does.
 const isDirectRun =

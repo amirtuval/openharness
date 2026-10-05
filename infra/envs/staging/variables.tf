@@ -120,3 +120,15 @@ variable "budget_amount" {
   type        = number
   default     = 100
 }
+
+variable "trace_sample_rate" {
+  description = "OPENHARNESS_TRACE_SAMPLE_RATE (#158): the fraction of traces exported to Cloud Trace; 0..1."
+  type        = number
+  default     = 0.1
+}
+
+variable "alert_email" {
+  description = "Address the monitoring alerts are emailed to (#158). Empty (the default) creates no notification channel and no alert policies, so an apply without it succeeds."
+  type        = string
+  default     = ""
+}

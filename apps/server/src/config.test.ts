@@ -13,8 +13,11 @@ import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
 import { DEFAULT_DRAIN_TIMEOUT_MS } from './runner'
 import {
   DEFAULT_KEY_PROVIDER,
+  DEFAULT_LOG_FORMAT,
   DEFAULT_PORT,
   DEFAULT_SCHEDULER,
+  DEFAULT_TRACE_SAMPLE_RATE,
+  DEFAULT_TRACING,
   DEFAULT_TRUSTED_PROXY_HOPS,
   defaultInstanceId,
   describeConfig,
@@ -81,6 +84,10 @@ describe('readServerConfig', () => {
       sweepMs: DEFAULT_SWEEP_MS,
       deltaRetentionMs: DEFAULT_DELTA_RETENTION_MS,
       compactIntervalMs: DEFAULT_COMPACT_INTERVAL_MS,
+      logFormat: DEFAULT_LOG_FORMAT,
+      tracing: DEFAULT_TRACING,
+      traceSampleRate: DEFAULT_TRACE_SAMPLE_RATE,
+      gcpProjectId: undefined,
     })
     // The instance id is generated, so it is only asserted to look like one: this host, this
     // process, and a suffix that makes two instances on the host unique.
@@ -120,6 +127,10 @@ describe('readServerConfig', () => {
         OPENHARNESS_COMPACT_INTERVAL_MS: '60000',
         OPENHARNESS_KEY_PROVIDER: 'local',
         OPENHARNESS_KEY_CACHE_TTL_MS: '120000',
+        OPENHARNESS_LOG_FORMAT: 'json',
+        OPENHARNESS_TRACING: 'cloud-trace',
+        OPENHARNESS_TRACE_SAMPLE_RATE: '0.5',
+        GOOGLE_CLOUD_PROJECT: 'openharness-dev',
       }),
     )
 
@@ -150,6 +161,10 @@ describe('readServerConfig', () => {
       sweepMs: 450,
       deltaRetentionMs: 120_000,
       compactIntervalMs: 60_000,
+      logFormat: 'json',
+      tracing: 'cloud-trace',
+      traceSampleRate: 0.5,
+      gcpProjectId: 'openharness-dev',
     })
     expect(usesTestModel(config)).toBe(true)
   })
@@ -566,7 +581,65 @@ describe('secrets from files', () => {
   })
 })
 
+describe('observability (#158)', () => {
+  it('defaults to the readable log format, tracing off, and a tenth of traces', () => {
+    const config = readServerConfig(env())
+    expect(config.logFormat).toBe('text')
+    expect(config.tracing).toBe('off')
+    expect(config.traceSampleRate).toBe(0.1)
+    expect(config.gcpProjectId).toBeUndefined()
+  })
+
+  it('takes the JSON format and Cloud Trace, with a sample rate and the project', () => {
+    const config = readServerConfig(
+      env({
+        OPENHARNESS_LOG_FORMAT: 'json',
+        OPENHARNESS_TRACING: 'cloud-trace',
+        OPENHARNESS_TRACE_SAMPLE_RATE: '0.25',
+        GOOGLE_CLOUD_PROJECT: 'openharness-dev',
+      }),
+    )
+    expect(config.logFormat).toBe('json')
+    expect(config.tracing).toBe('cloud-trace')
+    expect(config.traceSampleRate).toBe(0.25)
+    expect(config.gcpProjectId).toBe('openharness-dev')
+  })
+
+  it('takes a sample rate of zero and of one, and refuses anything outside', () => {
+    expect(readServerConfig(env({ OPENHARNESS_TRACE_SAMPLE_RATE: '0' })).traceSampleRate).toBe(0)
+    expect(readServerConfig(env({ OPENHARNESS_TRACE_SAMPLE_RATE: '1' })).traceSampleRate).toBe(1)
+    expect(() => readServerConfig(env({ OPENHARNESS_TRACE_SAMPLE_RATE: '1.5' }))).toThrow(/0\.\.1/)
+    expect(() => readServerConfig(env({ OPENHARNESS_TRACE_SAMPLE_RATE: 'half' }))).toThrow(
+      /OPENHARNESS_TRACE_SAMPLE_RATE/,
+    )
+  })
+
+  it('refuses a log format or a trace mode it does not have', () => {
+    expect(() => readServerConfig(env({ OPENHARNESS_LOG_FORMAT: 'yaml' }))).toThrow(/text, json/)
+    expect(() => readServerConfig(env({ OPENHARNESS_TRACING: 'jaeger' }))).toThrow(
+      /off, cloud-trace/,
+    )
+  })
+})
+
 describe('describeConfig', () => {
+  it('says which log format and which tracing the server runs (#158)', () => {
+    const text = describeConfig(readServerConfig(env())).join('\n')
+    expect(text).toContain('logs: text')
+    expect(text).toContain('tracing: off')
+    const json = describeConfig(
+      readServerConfig(
+        env({
+          OPENHARNESS_LOG_FORMAT: 'json',
+          OPENHARNESS_TRACING: 'cloud-trace',
+          OPENHARNESS_TRACE_SAMPLE_RATE: '0.5',
+        }),
+      ),
+    ).join('\n')
+    expect(json).toContain('JSON')
+    expect(json).toContain('tracing: Cloud Trace (OPENHARNESS_TRACE_SAMPLE_RATE=0.5)')
+  })
+
   it('says which store, model and sign-in the server will run with', () => {
     const lines = describeConfig(readServerConfig(env({ OPENHARNESS_TEST_MODEL: 'mock' })))
 

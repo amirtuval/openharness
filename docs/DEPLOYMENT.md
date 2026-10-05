@@ -275,3 +275,97 @@ is published to npm as the public package
 deploy job builds, publishes or tags it, and its npm dist-tags are the maintainer's to move —
 server deploys never touch them. The workflow itself, the one-time npm setup it needs, and how
 to move a dist-tag or verify provenance: [`RELEASING.md`](./RELEASING.md).
+
+## Observability
+
+Logs, traces and alerts all use GCP's own services — no agent to install, no third-party
+account, and nothing outside the free tiers at this scale (issue
+[#158](https://github.com/amirtuval/openharness/issues/158)).
+
+### Logs — Cloud Logging
+
+With `OPENHARNESS_LOG_FORMAT=json` (which Terraform sets on both environments) the server
+writes **one JSON object per line to stdout**, in the shape Cloud Logging reads without a
+parser: `severity` (`DEBUG`/`INFO`/`WARNING`/`ERROR`), `message`, `time`, and
+`logging.googleapis.com/trace` + `logging.googleapis.com/spanId` when the line was written
+while a request was being served. A `detail` object a call site passes is merged in as
+top-level fields, so a line is filterable by `session_id`, `path` and `status`. Nothing
+sensitive is ever written: `authorization`, `cookie`, `*_secret`, `*_token`, `*_api_key`,
+passwords and credentials are replaced with `[REDACTED]` before serialization.
+
+Local development keeps the readable one-line format; only the deployment sets `json`.
+
+- **Where:** Logging → Logs Explorer, project `openharness-dev` or `openharness-510710`.
+  Filter by `resource.type="k8s_container"` and `resource.labels.container_name="openharness"`.
+- **Volume:** a few hundred megabytes a month at this size — a couple of lines per request
+  plus the startup banner. The `_Default` bucket keeps logs 30 days, and its first **50 GiB per
+  project per month** are free, then $0.50/GiB — this deployment is three orders of magnitude
+  below that.
+- **Joining a log to its trace:** open a line with a trace id and Logs Explorer offers "View
+  trace", which lands in Cloud Trace on the same request.
+
+### Traces — Cloud Trace
+
+With `OPENHARNESS_TRACING=cloud-trace` the server exports OpenTelemetry spans to Cloud Trace,
+sampling `OPENHARNESS_TRACE_SAMPLE_RATE` of root traces (**0.1** by default). The spans are:
+
+- one **server span per HTTP request**, continuing the trace the load balancer started (its
+  `traceparent` / `X-Cloud-Trace-Context` headers are honoured), with the method, path and
+  response status;
+- one **turn span** per turn of a session, and one **child span per model request** built from
+  the session log's `span.model_request_start` / `span.model_request_end` events, carrying the
+  model and its token usage. (v1 has no tool-call events — `hands` is unused — so tool calls
+  are not traced yet.)
+
+The OpenTelemetry SDK and the Cloud Trace exporter are imported **lazily**: an untraced server
+(`OPENHARNESS_TRACING=off`, the default) never loads them, so local development and CI pay
+nothing.
+
+- **Where:** Trace Explorer, project `openharness-dev` or `openharness-510710`.
+- **Volume and cost:** one request is roughly 3–6 spans (the server span, a turn, and its
+  model requests). At a few thousand requests a month that is well inside Cloud Trace's free
+  tier of **2.5 million spans per month**; spans are kept 30 days.
+- **Changing the sample rate:** it is the Terraform variable `trace_sample_rate` (0..1), passed
+  to the pods as `OPENHARNESS_TRACE_SAMPLE_RATE`. It has a default of `0.1` in both environment
+  roots, so either edit that default or apply with `-var trace_sample_rate=0.5` (a re-apply —
+  the value reaches the pods through the Helm release). Sampling is decided per root trace and
+  inherited by its child spans, so a kept request is kept whole; `0` keeps none while leaving
+  the exporter wired, `1` keeps everything.
+
+### Alerts — Cloud Monitoring
+
+`infra/modules/monitoring`, instantiated in both environments, creates:
+
+- an **uptime check** on `https://<host>/health`, HTTPS, every five minutes, from three probe
+  regions — always created, and what the console's uptime dashboard reads;
+- once `alert_email` is set: an **email notification channel**, and alert policies for the
+  uptime check failing from every region for five minutes, a high load-balancer 5xx rate, Cloud
+  SQL CPU above 80%, Cloud SQL disk above 80%, and containers restarting.
+
+`alert_email` is empty by default, and an empty value creates **no channel and no alert
+policies** — so the first apply of an environment succeeds before anyone has decided who is on
+call. Set it to turn alerting on:
+
+```bash
+terraform -chdir=infra/envs/production apply -var alert_email=oncall@example.com -var image_tag=<sha>
+```
+
+The thresholds are the module's own variables — `http_5xx_threshold` (5xx per second),
+`db_cpu_threshold` and `db_disk_threshold` (utilization, 0..1), `container_restart_threshold`
+(restarts per hour; the default `0` means "any restart") — each with a default that fits this
+deployment. Override one by adding it to the `monitoring` module call.
+
+- **Where:** Monitoring → Alerting (the policies) and Monitoring → Uptime (the check); each
+  policy's documentation links to what to look at when it fires.
+- **Cost:** uptime checks are billed per execution and the free tier is **1 million
+  executions/month** — three regions at five-minute intervals is about 26,000 — and alerting
+  policies and notification channels carry no separate charge. The metrics the alerts read are
+  GCP's own (load balancer, Cloud SQL, GKE), which need no agent and are not billed as custom
+  metrics.
+
+### What is deliberately off
+
+**Load-balancer request logging stays off.** It is the single most expensive thing in this
+picture — every request is a log entry — and the server's own structured logs already carry
+the request path and status, joined to the trace. Turning it on is a per-backend change in
+Cloud Logging that this configuration does not make.
