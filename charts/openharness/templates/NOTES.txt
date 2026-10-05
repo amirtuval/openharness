@@ -1,0 +1,19 @@
+openharness {{ .Chart.Version }} is installed as release {{ .Release.Name }} in namespace
+{{ .Release.Namespace }}.
+
+{{- if .Values.ingress.host }}
+The app is served at https://{{ .Values.ingress.host }} — once its DNS record points at the
+static IP {{ .Values.ingress.staticIpName | default "(GKE-allocated)" | quote }} and Google has
+provisioned the managed certificate. Watch for it with:
+
+  kubectl describe managedcertificate {{ include "openharness.fullname" . }} -n {{ .Release.Namespace }}
+{{- else }}
+No `ingress.host` was set, so no Ingress was rendered. Terraform sets it per environment.
+{{- end }}
+
+Check the rollout:
+
+  kubectl rollout status deployment/{{ include "openharness.fullname" . }} -n {{ .Release.Namespace }}
+
+The pods read /health for liveness and /ready for readiness; the load balancer's health check
+is /ready, so a pod whose database is down leaves the backend on its own.

@@ -1,0 +1,25 @@
+{{- if .Values.autoscaling.enabled }}
+# Scales the Deployment on CPU, measured as a percentage of the CPU *request* (250m), not of a
+# core — 70% of 250m is 175m per pod. Two pods is the floor the Deployment's replicas agrees at;
+# the ceiling is per environment (TF).
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "openharness.fullname" . }}
+  labels:
+    {{- include "openharness.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "openharness.fullname" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}

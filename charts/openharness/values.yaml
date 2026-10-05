@@ -1,0 +1,110 @@
+# Default values for the openharness chart (#154).
+#
+# These are **safe defaults for no environment in particular**, and they render on their own:
+# `helm template charts/openharness` produces a valid Deployment, Service, BackendConfig and
+# autoscaler with none of the keys marked (TF) set. Every key marked (TF) below is filled in
+# by Terraform per environment — staging and production — and nothing else should fill them:
+# Terraform is the only thing that deploys. The chart ⇄ Terraform contract is written out in
+# `README.md`, and a realistic staging rendering lives in `ci/staging-values.yaml`.
+
+# The one image (docker/Dockerfile): the API under /v1 and the web app at /, on port 3000.
+image:
+  # The repository, without a tag. (TF)
+  # us-central1-docker.pkg.dev/<project>/openharness/server
+  repository: ''
+  # The tag — a git sha, one image per commit, promoted by digest. (TF) Required in practice:
+  # an empty tag renders `image: ":"`, which is what `helm lint`/`kubeconform` exist to catch.
+  tag: ''
+  # The image is immutable per tag (a git sha), so a node never needs to re-pull it.
+  pullPolicy: IfNotPresent
+
+# How many pods to run when the autoscaler is off. The Deployment always declares this; when
+# `autoscaling.enabled` is true the HPA owns the count from here on and reconciles it between
+# `autoscaling.minReplicas` and `maxReplicas` (the two agree at 2, so nothing moves at boot).
+replicaCount: 2
+
+# CPU-based autoscaling. Kept on in every environment: two pods is the floor that keeps a
+# rolling update (maxUnavailable: 0) and a node upgrade from ever taking the last one down.
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  # (TF) Terraform may raise the ceiling per environment; 4 is the safe default.
+  maxReplicas: 4
+  # Percentage of the CPU request below, not of a core.
+  targetCPUUtilizationPercentage: 70
+
+# Requests sized for GKE Autopilot, which schedules on requests and bills on requests. 250m /
+# 512Mi is Autopilot's own floor for a container, so this is the smallest a pod can be asked
+# for — a request below it is silently rounded up. The memory limit equals the request: the
+# server's footprint is steady (it holds session state and runs model turns), so a limit above
+# the request would only buy a slower OOM.
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    memory: 512Mi
+
+# The Kubernetes ServiceAccount the pods run as, annotated so that it *is* a Google service
+# account (Workload Identity): the GKE metadata server hands the pod an access token for it.
+serviceAccount:
+  # The name the Secret Provider Class, the Workload Identity binding and `kubectl` all use.
+  name: openharness
+  # The app GSA's email, e.g. openharness-app@<project>.iam.gserviceaccount.com. (TF) It is the
+  # `iam.gke.io/gcp-service-account` annotation; without it the pod has no Google identity and
+  # neither Cloud KMS nor Secret Manager answers.
+  gcpServiceAccount: ''
+
+# The external HTTPS ingress (GKE ingress class `gce`). Both keys are empty by default: with no
+# host there is nothing to route, so the Ingress and its ManagedCertificate are not rendered.
+ingress:
+  # The serving host, staging.oharness.dev | app.oharness.dev. (TF)
+  host: ''
+  # The name of the `google_compute_global_address` the load balancer answers on. (TF) It is
+  # the `kubernetes.io/ingress.global-static-ip-name` annotation; without it GKE allocates an
+  # address of its own, which no DNS record points at.
+  staticIpName: ''
+
+# Cloud CDN, in front of the load balancer's backend service. The server sets Cache-Control per
+# route (W1, #151), so the CDN follows the origin's headers rather than a policy of its own.
+cdn:
+  enabled: true
+
+# The BackendConfig that shapes how the load balancer talks to the pods.
+backend:
+  # How long the load balancer waits for a response before giving up. The SSE streams (session
+  # watch, AI SDK chat) hold a connection open for the length of a turn, so this is long — an
+  # hour — and it is documented rather than tuned down: a shorter value would cut streams off.
+  timeoutSec: 3600
+  # Connection draining: how long the load balancer keeps sending in-flight requests to a pod
+  # that is going away. It must be at least the server's own drain timeout
+  # (`OPENHARNESS_DRAIN_TIMEOUT_MS`, 5s by default) so the pod is not killed mid-turn.
+  drainingTimeoutSec: 30
+
+# How long Kubernetes waits after SIGTERM before it SIGKILLs the pod. It must be **longer than
+# the server's drain timeout** (`OPENHARNESS_DRAIN_TIMEOUT_MS`, 5s by default) so a clean
+# shutdown finishes; 60s leaves room for the load balancer's connection draining above to
+# finish too, and for a Postgres migration that is still applying at boot on a slow start.
+terminationGracePeriodSeconds: 60
+
+# The GCP project the Secret Manager secrets live in. (TF) It is the middle segment of each
+# Secret Provider Class `resourceName` (`projects/<project>/secrets/<secret>/versions/latest`);
+# not needed when `secrets` is empty.
+gcpProject: ''
+
+# Plain, non-secret environment variables, name → string. (TF) Terraform passes
+# BETTER_AUTH_URL, OPENHARNESS_TRUSTED_PROXY_HOPS, OPENHARNESS_KEY_PROVIDER,
+# OPENHARNESS_KMS_KEY, OPENHARNESS_DEV_LOGIN and any provider client id set for the
+# environment. Secrets do not go here — see `secrets` below.
+env: {}
+
+# Secrets, delivered by the GKE Secret Manager add-on rather than put in the environment. (TF)
+# Each entry mounts the named Secret Manager secret as a file under
+# /var/run/secrets/openharness/ and gives the container `<env>_FILE=<that path>`; the server
+# reads the file (#154). With no entries, neither the CSI volume nor the Secret Provider Class
+# is rendered. Terraform passes DATABASE_URL/database-url and
+# BETTER_AUTH_SECRET/better-auth-secret, plus a provider's client secret only when that
+# provider's client id is set.
+#   - env: DATABASE_URL
+#     secret: database-url
+secrets: []

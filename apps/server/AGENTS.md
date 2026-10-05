@@ -109,6 +109,19 @@ a `user.interrupt` signals `interrupt` — exactly what the same events would do
 | `OPENHARNESS_SWEEP_MS`                | `60000`                          | how often owned partitions are re-scanned for missed work                                       |
 | `OPENHARNESS_DELTA_RETENTION_MS`      | `3600000`                        | how long superseded chunks are kept before compaction deletes them                              |
 | `OPENHARNESS_COMPACT_INTERVAL_MS`     | `300000`                         | how often the compaction job runs; `0` disables it                                              |
+| `<NAME>_FILE`                         | —                                | for any secret above: read the value from this path instead of `<NAME>` (#154, see below)       |
+
+Every **secret** in that table — `DATABASE_URL`, `BETTER_AUTH_SECRET`,
+`OPENHARNESS_SECRETS_KEY`, and each provider's `*_CLIENT_SECRET` — can be delivered as a file
+instead, by setting `<NAME>_FILE` to a path that holds the value (#154). That is how the Helm
+chart mounts them from Secret Manager: the container gets
+`DATABASE_URL_FILE=/var/run/secrets/openharness/database-url`, not `DATABASE_URL`. The file's
+value has **one** trailing newline removed, so `printf '…'` and `echo '…'` are the same
+secret. Setting both `<NAME>` and `<NAME>_FILE` fails the boot (they could disagree); so does a
+file that cannot be read, with a message naming the variable and the path and never the
+content. The rule that an empty value is unset holds here too: an empty file is an unset
+setting. Local dev and docker compose are unaffected — with no `_FILE` variable, nothing reads
+a file. `OPENHARNESS_KMS_KEY` is a resource name, not a secret, and stays inline.
 
 Provider credentials (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) are **not read at all**
 (epic #65, A5), and the server keeps none of its own: every model request is made with the
@@ -802,7 +815,7 @@ before the instance stops serving it (#151).
 | `createDevLoginUser`, `rewriteDevLoginRequest`, `refuseUnverifiedUser`                                               | the dev-login seeding and shim, and the verified-email hook                          |
 | `createMockModelFactory()`                                                                                           | the deterministic test model, for a host that wires its own                          |
 | `defaultInstanceId()`                                                                                                | hostname + pid + random suffix: the id a server leases partitions under              |
-| `readServerConfig(env)`, `ServerConfig`, `ENV_VARS`                                                                  | the environment, parsed                                                              |
+| `readServerConfig(env)`, `ServerConfig`, `ENV_VARS`, `readSecret`, `secretFileVar`                                   | the environment, parsed; a secret from `<NAME>` or its `<NAME>_FILE` (#154)          |
 | `createConfigVault(config)`, `KeyProviderKind`                                                                       | the vault the config asks for: the env key or Cloud KMS (#150)                       |
 | `HttpError`, `rateLimitError`, `PACKAGE_NAME`, `Logger`                                                              | the error types, the package name and the logging seam                               |
 | `resolveClientIp`, `withClientIpHeader`, `CLIENT_IP_HEADER`, `FORWARDED_FOR_HEADER`                                  | the client IP behind a proxy: one resolution, one header (#151)                      |

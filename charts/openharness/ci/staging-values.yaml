@@ -1,0 +1,68 @@
+# Realistic staging values, the shape Terraform passes for the `openharness-dev` project (#154).
+#
+# `helm lint` renders an extra pass for every `ci/*-values.yaml`, and the CI job renders this
+# one before `kubeconform` validates it — so this file is what proves the chart renders the way
+# staging is deployed, not just its empty defaults. Production differs only in the project, the
+# host, the static IP and the secret names; the image tag is a git sha in both.
+
+image:
+  repository: us-central1-docker.pkg.dev/openharness-dev/openharness/server
+  tag: 4b0c557 # a git sha, one image per commit
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 70
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    memory: 512Mi
+
+serviceAccount:
+  name: openharness
+  # The app GSA Terraform creates in openharness-dev.
+  gcpServiceAccount: openharness-app@openharness-dev.iam.gserviceaccount.com
+
+ingress:
+  host: staging.oharness.dev
+  staticIpName: openharness-staging-ip
+
+cdn:
+  enabled: true
+
+backend:
+  timeoutSec: 3600
+  drainingTimeoutSec: 30
+
+gcpProject: openharness-dev
+
+# The plain settings Terraform passes for this environment. BETTER_AUTH_URL is the host above;
+# the dev login is off (staging is not a laptop); Cloud KMS wraps the vault's keys, and its key
+# is a resource name, not a secret; GCLB appends one entry to x-forwarded-for.
+#
+# A sign-in provider is *not* shown here: this file keeps to the two secrets below. A real
+# environment signs in with one, which Terraform passes as a client id here plus that
+# provider's client secret as a third `secrets` entry (e.g. GOOGLE_CLIENT_ID +
+# {env: GOOGLE_CLIENT_SECRET, secret: google-client-secret}).
+env:
+  BETTER_AUTH_URL: https://staging.oharness.dev
+  OPENHARNESS_TRUSTED_PROXY_HOPS: '1'
+  OPENHARNESS_DEV_LOGIN: '0'
+  OPENHARNESS_KEY_PROVIDER: gcp-kms
+  OPENHARNESS_KMS_KEY: projects/openharness-dev/locations/global/keyRings/openharness/cryptoKeys/credentials
+
+# Two secrets, mounted from Secret Manager: the database URL and the Better Auth signing
+# secret, each landing under /var/run/secrets/openharness/ and read through its `_FILE`
+# variable (#154).
+secrets:
+  - env: DATABASE_URL
+    secret: database-url
+  - env: BETTER_AUTH_SECRET
+    secret: better-auth-secret

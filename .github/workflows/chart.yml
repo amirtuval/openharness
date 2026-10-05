@@ -1,0 +1,61 @@
+# The Helm chart's own check (#154): lint it, render the realistic staging values, and validate
+# every rendered object against the Kubernetes schema. A job of its own rather than a step in
+# `ci.yml`, so it runs when the chart changes and stays out of the Node suites' way — the chart
+# has no JavaScript to build and the Node jobs have no chart to render.
+#
+# It runs on changes to `charts/**` and to itself. `kubeconform -ignore-missing-schemas` skips
+# the GKE custom resources (BackendConfig, FrontendConfig, ManagedCertificate,
+# SecretProviderClass), which have no schema in the upstream catalogue; everything the
+# kubernetes API server itself validates is checked strictly.
+name: Chart
+
+on:
+  pull_request:
+    paths:
+      - charts/**
+      - .github/workflows/chart.yml
+  push:
+    branches: [main]
+    paths:
+      - charts/**
+      - .github/workflows/chart.yml
+
+concurrency:
+  group: chart-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+
+      # `helm lint` renders an extra pass for every `ci/*-values.yaml` it finds, so the staging
+      # values are linted too, not only validated below.
+      - name: Lint the chart
+        run: helm lint charts/openharness
+
+      # The rendering this job validates — and the same command the README documents. Written to
+      # a file so kubeconform sees exactly what was rendered and the log shows it.
+      - name: Render with the ci staging values
+        run: |
+          helm template openharness charts/openharness \
+            --namespace openharness \
+            --values charts/openharness/ci/staging-values.yaml \
+            > rendered.yaml
+          cat rendered.yaml
+
+      - name: Install kubeconform
+        run: |
+          curl -fsSL \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | sudo tar xz -C /usr/local/bin kubeconform
+
+      - name: Validate the rendered objects
+        run: >-
+          kubeconform -strict -summary -ignore-missing-schemas
+          -kubernetes-version 1.30.0 rendered.yaml

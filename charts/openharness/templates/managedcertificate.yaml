@@ -1,0 +1,14 @@
+# A Google-managed TLS certificate for the host. GKE provisions it (and renews it) once the
+# host's DNS record points at the static IP; until then the HTTPS frontend serves the default
+# certificate. The Ingress names this object in `networking.gke.io/managed-certificates`.
+{{- if .Values.ingress.host }}
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: {{ include "openharness.fullname" . }}
+  labels:
+    {{- include "openharness.labels" . | nindent 4 }}
+spec:
+  domains:
+    - {{ .Values.ingress.host | quote }}
+{{- end }}
