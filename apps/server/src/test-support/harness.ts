@@ -18,7 +18,7 @@ import {
 } from '@openharness/session'
 import { createVault, envKeyProvider, type Vault } from '@openharness/vault'
 
-import { createApp } from '../app'
+import { alwaysReady, createApp, type Readiness } from '../app'
 import {
   DEV_LOGIN_EMAIL,
   DEV_LOGIN_PASSWORD,
@@ -32,7 +32,7 @@ import {
 import { ModelCatalog } from '../catalog/catalog'
 import { emptyRegistry, type ModelRegistry } from '../catalog/registry'
 import { DEFAULT_DELTA_RETENTION_MS } from '../compaction'
-import type { SchedulerKind, ServerConfig } from '../config'
+import { DEFAULT_TRUSTED_PROXY_HOPS, type SchedulerKind, type ServerConfig } from '../config'
 import { startServer } from '../main'
 import {
   DEFAULT_HEARTBEAT_MS,
@@ -146,6 +146,15 @@ export interface TestOptions {
   readonly vault?: Vault
   /** Serve a built web app from this directory. */
   readonly webDir?: string
+  /** Origins allowed to call the API from a browser; none (no CORS) by default. */
+  readonly corsOrigins?: readonly string[]
+  /** How many proxies append to `x-forwarded-for`; `0` (the default) trusts no header (#151). */
+  readonly trustedProxyHops?: number
+  /**
+   * The readiness `GET /ready` answers with (#151); {@link alwaysReady} by default — the
+   * in-memory truth. A test of the unsatisfied cases passes its own.
+   */
+  readonly readiness?: Readiness
   /** The public URL Better Auth is based at; {@link TEST_PUBLIC_URL} by default. */
   readonly betterAuthUrl?: string
   /** The trusted origins a cookie-authenticated write may come from. */
@@ -274,6 +283,11 @@ export function createTestApp(options: TestOptions = {}): TestContext {
     catalog,
     ...(options.registry === undefined ? {} : { registry: options.registry }),
     ...(options.webDir === undefined ? {} : { webDir: options.webDir }),
+    ...(options.trustedProxyHops === undefined
+      ? {}
+      : { trustedProxyHops: options.trustedProxyHops }),
+    readiness: options.readiness ?? alwaysReady,
+    ...(options.corsOrigins === undefined ? {} : { corsOrigins: options.corsOrigins }),
     ...(options.sseKeepaliveMs === undefined ? {} : { sseKeepaliveMs: options.sseKeepaliveMs }),
     ...(options.sessionRecheckMs === undefined
       ? {}
@@ -558,7 +572,8 @@ export function testConfig(options: TestOptions = {}): ServerConfig {
           },
     testModel: undefined,
     webDir: options.webDir,
-    corsOrigins: [],
+    trustedProxyHops: options.trustedProxyHops ?? DEFAULT_TRUSTED_PROXY_HOPS,
+    corsOrigins: [...(options.corsOrigins ?? [])],
     maxConcurrentSessions: options.maxConcurrentSessions ?? 4,
     drainTimeoutMs: options.drainTimeoutMs ?? 5000,
     instanceId: options.instanceId ?? 'test-instance',

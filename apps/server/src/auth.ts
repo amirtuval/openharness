@@ -11,6 +11,7 @@ import {
   type SocialProviderName,
   providerOptions,
 } from './auth-profile'
+import { CLIENT_IP_HEADER } from './client-ip'
 import type { Logger } from './types'
 
 /**
@@ -300,11 +301,25 @@ export function createAuth(config: AuthConfig, database: AuthDatabase, logger: L
     // The public URL is the only origin Better Auth trusts. The web app is served from it
     // (or talks to it through `OPENHARNESS_CORS_ORIGINS`, which is the /v1 CORS knob).
     trustedOrigins: [config.baseUrl],
-    // `enforceOriginCheck` is the tests' hole in `isTest()`, and nothing else: unset (what a
-    // deployment runs) leaves Better Auth's default, which is the check **on** outside a test
-    // process, and `true` spells "do not auto-skip" explicitly. Nothing sets
-    // `disableOriginCheck: true` — see {@link AuthConfig.enforceOriginCheck}.
-    ...(config.enforceOriginCheck === true ? { advanced: { disableOriginCheck: false } } : {}),
+    // The client IP (#151): Better Auth keys its rate-limit counters — and the `ipAddress` it
+    // records on a session — by the one header named here. The app resolves the address from
+    // the trusted part of `x-forwarded-for` (or from the connection when no proxy is trusted,
+    // `OPENHARNESS_TRUSTED_PROXY_HOPS`) and stamps it on that header on every `/api/auth/*`
+    // request, before any other header is read — see `client-ip.ts`. Reading one server-set
+    // header and nothing else is what stops a client, which is free to send
+    // `x-forwarded-for`, from choosing its own rate-limit bucket; with no value on it, Better
+    // Auth falls back to what it always did (a shared bucket outside a test process, the
+    // loopback address inside one). `enforceOriginCheck` below shares this block.
+    advanced: {
+      // `enforceOriginCheck` is the tests' hole in `isTest()`, and nothing else: unset (what a
+      // deployment runs) leaves Better Auth's default, which is the check **on** outside a
+      // test process, and `true` spells "do not auto-skip" explicitly. Nothing sets
+      // `disableOriginCheck: true` — see {@link AuthConfig.enforceOriginCheck}.
+      ...(config.enforceOriginCheck === true ? { disableOriginCheck: false } : {}),
+      ipAddress: {
+        ipAddressHeaders: [CLIENT_IP_HEADER],
+      },
+    },
     // The plugin list the session migrations were generated from — see
     // `packages/session/migrations/0011_better_auth.sql`. A plugin added here without
     // regenerating that migration is a schema mismatch Better Auth will notice.

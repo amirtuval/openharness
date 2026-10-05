@@ -33,6 +33,7 @@ import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
  * | `PORT`                              | the port to listen on; `3000` by default                         |
  * | `OPENHARNESS_TEST_MODEL`            | `mock` swaps in the deterministic test model (see `mock-model.ts`) |
  * | `OPENHARNESS_WEB_DIR`               | a built web app to serve at `/`                                  |
+ * | `OPENHARNESS_TRUSTED_PROXY_HOPS`    | how many proxies append to `x-forwarded-for`; `0` trusts none (#151) |
  * | `OPENHARNESS_CORS_ORIGINS`          | comma-separated origins to allow; unset means no CORS at all     |
  * | `OPENHARNESS_MAX_CONCURRENT_SESSIONS` | how many sessions may run at once; `4` by default               |
  * | `OPENHARNESS_DRAIN_TIMEOUT_MS`      | how long shutdown waits for a turn in flight; `5000` by default  |
@@ -72,6 +73,7 @@ export const ENV_VARS = {
   port: 'PORT',
   testModel: 'OPENHARNESS_TEST_MODEL',
   webDir: 'OPENHARNESS_WEB_DIR',
+  trustedProxyHops: 'OPENHARNESS_TRUSTED_PROXY_HOPS',
   corsOrigins: 'OPENHARNESS_CORS_ORIGINS',
   maxConcurrentSessions: 'OPENHARNESS_MAX_CONCURRENT_SESSIONS',
   drainTimeoutMs: 'OPENHARNESS_DRAIN_TIMEOUT_MS',
@@ -121,6 +123,11 @@ export interface ServerConfig {
   readonly testModel: string | undefined
   /** A directory of built web assets to serve at `/`. */
   readonly webDir: string | undefined
+  /**
+   * `OPENHARNESS_TRUSTED_PROXY_HOPS`: how many proxies append to `x-forwarded-for` before
+   * this server — `0` (the default) means forwarding headers are not trusted (#151).
+   */
+  readonly trustedProxyHops: number
   /** Origins allowed to call the API from a browser; empty means no CORS. */
   readonly corsOrigins: readonly string[]
   /** How many sessions may run at once. */
@@ -154,6 +161,13 @@ export const DEFAULT_SCHEDULER: SchedulerKind = 'local'
 
 /** The Entra tenant a Microsoft sign-in uses when `MICROSOFT_TENANT_ID` does not say. */
 export const DEFAULT_MICROSOFT_TENANT_ID = 'common'
+
+/**
+ * How many proxies are trusted to have appended to `x-forwarded-for` when the variable does
+ * not say: none (#151). A server that talks to clients directly must not believe a header a
+ * client wrote; a deployment behind proxies sets the count it runs.
+ */
+export const DEFAULT_TRUSTED_PROXY_HOPS = 0
 
 /**
  * An instance id nobody else is using: this host, this process, and a random suffix.
@@ -249,6 +263,11 @@ export function readServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
     microsoft,
     testModel: readString(env, ENV_VARS.testModel),
     webDir: readString(env, ENV_VARS.webDir),
+    // Zero is meaningful — forwarding headers not trusted at all — so the bound is what
+    // refuses a negative count, not a falsy check.
+    trustedProxyHops: readInteger(env, ENV_VARS.trustedProxyHops, DEFAULT_TRUSTED_PROXY_HOPS, {
+      min: 0,
+    }),
     corsOrigins: readOrigins(env),
     maxConcurrentSessions: readInteger(
       env,
@@ -325,6 +344,14 @@ export function describeConfig(config: ServerConfig): string[] {
           `retaining superseded chunks ${config.deltaRetentionMs}ms`,
   )
   lines.push(config.webDir === undefined ? 'web assets: none' : `web assets: ${config.webDir}`)
+  if (config.trustedProxyHops > 0) {
+    // Only when it is on: an operating deployment wants to see that the forwarding chain is
+    // read, and where in it the client sits (#151).
+    lines.push(
+      `client IP: x-forwarded-for, entry ${config.trustedProxyHops + 1} from the right ` +
+        `(${ENV_VARS.trustedProxyHops}=${config.trustedProxyHops})`,
+    )
+  }
   if (config.corsOrigins.length > 0) {
     lines.push(`cors: ${config.corsOrigins.join(', ')}`)
   }

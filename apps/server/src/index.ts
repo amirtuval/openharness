@@ -32,7 +32,7 @@ import { main } from './main'
 /** This package's name; a cheap way for a dependent to prove the import resolved. */
 export const PACKAGE_NAME = '@openharness/server'
 
-export { createApp, isApiPath, type AppOptions } from './app'
+export { alwaysReady, createApp, isApiPath, type AppOptions, type Readiness } from './app'
 export {
   DEVICE_CODE_EXPIRES_IN,
   DEVICE_CODE_EXPIRES_IN_MS,
@@ -71,6 +71,13 @@ export {
   type SocialProviderName,
 } from './auth-profile'
 export {
+  CLIENT_IP_HEADER,
+  FORWARDED_FOR_HEADER,
+  resolveClientIp,
+  withClientIpHeader,
+  type ClientIpInput,
+} from './client-ip'
+export {
   apiKeyPayload,
   createSessionCredentialResolver,
   credentialAad,
@@ -91,6 +98,7 @@ export {
   ENV_VARS,
   DEFAULT_PORT,
   DEFAULT_SCHEDULER,
+  DEFAULT_TRUSTED_PROXY_HOPS,
   defaultInstanceId,
   describeConfig,
   readServerConfig,
@@ -139,7 +147,15 @@ export {
   type ModelRegistry,
   type RegistryModel,
 } from './catalog/registry'
-export { main, startServer, type StartServerOptions, type StartedServer } from './main'
+export {
+  READINESS_QUERY_TIMEOUT_MS,
+  checkDatabase,
+  main,
+  startServer,
+  type ReadinessPool,
+  type StartServerOptions,
+  type StartedServer,
+} from './main'
 export {
   createMockModelFactory,
   MOCK_ECHO_CHUNKS,

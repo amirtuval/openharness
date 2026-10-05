@@ -41,6 +41,15 @@ import { LocalScheduler, type SessionScheduler } from './scheduler'
  * {@link startServer} for a test that wants a real listening server on an ephemeral port.
  */
 
+/**
+ * How long `GET /ready` waits for `select 1` before answering "not ready" (#151).
+ *
+ * Short on purpose: a readiness probe has to answer before the load balancer's own probe
+ * timeout, and a database that cannot answer a one-row query in two seconds is not one this
+ * instance should be sent traffic for.
+ */
+export const READINESS_QUERY_TIMEOUT_MS = 2000
+
 /** What is running once {@link startServer} has resolved. */
 export interface StartedServer {
   /** The Hono app, for a caller that wants to keep it (tests use the HTTP interface). */
@@ -125,6 +134,12 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   const logger = options.logger ?? consoleLogger
   const config = options.config ?? readServerConfig()
   const opened = await openStore(config, options, logger)
+  // `/ready` flips to 503 the instant `shutdown()` is called — before the listener closes and
+  // before the turns in flight are drained — so a load balancer stops sending new requests
+  // while the ones in flight finish (#151). The closure keeps answering this flag for the
+  // app's lifetime, which is what makes `started.app.request('/ready')` a probe after the
+  // listener is gone.
+  let draining = false
   const credentials = options.credentials ?? opened.credentials
   const vault = options.vault ?? createVault(envKeyProvider(config.secretsKey))
   const auth = createAuth(
@@ -209,6 +224,10 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     },
     catalog,
     registry,
+    // #151: the client's address behind the deployment's proxies, and the readiness answer
+    // the probes see — the store's own `select 1` and this process's drain flag.
+    trustedProxyHops: config.trustedProxyHops,
+    readiness: { isDraining: () => draining, check: opened.checkReady },
     ...(config.webDir === undefined ? {} : { webDir: config.webDir }),
     ...(config.corsOrigins.length === 0 ? {} : { corsOrigins: config.corsOrigins }),
     ...(options.sseKeepaliveMs === undefined ? {} : { sseKeepaliveMs: options.sseKeepaliveMs }),
@@ -247,6 +266,10 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     vault,
     port,
     shutdown: () => {
+      // Draining starts here, not when the listener closes: the load balancer is told "not
+      // ready" first and the requests that were already on their way are the ones this drain
+      // is for (#151).
+      draining = true
       stopping ??= stop(server, scheduler, compactor, opened.close, config, logger)
       return stopping
     },
@@ -372,6 +395,11 @@ function createScheduler(
  * is handed the same Kysely handle. Without it the in-memory stores are used — the same ones
  * every other package tests against, including a memory adapter for Better Auth's tables —
  * with a warning that says out loud what it costs: nothing survives a restart.
+ *
+ * The `checkReady` it returns is `GET /ready`'s store question (#151): the pool's own
+ * `select 1` on Postgres, and "yes" for a store that answers in process. A store the caller
+ * supplied is the caller's to know about — this function owns a connection only when it
+ * built one — and answers `true`.
  */
 async function openStore(
   config: ServerConfig,
@@ -381,6 +409,7 @@ async function openStore(
   store: SessionStore
   credentials: CredentialStore
   authDatabase: AuthDatabase
+  checkReady: () => Promise<boolean>
   close: () => Promise<void>
 }> {
   if (options.store !== undefined) {
@@ -391,6 +420,7 @@ async function openStore(
       // unless the caller says otherwise (`authDatabase`), which is what a test against a
       // Postgres store has to do — its `user` rows are the foreign keys `owner_id` needs.
       authDatabase: options.authDatabase ?? { kind: 'memory', db: emptyAuthTables() },
+      checkReady: () => Promise.resolve(true),
       close: () => Promise.resolve(),
     }
   }
@@ -405,6 +435,9 @@ async function openStore(
       store: new InMemorySessionStore({ partitionCount: config.partitions }),
       credentials: new InMemoryCredentialStore(),
       authDatabase: { kind: 'memory', db: emptyAuthTables() },
+      // Nothing to check: the in-memory store is this process, and it is up whenever the
+      // process is (#151).
+      checkReady: () => Promise.resolve(true),
       close: () => Promise.resolve(),
     }
   }
@@ -421,6 +454,7 @@ async function openStore(
     store,
     credentials,
     authDatabase: { kind: 'postgres', db },
+    checkReady: () => checkDatabase(pool),
     close: async () => {
       // The pool is ours — `{ pool }` means the stores do not end it — so everything is
       // closed, in order: the stores first, so their connections go before the pool does.
@@ -434,6 +468,43 @@ async function openStore(
 /** The empty tables Better Auth's memory adapter starts from. */
 function emptyAuthTables(): MemoryDB {
   return { user: [], session: [], account: [], verification: [], deviceCode: [] }
+}
+
+/** The one thing {@link checkDatabase} needs from a pool: somewhere to send `select 1`. */
+export interface ReadinessPool {
+  query(text: string): Promise<unknown>
+}
+
+/**
+ * `select 1` against the pool, inside {@link READINESS_QUERY_TIMEOUT_MS} — the one question
+ * `GET /ready` asks Postgres (#151).
+ *
+ * Every answer is a boolean: the query's rows do not matter, a rejected query and a query
+ * still unanswered when the deadline passes are both "not ready". A `select 1` the pool is
+ * already queueing is left to finish or fail in the background — it is one row against a
+ * pool that will reuse the connection — because what a probe must not do is hang.
+ *
+ * Takes only {@link ReadinessPool} — what a pool can do here — so a test can hand it a stub
+ * and ask the timeout question without a database.
+ */
+export async function checkDatabase(pool: ReadinessPool): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined
+  const deadline = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => {
+      resolve(false)
+    }, READINESS_QUERY_TIMEOUT_MS)
+  })
+  try {
+    return await Promise.race([
+      pool.query('select 1').then(
+        () => true,
+        () => false,
+      ),
+      deadline,
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 /** Resolve when the server is accepting connections, or reject when it cannot. */
