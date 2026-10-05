@@ -280,6 +280,13 @@ export {
 export type { StreamCollector } from './events'
 export { expectedSlowReply } from './mock'
 export {
+  startProviderStub,
+  type ProviderStub,
+  type StubAnswer,
+  type StubAnswerer,
+  type StubRequest,
+} from './provider-stub'
+export {
   serverEntryPath,
   startServerProcess,
   stopAllServerProcesses,
