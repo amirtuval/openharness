@@ -1,0 +1,179 @@
+name: publish-cli
+
+# The public CLI — `apps/tui`, the `oh` command, npm package `openharness` — is released by
+# hand, and only from this file (#156, deployment epic #148). It is the one artefact the
+# deployment does not build, promote or touch: the server image never carries it, no deploy
+# job publishes it, and its npm dist-tags stay the maintainer's to move (D9).
+#
+# Publishing uses npm **trusted publishing**. The job takes a short-lived OIDC token from
+# GitHub (`id-token: write`) and npm exchanges it for its own ephemeral publish credential —
+# there is no `NPM_TOKEN` secret here, and nothing long-lived to rotate. Under trusted
+# publishing npm also attaches a signed **provenance** attestation to the tarball by default;
+# `--provenance` below says so out loud. It needs npm CLI 11.5.1+
+# (https://docs.npmjs.com/trusted-publishers), which Node 24's bundled npm satisfies.
+#
+# The maintainer configures the trusted publisher once on npmjs.com, and that config names
+# *this file*: user `amirtuval`, repository `amirtuval/openharness`, workflow
+# `publish-cli.yml`, no environment. The package has to exist before the config can be saved,
+# so the very first release is a manual `npm publish` — docs/RELEASING.md walks through it.
+on:
+  # By hand only. A release is a decision, not something a push or a tag implies.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '`patch`, `minor`, `major`, or an exact version such as `1.4.0`.'
+        type: string
+        required: true
+        default: patch
+      dry_run:
+        description: >-
+          Publish with `--dry-run` and stop before the version bump is committed. Leave this
+          on until the first real release has gone through.
+        type: boolean
+        required: true
+        default: true
+
+# One release at a time, and never cancelled: a run stopped between the publish and the push
+# is exactly the state the push failure below has to explain.
+concurrency:
+  group: publish-cli
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # `id-token: write` is what lets npm exchange a GitHub OIDC token for its publish
+    # credential (trusted publishing — no NPM_TOKEN) and what signs the provenance
+    # attestation. `contents: write` is for the version-bump commit and the `cli-v<version>`
+    # tag the job pushes back to main after a successful publish.
+    permissions:
+      id-token: write
+      contents: write
+    steps:
+      # Full history: the bump is committed on top of main and pushed back, and a shallow
+      # clone would make that push a non-fast-forward.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          # npm has to know which registry to trade the OIDC token with. setup-node also
+          # writes an `_authToken=${NODE_AUTH_TOKEN}` line into .npmrc, so this job must never
+          # set NODE_AUTH_TOKEN: a token there makes npm authenticate with it instead of with
+          # OIDC, and the publish fails.
+          registry-url: https://registry.npmjs.org
+
+      - run: corepack enable
+
+      - run: yarn install --immutable
+
+      # The one input that reaches a shell, so it is checked before it gets near `npm version`
+      # — nothing but patch/minor/major or an exact X.Y.Z passes — and it is passed through
+      # the environment rather than interpolated into the script.
+      - name: Validate the version input
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          case "$VERSION_INPUT" in
+            patch|minor|major) ;;
+            *)
+              if ! printf '%s' "$VERSION_INPUT" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+                echo "::error::version must be patch, minor, major or an exact X.Y.Z version — got '$VERSION_INPUT'"
+                exit 1
+              fi
+              ;;
+          esac
+
+      # `--no-git-tag-version`: npm rewrites the file only. The commit and the tag are the
+      # last step, and happen only once npm has accepted the publish. A version that would
+      # not change (an exact version equal to the current one) fails here, loudly.
+      #
+      # `--workspaces-update=false`: apps/tui is a member of a workspaces root, and without
+      # this npm reifies that whole tree after the bump — which fails outright on Yarn's
+      # `workspace:*` protocol (`EUNSUPPORTEDPROTOCOL`). Only the version in this one file is
+      # ours to change; the lockfile belongs to Yarn.
+      - name: Bump the version in apps/tui
+        id: bump
+        working-directory: apps/tui
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          npm version "$VERSION_INPUT" --no-git-tag-version --workspaces-update=false
+          VERSION="$(node -p "JSON.parse(require('node:fs').readFileSync('package.json', 'utf8')).version")"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          {
+            echo "### publish-cli"
+            echo
+            echo "\`openharness@$VERSION\` — dry run: \`$DRY_RUN\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Bump first, build second: tsdown inlines the package version into the bundle
+      # (`__CLI_VERSION__` in apps/tui/tsdown.config.ts), so `oh --version` can only print the
+      # new version if the bump came first. The `...` also builds the CLI's workspace
+      # dependencies (protocol, client).
+      - name: Build the CLI and its workspace dependencies
+        run: yarn turbo run build --filter=openharness...
+
+      # The published shape, proved (#152): npm pack, install the tarball in a clean directory
+      # outside the workspace, and run the installed `oh --version`/`--help`. It also re-checks
+      # the version, since `oh --version` is compared against the bumped package.json.
+      - name: Check the packed CLI
+        run: yarn workspace openharness check:pack
+
+      # Trusted publishing needs npm CLI 11.5.1+ (https://docs.npmjs.com/trusted-publishers).
+      # Node 24 already bundles npm 11.19, so this is normally a no-op — but the runner image
+      # is not ours to pin, and an older npm fails the publish with a bewildering 404.
+      - name: Ensure npm supports trusted publishing (>= 11.5.1)
+        run: |
+          required=11.5.1
+          have="$(npm --version)"
+          if [ "$(printf '%s\n' "$required" "$have" | sort -V | head -n1)" = "$required" ]; then
+            echo "npm $have >= $required — nothing to do"
+          else
+            echo "npm $have < $required — installing npm@^11.5.1"
+            npm install -g 'npm@^11.5.1'
+          fi
+
+      # No `--tag`: the publish lands on npm's default dist-tag, `latest`, and this workflow
+      # deliberately moves no other one (D9 — dist-tags are the maintainer's to move by hand).
+      # No secret is named: npm authenticates itself with the OIDC token `id-token: write`
+      # grants. `--dry-run` prints the tarball and stops — it performs no OIDC exchange and no
+      # upload, so it proves the build, the pack and the version, not the publish itself.
+      - name: Publish to npm (trusted publishing, provenance)
+        working-directory: apps/tui
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          args=(--provenance --access public)
+          if [ "$DRY_RUN" = 'true' ]; then
+            args+=(--dry-run)
+          fi
+          npm publish "${args[@]}"
+
+      # Only after npm has the tarball. A push that fails now leaves the registry ahead of
+      # main, which is the one state worth failing loudly about: re-running this workflow would
+      # try to publish a version that is already published.
+      - name: Commit the bump and push it, with the tag
+        if: inputs.dry_run == false
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/tui/package.json
+          # A workspace's version is normalized in yarn.lock, so the bump normally leaves it
+          # alone — commit it when it does change, rather than leave main with a lockfile the
+          # CI's `yarn install --immutable` would reject.
+          if [ -n "$(git status --porcelain -- yarn.lock)" ]; then
+            git add yarn.lock
+          fi
+          git commit -m "cli: v$VERSION"
+          git tag "cli-v$VERSION"
+          if ! git push origin HEAD:main || ! git push origin "cli-v$VERSION"; then
+            echo "::error::openharness@$VERSION is already published to npm, but pushing its version bump to main failed. Commit apps/tui/package.json as 'cli: v$VERSION' and push the tag cli-v$VERSION by hand — do not re-run this workflow, it would try to publish $VERSION a second time. If main refuses direct pushes, see the branch-protection note in docs/RELEASING.md."
+            exit 1
+          fi

@@ -78,3 +78,13 @@ Terraform is also where the least-privilege boundary is exercised: `deploy@` hol
 `DEPLOY_GRANTABLE_PROJECT_ROLES` list, pinned by an IAM condition on that account. The one
 role the plan account gained here, `roles/secretmanager.secretAccessor`, is what
 `terraform plan` needs to refresh a Secret Manager secret version.
+
+## CLI releases
+
+The CLI (`apps/tui`, the `oh` command) is the one artefact that does not leave through GCP: it
+is published to npm as the public package
+[`openharness`](https://www.npmjs.com/package/openharness), by hand, from
+[`.github/workflows/publish-cli.yml`](../.github/workflows/publish-cli.yml) (decision D9). No
+deploy job builds, publishes or tags it, and its npm dist-tags are the maintainer's to move —
+server deploys never touch them. The workflow itself, the one-time npm setup it needs, and how
+to move a dist-tag or verify provenance: [`RELEASING.md`](./RELEASING.md).
