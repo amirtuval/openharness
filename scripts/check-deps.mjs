@@ -33,9 +33,15 @@ const ALLOWED = {
     '@openharness/vault',
   ],
   '@openharness/web': ['@openharness/protocol', '@openharness/client'],
-  '@openharness/cli': ['@openharness/protocol', '@openharness/client'],
+  // The CLI is published to npm as the unscoped `openharness` (#152), so it is the one
+  // workspace outside the `@openharness/*` naming convention — and the one exception the
+  // dependency scan below has to know about.
+  openharness: ['@openharness/protocol', '@openharness/client'],
   '@openharness/e2e': 'any',
 }
+
+/** The workspace whose name sits outside the `@openharness/*` scope. */
+const UNSCOPED_PACKAGE = 'openharness'
 
 const DEPENDENCY_FIELDS = [
   'dependencies',
@@ -93,7 +99,9 @@ for (const dir of workspaces) {
 
   for (const field of DEPENDENCY_FIELDS) {
     for (const [dependency, range] of Object.entries(manifest[field] ?? {})) {
-      if (!dependency.startsWith('@openharness/')) continue
+      if (!dependency.startsWith('@openharness/') && dependency !== UNSCOPED_PACKAGE) {
+        continue
+      }
 
       if (dependency === self) {
         problems.push(`${where}: "${self}" depends on itself (${field}).`)

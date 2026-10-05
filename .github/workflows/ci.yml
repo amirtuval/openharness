@@ -109,6 +109,17 @@ jobs:
           TURBO_FORCE_FLAG: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.force)) && '--force' || '' }}
         run: yarn turbo run build typecheck lint format:check test --cache-dir=.turbo/cache $TURBO_FORCE_FLAG
 
+      # The published shape of the CLI (#152): `npm pack`, and only the expected files in the
+      # tarball; `npm install` of that tarball **offline** into a temp directory outside the
+      # workspace, with no dependencies to resolve; the installed `oh --version`/`oh --help`
+      # run there; and a grep of the bundle for an `import`/`require` it would still have to
+      # resolve at runtime. `check:pack` dependsOn `build`, so turbo builds the CLI (and
+      # everything inlined into it, e.g. ink's `yoga-layout`) first; a PR that does not touch
+      # any of them is a turbo cache hit. It runs on both the affected and the all-packages
+      # paths, since a cached hit there is what lets it run on every PR cheaply.
+      - name: Check the CLI package (npm pack, install it, run the installed `oh`)
+        run: yarn turbo run check:pack --filter=openharness --cache-dir=.turbo/cache
+
   # The provider-credential success path, end to end with a real key (#120). `PUT
   # /v1/provider-credentials` validates the key with one real provider call, and no test seam
   # crosses the process boundary (`e2e/src/harness/credentials.ts` documents why the rest of the

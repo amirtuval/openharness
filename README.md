@@ -129,10 +129,17 @@ trial, nothing survives a restart (it says so at startup).
 ### The terminal client, `oh`
 
 ```bash
-yarn turbo run build --filter=@openharness/cli
-node apps/tui/dist/index.js                       # oh, from the repo
-oh                                                # the same thing, once installed
+npm i -g openharness                              # the published CLI, as the `oh` command
+oh login && oh                                    # once installed
+
+yarn turbo run build --filter=openharness         # from a checkout of this repo
+node apps/tui/dist/index.js                       # the same `oh`, built locally
 ```
+
+The npm package is **`openharness`** and the command stays **`oh`** (#152). It is one
+self-contained bundle — Ink, React and the client inlined, nothing resolved from
+`node_modules` at runtime — so `npm install -g openharness@next` can replace it on disk while
+a running `oh` keeps working.
 
 `oh` signs in with `oh login`: the device flow prints a URL and a code, opens the browser at
 it (skipped with `--no-browser`, in CI, over SSH, or when there is no display), and stores
