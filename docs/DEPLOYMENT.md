@@ -41,3 +41,13 @@ Terraform. Prerequisites, usage, the role list, how to run the test and how to u
 The billing budget is the one grant this cannot carry: budgets live on the billing
 account, so `roles/billing.costsManager` on the billing account is granted separately, by
 hand — no project-level role reaches it.
+
+## CLI releases
+
+The CLI (`apps/tui`, the `oh` command) is the one artefact that does not leave through GCP: it
+is published to npm as the public package
+[`openharness`](https://www.npmjs.com/package/openharness), by hand, from
+[`.github/workflows/publish-cli.yml`](../.github/workflows/publish-cli.yml) (decision D9). No
+deploy job builds, publishes or tags it, and its npm dist-tags are the maintainer's to move —
+server deploys never touch them. The workflow itself, the one-time npm setup it needs, and how
+to move a dist-tag or verify provenance: [`RELEASING.md`](./RELEASING.md).
