@@ -80,36 +80,40 @@ a `user.interrupt` signals `interrupt` — exactly what the same events would do
 
 ## Environment variables
 
-| variable                              | default                          | what it does                                                                                    |
-| ------------------------------------- | -------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `DATABASE_URL`                        | —                                | run on Postgres, migrating on boot; unset means in-memory                                       |
-| `SCHEDULER`                           | `local`                          | `local`, or `postgres` for the multi-instance scheduler                                         |
-| `BETTER_AUTH_SECRET`                  | — (**required**)                 | signs sessions and cookies                                                                      |
-| `BETTER_AUTH_URL`                     | — (**required**)                 | the public URL: Better Auth's base, the one trusted origin (CSRF)                               |
-| `OPENHARNESS_SECRETS_KEY`             | — (**required** under `local`)   | base64 32-byte master key the vault seals credentials with; not needed under `gcp-kms`          |
-| `OPENHARNESS_KEY_PROVIDER`            | `local`                          | `local` (the environment key) or `gcp-kms` (Cloud KMS): who wraps the vault's data keys (#150)  |
-| `OPENHARNESS_KMS_KEY`                 | — (**required** under `gcp-kms`) | the Cloud KMS `projects/…/cryptoKeys/…` key; unused under `local`                               |
-| `OPENHARNESS_KEY_CACHE_TTL_MS`        | `300000`                         | how long unwrapped data keys stay cached in memory; `0` disables the cache                      |
-| `OPENHARNESS_DEV_LOGIN`               | off                              | `1` enables the local dev login; localhost URLs only (A7); the way in when no provider is set   |
-| `GOOGLE_CLIENT_ID`/`_SECRET`          | —                                | enable Google sign-in (both, or neither; one provider or the dev login is required)             |
-| `GITHUB_CLIENT_ID`/`_SECRET`          | —                                | enable GitHub sign-in                                                                           |
-| `MICROSOFT_CLIENT_ID`/`_SECRET`       | —                                | enable Microsoft sign-in                                                                        |
-| `MICROSOFT_TENANT_ID`                 | `common`                         | the Entra tenant the Microsoft provider authenticates against                                   |
-| `PORT`                                | `3000`                           | the port to listen on                                                                           |
-| `OPENHARNESS_TEST_MODEL`              | —                                | `mock` swaps in the deterministic test model                                                    |
-| `OPENHARNESS_WEB_DIR`                 | —                                | a built web app to serve at `/`                                                                 |
-| `OPENHARNESS_TRUSTED_PROXY_HOPS`      | `0`                              | how many proxies append to `x-forwarded-for`; `0` trusts no forwarding header (#151, see below) |
-| `OPENHARNESS_CORS_ORIGINS`            | —                                | comma-separated origins to allow; unset means no CORS headers                                   |
-| `OPENHARNESS_MAX_CONCURRENT_SESSIONS` | `4`                              | how many sessions may be running at once                                                        |
-| `OPENHARNESS_DRAIN_TIMEOUT_MS`        | `5000`                           | how long shutdown waits for a turn in flight                                                    |
-| `OPENHARNESS_INSTANCE_ID`             | hostname + pid + random suffix   | this instance's id in the lease table                                                           |
-| `OPENHARNESS_PARTITIONS`              | `64` (the protocol's)            | how many partitions the session space has                                                       |
-| `OPENHARNESS_LEASE_TTL_MS`            | `30000`                          | how long a partition lease lasts before it must be renewed                                      |
-| `OPENHARNESS_HEARTBEAT_MS`            | `10000`                          | how often leases are renewed and free partitions taken                                          |
-| `OPENHARNESS_SWEEP_MS`                | `60000`                          | how often owned partitions are re-scanned for missed work                                       |
-| `OPENHARNESS_DELTA_RETENTION_MS`      | `3600000`                        | how long superseded chunks are kept before compaction deletes them                              |
-| `OPENHARNESS_COMPACT_INTERVAL_MS`     | `300000`                         | how often the compaction job runs; `0` disables it                                              |
-| `<NAME>_FILE`                         | —                                | for any secret above: read the value from this path instead of `<NAME>` (#154, see below)       |
+| variable                              | default                          | what it does                                                                                      |
+| ------------------------------------- | -------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `DATABASE_URL`                        | —                                | run on Postgres, migrating on boot; unset means in-memory                                         |
+| `SCHEDULER`                           | `local`                          | `local`, or `postgres` for the multi-instance scheduler                                           |
+| `BETTER_AUTH_SECRET`                  | — (**required**)                 | signs sessions and cookies                                                                        |
+| `BETTER_AUTH_URL`                     | — (**required**)                 | the public URL: Better Auth's base, the one trusted origin (CSRF)                                 |
+| `OPENHARNESS_SECRETS_KEY`             | — (**required** under `local`)   | base64 32-byte master key the vault seals credentials with; not needed under `gcp-kms`            |
+| `OPENHARNESS_KEY_PROVIDER`            | `local`                          | `local` (the environment key) or `gcp-kms` (Cloud KMS): who wraps the vault's data keys (#150)    |
+| `OPENHARNESS_KMS_KEY`                 | — (**required** under `gcp-kms`) | the Cloud KMS `projects/…/cryptoKeys/…` key; unused under `local`                                 |
+| `OPENHARNESS_KEY_CACHE_TTL_MS`        | `300000`                         | how long unwrapped data keys stay cached in memory; `0` disables the cache                        |
+| `OPENHARNESS_DEV_LOGIN`               | off                              | `1` enables the local dev login; localhost URLs only (A7); the way in when no provider is set     |
+| `GOOGLE_CLIENT_ID`/`_SECRET`          | —                                | enable Google sign-in (both, or neither; one provider or the dev login is required)               |
+| `GITHUB_CLIENT_ID`/`_SECRET`          | —                                | enable GitHub sign-in                                                                             |
+| `MICROSOFT_CLIENT_ID`/`_SECRET`       | —                                | enable Microsoft sign-in                                                                          |
+| `MICROSOFT_TENANT_ID`                 | `common`                         | the Entra tenant the Microsoft provider authenticates against                                     |
+| `PORT`                                | `3000`                           | the port to listen on                                                                             |
+| `OPENHARNESS_TEST_MODEL`              | —                                | `mock` swaps in the deterministic test model                                                      |
+| `OPENHARNESS_WEB_DIR`                 | —                                | a built web app to serve at `/`                                                                   |
+| `OPENHARNESS_TRUSTED_PROXY_HOPS`      | `0`                              | how many proxies append to `x-forwarded-for`; `0` trusts no forwarding header (#151, see below)   |
+| `OPENHARNESS_CORS_ORIGINS`            | —                                | comma-separated origins to allow; unset means no CORS headers                                     |
+| `OPENHARNESS_MAX_CONCURRENT_SESSIONS` | `4`                              | how many sessions may be running at once                                                          |
+| `OPENHARNESS_DRAIN_TIMEOUT_MS`        | `5000`                           | how long shutdown waits for a turn in flight                                                      |
+| `OPENHARNESS_INSTANCE_ID`             | hostname + pid + random suffix   | this instance's id in the lease table                                                             |
+| `OPENHARNESS_PARTITIONS`              | `64` (the protocol's)            | how many partitions the session space has                                                         |
+| `OPENHARNESS_LEASE_TTL_MS`            | `30000`                          | how long a partition lease lasts before it must be renewed                                        |
+| `OPENHARNESS_HEARTBEAT_MS`            | `10000`                          | how often leases are renewed and free partitions taken                                            |
+| `OPENHARNESS_SWEEP_MS`                | `60000`                          | how often owned partitions are re-scanned for missed work                                         |
+| `OPENHARNESS_DELTA_RETENTION_MS`      | `3600000`                        | how long superseded chunks are kept before compaction deletes them                                |
+| `OPENHARNESS_COMPACT_INTERVAL_MS`     | `300000`                         | how often the compaction job runs; `0` disables it                                                |
+| `OPENHARNESS_LOG_FORMAT`              | `text`                           | `text` (readable) or `json` (Cloud Logging): what stdout carries (#158)                           |
+| `OPENHARNESS_TRACING`                 | `off`                            | `off`, or `cloud-trace` to export spans to Cloud Trace (#158)                                     |
+| `OPENHARNESS_TRACE_SAMPLE_RATE`       | `0.1`                            | the fraction of root traces kept when tracing is on; `0` keeps none, `1` keeps all (#158)         |
+| `GOOGLE_CLOUD_PROJECT`                | —                                | the project a JSON log line's trace id is qualified with; Cloud Logging resolves a bare id (#158) |
+| `<NAME>_FILE`                         | —                                | for any secret above: read the value from this path instead of `<NAME>` (#154, see below)         |
 
 Every **secret** in that table — `DATABASE_URL`, `BETTER_AUTH_SECRET`,
 `OPENHARNESS_SECRETS_KEY`, and each provider's `*_CLIENT_SECRET` — can be delivered as a file
@@ -770,6 +774,48 @@ handler produced it. `/api/auth/*` responses also carry `Vary: Cookie` (they are
 the session cookie), and a CORS-enabled response carries `Vary: Origin`, so anything reading
 them without honouring `no-store` is told what they vary by.
 
+## Observability (deployment epic #148, #158)
+
+Two switches, both off on a laptop, both set by Terraform in the deployment. `observability/`
+is the whole of it — nothing a route imports, and nothing that changes a route's behaviour.
+
+**Logs.** `OPENHARNESS_LOG_FORMAT=json` makes the server write one Cloud Logging-shaped JSON
+object per line to stdout instead of the readable one-line format: `severity`
+(`DEBUG`/`INFO`/`WARNING`/`ERROR`), `message`, `time`, and the two `logging.googleapis.com/*`
+keys when the line was written inside a request. A `detail` object a call site passes is merged
+in as top-level fields — which is why `app.onError` now passes `{ error, method, path, status,
+request_id }` rather than the bare `Error`: a failed request is findable in Logs Explorer by
+path and status, joined to its trace. Nothing sensitive is ever written (`redact()` replaces
+`authorization`, `cookie`, `*_secret`, `*_token`, `*_api_key`, passwords and credentials with
+`[REDACTED]`, at any depth); the test that asserts this is `logging.test.ts`. `loggerFor()`
+builds the logger the format asks for, and `main.ts`/`startServer` call it — a caller that
+passes its own logger keeps it.
+
+**Traces.** `OPENHARNESS_TRACING=cloud-trace` exports spans to Cloud Trace, sampling
+`OPENHARNESS_TRACE_SAMPLE_RATE` (default `0.1`) of root traces. `initTracing()` is the one
+entry point: `off` answers `noopTracer` without importing anything, and the Cloud Trace path
+`await import()`s the OpenTelemetry SDK and the exporter, so an untraced server never loads
+them. The exporter is `@google-cloud/opentelemetry-cloud-trace-exporter` — it authenticates
+with ADC and refreshes its own OAuth token, which is what keeps a long-running pod exporting
+(an OTLP header cannot be refreshed; see the TSDoc in `tracing.ts`).
+
+Spans come from two places:
+
+- **`app.ts`** opens one **server span** per request, as the outermost middleware. It honours
+  the load balancer's `traceparent` / `X-Cloud-Trace-Context` (`parseTraceContext`), and puts
+  the resulting ids in an `AsyncLocalStorage` (`runWithTraceContext`) for the whole request —
+  which is exactly what the JSON logger reads, so a log line and its trace agree. With tracing
+  off the header's ids still reach the log: a client's trace is not this server's to drop.
+- **`session-traces.ts`** turns the session log into spans: a **turn span** per
+  `session.status_running`…`session.status_idle`, and a **child span per model request** from
+  `span.model_request_start`/`_end` with its token usage and error. It is fed by
+  `withSessionTraces()`, a store proxy that intercepts `appendEvents` and forwards everything
+  else — applied in `startServer` only when tracing is on, so an untraced server passes its
+  store around unchanged. v1 has no tool-call events (`hands` is unused), so none are traced.
+
+`initTracing` failing (an SDK that will not load) logs and answers `noopTracer`: a server that
+cannot trace is still a server. `shutdown` flushes the tracer last of all, after the store.
+
 ## Shutdown
 
 `SIGTERM` / `SIGINT` shut down in a fixed order: stop accepting requests, drain the scheduler
@@ -782,46 +828,51 @@ before the instance stops serving it (#151).
 
 ## Public API
 
-| `@openharness/server`                                                                                                | what it is                                                                           |
-| -------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| `createApp(options)`                                                                                                 | the Hono app: routes, auth, errors, static assets — against any store/scheduler/auth |
-| `startServer(options)`                                                                                               | store, migrations, model, scheduler, listener and a `shutdown()`                     |
-| `main(env, options)`                                                                                                 | `startServer` from the environment, plus the signal handlers                         |
-| `DeltaCompactor`                                                                                                     | the periodic compaction of superseded chunks (D9)                                    |
-| `DEFAULT_DELTA_RETENTION_MS`, `DEFAULT_COMPACT_INTERVAL_MS`                                                          | `3600000`, `300000` — the compaction defaults                                        |
-| `LocalScheduler`                                                                                                     | the single-process `SessionScheduler`                                                |
-| `PostgresPartitionScheduler`                                                                                         | the multi-instance `SessionScheduler`: partition leases, epochs, recovery (#11)      |
-| `PassQueue`                                                                                                          | the pass queue and concurrency limit both schedulers share                           |
-| `SessionRunner`                                                                                                      | the per-session turn loop, reusable: what both schedulers run passes with            |
-| `createAuth(config, database, logger)`                                                                               | Better Auth configured for this server (A1/A2/A3/A7), plus `Auth`, `AuthConfig`      |
-| `createSessionCredentialResolver(deps)`                                                                              | the session owner's sealed key, opened per model request (A5)                        |
-| `sealApiKey` / `openApiKey` / `credentialAad` / `credentialUpsert`                                                   | the credential sealing helpers (A5)                                                  |
-| `createAuthGuard(options)`                                                                                           | the `/v1` session + CSRF middleware (A2)                                             |
-| `createSessionRevocations(options)`                                                                                  | the registry of open responses a revocation closes, subscribed to the store (#76)    |
-| `startSessionRecheck(options)`, `DEFAULT_SESSION_RECHECK_MS`                                                         | the periodic session re-check of a long-lived response (#76)                         |
-| `SESSION_INVALID_MESSAGE`, `SSE_SESSION_INVALID`                                                                     | what a stream says when its session is revoked or expires (#76)                      |
-| `validateProviderApiKey`, `VALIDATABLE_PROVIDERS`                                                                    | the one cheap provider call a saved key is checked with                              |
-| `ModelCatalog`, `ModelCatalogOptions`, `CatalogRefreshLimitedError`                                                  | the model catalogue: provider lists, registry join, cache, fallback (#90)            |
-| `createMastraRegistry()`, `emptyRegistry`, `ModelRegistry`, `RegistryModel`                                          | the registry join's seam, over the bundled `@mastra/core` data                       |
-| `createProviderFetch()`, `ProviderFetch`, `DEFAULT_PROVIDER_TIMEOUT_MS`                                              | the provider HTTP client: egress-proxy aware, 5 s deadline                           |
-| `CatalogCache`, `RefreshLimiter`, `DEFAULT_CATALOG_TTL_MS`, `DEFAULT_REFRESH_INTERVAL_MS`                            | the in-memory per-(user, provider) cache and the refresh rate limit (C4)             |
-| `adapterFor()`, `adaptedProviders()`, `isChatModel()`, `isNonChatFamily()`                                           | the fixed endpoint table and the chat filter (C1/C2)                                 |
-| `DefaultModelPicker`, `DefaultModelPickerOptions`, `RECOMMENDED_DEFAULT_MODELS`                                      | the automatic default model: the picker, and the curated table it picks from (U4)    |
-| `isEverydayModel()`, `isExpensiveModel()`, `isReasoningModel()`, `newestModelId()`                                   | the registry fallback's rule: everyday chat models, newest first (U4)                |
-| `DEV_LOGIN_EMAIL`, `DEV_LOGIN_PASSWORD`, `DEV_LOGIN_STORED_EMAIL`                                                    | the documented dev user (A7)                                                         |
-| `OPENHARNESS_CLI_CLIENT_ID`, `DEVICE_CODE_EXPIRES_IN`                                                                | the device flow's client id and code lifetime (A6)                                   |
-| `deviceVerificationUri`, `deviceVerificationUriComplete`                                                             | the approval URL the device flow answers with: `#/device` and its `?user_code=` (A6) |
-| `SOCIAL_PROVIDERS`, `providerOptions`, `microsoftEmailVerified`, `githubVerifiedPrimaryEmail`, `googleEmailVerified` | the A3 identity rules                                                                |
-| `createDevLoginUser`, `rewriteDevLoginRequest`, `refuseUnverifiedUser`                                               | the dev-login seeding and shim, and the verified-email hook                          |
-| `createMockModelFactory()`                                                                                           | the deterministic test model, for a host that wires its own                          |
-| `defaultInstanceId()`                                                                                                | hostname + pid + random suffix: the id a server leases partitions under              |
-| `readServerConfig(env)`, `ServerConfig`, `ENV_VARS`, `readSecret`, `secretFileVar`                                   | the environment, parsed; a secret from `<NAME>` or its `<NAME>_FILE` (#154)          |
-| `createConfigVault(config)`, `KeyProviderKind`                                                                       | the vault the config asks for: the env key or Cloud KMS (#150)                       |
-| `HttpError`, `rateLimitError`, `PACKAGE_NAME`, `Logger`                                                              | the error types, the package name and the logging seam                               |
-| `resolveClientIp`, `withClientIpHeader`, `CLIENT_IP_HEADER`, `FORWARDED_FOR_HEADER`                                  | the client IP behind a proxy: one resolution, one header (#151)                      |
-| `Readiness`, `alwaysReady`                                                                                           | what `GET /ready` asks, and the no-database answer (#151)                            |
-| `checkDatabase`, `READINESS_QUERY_TIMEOUT_MS`                                                                        | the Postgres side of `/ready`: `select 1` inside about 2 s (#151)                    |
-| `DEFAULT_TRUSTED_PROXY_HOPS`                                                                                         | `0` — no forwarding header trusted (#151)                                            |
+| `@openharness/server`                                                                                                            | what it is                                                                                |
+| -------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `createApp(options)`                                                                                                             | the Hono app: routes, auth, errors, static assets — against any store/scheduler/auth      |
+| `startServer(options)`                                                                                                           | store, migrations, model, scheduler, listener and a `shutdown()`                          |
+| `main(env, options)`                                                                                                             | `startServer` from the environment, plus the signal handlers                              |
+| `DeltaCompactor`                                                                                                                 | the periodic compaction of superseded chunks (D9)                                         |
+| `DEFAULT_DELTA_RETENTION_MS`, `DEFAULT_COMPACT_INTERVAL_MS`                                                                      | `3600000`, `300000` — the compaction defaults                                             |
+| `LocalScheduler`                                                                                                                 | the single-process `SessionScheduler`                                                     |
+| `PostgresPartitionScheduler`                                                                                                     | the multi-instance `SessionScheduler`: partition leases, epochs, recovery (#11)           |
+| `PassQueue`                                                                                                                      | the pass queue and concurrency limit both schedulers share                                |
+| `SessionRunner`                                                                                                                  | the per-session turn loop, reusable: what both schedulers run passes with                 |
+| `createAuth(config, database, logger)`                                                                                           | Better Auth configured for this server (A1/A2/A3/A7), plus `Auth`, `AuthConfig`           |
+| `createSessionCredentialResolver(deps)`                                                                                          | the session owner's sealed key, opened per model request (A5)                             |
+| `sealApiKey` / `openApiKey` / `credentialAad` / `credentialUpsert`                                                               | the credential sealing helpers (A5)                                                       |
+| `createAuthGuard(options)`                                                                                                       | the `/v1` session + CSRF middleware (A2)                                                  |
+| `createSessionRevocations(options)`                                                                                              | the registry of open responses a revocation closes, subscribed to the store (#76)         |
+| `startSessionRecheck(options)`, `DEFAULT_SESSION_RECHECK_MS`                                                                     | the periodic session re-check of a long-lived response (#76)                              |
+| `SESSION_INVALID_MESSAGE`, `SSE_SESSION_INVALID`                                                                                 | what a stream says when its session is revoked or expires (#76)                           |
+| `validateProviderApiKey`, `VALIDATABLE_PROVIDERS`                                                                                | the one cheap provider call a saved key is checked with                                   |
+| `ModelCatalog`, `ModelCatalogOptions`, `CatalogRefreshLimitedError`                                                              | the model catalogue: provider lists, registry join, cache, fallback (#90)                 |
+| `createMastraRegistry()`, `emptyRegistry`, `ModelRegistry`, `RegistryModel`                                                      | the registry join's seam, over the bundled `@mastra/core` data                            |
+| `createProviderFetch()`, `ProviderFetch`, `DEFAULT_PROVIDER_TIMEOUT_MS`                                                          | the provider HTTP client: egress-proxy aware, 5 s deadline                                |
+| `CatalogCache`, `RefreshLimiter`, `DEFAULT_CATALOG_TTL_MS`, `DEFAULT_REFRESH_INTERVAL_MS`                                        | the in-memory per-(user, provider) cache and the refresh rate limit (C4)                  |
+| `adapterFor()`, `adaptedProviders()`, `isChatModel()`, `isNonChatFamily()`                                                       | the fixed endpoint table and the chat filter (C1/C2)                                      |
+| `DefaultModelPicker`, `DefaultModelPickerOptions`, `RECOMMENDED_DEFAULT_MODELS`                                                  | the automatic default model: the picker, and the curated table it picks from (U4)         |
+| `isEverydayModel()`, `isExpensiveModel()`, `isReasoningModel()`, `newestModelId()`                                               | the registry fallback's rule: everyday chat models, newest first (U4)                     |
+| `DEV_LOGIN_EMAIL`, `DEV_LOGIN_PASSWORD`, `DEV_LOGIN_STORED_EMAIL`                                                                | the documented dev user (A7)                                                              |
+| `OPENHARNESS_CLI_CLIENT_ID`, `DEVICE_CODE_EXPIRES_IN`                                                                            | the device flow's client id and code lifetime (A6)                                        |
+| `deviceVerificationUri`, `deviceVerificationUriComplete`                                                                         | the approval URL the device flow answers with: `#/device` and its `?user_code=` (A6)      |
+| `SOCIAL_PROVIDERS`, `providerOptions`, `microsoftEmailVerified`, `githubVerifiedPrimaryEmail`, `googleEmailVerified`             | the A3 identity rules                                                                     |
+| `createDevLoginUser`, `rewriteDevLoginRequest`, `refuseUnverifiedUser`                                                           | the dev-login seeding and shim, and the verified-email hook                               |
+| `createMockModelFactory()`                                                                                                       | the deterministic test model, for a host that wires its own                               |
+| `defaultInstanceId()`                                                                                                            | hostname + pid + random suffix: the id a server leases partitions under                   |
+| `readServerConfig(env)`, `ServerConfig`, `ENV_VARS`, `readSecret`, `secretFileVar`                                               | the environment, parsed; a secret from `<NAME>` or its `<NAME>_FILE` (#154)               |
+| `createConfigVault(config)`, `KeyProviderKind`                                                                                   | the vault the config asks for: the env key or Cloud KMS (#150)                            |
+| `HttpError`, `rateLimitError`, `PACKAGE_NAME`, `Logger`                                                                          | the error types, the package name and the logging seam                                    |
+| `resolveClientIp`, `withClientIpHeader`, `CLIENT_IP_HEADER`, `FORWARDED_FOR_HEADER`                                              | the client IP behind a proxy: one resolution, one header (#151)                           |
+| `Readiness`, `alwaysReady`                                                                                                       | what `GET /ready` asks, and the no-database answer (#151)                                 |
+| `checkDatabase`, `READINESS_QUERY_TIMEOUT_MS`                                                                                    | the Postgres side of `/ready`: `select 1` inside about 2 s (#151)                         |
+| `DEFAULT_TRUSTED_PROXY_HOPS`                                                                                                     | `0` — no forwarding header trusted (#151)                                                 |
+| `loggerFor`, `jsonLogger`, `redact`, `redactError`, `isSensitiveKey`, `detailFields`, `REDACTED`                                 | the Cloud Logging JSON logger and its redaction (#158)                                    |
+| `parseTraceContext`, `parseTraceparent`, `parseCloudTraceContext`, `activeTraceContext`, `runWithTraceContext`, `TraceContext`   | the request's trace, and the async context the logger reads (#158)                        |
+| `initTracing`, `noopTracer`, `Tracer`, `Span`, `StartSpanOptions`, `TracingMode`, `TracingOptions`, `AttributeValue`, `SpanKind` | the tracer seam, its no-op, and the lazy Cloud Trace implementation (#158)                |
+| `SessionTraces`, `withSessionTraces`                                                                                             | the session log as turn and model-request spans, and the store proxy that feeds it (#158) |
+| `DEFAULT_LOG_FORMAT`, `DEFAULT_TRACING`, `DEFAULT_TRACE_SAMPLE_RATE`, `LogFormat`                                                | `text`, `off`, `0.1` — the observability defaults (#158)                                  |
 
 `node dist/index.js` runs `main()`, which reads the environment and starts the server.
 
@@ -861,6 +912,11 @@ src/
   titles.ts             naming a session after its first message (#29)
   static.ts             serving a built web app from OPENHARNESS_WEB_DIR
   types.ts              AppEnv (the Hono environment) and the Logger seam
+  observability/
+    logging.ts          the Cloud Logging JSON logger, and the redaction (#158)
+    trace-context.ts    the request's trace, in an AsyncLocalStorage (#158)
+    tracing.ts          the Tracer seam, the no-op, and the Cloud Trace exporter (#158)
+    session-traces.ts   the session log as spans, and the store proxy that feeds it (#158)
   http/
     errors.ts           HttpError and the protocol's error envelope
     request.ts          body/query/path reading, through the protocol's schemas

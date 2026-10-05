@@ -68,13 +68,24 @@ function write(sink: (message: string) => void, message: string, detail?: unknow
 /** A detail value as one log line: an `Error` as its stack, anything else as JSON. */
 function format(detail: unknown): string {
   if (detail instanceof Error) {
-    return detail.stack ?? `${detail.name}: ${detail.message}`
+    return errorText(detail)
   }
   try {
-    return JSON.stringify(detail)
+    // A replacer, because `JSON.stringify(new Error('x'))` is `{}` — an `Error` nested in a
+    // detail object (the shape the request-path log uses) would lose its message and stack.
+    return JSON.stringify(detail, (_key, value: unknown) =>
+      value instanceof Error
+        ? { name: value.name, message: value.message, stack: value.stack }
+        : value,
+    )
   } catch {
     return String(detail)
   }
+}
+
+/** An `Error` as one readable line: its stack, or its name and message when it has none. */
+function errorText(error: Error): string {
+  return error.stack ?? `${error.name}: ${error.message}`
 }
 
 /** A {@link Logger} that throws every call away; the default in tests. */

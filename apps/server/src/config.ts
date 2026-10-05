@@ -5,6 +5,8 @@ import { hostname } from 'node:os'
 import { DEFAULT_PARTITION_COUNT } from '@openharness/protocol'
 import { DEFAULT_KEY_CACHE_TTL_MS, envKeyProvider, gcpKmsKeyProvider } from '@openharness/vault'
 
+import type { TracingMode } from './observability/tracing'
+
 import { DEFAULT_COMPACT_INTERVAL_MS, DEFAULT_DELTA_RETENTION_MS } from './compaction'
 import { MOCK_MODEL_ENV_VALUE } from './mock-model'
 import { DEFAULT_HEARTBEAT_MS, DEFAULT_LEASE_TTL_MS, DEFAULT_SWEEP_MS } from './partition-scheduler'
@@ -48,6 +50,10 @@ import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
  * | `OPENHARNESS_SWEEP_MS`              | how often owned partitions are re-scanned; `60000` by default    |
  * | `OPENHARNESS_DELTA_RETENTION_MS`    | how long superseded chunks are kept before compaction deletes them; `3600000` |
  * | `OPENHARNESS_COMPACT_INTERVAL_MS`   | how often compaction runs; `300000` by default, `0` disables it  |
+ * | `OPENHARNESS_LOG_FORMAT`            | `text` (default, the readable one-line format) or `json` (Cloud Logging) (#158) |
+ * | `OPENHARNESS_TRACING`               | `off` (default) or `cloud-trace`: export spans to Cloud Trace (#158) |
+ * | `OPENHARNESS_TRACE_SAMPLE_RATE`     | the fraction of traces kept when tracing is on; `0.1` (#158)      |
+ * | `GOOGLE_CLOUD_PROJECT`              | the project a JSON log line's trace id belongs to; ambient, optional (#158) |
  * | `<NAME>_FILE`                       | a file holding a secret's value, for any secret above (#154)      |
  *
  * There are **no provider credentials in the environment** any more (epic #65, A5): every
@@ -99,6 +105,10 @@ export const ENV_VARS = {
   sweepMs: 'OPENHARNESS_SWEEP_MS',
   deltaRetentionMs: 'OPENHARNESS_DELTA_RETENTION_MS',
   compactIntervalMs: 'OPENHARNESS_COMPACT_INTERVAL_MS',
+  logFormat: 'OPENHARNESS_LOG_FORMAT',
+  tracing: 'OPENHARNESS_TRACING',
+  traceSampleRate: 'OPENHARNESS_TRACE_SAMPLE_RATE',
+  gcpProjectId: 'GOOGLE_CLOUD_PROJECT',
 } as const
 
 /** A social provider's configured OAuth client. */
@@ -169,6 +179,18 @@ export interface ServerConfig {
   readonly deltaRetentionMs: number
   /** How often the compaction job runs; `0` disables it. */
   readonly compactIntervalMs: number
+  /** `OPENHARNESS_LOG_FORMAT`: the readable one-line format, or Cloud Logging JSON (#158). */
+  readonly logFormat: LogFormat
+  /** `OPENHARNESS_TRACING`: where spans go — nowhere, or Cloud Trace (#158). */
+  readonly tracing: TracingMode
+  /** `OPENHARNESS_TRACE_SAMPLE_RATE`: the fraction of root traces kept, `0..1` (#158). */
+  readonly traceSampleRate: number
+  /**
+   * `GOOGLE_CLOUD_PROJECT`: the project a JSON log line's trace id is qualified with (#158).
+   * Ambient — GKE does not set it, and absent, Cloud Logging resolves the bare trace id
+   * against the log entry's own project, which is the same one the pod runs in.
+   */
+  readonly gcpProjectId: string | undefined
 }
 
 /** Which {@link SessionScheduler} the server runs. */
@@ -176,6 +198,9 @@ export type SchedulerKind = 'local' | 'postgres'
 
 /** Which key provider wraps the vault's data keys (#150): the env key, or Cloud KMS. */
 export type KeyProviderKind = 'local' | 'gcp-kms'
+
+/** `OPENHARNESS_LOG_FORMAT`: what the server writes to stdout (#158). */
+export type LogFormat = 'text' | 'json'
 
 /** The port a server listens on when `PORT` does not say. */
 export const DEFAULT_PORT = 3000
@@ -185,6 +210,21 @@ export const DEFAULT_SCHEDULER: SchedulerKind = 'local'
 
 /** The key provider a server uses when `OPENHARNESS_KEY_PROVIDER` does not say. */
 export const DEFAULT_KEY_PROVIDER: KeyProviderKind = 'local'
+
+/** What the server writes when `OPENHARNESS_LOG_FORMAT` does not say: the readable format (#158). */
+export const DEFAULT_LOG_FORMAT: LogFormat = 'text'
+
+/** Where spans go when `OPENHARNESS_TRACING` does not say: nowhere (#158). */
+export const DEFAULT_TRACING: TracingMode = 'off'
+
+/**
+ * How many root traces are kept when `OPENHARNESS_TRACE_SAMPLE_RATE` does not say (#158).
+ *
+ * A tenth of requests: enough to see what a deployment is doing in Cloud Trace without paying
+ * to store every turn's spans — the free tier is 2.5 million spans a month, and one request's
+ * trace is a handful of spans.
+ */
+export const DEFAULT_TRACE_SAMPLE_RATE = 0.1
 
 /** The Entra tenant a Microsoft sign-in uses when `MICROSOFT_TENANT_ID` does not say. */
 export const DEFAULT_MICROSOFT_TENANT_ID = 'common'
@@ -340,6 +380,17 @@ export function readServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
     compactIntervalMs: readInteger(env, ENV_VARS.compactIntervalMs, DEFAULT_COMPACT_INTERVAL_MS, {
       min: 0,
     }),
+    // Observability (#158). The log format and the trace mode are a choice each, so an
+    // unknown value is a boot failure naming the variable rather than a silent default; the
+    // sample rate is a fraction, and 0 is meaningful (trace nothing while keeping the
+    // exporter wired), so the bound — not a falsy check — is what refuses a negative one.
+    logFormat: readChoice(env, ENV_VARS.logFormat, ['text', 'json'] as const, DEFAULT_LOG_FORMAT),
+    tracing: readChoice(env, ENV_VARS.tracing, ['off', 'cloud-trace'] as const, DEFAULT_TRACING),
+    traceSampleRate: readNumber(env, ENV_VARS.traceSampleRate, DEFAULT_TRACE_SAMPLE_RATE, {
+      min: 0,
+      max: 1,
+    }),
+    gcpProjectId: readString(env, ENV_VARS.gcpProjectId),
   }
 }
 
@@ -400,6 +451,18 @@ export function describeConfig(config: ServerConfig): string[] {
           `retaining superseded chunks ${config.deltaRetentionMs}ms`,
   )
   lines.push(config.webDir === undefined ? 'web assets: none' : `web assets: ${config.webDir}`)
+  // Observability (#158): which shape the output is in, and whether spans are exported — the
+  // two things a person checking a deployment wants to confirm.
+  lines.push(
+    config.logFormat === 'json'
+      ? `logs: JSON on stdout for Cloud Logging (${ENV_VARS.logFormat}=json)`
+      : 'logs: text',
+  )
+  lines.push(
+    config.tracing === 'off'
+      ? 'tracing: off'
+      : `tracing: Cloud Trace (${ENV_VARS.traceSampleRate}=${config.traceSampleRate})`,
+  )
   if (config.trustedProxyHops > 0) {
     // Only when it is on: an operating deployment wants to see that the forwarding chain is
     // read, and where in it the client sits (#151).
@@ -451,6 +514,35 @@ function readInteger(
     const range =
       bounds.max === undefined ? `at least ${bounds.min}` : `${bounds.min}..${bounds.max}`
     throw new Error(`${name} must be an integer ${range}, got ${JSON.stringify(value)}`)
+  }
+  return parsed
+}
+
+/**
+ * A variable's value as a number that need not be an integer, or `fallback` when it is unset.
+ *
+ * For a fraction like `OPENHARNESS_TRACE_SAMPLE_RATE`, where `0.1` is the value and
+ * {@link readInteger} would refuse it.
+ */
+function readNumber(
+  env: NodeJS.ProcessEnv,
+  name: string,
+  fallback: number,
+  bounds: { readonly min: number; readonly max?: number },
+): number {
+  const value = readString(env, name)
+  if (value === undefined) {
+    return fallback
+  }
+  const parsed = Number(value)
+  if (
+    !Number.isFinite(parsed) ||
+    parsed < bounds.min ||
+    (bounds.max !== undefined && parsed > bounds.max)
+  ) {
+    const range =
+      bounds.max === undefined ? `at least ${bounds.min}` : `${bounds.min}..${bounds.max}`
+    throw new Error(`${name} must be a number ${range}, got ${JSON.stringify(value)}`)
   }
   return parsed
 }

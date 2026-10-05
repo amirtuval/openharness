@@ -83,6 +83,9 @@ Terraform passes, per environment:
 | `OPENHARNESS_KEY_PROVIDER`       | `gcp-kms` — Cloud KMS wraps the vault's keys (#150)              |
 | `OPENHARNESS_KMS_KEY`            | the `cryptoKeys/…` resource name (a resource name, not a secret) |
 | `OPENHARNESS_DEV_LOGIN`          | `0`                                                              |
+| `OPENHARNESS_LOG_FORMAT`         | `json` — Cloud Logging reads the server's stdout as JSON (#158)  |
+| `OPENHARNESS_TRACING`            | `cloud-trace` — spans go to Cloud Trace (#158)                   |
+| `OPENHARNESS_TRACE_SAMPLE_RATE`  | `0.1` — the fraction of traces kept (#158)                       |
 | a provider's `*_CLIENT_ID`       | only when that provider is set for the environment               |
 
 The chart also sets `PORT=3000`, `TMPDIR=/tmp` and `HOME=/tmp` itself: the container's port,

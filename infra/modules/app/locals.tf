@@ -27,6 +27,13 @@ locals {
       OPENHARNESS_KEY_PROVIDER       = "gcp-kms"
       OPENHARNESS_KMS_KEY            = var.kms_key_id
       OPENHARNESS_DEV_LOGIN          = "0"
+      # Observability (#158): Cloud Logging reads these lines as JSON, and spans go
+      # to Cloud Trace at the configured sample rate. The exporter and the SDK are
+      # loaded lazily by the server, so these two strings are the whole cost of
+      # turning observability on — the chart needs nothing new beyond `env`.
+      OPENHARNESS_LOG_FORMAT        = "json"
+      OPENHARNESS_TRACING           = "cloud-trace"
+      OPENHARNESS_TRACE_SAMPLE_RATE = tostring(var.trace_sample_rate)
     },
     var.google_client_id != "" ? { GOOGLE_CLIENT_ID = var.google_client_id } : {},
     var.github_client_id != "" ? { GITHUB_CLIENT_ID = var.github_client_id } : {},

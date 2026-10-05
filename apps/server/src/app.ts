@@ -18,6 +18,8 @@ import { FORWARDED_FOR_HEADER, resolveClientIp, withClientIpHeader } from './cli
 import { emptyRegistry, type ModelRegistry } from './catalog/registry'
 import { DefaultModelPicker } from './default-model'
 import { createSessionRevocations } from './session-watch'
+import { parseTraceContext, runWithTraceContext } from './observability/trace-context'
+import { noopTracer, type Tracer } from './observability/tracing'
 import { errorResponse, httpErrorResponse, HttpError } from './http/errors'
 import { registerAgentRoutes } from './routes/agents'
 import { registerAiSdkRoutes } from './routes/ai-sdk'
@@ -136,6 +138,13 @@ export interface AppOptions {
    * defaults to {@link DEFAULT_SESSION_RECHECK_MS}. Tests shorten it.
    */
   readonly sessionRecheckMs?: number
+  /**
+   * Where spans go (issue #158): {@link initTracing}'s Cloud Trace tracer in a deployment,
+   * {@link noopTracer} (the default) everywhere else. The app opens one server span per
+   * request, continuing the trace the load balancer's headers name when it sent one, and
+   * every JSON log line written while the request is served is tagged with that trace.
+   */
+  readonly tracer?: Tracer
   /** Where the app logs unexpected failures; defaults to the console. */
   readonly logger?: Logger
 }
@@ -223,6 +232,45 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
   const app = new Hono<AppEnv>()
   const trustedProxyHops = options.trustedProxyHops ?? 0
   const readiness = options.readiness ?? alwaysReady
+  const tracer = options.tracer ?? noopTracer
+
+  // The trace a request belongs to (#158), outermost so the span covers everything below it.
+  // The context is the load balancer's `traceparent` / `X-Cloud-Trace-Context` when it sent
+  // one — continued, when tracing is on, by the server span opened here — and it is put in an
+  // `AsyncLocalStorage` for the whole request, so every JSON log line written while the
+  // request is served carries the trace and span ids that join it to that trace. With tracing
+  // off there is no span, but the header's ids still reach the logs: a client's trace is not
+  // this server's to drop.
+  app.use('*', async (c, next) => {
+    const incoming = parseTraceContext(c.req.raw.headers)
+    const span = tracer.enabled
+      ? tracer.startSpan(`HTTP ${c.req.method}`, {
+          kind: 'server',
+          parent: incoming,
+          attributes: {
+            'http.request.method': c.req.method,
+            'url.path': c.req.path,
+          },
+        })
+      : null
+    const context = span ?? incoming
+    const serve = async (): Promise<void> => {
+      try {
+        await next()
+      } finally {
+        if (span !== null) {
+          span.setAttribute('http.response.status_code', c.res.status)
+          span.setStatus(c.res.status < 500)
+          span.end()
+        }
+      }
+    }
+    if (context === null) {
+      await serve()
+      return
+    }
+    await runWithTraceContext(context, serve)
+  })
 
   // The request id is minted first and attached last, so it is on every response — including
   // the ones a route streamed, and the ones an error handler built.
@@ -370,8 +418,16 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
       return errorResponse(c, 'invalid_request_error', error.message)
     }
     // Everything else is this server's problem, and the client is told nothing about it: an
-    // unchecked error is where a stack trace or a query string would leak out.
-    logger.error('unhandled error', error)
+    // unchecked error is where a stack trace or a query string would leak out. The line keeps
+    // the request's own coordinates (#158) so a failure is findable in Cloud Logging by path
+    // and status, and joined to the trace it happened in.
+    logger.error('unhandled error', {
+      error,
+      method: c.req.method,
+      path: c.req.path,
+      status: 500,
+      request_id: c.get('requestId'),
+    })
     return errorResponse(c, 'api_error', 'an unexpected error occurred')
   })
 

@@ -19,6 +19,7 @@ infra/
     kms/               # key ring + key for the vault, encrypter/decrypter for the app SA
     dns/               # zone, A records, staging delegation
     app/               # global static IP, Workload Identity binding, app project roles, helm_release
+    monitoring/        # uptime check + alert policies + email channel (#158, optional alerts)
     budget/            # billing budget with 50/90/100% alerts (optional)
   envs/
     staging/           # project openharness-dev, backend gs://openharness-dev-tfstate
@@ -166,26 +167,28 @@ Every environment input, its default, and where a non-default value comes from. 
 
 ### Both environments
 
-| Variable                            | Default                                                         | Where the value comes from                                                    |
-| ----------------------------------- | --------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| `project_id`                        | `openharness-dev` / `openharness-510710`                        | The project's **ID**; staging and production differ. Never the display name.  |
-| `region`                            | `us-central1`                                                   | Fixed by the epic.                                                            |
-| `image_repository`                  | `us-central1-docker.pkg.dev/openharness-dev/openharness/server` | The registry in `openharness-dev`; production pulls from it.                  |
-| `image_tag`                         | _(none — required)_                                             | `-var image_tag=<git sha>`, passed by the deploy workflow (#155).             |
-| `host`                              | `staging.oharness.dev` / `app.oharness.dev`                     | The environment's public hostname.                                            |
-| `app_service_account_id`            | `openharness-app`                                               | Account ID of the app's GCP service account.                                  |
-| `google_client_id`                  | `""`                                                            | Set to offer Google sign-in; also creates `google-client-secret`.             |
-| `github_client_id`                  | `""`                                                            | Set to offer GitHub sign-in; also creates `github-client-secret`.             |
-| `microsoft_client_id`               | `""`                                                            | Set to offer Microsoft sign-in; also creates `microsoft-client-secret`.       |
-| `microsoft_tenant_id`               | `""`                                                            | Passed to the app only when non-empty.                                        |
-| `db_tier`                           | `db-g1-small` / `db-custom-1-3840`                              | Cloud SQL tier: shared-core in staging, a small dedicated tier in production. |
-| `db_availability_type`              | `ZONAL` / `REGIONAL`                                            | HA in production only.                                                        |
-| `db_backup_enabled`                 | `false` / `true`                                                | Automated backups.                                                            |
-| `db_point_in_time_recovery_enabled` | `false` / `true`                                                | Point-in-time recovery.                                                       |
-| `deletion_protection`               | `false` / `true`                                                | Blocks destroy of the cluster, the database and the secrets.                  |
-| `enable_budget`                     | `false`                                                         | Turn on after the billing grant above.                                        |
-| `billing_account_id`                | `""`                                                            | `gcloud billing accounts list`; only used when `enable_budget` is true.       |
-| `budget_amount`                     | `100`                                                           | Monthly budget in USD.                                                        |
+| Variable                            | Default                                                         | Where the value comes from                                                                  |
+| ----------------------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `project_id`                        | `openharness-dev` / `openharness-510710`                        | The project's **ID**; staging and production differ. Never the display name.                |
+| `region`                            | `us-central1`                                                   | Fixed by the epic.                                                                          |
+| `image_repository`                  | `us-central1-docker.pkg.dev/openharness-dev/openharness/server` | The registry in `openharness-dev`; production pulls from it.                                |
+| `image_tag`                         | _(none — required)_                                             | `-var image_tag=<git sha>`, passed by the deploy workflow (#155).                           |
+| `host`                              | `staging.oharness.dev` / `app.oharness.dev`                     | The environment's public hostname.                                                          |
+| `app_service_account_id`            | `openharness-app`                                               | Account ID of the app's GCP service account.                                                |
+| `google_client_id`                  | `""`                                                            | Set to offer Google sign-in; also creates `google-client-secret`.                           |
+| `github_client_id`                  | `""`                                                            | Set to offer GitHub sign-in; also creates `github-client-secret`.                           |
+| `microsoft_client_id`               | `""`                                                            | Set to offer Microsoft sign-in; also creates `microsoft-client-secret`.                     |
+| `microsoft_tenant_id`               | `""`                                                            | Passed to the app only when non-empty.                                                      |
+| `db_tier`                           | `db-g1-small` / `db-custom-1-3840`                              | Cloud SQL tier: shared-core in staging, a small dedicated tier in production.               |
+| `db_availability_type`              | `ZONAL` / `REGIONAL`                                            | HA in production only.                                                                      |
+| `db_backup_enabled`                 | `false` / `true`                                                | Automated backups.                                                                          |
+| `db_point_in_time_recovery_enabled` | `false` / `true`                                                | Point-in-time recovery.                                                                     |
+| `deletion_protection`               | `false` / `true`                                                | Blocks destroy of the cluster, the database and the secrets.                                |
+| `trace_sample_rate`                 | `0.1`                                                           | `OPENHARNESS_TRACE_SAMPLE_RATE` (#158): fraction of traces sent to Cloud Trace.             |
+| `alert_email`                       | `""`                                                            | Address the monitoring alerts go to (#158). Empty creates no channel and no alert policies. |
+| `enable_budget`                     | `false`                                                         | Turn on after the billing grant above.                                                      |
+| `billing_account_id`                | `""`                                                            | `gcloud billing accounts list`; only used when `enable_budget` is true.                     |
+| `budget_amount`                     | `100`                                                           | Monthly budget in USD.                                                                      |
 
 ### Staging only
 
@@ -236,6 +239,10 @@ env:
   OPENHARNESS_KEY_PROVIDER: gcp-kms
   OPENHARNESS_KMS_KEY: projects/<p>/locations/us-central1/keyRings/openharness/cryptoKeys/credentials
   OPENHARNESS_DEV_LOGIN: '0'
+  # observability (#158): JSON logs, Cloud Trace at the configured sample rate
+  OPENHARNESS_LOG_FORMAT: json
+  OPENHARNESS_TRACING: cloud-trace
+  OPENHARNESS_TRACE_SAMPLE_RATE: '0.1'
   # plus GOOGLE_CLIENT_ID, GITHUB_CLIENT_ID, MICROSOFT_CLIENT_ID and
   # MICROSOFT_TENANT_ID, each only when its variable is non-empty
 secrets:
@@ -301,6 +308,7 @@ Nothing needed a new role for the apply itself; the one role added in this PR is
 | `google_project_iam_member` (the app SA's three project roles)                                                   | `roles/resourcemanager.projectIamAdmin`, **conditionally** — see below             |
 | `google_artifact_registry_repository` and its IAM (staging only)                                                 | `roles/artifactregistry.admin` (staging only)                                      |
 | Reading/writing the state and taking the lock                                                                    | `roles/storage.objectAdmin` on the state bucket                                    |
+| `google_monitoring_uptime_check_config`, `_alert_policy`, `_notification_channel` (monitoring module)            | `roles/monitoring.editor` (already held — no new grant)                            |
 | `google_billing_budget` (budget module)                                                                          | none on the project — `roles/billing.costsManager` on the billing account, by hand |
 
 ### What Terraform grants, and to whom

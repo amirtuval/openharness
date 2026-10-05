@@ -186,6 +186,10 @@ module "app" {
   microsoft_client_id = var.microsoft_client_id
   microsoft_tenant_id = var.microsoft_tenant_id
 
+  # #158: how much of the traffic is traced. The app module turns Cloud Trace on
+  # and passes this as OPENHARNESS_TRACE_SAMPLE_RATE.
+  trace_sample_rate = var.trace_sample_rate
+
   # The cluster, the database and the secrets must all exist before the release
   # rolls out: the pods read the secrets and the database at start-up.
   depends_on = [
@@ -195,6 +199,21 @@ module "app" {
     module.network,
     module.secrets,
   ]
+}
+
+# Monitoring (#158): the uptime check on https://<host>/health, and — once
+# `alert_email` is set — the email channel and the alert policies over it,
+# Cloud SQL and the deployment's containers. Empty `alert_email` (the default)
+# creates neither a channel nor a policy, so the first apply needs no address.
+module "monitoring" {
+  source = "../../modules/monitoring"
+
+  project_id  = var.project_id
+  host        = var.host
+  alert_email = var.alert_email
+  name_prefix = "openharness ${local.environment}"
+
+  depends_on = [google_project_service.services]
 }
 
 module "dns" {
