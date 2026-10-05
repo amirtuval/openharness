@@ -18,8 +18,12 @@ Federation — there are no service-account keys.
 
 ## One-time setup
 
-`.github/setup/workload-identity.sh`, run once per project by the maintainer with their own
-gcloud credentials, creates the Workload Identity pool, the `deploy` and `plan` service
-accounts, the Terraform state bucket and the GitHub environments and variables. Everything
-else — Artifact Registry, GKE, Cloud SQL, Secret Manager — is Terraform. Prerequisites,
-usage, role choices and how to undo it: [`.github/setup/README.md`](../.github/setup/README.md).
+`.github/setup/workload-identity.sh`, run per project by the maintainer with their own
+gcloud credentials, creates the Workload Identity pool, the OIDC provider, the `deploy` and
+`plan` service accounts, the Terraform state bucket and the GitHub environments and
+variables. It converges on re-run: what it owns is declared in lists at the top of the
+script, so after an edit a re-run creates what is missing, updates what exists, and
+`--prune` removes bindings the lists no longer declare. Everything else — Artifact
+Registry, GKE, Cloud SQL, Secret Manager — is Terraform. Prerequisites, usage, role
+choices, how to run the test and how to undo it:
+[`.github/setup/README.md`](../.github/setup/README.md).
