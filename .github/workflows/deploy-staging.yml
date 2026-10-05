@@ -251,4 +251,4 @@ jobs:
         working-directory: infra/envs/staging
         run: |
           set -euo pipefail
-          "$GITHUB_WORKSPACE/.github/scripts/smoke-test.sh" "$(terraform output -raw url)"
+          "$GITHUB_WORKSPACE/.github/scripts/smoke-test.sh" "$(terraform output -no-color -raw url)"

@@ -175,6 +175,11 @@ jobs:
       # was applied), so a state that has ever been applied carries it. An environment with
       # no state is skipped — a plan of an empty project cannot render the helm_release
       # anyway, because the cluster endpoint it needs does not exist yet.
+      #
+      # `-json` and not `-raw`: on an empty state `terraform output -raw image_tag` prints a
+      # "Warning: No outputs found" block **to stdout** and still exits 0, so the value read
+      # that way is the warning, not a tag. `-json` prints `{}` — valid JSON, empty here —
+      # and jq turns "no such output" into an empty string either way.
       - name: Read the deployed image tag from remote state
         id: state
         working-directory: infra/envs/${{ matrix.environment }}
@@ -182,9 +187,13 @@ jobs:
           ENVIRONMENT: ${{ matrix.environment }}
         run: |
           set -euo pipefail
-          if tag="$(terraform output -raw image_tag 2>/dev/null)" && [[ -n "$tag" ]]; then
+          outputs="$(terraform output -no-color -json)"
+          tag="$(printf '%s' "$outputs" | jq -r '.image_tag.value? // empty')"
+
+          if [[ -n "$tag" ]]; then
             echo "have_state=true" >> "$GITHUB_OUTPUT"
             echo "tag=$tag" >> "$GITHUB_OUTPUT"
+            echo "::notice::$ENVIRONMENT is deployed as $tag — planning against it."
             exit 0
           fi
 
