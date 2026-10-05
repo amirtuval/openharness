@@ -101,7 +101,7 @@ Per project, in `us-central1` except where noted:
 | Workload Identity  | pool `github` (global)                                                                                                                                                                                                                                 |
 | OIDC provider      | `github`, issuer `https://token.actions.githubusercontent.com`, attribute condition `assertion.repository == 'amirtuval/openharness'`; the mapping exposes `attribute.repository`, `attribute.environment`, `attribute.ref` and `attribute.event_name` |
 | Service account    | `deploy@<project>` — Terraform apply, the least-privilege role list of [Deploy roles](#deploy-roles-least-privilege)                                                                                                                                   |
-| Service account    | `tf-plan@<project>` — `terraform plan` on PRs, `roles/viewer` + `roles/iam.securityReviewer`, and `roles/storage.objectAdmin` on the state bucket only                                                                                                 |
+| Service account    | `tf-plan@<project>` — `terraform plan` on PRs, `roles/viewer` + `roles/iam.securityReviewer` + `roles/secretmanager.secretAccessor`, and `roles/storage.objectAdmin` on the state bucket only                                                          |
 | Terraform state    | bucket `gs://<project>-tfstate` with versioning, uniform bucket-level access and public access prevention                                                                                                                                              |
 | GitHub environment | `staging` or `production`, with the variables below                                                                                                                                                                                                    |
 
@@ -223,17 +223,24 @@ script.
 
 ## The plan account, and its risk
 
-**`plan` gets `roles/viewer`, `roles/iam.securityReviewer` and `roles/storage.objectAdmin` on
-the state bucket only.** Viewer reads the project; securityReviewer adds read-only IAM policy
-reads, which a plan that refreshes IAM resources needs and Viewer alone does not give.
-objectAdmin on the one bucket is what the Terraform lock needs (create/delete of `.tflock`).
+**`plan` gets `roles/viewer`, `roles/iam.securityReviewer`,
+`roles/secretmanager.secretAccessor` and `roles/storage.objectAdmin` on the state bucket
+only.** Viewer reads the project; securityReviewer adds read-only IAM policy reads, which a
+plan that refreshes IAM resources needs and Viewer alone does not give; secretAccessor adds
+`secretmanager.versions.access`, reading a secret's payload, which a plan needs to refresh a
+`google_secret_manager_secret_version` (#153) and which neither of the other two carries —
+Viewer deliberately stops at the secret's metadata. objectAdmin on the one bucket is what the
+Terraform lock needs (create/delete of `.tflock`).
 
 **The plan binding's risk.** `attribute.event_name/pull_request` matches any `pull_request`
 run of this repository. That includes a PR from a fork, whose workflow can request an OIDC
 token issued in this repository's name — so a fork PR can impersonate `plan`. The account is
 read-only apart from the state bucket, where it can read state (which holds the generated
 secrets, D5) and write or delete state objects; bucket versioning keeps every earlier
-version, so tampering is recoverable rather than lost. If that exposure is not acceptable,
+version, so tampering is recoverable rather than lost. Its secretAccessor role reads secret
+payloads directly (#153), which is the same secret material the state file already holds, so
+it widens what the account can reach only in how, not in what. If that exposure is not
+acceptable,
 `terraform-pr.yml` (#155) can gate plans to same-repository PRs. The alternative — a
 repository-scoped `attribute.repository/amirtuval/openharness` binding — would accept every
 event of this repository, pushes included, so `event_name` is the tighter of the two.
