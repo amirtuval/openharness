@@ -1,0 +1,44 @@
+# The application: a reserved global static IP, the app identity's Workload
+# Identity binding and its project roles, and the helm_release of the chart
+# (issue #153, epic #148 D1/D2/D4).
+
+# The address the Ingress claims by name
+# (kubernetes.io/ingress.global-static-ip-name). Reserved here, so the chart
+# never races the load balancer for an ephemeral address.
+resource "google_compute_global_address" "static_ip" {
+  project      = var.project_id
+  name         = local.static_ip_name
+  address_type = "EXTERNAL"
+  description  = "openharness ${var.release_name} ingress address"
+}
+
+# Workload Identity: the Kubernetes service account the chart creates may
+# impersonate the app GCP service account.
+resource "google_service_account_iam_member" "workload_identity" {
+  service_account_id = "projects/${var.project_id}/serviceAccounts/${var.app_service_account_email}"
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "serviceAccount:${var.project_id}.svc.id.goog[${var.namespace}/${var.kubernetes_service_account}]"
+}
+
+# The app's project-level roles — traces, logs, metrics, and nothing more. All
+# three are in the setup script's DEPLOY_GRANTABLE_PROJECT_ROLES, which is what
+# deploy@ may hand out at project level.
+resource "google_project_iam_member" "app" {
+  for_each = toset(var.project_roles)
+
+  project = var.project_id
+  role    = each.value
+  member  = "serviceAccount:${var.app_service_account_email}"
+}
+
+resource "helm_release" "app" {
+  name             = var.release_name
+  namespace        = var.namespace
+  create_namespace = true
+  chart            = local.chart_path
+  timeout          = var.helm_timeout
+
+  # env and secrets go in as one YAML document, not as `set` entries: `secrets`
+  # is a list of objects, which `set` cannot express.
+  values = [yamlencode(local.values)]
+}

@@ -26,6 +26,14 @@ e2e/test-results/
 .env.*
 !.env.example
 
+# terraform: provider binaries, state and crash logs. The .terraform.lock.hcl files
+# under infra/ are committed on purpose — they pin the provider hashes.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+.terraform.tfstate.lock.info
+
 # misc
 .DS_Store
 *.log
