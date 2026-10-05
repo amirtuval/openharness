@@ -53,6 +53,7 @@ export type CliCommand =
   | { readonly kind: 'login'; readonly options: LoginOptions }
   | { readonly kind: 'logout'; readonly options: GlobalOptions }
   | { readonly kind: 'whoami'; readonly options: GlobalOptions }
+  | { readonly kind: 'update'; readonly options: GlobalOptions }
   | { readonly kind: 'version' }
   | { readonly kind: 'help' }
 
@@ -67,7 +68,15 @@ export type ParseOutcome =
   | { readonly ok: false; readonly error: string }
 
 /** The commands that are words rather than flags, e.g. `oh sessions`. */
-const SUBCOMMANDS = ['sessions', 'agents', 'default-model', 'login', 'logout', 'whoami'] as const
+const SUBCOMMANDS = [
+  'sessions',
+  'agents',
+  'default-model',
+  'login',
+  'logout',
+  'whoami',
+  'update',
+] as const
 
 type Subcommand = (typeof SUBCOMMANDS)[number]
 
@@ -79,6 +88,7 @@ const SUBCOMMAND_BLURBS: Record<Subcommand, string> = {
   login: 'it signs you in through the browser',
   logout: 'it ends the session and forgets the token',
   whoami: 'it prints the signed-in user',
+  update: 'it installs the newest published version',
 }
 
 const OPTIONS = {

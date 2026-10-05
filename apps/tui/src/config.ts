@@ -15,6 +15,12 @@ export type ConfigSource = 'flag' | 'env' | 'file' | 'default' | 'unset'
 export interface ResolvedConfig {
   /** Server root, without a trailing slash. */
   readonly server: string
+  /**
+   * Whether `oh` may update itself in the background (#157, D10). Default true; the config
+   * file's `autoUpdate: false` is the setting-shaped off switch (the environment's
+   * `OH_NO_AUTO_UPDATE`, and `CI`, are the other two).
+   */
+  readonly autoUpdate: boolean
   /** Which source the server URL came from, for `--debug`. */
   readonly sources: {
     readonly server: ConfigSource
@@ -85,6 +91,7 @@ export function resolveConfig(inputs: ConfigInputs = {}): ConfigOutcome {
     ok: true,
     config: {
       server: normalized.value,
+      autoUpdate: file.value.autoUpdate ?? true,
       sources: { server: server.source },
     },
   }
@@ -93,9 +100,10 @@ export function resolveConfig(inputs: ConfigInputs = {}): ConfigOutcome {
 /** The settings the config file may hold. */
 interface FileConfig {
   readonly server?: string | undefined
+  readonly autoUpdate?: boolean | undefined
 }
 
-const FILE_KEYS = ['server'] as const
+const FILE_KEYS = ['server', 'autoUpdate'] as const
 
 type ReadResult =
   { readonly ok: true; readonly value: FileConfig } | { readonly ok: false; readonly error: string }
@@ -150,17 +158,25 @@ function readConfigFile(path: string, read: (path: string) => string | undefined
     }
   }
 
-  const value: { server?: string } = {}
-  for (const key of FILE_KEYS) {
-    const entry = record[key]
-    if (entry === undefined) continue
-    if (typeof entry !== 'string') {
-      return { ok: false, error: `${path}: '${key}' must be a string.` }
+  const value: { server?: string; autoUpdate?: boolean } = {}
+
+  const server = record['server']
+  if (server !== undefined) {
+    if (typeof server !== 'string') {
+      return { ok: false, error: `${path}: 'server' must be a string.` }
     }
-    if (entry.trim() === '') {
-      return { ok: false, error: `${path}: '${key}' is empty.` }
+    if (server.trim() === '') {
+      return { ok: false, error: `${path}: 'server' is empty.` }
     }
-    value[key] = entry.trim()
+    value.server = server.trim()
+  }
+
+  const autoUpdate = record['autoUpdate']
+  if (autoUpdate !== undefined) {
+    if (typeof autoUpdate !== 'boolean') {
+      return { ok: false, error: `${path}: 'autoUpdate' must be true or false.` }
+    }
+    value.autoUpdate = autoUpdate
   }
 
   return { ok: true, value }

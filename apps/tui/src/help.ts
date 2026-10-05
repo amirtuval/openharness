@@ -12,6 +12,7 @@ Usage:
   oh login                     sign in through the browser (the device flow)
   oh logout                    end the session and forget the token
   oh whoami                    print the signed-in user
+  oh update                    install the newest published version now
   oh --version | -v            print the version
   oh --help | -h               print this message
 
@@ -28,10 +29,18 @@ Options:
 
 Environment:
   OPENHARNESS_URL              server root, if --server is not given
+  OH_NO_AUTO_UPDATE            set it to stop the background self-update
 
 Config:
   ~/.config/openharness/config.json (or $XDG_CONFIG_HOME/openharness/config.json):
-    { "server": "http://localhost:3000" }
+    { "server": "http://localhost:3000", "autoUpdate": true }
+
+Updating:
+  Installed with \`npm i -g openharness\`, oh keeps itself current: at most once an
+  hour a background check asks npm for the published version and, when it is newer,
+  installs it for the next run. It is off in CI, with OH_NO_AUTO_UPDATE set, and with
+  autoUpdate false in the config. The next run prints one line about it. \`oh update\`
+  does the same thing in the foreground, with npm's own progress.
 
 Signing in:
   oh login runs the device flow: it prints the sign-in URL and a code, opens the

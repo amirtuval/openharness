@@ -161,6 +161,31 @@ describe('resolveConfig', () => {
     expect(errorOf({ env: {}, readFile: () => '{"server": "  "}' })).toContain("'server' is empty")
   })
 
+  it('turns the auto-update on unless the file says otherwise (#157)', () => {
+    expect(configOf({ env: {}, readFile: () => undefined }).autoUpdate).toBe(true)
+    expect(withFile('{"autoUpdate": true}')).toMatchObject({
+      ok: true,
+      config: { autoUpdate: true },
+    })
+    expect(withFile('{"autoUpdate": false}')).toMatchObject({
+      ok: true,
+      config: { autoUpdate: false },
+    })
+  })
+
+  it('reads autoUpdate beside a server', () => {
+    expect(
+      configOf({ env: {}, readFile: () => '{"server": "http://x.test", "autoUpdate": false}' }),
+    ).toMatchObject({ server: 'http://x.test', autoUpdate: false })
+  })
+
+  it('rejects an autoUpdate that is not a boolean', () => {
+    expect(errorOf({ env: {}, readFile: () => '{"autoUpdate": "no"}' })).toContain(
+      "'autoUpdate' must be true or false",
+    )
+    expect(errorOf({ env: {}, readFile: () => '{"autoUpdate": 1}' })).toContain("'autoUpdate'")
+  })
+
   it('reports a config file it cannot read', () => {
     const error = errorOf({
       env: {},
