@@ -312,6 +312,12 @@ service_account_resource() {
       cat "$file"
       ;;
     create)
+      # The real API's rule for account IDs: 6-30 characters, a lowercase letter first,
+      # then lowercase letters, digits or hyphens, not ending in a hyphen.
+      if [[ ! "$(last_positional)" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]$ ]]; then
+        printf 'ERROR: (gcloud.iam.service-accounts.create) INVALID_ARGUMENT: The account ID "%s" does not have a length between 6 and 30.\n' "$(last_positional)" >&2
+        exit 1
+      fi
       if [[ -f "$file" ]]; then already_exists "service account [$email]"; fi
       mkdir -p "$(dirname "$file")"
       write_sa "$file"

@@ -69,7 +69,7 @@ DEPLOY_PROJECT_ROLES_NARROW=(
   roles/logging.admin
 )
 
-# Project roles for the plan account (plan@). Viewer reads most of the project;
+# Project roles for the plan account (tf-plan@). Viewer reads most of the project;
 # securityReviewer adds read-only IAM policy reads, which a plan that refreshes IAM
 # resources needs. Both are read-only.
 PLAN_PROJECT_ROLES=(
@@ -187,8 +187,11 @@ case "$ENVIRONMENT" in
   production) PROJECT_ID="openharness" ;;
 esac
 
-SA_DEPLOY="deploy@${PROJECT_ID}.iam.gserviceaccount.com"
-SA_PLAN="plan@${PROJECT_ID}.iam.gserviceaccount.com"
+# Service account IDs must be 6-30 characters ([a-z][a-z0-9-]{4,28}[a-z0-9]).
+SA_DEPLOY_ID="deploy"
+SA_PLAN_ID="tf-plan"
+SA_DEPLOY="${SA_DEPLOY_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
+SA_PLAN="${SA_PLAN_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
 STATE_BUCKET="${PROJECT_ID}-tfstate"
 ENV_SUFFIX="$(printf '%s' "$ENVIRONMENT" | tr '[:lower:]' '[:upper:]')"
 
@@ -292,7 +295,7 @@ check_prerequisites() {
 # Pruning (--prune, issue #161).
 #
 # The default run is additive. --prune additionally removes what the two managed
-# service accounts of this project (deploy@ and plan@, and nothing else) must
+# service accounts of this project (deploy@ and tf-plan@, and nothing else) must
 # not hold:
 #   * their project-level roles that are not in the active lists at the top;
 #   * their roles on the state bucket that are not declared (deploy@ is declared
@@ -497,7 +500,7 @@ main() {
 
   section "Service accounts"
   if is_missing gcloud iam service-accounts describe "$SA_DEPLOY" --project="$PROJECT_ID"; then
-    run gcloud iam service-accounts create deploy \
+    run gcloud iam service-accounts create "$SA_DEPLOY_ID" \
       --project="$PROJECT_ID" \
       --display-name="$SA_DEPLOY_DISPLAY" \
       --description="$SA_DEPLOY_DESCRIPTION"
@@ -508,7 +511,7 @@ main() {
       --description="$SA_DEPLOY_DESCRIPTION"
   fi
   if is_missing gcloud iam service-accounts describe "$SA_PLAN" --project="$PROJECT_ID"; then
-    run gcloud iam service-accounts create plan \
+    run gcloud iam service-accounts create "$SA_PLAN_ID" \
       --project="$PROJECT_ID" \
       --display-name="$SA_PLAN_DISPLAY" \
       --description="$SA_PLAN_DESCRIPTION"
