@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { hostname } from 'node:os'
 
 import { DEFAULT_PARTITION_COUNT } from '@openharness/protocol'
@@ -47,6 +48,7 @@ import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
  * | `OPENHARNESS_SWEEP_MS`              | how often owned partitions are re-scanned; `60000` by default    |
  * | `OPENHARNESS_DELTA_RETENTION_MS`    | how long superseded chunks are kept before compaction deletes them; `3600000` |
  * | `OPENHARNESS_COMPACT_INTERVAL_MS`   | how often compaction runs; `300000` by default, `0` disables it  |
+ * | `<NAME>_FILE`                       | a file holding a secret's value, for any secret above (#154)      |
  *
  * There are **no provider credentials in the environment** any more (epic #65, A5): every
  * model request is made with the session owner's own stored key, and `OPENAI_API_KEY` and
@@ -56,6 +58,13 @@ import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
  * pair, or `OPENHARNESS_DEV_LOGIN=1` on a localhost URL. A provider is enabled only when both
  * of its variables are set; setting both empty (i.e. unset) hides its button. A server with
  * neither is a boot failure — see {@link readServerConfig}.
+ *
+ * Every **secret** among these — `DATABASE_URL`, `BETTER_AUTH_SECRET`,
+ * `OPENHARNESS_SECRETS_KEY`, and each provider's `*_CLIENT_SECRET` — can instead be delivered
+ * as a file, by setting `<NAME>_FILE` to the path that holds the value (see
+ * {@link readSecret}). That is how the chart mounts them from Secret Manager, so a container
+ * never carries a secret inline in its environment. `OPENHARNESS_KMS_KEY` is a resource name,
+ * not a secret, and stays inline.
  */
 
 /** The environment variable names this package reads. */
@@ -222,7 +231,7 @@ export function defaultInstanceId(): string {
  *   and dev login is off
  */
 export function readServerConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
-  const databaseUrl = readString(env, ENV_VARS.databaseUrl)
+  const databaseUrl = readSecret(env, ENV_VARS.databaseUrl)
   const scheduler = readChoice(env, ENV_VARS.scheduler, ['local', 'postgres'], DEFAULT_SCHEDULER)
   if (scheduler === 'postgres' && databaseUrl === undefined) {
     // Partition leases live in the store, and only the Postgres store has a table to put them
@@ -242,7 +251,7 @@ export function readServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
         `${ENV_VARS.leaseTtlMs} (${leaseTtlMs})`,
     )
   }
-  const betterAuthSecret = requireString(env, ENV_VARS.betterAuthSecret)
+  const betterAuthSecret = requireSecret(env, ENV_VARS.betterAuthSecret)
   const betterAuthUrl = requireString(env, ENV_VARS.betterAuthUrl)
   // The vault's key provider (#150, D6), and the one variable that provider needs. Each is
   // checked here, at boot, with the vault's own validation — so a bad key fails immediately
@@ -261,7 +270,7 @@ export function readServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
     kmsKey = requireString(env, ENV_VARS.kmsKey)
     gcpKmsKeyProvider({ key: kmsKey })
   } else {
-    secretsKey = requireString(env, ENV_VARS.secretsKey)
+    secretsKey = requireSecret(env, ENV_VARS.secretsKey)
     envKeyProvider(secretsKey)
   }
   const devLogin = readFlag(env, ENV_VARS.devLogin)
@@ -487,16 +496,80 @@ function readProvider(
   clientSecretVar: string,
 ): ProviderCredentialsConfig | undefined {
   const clientId = readString(env, clientIdVar)
-  const clientSecret = readString(env, clientSecretVar)
+  const clientSecret = readSecret(env, clientSecretVar)
   if (clientId === undefined && clientSecret === undefined) {
     return undefined
   }
   if (clientId === undefined || clientSecret === undefined) {
     throw new Error(
-      `set both ${clientIdVar} and ${clientSecretVar} to enable the provider, or neither`,
+      `set both ${clientIdVar} and ${clientSecretVar} (or ${clientSecretVar}_FILE) to enable ` +
+        'the provider, or neither',
     )
   }
   return { clientId, clientSecret }
+}
+
+/**
+ * A secret setting, from the variable itself or from a file `<NAME>_FILE` names.
+ *
+ * A deployment that mounts its secrets from a manager (the chart, from Secret Manager) has the
+ * value as a file, not as an environment variable: the container is given
+ * `DATABASE_URL_FILE=/var/run/secrets/openharness/database-url`, and this reads it. The file's
+ * value is the secret with **one** trailing newline removed, so a `printf '…'`/`echo '…'`
+ * writing difference is not a difference in the secret.
+ *
+ * Setting both `<NAME>` and `<NAME>_FILE` is a boot failure: the two could disagree, and there
+ * is no reason to guess which one is meant. A file that cannot be read is one too, naming the
+ * variable and the path — never the content, which a failed read never produced and which this
+ * message is not allowed to leak.
+ *
+ * {@link readString}'s rule holds: a variable set but empty counts as unset, and so does a
+ * file whose only content is whitespace — an empty secret is a deployment mistake, not a
+ * secret of zero bytes.
+ */
+export function readSecret(env: NodeJS.ProcessEnv, name: string): string | undefined {
+  const fileVar = secretFileVar(name)
+  const filePath = readString(env, fileVar)
+  const inline = readString(env, name)
+  if (filePath !== undefined && inline !== undefined) {
+    throw new Error(
+      `set either ${name} or ${fileVar}, not both: they would disagree about the same secret`,
+    )
+  }
+  if (filePath === undefined) {
+    return inline
+  }
+  let contents: string
+  try {
+    contents = readFileSync(filePath, 'utf8')
+  } catch (error) {
+    // Only the OS error code (ENOENT, EACCES, EISDIR…): the path is what the operator has to
+    // fix, and the driver's message is about the path, not the secret. The cause is kept for a
+    // log that wants the stack, and it carries no content either — a failed read yields none.
+    const code = (error as NodeJS.ErrnoException).code ?? 'unknown error'
+    throw new Error(`${fileVar} names a file that could not be read: ${filePath} (${code})`, {
+      cause: error,
+    })
+  }
+  const value = contents.replace(/\r?\n$/, '')
+  return value.trim() === '' ? undefined : value
+}
+
+/** The variable a secret setting's file path is read from: `<NAME>_FILE`. */
+export function secretFileVar(name: string): string {
+  return `${name}_FILE`
+}
+
+/** A secret that has to be set: its value, or a boot failure naming it and its file form. */
+function requireSecret(env: NodeJS.ProcessEnv, name: string): string {
+  const value = readSecret(env, name)
+  if (value === undefined) {
+    throw new Error(
+      `${name} is required: the server cannot start without it. Set ${name} or ` +
+        `${secretFileVar(name)} (a file holding it). See .env.example.`,
+    )
+  }
+  return value
 }
 
 /** The Microsoft client, which additionally carries the Entra tenant. */

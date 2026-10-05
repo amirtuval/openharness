@@ -1,3 +1,7 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
 import { describe, expect, it } from 'vitest'
 
 import { DEFAULT_PARTITION_COUNT } from '@openharness/protocol'
@@ -14,7 +18,9 @@ import {
   DEFAULT_TRUSTED_PROXY_HOPS,
   defaultInstanceId,
   describeConfig,
+  readSecret,
   readServerConfig,
+  secretFileVar,
   usesTestModel,
 } from './config'
 
@@ -432,6 +438,131 @@ describe('readServerConfig', () => {
       env({ MICROSOFT_CLIENT_ID: 'id', MICROSOFT_CLIENT_SECRET: 's' }),
     )
     expect(config.microsoft).toEqual({ clientId: 'id', clientSecret: 's', tenantId: 'common' })
+  })
+})
+
+/**
+ * Secrets delivered as files (#154): `<NAME>_FILE` is how a deployment mounts a secret from a
+ * manager instead of putting it in the environment. The chart gives the container
+ * `DATABASE_URL_FILE=/var/run/secrets/openharness/database-url` and no `DATABASE_URL`.
+ */
+describe('secrets from files', () => {
+  /** A scratch directory, removed when the test that made it is done. */
+  function scratch(): string {
+    return mkdtempSync(join(tmpdir(), 'openharness-secret-'))
+  }
+
+  it('reads a secret from the file its _FILE variable names, trimming one newline', () => {
+    const dir = scratch()
+    try {
+      const path = join(dir, 'database-url')
+      writeFileSync(path, 'postgres://user:pw@host:5432/db\n')
+
+      expect(readSecret({ DATABASE_URL_FILE: path }, 'DATABASE_URL')).toBe(
+        'postgres://user:pw@host:5432/db',
+      )
+      // A file written without the trailing newline is the same secret.
+      writeFileSync(path, 'postgres://user:pw@host:5432/db')
+      expect(readSecret({ DATABASE_URL_FILE: path }, 'DATABASE_URL')).toBe(
+        'postgres://user:pw@host:5432/db',
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('names the file variable as <NAME>_FILE', () => {
+    expect(secretFileVar('BETTER_AUTH_SECRET')).toBe('BETTER_AUTH_SECRET_FILE')
+  })
+
+  it('treats a file that is empty or only a newline as unset', () => {
+    const dir = scratch()
+    try {
+      const path = join(dir, 'secret')
+      writeFileSync(path, '')
+      expect(readSecret({ BETTER_AUTH_SECRET_FILE: path }, 'BETTER_AUTH_SECRET')).toBeUndefined()
+      writeFileSync(path, '\n')
+      expect(readSecret({ BETTER_AUTH_SECRET_FILE: path }, 'BETTER_AUTH_SECRET')).toBeUndefined()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses a secret that is set both inline and as a file', () => {
+    const dir = scratch()
+    try {
+      const path = join(dir, 'secret')
+      writeFileSync(path, 'from-the-file')
+      expect(() =>
+        readSecret(
+          { BETTER_AUTH_SECRET: 'from-the-env', BETTER_AUTH_SECRET_FILE: path },
+          'BETTER_AUTH_SECRET',
+        ),
+      ).toThrow(/BETTER_AUTH_SECRET_FILE/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('fails the boot, naming the variable and the path, when the file cannot be read', () => {
+    const dir = scratch()
+    try {
+      // A directory is a path a read cannot succeed on (EISDIR) whatever the uid, so the test
+      // does not depend on running unprivileged.
+      const error = (() => {
+        try {
+          readServerConfig(env({ DATABASE_URL_FILE: dir }))
+          return undefined
+        } catch (thrown) {
+          return thrown as Error
+        }
+      })()
+      expect(error?.message).toContain('DATABASE_URL_FILE')
+      expect(error?.message).toContain(dir)
+      // Never the content: this message goes to logs, and the read produced nothing to put there.
+      expect(error?.message).not.toMatch(/postgres(ql)?:\/\//)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('delivers the required secrets and provider client secrets from files', () => {
+    const dir = scratch()
+    try {
+      const store = join(dir, 'database-url')
+      const authSecret = join(dir, 'better-auth-secret')
+      const secretsKey = join(dir, 'secrets-key')
+      const googleSecret = join(dir, 'google-secret')
+      writeFileSync(store, 'postgres://user:pw@host:5432/db\n')
+      writeFileSync(authSecret, `${'s'.repeat(32)}\n`)
+      writeFileSync(secretsKey, `${REQUIRED.OPENHARNESS_SECRETS_KEY}\n`)
+      writeFileSync(googleSecret, 'google-client-secret\n')
+
+      const config = readServerConfig({
+        DATABASE_URL_FILE: store,
+        BETTER_AUTH_SECRET_FILE: authSecret,
+        OPENHARNESS_SECRETS_KEY_FILE: secretsKey,
+        // The other half of the provider still comes from the environment (a client id is not
+        // a secret); the dev login is off, so Google is what makes the boot possible.
+        GOOGLE_CLIENT_ID: 'google-client-id',
+        GOOGLE_CLIENT_SECRET_FILE: googleSecret,
+        BETTER_AUTH_URL: 'https://app.test',
+      })
+
+      expect(config.databaseUrl).toBe('postgres://user:pw@host:5432/db')
+      expect(config.betterAuthSecret).toBe('s'.repeat(32))
+      expect(config.secretsKey).toBe(REQUIRED.OPENHARNESS_SECRETS_KEY)
+      expect(config.google).toEqual({
+        clientId: 'google-client-id',
+        clientSecret: 'google-client-secret',
+      })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('still names a missing required secret, and its file form, when neither is set', () => {
+    expect(() => readServerConfig({})).toThrow(/BETTER_AUTH_SECRET_FILE/)
   })
 })
 
