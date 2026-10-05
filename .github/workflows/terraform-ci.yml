@@ -1,17 +1,20 @@
 name: terraform-ci
 
 # The Terraform under infra/ is not part of the workspace, so turbo never sees it. This
-# job checks it without any GCP credentials: formatting, provider-specific linting, and a
-# provider-and-module validation of both environment roots. The credentialed `terraform
-# plan` on pull requests — which impersonates tf-plan@ through Workload Identity — is a
-# later issue (#155).
+# workflow checks it without any GCP credentials: formatting, provider-specific linting,
+# and a provider-and-module validation of both environment roots. init runs with
+# -backend=false, so nothing here reads or writes the state buckets.
 #
-# Scoped to infra/** so an unrelated PR does not run it. init runs with -backend=false, so
-# nothing here reads or writes the state buckets and no credentials are needed.
+# It is also the **reusable** half of the pull-request check (#155): terraform-pr.yml calls
+# it with `uses:`, so the format/validate/lint jobs are written once and the credentialed
+# plan jobs are added on top rather than repeating them. That is why the pull_request
+# trigger is gone — terraform-pr.yml owns PRs now, and its paths include infra/** — while
+# the push trigger stays, so a change merged to main is still checked on its own.
 on:
-  pull_request:
-    paths:
-      - 'infra/**'
+  # Called by terraform-pr.yml on pull requests touching infra/**, charts/** or the
+  # workflows themselves. The caller cannot grant more than it holds, and this workflow
+  # declares contents: read, so nothing here can reach a credential.
+  workflow_call:
   push:
     branches: [main]
     paths:

@@ -372,6 +372,131 @@ describe('run: auth', () => {
   })
 })
 
+describe('run: auto-update (#157)', () => {
+  /** The state file the updater reads, under this test's own config home. */
+  function statePath(): string {
+    return join(configHome, 'openharness', 'update-state.json')
+  }
+
+  /** Leave an install outcome behind, the way the detached child would. */
+  function seedResult(result: unknown): void {
+    mkdirSync(join(configHome, 'openharness'), { recursive: true })
+    writeFileSync(statePath(), `${JSON.stringify({ result })}\n`, 'utf8')
+  }
+
+  it('documents the command and its off switch in --help', async () => {
+    const { out } = await runCaptured(['--help'])
+
+    expect(out).toContain('oh update')
+    expect(out).toContain('OH_NO_AUTO_UPDATE')
+    expect(out).toContain('autoUpdate')
+  })
+
+  it('prints the pending outcome once, and never again', async () => {
+    seedResult({ status: 'success', version: '0.4.0', at: '2026-10-05T12:00:00.000Z' })
+
+    const first = await runCaptured(['agents'], { OPENHARNESS_FAKE: '1' })
+    expect(first.code).toBe(0)
+    expect(first.out).toContain('oh updated to v0.4.0')
+
+    const second = await runCaptured(['agents'], { OPENHARNESS_FAKE: '1' })
+    expect(second.code).toBe(0)
+    expect(second.out).not.toContain('oh updated')
+  })
+
+  it('prints a failed install once, on stderr, with the sudo hint', async () => {
+    seedResult({
+      status: 'failure',
+      version: '0.4.0',
+      reason: 'npm exited with code 1: EACCES',
+      permission: true,
+      at: '2026-10-05T12:00:00.000Z',
+    })
+
+    const { code, out, err } = await runCaptured(['agents'], { OPENHARNESS_FAKE: '1' })
+
+    expect(code).toBe(0)
+    expect(out).not.toContain('could not update')
+    expect(err).toContain('oh could not update itself: npm exited with code 1: EACCES')
+    expect(err).toContain('run npm i -g openharness')
+    expect(err).toContain('sudo')
+  })
+
+  it('keeps --version and --help to their one output, even with a notice pending', async () => {
+    seedResult({ status: 'success', version: '0.4.0', at: '2026-10-05T12:00:00.000Z' })
+
+    const version = await runCaptured(['--version'])
+    expect(version.out.trim()).toBe('0.0.0')
+
+    const help = await runCaptured(['--help'])
+    expect(help.out).not.toContain('oh updated')
+    // The notice is still pending for the next command that is not one of those two.
+    const after = await runCaptured(['agents'], { OPENHARNESS_FAKE: '1' })
+    expect(after.out).toContain('oh updated to v0.4.0')
+  })
+
+  it('hands the updater the command, the environment and the config setting', async () => {
+    const seen: { command: unknown; configAutoUpdate: unknown; scriptPath: unknown }[] = []
+    const autoUpdate = (context: {
+      command: unknown
+      configAutoUpdate: unknown
+      scriptPath: unknown
+    }): void => {
+      seen.push(context)
+    }
+
+    await runCaptured(['agents'], { OPENHARNESS_FAKE: '1' }, { autoUpdate })
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toMatchObject({ command: 'agents', configAutoUpdate: true })
+
+    await runCaptured(['default-model'], { OPENHARNESS_FAKE: '1' }, { autoUpdate })
+    expect(seen[1]).toMatchObject({ command: 'default-model' })
+
+    await runCaptured(['update'], { OPENHARNESS_FAKE: '1' }, { autoUpdate })
+    expect(seen[2]).toMatchObject({ command: 'update' })
+  })
+
+  it('never hands --version or --help to the updater', async () => {
+    let calls = 0
+    const autoUpdate = (): void => {
+      calls += 1
+    }
+
+    await runCaptured(['--version'], {}, { autoUpdate })
+    await runCaptured(['--help'], {}, { autoUpdate })
+
+    expect(calls).toBe(0)
+  })
+
+  it('carries autoUpdate false from the config file into the updater', async () => {
+    mkdirSync(join(configHome, 'openharness'), { recursive: true })
+    writeFileSync(join(configHome, 'openharness', 'config.json'), '{"autoUpdate": false}', 'utf8')
+
+    const seen: unknown[] = []
+    await runCaptured(
+      ['agents'],
+      { OPENHARNESS_FAKE: '1' },
+      {
+        autoUpdate: (context) => {
+          seen.push(context.configAutoUpdate)
+        },
+      },
+    )
+
+    expect(seen).toEqual([false])
+  })
+
+  it('`oh update` refuses, exit 2, when this is not a global install', async () => {
+    // The default updater is left in place here: under the test runner `process.argv[1]` is
+    // not a global `oh`, so the command must refuse without spawning npm at all.
+    const { code, out, err } = await runCaptured(['update'], {}, { autoUpdate: () => {} })
+
+    expect(code).toBe(2)
+    expect(out).toBe('')
+    expect(err).toContain('not a global npm install')
+  })
+})
+
 describe('isDirectRun (#152)', () => {
   it('is true for the exact entry path, in both spellings', () => {
     expect(isDirectRun('/somewhere/index.js', pathToFileURL('/somewhere/index.js').href)).toBe(true)

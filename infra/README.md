@@ -70,6 +70,42 @@ already there.
 A tfvars file per environment is a fine alternative to the `-var` flags, but it must not be
 committed if it holds a client ID you would rather not publish (they are not secrets).
 
+In the deploy workflows the values above come from GitHub variables, not from a laptop:
+`existing_zone_name` from `TF_EXISTING_ZONE_NAME_PRODUCTION` and `staging_name_servers` from
+`TF_STAGING_NAME_SERVERS` — see
+[`docs/DEPLOYMENT.md`](../docs/DEPLOYMENT.md#variables-the-workflows-read).
+
+### The first deploy is two applies; every one after it is one
+
+The `helm` and `kubernetes` providers are configured from the cluster's endpoint and CA, and
+on a first apply those do not exist yet — Terraform cannot configure those providers (let
+alone render the `helm_release`) while the cluster is still unknown. A first apply therefore
+targets the cluster and its prerequisites, and the full apply follows it:
+
+```bash
+# First deploy only, on a project with no cluster yet. Staging adds -target=module.registry,
+# because the image push has nowhere to go until the registry exists:
+terraform apply -auto-approve -var image_tag=<sha> \
+  -target=google_project_service.services \
+  -target=module.network \
+  -target=module.gke \
+  -target=module.registry
+
+# Always, first deploy or not:
+terraform apply -auto-approve -var image_tag=<sha>
+```
+
+Both deploy workflows detect the cluster with `gcloud container clusters describe` and do
+this by themselves; re-applies are the single apply. The targeted apply creates the project's
+services, the VPC, the cluster and the registry, and nothing else — the second apply is what
+creates Cloud SQL, the secrets, the DNS records and the release.
+
+Two things follow from it. The first targeted apply is also where the cluster's ~10-minute
+creation lands, so the deploy job's timeout and the rollout wait both have to accommodate a
+first deploy that is much slower than the ones after it. And a targeted apply leaves the rest
+of the configuration untouched, so nothing but the cluster is half-created: if it fails
+partway, re-running the same two applies converges.
+
 ### Staging's name servers, and the empty delegation
 
 `staging_name_servers` defaults to `[]`, and an empty list **skips** the NS records: the
@@ -80,10 +116,11 @@ is a second apply, not a first one.
 ### The first plan cannot render the Helm release
 
 The `helm` and `kubernetes` providers are configured from the cluster's endpoint and CA, and
-on a first apply those do not exist yet — Terraform cannot plan the `helm_release` until the
-cluster is in state. The first apply creates the cluster and then the release; later plans
-are complete. This is inherent to creating the cluster and deploying into it from the same
-configuration.
+on a first plan those do not exist yet — so the first plan of an empty project either fails
+or cannot render the `helm_release`. That is what the two-stage apply
+[above](#the-first-deploy-is-two-applies-every-one-after-it-is-one) exists for, and it is
+also why `terraform-pr.yml` skips the plan of an environment that has no state yet: there is
+nothing in state to plan against, and a plan of an empty project cannot show the release.
 
 ## State
 
@@ -130,6 +167,11 @@ The zone name is whatever the maintainer created it as; it is not derivable from
 If the zone's `dns_name` or visibility differ from `oharness.dev.` / public, the apply will
 try to replace it — check before applying.
 
+Put the name in the repository variable `TF_EXISTING_ZONE_NAME_PRODUCTION`
+(`gh variable set TF_EXISTING_ZONE_NAME_PRODUCTION --body oharness-dev-zone`), which is
+where `deploy-production.yml` and the PR plan job read it from — it cannot be derived, so it
+cannot be committed.
+
 **3. Add the OAuth client secrets.** Terraform creates `google-client-secret`,
 `github-client-secret` and `microsoft-client-secret` — but only for a provider whose client
 ID variable is non-empty — with no version, because the value is the provider's and not
@@ -175,12 +217,12 @@ Every environment input, its default, and where a non-default value comes from. 
 | `image_tag`                         | _(none — required)_                                             | `-var image_tag=<git sha>`, passed by the deploy workflow (#155).                           |
 | `host`                              | `staging.oharness.dev` / `app.oharness.dev`                     | The environment's public hostname.                                                          |
 | `app_service_account_id`            | `openharness-app`                                               | Account ID of the app's GCP service account.                                                |
-| `google_client_id`                  | `""`                                                            | Set to offer Google sign-in; also creates `google-client-secret`.                           |
-| `github_client_id`                  | `""`                                                            | Set to offer GitHub sign-in; also creates `github-client-secret`.                           |
-| `microsoft_client_id`               | `""`                                                            | Set to offer Microsoft sign-in; also creates `microsoft-client-secret`.                     |
-| `microsoft_tenant_id`               | `""`                                                            | Passed to the app only when non-empty.                                                      |
+| `google_client_id`                  | `""`                                                            | GitHub variable `GOOGLE_CLIENT_ID`; also creates `google-client-secret`.                    |
+| `github_client_id`                  | `""`                                                            | GitHub variable `GITHUB_CLIENT_ID`; also creates `github-client-secret`.                    |
+| `microsoft_client_id`               | `""`                                                            | GitHub variable `MICROSOFT_CLIENT_ID`; also creates `microsoft-client-secret`.              |
+| `microsoft_tenant_id`               | `""`                                                            | GitHub variable `MICROSOFT_TENANT_ID`; passed to the app only when non-empty.               |
 | `db_tier`                           | `db-g1-small` / `db-custom-1-3840`                              | Cloud SQL tier: shared-core in staging, a small dedicated tier in production.               |
-| `db_availability_type`              | `ZONAL` / `REGIONAL`                                            | HA in production only.                                                                      |
+| `db_availability_type`              | `ZONAL` / `ZONAL`                                               | Single zone in both. HA (`REGIONAL`) in production was deferred (#153).                     |
 | `db_backup_enabled`                 | `false` / `true`                                                | Automated backups.                                                                          |
 | `db_point_in_time_recovery_enabled` | `false` / `true`                                                | Point-in-time recovery.                                                                     |
 | `deletion_protection`               | `false` / `true`                                                | Blocks destroy of the cluster, the database and the secrets.                                |
@@ -199,11 +241,11 @@ Every environment input, its default, and where a non-default value comes from. 
 
 ### Production only
 
-| Variable               | Default             | Where the value comes from                                                                       |
-| ---------------------- | ------------------- | ------------------------------------------------------------------------------------------------ |
-| `dns_name`             | `oharness.dev.`     | The adopted zone's DNS name; records and the staging delegation hang off it.                     |
-| `existing_zone_name`   | _(none — required)_ | `gcloud dns managed-zones list --project openharness-510710`; see [Manual steps](#manual-steps). |
-| `staging_name_servers` | `[]`                | Staging's `terraform output name_servers`. Empty skips the delegation.                           |
+| Variable               | Default             | Where the value comes from                                                                                                                                                  |
+| ---------------------- | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dns_name`             | `oharness.dev.`     | The adopted zone's DNS name; records and the staging delegation hang off it.                                                                                                |
+| `existing_zone_name`   | _(none — required)_ | GitHub variable `TF_EXISTING_ZONE_NAME_PRODUCTION`, whose value comes from `gcloud dns managed-zones list --project openharness-510710`; see [Manual steps](#manual-steps). |
+| `staging_name_servers` | `[]`                | GitHub variable `TF_STAGING_NAME_SERVERS`, set from staging's `terraform output -json name_servers` after the first staging deploy. Empty skips the delegation.             |
 
 ## Outputs
 
@@ -266,10 +308,15 @@ Postgres **18** — the newest major the provider's `database_version` accepts
 |              | staging                     | production                     |
 | ------------ | --------------------------- | ------------------------------ |
 | Tier         | `db-g1-small` (shared-core) | `db-custom-1-3840` (dedicated) |
-| Availability | `ZONAL`                     | `REGIONAL`                     |
+| Availability | `ZONAL`                     | `ZONAL`                        |
 | Backups      | off                         | daily, 03:00                   |
 | PITR         | off                         | on                             |
 | Delete guard | off                         | on                             |
+
+Both run a single zone. Production's HA (`REGIONAL`) was deliberately deferred: it roughly
+doubles the instance's cost, and nothing in the deploy path depends on it. Turning it on is
+one variable — `-var db_availability_type=REGIONAL`, or change the default in
+`envs/production/variables.tf` — and the next apply updates the instance in place.
 
 ### Secrets
 
@@ -357,5 +404,10 @@ terraform fmt -check -recursive
 tflint --init && tflint --recursive
 ```
 
-`.github/workflows/terraform-ci.yml` runs exactly these on every change under `infra/**`,
-with no GCP credentials. The credentialed `terraform plan` on PRs is a later issue (#155).
+`.github/workflows/terraform-ci.yml` runs exactly these with no GCP credentials — the
+reusable half of the PR check (#155). `.github/workflows/terraform-pr.yml` calls it on every
+pull request that touches `infra/**`, `charts/**` or itself, and adds the credentialed half:
+a `terraform plan` per environment, impersonating `tf-plan@` through Workload Identity, and
+one collapsed PR comment with both plans. A plan of an environment with no remote state is
+skipped with a note, since a plan of an empty project cannot render the release
+([above](#the-first-plan-cannot-render-the-helm-release)).

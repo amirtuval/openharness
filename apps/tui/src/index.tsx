@@ -10,6 +10,7 @@ import { openBrowser } from './browser'
 import { runLogin, runLogout, runWhoami, type AuthIo } from './commands/auth'
 import { runAgents, runSessionDelete, runSessions } from './commands/list'
 import { runDefaultModel } from './commands/preferences'
+import { createNpmPort, runUpdate } from './commands/update'
 import { resolveConfig, type ResolvedConfig } from './config'
 import { openCredentials, type CredentialStore } from './credentials'
 import { createDevClient, FAKE_BANNER, isFakeMode } from './dev/fake'
@@ -17,6 +18,11 @@ import { describeError, type ErrorContext } from './errors'
 import { HELP_TEXT } from './help'
 import { installSignals } from './signals'
 import { restoreTerminal } from './terminal'
+import {
+  autoUpdate as runAutoUpdate,
+  detectGlobalInstall,
+  type AutoUpdateHook,
+} from './update/index'
 import { readVersion } from './version'
 
 /** This package's name; lets a dependent prove the import resolved. */
@@ -41,6 +47,14 @@ export interface RunOptions {
   readonly stderr?: NodeJS.WriteStream | undefined
   /** The environment to read the configuration from; defaults to `process.env`. */
   readonly env?: Record<string, string | undefined> | undefined
+  /**
+   * The auto-update entry point (#157).
+   *
+   * The real one spawns npm, so a test that calls `run()` hands it a stand-in and watches what
+   * it is asked — which commands reach it, and with which environment — instead of touching
+   * the network. Its default is the real updater, and nothing else about `run()` changes.
+   */
+  readonly autoUpdate?: AutoUpdateHook | undefined
 }
 
 /**
@@ -106,6 +120,21 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
     err(`oh: ${describeConfig(config)}`)
   }
 
+  // The auto-update (#157), before anything renders: this is the one moment a notice can be
+  // printed without landing in the middle of the chat's Ink UI or `oh login`'s device flow,
+  // and the check it may start never blocks what comes next. `--version` and `--help` returned
+  // above, so the one line they are is never joined by another.
+  const autoUpdate = options.autoUpdate ?? runAutoUpdate
+  autoUpdate({
+    command: command.kind,
+    env,
+    configAutoUpdate: config.autoUpdate,
+    scriptPath: process.argv[1],
+    runningVersion: readVersion(),
+    stdout: out,
+    stderr: err,
+  })
+
   try {
     const connected = await connect(config, env, credentials.store)
 
@@ -165,6 +194,29 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
         return await runLogout(authIo(connected, config, credentials.store, out, err, context))
       case 'whoami':
         return await runWhoami(authIo(connected, config, credentials.store, out, err, context))
+      case 'update': {
+        // `oh update` needs no server: it is npm, in the foreground, with npm's own progress.
+        // Its one precondition is that this `oh` is a global install — the same question the
+        // background check asks, here answered before anything is spawned.
+        const isGlobalInstall = await detectGlobalInstall({ env, scriptPath: process.argv[1] })
+        return await runUpdate({
+          stdout: out,
+          stderr: err,
+          runningVersion: readVersion(),
+          isGlobalInstall,
+          npm: createNpmPort({
+            env,
+            progress: {
+              stdout: (chunk) => {
+                stdout.write(chunk)
+              },
+              stderr: (chunk) => {
+                stderr.write(chunk)
+              },
+            },
+          }),
+        })
+      }
     }
   } catch (error) {
     report(err, error, context)

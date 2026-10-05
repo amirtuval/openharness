@@ -44,6 +44,7 @@ repo.
 | `oh login`                              | sign in through the browser (the device flow)            |
 | `oh logout`                             | revoke the session on the server, forget the token       |
 | `oh whoami`                             | print the signed-in email and server                     |
+| `oh update`                             | install the newest published version now                 |
 | `oh -v` / `--version`, `oh -h`/`--help` | print and stop                                           |
 
 Global flags: `--server <url>`, `--debug`; `oh login` also takes `--no-browser`, and
@@ -58,7 +59,8 @@ the network or the sign-in state said no — a 401 is the not-signed-in error de
 model" describes; `2`
 the command line or the configuration was wrong (including an unusable config or credentials
 file, named in the message) — and also a chat asked for without a terminal, since stdin has
-to be a TTY to read a key; and `130`/`143` when the process was signalled, which is also how
+to be a TTY to read a key, and an `oh update` in an `oh` that is not a global npm install;
+and `130`/`143` when the process was signalled, which is also how
 a running `oh login` is cancelled.
 
 Unknown flags are errors, not positionals: `node:util`'s `parseArgs` runs in strict mode, the
@@ -71,8 +73,13 @@ Highest first:
 1. `--server`
 2. `OPENHARNESS_URL`
 3. `~/.config/openharness/config.json` (or `$XDG_CONFIG_HOME/openharness/config.json`, which
-   is ignored when it is not an absolute path): `{ "server": "http://localhost:3000" }`
+   is ignored when it is not an absolute path):
+   `{ "server": "http://localhost:3000", "autoUpdate": true }`
 4. `http://localhost:3000`
+
+`autoUpdate` is the config file's own off switch for the background self-update (it defaults to
+`true`); `server` is the only other key the file takes, and either may be left out. See
+"Updating itself" below.
 
 A missing config file is fine. A file that exists and does not parse, holds the wrong types,
 or names a key that does not exist is an error (exit `2`) naming the file and the problem. An
@@ -198,6 +205,74 @@ response. It draws ten rows at a time, with the window following the cursor and 
 leaves out counted above and below (`↑ 35 more`); a number key picks only while the list is
 at most nine long, with the same "12" rule as before.
 
+### Updating itself
+
+The CLI is published to npm as `openharness` (#152) and installed with `npm i -g openharness`,
+so there is no launcher to keep it current: it updates itself (epic #148, decision D10). The
+ground it stands on is that the published package is one self-contained file — `npm install -g
+openharness@<v>` may replace it on disk while the running copy keeps going, which is why the
+running process is never the one that changes and the next run is simply the new version.
+
+On startup — for every command except `--version`, `--help` and `oh update`, and before the
+chat's Ink UI mounts or `oh login` starts its device flow, so a notice is never printed into a
+screen — the updater does two things:
+
+1. **The notice.** A finished install leaves its outcome in the state file; the next run prints
+   it **once** and forgets it. A success is one line on stdout, `oh updated to v0.4.0`. A
+   failure is one line on stderr — `oh could not update itself: <reason>; run npm i -g
+openharness` — plus, when npm could not write to its global prefix, a hint about sudo or
+   `npm config set prefix`.
+2. **The check.** At most once an hour (`lastCheck` in the same state file), it asks `npm view
+openharness version` in the background — never awaited, with a timeout — and if that version
+   is newer (a small comparator in `semver.ts`, prereleases included, since the bundle cannot
+   take a runtime dependency) starts a **detached** `npm install -g openharness@<v>`: a fresh
+   `node` process, `unref`'d, its output redirected to the log file. The running process is
+   untouched.
+
+   "Never awaited" is not enough for "does not block": npm is spawned with its pipes and the
+   timeout `unref`'d as well. A child's pipes are event-loop handles of their own, and with a
+   `'data'` listener attached they hold a finished command open until npm exits — a second of
+   npm before the shell prompt comes back, for a lookup nobody asked for. The check therefore
+   simply does not finish for a command that exits first, which is why updates land during
+   chats and logins and not during `oh agents`. A test proves it against a slow fake npm, by
+   timing the process itself.
+
+A detached child has no way to report back, so it is a tiny `node -e` program (`npm.ts`'s
+`installWrapperSource`) that runs npm, waits for it, and writes npm's exit code and the tail of
+its output into the state file, where the next run picks it up. The wrapper is spawned as
+either CommonJS or ESM (the input type of `-e` depends on the nearest `package.json`), which is
+why its imports are `await import()`.
+
+Both files live in the CLI's config directory, beside `config.json` and `credentials.json`:
+
+| file                              | what it holds                                                        |
+| --------------------------------- | -------------------------------------------------------------------- |
+| `…/openharness/update-state.json` | `lastCheck`, the cached global root, and the pending install outcome |
+| `…/openharness/update.log`        | npm's output from the last detached install                          |
+
+The auto-update is **off** when any of these says so:
+
+- `OH_NO_AUTO_UPDATE` is set (blank, `0` and `false` do not count — the rule `CI` already gets);
+- the config file sets `"autoUpdate": false`;
+- `CI` is set;
+- this `oh` is not a global npm install.
+
+The last is the one that matters and it is deliberately two questions, because one of them is
+free. The running bundle must sit at `<somewhere>/<module dir>/openharness/dist/index.js`
+(reached through the `bin` symlink npm installs, so the check realpaths first) — which
+`node apps/tui/dist/index.js` from this repo does not, and that answer costs nothing. Then that
+module directory must be the one `npm root -g` names; only this needs npm, and its answer is
+cached in the state file beside the `node` that produced it, so a checkout never spawns npm and
+an installed `oh` spawns it at most once per node installation. A `realpath` that fails, a
+missing `npm`, a mangled state file: every one of them ends the same way, as "no update", never
+as a failed command.
+
+`oh update` does the same thing in the foreground: the version lookup, then npm's own install
+output as the progress, `0` when the CLI is current or just became so and `1` when npm could
+not be asked or the install failed. It works with the auto-update switched off — it is the one
+thing that is always about updating — and refuses with exit `2` when this `oh` is not a global
+install, because there is nothing here for npm to replace.
+
 ## In the chat
 
 | key               | what it does                                                 |
@@ -251,10 +326,19 @@ src/
     ctrl-c.ts            the Ctrl+C rules (interrupt / arm / exit)
   components/            message-view, transcript-view, status-line, prompt-input,
                          notice-view, model-picker
+  update/
+    index.ts             the auto-update: the notice, the background check, detection
+    decide.ts            the off switches (env / config / CI) and the hourly throttle
+    semver.ts            the version comparator — the bundle cannot borrow one
+    detect.ts            is this `oh` a global npm install?
+    npm.ts               spawning npm, and the detached installer's `node -e` wrapper
+    state.ts             update-state.json: the timestamp, the cached root, the outcome
+    notice.ts            the one line the next run prints, once
   commands/list.ts       `oh sessions` / `oh agents` / `oh sessions delete`
   commands/preferences.ts  `oh default-model`
   commands/io.ts         what a print-and-stop command writes, and how it fails
   commands/auth.ts       `oh login` / `oh logout` / `oh whoami`
+  commands/update.ts     `oh update` — the auto-update, in the foreground
   dev/fake.ts            OPENHARNESS_FAKE: the fake client, seeded, dev only
   test-support/          test-only helpers (fake clients, keystrokes, frame waits)
 ```
@@ -330,6 +414,14 @@ also seeds long lists and serves them a page at a time (`seedAgents`, `pagedAgen
 (args, config precedence, error mapping, the Ctrl+C rules, the transcript-driven runtime) is
 tested without Ink at all.
 
+The auto-update is tested without a registry: `src/update/`'s decisions are plain values
+(the off switches, the throttle, the version comparison, the cached global root) tested against
+fakes, and the one thing that _must_ be exercised through a real subprocess — the spawn, the
+detached installer's log and state file, the exit code it records — runs against a **fake
+`npm` on `PATH`**, a small shell script, rather than a mocked `spawn`. `run()` itself takes the
+updater as a `RunOptions` seam, so its tests watch which commands reach it without anything
+spawning npm.
+
 The auth side is tested at both levels: `src/credentials.ts` against a temp directory (the
 atomic write, `0600`/`0700`, per-server tokens, the errors a broken file produces),
 `src/browser.ts` with an injected spawn (the CI / SSH / no-display skips and the per-platform
@@ -354,6 +446,14 @@ denial, cancellation, revoke failures); `src/index.test.ts` drives `run()` all t
 | `src/app.test.tsx`                                | the Ink screens through `ink-testing-library` and `createFakeClient()`                                      |
 | `src/errors.test.ts`                              | `describeError`: the 401 line, the connection hints, 403/429, `--debug`                                     |
 | `src/signals.test.ts`, `src/terminal.test.ts`     | the signal handlers and `restoreTerminal`                                                                   |
+| `src/update/semver.test.ts`                       | the comparator: the three numbers, prereleases, and what is not a version                                   |
+| `src/update/decide.test.ts`                       | the off switches, and the hourly throttle                                                                   |
+| `src/update/state.test.ts`                        | `update-state.json`: the write, the tolerant read, and the once-only consume                                |
+| `src/update/detect.test.ts`                       | the global-install check, `bin` symlink and case-insensitivity included                                     |
+| `src/update/notice.test.ts`                       | the one line: its two shapes, the stream it goes to, and that it never repeats                              |
+| `src/update/npm.test.ts`                          | npm over a fake `npm` on `PATH`: the lookup, the timeout, and the detached installer's state file           |
+| `src/update/check.test.ts`                        | the background check's decisions, against a fake npm runner                                                 |
+| `src/commands/update.test.ts`                     | `oh update`: up to date, installed, failed, and refused                                                     |
 | `src/dev/fake.test.ts`                            | the fake-mode gate and the seeded dev client                                                                |
 
 Every `run()` test gets its own `XDG_CONFIG_HOME` (`index.test.ts` creates one per test):
