@@ -16,7 +16,12 @@ import {
   type CredentialStore,
   type SessionStore,
 } from '@openharness/session'
-import { createVault, envKeyProvider, type Vault } from '@openharness/vault'
+import {
+  DEFAULT_KEY_CACHE_TTL_MS,
+  createVault,
+  envKeyProvider,
+  type Vault,
+} from '@openharness/vault'
 
 import { alwaysReady, createApp, type Readiness } from '../app'
 import {
@@ -558,7 +563,10 @@ export function testConfig(options: TestOptions = {}): ServerConfig {
     scheduler: options.scheduler ?? 'local',
     betterAuthSecret: 'test-secret-that-is-at-least-32-characters-long',
     betterAuthUrl: options.betterAuthUrl ?? TEST_PUBLIC_URL,
+    keyProvider: 'local',
     secretsKey: TEST_SECRETS_KEY,
+    kmsKey: undefined,
+    keyCacheTtlMs: DEFAULT_KEY_CACHE_TTL_MS,
     devLogin: options.devLogin ?? true,
     google: options.providers?.google,
     github: options.providers?.github,

@@ -1,0 +1,44 @@
+name: setup-script
+
+# The Workload Identity setup script (#149, #161) is the one piece of the deployment no
+# other CI job touches — it is not part of the workspace, so turbo never sees it. This job
+# checks it: shellcheck on every script under .github/setup, then the automated test that
+# runs the real script against the stateful fake gcloud and gh in .github/setup/test
+# (converge on re-run, provider update-oidc, --prune selectivity, dry-run purity).
+#
+# Scoped to .github/setup/** so an unrelated PR does not run it; the test needs no gcloud,
+# gh, login or network.
+on:
+  pull_request:
+    paths:
+      - '.github/setup/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/setup/**'
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck and jq
+        run: sudo apt-get update && sudo apt-get install -y shellcheck jq
+
+      # Both globstar levels: .github/setup/*.sh and .github/setup/<dir>/*.sh (the test
+      # script and its fakes). A new script under .github/setup is checked without a
+      # workflow edit.
+      - name: Shellcheck every script under .github/setup
+        shell: bash
+        run: |
+          shopt -s globstar
+          shellcheck .github/setup/**/*.sh
+
+      # Runs the real workload-identity.sh against the fakes on PATH; jq is what the
+      # script's --prune parses IAM policies with.
+      - name: Run the setup-script test
+        run: .github/setup/test/run-tests.sh

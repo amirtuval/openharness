@@ -77,6 +77,25 @@ export function runCredentialStoreConformance(
         expect(record).toMatchObject({ id: metadata.id, sealed: sealedSecret('one') })
       })
 
+      it('round-trips a sealed secret whose keyProvider is absent, keeping it absent', async () => {
+        // #150: a credential written before the provider field existed is a `local` one (the
+        // vault reads it so), and the store writes and reads it down exactly — no invented
+        // provider, no field added to what it was given.
+        const { store, clock } = await setup()
+        await store.upsert({
+          userId: OWNER_A,
+          provider: 'anthropic',
+          type: 'api_key',
+          sealed: legacySealedSecret('legacy'),
+          last4: 'cdef',
+          validatedAt: timestampAt(clock.currentMs),
+        })
+
+        const record = await store.get({ userId: OWNER_A, provider: 'anthropic' })
+        expect(record?.sealed).toStrictEqual(legacySealedSecret('legacy'))
+        expect(record?.sealed).not.toHaveProperty('keyProvider')
+      })
+
       it('replaces the credential for the same user and provider, keeping its id and created_at', async () => {
         const { store, clock } = await setup()
         const first = await store.upsert({
@@ -307,9 +326,25 @@ const SECOND = 1000
 /**
  * A sealed secret for a test: distinct, recognizable strings per {@link tag}, so a test can
  * say exactly what came back out. A real one comes from `@openharness/vault`; the store
- * treats every field as opaque, so a fixture is as good as a ciphertext here.
+ * treats every field as opaque, so a fixture is as good as a ciphertext here — `keyProvider`
+ * included, whose value is a made-up provider name because the store must not know any.
  */
 function sealedSecret(tag: string): SealedSecret {
+  return {
+    ciphertext: `ciphertext:${tag}`,
+    nonce: `nonce:${tag}`,
+    wrappedKey: `wrapped-key:${tag}`,
+    kekVersion: 'test-v1',
+    keyProvider: 'test-provider',
+  }
+}
+
+/**
+ * The same fixture as a credential stored before `keyProvider` existed (#150): the field
+ * simply absent. The store has to hand it back absent too — the vault is what reads an
+ * absent provider as `local`.
+ */
+function legacySealedSecret(tag: string): SealedSecret {
   return {
     ciphertext: `ciphertext:${tag}`,
     nonce: `nonce:${tag}`,

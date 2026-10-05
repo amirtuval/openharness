@@ -1,13 +1,14 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 import { FAKE_SESSION_TOKEN } from '@openharness/client/testing'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { Readable } from 'node:stream'
 
-import { run, type RunOptions } from './index'
+import { isDirectRun, run, type RunOptions } from './index'
 
 /**
  * A fresh config directory for the test at hand.
@@ -368,5 +369,36 @@ describe('run: auth', () => {
 
     expect(code).toBe(2)
     expect(err).toContain("'apiKey'")
+  })
+})
+
+describe('isDirectRun (#152)', () => {
+  it('is true for the exact entry path, in both spellings', () => {
+    expect(isDirectRun('/somewhere/index.js', pathToFileURL('/somewhere/index.js').href)).toBe(true)
+    expect(isDirectRun(undefined)).toBe(false)
+  })
+
+  it('is the entry point when argv names the npm `bin` symlink', () => {
+    // What `npm i -g` produces: `<prefix>/bin/oh` → `…/openharness/dist/index.js`. Node
+    // resolves the entry to its real path, so `import.meta.url` is the target while
+    // `process.argv[1]` keeps the symlink — a string comparison alone would say "not the
+    // entry point" and the installed `oh` would silently do nothing.
+    const home = mkdtempSync(join(tmpdir(), 'oh-direct-run-'))
+    try {
+      const real = join(home, 'index.js')
+      writeFileSync(real, '// the built bundle, standing in\n')
+      const link = join(home, 'oh')
+      symlinkSync(real, link)
+
+      expect(isDirectRun(link, pathToFileURL(real).href)).toBe(true)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  it('is false when another file is the entry point', () => {
+    expect(isDirectRun('/somewhere/else.js', pathToFileURL('/somewhere/index.js').href)).toBe(false)
+    // A path that is not there cannot be anybody's entry point.
+    expect(isDirectRun('/nowhere/at/all.js', pathToFileURL('/somewhere/index.js').href)).toBe(false)
   })
 })

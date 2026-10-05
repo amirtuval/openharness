@@ -102,8 +102,17 @@ export interface SealedSecret {
   readonly nonce: string
   /** The per-secret 32-byte data key, itself encrypted under the master key. */
   readonly wrappedKey: string
-  /** The version of the master key that wrapped `wrappedKey`, for rotation later. */
+  /**
+   * The name of the master key that wrapped `wrappedKey`: the local provider's key version
+   * (`v1`), or a Cloud KMS `cryptoKeys/…` resource name. Never key material.
+   */
   readonly kekVersion: string
+  /**
+   * Which key provider wrapped `wrappedKey` (#150): `local` or `gcp-kms`. Recorded so a
+   * secret cannot be opened by a provider that did not wrap it. Absent on credentials stored
+   * before the field existed, when `local` was the only provider — absent means `local`.
+   */
+  readonly keyProvider?: string
 }
 
 /** Which user's credential a {@link CredentialStore.get} or {@link CredentialStore.delete} is about. */

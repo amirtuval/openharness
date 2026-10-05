@@ -81,6 +81,9 @@ export class PostgresCredentialStore implements CredentialStore {
       nonce: input.sealed.nonce,
       wrapped_key: input.sealed.wrappedKey,
       kek_version: input.sealed.kekVersion,
+      // The caller's sealed blob is written as given (#150); `undefined` means a caller that
+      // predates the field, and `local` is what the vault reads a `null` back as.
+      key_provider: input.sealed.keyProvider ?? null,
       last4: input.last4,
       created_at: at,
       updated_at: at,
@@ -99,6 +102,7 @@ export class PostgresCredentialStore implements CredentialStore {
           nonce: row.nonce,
           wrapped_key: row.wrapped_key,
           kek_version: row.kek_version,
+          key_provider: row.key_provider,
           last4: row.last4,
           updated_at: row.updated_at,
           validated_at: row.validated_at,

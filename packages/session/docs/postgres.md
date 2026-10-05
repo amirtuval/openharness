@@ -178,6 +178,7 @@ databases while applying to new ones. Add a new file instead.
 | `0015_session_model.sql`           | the effective `model`/`system` on `sessions`, backfilled from the agent snapshot; the snapshot becomes nullable (#93) |
 | `0016_user_preferences.sql`        | `user_preferences`, one row per user: the stored `default_model`, or NULL (#111)                                      |
 | `0017_scheduler_instances.sql`     | `scheduler_instances`, one row per live scheduler instance: `instance_id`, `last_seen` (#122)                         |
+| `0018_credential_key_provider.sql` | `key_provider` on `provider_credentials`: which provider wrapped a credential's data key (#150)                       |
 
 To run them outside an application:
 
@@ -231,7 +232,9 @@ guard skips the deletes forever, so data created after the migration is safe.
 
 `0013_provider_credentials.sql` (decision A5) creates the credential table: one sealed key per
 `(user_id, provider)`, `on delete cascade` from `"user"`. Its columns are the sealed form
-(`ciphertext`, `nonce`, `wrapped_key`, `kek_version`), the `last4` recognition aid and the
+(`ciphertext`, `nonce`, `wrapped_key`, `kek_version`, plus `key_provider` since #150 — see
+[the key provider on a credential](#the-key-provider-on-a-credential-150)), the `last4`
+recognition aid and the
 timestamps. **There is no plaintext column**, and the store that writes it
 (`PostgresCredentialStore`) never sees a plaintext either: the server seals with
 `@openharness/vault` and this package only moves blobs.
@@ -263,6 +266,20 @@ user — `user_id` primary key, `on delete cascade` from `"user"` — with `defa
 protocol's default, `{ default_model: null }`. `postgres.test.ts` re-runs the migrations and
 then reads and writes preferences through the store, so the re-run is proved to leave the
 table working.
+
+### The key provider on a credential (#150)
+
+`0018_credential_key_provider.sql` (issue #150, deployment epic #148 decision D6) adds
+`key_provider text` to `provider_credentials`: the name of the key provider that wrapped the
+row's data key — `local` (`OPENHARNESS_SECRETS_KEY`) or `gcp-kms` (Cloud KMS). It is a name,
+never key material, and it is what lets the vault refuse a secret under a provider that did
+not wrap it with a clear error instead of a decryption failure. The column is **nullable on
+purpose**: NULL is what every row written before the migration holds, when `local` was the
+only provider, and the vault reads an absent provider as `local` — there is nothing to
+backfill, and a re-run of the migrator (which happens on every `migrate()`) leaves every row
+and every sealed blob exactly as it was. One `add column if not exists`, idempotent like the
+rest; `credential-conformance` pins both the round trip of the field and that an absent one
+stays absent.
 
 ### The scheduler membership (#122)
 

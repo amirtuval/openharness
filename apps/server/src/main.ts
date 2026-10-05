@@ -17,7 +17,7 @@ import {
   createPostgresSessionStore,
   migrate,
 } from '@openharness/session/postgres'
-import { createVault, envKeyProvider, type Vault } from '@openharness/vault'
+import type { Vault } from '@openharness/vault'
 
 import { type AppEnv, type Logger, consoleLogger } from './types'
 import { createApp } from './app'
@@ -28,6 +28,7 @@ import { createMastraRegistry, type ModelRegistry } from './catalog/registry'
 import { DeltaCompactor } from './compaction'
 import { ENV_VARS, type ServerConfig, describeConfig, readServerConfig } from './config'
 import { createSessionCredentialResolver, type ResolveSessionCredential } from './credentials'
+import { createConfigVault } from './key-provider'
 import { resolveMockCredential, resolveModelFactory } from './model'
 import { PostgresPartitionScheduler } from './partition-scheduler'
 import { validateProviderApiKey, type ProviderCredentialValidator } from './provider-validation'
@@ -141,7 +142,10 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   // listener is gone.
   let draining = false
   const credentials = options.credentials ?? opened.credentials
-  const vault = options.vault ?? createVault(envKeyProvider(config.secretsKey))
+  // The vault the configuration asks for (#150): the environment key, or Cloud KMS. Either
+  // way it is built here, once, and shared by the credential routes, the per-request resolver
+  // and the model catalogue — one cache of unwrapped data keys, not three.
+  const vault = options.vault ?? createConfigVault(config)
   const auth = createAuth(
     {
       secret: config.betterAuthSecret,

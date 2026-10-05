@@ -96,6 +96,7 @@ export {
 } from './compaction'
 export {
   ENV_VARS,
+  DEFAULT_KEY_PROVIDER,
   DEFAULT_PORT,
   DEFAULT_SCHEDULER,
   DEFAULT_TRUSTED_PROXY_HOPS,
@@ -103,9 +104,11 @@ export {
   describeConfig,
   readServerConfig,
   usesTestModel,
+  type KeyProviderKind,
   type SchedulerKind,
   type ServerConfig,
 } from './config'
+export { createConfigVault } from './key-provider'
 export {
   HttpError,
   authenticationError,

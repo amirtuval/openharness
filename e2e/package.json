@@ -19,7 +19,6 @@
     "qa:web": "playwright test --config=playwright.config.ts"
   },
   "dependencies": {
-    "@openharness/cli": "workspace:*",
     "@openharness/client": "workspace:*",
     "@openharness/protocol": "workspace:*",
     "@openharness/server": "workspace:*",
@@ -27,6 +26,7 @@
     "@openharness/vault": "workspace:*",
     "@openharness/web": "workspace:*",
     "better-auth": "1.7.6",
+    "openharness": "workspace:*",
     "pg": "8.23.0"
   },
   "devDependencies": {

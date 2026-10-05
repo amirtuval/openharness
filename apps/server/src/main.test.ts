@@ -362,6 +362,27 @@ describe('main', () => {
     ).rejects.toThrow(/OPENHARNESS_TEST_MODEL/)
   })
 
+  it('boots on gcp-kms without the environment key and without reaching Cloud KMS', async () => {
+    // #150, D6: the KMS client is built lazily, on the first credential sealed or opened, so
+    // a server configured for Cloud KMS comes up with no environment key and no credential
+    // lookup — the first credential write is what would need both.
+    const logger = recordingLogger()
+    const env = bootEnv({
+      OPENHARNESS_TEST_MODEL: 'mock',
+      OPENHARNESS_KEY_PROVIDER: 'gcp-kms',
+      OPENHARNESS_KMS_KEY:
+        'projects/openharness-dev/locations/global/keyRings/openharness/cryptoKeys/credentials',
+    })
+    delete env['OPENHARNESS_SECRETS_KEY']
+    const server = await main(env, { logger })
+    started.push(server)
+
+    expect(server.port).toBeGreaterThan(0)
+    expect(logger.lines.join('\n')).toContain('vault keys: Cloud KMS key')
+    const response = await fetch(`http://127.0.0.1:${server.port}/health`)
+    expect(response.status).toBe(200)
+  })
+
   it('refuses to boot without the signing secret, the public URL or the vault key', async () => {
     // A2/A5: half a configuration is worse than none.
     const base = bootEnv()

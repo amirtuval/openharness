@@ -91,8 +91,10 @@ least one OAuth provider, or the localhost-only dev login (`OPENHARNESS_DEV_LOGI
 Everything under `/v1` is scoped to the signed-in user. Agents and sessions carry an owner,
 another user's resource is answered 404 rather than 403, and there is no static server API
 key. Model-provider keys are each user's own: a key is validated on save, sealed with
-envelope encryption from `@openharness/vault` under `OPENHARNESS_SECRETS_KEY`, and never
-returned. [`docs/api.md`](./api.md#authentication) has the routes and rules;
+envelope encryption from `@openharness/vault` under a master key that comes from
+`OPENHARNESS_SECRETS_KEY` (`OPENHARNESS_KEY_PROVIDER=local`, the default) or from Cloud KMS
+(`gcp-kms`, #150), and never returned.
+[`docs/api.md`](./api.md#authentication) has the routes and rules;
 [`apps/server/AGENTS.md`](../apps/server/AGENTS.md) has the implementation.
 
 ## Package map
@@ -108,8 +110,12 @@ returned. [`docs/api.md`](./api.md#authentication) has the routes and rules;
 | `@openharness/client`   | `packages/client`   | client for the server, used by the web app and the TUI     |
 | `@openharness/server`   | `apps/server`       | Hono HTTP server: the chat API, SSE, the scheduler         |
 | `@openharness/web`      | `apps/web`          | Vite + React chat UI (Tailwind + shadcn/ui)                |
-| `@openharness/cli`      | `apps/tui`          | Ink + React terminal UI, installed as `oh`                 |
+| `openharness`           | `apps/tui`          | Ink + React terminal UI, installed as `oh`                 |
 | `@openharness/e2e`      | `e2e`               | cross-package tests: real servers, real Postgres           |
+
+The TUI is the one workspace published to npm — as the unscoped **`openharness`**, its bundle
+self-contained (#152) — which is why its name is not `@openharness/cli`; the other workspaces
+are private to the repo.
 
 `@openharness/hands` is a placeholder today — the tools phase builds it, and the seam is
 `execute(name, input)` ([`docs/ROADMAP.md`](./ROADMAP.md), "Tools").
@@ -129,7 +135,7 @@ The rules cover `dependencies`, `devDependencies`, `peerDependencies` and
 | `@openharness/brain`    | protocol, session, hands               |
 | `@openharness/server`   | protocol, session, brain, hands, vault |
 | `@openharness/web`      | protocol, client                       |
-| `@openharness/cli`      | protocol, client                       |
+| `openharness` (the CLI) | protocol, client                       |
 | `@openharness/e2e`      | anything                               |
 
 `yarn check:deps` enforces this table and fails with the offending package, the dependency and

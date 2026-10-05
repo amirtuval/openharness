@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { createClient, type Client } from '@openharness/client'
 import { render, type Instance } from 'ink'
-import { pathToFileURL } from 'node:url'
+import { realpathSync } from 'node:fs'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { App, type ExitPayload } from './app'
 import { parseArgs, type ChatOptions } from './args'
@@ -19,7 +20,7 @@ import { restoreTerminal } from './terminal'
 import { readVersion } from './version'
 
 /** This package's name; lets a dependent prove the import resolved. */
-export const PACKAGE_NAME = '@openharness/cli'
+export const PACKAGE_NAME = 'openharness'
 
 export { App } from './app'
 export type { AppProps, ExitPayload } from './app'
@@ -346,9 +347,33 @@ function report(write: (line: string) => void, error: unknown, context: ErrorCon
   if (described.stack !== undefined) write(described.stack)
 }
 
-const isDirectRun =
-  process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href
+/**
+ * Is this module the process's entry point?
+ *
+ * Usually a plain URL comparison is enough, but npm installs a package's `bin` as a
+ * **symlink** (`node_modules/.bin/oh` → `../openharness/dist/index.js`, and the same shape
+ * under a global prefix), and Node resolves the entry to its real path: `import.meta.url` is
+ * `apps/tui/dist/index.js` while `process.argv[1]` is still the `.bin/oh` symlink — so the
+ * string comparison says "not the entry point" and an installed `oh` would silently do
+ * nothing (#152). The realpath comparison is the one that holds however it was reached;
+ * the string comparison stays as the cheap, exact case.
+ *
+ * Exported (with its two inputs) so the tests can exercise it; `run()` itself is the module
+ * run only when this answers true.
+ */
+export function isDirectRun(
+  entry: string | undefined = process.argv[1],
+  moduleUrl: string = import.meta.url,
+): boolean {
+  if (entry === undefined) return false
+  if (moduleUrl === pathToFileURL(entry).href) return true
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(moduleUrl))
+  } catch {
+    return false
+  }
+}
 
-if (isDirectRun) {
+if (isDirectRun()) {
   process.exitCode = await run(process.argv.slice(2))
 }

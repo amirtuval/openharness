@@ -195,6 +195,12 @@ export interface ProviderCredentialsTable {
   nonce: string
   wrapped_key: string
   kek_version: string
+  /**
+   * Which key provider wrapped `wrapped_key` (#150) — `local` or `gcp-kms`. `null` on a row
+   * written before the column existed (see `0018_credential_key_provider.sql`), where `local`
+   * was the only provider: the vault treats `null` as `local`.
+   */
+  key_provider: string | null
   /** The last four characters of the plaintext, for recognition only. */
   last4: string
   created_at: Date
@@ -358,7 +364,14 @@ export function credentialMetadataFromRow(row: ProviderCredentialMetadataRow): P
   })
 }
 
-/** The sealed record a row carries: the metadata above plus the sealed blob, deep-frozen. */
+/**
+ * The sealed record a row carries: the metadata above plus the sealed blob, deep-frozen.
+ *
+ * The sealed fields come back exactly as they were stored, `keyProvider` included — and
+ * *absent* for a row written before `0018_credential_key_provider.sql`, whose `null` column
+ * means the local provider, the only one that existed then (the vault reads an absent
+ * provider as `local`).
+ */
 export function credentialFromRow(row: ProviderCredentialRow): SealedProviderCredential {
   return deepFreeze({
     ...credentialMetadataFromRow(row),
@@ -367,6 +380,7 @@ export function credentialFromRow(row: ProviderCredentialRow): SealedProviderCre
       nonce: row.nonce,
       wrappedKey: row.wrapped_key,
       kekVersion: row.kek_version,
+      ...(row.key_provider === null ? {} : { keyProvider: row.key_provider }),
     },
   })
 }
