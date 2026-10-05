@@ -1,0 +1,79 @@
+name: terraform-ci
+
+# The Terraform under infra/ is not part of the workspace, so turbo never sees it. This
+# job checks it without any GCP credentials: formatting, provider-specific linting, and a
+# provider-and-module validation of both environment roots. The credentialed `terraform
+# plan` on pull requests — which impersonates tf-plan@ through Workload Identity — is a
+# later issue (#155).
+#
+# Scoped to infra/** so an unrelated PR does not run it. init runs with -backend=false, so
+# nothing here reads or writes the state buckets and no credentials are needed.
+on:
+  pull_request:
+    paths:
+      - 'infra/**'
+  push:
+    branches: [main]
+    paths:
+      - 'infra/**'
+
+permissions:
+  contents: read
+
+env:
+  TF_IN_AUTOMATION: 'true'
+
+jobs:
+  format-and-lint:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        # tflint walks up the tree for .tflint.hcl, so every module and both
+        # environments pick up infra/.tflint.hcl and its google ruleset.
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.9.8'
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff
+
+      # Pin the version the configuration was developed against, so a newer tflint cannot
+      # fail the build on a rule the change was never tested against.
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: v0.53.0
+
+      - name: tflint init
+        run: tflint --init
+
+      - name: tflint
+        run: tflint --recursive
+
+  validate:
+    runs-on: ubuntu-latest
+    strategy:
+      # Report both environments even if one fails.
+      fail-fast: false
+      matrix:
+        environment: [staging, production]
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.9.8'
+
+      # -backend=false: the state bucket is created by the setup script, not here, and
+      # validate needs no state to check the configuration and its modules.
+      - name: terraform init
+        run: terraform -chdir=envs/${{ matrix.environment }} init -backend=false
+
+      - name: terraform validate
+        run: terraform -chdir=envs/${{ matrix.environment }} validate
