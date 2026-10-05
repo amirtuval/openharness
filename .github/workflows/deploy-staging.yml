@@ -105,6 +105,9 @@ jobs:
           # reads the ones the setup script set there.
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_DEPLOY_SA }}
+          # docker/login-action below needs an OAuth access token as its password; the action
+          # only outputs `access_token` when asked for one.
+          token_format: access_token
 
       - uses: hashicorp/setup-terraform@v3
         with:
