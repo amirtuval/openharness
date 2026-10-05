@@ -20,10 +20,13 @@ import { sessionRefresh } from '../lib/session-refresh'
  *
  * The model control in the composer is the app's one picker (compact): the default stands in
  * until the reader picks another one, and their pick is what the session is created with.
- * With no default — an account with no provider keys at all — there is nothing to run, so the
- * screen says so and links to Settings instead of pretending to be a chat. (The screen is
- * reachable signed in, after a 401, and while preferences load; each state is drawn, not
- * assumed away.)
+ * With no default the **catalog** decides what can run (#146): an account whose key predates
+ * automatic picking, whose pick failed at save time, or whose provider's default was cleared
+ * still lists models, so the screen is the normal composer waiting for a pick (a one-model
+ * catalog is the only choice there could be, so it is preselected). Only an account with no
+ * providers and no models is told to add a key, and a catalog that failed to load shows that
+ * error instead of claiming there are no keys. (The screen is reachable signed in, after a
+ * 401, and while preferences or the catalog load; each state is drawn, not assumed away.)
  */
 export function NewChatScreen({
   createSession,
@@ -48,7 +51,15 @@ export function NewChatScreen({
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
   const defaultModel = preferences?.default_model ?? null
-  const model = chosen ?? created?.model ?? defaultModel
+  // No default, but the catalog has exactly one model (#146): it is the only thing a chat
+  // could run on, so it stands in the way a default would — there is no pick to wait for.
+  // (Only with loaded preferences: after a failed read the screen offers the picker instead,
+  // and a stale guess would be worse than an empty control.)
+  const onlyModel =
+    defaultModel === null && error === null && catalog.models.length === 1
+      ? (catalog.models[0]?.id ?? null)
+      : null
+  const model = chosen ?? created?.model ?? defaultModel ?? onlyModel
 
   // A new chat opens with the cursor in the box, like any other chat.
   useEffect(() => {
@@ -59,6 +70,8 @@ export function NewChatScreen({
   }, [loading, model])
 
   const send = async (text: string): Promise<boolean> => {
+    // No model — no default and nothing picked yet (#146) — is a refusal, not a silent
+    // ignore: `false` keeps the text in the box, and the hint above the composer says why.
     if (model === null || sending) {
       return false
     }
@@ -114,24 +127,39 @@ export function NewChatScreen({
     )
   }
 
-  // No default and no session created yet: nothing to run. The one screen of #91 that
-  // survives is this state — and it is a state, not a picker.
+  // No default and no session created yet: what this screen is depends on the catalog
+  // (#146). The shell loads it alongside the preferences, so "no default" is not yet "nothing
+  // to run" while the first load is in flight.
   if (defaultModel === null && created === null && error === null) {
-    return (
-      <div className="flex h-full items-center justify-center px-6">
-        <div className="max-w-md space-y-2 text-center">
-          <h1 className="text-base font-medium">New chat</h1>
-          <p className="text-sm font-medium">Add a provider key to start</p>
-          <p className="text-sm text-muted-foreground">
-            A chat runs on a model from a provider you have a key for. Saving the first key also
-            picks a default model for you.
+    if (catalog.loading) {
+      return (
+        <div className="flex h-full items-center justify-center px-6">
+          <p role="status" className="text-sm text-muted-foreground">
+            Loading your models…
           </p>
-          <a className="text-sm underline underline-offset-2" href={settingsHash()}>
-            Settings → Model providers
-          </a>
         </div>
-      </div>
-    )
+      )
+    }
+    // No providers and no models: an account that never saved a key, where a pointer to
+    // Settings is the whole truth. Keys with a catalog of models fall through to the
+    // composer, and a failed load is the error banner beside it — never this claim.
+    if (catalog.error === null && catalog.models.length === 0 && catalog.providers.length === 0) {
+      return (
+        <div className="flex h-full items-center justify-center px-6">
+          <div className="max-w-md space-y-2 text-center">
+            <h1 className="text-base font-medium">New chat</h1>
+            <p className="text-sm font-medium">Add a provider key to start</p>
+            <p className="text-sm text-muted-foreground">
+              A chat runs on a model from a provider you have a key for. Saving the first key also
+              picks a default model for you.
+            </p>
+            <a className="text-sm underline underline-offset-2" href={settingsHash()}>
+              Settings → Model providers
+            </a>
+          </div>
+        </div>
+      )
+    }
   }
 
   return (
@@ -168,6 +196,17 @@ export function NewChatScreen({
               onDismiss={() => setSendError(null)}
             />
           )}
+          {model === null ? (
+            // No default and nothing picked: the send is refused (there is no model to create
+            // the session with), so the screen says what is missing and where a default lives.
+            <p className="text-xs text-muted-foreground">
+              Pick a model to start, or{' '}
+              <a className="underline underline-offset-2" href={settingsHash()}>
+                set a default in Settings
+              </a>
+              .
+            </p>
+          ) : null}
           <Composer
             running={false}
             onSend={send}

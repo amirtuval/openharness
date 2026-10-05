@@ -20,13 +20,15 @@ import {
  * first message — there is no picker screen and no agent form to drive any more (this scenario
  * used to create an agent through the UI first, then pick it).
  *
- * The two states a first run can be in are both worth asserting, and which one this stack is
- * in depends on whether it has a provider key:
+ * The states a first run can be in are all worth asserting, and which one this stack is in
+ * depends on what it holds:
  *
- * - **no default** (a stack nobody has saved a key on — the mock pass) → "Add a provider key
- *   to start" and the link to Settings, which is what a first run with nothing configured
- *   must say. The immediate chat is then driven by storing a default the way Settings does
- *   (`PUT /v1/me/preferences`), because that is the state the rest of the scenario is about.
+ * - **no default, no key** (the mock pass) → "Add a provider key to start" and the link to
+ *   Settings, which is what a first run with nothing configured must say. The immediate chat
+ *   is then driven by storing a default the way Settings does (`PUT /v1/me/preferences`),
+ *   because that is the state the rest of the scenario is about.
+ * - **no default, keys** (#146) → the composer waits for a pick ("Pick a model to start"),
+ *   because the catalog lists what can run; the same `PUT` then gives it a default.
  * - **a default** (a stack where a key was saved, or another scenario set one) → the composer
  *   straight away.
  *
@@ -69,12 +71,22 @@ test.describe('W1 first run', () => {
       await expect(page.getByRole('heading', { name: 'New chat' })).toBeVisible()
 
       if (previousDefault === null) {
-        // No key has been saved on this stack and nothing set a default: the one honest thing
-        // the screen can say. (The server's automatic default arrives with the first key, U4 —
-        // see `defaultModel` in `support.ts`.)
-        await expect(page.getByText('Add a provider key to start')).toBeVisible()
-        await expect(page.getByRole('link', { name: /Model providers/ })).toBeVisible()
-        await shot(page, 'w1-02-no-default')
+        const catalog = (await (await request.get('/v1/models')).json()) as { data: unknown[] }
+        if (catalog.data.length === 0) {
+          // No key has been saved on this stack and nothing set a default: the one honest
+          // thing the screen can say. (The server's automatic default arrives with the first
+          // key, U4 — see `defaultModel` in `support.ts`.)
+          await expect(page.getByText('Add a provider key to start')).toBeVisible()
+          await expect(page.getByRole('link', { name: /Model providers/ })).toBeVisible()
+          await shot(page, 'w1-02-no-default')
+        } else {
+          // Keys but no default (#146): the catalog says what can run, so the composer offers
+          // it — waiting for a pick, or with a sole model preselected — instead of claiming
+          // there is no key.
+          await expect(composer(page)).toBeVisible()
+          await expect(page.getByText('Add a provider key to start')).not.toBeVisible()
+          await shot(page, 'w1-02-pick-a-model')
+        }
 
         // Store a default the way Settings does, and reload: the account now has one.
         await ensureDefaultModel(request)
