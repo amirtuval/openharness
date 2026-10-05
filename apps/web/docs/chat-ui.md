@@ -130,7 +130,11 @@ panel for a `provider/model` text field instead of closing over a selection.
   `{ ok: false, kind: 'rate_limit' }`, the picker shows the server's sentence inline
   (`role="status"`) and the list that is already on screen stays exactly as it was;
 - no keys at all → New chat shows the "Add a provider key to start" state that links to
-  Settings → Model providers, and there is nothing to type into.
+  Settings → Model providers, and there is nothing to type into;
+- keys but no default (#146) → the composer is there with the picker, nothing selected, and
+  the send is refused until a pick ("Pick a model to start", with a link to Settings); a
+  one-model catalog is preselected, because there is no choice in it. A catalog that is
+  still loading, or that failed, is shown as that — never as a claim about keys.
 
 ## New chat is immediate, the model is switched from the composer (#113)
 
@@ -146,6 +150,15 @@ server picks the default itself when the first provider key is saved (U4) — Se
 model shows that value because it is a read of the same stored field the picker writes, not a
 local choice. A failed create keeps the reader's text in the box; a failure _after_ a create
 keeps the session and retries into it.
+
+**Keys without a default are the clients' to handle** (#146). The server picks a default only
+at the moment a key is saved: it never backfills one on read, and deleting the provider behind
+a default the reader chose **clears** it on purpose even when other keys remain. So `#/new`
+with no default asks the catalog what can still run — models mean the composer with the picker
+(nothing selected, the send refused until a pick, a sole model preselected), still loading
+means a loading line, failed means its error banner, and only no providers and no models means
+"Add a provider key to start". `oh` already opened its picker over the same catalog in this
+state; now the web app does too.
 
 **The session is named by the first message** (#35), which this flow stores before the chat
 opens — so the header's mount read already sees the title, while the sidebar row (added by the

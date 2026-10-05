@@ -77,8 +77,11 @@ test.describe('W19 the default model in Settings', () => {
     request,
     consoleErrors,
   }) => {
-    // The state the mock pass starts in (U2/U4): nothing has been saved, so nothing can run.
-    // Set it to null explicitly rather than assume, and put the stored value back afterwards.
+    // The states a stack with no default can be in (#146). With no provider key at all the
+    // catalog is empty and "Add a provider key to start" is the truth — the state the mock
+    // pass starts in (U2/U4). With keys the catalog lists models that can run, so the screen
+    // must offer them instead of claiming there is no key. Set the default to null
+    // explicitly rather than assume, and put the stored value back afterwards.
     const previous = await defaultModel(request)
     await setDefaultModel(request, null)
 
@@ -86,9 +89,17 @@ test.describe('W19 the default model in Settings', () => {
       await page.goto('/#/settings')
       await expect(page.getByRole('button', { name: /^Model\b/ })).toContainText('Choose a model')
 
+      const catalog = (await (await request.get('/v1/models')).json()) as { data: unknown[] }
       await page.goto('/#/new')
-      await expect(page.getByText('Add a provider key to start')).toBeVisible()
-      await expect(page.getByRole('link', { name: /Model providers/ })).toBeVisible()
+      if (catalog.data.length === 0) {
+        await expect(page.getByText('Add a provider key to start')).toBeVisible()
+        await expect(page.getByRole('link', { name: /Model providers/ })).toBeVisible()
+      } else {
+        // Keys but no default (#146): the composer offers the catalog — waiting for a pick,
+        // or with a sole model preselected — and never the claim about keys.
+        await expect(composer(page)).toBeVisible()
+        await expect(page.getByText('Add a provider key to start')).not.toBeVisible()
+      }
       await shot(page, 'w19-04-no-default')
     } finally {
       await setDefaultModel(request, previous)

@@ -40,6 +40,11 @@ import {
  *   server's own sealing and store — see `harness/credentials.ts`) can be deleted through the
  *   real route. Every credential in those cases belongs to a provider no adapter knows, so the
  *   catalogue answers from the registry and the suite makes no outbound request (C3/C5).
+ *
+ * And one state the clients own: a key stored **without** the route leaves no default (the
+ * pick is the route's), while the catalogue still lists what the key can run — keys without a
+ * default, which the web's New chat and `oh` must handle rather than claiming there is no key
+ * (#146).
  */
 
 const harness = e2eHarness('default-model')
@@ -296,6 +301,36 @@ describe('the automatic default model (U4)', () => {
       })
       // Exactly the two calls: the validation and the list that failed.
       expect(stub.requests.filter((request) => request.host === 'api.together.xyz')).toHaveLength(2)
+    } finally {
+      await killServers()
+      await stub.stop()
+    }
+  })
+
+  it('leaves the default null when the key arrived without the route — the clients’ #146 state', async () => {
+    const stub = await startProviderStub()
+    try {
+      answerWithModel(stub, 'api.anthropic.com', recommendedModelFor('anthropic'))
+      const server = await harness.server({ env: stub.env })
+      const me = await person(server, 'seeded-key')
+
+      // `seedProviderCredential` writes the exact row the PUT route writes, but the automatic
+      // pick (U4) lives in the route — so this account has a key and **no default**. That is
+      // the state #146 is about: the same one a key saved before the pick existed leaves, or
+      // one a failed pick leaves; the delete cases above reach it when the user's own choice
+      // is cleared.
+      await seedKey(me.signedIn.user.id, 'anthropic')
+
+      // The catalogue still lists what the key can run, so both clients can offer a pick:
+      // this is what the web's New chat picker and `oh`'s are fed from.
+      const catalog = await me.client.models.list()
+      expect(catalog.data.map((entry) => entry.id)).toContain(
+        `anthropic/${recommendedModelFor('anthropic')}`,
+      )
+
+      // And reading the preferences does **not** backfill a choice the user never made: the
+      // fix is in the clients (#146), not a server that substitutes one.
+      await expect(me.client.preferences.get()).resolves.toEqual({ default_model: null })
     } finally {
       await killServers()
       await stub.stop()
