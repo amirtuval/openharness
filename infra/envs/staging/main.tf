@@ -158,10 +158,18 @@ module "registry" {
   # image across projects, which their project-level roles cannot cover.
   # roles/container.defaultNodeServiceAccount does not include
   # artifactregistry.reader, so the grant is needed on both.
-  reader_service_accounts = [
+  #
+  # `compact` drops the production account while the variable is empty — its
+  # default, and the value on a first staging deploy. Production's account is
+  # created by production's Terraform, and GCP rejects an IAM member that does
+  # not exist yet, so naming it before that first production apply is what broke
+  # the first staging deploy. It is set (TF_PRODUCTION_NODE_SA) and re-applied
+  # once production has created the account; see docs/DEPLOYMENT.md, "The first
+  # deploy".
+  reader_service_accounts = compact([
     module.gke.node_service_account_email,
-    var.production_node_service_account_email,
-  ]
+    var.production_node_service_account,
+  ])
 
   depends_on = [google_project_service.services]
 }

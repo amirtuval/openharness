@@ -180,7 +180,21 @@ from staging's registry.
    Production's own hostname (`app.oharness.dev`) is in the zone production adopts, so it
    works as soon as the domain's registration delegates to it.
 6. **Cut the production tag** (`git tag -f production <sha> && git push -f origin production`)
-   with the SHA staging just deployed, and watch `deploy-production`.
+   with the SHA staging just deployed, and watch `deploy-production`. Production's nodes cannot
+   read staging's registry yet, so **this first apply is expected to end with the release stuck
+   in `ImagePullBackOff`** — production's node service account exists as of this apply, and that
+   is the point of it. Steps 7–9 turn the read on.
+7. **Set `TF_PRODUCTION_NODE_SA`** to production's node service account, whose email is
+   predictable and needs no lookup:
+   `gh variable set TF_PRODUCTION_NODE_SA --body gke-nodes@openharness-510710.iam.gserviceaccount.com`.
+   Empty is the correct value until now: staging's registry only grants read while the account
+   in that variable exists, and naming an account that does not exist yet would fail the apply.
+8. **Re-run staging** (`workflow_dispatch`). This is the apply that adds the reader grant on the
+   repository for production's now-existing account — staging passes
+   `-var production_node_service_account=${{ vars.TF_PRODUCTION_NODE_SA }}`.
+9. **Re-run production** — re-push the `production` tag, or dispatch `deploy-production.yml` by
+   hand. Its nodes can read the registry now, so the rollout finishes and the smoke test runs.
+   That is the end of the bootstrap: the grant is part of staging's ordinary apply from here on.
 
 Two things can only be verified on the first real deploy, because they are the first time any
 of this touches GCP: the two-stage apply actually finding an empty project (the detection is
@@ -224,14 +238,15 @@ written into a workflow.
 
 Beyond them, every workflow reads these. **They are not set by the setup script.**
 
-| Variable                           | Scope                                          | Read by                       | What it is                                                                                                                  |
-| ---------------------------------- | ---------------------------------------------- | ----------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `TF_EXISTING_ZONE_NAME_PRODUCTION` | repository                                     | plan job, `deploy-production` | **Required for production.** Resource name of the existing `oharness.dev` zone, from `gcloud dns managed-zones list`.       |
-| `TF_STAGING_NAME_SERVERS`          | repository                                     | plan job, `deploy-production` | Staging's `terraform output -json name_servers`, printed by the first staging deploy. Unset (or `[]`) skips the delegation. |
-| `GOOGLE_CLIENT_ID`                 | environment, and repo `_STAGING`/`_PRODUCTION` | plan job, deploys             | Google OAuth client ID. Empty disables Google sign-in.                                                                      |
-| `GITHUB_CLIENT_ID`                 | environment, and repo `_STAGING`/`_PRODUCTION` | plan job, deploys             | GitHub OAuth client ID. Empty disables GitHub sign-in.                                                                      |
-| `MICROSOFT_CLIENT_ID`              | environment, and repo `_STAGING`/`_PRODUCTION` | plan job, deploys             | Microsoft OAuth client ID. Empty disables Microsoft sign-in.                                                                |
-| `MICROSOFT_TENANT_ID`              | environment, and repo `_STAGING`/`_PRODUCTION` | plan job, deploys             | Microsoft tenant ID, used only with the client ID above.                                                                    |
+| Variable                           | Scope                                          | Read by                            | What it is                                                                                                                                                                                                                                     |
+| ---------------------------------- | ---------------------------------------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TF_EXISTING_ZONE_NAME_PRODUCTION` | repository                                     | plan job, `deploy-production`      | **Required for production.** Resource name of the existing `oharness.dev` zone, from `gcloud dns managed-zones list`.                                                                                                                          |
+| `TF_STAGING_NAME_SERVERS`          | repository                                     | plan job, `deploy-production`      | Staging's `terraform output -json name_servers`, printed by the first staging deploy. Unset (or `[]`) skips the delegation.                                                                                                                    |
+| `TF_PRODUCTION_NODE_SA`            | repository                                     | staging plan job, `deploy-staging` | Production's GKE node service account email, granted read on staging's registry. **Empty until production's first deploy has created the account** — setting it earlier names a member GCP rejects. See [The first deploy](#the-first-deploy). |
+| `GOOGLE_CLIENT_ID`                 | environment, and repo `_STAGING`/`_PRODUCTION` | plan job, deploys                  | Google OAuth client ID. Empty disables Google sign-in.                                                                                                                                                                                         |
+| `GITHUB_CLIENT_ID`                 | environment, and repo `_STAGING`/`_PRODUCTION` | plan job, deploys                  | GitHub OAuth client ID. Empty disables GitHub sign-in.                                                                                                                                                                                         |
+| `MICROSOFT_CLIENT_ID`              | environment, and repo `_STAGING`/`_PRODUCTION` | plan job, deploys                  | Microsoft OAuth client ID. Empty disables Microsoft sign-in.                                                                                                                                                                                   |
+| `MICROSOFT_TENANT_ID`              | environment, and repo `_STAGING`/`_PRODUCTION` | plan job, deploys                  | Microsoft tenant ID, used only with the client ID above.                                                                                                                                                                                       |
 
 A deploy job runs inside its environment, so it reads the environment-scoped copy of an OAuth
 variable; the plan job runs outside any environment and reads the repository-level

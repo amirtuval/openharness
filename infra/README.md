@@ -105,6 +105,32 @@ first deploy that is much slower than the ones after it. And a targeted apply le
 of the configuration untouched, so nothing but the cluster is half-created: if it fails
 partway, re-running the same two applies converges.
 
+### The first production deploy grants registry read only once its account exists
+
+Staging's registry grants read to **both** node service accounts, and production's does not
+exist until production's own Terraform has run. GCP rejects an IAM policy that names a member
+that does not exist, so a first staging apply must not name production's account at all — that
+is what `production_node_service_account` being empty (its default) means, and it is why the
+first staging deploy no longer fails on the registry's IAM. The account is granted read later,
+once it exists:
+
+1. **Deploy staging** (`.github/workflows/deploy-staging.yml`). It creates the registry and
+   grants read to staging's own node SA. Nothing names production yet.
+2. **Deploy production once.** Its first apply creates the production cluster and its node
+   service account. The release's rollout can then fail with `ImagePullBackOff` — production's
+   nodes cannot read staging's registry yet, which is expected at this point, not a broken
+   deploy.
+3. **Set the variable** to production's node account, whose email is predictable:
+   `gh variable set TF_PRODUCTION_NODE_SA --body gke-nodes@openharness-510710.iam.gserviceaccount.com`
+4. **Re-run staging** (`workflow_dispatch`). `deploy-staging.yml` passes
+   `-var production_node_service_account=${{ vars.TF_PRODUCTION_NODE_SA }}`, so this apply adds
+   the reader grant on the repository for production's now-existing account.
+5. **Re-run production** — re-push the `production` tag, or dispatch `deploy-production.yml` by
+   hand. Its nodes can read the registry now, so the rollout completes.
+
+After that the grant is part of staging's ordinary apply and nothing here is manual again: an
+empty `TF_PRODUCTION_NODE_SA` grants nothing, and a set one grants read.
+
 ### Staging's name servers, and the empty delegation
 
 `staging_name_servers` defaults to `[]`, and an empty list **skips** the NS records: the
@@ -231,10 +257,10 @@ Every environment input, its default, and where a non-default value comes from. 
 
 ### Staging only
 
-| Variable                                | Default                                                | Where the value comes from                                                                                         |
-| --------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| `dns_zone_name`                         | `staging-oharness-dev`                                 | Resource name of the zone staging creates.                                                                         |
-| `production_node_service_account_email` | `gke-nodes@openharness-510710.iam.gserviceaccount.com` | Production's node service account. Its email is predictable, so it needs no lookup; the registry grants it reader. |
+| Variable                          | Default                | Where the value comes from                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| --------------------------------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dns_zone_name`                   | `staging-oharness-dev` | Resource name of the zone staging creates.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `production_node_service_account` | `""`                   | Production's node service account, granted repository-level read. **Empty grants nothing**: the account is created by production's Terraform, and GCP rejects an IAM member that does not exist. Set it (repository variable `TF_PRODUCTION_NODE_SA`) after the first production deploy, then re-apply — see [The first production deploy grants registry read only once its account exists](#the-first-production-deploy-grants-registry-read-only-once-its-account-exists). Its email is predictable and needs no lookup: `gke-nodes@openharness-510710.iam.gserviceaccount.com`. |
 
 ### Production only
 
@@ -355,15 +381,15 @@ Nothing needed a new role for the apply itself; the one role added in this PR is
 Terraform grants nothing to `deploy@` or `tf-plan@`. It grants roles **to the two service
 accounts it creates**:
 
-| Grantee              | Role                                                                                 | Scope                                            |
-| -------------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------ |
-| node SA              | `roles/container.defaultNodeServiceAccount`                                          | project                                          |
-| app SA               | `roles/cloudtrace.agent`, `roles/logging.logWriter`, `roles/monitoring.metricWriter` | project                                          |
-| app SA               | `roles/secretmanager.secretAccessor`                                                 | each secret, resource-level                      |
-| app SA               | `roles/cloudkms.cryptoKeyEncrypterDecrypter`                                         | the crypto key, resource-level                   |
-| app SA               | `roles/iam.workloadIdentityUser`                                                     | on itself, for the `openharness/openharness` KSA |
-| staging's node SA    | `roles/artifactregistry.reader`                                                      | the staging repository, resource-level           |
-| production's node SA | `roles/artifactregistry.reader`                                                      | the staging repository, resource-level           |
+| Grantee              | Role                                                                                 | Scope                                                                                 |
+| -------------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
+| node SA              | `roles/container.defaultNodeServiceAccount`                                          | project                                                                               |
+| app SA               | `roles/cloudtrace.agent`, `roles/logging.logWriter`, `roles/monitoring.metricWriter` | project                                                                               |
+| app SA               | `roles/secretmanager.secretAccessor`                                                 | each secret, resource-level                                                           |
+| app SA               | `roles/cloudkms.cryptoKeyEncrypterDecrypter`                                         | the crypto key, resource-level                                                        |
+| app SA               | `roles/iam.workloadIdentityUser`                                                     | on itself, for the `openharness/openharness` KSA                                      |
+| staging's node SA    | `roles/artifactregistry.reader`                                                      | the staging repository, resource-level                                                |
+| production's node SA | `roles/artifactregistry.reader`                                                      | the staging repository, resource-level, **only while `TF_PRODUCTION_NODE_SA` is set** |
 
 Every **project-level** grant above is a role inside the setup script's
 `DEPLOY_GRANTABLE_PROJECT_ROLES` — that is the only thing the condition on `deploy@`'s
@@ -376,6 +402,13 @@ The repository read goes to **both** node service accounts, not only production'
 staging's nodes are what run the staging deployment. The grant has to be on the repository
 (rather than a project role) for production's nodes anyway — the repository is in the
 staging project, which their project-level roles do not reach.
+
+Production's half of that grant is **conditional on `TF_PRODUCTION_NODE_SA`**: production's
+node service account does not exist until production's Terraform creates it, and GCP rejects an
+IAM member that does not exist, so a first staging apply that named it would fail the whole
+registry apply. Empty is therefore the correct state on a first deploy, and setting the variable
+after production's first apply is what turns the grant on
+([above](#the-first-production-deploy-grants-registry-read-only-once-its-account-exists)).
 
 ### The plan account
 
