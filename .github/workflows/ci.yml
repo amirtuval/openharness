@@ -107,7 +107,12 @@ jobs:
         env:
           DATABASE_URL: postgres://openharness:openharness@localhost:5432/openharness
           TURBO_FORCE_FLAG: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.force)) && '--force' || '' }}
-        run: yarn turbo run build typecheck lint format:check test --cache-dir=.turbo/cache $TURBO_FORCE_FLAG
+        run: |
+          # The unquoted expansion is the point: an empty TURBO_FORCE_FLAG must disappear from
+          # the command line, and "yarn turbo ... ''" is not the same command. The lint pass
+          # reads it as a word-splitting bug; it is not one.
+          # shellcheck disable=SC2086
+          yarn turbo run build typecheck lint format:check test --cache-dir=.turbo/cache $TURBO_FORCE_FLAG
 
       # The published shape of the CLI (#152): `npm pack`, and only the expected files in the
       # tarball; `npm install` of that tarball **offline** into a temp directory outside the

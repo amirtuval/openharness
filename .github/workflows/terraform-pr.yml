@@ -1,0 +1,360 @@
+name: terraform-pr
+
+# Everything a pull request needs to see about the infrastructure (issue #155, epic #148).
+#
+#   checks  the un-credentialed half: fmt, validate and tflint, by calling terraform-ci.yml
+#           (which this workflow reused rather than copying — it owns those jobs).
+#   helm    helm lint and helm template, when charts/openharness exists. It does not yet:
+#           the chart lands in #154, and the step is conditional so this workflow is
+#           correct either side of it.
+#   plan    `terraform plan` for staging and production, impersonating tf-plan@ through
+#           Workload Identity, then one collapsed PR comment with both plans.
+#
+# **The trigger is `pull_request`, never `pull_request_target`.** The plan runs the PR's own
+# tree, so a fork's code is never executed with this repository's credentials — and even so,
+# the plan job is skipped outright for a fork (`head.repo.full_name != github.repository`),
+# because tf-plan@'s impersonation binding is by event_name (any pull_request of this repo)
+# rather than by environment, so a fork's workflow could otherwise request a token in this
+# repository's name. The account is read-only outside the state bucket, and this is the belt
+# to that suspenders. See .github/setup/README.md, "The plan account, and its risk".
+#
+# The plan job reads the repository-level `*_STAGING` / `*_PRODUCTION` copies of the setup
+# script's variables: it runs outside any GitHub environment, so it cannot read the
+# environment-scoped ones (that is exactly why the script sets both).
+on:
+  pull_request:
+    paths:
+      - 'infra/**'
+      - 'charts/**'
+      - '.github/workflows/terraform-pr.yml'
+      - '.github/workflows/terraform-ci.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  # One plan per pull request: a new push cancels the run that is still planning the old
+  # tree, whose comment would be stale the moment it was posted.
+  group: terraform-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  TF_IN_AUTOMATION: 'true'
+  # Pinned, like terraform-ci.yml: the version infra/ is developed against.
+  TERRAFORM_VERSION: '1.9.8'
+
+jobs:
+  # fmt -check -recursive, `init -backend=false` + `validate` per environment, and tflint.
+  # No credentials: -backend=false never touches the state buckets.
+  checks:
+    uses: ./.github/workflows/terraform-ci.yml
+
+  # `helm lint` and `helm template`, against the chart the app module installs. The chart
+  # arrives in #154; until it is on main these steps report that there is nothing to check
+  # rather than failing, so nothing here depends on that issue's merge order.
+  helm:
+    name: helm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Look for the chart
+        id: chart
+        run: |
+          set -euo pipefail
+          if [[ -f charts/openharness/Chart.yaml ]]; then
+            echo 'present=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'present=false' >> "$GITHUB_OUTPUT"
+            {
+              echo '### helm'
+              echo
+              echo 'No charts/openharness/Chart.yaml in this tree — nothing to lint.'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - if: steps.chart.outputs.present == 'true'
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+
+      - name: helm lint
+        if: steps.chart.outputs.present == 'true'
+        run: helm lint charts/openharness
+
+      # Renders the templates with the chart's own defaults. A chart that cannot render
+      # with its defaults — which is what a bare `terraform apply` would ask of it, since
+      # the app module passes only the values it sets — is a broken chart.
+      - name: helm template
+        if: steps.chart.outputs.present == 'true'
+        run: helm template openharness charts/openharness --namespace openharness > /dev/null
+
+  plan:
+    name: plan (${{ matrix.environment }})
+    # A fork pull request gets no plan. See the header.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # contents is not merged with the workflow-level block, so it is repeated here;
+      # id-token is what `google-github-actions/auth` exchanges for a tf-plan@ token.
+      contents: read
+      id-token: write
+    strategy:
+      # Report both environments even when one of them fails.
+      fail-fast: false
+      matrix:
+        include:
+          # Every value below is a GitHub variable — never a project ID or a hostname
+          # written into the workflow. The plan job is outside any environment, so these
+          # are the repository-level copies.
+          - environment: staging
+            project_id: ${{ vars.GCP_PROJECT_ID_STAGING }}
+            wif_provider: ${{ vars.GCP_WIF_PROVIDER_STAGING }}
+            plan_sa: ${{ vars.GCP_PLAN_SA_STAGING }}
+            # staging declares neither variable; leaving them empty keeps them off the
+            # command line, where Terraform would reject them as undeclared.
+            existing_zone_name: ''
+            staging_name_servers: ''
+            # `OAUTH_`, not the Terraform variable's own name: GitHub rejects a
+            # configuration variable whose name starts with `GITHUB_`, so
+            # `github_client_id` cannot be spelled that way here.
+            google_client_id: ${{ vars.OAUTH_GOOGLE_CLIENT_ID_STAGING }}
+            github_client_id: ${{ vars.OAUTH_GITHUB_CLIENT_ID_STAGING }}
+            microsoft_client_id: ${{ vars.OAUTH_MICROSOFT_CLIENT_ID_STAGING }}
+            microsoft_tenant_id: ${{ vars.OAUTH_MICROSOFT_TENANT_ID_STAGING }}
+          - environment: production
+            project_id: ${{ vars.GCP_PROJECT_ID_PRODUCTION }}
+            wif_provider: ${{ vars.GCP_WIF_PROVIDER_PRODUCTION }}
+            plan_sa: ${{ vars.GCP_PLAN_SA_PRODUCTION }}
+            existing_zone_name: ${{ vars.TF_EXISTING_ZONE_NAME_PRODUCTION }}
+            staging_name_servers: ${{ vars.TF_STAGING_NAME_SERVERS }}
+            google_client_id: ${{ vars.OAUTH_GOOGLE_CLIENT_ID_PRODUCTION }}
+            github_client_id: ${{ vars.OAUTH_GITHUB_CLIENT_ID_PRODUCTION }}
+            microsoft_client_id: ${{ vars.OAUTH_MICROSOFT_CLIENT_ID_PRODUCTION }}
+            microsoft_tenant_id: ${{ vars.OAUTH_MICROSOFT_TENANT_ID_PRODUCTION }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # A default body for the PR comment, so the comment job always has something to post
+      # — including when this job dies before it can plan (a missing variable, an expired
+      # OIDC provider, a failed init). The plan step overwrites it.
+      - name: Prepare the comment
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pr-comment"
+          {
+            echo '<details>'
+            echo '<summary><code>terraform plan</code> — did not run</summary>'
+            echo
+            echo 'The plan job failed before it could plan. See the job log.'
+            echo
+            echo '</details>'
+          } > "$RUNNER_TEMP/pr-comment/body.md"
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      # tf-plan@, through Workload Identity Federation. No key: the OIDC token carries
+      # attribute.event_name=pull_request, which is what its impersonation binding matches.
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ matrix.wif_provider }}
+          service_account: ${{ matrix.plan_sa }}
+
+      # The state bucket is hardcoded in each environment's versions.tf, so init needs no
+      # -backend-config; it does need the credentials above, which is why it is here and
+      # not in the checks job.
+      - name: terraform init
+        working-directory: infra/envs/${{ matrix.environment }}
+        run: terraform init -input=false -no-color
+
+      # `image_tag` has no default and cannot be invented: a plan must show the change
+      # against what is actually deployed. It is an output of both roots (the input that
+      # was applied), so a state that has ever been applied carries it. An environment with
+      # no state is skipped — a plan of an empty project cannot render the helm_release
+      # anyway, because the cluster endpoint it needs does not exist yet.
+      - name: Read the deployed image tag from remote state
+        id: state
+        working-directory: infra/envs/${{ matrix.environment }}
+        env:
+          ENVIRONMENT: ${{ matrix.environment }}
+        run: |
+          set -euo pipefail
+          if tag="$(terraform output -raw image_tag 2>/dev/null)" && [[ -n "$tag" ]]; then
+            echo "have_state=true" >> "$GITHUB_OUTPUT"
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "have_state=false" >> "$GITHUB_OUTPUT"
+          {
+            echo '<details>'
+            echo "<summary><code>terraform plan</code> — $ENVIRONMENT — skipped, no state</summary>"
+            echo
+            echo "This environment has never been applied, so remote state holds no \`image_tag\`"
+            echo "to plan against — and a plan of an empty project cannot render the helm"
+            echo "release anyway, because the cluster endpoint it needs does not exist yet."
+            echo "The first deploy (\`deploy-$ENVIRONMENT.yml\`) creates the state."
+            echo
+            echo '</details>'
+          } > "$RUNNER_TEMP/pr-comment/body.md"
+
+      - name: terraform plan
+        id: plan
+        if: steps.state.outputs.have_state == 'true'
+        working-directory: infra/envs/${{ matrix.environment }}
+        env:
+          ENVIRONMENT: ${{ matrix.environment }}
+          # `runner.temp` is not in this context, so the plan file goes to the same
+          # RUNNER_TEMP the steps below use.
+          RUNNER_TEMP: ${{ runner.temp }}
+          IMAGE_TAG: ${{ steps.state.outputs.tag }}
+          EXISTING_ZONE_NAME: ${{ matrix.existing_zone_name }}
+          STAGING_NAME_SERVERS: ${{ matrix.staging_name_servers }}
+          GOOGLE_CLIENT_ID: ${{ matrix.google_client_id }}
+          GITHUB_CLIENT_ID: ${{ matrix.github_client_id }}
+          MICROSOFT_CLIENT_ID: ${{ matrix.microsoft_client_id }}
+          MICROSOFT_TENANT_ID: ${{ matrix.microsoft_tenant_id }}
+        run: |
+          set -euo pipefail
+
+          # Production's zone has no default — it is created by hand and adopted with an
+          # import block. Fail with a sentence rather than Terraform's "No value for
+          # required variable".
+          if [[ "$ENVIRONMENT" == production && -z "$EXISTING_ZONE_NAME" ]]; then
+            echo "::error title=Missing repository variable::TF_EXISTING_ZONE_NAME_PRODUCTION is not set. Production's plan needs it (the zone is created by hand and has no default); see docs/DEPLOYMENT.md, 'Variables the workflows read'."
+            exit 1
+          fi
+
+          args=(-input=false -no-color -lock-timeout=2m -var "image_tag=$IMAGE_TAG")
+          # The OAuth client IDs all default to "": passing the empty value back is the
+          # same as not passing it, and it keeps the plan honest when one of them is set.
+          args+=(-var "google_client_id=${GOOGLE_CLIENT_ID:-}")
+          args+=(-var "github_client_id=${GITHUB_CLIENT_ID:-}")
+          args+=(-var "microsoft_client_id=${MICROSOFT_CLIENT_ID:-}")
+          args+=(-var "microsoft_tenant_id=${MICROSOFT_TENANT_ID:-}")
+          # Only production declares these two, and an empty value means "leave it at the
+          # default" — so an unset variable is simply left off the command line.
+          if [[ -n "$EXISTING_ZONE_NAME" ]]; then
+            args+=(-var "existing_zone_name=$EXISTING_ZONE_NAME")
+          fi
+          if [[ -n "$STAGING_NAME_SERVERS" ]]; then
+            args+=(-var "staging_name_servers=$STAGING_NAME_SERVERS")
+          fi
+
+          status=ok
+          # Outside the checkout: the plan is a build artifact, not something to leave in the
+          # tree the next step looks at.
+          plan_file="$RUNNER_TEMP/plan-$ENVIRONMENT.txt"
+          terraform plan "${args[@]}" > "$plan_file" 2>&1 || status=failed
+          cat "$plan_file"
+
+          # The "Plan: N to add, N to change, N to destroy." trailer, for the comment's
+          # summary line. Empty when the plan failed or there is nothing to do.
+          headline="$(grep -E '^(Plan: |No changes)' "$plan_file" | tail -1 || true)"
+          [[ -n "$headline" ]] || headline="$( [[ "$status" == ok ]] && echo 'No changes.' || echo 'The plan failed.' )"
+
+          {
+            echo '<details>'
+            echo "<summary><code>terraform plan</code> — ${ENVIRONMENT} — ${headline}</summary>"
+            echo
+            echo '~~~'
+            cat "$plan_file"
+            echo '~~~'
+            echo
+            echo '</details>'
+          } > "$RUNNER_TEMP/pr-comment/body.md"
+
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+
+          # A failed plan turns the job red — the comment still posts, but nobody should
+          # read a green check as "this plan is fine".
+          [[ "$status" == ok ]]
+
+      - name: Upload the plan for the comment job
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: plan-${{ matrix.environment }}
+          path: ${{ runner.temp }}/pr-comment
+          # A warning, not a failure: the comment job has a fallback for a missing artifact,
+          # and the plan's own status is what the check is for.
+          if-no-files-found: warn
+          retention-days: 5
+
+  # One comment, updated in place, for both plans. `always()` so a plan that failed still
+  # says so on the PR — a plan job that goes red with no comment is a dead end for whoever
+  # opened the pull request.
+  report:
+    name: plan comment
+    needs: [plan]
+    if: always() && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/download-artifact@v4
+        # Nothing to download is not a reason to leave the PR without a comment.
+        continue-on-error: true
+        with:
+          pattern: plan-*
+          path: ${{ runner.temp }}/plans
+
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs')
+            const path = require('path')
+
+            // The marker is how the comment is found again: one comment, edited in place,
+            // rather than a new one every push.
+            const marker = '<!-- terraform-pr-plan -->'
+            const MAX = 60000
+            const plansDir = path.join(process.env.RUNNER_TEMP, 'plans')
+
+            const environments = ['staging', 'production']
+            const header = [
+              marker,
+              '## Terraform plan',
+              '',
+              'Both environments, planned against the state the last deploy left behind.',
+              'Read-only (`tf-plan@`); applying is the deploy workflows.',
+              '',
+            ].join('\n')
+
+            let body = header
+            const dropped = []
+            for (const environment of environments) {
+              const file = path.join(plansDir, `plan-${environment}`, 'body.md')
+              const block = fs.existsSync(file)
+                ? fs.readFileSync(file, 'utf8').trim()
+                : `_No plan artifact for \`${environment}\`._`
+              if (body.length + block.length + 2 <= MAX) {
+                body += block + '\n'
+              } else {
+                dropped.push(environment)
+              }
+            }
+
+            if (dropped.length > 0) {
+              body += `\n> ${dropped.join(' and ')} did not fit in a comment — see this run's artifacts.\n`
+            }
+
+            const { owner, repo } = context.repo
+            const issue_number = context.issue.number
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number,
+              per_page: 100,
+            })
+            const existing = comments.find((comment) => comment.body?.startsWith(marker))
+
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body })
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body })
+            }
