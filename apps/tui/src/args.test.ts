@@ -81,6 +81,20 @@ describe('parseArgs', () => {
     })
     expect(commandOf(['logout'])).toMatchObject({ kind: 'logout' })
     expect(commandOf(['whoami'])).toMatchObject({ kind: 'whoami' })
+    expect(commandOf(['update'])).toMatchObject({ kind: 'update', options: { debug: false } })
+    expect(commandOf(['update', '--server', 'http://x.test'])).toMatchObject({
+      kind: 'update',
+      options: { server: 'http://x.test' },
+    })
+  })
+
+  it('rejects chat flags on `oh update`, which takes none of them', () => {
+    expect(errorOf(['update', '-c'])).toContain('--continue')
+    expect(errorOf(['update', '--model', 'openai/gpt-4.1-mini'])).toContain('--model')
+  })
+
+  it('rejects an argument to `oh update`', () => {
+    expect(errorOf(['update', '1.2.3'])).toContain('takes no arguments')
   })
 
   it('rejects --no-browser without `oh login`', () => {
