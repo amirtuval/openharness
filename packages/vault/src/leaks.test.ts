@@ -3,7 +3,12 @@ import { inspect } from 'node:util'
 import { describe, expect, it } from 'vitest'
 
 import { envKeyProvider } from './keys'
+import { GCP_KMS_PROVIDER, gcpKmsKeyProvider } from './kms'
 import { createVault } from './vault'
+
+/** A Cloud KMS key resource name, as `OPENHARNESS_KMS_KEY` carries it. Not a secret. */
+const kmsKeyName =
+  'projects/test-project/locations/global/keyRings/openharness/cryptoKeys/credentials'
 
 // Long, random and unique: if any of them reaches a string — a message, String(), a JSON
 // dump, a stack, util.inspect — the assertions below are categorical about it.
@@ -51,6 +56,8 @@ describe('nothing secret ever reaches a string', () => {
     const objects = [
       ['vault', vault],
       ['provider', provider],
+      // The Cloud KMS provider (#150) too: its metadata names a key, never material.
+      ['gcp-kms provider', gcpKmsKeyProvider({ key: kmsKeyName })],
     ] as const
     for (const [label, value] of objects) {
       expectNoSecrets(objectToString(value), `String(${label})`)
@@ -70,6 +77,17 @@ describe('nothing secret ever reaches a string', () => {
     const otherKeyVault = createVault(envKeyProvider(randomBytes(32).toString('base64')))
     const sealed = await vault.seal(plaintext, aad)
 
+    // A Cloud KMS provider whose client refuses every call: its errors are wrapped here, and
+    // the wrapper must stay clean too.
+    const refusingKms = gcpKmsKeyProvider({
+      key: kmsKeyName,
+      createClient: () =>
+        Promise.resolve({
+          encrypt: () => Promise.reject(new Error('PERMISSION_DENIED')),
+          decrypt: () => Promise.reject(new Error('PERMISSION_DENIED')),
+        }),
+    })
+
     const errors = [
       await capture(() => vault.open(sealed, `${aad}-elsewhere`)), // wrong aad
       await capture(() => vault.open({ ...sealed, kekVersion: 'v9' }, aad)), // unknown version
@@ -80,9 +98,14 @@ describe('nothing secret ever reaches a string', () => {
       await capture(() => otherKeyVault.open(sealed, aad)), // a different master key
       await capture(() => envKeyProvider('this is not base64')), // invalid master key
       await capture(() => envKeyProvider(randomBytes(16).toString('base64'))), // wrong length
-      await capture(() => provider.unwrap(new Uint8Array(60), provider.version)), // garbage wrap
+      await capture(() => provider.unwrap(new Uint8Array(60), provider.meta)), // garbage wrap
+      // #150: a secret under a provider this one is not, both ways round.
+      await capture(() => vault.open({ ...sealed, keyProvider: GCP_KMS_PROVIDER }, aad)),
+      await capture(() => createVault(refusingKms).open(sealed, aad)),
+      await capture(() => refusingKms.wrap(randomBytes(32))), // a KMS call that fails
+      await capture(() => gcpKmsKeyProvider({ key: 'not-a-resource-name' })), // bad KMS key
     ]
-    expect(errors).toHaveLength(10)
+    expect(errors).toHaveLength(14)
 
     for (const error of errors) {
       expect(error).toBeInstanceOf(Error)
