@@ -18,10 +18,24 @@ and a re-run converges the project to them — see [Re-running](#re-running-conv
 - `jq` — every run builds the conditional binding's condition file with it, and `--prune`
   reads the current IAM policies with `gcloud ... get-iam-policy --format=json` and parses
   them with it.
-- The project exists and has **billing linked**. Both projects (`openharness-dev` for
-  staging, `openharness` for production) are created by hand; the script creates nothing
-  itself.
+- The project exists and has **billing linked**. Both projects are created by hand; the
+  script creates nothing itself. What it needs is the project **ID**, which need not match
+  the display name the project is known by.
 - A recent gcloud, for the `gcloud billing` and `gcloud storage` command groups.
+
+Both projects, by ID and display name:
+
+| Environment | Project ID           | Display name      |
+| ----------- | -------------------- | ----------------- |
+| staging     | `openharness-dev`    | `openharness-dev` |
+| production  | `openharness-510710` | `openharness`     |
+
+Production is the case in point: its display name is `openharness`, but its ID — the only
+thing gcloud accepts — is `openharness-510710`. To see both side by side:
+
+```bash
+gcloud projects list --format="table(projectId,name)"
+```
 
 ## Run
 
@@ -32,7 +46,7 @@ For staging (project `openharness-dev`):
 ./.github/setup/workload-identity.sh staging
 ```
 
-Then for production (project `openharness`):
+Then for production (project ID `openharness-510710`, display name "openharness"):
 
 ```bash
 ./.github/setup/workload-identity.sh production
@@ -115,7 +129,7 @@ repository level with a `_STAGING` / `_PRODUCTION` suffix:
 
 | Variable             | Value                                                                              |
 | -------------------- | ---------------------------------------------------------------------------------- |
-| `GCP_PROJECT_ID`     | `openharness-dev` / `openharness`                                                  |
+| `GCP_PROJECT_ID`     | `openharness-dev` / `openharness-510710` (the project IDs, not display names)      |
 | `GCP_PROJECT_NUMBER` | the project number                                                                 |
 | `GCP_WIF_PROVIDER`   | `projects/<number>/locations/global/workloadIdentityPools/github/providers/github` |
 | `GCP_DEPLOY_SA`      | `deploy@<project>.iam.gserviceaccount.com`                                         |
@@ -188,8 +202,8 @@ condition both match, so a changed condition is replaced by the run's grant, not
 ### Cross-project read, and the state bucket
 
 Images are built and pushed in staging only (#152), and production promotes them by
-digest. A production run grants `deploy@openharness` `roles/artifactregistry.reader` on
-`openharness-dev` (`DEPLOY_CROSS_PROJECT_ROLES`) so `deploy-production.yml` can verify the
+digest. A production run grants `deploy@openharness-510710` `roles/artifactregistry.reader`
+on `openharness-dev` (`DEPLOY_CROSS_PROJECT_ROLES`) so `deploy-production.yml` can verify the
 image exists; Terraform gives the production GKE node account its own read access. A
 production `--prune` acts on `openharness-dev` only for that one member — staging's own
 accounts and everyone else's bindings there are not its to touch.
@@ -255,7 +269,7 @@ removes the rest, printing each removal:
   bindings there).
 
 A production `--prune` additionally manages the one cross-project member it granted —
-`deploy@openharness` on `openharness-dev` — against `DEPLOY_CROSS_PROJECT_ROLES`, and
+`deploy@openharness-510710` on `openharness-dev` — against `DEPLOY_CROSS_PROJECT_ROLES`, and
 nothing else on that project. Everywhere else, only bindings whose member is one of the
 two managed accounts are ever considered: another member's bindings — staging's own
 accounts included, from a production run — are never touched. A removal carries the stale
@@ -288,7 +302,8 @@ this folder, in `.github/workflows/setup-script.yml` whenever `.github/setup/**`
 
 ## Undo
 
-Per environment — staging shown; the same with `openharness` and `production` for production:
+Per environment — staging shown; the same with `openharness-510710` and `production` for
+production (the project ID, not the display name `openharness`):
 
 ```bash
 # GitHub
@@ -307,7 +322,7 @@ gcloud projects remove-iam-policy-binding openharness-dev \
 # (DEPLOY_STATE_BUCKET_ROLES / PLAN_STATE_BUCKET_ROLES) on gs://openharness-dev-tfstate.
 # A production undo also drops the cross-project read it granted on staging:
 #   gcloud projects remove-iam-policy-binding openharness-dev \
-#     --member="serviceAccount:deploy@openharness.iam.gserviceaccount.com" \
+#     --member="serviceAccount:deploy@openharness-510710.iam.gserviceaccount.com" \
 #     --role=roles/artifactregistry.reader
 gcloud projects remove-iam-policy-binding openharness-dev \
   --member="serviceAccount:tf-plan@openharness-dev.iam.gserviceaccount.com" --role=roles/viewer

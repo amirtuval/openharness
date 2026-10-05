@@ -18,7 +18,8 @@
 #   4. --prune removes a stray roles/owner from deploy@, a stale project role and bucket
 #      bindings of tf-plan@, and a foreign impersonator on tf-plan@, while an unrelated
 #      member's binding and every declared binding — the conditional one included — stay;
-#      a production --prune touches openharness-dev only for deploy@openharness;
+#      a production --prune touches openharness-dev only for deploy@ of the production
+#      project (whose ID is openharness-510710);
 #   5. a conditional binding whose condition changed is removed with its own condition
 #      and replaced by the run's grant — replaced, not doubled — and a converged re-run
 #      removes nothing;
@@ -62,7 +63,10 @@ CHECKS=0
 FAILURES=0
 
 DEV=openharness-dev
-PROD=openharness
+# Production's project *ID*. Its display name is "openharness", which is what the script
+# used to be given; only the ID works with gcloud. The fixture pins the ID so a regression
+# back to the display name fails here.
+PROD=openharness-510710
 
 # The roles deploy@ may hand out (#167). The test owns this expectation: the condition
 # expression on the conditional binding must list exactly these.
@@ -288,6 +292,11 @@ assert_contains "$prod_first" "storage buckets create gs://$PROD-tfstate" "produ
 assert_contains "$prod_first" "projects add-iam-policy-binding $DEV --member=serviceAccount:deploy@$PROD.iam.gserviceaccount.com --role=roles/artifactregistry.reader --condition=None" "production: run grants its cross-project Artifact Registry read on staging"
 assert_only_lines "$prod_first" "$DEV" "add-iam-policy-binding $DEV --member=serviceAccount:deploy@$PROD.iam.gserviceaccount.com --role=roles/artifactregistry.reader" "production: touches no staging resource but the cross-project grant"
 
+# The production project ID, pinned as literals: the display name "openharness" is not a
+# project ID and does not exist, so a regression to it has to fail here.
+assert_contains "$prod_first" "projects add-iam-policy-binding openharness-510710 --member=serviceAccount:deploy@openharness-510710.iam.gserviceaccount.com" "production: run targets project ID openharness-510710"
+assert_contains "$prod_first" "storage buckets create gs://openharness-510710-tfstate" "production: state bucket is gs://openharness-510710-tfstate"
+
 before="$(calls_count)"
 run_capture production
 assert_rc "$RUN_RC" "production: second run exits 0"
@@ -355,8 +364,8 @@ for grantable in "${GRANTABLE_ROLES[@]}"; do
   assert_contains "$expression" "'$grantable'" "the condition allows $grantable"
 done
 
-assert_binding "$dev_policy" "$deploy_prod_member" "roles/artifactregistry.reader" "production: deploy@openharness reads staging's Artifact Registry"
-assert_no_binding "$dev_policy" "$deploy_prod_member" "roles/artifactregistry.admin" "production: deploy@openharness holds no admin there"
+assert_binding "$dev_policy" "$deploy_prod_member" "roles/artifactregistry.reader" "production: deploy@$PROD reads staging's Artifact Registry"
+assert_no_binding "$dev_policy" "$deploy_prod_member" "roles/artifactregistry.admin" "production: deploy@$PROD holds no admin there"
 
 # --- 4. --prune removes only the managed accounts' stale bindings ------------
 
@@ -422,7 +431,7 @@ before="$(calls_count)"
 run_capture production --prune
 assert_rc "$RUN_RC" "production prune: run exits 0"
 prod_pruned="$(calls_since "$before")"
-assert_contains "$prod_pruned" "projects remove-iam-policy-binding $DEV --member=$deploy_prod_member --role=roles/viewer --condition=None" "production prune drops deploy@openharness's undeclared role on staging"
+assert_contains "$prod_pruned" "projects remove-iam-policy-binding $DEV --member=$deploy_prod_member --role=roles/viewer --condition=None" "production prune drops deploy@$PROD's undeclared role on staging"
 assert_not_contains "$prod_pruned" "remove-iam-policy-binding $DEV --member=$outsider" "production prune leaves another member's binding on staging alone"
 assert_not_contains "$prod_pruned" "remove-iam-policy-binding $DEV --member=$plan_member" "production prune leaves staging's own accounts alone"
 assert_binding "$dev_policy" "$deploy_prod_member" "roles/artifactregistry.reader" "production keeps its cross-project reader"
