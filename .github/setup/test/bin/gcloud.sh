@@ -26,8 +26,15 @@
 #   * add-iam-policy-binding is idempotent — re-adding an existing binding exits 0 (the
 #     setup script relies on that for its re-run safety);
 #   * services enable is a no-op for an API that is already enabled;
-#   * IAM conditions are not modelled: bindings are (role, member) pairs, and removal
-#     takes the whole (role, member) pair, which is what `remove ... --all` does.
+#   * IAM conditions are modelled (#167): a binding is (role, member, condition). The
+#     condition arrives through --condition-from-file=FILE (the script's only form; the
+#     inline --condition is not modelled). Adding the same role, member and condition is
+#     a no-op; a different condition adds a second binding, as the real CLI does.
+#     remove-iam-policy-binding matches the condition exactly — --condition=None removes
+#     only the unconditional binding, --condition-from-file only a binding whose
+#     condition is equal — or, with --all, removes the member from every binding of the
+#     role. This is what lets the test prove that a changed condition is replaced, not
+#     doubled. Conditions compare as parsed JSON, so key order does not matter.
 #
 # Every invocation is appended to calls.log as one line: 'gcloud' followed by the
 # arguments, space-separated (raw, so the test can grep for them).
@@ -99,40 +106,88 @@ policy_init() {
   [[ -f "$1" ]] || printf '{"bindings": [], "etag": "fake-etag"}\n' >"$1"
 }
 
-# binding_has FILE MEMBER ROLE
+# condition_of_invocation — how the invocation names a binding's condition: 'null' for
+# --condition=None or no flag at all, 'all' for --all, or the JSON read from the file
+# named by --condition-from-file. The inline --condition form is not modelled: the setup
+# script never uses it.
+condition_of_invocation() {
+  local file
+  if has_flag all; then
+    printf 'all'
+    return 0
+  fi
+  case "$(flag condition)" in
+    None) printf 'null' ;;
+    '')
+      file="$(flag condition-from-file)"
+      [[ -n "$file" ]] || unhandled
+      [[ -f "$file" ]] || not_found "condition file [$file]"
+      jq -c . "$file"
+      ;;
+    *) unhandled ;;
+  esac
+}
+
+# binding_has FILE MEMBER ROLE CONDITION — a binding of ROLE includes MEMBER and carries
+# exactly CONDITION (JSON; 'null' for an unconditional binding).
 binding_has() {
+  jq -e --arg member "$2" --arg role "$3" --argjson cond "$4" \
+    'any((.bindings // [])[];
+       .role == $role and ((.members // []) | index($member)) and ((.condition // null) == $cond))' \
+    "$1" >/dev/null 2>&1
+}
+
+# binding_has_role_member FILE MEMBER ROLE — any binding of ROLE includes MEMBER,
+# whatever its condition.
+binding_has_role_member() {
   jq -e --arg member "$2" --arg role "$3" \
     'any((.bindings // [])[]; .role == $role and ((.members // []) | index($member)))' \
     "$1" >/dev/null 2>&1
 }
 
-# binding_add FILE MEMBER ROLE — idempotent, like the real add-iam-policy-binding.
+# binding_add FILE MEMBER ROLE CONDITION — idempotent on (role, member, condition), like
+# the real add-iam-policy-binding; a different condition adds a second binding.
 binding_add() {
-  local file="$1" member="$2" role="$3" tmp
+  local file="$1" member="$2" role="$3" cond="${4:-null}" tmp
+  [[ "$cond" != "all" ]] || unhandled # add-iam-policy-binding has no --all
   policy_init "$file"
-  if binding_has "$file" "$member" "$role"; then
+  if binding_has "$file" "$member" "$role" "$cond"; then
     printf 'No changes to the policy.\n'
     return 0
   fi
   tmp="$(mktemp)"
-  jq --arg member "$member" --arg role "$role" \
-    '.bindings = ((.bindings // []) + [{"role": $role, "members": [$member]}])' \
-    "$file" >"$tmp"
+  jq --arg member "$member" --arg role "$role" --argjson cond "$cond" '
+    .bindings = ((.bindings // []) + [
+      if $cond == null then {role: $role, members: [$member]}
+      else {role: $role, members: [$member], condition: $cond} end
+    ])
+  ' "$file" >"$tmp"
   mv "$tmp" "$file"
   printf 'Updated IAM policy.\n'
 }
 
-# binding_remove FILE MEMBER ROLE — removes the member from every binding of the role
-# (what the real CLI's --all does); fails when the binding is not there.
+# binding_remove FILE MEMBER ROLE CONDITION — 'all' removes the member from every binding
+# of the role (the real CLI's --all); otherwise only bindings whose condition equals
+# CONDITION ('null' for the unconditional one) lose the member. Fails, like the real CLI,
+# when nothing matches.
 binding_remove() {
-  local file="$1" member="$2" role="$3" tmp
-  if ! binding_has "$file" "$member" "$role"; then
-    not_found "binding [$role] for [$member]"
+  local file="$1" member="$2" role="$3" cond="${4:-null}" mode=exact tmp
+  if [[ "$cond" == "all" ]]; then
+    mode=all
+    cond=null
+    binding_has_role_member "$file" "$member" "$role" ||
+      not_found "binding [$role] for [$member]"
+  else
+    binding_has "$file" "$member" "$role" "$cond" ||
+      not_found "binding [$role] for [$member] with condition [$cond]"
   fi
   tmp="$(mktemp)"
-  jq --arg member "$member" --arg role "$role" '
+  jq --arg member "$member" --arg role "$role" --arg mode "$mode" --argjson cond "$cond" '
     .bindings = [(.bindings // [])[]
-      | if .role == $role then .members = [.members[] | select(. != $member)] else . end
+      | if (.role == $role
+            and ($mode == "all" or (.condition // null) == $cond))
+        then .members = [.members[] | select(. != $member)]
+        else . end
       | select((.members // []) | length > 0)]
   ' "$file" >"$tmp"
   mv "$tmp" "$file"
@@ -170,12 +225,12 @@ projects() {
     add-iam-policy-binding)
       require_project "$project"
       file="$(policy_path "project-$project")"
-      binding_add "$file" "$(flag member)" "$(flag role)"
+      binding_add "$file" "$(flag member)" "$(flag role)" "$(condition_of_invocation)"
       ;;
     remove-iam-policy-binding)
       require_project "$project"
       file="$(policy_path "project-$project")"
-      binding_remove "$file" "$(flag member)" "$(flag role)"
+      binding_remove "$file" "$(flag member)" "$(flag role)" "$(condition_of_invocation)"
       ;;
     *) unhandled ;;
   esac
@@ -349,8 +404,8 @@ service_account_policy() {
   file="$(policy_path "sa-$email")"
   case "$verb" in
     get-iam-policy) policy_print "$file" ;;
-    add-iam-policy-binding) binding_add "$file" "$(flag member)" "$(flag role)" ;;
-    remove-iam-policy-binding) binding_remove "$file" "$(flag member)" "$(flag role)" ;;
+    add-iam-policy-binding) binding_add "$file" "$(flag member)" "$(flag role)" "$(condition_of_invocation)" ;;
+    remove-iam-policy-binding) binding_remove "$file" "$(flag member)" "$(flag role)" "$(condition_of_invocation)" ;;
   esac
 }
 
@@ -417,8 +472,8 @@ bucket_policy() {
   file="$(policy_path "bucket-$name")"
   case "$verb" in
     get-iam-policy) policy_print "$file" ;;
-    add-iam-policy-binding) binding_add "$file" "$(flag member)" "$(flag role)" ;;
-    remove-iam-policy-binding) binding_remove "$file" "$(flag member)" "$(flag role)" ;;
+    add-iam-policy-binding) binding_add "$file" "$(flag member)" "$(flag role)" "$(condition_of_invocation)" ;;
+    remove-iam-policy-binding) binding_remove "$file" "$(flag member)" "$(flag role)" "$(condition_of_invocation)" ;;
   esac
 }
 
