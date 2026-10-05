@@ -11,10 +11,19 @@ Federation — there are no service-account keys.
 
 ## Environments
 
-| Environment | GCP project       | GitHub environment | URL                    |
-| ----------- | ----------------- | ------------------ | ---------------------- |
-| staging     | `openharness-dev` | `staging`          | `staging.oharness.dev` |
-| production  | `openharness`     | `production`       | `app.oharness.dev`     |
+| Environment | GCP project ID       | Display name      | GitHub environment | URL                    |
+| ----------- | -------------------- | ----------------- | ------------------ | ---------------------- |
+| staging     | `openharness-dev`    | `openharness-dev` | `staging`          | `staging.oharness.dev` |
+| production  | `openharness-510710` | `openharness`     | `production`       | `app.oharness.dev`     |
+
+The ID is what gcloud and every resource name take — the display name is only a label, and
+production's `openharness` is not an ID. The setup script derives the state bucket
+(`<id>-tfstate`), the service-account emails and the GitHub variables from the ID. To see
+both side by side:
+
+```bash
+gcloud projects list --format="table(projectId,name)"
+```
 
 ## One-time setup
 

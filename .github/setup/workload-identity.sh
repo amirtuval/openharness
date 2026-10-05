@@ -40,6 +40,21 @@ set -euo pipefail
 # script needs touching. The binding loops below iterate these arrays.
 # ---------------------------------------------------------------------------
 
+# The two GCP projects, one per environment, created by hand before the first run
+# (README.md). These are project **IDs**, not display names: every gcloud call and every
+# resource name below is built from the ID, and a project's ID need not match the display
+# name it is known by. Production is the case in point — its display name is
+# "openharness", but its ID is openharness-510710, and only the ID works with gcloud.
+# When a run cannot find the project, list the IDs with
+# 'gcloud projects list --format="table(projectId,name)"'.
+#
+# Everything below derives from these two: the environment → project mapping, the state
+# bucket (<project-id>-tfstate), the two service-account emails, the production
+# cross-project binding (deploy@<production id> reading the staging project) and the
+# GitHub variables.
+STAGING_PROJECT_ID="openharness-dev"
+PRODUCTION_PROJECT_ID="openharness-510710"
+
 # The APIs Workload Identity and Terraform need to start. Terraform enables the rest (D4).
 APIS=(
   iam.googleapis.com
@@ -129,17 +144,16 @@ PLAN_STATE_BUCKET_ROLES=(
 )
 
 # Images are built and pushed in staging only (#152), and production promotes them by
-# digest. A production run grants deploy@openharness reader on the staging project so
-# deploy-production.yml can verify the image exists; Terraform gives the production GKE
-# node account its own read access. Applied by a production run only, on that one
-# project, and the single member against which a production --prune may act there.
+# digest. A production run grants deploy@ of the production project reader on the staging
+# project so deploy-production.yml can verify the image exists; Terraform gives the
+# production GKE node account its own read access. Applied by a production run only, on
+# that one project, and the single member against which a production --prune may act there.
 DEPLOY_CROSS_PROJECT_ROLES=(
   roles/artifactregistry.reader
 )
 
-# Fixed names from the deployment epic (#148, D3).
-STAGING_PROJECT_ID="openharness-dev"
-PRODUCTION_PROJECT_ID="openharness"
+# Fixed names from the deployment epic (#148, D3). The two project IDs live at the top,
+# with the declared lists.
 POOL_ID="github"
 PROVIDER_ID="github"
 ISSUER_URI="https://token.actions.githubusercontent.com"
@@ -152,14 +166,14 @@ DRY_RUN=false
 PRUNE=false
 
 usage() {
-  cat <<'EOF'
+  cat <<EOF
 Usage: workload-identity.sh <staging|production> [options]
 
-  staging       set up project openharness-dev
-  production    set up project openharness
+  staging       set up project $STAGING_PROJECT_ID
+  production    set up project $PRODUCTION_PROJECT_ID
 
 Options:
-  --repo OWNER/REPO    this repository (default: amirtuval/openharness)
+  --repo OWNER/REPO    this repository (default: $REPO)
   --prune              also remove the managed accounts' bindings that are not in the
                        script's lists (project, state bucket and impersonation bindings,
                        and on a production run the cross-project grant), comparing the
@@ -325,7 +339,7 @@ check_prerequisites() {
   gh auth status >/dev/null 2>&1 || fail "gh is not logged in; run 'gh auth login'"
 
   gcloud projects describe "$PROJECT_ID" >/dev/null 2>&1 ||
-    fail "project ${PROJECT_ID} does not exist, or the active account cannot see it (it needs Owner); create the project and link billing first"
+    fail "project ${PROJECT_ID} does not exist, or the active account cannot see it (it needs Owner); a project's ID can differ from its display name — list the IDs this account can see with 'gcloud projects list --format=\"table(projectId,name)\"'; create the project and link billing first"
   PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
 
   gh repo view "$REPO" >/dev/null 2>&1 ||
@@ -422,8 +436,8 @@ deploy_project_bindings() {
 #   * roles/iam.workloadIdentityUser members on the two accounts other than the
 #     declared principalSet.
 # A production run additionally prunes the one cross-project member it manages,
-# deploy@openharness on the staging project, against DEPLOY_CROSS_PROJECT_ROLES —
-# and nothing else on that project.
+# deploy@ of the production project on the staging project, against
+# DEPLOY_CROSS_PROJECT_ROLES — and nothing else on that project.
 # The current policies are read with `gcloud ... get-iam-policy --format=json`
 # and parsed with jq. A removal carries the binding's own condition back to
 # gcloud — --condition=None for an unconditional binding, --condition-from-file
