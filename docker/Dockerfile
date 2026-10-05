@@ -42,9 +42,10 @@ COPY packages/vault/package.json packages/vault/
 
 # --- build: the workspace dependencies of the server and the web app, then their builds -------
 FROM manifests AS build
-# `openharness` (the root) is in the list for turbo, which is the root's devDependency and what
-# walks the build order — protocol, session, hands, client, brain, then server and web.
-RUN yarn workspaces focus openharness @openharness/server @openharness/web
+# `openharness-monorepo` (the root) is in the list for turbo, which is the root's
+# devDependency and what walks the build order — protocol, session, hands, client, brain,
+# then server and web.
+RUN yarn workspaces focus openharness-monorepo @openharness/server @openharness/web
 COPY . .
 RUN yarn turbo run build --filter='@openharness/server...' --filter='@openharness/web...'
 

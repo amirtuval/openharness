@@ -944,30 +944,6 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@openharness/cli@workspace:*, @openharness/cli@workspace:apps/tui":
-  version: 0.0.0-use.local
-  resolution: "@openharness/cli@workspace:apps/tui"
-  dependencies:
-    "@openharness/client": "workspace:*"
-    "@openharness/config": "workspace:*"
-    "@openharness/protocol": "workspace:*"
-    "@types/node": "npm:26.6.3"
-    "@types/react": "npm:19.3.0"
-    eslint: "npm:10.11.0"
-    ink: "npm:7.1.1"
-    ink-testing-library: "npm:4.0.0"
-    prettier: "npm:3.9.9"
-    react: "npm:19.3.0"
-    tsdown: "npm:0.23.0"
-    turbo: "npm:2.11.4"
-    typescript: "npm:6.0.3"
-    vite: "npm:8.3.1"
-    vitest: "npm:5.0.2"
-  bin:
-    oh: ./dist/index.js
-  languageName: unknown
-  linkType: soft
-
 "@openharness/client@workspace:*, @openharness/client@workspace:packages/client":
   version: 0.0.0-use.local
   resolution: "@openharness/client@workspace:packages/client"
@@ -1011,7 +987,6 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@openharness/e2e@workspace:e2e"
   dependencies:
-    "@openharness/cli": "workspace:*"
     "@openharness/client": "workspace:*"
     "@openharness/config": "workspace:*"
     "@openharness/protocol": "workspace:*"
@@ -1024,6 +999,7 @@ __metadata:
     "@types/pg": "npm:8.23.1"
     better-auth: "npm:1.7.6"
     eslint: "npm:10.11.0"
+    openharness: "workspace:*"
     pg: "npm:8.23.0"
     prettier: "npm:3.9.9"
     turbo: "npm:2.11.4"
@@ -7051,14 +7027,38 @@ __metadata:
   languageName: node
   linkType: hard
 
-"openharness@workspace:.":
+"openharness-monorepo@workspace:.":
   version: 0.0.0-use.local
-  resolution: "openharness@workspace:."
+  resolution: "openharness-monorepo@workspace:."
   dependencies:
     "@openharness/config": "workspace:*"
     prettier: "npm:3.9.9"
     turbo: "npm:2.11.4"
     typescript: "npm:6.0.3"
+  languageName: unknown
+  linkType: soft
+
+"openharness@workspace:*, openharness@workspace:apps/tui":
+  version: 0.0.0-use.local
+  resolution: "openharness@workspace:apps/tui"
+  dependencies:
+    "@openharness/client": "workspace:*"
+    "@openharness/config": "workspace:*"
+    "@openharness/protocol": "workspace:*"
+    "@types/node": "npm:26.6.3"
+    "@types/react": "npm:19.3.0"
+    eslint: "npm:10.11.0"
+    ink: "npm:7.1.1"
+    ink-testing-library: "npm:4.0.0"
+    prettier: "npm:3.9.9"
+    react: "npm:19.3.0"
+    tsdown: "npm:0.23.0"
+    turbo: "npm:2.11.4"
+    typescript: "npm:6.0.3"
+    vite: "npm:8.3.1"
+    vitest: "npm:5.0.2"
+  bin:
+    oh: ./dist/index.js
   languageName: unknown
   linkType: soft
 

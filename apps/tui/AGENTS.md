@@ -1,8 +1,15 @@
-# @openharness/cli
+# openharness (the CLI)
 
 The openharness terminal UI: an Ink (React) chat client, installed as the `oh` command. It
 talks to the server through `@openharness/client` only — the same client the web app uses —
 so there is no second transport to keep honest.
+
+The package is published to npm as the unscoped, public **`openharness`** (#152) — the one
+workspace whose name is not `@openharness/*`. The build is **one self-contained file**:
+`dist/index.js` inlines the workspace packages and every third-party dependency, so the
+published `package.json` has no runtime `dependencies` and `npm install -g openharness@next`
+may replace the file under a running `oh` (that is the ground the D10 auto-update stands on).
+See "Packaging" below.
 
 ## Commands
 
@@ -275,12 +282,41 @@ out; `oh whoami` reads what the login stored.
 
 ## Public API
 
-| `@openharness/cli` | `PACKAGE_NAME`, `App`, `parseArgs()`, `readVersion()`, `run()`, `createChatSession()`, `resolveConfig()`, `describeError()` |
+| `openharness` (npm) | `PACKAGE_NAME`, `App`, `parseArgs()`, `readVersion()`, `run()`, `createChatSession()`, `resolveConfig()`, `describeError()` |
 | `oh` (bin) | the commands above |
 
 The version is injected at build time from `package.json` as `__CLI_VERSION__`
 (see `tsdown.config.ts` and `vitest.config.ts`), so `oh --version` works from any
 working directory and cannot drift from `package.json`.
+
+## Packaging
+
+`npm i -g openharness` installs the package as the `oh` command. The published package is
+the `package.json` (`private` removed, `bin`, `files`, `publishConfig`) plus
+`dist/index.js`, `dist/index.d.ts`, `README.md` and `LICENSE`. There are **no runtime
+`dependencies`**: everything — `@openharness/client`, `@openharness/protocol`, Ink, React —
+lives in `devDependencies` and is inlined into the bundle.
+
+`tsdown.config.ts` builds the single file:
+
+- every import is bundled (nothing is external: the production-dependency list tsdown would
+  externalize is empty), and `outputOptions.codeSplitting: false` folds the one dynamic
+  import (`src/dev/fake.ts`'s lazy `@openharness/client/testing`) into the bundle instead of
+  emitting a chunk;
+- `process.env.NODE_ENV` is defined as `"production"` at build time, so React's and Ink's
+  dev-only paths are dropped;
+- Ink's layout engine needs no asset handling: the `yoga-layout` build this package
+  resolves (`yoga-wasm-base64-esm.js`) carries its wasm **base64-encoded inside the JS
+  module**, so the wasm travels in `dist/index.js` like any other module — there is no
+  `.wasm` file to ship and nothing to read from disk at startup;
+- the shebang is kept (`dist/index.js` is executable — the `bin` entry), and a source map is
+  built for local debugging but **not** in `files`, so it does not ship.
+
+`yarn check:pack` (`scripts/check-pack.mjs`) is the proof: it runs `npm pack`, installs the
+tarball into a fresh temporary directory outside the workspace, runs the installed `oh
+--version` and `oh --help` there (asserting the printed version), and greps the bundle for
+a bare-specifier `import`/`require` that would resolve from `node_modules` at runtime. CI
+runs it after the build.
 
 ## Testing
 
@@ -347,7 +383,9 @@ Only these (see the table in `docs/architecture.md`):
 - `@openharness/client` (including its `@openharness/client/testing` subpath, for dev mode and
   for tests)
 
-`@openharness/config` is additionally allowed as a **devDependency**.
+`@openharness/config` is additionally allowed as a **devDependency**. Since the bundle
+inlines them, the two above are **devDependencies** here too — the package publishes no
+runtime `dependencies` at all.
 
 Packages consume each other through built output only (`exports` → `dist/`), never through
 relative paths. `yarn check:deps` at the repo root enforces this.

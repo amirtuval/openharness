@@ -45,9 +45,9 @@ function server(): Promise<ServerProcess> {
   return (serverPromise ??= harness.server())
 }
 
-/** The path of the built `oh`, resolved through the `@openharness/cli` package. */
+/** The path of the built `oh`, resolved through the `openharness` package (the npm name). */
 function cliEntryPath(): string {
-  return fileURLToPath(import.meta.resolve('@openharness/cli'))
+  return fileURLToPath(import.meta.resolve('openharness'))
 }
 
 /** A spawned `oh`: what it printed, how it ended, and how to signal it. */
