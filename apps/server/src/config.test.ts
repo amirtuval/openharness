@@ -11,6 +11,7 @@ import {
   DEFAULT_KEY_PROVIDER,
   DEFAULT_PORT,
   DEFAULT_SCHEDULER,
+  DEFAULT_TRUSTED_PROXY_HOPS,
   defaultInstanceId,
   describeConfig,
   readServerConfig,
@@ -63,6 +64,7 @@ describe('readServerConfig', () => {
       microsoft: undefined,
       testModel: undefined,
       webDir: undefined,
+      trustedProxyHops: DEFAULT_TRUSTED_PROXY_HOPS,
       corsOrigins: [],
       maxConcurrentSessions: DEFAULT_MAX_CONCURRENT_SESSIONS,
       drainTimeoutMs: DEFAULT_DRAIN_TIMEOUT_MS,
@@ -98,6 +100,7 @@ describe('readServerConfig', () => {
         MICROSOFT_CLIENT_SECRET: 'ms-secret',
         MICROSOFT_TENANT_ID: 'contoso',
         OPENHARNESS_WEB_DIR: '/srv/web',
+        OPENHARNESS_TRUSTED_PROXY_HOPS: '2',
         OPENHARNESS_CORS_ORIGINS: 'http://a.test, http://b.test',
         OPENHARNESS_MAX_CONCURRENT_SESSIONS: '12',
         OPENHARNESS_DRAIN_TIMEOUT_MS: '250',
@@ -130,6 +133,7 @@ describe('readServerConfig', () => {
       microsoft: { clientId: 'ms-id', clientSecret: 'ms-secret', tenantId: 'contoso' },
       testModel: 'mock',
       webDir: '/srv/web',
+      trustedProxyHops: 2,
       corsOrigins: ['http://a.test', 'http://b.test'],
       maxConcurrentSessions: 12,
       drainTimeoutMs: 250,
@@ -196,6 +200,22 @@ describe('readServerConfig', () => {
     expect(() => readServerConfig(env({ OPENHARNESS_PARTITIONS: '0' }))).toThrow(
       /OPENHARNESS_PARTITIONS/,
     )
+  })
+
+  it('trusts no forwarding headers by default, and as many proxies as it is told (#151)', () => {
+    expect(readServerConfig(env()).trustedProxyHops).toBe(DEFAULT_TRUSTED_PROXY_HOPS)
+    // Behind GCLB the load balancer is the one proxy appending to the chain.
+    expect(readServerConfig(env({ OPENHARNESS_TRUSTED_PROXY_HOPS: '1' })).trustedProxyHops).toBe(1)
+    // Zero is a value, not an absence: "do not trust the header".
+    expect(readServerConfig(env({ OPENHARNESS_TRUSTED_PROXY_HOPS: '0' })).trustedProxyHops).toBe(0)
+  })
+
+  it('refuses a trusted-proxy hop count that is not a non-negative integer', () => {
+    for (const value of ['-1', 'one', '1.5']) {
+      expect(() => readServerConfig(env({ OPENHARNESS_TRUSTED_PROXY_HOPS: value }))).toThrow(
+        /OPENHARNESS_TRUSTED_PROXY_HOPS/,
+      )
+    }
   })
 
   it('treats an empty variable as unset', () => {

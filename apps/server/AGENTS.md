@@ -38,29 +38,30 @@ Everything under `API_VERSION_PREFIX` (`/v1`). Bodies and queries are validated 
 protocol's schemas, so the shapes are not repeated here — see
 [`packages/protocol/AGENTS.md`](../../packages/protocol/AGENTS.md).
 
-| method   | path                                      | body / query                             | answers                                                                            |
-| -------- | ----------------------------------------- | ---------------------------------------- | ---------------------------------------------------------------------------------- |
-| `GET`    | `/health`                                 | —                                        | `{ status: 'ok' }`; never needs a session                                          |
-| `GET`    | `/v1/auth-config`                         | —                                        | `{ providers, dev_login }`; never needs a session                                  |
-| `GET`    | `/v1/me`                                  | —                                        | the signed-in `User`                                                               |
-| `GET`    | `/v1/me/preferences`                      | —                                        | the caller's `UserPreferences`, unwrapped                                          |
-| `PUT`    | `/v1/me/preferences`                      | `PutPreferencesRequestSchema`            | the stored preferences; 400 for a malformed `default_model`                        |
-| `POST`   | `/v1/agents`                              | `CreateAgentRequestSchema`               | 201, the `Agent`                                                                   |
-| `GET`    | `/v1/agents`                              | `ListAgentsQuerySchema`                  | `{ data, next_page }`                                                              |
-| `GET`    | `/v1/agents/{agent_id}`                   | —                                        | the `Agent`, or 404                                                                |
-| `POST`   | `/v1/agents/{agent_id}`                   | `UpdateAgentRequestSchema`               | the updated `Agent`, or 404                                                        |
-| `POST`   | `/v1/sessions`                            | `CreateSessionRequestSchema`             | 201, the `Session`; 404 for an unknown agent; 400 for neither an agent nor a model |
-| `GET`    | `/v1/sessions`                            | `ListSessionsQuerySchema`                | `{ data, next_page }`                                                              |
-| `GET`    | `/v1/sessions/{session_id}`               | —                                        | the `Session`, or 404                                                              |
-| `DELETE` | `/v1/sessions/{session_id}`               | —                                        | 204; hard delete (U5); 404 for another owner's or an unknown session               |
-| `POST`   | `/v1/sessions/{session_id}/events`        | `SendEventsRequestSchema`                | `{ data: user event[] }`; then signals, and a title                                |
-| `GET`    | `/v1/sessions/{session_id}/events`        | `ListEventsQuerySchema`                  | `{ data, next_page }`                                                              |
-| `GET`    | `/v1/sessions/{session_id}/events/stream` | `StreamEventsQuerySchema`                | the SSE stream; 404 for an unknown session                                         |
-| `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`   | the AI SDK `useChat` request (see below) | an AI SDK UI message stream — an **extension**                                     |
-| `GET`    | `/v1/models`                              | `ListModelsQuerySchema` (`refresh`)      | `{ data, providers }`; 429 for a refresh inside the minute                         |
-| `PUT`    | `/v1/provider-credentials/{provider}`     | `PutProviderCredentialRequestSchema`     | the credential's metadata; 422 if the key is refused                               |
-| `GET`    | `/v1/provider-credentials`                | —                                        | `{ data: ProviderCredential[] }`, metadata only                                    |
-| `DELETE` | `/v1/provider-credentials/{provider}`     | —                                        | 204; never an error for one that is not there                                      |
+| method   | path                                      | body / query                             | answers                                                                                                              |
+| -------- | ----------------------------------------- | ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `GET`    | `/health`                                 | —                                        | liveness: `{ status: 'ok' }`; never needs a session                                                                  |
+| `GET`    | `/ready`                                  | —                                        | readiness (#151): `{ status: 'ok' }`, or 503 while draining or when the store does not answer; never needs a session |
+| `GET`    | `/v1/auth-config`                         | —                                        | `{ providers, dev_login }`; never needs a session                                                                    |
+| `GET`    | `/v1/me`                                  | —                                        | the signed-in `User`                                                                                                 |
+| `GET`    | `/v1/me/preferences`                      | —                                        | the caller's `UserPreferences`, unwrapped                                                                            |
+| `PUT`    | `/v1/me/preferences`                      | `PutPreferencesRequestSchema`            | the stored preferences; 400 for a malformed `default_model`                                                          |
+| `POST`   | `/v1/agents`                              | `CreateAgentRequestSchema`               | 201, the `Agent`                                                                                                     |
+| `GET`    | `/v1/agents`                              | `ListAgentsQuerySchema`                  | `{ data, next_page }`                                                                                                |
+| `GET`    | `/v1/agents/{agent_id}`                   | —                                        | the `Agent`, or 404                                                                                                  |
+| `POST`   | `/v1/agents/{agent_id}`                   | `UpdateAgentRequestSchema`               | the updated `Agent`, or 404                                                                                          |
+| `POST`   | `/v1/sessions`                            | `CreateSessionRequestSchema`             | 201, the `Session`; 404 for an unknown agent; 400 for neither an agent nor a model                                   |
+| `GET`    | `/v1/sessions`                            | `ListSessionsQuerySchema`                | `{ data, next_page }`                                                                                                |
+| `GET`    | `/v1/sessions/{session_id}`               | —                                        | the `Session`, or 404                                                                                                |
+| `DELETE` | `/v1/sessions/{session_id}`               | —                                        | 204; hard delete (U5); 404 for another owner's or an unknown session                                                 |
+| `POST`   | `/v1/sessions/{session_id}/events`        | `SendEventsRequestSchema`                | `{ data: user event[] }`; then signals, and a title                                                                  |
+| `GET`    | `/v1/sessions/{session_id}/events`        | `ListEventsQuerySchema`                  | `{ data, next_page }`                                                                                                |
+| `GET`    | `/v1/sessions/{session_id}/events/stream` | `StreamEventsQuerySchema`                | the SSE stream; 404 for an unknown session                                                                           |
+| `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`   | the AI SDK `useChat` request (see below) | an AI SDK UI message stream — an **extension**                                                                       |
+| `GET`    | `/v1/models`                              | `ListModelsQuerySchema` (`refresh`)      | `{ data, providers }`; 429 for a refresh inside the minute                                                           |
+| `PUT`    | `/v1/provider-credentials/{provider}`     | `PutProviderCredentialRequestSchema`     | the credential's metadata; 422 if the key is refused                                                                 |
+| `GET`    | `/v1/provider-credentials`                | —                                        | `{ data: ProviderCredential[] }`, metadata only                                                                      |
+| `DELETE` | `/v1/provider-credentials/{provider}`     | —                                        | 204; never an error for one that is not there                                                                        |
 
 Every `/v1` route except `auth-config` requires a session (see "Authentication"), and every
 resource is scoped to its owner. `/api/auth/*` is Better Auth's own surface: sign-in, sign-out,
@@ -79,34 +80,35 @@ a `user.interrupt` signals `interrupt` — exactly what the same events would do
 
 ## Environment variables
 
-| variable                              | default                          | what it does                                                                                   |
-| ------------------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `DATABASE_URL`                        | —                                | run on Postgres, migrating on boot; unset means in-memory                                      |
-| `SCHEDULER`                           | `local`                          | `local`, or `postgres` for the multi-instance scheduler                                        |
-| `BETTER_AUTH_SECRET`                  | — (**required**)                 | signs sessions and cookies                                                                     |
-| `BETTER_AUTH_URL`                     | — (**required**)                 | the public URL: Better Auth's base, the one trusted origin (CSRF)                              |
-| `OPENHARNESS_SECRETS_KEY`             | — (**required** under `local`)   | base64 32-byte master key the vault seals credentials with; not needed under `gcp-kms`         |
-| `OPENHARNESS_KEY_PROVIDER`            | `local`                          | `local` (the environment key) or `gcp-kms` (Cloud KMS): who wraps the vault's data keys (#150) |
-| `OPENHARNESS_KMS_KEY`                 | — (**required** under `gcp-kms`) | the Cloud KMS `projects/…/cryptoKeys/…` key; unused under `local`                              |
-| `OPENHARNESS_KEY_CACHE_TTL_MS`        | `300000`                         | how long unwrapped data keys stay cached in memory; `0` disables the cache                     |
-| `OPENHARNESS_DEV_LOGIN`               | off                              | `1` enables the local dev login; localhost URLs only (A7); the way in when no provider is set  |
-| `GOOGLE_CLIENT_ID`/`_SECRET`          | —                                | enable Google sign-in (both, or neither; one provider or the dev login is required)            |
-| `GITHUB_CLIENT_ID`/`_SECRET`          | —                                | enable GitHub sign-in                                                                          |
-| `MICROSOFT_CLIENT_ID`/`_SECRET`       | —                                | enable Microsoft sign-in                                                                       |
-| `MICROSOFT_TENANT_ID`                 | `common`                         | the Entra tenant the Microsoft provider authenticates against                                  |
-| `PORT`                                | `3000`                           | the port to listen on                                                                          |
-| `OPENHARNESS_TEST_MODEL`              | —                                | `mock` swaps in the deterministic test model                                                   |
-| `OPENHARNESS_WEB_DIR`                 | —                                | a built web app to serve at `/`                                                                |
-| `OPENHARNESS_CORS_ORIGINS`            | —                                | comma-separated origins to allow; unset means no CORS headers                                  |
-| `OPENHARNESS_MAX_CONCURRENT_SESSIONS` | `4`                              | how many sessions may be running at once                                                       |
-| `OPENHARNESS_DRAIN_TIMEOUT_MS`        | `5000`                           | how long shutdown waits for a turn in flight                                                   |
-| `OPENHARNESS_INSTANCE_ID`             | hostname + pid + random suffix   | this instance's id in the lease table                                                          |
-| `OPENHARNESS_PARTITIONS`              | `64` (the protocol's)            | how many partitions the session space has                                                      |
-| `OPENHARNESS_LEASE_TTL_MS`            | `30000`                          | how long a partition lease lasts before it must be renewed                                     |
-| `OPENHARNESS_HEARTBEAT_MS`            | `10000`                          | how often leases are renewed and free partitions taken                                         |
-| `OPENHARNESS_SWEEP_MS`                | `60000`                          | how often owned partitions are re-scanned for missed work                                      |
-| `OPENHARNESS_DELTA_RETENTION_MS`      | `3600000`                        | how long superseded chunks are kept before compaction deletes them                             |
-| `OPENHARNESS_COMPACT_INTERVAL_MS`     | `300000`                         | how often the compaction job runs; `0` disables it                                             |
+| variable                              | default                          | what it does                                                                                    |
+| ------------------------------------- | -------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `DATABASE_URL`                        | —                                | run on Postgres, migrating on boot; unset means in-memory                                       |
+| `SCHEDULER`                           | `local`                          | `local`, or `postgres` for the multi-instance scheduler                                         |
+| `BETTER_AUTH_SECRET`                  | — (**required**)                 | signs sessions and cookies                                                                      |
+| `BETTER_AUTH_URL`                     | — (**required**)                 | the public URL: Better Auth's base, the one trusted origin (CSRF)                               |
+| `OPENHARNESS_SECRETS_KEY`             | — (**required** under `local`)   | base64 32-byte master key the vault seals credentials with; not needed under `gcp-kms`          |
+| `OPENHARNESS_KEY_PROVIDER`            | `local`                          | `local` (the environment key) or `gcp-kms` (Cloud KMS): who wraps the vault's data keys (#150)  |
+| `OPENHARNESS_KMS_KEY`                 | — (**required** under `gcp-kms`) | the Cloud KMS `projects/…/cryptoKeys/…` key; unused under `local`                               |
+| `OPENHARNESS_KEY_CACHE_TTL_MS`        | `300000`                         | how long unwrapped data keys stay cached in memory; `0` disables the cache                      |
+| `OPENHARNESS_DEV_LOGIN`               | off                              | `1` enables the local dev login; localhost URLs only (A7); the way in when no provider is set   |
+| `GOOGLE_CLIENT_ID`/`_SECRET`          | —                                | enable Google sign-in (both, or neither; one provider or the dev login is required)             |
+| `GITHUB_CLIENT_ID`/`_SECRET`          | —                                | enable GitHub sign-in                                                                           |
+| `MICROSOFT_CLIENT_ID`/`_SECRET`       | —                                | enable Microsoft sign-in                                                                        |
+| `MICROSOFT_TENANT_ID`                 | `common`                         | the Entra tenant the Microsoft provider authenticates against                                   |
+| `PORT`                                | `3000`                           | the port to listen on                                                                           |
+| `OPENHARNESS_TEST_MODEL`              | —                                | `mock` swaps in the deterministic test model                                                    |
+| `OPENHARNESS_WEB_DIR`                 | —                                | a built web app to serve at `/`                                                                 |
+| `OPENHARNESS_TRUSTED_PROXY_HOPS`      | `0`                              | how many proxies append to `x-forwarded-for`; `0` trusts no forwarding header (#151, see below) |
+| `OPENHARNESS_CORS_ORIGINS`            | —                                | comma-separated origins to allow; unset means no CORS headers                                   |
+| `OPENHARNESS_MAX_CONCURRENT_SESSIONS` | `4`                              | how many sessions may be running at once                                                        |
+| `OPENHARNESS_DRAIN_TIMEOUT_MS`        | `5000`                           | how long shutdown waits for a turn in flight                                                    |
+| `OPENHARNESS_INSTANCE_ID`             | hostname + pid + random suffix   | this instance's id in the lease table                                                           |
+| `OPENHARNESS_PARTITIONS`              | `64` (the protocol's)            | how many partitions the session space has                                                       |
+| `OPENHARNESS_LEASE_TTL_MS`            | `30000`                          | how long a partition lease lasts before it must be renewed                                      |
+| `OPENHARNESS_HEARTBEAT_MS`            | `10000`                          | how often leases are renewed and free partitions taken                                          |
+| `OPENHARNESS_SWEEP_MS`                | `60000`                          | how often owned partitions are re-scanned for missed work                                       |
+| `OPENHARNESS_DELTA_RETENTION_MS`      | `3600000`                        | how long superseded chunks are kept before compaction deletes them                              |
+| `OPENHARNESS_COMPACT_INTERVAL_MS`     | `300000`                         | how often the compaction job runs; `0` disables it                                              |
 
 Provider credentials (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) are **not read at all**
 (epic #65, A5), and the server keeps none of its own: every model request is made with the
@@ -696,11 +698,64 @@ someone retyping the URL, lands on the page the reader meant instead of the app'
 screen). Without the variable there is no static serving at all, `/device` included: `/`
 answers the API's 404.
 
+Every served file carries the `Cache-Control` class it belongs to (see "Behind a load
+balancer"): the content-hashed files under `assets/` are immutable for a year, `index.html`
+(and the fallback that serves it) revalidates every time, and the other root files get an
+hour — decided by the file that is actually served, so a request for a missing asset falls
+back to the shell and is cached like the shell.
+
 ## CORS
 
 Off by default. `OPENHARNESS_CORS_ORIGINS` (comma-separated) enables it for exactly those
 origins — nothing else, and no wildcard. A browser talking to this API needs it; the web app
 served from the same origin does not.
+
+## Behind a load balancer (deployment epic #148, #151)
+
+The target deployment is GKE behind Google's global external HTTPS load balancer, with Cloud
+CDN on the backend (`cacheMode: USE_ORIGIN_HEADERS`), one image serving the API at `/v1` and
+the built web app at `/`. Three things in this package exist for it.
+
+**The client IP.** `x-forwarded-for` is a list proxies append to, so the leftmost entries are
+the client's to write and only what the deployment's own proxies appended can be trusted.
+`OPENHARNESS_TRUSTED_PROXY_HOPS` says how many of those there are; the client IP is the entry
+**one further from the right** (`trustedProxyHops + 1` entries from the right) — behind GCLB,
+which appends `<client-ip>, <lb-ip>`, hops `1` picks `<client-ip>`, the entry no client could
+have written. `client-ip.ts` is the one helper (`resolveClientIp`); the app resolves the IP
+once per `/api/auth/*` request — or falls back to the connection's own address when the chain
+is short, malformed or untrusted, so junk can never mint a rate-limit bucket — and hands it to
+Better Auth on the one header it reads (`x-openharness-client-ip`, via `advanced.ipAddress`) —
+see "Authentication". With the default `0` no forwarding header is read at all and the socket
+address is the client IP; a client that sends `x-forwarded-for` cannot move itself — or anyone
+else — between the rate-limit buckets Better Auth keys (the QA bug this fixed: behind a proxy
+everyone shared one bucket, so one user's failed sign-ins blocked everyone). The
+refresh rate limit (`RefreshLimiter`) is per user, so it needs nothing from this.
+
+**The probes.** `/health` is **liveness** and does nothing — 200 while the process lives,
+draining included; point the liveness probe at it. `/ready` is **readiness**: 200
+`{status:"ok"}` only while the store answers `select 1` (about a 2 s deadline; the in-memory
+store answers trivially) **and** the instance is not draining, 503 `{status:"unavailable"}`
+otherwise — point the startup and readiness probes, and the load balancer's health check, at
+it. `startServer` flips the drain flag the instant `shutdown()` is called, before the listener
+closes, so the load balancer stops sending new requests while the turns in flight finish.
+Neither probe needs a session and neither logs a hit. (The Kubernetes probe manifests and the
+BackendConfig belong to the Helm chart, a later issue.)
+
+**The cache headers.** Cloud CDN with `USE_ORIGIN_HEADERS` caches exactly what a response
+says, so every response class has a directive:
+
+| response class                                                                | `Cache-Control`                       |
+| ----------------------------------------------------------------------------- | ------------------------------------- |
+| Vite's content-hashed assets (`/assets/*`)                                    | `public, max-age=31536000, immutable` |
+| `index.html` and the SPA fallback                                             | `no-cache`                            |
+| other root static files (favicon, manifest, …)                                | `public, max-age=3600`                |
+| `/v1/*`, `/api/auth/*`, `/health`, `/ready`, `/device`, and **every** non-2xx | `no-store`                            |
+
+The last row is the safety rule, applied in one place (`app.ts`): nothing dynamic — a
+session, an error body, an auth redirect — is ever stored by a shared cache, whatever route or
+handler produced it. `/api/auth/*` responses also carry `Vary: Cookie` (they are built from
+the session cookie), and a CORS-enabled response carries `Vary: Origin`, so anything reading
+them without honouring `no-store` is told what they vary by.
 
 ## Shutdown
 
@@ -708,7 +763,9 @@ served from the same origin does not.
 (abort the turns in flight, give them `OPENHARNESS_DRAIN_TIMEOUT_MS` to write their last
 events), drop the connections still open — including SSE streams, which would otherwise never
 end — and close the store. A second signal is ignored rather than allowed to interrupt the
-drain.
+drain. The drain starts the instant `shutdown()` is called — before the listener closes —
+and `GET /ready` answers 503 from that moment, so a load balancer stops sending traffic
+before the instance stops serving it (#151).
 
 ## Public API
 
@@ -748,6 +805,10 @@ drain.
 | `readServerConfig(env)`, `ServerConfig`, `ENV_VARS`                                                                  | the environment, parsed                                                              |
 | `createConfigVault(config)`, `KeyProviderKind`                                                                       | the vault the config asks for: the env key or Cloud KMS (#150)                       |
 | `HttpError`, `rateLimitError`, `PACKAGE_NAME`, `Logger`                                                              | the error types, the package name and the logging seam                               |
+| `resolveClientIp`, `withClientIpHeader`, `CLIENT_IP_HEADER`, `FORWARDED_FOR_HEADER`                                  | the client IP behind a proxy: one resolution, one header (#151)                      |
+| `Readiness`, `alwaysReady`                                                                                           | what `GET /ready` asks, and the no-database answer (#151)                            |
+| `checkDatabase`, `READINESS_QUERY_TIMEOUT_MS`                                                                        | the Postgres side of `/ready`: `select 1` inside about 2 s (#151)                    |
+| `DEFAULT_TRUSTED_PROXY_HOPS`                                                                                         | `0` — no forwarding header trusted (#151)                                            |
 
 `node dist/index.js` runs `main()`, which reads the environment and starts the server.
 
@@ -761,6 +822,7 @@ src/
   auth.ts               createAuth: Better Auth for this server (providers, plugins, sessions, dev login)
   auth-profile.ts       the A3 identity rules, and the provider options that enforce them
   auth-guard.ts         the /v1 session + CSRF middleware
+  client-ip.ts          the client IP behind a proxy: which x-forwarded-for entry, and why (#151)
   session-watch.ts      revocation registry + periodic re-check for long-lived responses (#76)
   credentials.ts        sealing, opening and the session-bound credential resolver (A5)
   provider-validation.ts the one cheap provider call a saved key is checked with
@@ -911,6 +973,27 @@ parallel with each other.
 - `config.test.ts`, `main.test.ts` — the environment (including the three required variables
   and the dev-login guard), startup, recovery and shutdown, and `SCHEDULER=postgres` wiring
   the partitioned scheduler.
+- `client-ip.test.ts` — the helper behind #151: the socket address with no trusted hops (the
+  header is not read at all), the `trustedProxyHops + 1`-from-the-right entry with hops (the
+  GCLB shape, spoofed entries to the left ignored, whitespace, IPv6), the socket fallback for
+  a short or malformed chain, and `withClientIpHeader` replacing a value a client set.
+- `trusted-proxy.test.ts` — the same rule through the real stack: the sign-in rate limiter's
+  buckets (a spoofed `x-forwarded-for` cannot move a client between them; with one trusted hop
+  a GCLB chain keys by the client entry and a forged prefix changes nothing; garbage never
+  mints a bucket), the `ipAddress` recorded on a session, and — over a real listener, from a
+  loopback alias — that with no trusted hop the _socket_ address is the key whatever the
+  header says.
+- `ready.test.ts` — `GET /ready` (#151): 200 while the store answers, 503 while draining
+  (without asking the store) or when the check fails, `/health` staying 200 either way,
+  neither probe logging a hit, the drain flip on a real `startServer` (200 before
+  `shutdown()`, 503 from the call on), and `checkDatabase`'s three answers — resolves,
+  rejects, times out at about two seconds — which a stub pool can ask without a database; the
+  Postgres suite runs against a real one when there is one.
+- `cache-headers.test.ts` — the CDN classes (#151): immutable hashed assets, a revalidating
+  shell (and the fallback that serves it, even for a missing `assets/` file), an hour for
+  other root files, and `no-store` for `/v1`, `/api/auth/*` (with `Vary: Cookie`), the
+  probes, the `/device` redirect and every error response — plus `Vary: Origin` where CORS
+  makes a response vary by origin.
 - `model-catalog.test.ts` — `GET /v1/models` (issue #90) over a **scripted fetch** and a
   registry stub: only the caller's providers are listed and only their URLs called, OpenAI's
   list filtered of embeddings/tts/whisper/dall-e/moderation, Gemini filtered by

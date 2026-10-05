@@ -78,29 +78,30 @@ the only way an event is ever removed together with its session.
 
 ## Routes
 
-| method   | path                                      | what it does                                                            |
-| -------- | ----------------------------------------- | ----------------------------------------------------------------------- |
-| `GET`    | `/health`                                 | liveness; open, like `/v1/auth-config` below                            |
-| `GET`    | `/v1/auth-config`                         | unauthenticated: which providers are on, and whether dev login is       |
-| `GET`    | `/v1/me`                                  | the signed-in user                                                      |
-| `GET`    | `/v1/me/preferences`                      | the caller's preferences — today, the default model                     |
-| `PUT`    | `/v1/me/preferences`                      | set them whole; `default_model` is `provider/model` or `null`           |
-| `POST`   | `/v1/agents`                              | create an agent                                                         |
-| `GET`    | `/v1/agents`                              | list agents, oldest first                                               |
-| `GET`    | `/v1/agents/{agent_id}`                   | read one agent                                                          |
-| `POST`   | `/v1/agents/{agent_id}`                   | update an agent; sessions already created keep their snapshot           |
-| `POST`   | `/v1/sessions`                            | create a session from a model and/or an agent (at least one)            |
-| `GET`    | `/v1/sessions`                            | list sessions, newest first (`agent_id` filters)                        |
-| `GET`    | `/v1/sessions/{session_id}`               | read one session                                                        |
-| `DELETE` | `/v1/sessions/{session_id}`               | delete it and its whole log; answers `204` with no body                 |
-| `POST`   | `/v1/sessions/{session_id}/events`        | append user events; the server owns every other event type              |
-| `GET`    | `/v1/sessions/{session_id}/events`        | read the log, with `types[]`, `after_seq`, `limit` and `page`           |
-| `GET`    | `/v1/sessions/{session_id}/events/stream` | follow it live over SSE; `event_deltas[]` opts into a reply's chunks    |
-| `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`   | AI SDK `useChat` compatibility — an extension, not the protocol         |
-| `PUT`    | `/v1/provider-credentials/{provider}`     | add or replace the caller's credential for a provider (write-only)      |
-| `GET`    | `/v1/provider-credentials`                | list the caller's credential metadata; never the secrets                |
-| `DELETE` | `/v1/provider-credentials/{provider}`     | delete one; answers `204` with no body                                  |
-| `GET`    | `/v1/models`                              | the chat models the caller's own keys can use, with per-provider status |
+| method   | path                                      | what it does                                                                                    |
+| -------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `GET`    | `/health`                                 | liveness — always `{ status: 'ok' }` while the process lives; open                              |
+| `GET`    | `/ready`                                  | readiness — `{ status: 'ok' }`, or `503` while draining or when the store does not answer; open |
+| `GET`    | `/v1/auth-config`                         | unauthenticated: which providers are on, and whether dev login is                               |
+| `GET`    | `/v1/me`                                  | the signed-in user                                                                              |
+| `GET`    | `/v1/me/preferences`                      | the caller's preferences — today, the default model                                             |
+| `PUT`    | `/v1/me/preferences`                      | set them whole; `default_model` is `provider/model` or `null`                                   |
+| `POST`   | `/v1/agents`                              | create an agent                                                                                 |
+| `GET`    | `/v1/agents`                              | list agents, oldest first                                                                       |
+| `GET`    | `/v1/agents/{agent_id}`                   | read one agent                                                                                  |
+| `POST`   | `/v1/agents/{agent_id}`                   | update an agent; sessions already created keep their snapshot                                   |
+| `POST`   | `/v1/sessions`                            | create a session from a model and/or an agent (at least one)                                    |
+| `GET`    | `/v1/sessions`                            | list sessions, newest first (`agent_id` filters)                                                |
+| `GET`    | `/v1/sessions/{session_id}`               | read one session                                                                                |
+| `DELETE` | `/v1/sessions/{session_id}`               | delete it and its whole log; answers `204` with no body                                         |
+| `POST`   | `/v1/sessions/{session_id}/events`        | append user events; the server owns every other event type                                      |
+| `GET`    | `/v1/sessions/{session_id}/events`        | read the log, with `types[]`, `after_seq`, `limit` and `page`                                   |
+| `GET`    | `/v1/sessions/{session_id}/events/stream` | follow it live over SSE; `event_deltas[]` opts into a reply's chunks                            |
+| `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`   | AI SDK `useChat` compatibility — an extension, not the protocol                                 |
+| `PUT`    | `/v1/provider-credentials/{provider}`     | add or replace the caller's credential for a provider (write-only)                              |
+| `GET`    | `/v1/provider-credentials`                | list the caller's credential metadata; never the secrets                                        |
+| `DELETE` | `/v1/provider-credentials/{provider}`     | delete one; answers `204` with no body                                                          |
+| `GET`    | `/v1/models`                              | the chat models the caller's own keys can use, with per-provider status                         |
 
 Every `/v1` resource belongs to the caller and is scoped to them.
 
@@ -309,8 +310,8 @@ curl localhost:3000/v1/me -H "Authorization: Bearer $TOKEN"
   it was created) — with the same `401 authentication_error` as no session at all, which is
   what tells a client to sign the user in again. Reads are not sensitive.
 - Anything not signed in — or carrying an invalid or expired session or token — gets an
-  `authentication_error` with status `401`. `/health` and `/v1/auth-config` are the only
-  routes that never ask.
+  `authentication_error` with status `401`. `/health`, `/ready` and `/v1/auth-config` are the
+  only routes that never ask.
 - **Everything belongs to the user who created it.** Agents and sessions carry a read-only
   `owner_id`; a resource that belongs to another user answers **`404`**, not `403`, so its
   existence never leaks. Nothing is shared and no request ever carries an owner.

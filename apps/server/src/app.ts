@@ -1,4 +1,6 @@
 import { Hono } from 'hono'
+import type { Context } from 'hono'
+import { getConnInfo } from '@hono/node-server/conninfo'
 import {
   ANTHROPIC_VERSION_HEADER,
   API_VERSION_PREFIX,
@@ -12,6 +14,7 @@ import { AgentNotFoundError, SessionNotFoundError, type SessionStore } from '@op
 import { consoleLogger, type AppEnv, type Logger } from './types'
 import { createAuthGuard } from './auth-guard'
 import { rewriteDevLoginRequest, type BetterAuthInstance } from './auth'
+import { FORWARDED_FOR_HEADER, resolveClientIp, withClientIpHeader } from './client-ip'
 import { emptyRegistry, type ModelRegistry } from './catalog/registry'
 import { DefaultModelPicker } from './default-model'
 import { createSessionRevocations } from './session-watch'
@@ -45,7 +48,10 @@ import { serveWebAsset } from './static'
  * - **`/v1/*` requires a session** (epic #65, A2): a Better Auth cookie or a bearer token,
  *   otherwise 401 `authentication_error`. `/v1/auth-config` is the one route ahead of the
  *   guard, because the web app reads it before sign-in; `/api/auth/*` is Better Auth's own
- *   surface and `/health` stays open.
+ *   surface and the two probes — `/health`, liveness, and `/ready`, readiness (#151) — stay
+ *   open.
+ * - **Nothing a shared cache may hold is left cacheable** (#151): dynamic and error responses
+ *   are `no-store`, static files carry the class `static.ts` gives them. See {@link NO_STORE}.
  * - **Auth is the only thing checked before the route**; everything else is validated by the
  *   protocol's schemas, which is what turns a malformed request into a 400 and not a 500.
  * - **A long-lived response outlives its session only until the session is revoked or expires**
@@ -98,6 +104,24 @@ export interface AppOptions {
    */
   readonly webDir?: string
   /**
+   * `OPENHARNESS_TRUSTED_PROXY_HOPS` (#151): how many proxies sit in front of this server,
+   * each of which appends one entry to `x-forwarded-for`. `0` (the default) trusts no
+   * forwarding header at all — a client is free to send one — and uses the connection's
+   * address as the client IP; with GCLB in front, `1`.
+   *
+   * The app resolves the client IP once, from the trusted entry of the chain (see
+   * `client-ip.ts` for exactly which entry and why), and hands it to Better Auth on the one
+   * header Better Auth reads for rate limiting and session records — so a client can neither
+   * choose its rate-limit bucket nor land in someone else's.
+   */
+  readonly trustedProxyHops?: number
+  /**
+   * What `GET /ready` answers (#151). Defaults to {@link alwaysReady} — no draining, a store
+   * that answers trivially — which is the in-memory store's truth. `main.ts` passes the real
+   * one: the store's own `select 1` and the shutdown drain.
+   */
+  readonly readiness?: Readiness
+  /**
    * Origins allowed to call the API from a browser, from `OPENHARNESS_CORS_ORIGINS`.
    *
    * Empty or omitted means no CORS headers at all — the API is same-origin or server-side
@@ -117,6 +141,78 @@ export interface AppOptions {
 }
 
 /**
+ * What `GET /ready` asks (#151): can this instance take traffic right now?
+ *
+ * A readiness answer is two questions, and both have to be "yes": the process is not on its
+ * way out (`isDraining`), and the store it depends on answers (`check`). The store question
+ * is where a deployment's database shows up: an instance whose Postgres is gone must leave
+ * the load balancer's rotation before it starts failing requests.
+ */
+export interface Readiness {
+  /** Whether the process is draining for shutdown; a draining instance is not ready. */
+  isDraining(): boolean
+  /**
+   * Whether the store answers a trivial query right now. Answers `false` for a store that
+   * cannot answer **promptly** (the Postgres check carries its own deadline, about 2 s);
+   * never throws — a failed check is the answer, not an error.
+   */
+  check(): Promise<boolean>
+}
+
+/**
+ * The readiness of an app built without a database behind it: the in-memory store answers
+ * trivially, and nothing is draining unless the host says so. `main.ts` passes the real one.
+ */
+export const alwaysReady: Readiness = {
+  isDraining: () => false,
+  check: () => Promise.resolve(true),
+}
+
+/**
+ * The `Cache-Control` every route class answers with (#151, deployment epic #148).
+ *
+ * The deployment runs Cloud CDN in front of this origin with `cacheMode: USE_ORIGIN_HEADERS`,
+ * so what a response says about caching is the CDN's whole policy. Two rules cover everything
+ * this app serves:
+ *
+ * - **Dynamic responses are `no-store`**: everything under `/v1` (session-scoped by
+ *   definition), Better Auth's own surface (`/api/auth/*`, user-specific and cookie-built —
+ *   the value also carries `Vary: Cookie`), the probes, the `/device` redirect, and **any**
+ *   response with a status outside 2xx on **any** path — an error body, a redirect or a
+ *   partially-user-specific response must never be stored by a shared cache, whatever route
+ *   produced it.
+ * - **Static files decide for themselves** (`static.ts`): the hashed assets are immutable,
+ *   the shell revalidates, other root files get an hour. They are not user-specific, so they
+ *   are the responses a cache is for.
+ */
+const NO_STORE = 'no-store'
+
+/** Where responses are dynamic: the API, Better Auth, the probes, the device redirect. */
+function wantsNoStore(path: string): boolean {
+  return isApiPath(path) || path === '/health' || path === '/ready' || path === '/device'
+}
+
+/** Whether the path is Better Auth's own surface, which the app mounts and nothing else. */
+function isAuthPath(path: string): boolean {
+  return path === '/api/auth' || path.startsWith('/api/auth/')
+}
+
+/**
+ * The connection's remote address, when the app runs on a listener that has one.
+ *
+ * `getConnInfo` reads the adapter's `incoming` socket; in-process (`app.request`, which is
+ * what a test does) there is no socket and it throws — nothing to resolve, which the caller
+ * answers `null` for.
+ */
+function socketAddress(c: Context<AppEnv>): string | null {
+  try {
+    return getConnInfo(c).remote.address ?? null
+  } catch {
+    return null
+  }
+}
+
+/**
  * Build the app.
  *
  * @param options the store, the scheduler, auth and the deployment's knobs; see
@@ -125,6 +221,8 @@ export interface AppOptions {
 export function createApp(options: AppOptions): Hono<AppEnv> {
   const logger = options.logger ?? consoleLogger
   const app = new Hono<AppEnv>()
+  const trustedProxyHops = options.trustedProxyHops ?? 0
+  const readiness = options.readiness ?? alwaysReady
 
   // The request id is minted first and attached last, so it is on every response — including
   // the ones a route streamed, and the ones an error handler built.
@@ -133,6 +231,23 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
     c.set('requestId', requestId)
     await next()
     c.header(REQUEST_ID_HEADER, requestId)
+  })
+
+  // The CDN contract (#151): attached last for the same reason the request id is — a response
+  // built by a route, a stream or an error handler is the one that gets the header. See
+  // {@link NO_STORE} for the two rules; this middleware never touches a 2xx static file, which
+  // carries the class `static.ts` gave it.
+  app.use('*', async (c, next) => {
+    await next()
+    if (wantsNoStore(c.req.path) || c.res.status >= 300) {
+      c.header('cache-control', NO_STORE)
+    }
+    if (isAuthPath(c.req.path)) {
+      // Auth responses are built from the request's cookie, so anything that ever looked at
+      // them without honouring `no-store` still gets told what they vary by. (`cors()` below
+      // appends `Vary: Origin` the same way when the API is called cross-origin.)
+      c.header('vary', 'cookie', { append: true })
+    }
   })
 
   const corsOrigins = options.corsOrigins ?? []
@@ -157,15 +272,37 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
     )
   }
 
+  // Liveness (#151): "this process is alive", nothing else — deliberately. It keeps answering
+  // 200 while the server drains, because a process that is finishing its turns is alive, not
+  // stuck; taking it out of rotation is `/ready`'s job.
   app.get('/health', (c) => c.json({ status: 'ok' }))
+
+  // Readiness (#151): "send me traffic". 200 only while the store answers and this instance
+  // is not draining; 503 the moment a shutdown begins, so a load balancer stops sending new
+  // requests while the turns in flight finish. No session (a probe cannot sign in) and no
+  // logging (a probe would fill the log).
+  app.get('/ready', async (c) => {
+    const ready = !readiness.isDraining() && (await readiness.check())
+    return c.json({ status: ready ? 'ok' : 'unavailable' }, ready ? 200 : 503)
+  })
 
   // Better Auth owns `/api/auth/*`: sign-in, sign-out, the device flow, and the session
   // lookups the guard makes. The request passes through the dev-login shim, which maps the
   // documented `dev@localhost` onto the seeded address when — and only when — dev login is
-  // on (see `auth.ts`).
-  app.all('/api/auth/*', async (c) =>
-    options.auth.instance.handler(await rewriteDevLoginRequest(c.req.raw, options.auth.devLogin)),
-  )
+  // on (see `auth.ts`), and then through the IP shim: the client's address, resolved from
+  // the trusted end of `x-forwarded-for` (or the socket, with no trusted proxy), is stamped
+  // on the one header Better Auth reads for rate limiting and session records (#151). The
+  // client's own forwarding headers — and any value it put on our header — are never what
+  // Better Auth sees.
+  app.all('/api/auth/*', async (c) => {
+    const request = await rewriteDevLoginRequest(c.req.raw, options.auth.devLogin)
+    const clientIp = resolveClientIp({
+      forwardedFor: request.headers.get(FORWARDED_FOR_HEADER),
+      socketAddress: socketAddress(c),
+      trustedProxyHops,
+    })
+    return options.auth.instance.handler(withClientIpHeader(request, clientIp))
+  })
 
   // The two halves of "a revoked or expired session ends its open responses" (A2/#76): the
   // registry of who is streaming under which session — swept by the store's revocation
