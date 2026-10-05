@@ -8,3 +8,7 @@ yarn.lock
 test-results
 e2e/test-results
 e2e/qa-output
+# Helm templates are Go templates, not YAML — `{{ … }}` does not parse — so prettier cannot
+# check them. `helm lint` and the chart's CI job are what check them; the chart's values files,
+# `Chart.yaml` and `README.md` are still formatted.
+charts/*/templates

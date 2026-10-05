@@ -1,0 +1,46 @@
+# How Google's global external HTTPS load balancer talks to the pods (#154).
+#
+# The Service points at this BackendConfig by name (the `cloud.google.com/backend-config`
+# annotation above), which is what turns it into settings on the backend service GKE creates.
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: {{ include "openharness.fullname" . }}
+  labels:
+    {{- include "openharness.labels" . | nindent 4 }}
+spec:
+  # The load balancer's own request timeout. SSE streams — the session watch and the AI SDK
+  # chat — hold one connection open for the length of a turn, so this is set very long (an
+  # hour) rather than tuned to a typical request. Documented, not lowerable without cutting
+  # streams off.
+  timeoutSec: {{ .Values.backend.timeoutSec }}
+  # A pod that is going away keeps receiving in-flight requests for this long, so a request the
+  # load balancer already dispatched is not dropped while the pod shuts down. It should be at
+  # least the server's own drain timeout (`OPENHARNESS_DRAIN_TIMEOUT_MS`); the pod's
+  # terminationGracePeriodSeconds is longer than both, so the graceful path wins.
+  connectionDraining:
+    drainingTimeoutSec: {{ .Values.backend.drainingTimeoutSec }}
+  # The load balancer's health check. It uses /ready, the readiness route, not /health: a pod
+  # whose database is unreachable or that is draining must leave the backend, and /ready is
+  # exactly that signal (W1, #151). A NEG's endpoints follow the readiness probe too, so the
+  # two agree.
+  healthCheck:
+    type: HTTP
+    requestPath: /ready
+    port: 3000
+    checkIntervalSec: 15
+    timeoutSec: 5
+    healthyThreshold: 1
+    unhealthyThreshold: 2
+  {{- if .Values.cdn.enabled }}
+  # Cloud CDN in front of the backend service. The server sets Cache-Control per route, so the
+  # CDN follows the origin's headers rather than caching on a policy of its own — a route that
+  # says no-store is never cached, and one that says max-age is cached for exactly that long.
+  cdn:
+    enabled: true
+    cacheMode: USE_ORIGIN_HEADERS
+    # Nothing negative is cached: a 404 or a 5xx is a fact about right now, and caching it
+    # would keep serving a blip long after it passed.
+    negativeCaching: false
+    requestCoalescing: true
+  {{- end }}

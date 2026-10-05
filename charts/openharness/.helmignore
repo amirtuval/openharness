@@ -1,0 +1,12 @@
+# Files that are not part of the chart.
+#
+# `ci/` is deliberately *not* ignored: `helm lint` runs an extra pass for every
+# `ci/*-values.yaml` it finds, so keeping the file in the chart means the lint in CI also
+# renders the realistic staging values.
+.git/
+.gitignore
+*.tmproj
+*.orig
+*.rej
+*~
+.DS_Store
