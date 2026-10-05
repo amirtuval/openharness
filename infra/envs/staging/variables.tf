@@ -43,10 +43,10 @@ variable "app_service_account_id" {
   default     = "openharness-app"
 }
 
-variable "production_node_service_account_email" {
-  description = "Production's GKE node service account, granted resource-level read on this project's Artifact Registry repository. Its email is predictable: gke-nodes@openharness-510710.iam.gserviceaccount.com."
+variable "production_node_service_account" {
+  description = "Production's GKE node service account, granted resource-level read on this project's Artifact Registry repository. Empty (the default) grants nothing: production's account is not created until production's own Terraform creates its cluster, and GCP rejects an IAM member that does not exist yet, so a first staging apply must not name it. Set it to gke-nodes@openharness-510710.iam.gserviceaccount.com — the repository variable TF_PRODUCTION_NODE_SA — after the first production deploy has created that account, then re-apply. See docs/DEPLOYMENT.md, 'The first deploy'."
   type        = string
-  default     = "gke-nodes@openharness-510710.iam.gserviceaccount.com"
+  default     = ""
 }
 
 variable "google_client_id" {

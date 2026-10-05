@@ -9,9 +9,21 @@ name: deploy-production
 # already pushed an image for that exact commit, and fails if it did not — so the only thing
 # that can reach production is a build staging has already run and someone has looked at.
 # Rolling back is the same command with an earlier SHA: the tag is a pointer, not a marker.
+#
+# workflow_dispatch re-runs the promotion by hand, which the first-deploy bootstrap needs:
+# production's first apply creates the node service account staging's registry must then
+# grant read, and until staging has re-applied with TF_PRODUCTION_NODE_SA set the release
+# cannot pull its image (ImagePullBackOff). Re-running is the same promotion, by hand:
+# docs/DEPLOYMENT.md, "The first deploy".
 on:
   push:
     tags: [production]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: 'Commit to promote. Empty promotes the tip of the ref this is run from.'
+        required: false
+        type: string
 
 # One production apply at a time, and a queue rather than a cancellation: interrupting an
 # apply is how an environment ends up half-changed.
@@ -48,9 +60,14 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Empty on a tag push and on a dispatch with no input (checkout then uses the ref
+          # that triggered the run); the commit the run was dispatched for otherwise.
+          ref: ${{ inputs.sha }}
 
-      # The tag's commit. `git rev-parse HEAD` in the checked-out tree is the commit the tag
-      # points at, whether the tag is annotated or not, and it is what every later step uses.
+      # The checked-out commit. `git rev-parse HEAD` in the tree is the commit the tag points
+      # at, whether the tag is annotated or not, and it is what every later step uses — on a
+      # dispatch it is the input's commit when one was given, and the ref's tip otherwise.
       - name: Resolve the tag's commit
         id: commit
         run: |
@@ -152,6 +169,11 @@ jobs:
             -var "existing_zone_name=$EXISTING_ZONE_NAME" \
             -var "staging_name_servers=${STAGING_NAME_SERVERS:-[]}"
 
+      # A rollout that cannot pull its image is the expected end of the *first* production
+      # deploy: production's nodes have no read on staging's registry until staging has
+      # re-applied with TF_PRODUCTION_NODE_SA set to this project's node service account
+      # (docs/DEPLOYMENT.md, "The first deploy"). ImagePullBackOff is a bootstrap step, not a
+      # broken deploy, so say so rather than leaving a bare kubectl failure.
       - name: Wait for the rollout
         env:
           PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
@@ -159,7 +181,20 @@ jobs:
           set -euo pipefail
           gcloud container clusters get-credentials "$CLUSTER_NAME" \
             --region "$REGION" --project "$PROJECT_ID"
-          kubectl -n openharness rollout status deployment/openharness --timeout=10m
+          if kubectl -n openharness rollout status deployment/openharness --timeout=10m; then
+            exit 0
+          fi
+          described="$(kubectl -n openharness describe pods 2>&1 || true)"
+          {
+            echo '::group::Pods'
+            kubectl -n openharness get pods -o wide 2>&1 || true
+            printf '%s\n' "$described"
+            echo '::endgroup::'
+          } >&2
+          if grep -qE 'ImagePullBackOff|ErrImagePull' <<<"$described"; then
+            echo "::error title=ImagePullBackOff — production cannot pull the image::The pods cannot read the staging registry. On a first production deploy this is the bootstrap: this project's node service account exists now, but staging has not granted it read yet. Set the repository variable and re-run deploy-staging, then re-run this workflow: gh variable set TF_PRODUCTION_NODE_SA --body gke-nodes@openharness-510710.iam.gserviceaccount.com — see docs/DEPLOYMENT.md, 'The first deploy'."
+          fi
+          exit 1
 
       # `output url` is `https://<var.host>` — production's hostname, from the state that
       # was just applied, rather than a second copy of it here.
