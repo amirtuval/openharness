@@ -118,9 +118,10 @@ once it exists:
 1. **Deploy staging** (`.github/workflows/deploy-staging.yml`). It creates the registry and
    grants read to staging's own node SA. Nothing names production yet.
 2. **Deploy production once.** Its first apply creates the production cluster and its node
-   service account. The release's rollout can then fail with `ImagePullBackOff` — production's
+   service account. The release's rollout then fails with `ImagePullBackOff` — production's
    nodes cannot read staging's registry yet, which is expected at this point, not a broken
-   deploy.
+   deploy — and, because the release is `atomic`, that failure rolls itself back rather than
+   leaving a release behind for the next attempt to trip over.
 3. **Set the variable** to production's node account, whose email is predictable:
    `gh variable set TF_PRODUCTION_NODE_SA --body gke-nodes@openharness-510710.iam.gserviceaccount.com`
 4. **Re-run staging** (`workflow_dispatch`). `deploy-staging.yml` passes
@@ -147,6 +148,45 @@ or cannot render the `helm_release`. That is what the two-stage apply
 [above](#the-first-deploy-is-two-applies-every-one-after-it-is-one) exists for, and it is
 also why `terraform-pr.yml` skips the plan of an environment that has no state yet: there is
 nothing in state to plan against, and a plan of an empty project cannot show the release.
+
+### A failed rollout rolls itself back
+
+`helm_release.app` sets `atomic = true` and `cleanup_on_fail = true`
+(`infra/modules/app/main.tf`). An install or upgrade that does not become ready inside
+`helm_timeout` (600s by default, a variable) is therefore **rolled back**, not left behind:
+
+- `atomic` waits for the release to be ready, and on failure uninstalls a failed install and
+  rolls a failed upgrade back to the last good revision. `wait` is implied, so a release is
+  never reported created before its pods are.
+- `cleanup_on_fail` deletes the resources the failed attempt created, so the rollback leaves
+  no half-applied objects behind.
+
+Both are top-level boolean arguments of the pinned provider (`hashicorp/helm` 3.3.0, in
+`envs/*/.terraform.lock.hcl`) — not blocks. Before #159 neither was set, and that is what made
+the first staging deploy unrecoverable: a rollout that timed out left a **failed** release in
+the cluster while the failed apply wrote nothing to state, so every retry died with
+`cannot re-use a name that is still in use` until someone uninstalled the release by hand.
+
+With them set, a failed apply is safe to re-run — which is what the workflows assume ("a first
+deploy that fails halfway converges when it is re-run"). The deploy workflows also collect
+diagnostics when an apply fails (#159); see
+[`docs/DEPLOYMENT.md`](../docs/DEPLOYMENT.md#when-a-deploy-fails).
+
+#### One-time recovery: the release the first staging deploy left behind
+
+The staging cluster still holds the failed release from that first deploy, and `atomic` only
+governs releases Terraform creates from now on — it does not clean up one already sitting in
+the cluster. Uninstall it once, by hand, before the next apply:
+
+```bash
+gcloud container clusters get-credentials openharness --region us-central1 --project openharness-dev
+helm -n openharness uninstall openharness
+```
+
+(`openharness-dev` is staging's project — the value in the `GCP_PROJECT_ID` variable of the
+staging environment. Production's is `openharness-510710`. If `helm uninstall` reports no
+release, there is nothing to clean up.) After that the next `deploy-staging` run installs
+normally, and any future failure cleans up after itself.
 
 ## State
 
@@ -383,6 +423,11 @@ Nothing needed a new role for the apply itself; the one role added in this PR is
 | Reading/writing the state and taking the lock                                                                    | `roles/storage.objectAdmin` on the state bucket                                    |
 | `google_monitoring_uptime_check_config`, `_alert_policy`, `_notification_channel` (monitoring module)            | `roles/monitoring.editor` (already held — no new grant)                            |
 | `google_billing_budget` (budget module)                                                                          | none on the project — `roles/billing.costsManager` on the billing account, by hand |
+
+One role covers no resource: `roles/logging.viewer` (#159) is what lets a deploy workflow run
+`gcloud logging read` on the container's logs when a rollout fails. It is in the setup
+script's `DEPLOY_PROJECT_ROLES`, so a project whose `deploy@` predates #159 needs the script
+re-run for it (`.github/setup/README.md`, "Deploy roles: least privilege").
 
 ### What Terraform grants, and to whom
 

@@ -134,6 +134,55 @@ tag, and the registry keeps every image it has pushed. Rolling back does not rev
 state — a schema migration is not undone by an older image — so treat a rollback as "run the
 previous server build", and fix forward if the change was a migration.
 
+This is the rollback you _choose_. A rollout that never becomes ready rolls itself back
+automatically — see [When a deploy fails](#when-a-deploy-fails) — and that one needs no tag.
+
+### When a deploy fails
+
+`helm_release.app` is installed `atomic = true, cleanup_on_fail = true` (#159), so an install
+or upgrade that does not become ready within `helm_timeout` (600s, the `helm_timeout` variable
+of `infra/modules/app`) is **rolled back instead of left half-applied**: a failed install is
+uninstalled, a failed upgrade returns to the last good revision, and the objects the failed
+attempt created are deleted. Two consequences for a failed `terraform apply`:
+
+- **It is safe to re-run.** Nothing is left in the cluster holding the release name. That is
+  what used to make one bad rollout poison every retry with Helm's "cannot re-use a name that
+  is still in use"; now re-dispatching the workflow (staging) or re-pushing the tag
+  (production) converges.
+- **The pods are already gone when the run ends**, so "look at the pods" is no longer a
+  diagnosis. That is why both deploy workflows run a **Rollout diagnostics** step when an
+  apply fails: cluster credentials, then `helm list -a` / `helm history` (tolerating errors),
+  `kubectl get pods -o wide`, `kubectl describe pods`, recent events
+  (`kubectl get events --sort-by=.lastTimestamp | tail -50`, which survive about an hour),
+  current and previous container logs (`--tail=200`), and finally Cloud Logging for the
+  namespace, which outlives the rollback entirely. It prints names, statuses, events and logs
+  — never a secret value.
+
+Cloud Logging is the part the rollback cannot take away:
+
+```bash
+gcloud logging read 'resource.type="k8s_container" AND resource.labels.namespace_name="openharness"' \
+  --freshness=30m --limit=200
+```
+
+Reading Cloud Logging needs `roles/logging.viewer` on `deploy@`, which the setup script now
+grants (#159). A project set up before that needs the script re-run for it
+(`.github/setup/workload-identity.sh staging`, then `production`); until then the Cloud Logging
+probe of the diagnostics step fails and everything else in it still runs. There is no
+Terraform-side action for this — the role is on `deploy@`, which Terraform does not manage.
+
+**One-time recovery for the release the first staging deploy left behind.** `atomic` governs
+the releases Terraform creates from here on; it does not remove one already stuck in the
+cluster. Before the next staging apply, uninstall it by hand:
+
+```bash
+gcloud container clusters get-credentials openharness --region us-central1 --project openharness-dev
+helm -n openharness uninstall openharness
+```
+
+(`openharness-dev` is staging's `GCP_PROJECT_ID`. For production substitute
+`openharness-510710`. `helm uninstall` reporting no release means there is nothing to clean up.)
+
 ### Re-running a staging deploy
 
 `deploy-staging` runs by hand from Actions (`workflow_dispatch`), with an optional SHA:
@@ -181,9 +230,12 @@ from staging's registry.
    works as soon as the domain's registration delegates to it.
 6. **Cut the production tag** (`git tag -f production <sha> && git push -f origin production`)
    with the SHA staging just deployed, and watch `deploy-production`. Production's nodes cannot
-   read staging's registry yet, so **this first apply is expected to end with the release stuck
-   in `ImagePullBackOff`** — production's node service account exists as of this apply, and that
-   is the point of it. Steps 7–9 turn the read on.
+   read staging's registry yet, so the pods sit in `ImagePullBackOff` and **this first apply is
+   expected to fail** — the release never becomes ready, so `helm_timeout` expires and the
+   `atomic` release rolls itself back (`helm -n openharness uninstall` by hand is not needed;
+   it already happened). Production's node service account exists as of this apply, and that is
+   the point of it. The failure diagnostics step prints the `ImagePullBackOff` events that say
+   so. Steps 7–9 turn the read on.
 7. **Set `TF_PRODUCTION_NODE_SA`** to production's node service account, whose email is
    predictable and needs no lookup:
    `gh variable set TF_PRODUCTION_NODE_SA --body gke-nodes@openharness-510710.iam.gserviceaccount.com`.
