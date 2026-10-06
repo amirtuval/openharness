@@ -82,7 +82,6 @@ Terraform passes, per environment:
 | `OPENHARNESS_TRUSTED_PROXY_HOPS` | `1` — GCLB appends one entry to `x-forwarded-for` (#151)         |
 | `OPENHARNESS_KEY_PROVIDER`       | `gcp-kms` — Cloud KMS wraps the vault's keys (#150)              |
 | `OPENHARNESS_KMS_KEY`            | the `cryptoKeys/…` resource name (a resource name, not a secret) |
-| `OPENHARNESS_DEV_LOGIN`          | `0`                                                              |
 | `OPENHARNESS_LOG_FORMAT`         | `json` — Cloud Logging reads the server's stdout as JSON (#158)  |
 | `OPENHARNESS_TRACING`            | `cloud-trace` — spans go to Cloud Trace (#158)                   |
 | `OPENHARNESS_TRACE_SAMPLE_RATE`  | `0.1` — the fraction of traces kept (#158)                       |
@@ -91,6 +90,11 @@ Terraform passes, per environment:
 The chart also sets `PORT=3000`, `TMPDIR=/tmp` and `HOME=/tmp` itself: the container's port,
 and where the two writable paths point on a read-only root filesystem. `env` is for the app's
 own settings.
+
+`OPENHARNESS_DEV_LOGIN` is deliberately **not** among them: the dev login is off by being
+unset, and the server refuses to boot on any value other than `1`/`true`, so setting it to
+`0` crash-loops the pod (#159). `ci/staging-values.yaml` mirrors what Terraform passes and a
+server test boots from it (`apps/server/src/chart-values.test.ts`).
 
 ### Secrets (`secrets`)
 

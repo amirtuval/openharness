@@ -94,8 +94,11 @@ gcpProject: ''
 
 # Plain, non-secret environment variables, name → string. (TF) Terraform passes
 # BETTER_AUTH_URL, OPENHARNESS_TRUSTED_PROXY_HOPS, OPENHARNESS_KEY_PROVIDER,
-# OPENHARNESS_KMS_KEY, OPENHARNESS_DEV_LOGIN and any provider client id set for the
-# environment. Secrets do not go here — see `secrets` below.
+# OPENHARNESS_KMS_KEY, OPENHARNESS_LOG_FORMAT, OPENHARNESS_TRACING,
+# OPENHARNESS_TRACE_SAMPLE_RATE and any provider client id set for the environment.
+# It never passes OPENHARNESS_DEV_LOGIN: the dev login is off by being unset, and the
+# server refuses to boot on any value other than `1`/`true` (#159). Secrets do not go
+# here — see `secrets` below.
 env: {}
 
 # Secrets, delivered by the GKE Secret Manager add-on rather than put in the environment. (TF)
