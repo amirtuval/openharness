@@ -3,10 +3,14 @@
 # `ci.yml`, so it runs when the chart changes and stays out of the Node suites' way — the chart
 # has no JavaScript to build and the Node jobs have no chart to render.
 #
-# It runs on changes to `charts/**` and to itself. `kubeconform -ignore-missing-schemas` skips
-# the GKE custom resources (BackendConfig, FrontendConfig, ManagedCertificate,
-# SecretProviderClass), which have no schema in the upstream catalogue; everything the
-# kubernetes API server itself validates is checked strictly.
+# It runs on changes to `charts/**` and to itself. Validation is strict, with two schema
+# sources: kubeconform's own Kubernetes schemas, and the datreeio CRDs-catalog, which carries
+# the Gateway API and GKE policy CRDs the chart renders now that the Ingress is gone (#159) —
+# `gateway.networking.k8s.io/{gateway,httproute}_v1`, `networking.gke.io/{healthcheckpolicy,
+# gcpbackendpolicy}_v1` and `secrets-store.csi.x-k8s.io/secretproviderclass_v1`. So a
+# misspelled field in the Gateway or a policy is caught here rather than by the controller.
+# `-ignore-missing-schemas` stays for `GCPHTTPFilter`, the one object the catalog does not
+# carry yet (Cloud CDN for a Gateway is GKE 1.35.2+ and still new).
 name: Chart
 
 on:
@@ -55,7 +59,15 @@ jobs:
             https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
             | sudo tar xz -C /usr/local/bin kubeconform
 
+      # Two schema locations: the default (Kubernetes' own), and the datreeio CRDs-catalog for
+      # the Gateway API and GKE CRDs. The catalog is keyed by group, kind and version, so a
+      # `Gateway` is validated against gateway.networking.k8s.io/v1 and a `GCPBackendPolicy`
+      # against networking.gke.io/v1 — not skipped. `-ignore-missing-schemas` keeps
+      # GCPHTTPFilter, which the catalog does not carry, a skip rather than a failure.
       - name: Validate the rendered objects
         run: >-
           kubeconform -strict -summary -ignore-missing-schemas
-          -kubernetes-version 1.30.0 rendered.yaml
+          -kubernetes-version 1.30.0
+          -schema-location default
+          -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+          rendered.yaml
