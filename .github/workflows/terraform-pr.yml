@@ -127,6 +127,10 @@ jobs:
             github_client_id: ${{ vars.OAUTH_GITHUB_CLIENT_ID_STAGING }}
             microsoft_client_id: ${{ vars.OAUTH_MICROSOFT_CLIENT_ID_STAGING }}
             microsoft_tenant_id: ${{ vars.OAUTH_MICROSOFT_TENANT_ID_STAGING }}
+            # The alert address and the billing account, so the plan shows exactly what the
+            # deploy will apply (#159). One billing account for both projects.
+            alert_email: ${{ vars.TF_ALERT_EMAIL_STAGING }}
+            billing_account_id: ${{ vars.TF_BILLING_ACCOUNT_ID }}
           - environment: production
             project_id: ${{ vars.GCP_PROJECT_ID_PRODUCTION }}
             wif_provider: ${{ vars.GCP_WIF_PROVIDER_PRODUCTION }}
@@ -139,6 +143,8 @@ jobs:
             github_client_id: ${{ vars.OAUTH_GITHUB_CLIENT_ID_PRODUCTION }}
             microsoft_client_id: ${{ vars.OAUTH_MICROSOFT_CLIENT_ID_PRODUCTION }}
             microsoft_tenant_id: ${{ vars.OAUTH_MICROSOFT_TENANT_ID_PRODUCTION }}
+            alert_email: ${{ vars.TF_ALERT_EMAIL_PRODUCTION }}
+            billing_account_id: ${{ vars.TF_BILLING_ACCOUNT_ID }}
     steps:
       - uses: actions/checkout@v4
 
@@ -233,6 +239,8 @@ jobs:
           GITHUB_CLIENT_ID: ${{ matrix.github_client_id }}
           MICROSOFT_CLIENT_ID: ${{ matrix.microsoft_client_id }}
           MICROSOFT_TENANT_ID: ${{ matrix.microsoft_tenant_id }}
+          ALERT_EMAIL: ${{ matrix.alert_email }}
+          BILLING_ACCOUNT_ID: ${{ matrix.billing_account_id }}
         run: |
           set -euo pipefail
 
@@ -251,6 +259,18 @@ jobs:
           args+=(-var "github_client_id=${GITHUB_CLIENT_ID:-}")
           args+=(-var "microsoft_client_id=${MICROSOFT_CLIENT_ID:-}")
           args+=(-var "microsoft_tenant_id=${MICROSOFT_TENANT_ID:-}")
+          # Both roots declare alert_email, and its default is "": passing the empty value
+          # back is the same as not passing it (#159).
+          args+=(-var "alert_email=${ALERT_EMAIL:-}")
+          # The budget carries two variables, and the deploy passes enable_budget either way —
+          # so the plan does too, or a plan with a billing account set would show a module the
+          # apply then leaves off. Empty means "no budget": the account needs
+          # roles/billing.costsManager, granted by hand (infra/README.md, "Manual steps").
+          if [[ -n "${BILLING_ACCOUNT_ID:-}" ]]; then
+            args+=(-var "enable_budget=true" -var "billing_account_id=$BILLING_ACCOUNT_ID")
+          else
+            args+=(-var "enable_budget=false")
+          fi
           # Only production declares these two, and an empty value means "leave it at the
           # default" — so an unset variable is simply left off the command line.
           if [[ -n "$EXISTING_ZONE_NAME" ]]; then
