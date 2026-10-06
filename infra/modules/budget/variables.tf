@@ -29,7 +29,7 @@ variable "display_name" {
 }
 
 variable "amount" {
-  description = "Budget amount per month, in whole currency units."
+  description = "Budget amount per month, in whole currency units, *in the billing account's currency* unless `currency_code` is set — see that variable."
   type        = number
   default     = 100
 
@@ -40,9 +40,14 @@ variable "amount" {
 }
 
 variable "currency_code" {
-  description = "ISO currency code of the budget amount."
+  description = "ISO 4217 currency code of the budget amount, or null (the default) to leave the amount in the billing account's own currency. Only set it to the account's currency: the Budgets API rejects a budget whose currency does not match the account's with a 400 (`Request contains an invalid argument`), and `gcloud billing accounts describe` is what reports it — ILS for the account this epic deploys against (#159)."
   type        = string
-  default     = "USD"
+  default     = null
+
+  validation {
+    condition     = var.currency_code == null || can(regex("^[A-Za-z]{3}$", var.currency_code))
+    error_message = "The currency code must be null or a three-letter ISO 4217 code (for example ILS or USD)."
+  }
 }
 
 variable "threshold_percents" {

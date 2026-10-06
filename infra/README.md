@@ -286,7 +286,22 @@ apply. From a laptop the same thing is a `-var`:
 terraform apply -var enable_budget=true -var billing_account_id=<BILLING_ACCOUNT_ID>
 ```
 
-The budget alerts at 50%, 90% and 100% of `budget_amount` (default 100 USD) every month.
+The budget alerts at 50%, 90% and 100% of `budget_amount` (default `100`) every month. The
+amount is in the **billing account's currency**, whatever that account is denominated in —
+this epic's is ILS — and no currency code is sent with it: the API documents
+`Money.currencyCode` as optional and requires it to match the account when given, and answers
+anything else with `400: Request contains an invalid argument`, which is what a hardcoded
+`USD` produced on the first staging deploy (#159). The module's `currency_code` therefore
+defaults to `null` and is omitted from the request, and the amount is set without a code
+change through the repository variables `TF_BUDGET_AMOUNT_STAGING` /
+`TF_BUDGET_AMOUNT_PRODUCTION`:
+
+```bash
+gh variable set TF_BUDGET_AMOUNT_STAGING --body 300
+```
+
+Unset, the deploy and the plan leave Terraform's own default in place — every apply passes
+`-var budget_amount=...` only when the variable is set.
 
 ## Input variables
 
@@ -295,28 +310,28 @@ Every environment input, its default, and where a non-default value comes from. 
 
 ### Both environments
 
-| Variable                            | Default                                                         | Where the value comes from                                                                                                                                      |
-| ----------------------------------- | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `project_id`                        | `openharness-dev` / `openharness-510710`                        | The project's **ID**; staging and production differ. Never the display name.                                                                                    |
-| `region`                            | `us-central1`                                                   | Fixed by the epic.                                                                                                                                              |
-| `image_repository`                  | `us-central1-docker.pkg.dev/openharness-dev/openharness/server` | The registry in `openharness-dev`; production pulls from it.                                                                                                    |
-| `image_tag`                         | _(none — required)_                                             | `-var image_tag=<git sha>`, passed by the deploy workflow (#155).                                                                                               |
-| `host`                              | `staging.oharness.dev` / `app.oharness.dev`                     | The environment's public hostname.                                                                                                                              |
-| `app_service_account_id`            | `openharness-app`                                               | Account ID of the app's GCP service account.                                                                                                                    |
-| `google_client_id`                  | `""`                                                            | GitHub variable `OAUTH_GOOGLE_CLIENT_ID_STAGING` / `_PRODUCTION`; empty disables Google sign-in. The `google-client-secret` container exists either way (#159). |
-| `github_client_id`                  | `""`                                                            | GitHub variable `OAUTH_GITHUB_CLIENT_ID_STAGING` / `_PRODUCTION`; empty disables GitHub sign-in.                                                                |
-| `microsoft_client_id`               | `""`                                                            | GitHub variable `OAUTH_MICROSOFT_CLIENT_ID_STAGING` / `_PRODUCTION`; empty disables Microsoft sign-in.                                                          |
-| `microsoft_tenant_id`               | `""`                                                            | GitHub variable `OAUTH_MICROSOFT_TENANT_ID_STAGING` / `_PRODUCTION`; passed to the app only when non-empty.                                                     |
-| `db_tier`                           | `db-g1-small` / `db-custom-1-3840`                              | Cloud SQL tier: shared-core in staging, a small dedicated tier in production.                                                                                   |
-| `db_availability_type`              | `ZONAL` / `ZONAL`                                               | Single zone in both. HA (`REGIONAL`) in production was deferred (#153).                                                                                         |
-| `db_backup_enabled`                 | `false` / `true`                                                | Automated backups.                                                                                                                                              |
-| `db_point_in_time_recovery_enabled` | `false` / `true`                                                | Point-in-time recovery.                                                                                                                                         |
-| `deletion_protection`               | `false` / `true`                                                | Blocks destroy of the cluster, the database and the secrets.                                                                                                    |
-| `trace_sample_rate`                 | `0.1`                                                           | `OPENHARNESS_TRACE_SAMPLE_RATE` (#158): fraction of traces sent to Cloud Trace.                                                                                 |
-| `alert_email`                       | `""`                                                            | GitHub variable `TF_ALERT_EMAIL_STAGING` / `_PRODUCTION`. Empty creates no channel and no alert policies (#158).                                                |
-| `enable_budget`                     | `false`                                                         | The deploy workflows pass `true` exactly when `TF_BILLING_ACCOUNT_ID` is set, `false` otherwise — turn it on with the billing grant above, never by hand.       |
-| `billing_account_id`                | `""`                                                            | GitHub variable `TF_BILLING_ACCOUNT_ID` (`gcloud billing accounts list`); the bare ID, no `billingAccounts/` prefix (#159), used only with `enable_budget`.     |
-| `budget_amount`                     | `100`                                                           | Monthly budget in USD.                                                                                                                                          |
+| Variable                            | Default                                                         | Where the value comes from                                                                                                                                                                                                           |
+| ----------------------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `project_id`                        | `openharness-dev` / `openharness-510710`                        | The project's **ID**; staging and production differ. Never the display name.                                                                                                                                                         |
+| `region`                            | `us-central1`                                                   | Fixed by the epic.                                                                                                                                                                                                                   |
+| `image_repository`                  | `us-central1-docker.pkg.dev/openharness-dev/openharness/server` | The registry in `openharness-dev`; production pulls from it.                                                                                                                                                                         |
+| `image_tag`                         | _(none — required)_                                             | `-var image_tag=<git sha>`, passed by the deploy workflow (#155).                                                                                                                                                                    |
+| `host`                              | `staging.oharness.dev` / `app.oharness.dev`                     | The environment's public hostname.                                                                                                                                                                                                   |
+| `app_service_account_id`            | `openharness-app`                                               | Account ID of the app's GCP service account.                                                                                                                                                                                         |
+| `google_client_id`                  | `""`                                                            | GitHub variable `OAUTH_GOOGLE_CLIENT_ID_STAGING` / `_PRODUCTION`; empty disables Google sign-in. The `google-client-secret` container exists either way (#159).                                                                      |
+| `github_client_id`                  | `""`                                                            | GitHub variable `OAUTH_GITHUB_CLIENT_ID_STAGING` / `_PRODUCTION`; empty disables GitHub sign-in.                                                                                                                                     |
+| `microsoft_client_id`               | `""`                                                            | GitHub variable `OAUTH_MICROSOFT_CLIENT_ID_STAGING` / `_PRODUCTION`; empty disables Microsoft sign-in.                                                                                                                               |
+| `microsoft_tenant_id`               | `""`                                                            | GitHub variable `OAUTH_MICROSOFT_TENANT_ID_STAGING` / `_PRODUCTION`; passed to the app only when non-empty.                                                                                                                          |
+| `db_tier`                           | `db-g1-small` / `db-custom-1-3840`                              | Cloud SQL tier: shared-core in staging, a small dedicated tier in production.                                                                                                                                                        |
+| `db_availability_type`              | `ZONAL` / `ZONAL`                                               | Single zone in both. HA (`REGIONAL`) in production was deferred (#153).                                                                                                                                                              |
+| `db_backup_enabled`                 | `false` / `true`                                                | Automated backups.                                                                                                                                                                                                                   |
+| `db_point_in_time_recovery_enabled` | `false` / `true`                                                | Point-in-time recovery.                                                                                                                                                                                                              |
+| `deletion_protection`               | `false` / `true`                                                | Blocks destroy of the cluster, the database and the secrets.                                                                                                                                                                         |
+| `trace_sample_rate`                 | `0.1`                                                           | `OPENHARNESS_TRACE_SAMPLE_RATE` (#158): fraction of traces sent to Cloud Trace.                                                                                                                                                      |
+| `alert_email`                       | `""`                                                            | GitHub variable `TF_ALERT_EMAIL_STAGING` / `_PRODUCTION`. Empty creates no channel and no alert policies (#158).                                                                                                                     |
+| `enable_budget`                     | `false`                                                         | The deploy workflows pass `true` exactly when `TF_BILLING_ACCOUNT_ID` is set, `false` otherwise — turn it on with the billing grant above, never by hand.                                                                            |
+| `billing_account_id`                | `""`                                                            | GitHub variable `TF_BILLING_ACCOUNT_ID` (`gcloud billing accounts list`); the bare ID, no `billingAccounts/` prefix (#159), used only with `enable_budget`.                                                                          |
+| `budget_amount`                     | `100`                                                           | Monthly budget, **in the billing account's currency** (ILS for this epic's account). GitHub variable `TF_BUDGET_AMOUNT_STAGING` / `_PRODUCTION` when set; the workflows pass no currency code, so the API uses the account's (#159). |
 
 ### Staging only
 

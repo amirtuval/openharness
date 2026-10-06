@@ -131,6 +131,9 @@ jobs:
             # deploy will apply (#159). One billing account for both projects.
             alert_email: ${{ vars.TF_ALERT_EMAIL_STAGING }}
             billing_account_id: ${{ vars.TF_BILLING_ACCOUNT_ID }}
+            # The monthly budget amount, in the billing account's currency. Unset leaves the
+            # Terraform default; the run below passes the -var only when it is set (#159).
+            budget_amount: ${{ vars.TF_BUDGET_AMOUNT_STAGING }}
           - environment: production
             project_id: ${{ vars.GCP_PROJECT_ID_PRODUCTION }}
             wif_provider: ${{ vars.GCP_WIF_PROVIDER_PRODUCTION }}
@@ -145,6 +148,7 @@ jobs:
             microsoft_tenant_id: ${{ vars.OAUTH_MICROSOFT_TENANT_ID_PRODUCTION }}
             alert_email: ${{ vars.TF_ALERT_EMAIL_PRODUCTION }}
             billing_account_id: ${{ vars.TF_BILLING_ACCOUNT_ID }}
+            budget_amount: ${{ vars.TF_BUDGET_AMOUNT_PRODUCTION }}
     steps:
       - uses: actions/checkout@v4
 
@@ -241,6 +245,7 @@ jobs:
           MICROSOFT_TENANT_ID: ${{ matrix.microsoft_tenant_id }}
           ALERT_EMAIL: ${{ matrix.alert_email }}
           BILLING_ACCOUNT_ID: ${{ matrix.billing_account_id }}
+          BUDGET_AMOUNT: ${{ matrix.budget_amount }}
         run: |
           set -euo pipefail
 
@@ -270,6 +275,12 @@ jobs:
             args+=(-var "enable_budget=true" -var "billing_account_id=$BILLING_ACCOUNT_ID")
           else
             args+=(-var "enable_budget=false")
+          fi
+          # The amount is in the billing account's currency, and unset means "leave Terraform's
+          # default" — so it is only passed when the repository variable is set, exactly as the
+          # deploys do (#159).
+          if [[ -n "${BUDGET_AMOUNT:-}" ]]; then
+            args+=(-var "budget_amount=$BUDGET_AMOUNT")
           fi
           # Only production declares these two, and an empty value means "leave it at the
           # default" — so an unset variable is simply left off the command line.

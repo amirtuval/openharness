@@ -181,6 +181,10 @@ jobs:
           ALERT_EMAIL: ${{ vars.TF_ALERT_EMAIL_STAGING }}
           # One billing account for both projects, so this one carries no environment suffix.
           BILLING_ACCOUNT_ID: ${{ vars.TF_BILLING_ACCOUNT_ID }}
+          # The monthly budget amount, in the billing account's currency — this account is
+          # denominated in ILS, and the module sends no currency code (#159). Unset is not an
+          # error: the -var below is only passed when it is set, so Terraform's default stands.
+          BUDGET_AMOUNT: ${{ vars.TF_BUDGET_AMOUNT_STAGING }}
         run: |
           set -euo pipefail
           args=(
@@ -200,6 +204,13 @@ jobs:
             args+=(-var "enable_budget=true" -var "billing_account_id=$BILLING_ACCOUNT_ID")
           else
             args+=(-var "enable_budget=false")
+          fi
+          # The amount is in the billing account's currency, and the module sends no currency
+          # code (#159). Unset means "leave Terraform's default" — it is only passed when the
+          # repository variable is set, which is what lets the maintainer change it without a
+          # code change.
+          if [[ -n "${BUDGET_AMOUNT:-}" ]]; then
+            args+=(-var "budget_amount=$BUDGET_AMOUNT")
           fi
           terraform apply "${args[@]}" \
             -target=google_project_service.services \
@@ -265,6 +276,7 @@ jobs:
           MICROSOFT_TENANT_ID: ${{ vars.OAUTH_MICROSOFT_TENANT_ID_STAGING }}
           ALERT_EMAIL: ${{ vars.TF_ALERT_EMAIL_STAGING }}
           BILLING_ACCOUNT_ID: ${{ vars.TF_BILLING_ACCOUNT_ID }}
+          BUDGET_AMOUNT: ${{ vars.TF_BUDGET_AMOUNT_STAGING }}
         run: |
           set -euo pipefail
           args=(
@@ -282,6 +294,10 @@ jobs:
             args+=(-var "enable_budget=true" -var "billing_account_id=$BILLING_ACCOUNT_ID")
           else
             args+=(-var "enable_budget=false")
+          fi
+          # As in the targeted apply: the amount only when it is set, in the account's currency.
+          if [[ -n "${BUDGET_AMOUNT:-}" ]]; then
+            args+=(-var "budget_amount=$BUDGET_AMOUNT")
           fi
           terraform apply "${args[@]}"
 

@@ -4,6 +4,14 @@
 # billing account, and deploy@ holds no rights there until the maintainer grants
 # roles/billing.costsManager on it — see infra/README.md. With the module
 # disabled the first apply works without that grant.
+#
+# `amount` is in the **billing account's currency** unless `currency_code` is
+# set. The Budgets API documents `Money.currencyCode` as optional, and it "must
+# match the currency of the billing account" when given
+# (https://cloud.google.com/billing/docs/reference/budget/rest/v1/billingAccounts.budgets);
+# omitted, the account's currency is used. A default of "USD" against the ILS
+# account this epic deploys on is what the first staging deploy was rejected
+# with — `400: Request contains an invalid argument` (#159).
 
 locals {
   # The API's own form is `billingAccounts/{id}` — see the request path in
@@ -27,6 +35,14 @@ resource "google_billing_budget" "budget" {
 
   amount {
     specified_amount {
+      # Null (the default) is omitted from the request, not sent as an empty
+      # string: the provider expands `specified_amount` through
+      # `expandBillingBudgetsBudgetAmountSpecifiedAmount`, which only sets
+      # `currencyCode` when the value is non-empty (hashicorp/google 8.5.0,
+      # google/services/billingbudgets/resource_billing_budget.go). With no
+      # `currencyCode` in the body the API uses the billing account's currency.
+      # Passing the caller's code here is still only safe when it matches the
+      # account — see the module header and the variable.
       currency_code = var.currency_code
       units         = tostring(var.amount)
     }

@@ -121,7 +121,7 @@ variable "billing_account_id" {
 }
 
 variable "budget_amount" {
-  description = "Monthly budget amount in USD, with alerts at 50%, 90% and 100%."
+  description = "Monthly budget amount, in the billing account's currency, with alerts at 50%, 90% and 100%. The deploy workflows and the PR plan pass it when the repository variable TF_BUDGET_AMOUNT_PRODUCTION is set, and leave this default otherwise; a budget whose currency does not match the account's is rejected with a 400 (#159)."
   type        = number
   default     = 100
 }
