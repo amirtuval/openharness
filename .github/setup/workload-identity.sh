@@ -83,6 +83,7 @@ DEPLOY_PROJECT_ROLES=(
   roles/dns.admin                       # DNS zones and records, the oharness.dev import included
   roles/monitoring.editor               # uptime checks, alert policies, notification channels
   roles/browser                         # resourcemanager.projects.get for google_project data sources
+  roles/logging.viewer                  # logging.logEntries.list, read by the deploy workflows' failure diagnostics (#159)
 )
 
 # Staging only (#167): the Artifact Registry (#152) lives in the staging project and

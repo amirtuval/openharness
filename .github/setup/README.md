@@ -169,6 +169,7 @@ by the maintainer; a re-run of this script does not create or touch them.
 | `roles/dns.admin`                       | DNS zones and records, the import of the existing `oharness.dev` zone in production included                           |
 | `roles/monitoring.editor`               | uptime checks, alert policies and notification channels                                                                |
 | `roles/browser`                         | `resourcemanager.projects.get`, for the `google_project` data sources                                                  |
+| `roles/logging.viewer`                  | `logging.logEntries.list` — the `gcloud logging read` the deploy workflows run when a rollout fails (#159)             |
 | `roles/artifactregistry.admin`          | _staging only_ (`DEPLOY_PROJECT_ROLES_STAGING`): the registry, its IAM, and the image pushes from `deploy-staging.yml` |
 
 The list is completed by the Terraform work (#153): a role a later wave turns out to need
