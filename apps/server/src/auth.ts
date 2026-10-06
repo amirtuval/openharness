@@ -252,6 +252,7 @@ export function createAuth(config: AuthConfig, database: AuthDatabase, logger: L
   )
   const socialProviders: NonNullable<BetterAuthOptions['socialProviders']> = providerOptions(
     config.providers,
+    logger,
   )
   const options: BetterAuthOptions = {
     secret: config.secret,

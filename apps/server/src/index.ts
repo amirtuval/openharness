@@ -57,16 +57,20 @@ export {
 } from './auth'
 export { createAuthGuard, type AuthGuardOptions } from './auth-guard'
 export {
+  MICROSOFT_REFUSAL_LOG,
   SOCIAL_PROVIDERS,
   githubVerifiedPrimaryEmail,
   googleEmailVerified,
+  microsoftClaimType,
   microsoftEmailVerified,
+  microsoftRefusalDetail,
   providerOptions,
   refusedEmailError,
   type GoogleClaims,
   type GithubEmail,
   type GithubProfile,
   type MicrosoftClaims,
+  type MicrosoftRefusalDetail,
   type SocialProviderCredentials,
   type SocialProviderName,
 } from './auth-profile'

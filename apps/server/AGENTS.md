@@ -189,7 +189,14 @@ Better Auth's own schema check passes on the migrated database.
   accounts, `xms_edov`, the verified lists) — the nOAuth guard. A provider that cannot prove
   the address refuses the sign-in (`email_not_verified`, 403) before a user or a link is
   created; `databaseHooks.user.create.before` (`refuseUnverifiedUser`) is the last gate, and
-  implicit linking follows the same email with no trusted-provider shortcut.
+  implicit linking follows the same email with no trusted-provider shortcut. A **Microsoft
+  refusal also logs one `WARNING`** (`MICROSOFT_REFUSAL_LOG`, via the logger `createAuth`
+  passes into `providerOptions`): the decoded token's claim **names** (sorted), the `tid` and
+  `iss` values, the **type** of each claim the rule reads (`absent` / `boolean` / `string` /
+  `array(n)`), whether the lowercased `email` is in either verified list, and `hasEmail` — and
+  nothing else. No address, name or token ever reaches the line, which is what tells the "the
+  optional claim is configured in the portal" case (a name present, a type that is not
+  `absent`) from the "Microsoft never sent it" one.
 - **Sessions** are opaque tokens in the database: 7 days, sliding at most once a day, and
   **fresh** (created within a day) for credential writes. The device-authorization plugin
   accepts the CLI's `openharness-cli` client id and approves at the web app's hash route
@@ -867,6 +874,7 @@ before the instance stops serving it (#151).
 | `OPENHARNESS_CLI_CLIENT_ID`, `DEVICE_CODE_EXPIRES_IN`                                                                            | the device flow's client id and code lifetime (A6)                                        |
 | `deviceVerificationUri`, `deviceVerificationUriComplete`                                                                         | the approval URL the device flow answers with: `#/device` and its `?user_code=` (A6)      |
 | `SOCIAL_PROVIDERS`, `providerOptions`, `microsoftEmailVerified`, `githubVerifiedPrimaryEmail`, `googleEmailVerified`             | the A3 identity rules                                                                     |
+| `microsoftRefusalDetail`, `microsoftClaimType`, `MICROSOFT_REFUSAL_LOG`, `MicrosoftRefusalDetail`                                | the claim names and types a refused Microsoft sign-in logs — never a value                |
 | `createDevLoginUser`, `rewriteDevLoginRequest`, `refuseUnverifiedUser`                                                           | the dev-login seeding and shim, and the verified-email hook                               |
 | `createMockModelFactory()`                                                                                                       | the deterministic test model, for a host that wires its own                               |
 | `defaultInstanceId()`                                                                                                            | hostname + pid + random suffix: the id a server leases partitions under                   |
@@ -1041,7 +1049,11 @@ parallel with each other.
   Better Auth's own origin check run with `enforceOriginCheck` — vitest's `NODE_ENV=test`
   skips it by default, which is the blind spot #79 fixed.
 - `auth-profile.test.ts` — the A3 rules with mocked profiles: Microsoft's nOAuth claims,
-  GitHub's primary-verified email, Google's `email_verified`, and the 403 each refusal is.
+  GitHub's primary-verified email, Google's `email_verified`, and the 403 each refusal is —
+  plus the refusal warning, parsed off a real `jsonLogger`: its `WARNING` severity, the sorted
+  claim names, the `tid`/`iss` of a consumer-tenant token, each claim's type (`absent` beside
+  `boolean`/`string`/`array(n)`), `hasEmail`, that an accepted sign-in writes nothing, and
+  that no address or name appears anywhere in the serialized line.
 - `isolation.test.ts` — two users, every `/v1` route walked as the second one: 404 for a
   by-id read, empty lists, no credentials of the other's, `/v1/me` answering the caller.
 - `credentials.test.ts` — the write-only round trip, the 422 a refused key gets, the fresh
