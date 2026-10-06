@@ -1,0 +1,32 @@
+{{- if .Values.gateway.host }}
+# How the load balancer's backend service behaves (#159) — what the BackendConfig's `timeoutSec`
+# and `connectionDraining` did, in the policy GKE's Gateway controller reads instead. One
+# GCPBackendPolicy per Service; a second one for the same Service loses to the one already there.
+apiVersion: networking.gke.io/v1
+kind: GCPBackendPolicy
+metadata:
+  name: {{ include "openharness.fullname" . }}
+  labels:
+    {{- include "openharness.labels" . | nindent 4 }}
+spec:
+  targetRef:
+    group: ''
+    kind: Service
+    name: {{ include "openharness.fullname" . }}
+  default:
+    # The load balancer's own request timeout. SSE streams — the session watch and the AI SDK
+    # chat — hold one connection open for the length of a turn, so this is set very long (an
+    # hour) rather than tuned to a typical request. Documented, not lowerable without cutting
+    # streams off.
+    timeoutSec: {{ .Values.backend.timeoutSec }}
+    # A pod that is going away keeps receiving in-flight requests for this long, so a request the
+    # load balancer already dispatched is not dropped while the pod shuts down. It should be at
+    # least the server's own drain timeout (`OPENHARNESS_DRAIN_TIMEOUT_MS`); the pod's
+    # terminationGracePeriodSeconds is longer than both, so the graceful path wins.
+    connectionDraining:
+      drainingTimeoutSec: {{ .Values.backend.drainingTimeoutSec }}
+    # No `logging` block on purpose: load-balancer request logging stays off. It is the single
+    # most expensive thing in this configuration and the server's own structured logs already
+    # carry the request path and status, joined to the trace (#158). The BackendConfig had no
+    # logging either.
+{{- end }}

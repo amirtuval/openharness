@@ -70,6 +70,16 @@ APIS=(
 # roles/owner. The list is expected to grow with Terraform: a role a later wave turns out
 # to need is added here in that issue's PR and the maintainer re-runs this script —
 # README.md, "Deploy roles: least privilege".
+#
+# roles/certificatemanager.editor (#159) is the narrowest of Certificate Manager's four
+# predefined roles that covers the four resource groups the certs module creates — DNS
+# authorizations, certificates, maps and map entries. It carries create/get/update/use on
+# each and **no delete** (only .admin and .owner do), so an ordinary apply is fully covered
+# while a `terraform destroy` — or a change Terraform can only realize by replacing a
+# resource, such as the map entry's hostname, which is ForceNew — would be denied. That is
+# deliberate for a first deploy: the role cannot delete anything. Add
+# roles/certificatemanager.admin here if the environment is ever torn down or the host
+# ever changes. README.md, "Deploy roles: least privilege", has the detail.
 DEPLOY_PROJECT_ROLES=(
   roles/serviceusage.serviceUsageAdmin  # google_project_service
   roles/compute.networkAdmin            # VPC, subnet, Cloud Router/NAT, global static address
@@ -81,6 +91,7 @@ DEPLOY_PROJECT_ROLES=(
   roles/secretmanager.admin             # secrets, versions, and IAM on secrets
   roles/cloudkms.admin                  # the key ring, key, and IAM on the key (no encrypt/decrypt)
   roles/dns.admin                       # DNS zones and records, the oharness.dev import included
+  roles/certificatemanager.editor       # Certificate Manager: the DNS authorization, the managed certificate, the certificate map and its entry (#159)
   roles/monitoring.editor               # uptime checks, alert policies, notification channels
   roles/browser                         # resourcemanager.projects.get for google_project data sources
   roles/logging.viewer                  # logging.logEntries.list, read by the deploy workflows' failure diagnostics (#159)
@@ -132,6 +143,7 @@ PLAN_PROJECT_ROLES=(
   roles/viewer
   roles/iam.securityReviewer
   roles/secretmanager.secretAccessor # refresh google_secret_manager_secret_version (#153)
+  roles/certificatemanager.viewer    # refresh the DNS authorization, certificate, map and map entry (#159)
 )
 
 # deploy@'s roles on the state bucket (#167): Terraform's GCS backend reads and writes

@@ -108,18 +108,24 @@ if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
 | \`/\`           | HTML            | \`${root_type:-none}\` |
 | \`/v1/sessions\` | 401 unauthenticated | \`${sessions}\` |
 
-On a **first** deploy this is usually DNS or the certificate, not the app: the
-Google-managed certificate is only issued once the domain resolves to the load balancer,
-which can take longer than this test waits. Check where the domain points, then:
+On a **first** deploy this is usually the load balancer or its certificate, not the app. The
+host is served by a GKE **Gateway**, and its TLS comes from Certificate Manager: the
+certificate is only issued once the DNS authorization's CNAME record
+(\`_acme-challenge.<host>.\`) resolves, which can take longer than this test waits. Check
+that the Gateway was claimed and where the domain points, then:
 
 \`\`\`bash
 gcloud container clusters get-credentials openharness --region us-central1 --project <project-id>
-kubectl -n openharness get managedcertificate,ingress
-kubectl -n openharness describe managedcertificate openharness
+kubectl -n openharness get gateway,httproute
+kubectl -n openharness describe gateway openharness
+gcloud certificate-manager certificates describe openharness-cert --project <project-id>
+gcloud certificate-manager dns-authorizations describe openharness-dns-auth --project <project-id>
 \`\`\`
 
-If the certificate is \`Provisioning\` and DNS is already correct, re-run the deploy
-(\`workflow_dispatch\`) rather than changing anything — it re-checks the same build.
+A Gateway with no \`status.addresses\`, or a route whose \`Accepted\` condition is \`False\`,
+means the load balancer never came up — the failure the Ingress produced silently (#159). A
+certificate that is \`PROVISIONING\` while DNS is already correct is the ordinary wait: re-run
+the deploy (\`workflow_dispatch\`) rather than changing anything — it re-checks the same build.
 EOF
 fi
 

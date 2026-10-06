@@ -47,14 +47,15 @@ is what turns the budget on ([Variables the workflows read](#variables-the-workf
 
 Everything after the setup script is Terraform, under [`infra/`](../infra/README.md): one
 root per environment, and reusable modules — `network`, `gke`, `cloudsql`, `secrets`, `kms`,
-`dns`, `app`, `registry` (staging only) and `budget` (optional). Terraform is the only thing
-that deploys; there is no imperative deploy path.
+`certs`, `dns`, `app`, `registry` (staging only) and `budget` (optional). Terraform is the only
+thing that deploys; there is no imperative deploy path.
 
 The shape of each environment is the same. A VPC with a subnet, private services access and
-Cloud NAT; an Autopilot GKE cluster with Workload Identity and the Secret Manager add-on; a
-private-only Cloud SQL Postgres instance with a generated password that Terraform writes into
-a `database-url` secret; Cloud KMS for the vault's master key; one GCP service account for
-the app, linked to the `openharness/openharness` Kubernetes service account; and a global
+Cloud NAT; an Autopilot GKE cluster with Workload Identity, the Secret Manager add-on and the
+Gateway API CRDs; a private-only Cloud SQL Postgres instance with a generated password that
+Terraform writes into a `database-url` secret; Cloud KMS for the vault's master key; one GCP
+service account for the app, linked to the `openharness/openharness` Kubernetes service
+account; a Certificate Manager certificate and certificate map for the host; and a global
 static IP, a DNS zone and a `helm_release` of [`charts/openharness`](../charts/openharness)
 that ties them together. The one Artifact Registry repository lives in staging, in
 `openharness-dev`; each environment's GKE nodes are granted resource-level read on it and
@@ -120,6 +121,71 @@ Terraform is also where the least-privilege boundary is exercised: `deploy@` hol
 `DEPLOY_GRANTABLE_PROJECT_ROLES` list, pinned by an IAM condition on that account. The one
 role the plan account gained here, `roles/secretmanager.secretAccessor`, is what
 `terraform plan` needs to refresh a Secret Manager secret version.
+
+## Exposure: the GKE Gateway (#159)
+
+**The chart used to render an Ingress, and the Ingress was never claimed.** The first real
+staging deploy left the app running with no way in, and the diagnosis is small enough to write
+down:
+
+```bash
+kubectl get ingressclass
+# No resources found
+kubectl describe ingress openharness -n openharness
+# Events: ... managed-certificate-controller ...
+```
+
+The Ingress asked for `spec.ingressClassName: gce`, which names an `IngressClass` **object** —
+and the cluster has none. Without the class the Ingress had no controller, so nothing created a
+forwarding rule, a backend service or a target proxy, and the only event on the object was the
+managed-certificate controller noticing it had been asked for a certificate for nothing. The
+global static IP was reserved, the DNS record pointed at it, and no load balancer existed to
+answer.
+
+The fix is the **Gateway API**, not a patched Ingress: a `GatewayClass` is owned by GKE's
+controller by name (`gke-l7-global-external-managed`), so there is no lookup that can come back
+empty. Everything the Ingress stack did is preserved, one object at a time:
+
+| before (Ingress stack)                            | now (Gateway API)                                                                                                                             |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Ingress`, class `gce`                            | `Gateway`, class `gke-l7-global-external-managed`, listeners `https` (443) and `http` (80)                                                    |
+| `kubernetes.io/ingress.global-static-ip-name`     | `Gateway.spec.addresses`, `type: NamedAddress`                                                                                                |
+| `ManagedCertificate` CRD                          | Certificate Manager: a DNS authorization, a managed certificate, a certificate map, a map entry (`infra/modules/certs`)                       |
+| `networking.gke.io/managed-certificates`          | `networking.gke.io/certmap` on the Gateway                                                                                                    |
+| `FrontendConfig` `redirectToHttps`                | an `HTTPRoute` on the `http` listener with a `RequestRedirect` filter, 301                                                                    |
+| `BackendConfig` `healthCheck`                     | `HealthCheckPolicy`, HTTP port 3000 `/ready`                                                                                                  |
+| `BackendConfig` `timeoutSec`/`connectionDraining` | `GCPBackendPolicy`, `timeoutSec: 3600`, `drainingTimeoutSec: 30`                                                                              |
+| `BackendConfig` `cdn` (`USE_ORIGIN_HEADERS`)      | `GCPHTTPFilter` with `cacheMode: USE_ORIGIN_HEADERS`, attached by `ExtensionRef` on the HTTPS route                                           |
+| Service `cloud.google.com/neg`                    | nothing — a Gateway creates **standalone NEGs** itself, and GKE documents that the annotation must not be modified on a Service it references |
+| Service `cloud.google.com/backend-config`         | nothing — the policies above replace it                                                                                                       |
+
+Three consequences worth knowing before the first deploy:
+
+- **The certificate is not a GKE object any more.** Certificate Manager needs a **DNS
+  authorization**: it hands back a CNAME record (`_acme-challenge.<host>.` → a
+  `certificatemanager.goog` target), the `dns` module publishes it in the environment's zone,
+  and only then does the certificate leave `PROVISIONING`. Until it does, the load balancer
+  serves its default certificate — the same "waiting on DNS" state the ManagedCertificate had,
+  with one more moving part.
+- **The CDN still follows the origin's headers.** `USE_ORIGIN_HEADERS` means the CDN caches
+  exactly what a response says, and Cloud CDN never caches a response carrying
+  `Cache-Control: no-store` in that mode (only `FORCE_CACHE_ALL` overrides that). The server
+  sets `no-store` on `index.html`, `/v1/*`, `/api/auth/*`, `/health`, `/ready`, `/device` and
+  every non-2xx (`apps/server/AGENTS.md`, "Behind a load balancer"), so none of the dynamic
+  surface is ever stored. The CDN is inline on the same hostname, and the Vite base stays `/`.
+- **The client IP is unchanged.** The global external managed (Envoy) load balancer appends
+  `<client-ip>,<load-balancer-ip>` to `x-forwarded-for` — one hop, as the classic one did — so
+  `OPENHARNESS_TRUSTED_PROXY_HOPS=1` still resolves the real client IP, and the sign-in rate
+  limiter still keys per client rather than per proxy (#151).
+
+The chart is where the objects live (`charts/openharness/templates/gateway.yaml`,
+`httproute.yaml`, `httproute-redirect.yaml`, `healthcheckpolicy.yaml`, `gcpbackendpolicy.yaml`,
+`gcphttpfilter.yaml`); Terraform supplies the host, the static IP's name and the map's name
+through the `gateway` values block, and creates the map itself in `infra/modules/certs`.
+`deploy@` needs one new role for that — `roles/certificatemanager.editor`, the narrowest of
+Certificate Manager's four predefined roles that covers all four resource types — which means
+**the setup script has to be re-run for both projects** before this plan can apply; see
+[`infra/README.md`](../infra/README.md#manual-steps).
 
 ## The workflows
 
@@ -339,12 +405,51 @@ created an empty secret, failed, and rolled itself back.
    ([Re-running a staging deploy](#re-running-a-staging-deploy)).
 
 **A first deploy is slow, and the smoke test is capped.** Creating the cluster takes about ten
-minutes before the release is even rendered, and the Google-managed certificate for the domain
-only issues once DNS resolves to the load balancer — on a genuinely first deploy that can take
-longer than the rollout. The smoke test retries with backoff for about fifteen minutes and then
-**fails** with the last observed status of each probe and a pointer at the certificate and the
-DNS record, rather than hanging. Failing there is not a broken deploy: re-running staging
-(`workflow_dispatch`) re-checks the same endpoints against the same build a few minutes later.
+minutes before the release is even rendered, and TLS arrives later than the release does: the
+Gateway exists as soon as the chart is installed, but the Certificate Manager certificate only
+issues once the **DNS authorization's CNAME** (`_acme-challenge.<host>.`) resolves — the
+authorization is what proves control of the domain now, not the A record pointing at the load
+balancer. On a genuinely first deploy that can take longer than the rollout. The smoke test
+retries with backoff for about fifteen minutes and then **fails** with the last observed status
+of each probe and a pointer at the certificate and the DNS record, rather than hanging. Failing
+there is not a broken deploy: re-running staging (`workflow_dispatch`) re-checks the same
+endpoints against the same build a few minutes later.
+
+What to check when the Gateway's first deploy looks wrong, in the order the pieces depend on
+each other:
+
+```bash
+# 1. Is the Gateway claimed, and does it have the address? (The Ingress never got here.)
+kubectl describe gateway openharness -n openharness
+kubectl get gateway openharness -n openharness -o=jsonpath='{.status.addresses[0].value}'
+
+# 2. Did the routes attach to it? A route that did not is `Accepted: False` with the reason.
+kubectl describe httproute openharness -n openharness
+kubectl describe httproute openharness-redirect -n openharness
+
+# 3. Is the certificate issued? PROVISIONING means the CNAME is not resolving yet.
+gcloud certificate-manager certificates describe openharness-cert --project openharness-dev
+gcloud certificate-manager dns-authorizations describe openharness-dns-auth --project openharness-dev
+
+# 4. Is the health check the policy's, not the default (`/`, port 80)?
+kubectl describe healthcheckpolicy openharness -n openharness
+```
+
+Then the two things #159 asks about, which only a live environment can answer:
+
+- **The CDN follows the origin.** After a page load, a second request for `/assets/*` should be
+  a cache `HIT` and `/v1/*`, `/api/auth/*` and `/health` should not appear in the cache at all —
+  the server marks them `no-store`, and `USE_ORIGIN_HEADERS` honours that. The response headers
+  are the quick check: `curl -sI https://<host>/health` carries `Cache-Control: no-store`, and
+  the CDN's own `Age` header does not appear on a repeated request. A `Cache-Control` that looks
+  right but an `Age` that climbs means the filter is not in the chain — check that the
+  `GCPHTTPFilter` exists in the release's namespace and that the route's rule carries the
+  `ExtensionRef`.
+- **Rate limiting is per client, not per load balancer.** With
+  `OPENHARNESS_TRUSTED_PROXY_HOPS=1`, four failed sign-ins from one address should be refused by
+  the fifth (`429`, `apps/server/AGENTS.md` → "Behind a load balancer"), and a _different_
+  address should still get its own attempts. If every client shares one bucket, the load
+  balancer is appending a different number of `x-forwarded-for` entries than one.
 
 ### The smoke test
 

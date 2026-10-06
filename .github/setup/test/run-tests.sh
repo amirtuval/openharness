@@ -11,7 +11,9 @@
 #   2. a changed attribute mapping is applied by update-oidc — no recreate — and the
 #      next default run converges it back;
 #   3. deploy@ never gets roles/owner; staging carries roles/artifactregistry.admin and
-#      production does not; the conditional roles/resourcemanager.projectIamAdmin binding
+#      production does not; both environments carry roles/certificatemanager.editor for
+#      deploy@ and roles/certificatemanager.viewer for tf-plan@, and neither is in the
+#      grantable list (#159); the conditional roles/resourcemanager.projectIamAdmin binding
 #      exists exactly once per environment and carries the terraform-grantable-roles
 #      condition built from the grantable list; production's deploy account can read
 #      staging's Artifact Registry and nothing else there;
@@ -330,6 +332,7 @@ echo "== 3. least privilege: no Owner, staging-only registry, one conditional bi
 deploy_member="serviceAccount:deploy@$DEV.iam.gserviceaccount.com"
 plan_member="serviceAccount:tf-plan@$DEV.iam.gserviceaccount.com"
 deploy_prod_member="serviceAccount:deploy@$PROD.iam.gserviceaccount.com"
+plan_prod_member="serviceAccount:tf-plan@$PROD.iam.gserviceaccount.com"
 conditional_role="roles/resourcemanager.projectIamAdmin"
 dev_policy="$STATE/policies/project-$DEV.json"
 prod_policy="$STATE/policies/project-$PROD.json"
@@ -343,6 +346,13 @@ assert_binding "$dev_policy" "$deploy_member" "roles/artifactregistry.admin" "st
 assert_no_binding "$prod_policy" "$deploy_prod_member" "roles/artifactregistry.admin" "production: deploy@ does not hold artifactregistry.admin"
 assert_binding "$prod_policy" "$deploy_prod_member" "roles/cloudsql.admin" "production: deploy@ holds a declared Terraform role"
 assert_binding "$prod_policy" "$deploy_prod_member" "roles/monitoring.editor" "production: deploy@ holds roles/monitoring.editor"
+# Certificate Manager (#159): the certs module creates the DNS authorization, the
+# managed certificate, the certificate map and its entry in both environments.
+assert_binding "$dev_policy" "$deploy_member" "roles/certificatemanager.editor" "staging: deploy@ holds roles/certificatemanager.editor"
+assert_binding "$prod_policy" "$deploy_prod_member" "roles/certificatemanager.editor" "production: deploy@ holds roles/certificatemanager.editor"
+# tf-plan@ must be able to refresh those four resources on a PR plan.
+assert_binding "$dev_policy" "$plan_member" "roles/certificatemanager.viewer" "staging: tf-plan@ holds roles/certificatemanager.viewer"
+assert_binding "$prod_policy" "$plan_prod_member" "roles/certificatemanager.viewer" "production: tf-plan@ holds roles/certificatemanager.viewer"
 
 for member_policy in "$dev_policy|$deploy_member" "$prod_policy|$deploy_prod_member"; do
   policy_file="${member_policy%%|*}"
@@ -360,6 +370,9 @@ assert_contains "$condition" '"title":"terraform-grantable-roles"' "the conditio
 expression="$(jq -r '.expression' <<<"$condition")"
 assert_contains "$expression" "api.getAttribute('iam.googleapis.com/modifiedGrantsByRole', []).hasOnly([" "the condition limits grants through modifiedGrantsByRole"
 assert_not_contains "$expression" "roles/owner" "the grantable list holds no roles/owner"
+# Certificate Manager (#159) is held by deploy@ and tf-plan@ directly, never handed out by
+# Terraform — so it must not appear in the condition on the projectIamAdmin binding either.
+assert_not_contains "$expression" "roles/certificatemanager" "the grantable list holds no Certificate Manager role"
 for grantable in "${GRANTABLE_ROLES[@]}"; do
   assert_contains "$expression" "'$grantable'" "the condition allows $grantable"
 done
@@ -410,6 +423,8 @@ assert_binding "$dev_policy" "$plan_member" "roles/secretmanager.secretAccessor"
 assert_binding "$dev_policy" "$outsider" "roles/editor" "another member's binding is untouched"
 assert_binding "$dev_policy" "$deploy_member" "roles/cloudsql.admin" "deploy@ keeps a declared role"
 assert_binding "$dev_policy" "$deploy_member" "roles/artifactregistry.admin" "deploy@ keeps the staging-only role"
+assert_binding "$dev_policy" "$deploy_member" "roles/certificatemanager.editor" "deploy@ keeps the Certificate Manager role"
+assert_binding "$dev_policy" "$plan_member" "roles/certificatemanager.viewer" "tf-plan@ keeps the Certificate Manager role"
 assert_no_binding "$bucket_policy" "$plan_member" "roles/storage.objectViewer" "prune dropped tf-plan@'s stale bucket role"
 assert_binding "$bucket_policy" "$plan_member" "roles/storage.objectAdmin" "tf-plan@ keeps its declared bucket role"
 assert_binding "$bucket_policy" "$deploy_member" "roles/storage.objectAdmin" "deploy@ keeps its declared bucket role"

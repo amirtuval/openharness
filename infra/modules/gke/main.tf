@@ -51,6 +51,23 @@ resource "google_container_cluster" "cluster" {
     enabled = true
   }
 
+  # Gateway API (#159). The chart renders a Gateway, HTTPRoutes and the
+  # networking.gke.io policies instead of an Ingress, and this is what installs the
+  # Gateway API CRDs and runs the controller that reconciles them.
+  #
+  # Autopilot enables Gateway API by default on 1.26+, so this block is not what
+  # turns it on — it is what pins *which* CRDs. GKE Gateway only supports the
+  # Standard channel, and CHANNEL_EXPERIMENTAL is deprecated in its favour.
+  #
+  # Setting `channel` is an **in-place update**, not a cluster replacement: the
+  # provider's schema has no ForceNew on it and its update path issues a
+  # cluster-update call, so an apply that changes it reconciles the cluster rather
+  # than destroying it. That is the check the issue asked for, and it is why this
+  # block is safe to add to a cluster that already exists.
+  gateway_api_config {
+    channel = var.gateway_api_channel
+  }
+
   # Private nodes, public control plane: the nodes have no addresses of their
   # own and reach the internet through Cloud NAT, while Terraform in CI reaches
   # the API server over its public endpoint.

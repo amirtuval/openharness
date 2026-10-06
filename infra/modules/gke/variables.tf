@@ -57,6 +57,17 @@ variable "release_channel" {
   }
 }
 
+variable "gateway_api_channel" {
+  description = "Gateway API channel. CHANNEL_STANDARD installs the standard Gateway API CRDs and runs the controller the chart's Gateway and HTTPRoutes need (#159); CHANNEL_EXPERIMENTAL is deprecated in favour of it, and CHANNEL_DISABLED turns the API off — which would leave the chart's Gateway unreconciled. Changing it is an in-place cluster update."
+  type        = string
+  default     = "CHANNEL_STANDARD"
+
+  validation {
+    condition     = contains(["CHANNEL_STANDARD", "CHANNEL_EXPERIMENTAL", "CHANNEL_DISABLED"], var.gateway_api_channel)
+    error_message = "gateway_api_channel must be CHANNEL_STANDARD, CHANNEL_EXPERIMENTAL or CHANNEL_DISABLED."
+  }
+}
+
 variable "master_ipv4_cidr_block" {
   description = "A /28 CIDR for the control plane's private peering, not overlapping the VPC's subnet, pods or services ranges."
   type        = string

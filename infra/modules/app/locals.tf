@@ -82,9 +82,16 @@ locals {
       enabled                = true
       instanceConnectionName = var.cloudsql_instance_connection_name
     }
-    ingress = {
-      host         = var.host
-      staticIpName = local.static_ip_name
+    # The GKE Gateway (#159), not an Ingress: the chart renders a Gateway, two
+    # HTTPRoutes, a HealthCheckPolicy, a GCPBackendPolicy and — while the CDN is on
+    # — a GCPHTTPFilter. The certificate map is created by the `certs` module and
+    # passed in here; it is what the Gateway's `networking.gke.io/certmap`
+    # annotation names, and the certificate itself (not the Gateway) is what
+    # carries the TLS.
+    gateway = {
+      host               = var.host
+      staticIpName       = local.static_ip_name
+      certificateMapName = var.certificate_map_name
     }
     env     = local.env
     secrets = local.secrets

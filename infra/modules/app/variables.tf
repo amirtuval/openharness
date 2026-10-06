@@ -48,12 +48,18 @@ variable "image_tag" {
 }
 
 variable "host" {
-  description = "Public hostname, e.g. staging.oharness.dev. Becomes the Ingress host and BETTER_AUTH_URL."
+  description = "Public hostname, e.g. staging.oharness.dev. Becomes the Gateway listener's hostname, both HTTPRoutes' hostnames and BETTER_AUTH_URL."
   type        = string
 }
 
 variable "static_ip_name" {
-  description = "Name of the reserved global address, claimed by the Ingress. Defaults to the release name."
+  description = "Name of the reserved global address, claimed by the Gateway. Defaults to the release name."
+  type        = string
+  default     = ""
+}
+
+variable "certificate_map_name" {
+  description = "Name of the Certificate Manager certificate map holding the host's certificate, from the certs module. It is the Gateway's `networking.gke.io/certmap` annotation; with none set, the Gateway is rendered without TLS and the HTTPS listener serves the default certificate."
   type        = string
   default     = ""
 }

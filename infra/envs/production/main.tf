@@ -6,6 +6,7 @@ locals {
   # the setup script's own) still rely on.
   services = [
     "billingbudgets.googleapis.com",
+    "certificatemanager.googleapis.com",
     "cloudkms.googleapis.com",
     "cloudtrace.googleapis.com",
     "compute.googleapis.com",
@@ -163,6 +164,22 @@ module "secrets" {
   depends_on = [google_project_service.services]
 }
 
+# TLS for the Gateway (#159), same shape as staging's. `app.oharness.dev`'s CNAME
+# goes into the oharness.dev zone this environment adopts, one record among the
+# zone's others (the `import` block above is what puts the zone itself in state).
+module "certs" {
+  source = "../../modules/certs"
+
+  project_id = var.project_id
+  host       = var.host
+
+  # Production is guarded: the certificate resources cannot be destroyed by an
+  # apply, the same way the cluster, the database and the secrets cannot.
+  deletion_protection = var.deletion_protection
+
+  depends_on = [google_project_service.services]
+}
+
 module "app" {
   source = "../../modules/app"
 
@@ -173,6 +190,10 @@ module "app" {
   image_repository = var.image_repository
   image_tag        = var.image_tag
   host             = var.host
+
+  # The Gateway's TLS (#159): the certificate map the Gateway names in its
+  # `networking.gke.io/certmap` annotation.
+  certificate_map_name = module.certs.certificate_map_name
 
   kms_key_id             = module.kms.crypto_key_id
   database_url_secret_id = module.secrets.database_url_secret_id
@@ -232,6 +253,17 @@ module "dns" {
 
   a_records = {
     "${var.host}." = module.app.static_ip_address
+  }
+
+  # Certificate Manager's proof that this project controls the host (#159),
+  # published in the adopted oharness.dev zone — `_acme-challenge.<host>.` →
+  # Certificate Manager. The certificate stays PROVISIONING until it resolves.
+  # Static key, apply-time value: the `dns` module's `cname_records` explains why.
+  cname_records = {
+    certificate-authorization = {
+      name   = module.certs.dns_authorization_cname_name
+      target = module.certs.dns_authorization_cname_data
+    }
   }
 
   # Delegate staging.oharness.dev to the zone staging created. Empty skips it.

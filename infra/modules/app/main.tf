@@ -2,9 +2,17 @@
 # Identity binding and its project roles, and the helm_release of the chart
 # (issue #153, epic #148 D1/D2/D4).
 
-# The address the Ingress claims by name
-# (kubernetes.io/ingress.global-static-ip-name). Reserved here, so the chart
-# never races the load balancer for an ephemeral address.
+# The address the Gateway claims by name (its `spec.addresses`, `type:
+# NamedAddress`). Reserved here, so the chart never races the load balancer for an
+# ephemeral address.
+#
+# `description` still says "ingress address" although the load balancer is a
+# Gateway now (#159), and that is deliberate: **every attribute of a reserved
+# address, `description` included, forces replacement**, so rewording it would
+# release the address the environment's DNS A record points at and allocate a new
+# one. A PR plan caught exactly that (`must be replaced … # forces replacement`)
+# and the wording was left alone rather than traded for an outage. Fix it in a
+# change whose plan is allowed to destroy this resource, not in passing.
 resource "google_compute_global_address" "static_ip" {
   project      = var.project_id
   name         = local.static_ip_name
