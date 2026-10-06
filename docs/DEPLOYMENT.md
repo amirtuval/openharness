@@ -381,6 +381,18 @@ created an empty secret, failed, and rolled itself back.
    `https://staging.oharness.dev/api/auth/callback/google`, for instance. `/api/auth` is Better
    Auth's base path (`basePath` in `apps/server/src/auth.ts`) and the provider ids are the ones
    that file enables.
+
+   **Microsoft needs one more step in the app registration**: open **Token configuration**,
+   choose **Add optional claim**, pick the **ID** token type, and tick **`email`** and
+   **`xms_edov`** (accept the prompt to add the Microsoft Graph `email` permission). The guard
+   in `apps/server/src/auth-profile.ts` refuses a Microsoft sign-in that asserts no verified
+   email, and those two claims are how Microsoft asserts it — without them every sign-in is
+   refused with `email_not_verified`. A **personal** Microsoft account is vouched for by
+   `xms_edov` alone: `verified_primary_email`/`verified_secondary_email` are an Entra
+   work/school thing, so `xms_edov` is not optional for consumer sign-in. Microsoft documents
+   `xms_edov` as a Boolean, but the token carries it as the string `"1"`/`"0"`; the guard reads
+   both spellings (`affirmativeClaim`).
+
 2. **Add the client secret** to the container Terraform created, filling in the provider and
    the project (`openharness-dev` for staging, `openharness-510710` for production):
 

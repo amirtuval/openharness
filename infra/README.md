@@ -267,7 +267,12 @@ apply that mounts it. Turning a provider on is:
 
 1. Create the OAuth app with the provider, with the callback URL
    `https://<host>/api/auth/callback/<google|github|microsoft>` (`/api/auth` is Better Auth's
-   base path — `basePath` in `apps/server/src/auth.ts`).
+   base path — `basePath` in `apps/server/src/auth.ts`). **For Microsoft**, also open **Token
+   configuration** → **Add optional claim** → **ID** and tick `email` and `xms_edov` (accepting
+   the Microsoft Graph `email` permission prompt): the server refuses a Microsoft sign-in that
+   asserts no verified email, and those are the claims it reads. A personal account is vouched
+   for by `xms_edov` — sent as the string `"1"`/`"0"`, not the `verified_*` lists — so without
+   it consumer sign-in is refused with `email_not_verified`.
 2. Fill the container in with the provider's secret:
 
    ```bash
