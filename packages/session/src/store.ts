@@ -612,8 +612,15 @@ export interface SessionStore {
   /**
    * Extend a lease by `ttlMs`, from the clock's current instant.
    *
-   * @returns `false` when the lease is not held by this owner at this epoch any more — expired,
-   *   released, or taken over — in which case the owner has been fenced and must re-acquire
+   * A lapse makes a lease **stealable, not lost**: this extends a lease whose row still names
+   * this owner at this epoch whether or not it has expired. `expires_at` is what lets *another*
+   * owner `acquire` the partition — which opens a new tenure and so changes both the owner and
+   * the epoch — not what makes the lease un-renewable for the owner that still has it. Nothing
+   * can be written while a lease is lapsed (a fenced write needs a live lease at its epoch), so
+   * an owner that comes back before anybody takes the partition over has lost nothing.
+   *
+   * @returns `false` when the lease is no longer this owner's at this epoch — released, or taken
+   *   over past its expiry — in which case the owner has been fenced and must re-acquire
    */
   renewPartition(partition: number, owner: string, epoch: number, ttlMs: number): Promise<boolean>
 

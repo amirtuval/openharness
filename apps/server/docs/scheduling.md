@@ -57,6 +57,18 @@ bookkeeping like the lease table, not part of the log.
 or an expired lease, and **never a live lease somebody else holds**. Every successful acquire
 opens a new tenure, so the epoch never repeats.
 
+**A lapse is stealable, not lost.** `expires_at` is what lets _another_ instance take the
+partition over — the acquire above — and not what takes it away from the instance that holds
+it. `renewPartition` therefore extends a lease whose row still names this owner at this epoch
+whether or not it has lapsed, and a refusal means one thing only: somebody else has the
+partition now. Nothing can be written while a lease is lapsed, because a fenced write needs a
+live lease at its epoch, so an instance that comes back before anybody takes the partition over
+has lost nothing. This is what keeps one long heartbeat cycle — a stalled process, a slow round
+trip, a runner under load — from costing an instance every partition it holds: with the refusal
+read as "the lease is gone", a cycle that ran past the TTL would drop all of them, abort the
+turns in them and re-acquire them at a new epoch, for no reason, since no peer ever wanted them.
+Only a genuine takeover moves the owner and the epoch out from under the renewal.
+
 That epoch is what makes a write safe. `runTurn` passes `fence: { partition, epoch }` to every
 `appendEvents` it makes — since D9 an append is the only write a turn makes, the claim included
 — and the store accepts the write only while that partition's lease is live at that epoch. So a
@@ -84,7 +96,7 @@ acquiring partition p
 
 heartbeat
   announce this instance        → upsert scheduler_instances, read the live members
-  renew every held lease        → a refusal means the lease is gone: drop it at once
+  renew every held lease        → a refusal means the lease is somebody else's: drop it at once
   give up the surplus           → finish the turns in it first, then release
   scan for free/expired leases  → take them up to the share, never a live one;
                                   recover each as above
@@ -217,23 +229,26 @@ store (its own `LISTEN` connection) on a shared pool, against real Postgres: `DA
 it is set, otherwise a container, otherwise the suite is skipped with a note. The leases are
 short (a few hundred milliseconds) and the heartbeats a tenth of that, so a takeover happens
 inside a test; every wait is a `waitFor` with a bounded timeout rather than a fixed sleep.
+Short leases are also safe to assert on: a lapse nobody takes over is renewable, so a runner
+that stalls a cycle past the TTL cannot make a healthy instance look dead.
 
-| test                                              | what it pins down                                                           |
-| ------------------------------------------------- | --------------------------------------------------------------------------- |
-| spread over instances that boot together          | half each, no overlap, and nothing changes hands afterwards                 |
-| a first scan that loses the race                  | the membership gives the loser its share (it takes, or the winner releases) |
-| three instances boot together                     | each at most `ceil(8/3)`, together the whole space, then stable             |
-| an idle instance that is alone                    | no release over five TTLs: the held set and every epoch stay put            |
-| a member that stops heartbeating                  | dropped after about a TTL, its share taken over                             |
-| a stop, then a restart                            | the membership row goes with the stop; the restart re-joins and re-takes    |
-| a live lease cannot be taken, a released one can  | no renewal ever fails, no overlap, a released one moves                     |
-| a stop racing an acquire                          | the lease it was taking is released, not left to the TTL                    |
-| leases handed back on shutdown                    | takeover well inside a 30-second TTL                                        |
-| one turn, in the instance that owns the session   | routed signal, one model request, one reply                                 |
-| every write fenced with the lease the owner holds | `{partition, epoch}` on every append and claim                              |
-| recovery on acquire, with the signal dropped      | the signal is not the record; the log is                                    |
-| the sweep finds work no signal mentioned          | the safety net, with the heartbeat slowed down                              |
-| died mid-turn → taken over → turn finished        | `brain_lost`, re-run, correct order, every span closed                      |
-| the zombie that wakes up cannot write             | a `FencedError`, nothing stored, the process still alive                    |
-| a lease that cannot be renewed is dropped         | the turn is aborted and the partition stops being this work                 |
-| interrupts routed across instances                | partial reply, closed span, idle, nothing left queued                       |
+| test                                              | what it pins down                                                                                        |
+| ------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| spread over instances that boot together          | half each, no overlap, and nothing changes hands afterwards                                              |
+| a first scan that loses the race                  | the membership gives the loser its share (it takes, or the winner releases)                              |
+| three instances boot together                     | each at most `ceil(8/3)`, together the whole space, then stable                                          |
+| an idle instance that is alone                    | no release over five TTLs: the held set and every epoch stay put, a lease that lapsed untouched included |
+| a cycle that outlives the lease                   | the lapse is renewed, not lost: same held set, same epochs, no "lost partition"                          |
+| a member that stops heartbeating                  | dropped after about a TTL, its share taken over                                                          |
+| a stop, then a restart                            | the membership row goes with the stop; the restart re-joins and re-takes                                 |
+| a live lease cannot be taken, a released one can  | no renewal ever fails, no overlap, a released one moves                                                  |
+| a stop racing an acquire                          | the lease it was taking is released, not left to the TTL                                                 |
+| leases handed back on shutdown                    | takeover well inside a 30-second TTL                                                                     |
+| one turn, in the instance that owns the session   | routed signal, one model request, one reply                                                              |
+| every write fenced with the lease the owner holds | `{partition, epoch}` on every append and claim                                                           |
+| recovery on acquire, with the signal dropped      | the signal is not the record; the log is                                                                 |
+| the sweep finds work no signal mentioned          | the safety net, with the heartbeat slowed down                                                           |
+| died mid-turn → taken over → turn finished        | `brain_lost`, re-run, correct order, every span closed                                                   |
+| the zombie that wakes up cannot write             | a `FencedError`, nothing stored, the process still alive                                                 |
+| a lease that cannot be renewed is dropped         | the turn is aborted and the partition stops being this work                                              |
+| interrupts routed across instances                | partial reply, closed span, idle, nothing left queued                                                    |

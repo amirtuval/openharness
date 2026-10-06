@@ -46,10 +46,10 @@ import { type TestClock, createTestClock } from './clock'
  * Postgres store must pass the same suite unchanged. That is why it only asks for what the
  * contract promises — ordering by `seq`, atomically assigned fields, the `processed_at`
  * lifecycle, turn state, pagination cursors, fencing, at-most-once signals, and leases that
- * acquire, renew, expire and are stolen after expiry. It never reaches into an implementation,
- * and it never assumes synchronous delivery: a store may notify subscriptions a tick later, or
- * over a connection, so the tests wait for a delivery instead of requiring one to have
- * happened already.
+ * acquire, renew (a lapse is stealable, not lost), expire and are stolen after expiry. It
+ * never reaches into an implementation, and it never assumes synchronous delivery: a store may
+ * notify subscriptions a tick later, or over a connection, so the tests wait for a delivery
+ * instead of requiring one to have happened already.
  *
  * ## Writing the factory
  *
@@ -119,7 +119,8 @@ import { type TestClock, createTestClock } from './clock'
  *   unsubscribe, and the final `session.deleted` a deleted session's subscribers receive.
  * - **partition signals** — delivery, fan-out to a partition's listeners, and dropping.
  * - **findSessionsNeedingWork** — pending events and open turns, scoped to partitions.
- * - **partition leases** — acquire, renew, expiry at `expires_at`, steal after expiry, release.
+ * - **partition leases** — acquire, renew (including through a lapse nobody took over), expiry
+ *   at `expires_at`, steal after expiry, release.
  * - **scheduler membership** (#122) — a heartbeat recording an instance, the window that keeps
  *   it live (and drops it, inclusively, at the edge), removal, and the window's argument check.
  * - **fencing** — a stale, expired, released or never-leased epoch is refused, and an unfenced
@@ -2212,12 +2213,31 @@ export function runSessionStoreConformance(
         expect(await store.acquirePartition(3, 'owner-2', 30 * SECOND)).toBeNull()
       })
 
-      it('refuses to renew for another owner, an old epoch, or an expired lease', async () => {
-        const { store, clock } = await setup()
+      it('refuses to renew for another owner or an old epoch', async () => {
+        const { store } = await setup()
         const lease = await leaseOn(store, 3, 'owner-1', 30 * SECOND)
         expect(await store.renewPartition(3, 'owner-2', lease.epoch, 30 * SECOND)).toBe(false)
         expect(await store.renewPartition(3, 'owner-1', lease.epoch + 1, 30 * SECOND)).toBe(false)
+      })
+
+      it('renews a lease that lapsed while nobody took it: a lapse is stealable, not lost', async () => {
+        // The row still naming this owner at this epoch is the whole test. A heartbeat cycle
+        // that ran past the TTL — a stalled process, a slow round trip — costs the owner
+        // nothing as long as nobody took the partition over in the meantime, and the epoch is
+        // the proof that nobody did. What a lapse *does* allow is a steal (below), which is
+        // why a lease that is lapsed and taken over is refused.
+        const { store, clock } = await setup()
+        const lease = await leaseOn(store, 3, 'owner-1', 30 * SECOND)
         clock.advance(30 * SECOND)
+        expect(await store.renewPartition(3, 'owner-1', lease.epoch, 30 * SECOND)).toBe(true)
+        expect(await store.currentEpoch(3)).toBe(lease.epoch)
+        clock.advance(20 * SECOND)
+        // Renewed 20 seconds ago: the partition is live and held, so nobody can take it.
+        expect(await store.acquirePartition(3, 'owner-2', 30 * SECOND)).toBeNull()
+
+        clock.advance(30 * SECOND)
+        const stolen = await leaseOn(store, 3, 'owner-2', 30 * SECOND)
+        expect(stolen.epoch).toBeGreaterThan(lease.epoch)
         expect(await store.renewPartition(3, 'owner-1', lease.epoch, 30 * SECOND)).toBe(false)
       })
 

@@ -541,7 +541,10 @@ returning …
 No row comes back when a live lease is held by somebody else, which is the `null` the contract
 asks for. **Every successful acquire increments the epoch**, including the same owner asking
 again, so a tenure never repeats and a write from an older one is refused. `renewPartition` is
-a conditional `update … where owner = $ and epoch = $ and expires_at > $now`; `releasePartition`
+a conditional `update … where owner = $ and epoch = $` — **a lapse is stealable, not lost**:
+the row still naming this owner at this epoch is the whole test, `expires_at` included, since
+expiry is what lets another owner acquire the partition (a new tenure, so a new owner _and_ a
+new epoch) and nothing can be written under a lapsed lease; `releasePartition`
 sets the row free and advances the epoch, so a write still in flight from the released tenure
 is fenced rather than landing in the next one; `currentEpoch` is the stored epoch, `0` when the
 partition has never been leased.

@@ -357,7 +357,9 @@ if (SOURCE === null) {
       // lost their owner for a heartbeat at a time for no reason. The membership says the
       // instance is alone, so its share is the whole space and nothing is ever released: a
       // release advances the epoch, and a take-back advances it again, so epochs that stay
-      // put over several short TTLs are exactly "nothing changed hands".
+      // put over several short TTLs are exactly "nothing changed hands". A lease that merely
+      // lapsed moves no epoch either: nobody took it, so the next renewal keeps the tenure
+      // (#185; the test below makes that cycle deterministic instead of load-dependent).
       const solo = instance('solo', { ttlMs: TTL_MS })
       await solo.scheduler.start()
       await waitFor(() => solo.scheduler.heldPartitions().length === PARTITIONS, {
@@ -376,6 +378,39 @@ if (SOURCE === null) {
         )
       }
       expect(solo.notices.filter((line) => line.includes('gave up'))).toEqual([])
+    })
+
+    it('keeps every partition through a heartbeat cycle that outlives the lease', async () => {
+      // The deterministic form of the flake the test above flakes on (#185): one refresh cycle
+      // that runs longer than the lease is what a stalled process, a loaded runner or a slow
+      // round trip looks like from the inside — `#announce`'s two round trips come first, so
+      // the renewal is what lands late. The lease lapses. Nobody takes it over, and the epoch
+      // is the proof: the row still names this instance at the epoch it took, so the renewal
+      // is this instance's to make and the tenure is kept. Reading the lapse as "the lease is
+      // gone" instead is what made an idle sole instance drop the whole space and take it back
+      // — aborting the turns in it and re-running them — with every epoch advancing.
+      const store = db.track(
+        new SlowFirstRenewStore({ pool: db.pool, partitionCount: PARTITIONS }, SLOW_FIRST_RENEW_MS),
+      )
+      const solo = instance('solo', { store, ttlMs: TTL_MS })
+      await solo.scheduler.start()
+      await waitFor(() => solo.scheduler.heldPartitions().length === PARTITIONS, {
+        timeoutMs: WAIT_MS,
+        message: 'the single instance never claimed the whole space',
+      })
+
+      const reader = db.store()
+      const held = sorted(solo.scheduler.heldPartitions())
+      const epochs = await Promise.all(held.map((partition) => reader.currentEpoch(partition)))
+      // Long enough for the delayed cycle to have run, its renewal to have landed past the
+      // TTL, and the heartbeats after it to have renewed everything again.
+      await sleep(3 * TTL_MS)
+
+      expect(sorted(solo.scheduler.heldPartitions())).toEqual(held)
+      expect(await Promise.all(held.map((partition) => reader.currentEpoch(partition)))).toEqual(
+        epochs,
+      )
+      expect(solo.notices.filter((line) => line.includes('lost partition'))).toEqual([])
     })
 
     it('drops a membership that stops heartbeating, and takes its share over within a TTL', async () => {
@@ -877,6 +912,14 @@ function sleep(ms: number): Promise<void> {
  */
 const SLOW_FIRST_ACQUIRE_MS = 150
 
+/**
+ * How long the sole instance's first renewal waits in the outlived-cycle test: well past the
+ * lease that started when the space was claimed, so the renewal arrives on a lease that has
+ * already lapsed — a heartbeat cycle slower than the lease, which is the one thing a test
+ * cannot produce by asking a runner to be slow.
+ */
+const SLOW_FIRST_RENEW_MS = 2 * TTL_MS
+
 /** A store whose first acquire waits, then behaves normally — a scan behind one slow query. */
 class SlowFirstAcquireStore extends PostgresSessionStore {
   readonly #delayMs: number
@@ -896,6 +939,28 @@ class SlowFirstAcquireStore extends PostgresSessionStore {
       await sleep(this.#delayMs)
     }
     return super.acquirePartition(...args)
+  }
+}
+
+/** A store whose first renewal waits, then behaves normally — a heartbeat cycle past its lease. */
+class SlowFirstRenewStore extends PostgresSessionStore {
+  readonly #delayMs: number
+
+  #delaysLeft = 1
+
+  constructor(options: { pool: Pool; partitionCount: number }, delayMs: number) {
+    super(options)
+    this.#delayMs = delayMs
+  }
+
+  override async renewPartition(
+    ...args: Parameters<PostgresSessionStore['renewPartition']>
+  ): ReturnType<PostgresSessionStore['renewPartition']> {
+    if (this.#delaysLeft > 0) {
+      this.#delaysLeft -= 1
+      await sleep(this.#delayMs)
+    }
+    return super.renewPartition(...args)
   }
 }
 

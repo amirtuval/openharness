@@ -580,12 +580,11 @@ export class InMemorySessionStore implements SessionStore {
     assertTtl(ttlMs)
     const now = this.#clock()
     const held = this.#leases.get(partition)
-    if (
-      held === undefined ||
-      held.owner !== owner ||
-      held.epoch !== epoch ||
-      held.expiresAtMs <= now
-    ) {
+    // A lapse makes a lease stealable, not lost: a row that still names this owner at this
+    // epoch is this owner's to renew, however long ago it lapsed. Only an `acquire` — which
+    // opens a new tenure — takes it away, and that moves the owner and the epoch out from
+    // under this check. The Postgres store says why in `renewPartition`.
+    if (held === undefined || held.owner !== owner || held.epoch !== epoch) {
       return resolved(false)
     }
     held.expiresAtMs = now + ttlMs
