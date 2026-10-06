@@ -837,13 +837,22 @@ export class PostgresSessionStore implements SessionStore {
   ): Promise<boolean> {
     assertTtl(ttlMs)
     const now = this.#clock()
+    // The row still naming this owner at this epoch is the whole test — `expires_at` is not.
+    // A lapse makes a lease *stealable*, not lost: an `acquire` past `expires_at` opens a new
+    // tenure, and that is what takes a partition away from an owner that stopped renewing.
+    // Nothing else can have happened while it was lapsed — a fenced write needs a live lease at
+    // its epoch, so nothing was written under this one, and an acquire that took the partition
+    // over in the meantime moved both owner and epoch, which this statement would no longer
+    // match. Renewing through a lapse is therefore safe, and it is what keeps an owner whose own
+    // heartbeat cycle ran long — a stalled process, a slow round trip — from doing what the
+    // scheduler does with a refused renewal: dropping every partition it holds, aborting the
+    // turns in them and re-acquiring them at a new epoch, when nobody wanted them (#185).
     const renewed = await sql`
       update partition_leases
          set expires_at = ${instant(now + ttlMs)}
        where partition = ${partition}
          and owner = ${owner}
          and epoch = ${epoch}
-         and expires_at > ${instant(now)}
       returning partition
     `.execute(this.#db)
     return renewed.rows.length > 0

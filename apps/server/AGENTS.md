@@ -592,7 +592,12 @@ only while it holds that partition's lease, writing every turn under `fence: {pa
   its leases stop being renewed, and the survivors' shares grow back to the whole space.
 - **Losing a lease** — a refused renewal, or a `FencedError` out of a turn — aborts that
   partition's turns, ends its subscription and stops it running work for it. It never crashes
-  the process.
+  the process. A refusal means the partition is **somebody else's** now: a lease that merely
+  lapsed, with nobody taking it over, is renewable and kept (a lapse is stealable, not lost —
+  see `@openharness/session`), so a refresh cycle that runs past the TTL because the process
+  stalled or a round trip was slow costs an instance nothing. Without that rule an instance
+  would drop every partition it held on one late cycle — aborting and re-running the turns in
+  them — for no reason, since no peer ever wanted them.
 - **`stop()`** drains the turns in flight, deletes the membership row (so peers stop counting
   the instance at once) and then releases every lease, so the next instance takes over at its
   next heartbeat instead of waiting out the TTL. A lease whose acquire was in flight when the
@@ -1023,7 +1028,9 @@ parallel with each other.
   instances in one process each with its own store connection: spread and takeover, the
   membership that gives an instance its share after a lost first-scan race (and three
   instances settling at theirs), a single idle instance releasing nothing over several TTLs
-  (#122), a member that stops heartbeating dropped after about a TTL, `stop()` deleting the
+  (#122) and keeping every partition through a heartbeat cycle that outlives its lease (#185,
+  deterministically, with a store whose first renewal is delayed past the TTL), a member that
+  stops heartbeating dropped after about a TTL, `stop()` deleting the
   membership row and a restart re-joining, one turn per session, a crash mid-turn and the
   recovery that finishes it, a zombie that cannot write, a lease that cannot be renewed,
   interrupts routed across instances, the sweep, the fences a turn writes with, and shutdown

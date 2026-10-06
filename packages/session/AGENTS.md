@@ -352,9 +352,14 @@ runs the session's turn. `acquirePartition` succeeds when the partition is free,
 previous lease has expired (`now >= expires_at`, inclusive), or when the same owner asks
 again — and every successful acquire opens a **new tenure**, so the epoch advances even for
 the same owner and an older one is fenced. `renewPartition` extends a lease the owner still
-holds at that epoch. `releasePartition` frees it and advances the epoch, so a write still in
-flight from the released tenure is fenced rather than landing in the next one. `currentEpoch`
-is `0` until the first acquire, and never repeats a tenure.
+holds at that epoch — **a lapse is stealable, not lost**: the row still naming this owner at
+this epoch is the whole test, `expires_at` included, because expiry is what lets _another_
+owner acquire the partition (a new tenure, so a new owner _and_ a new epoch), and nothing can
+be written under a lapsed lease. An owner whose own heartbeat cycle ran long — a stalled
+process, a slow round trip — therefore keeps its partitions by renewing them instead of
+dropping them and re-acquiring them at a new epoch. `releasePartition` frees it and advances
+the epoch, so a write still in flight from the released tenure is fenced rather than landing in
+the next one. `currentEpoch` is `0` until the first acquire, and never repeats a tenure.
 
 A write carrying `fence: { partition, epoch }` is accepted only while that partition's lease is
 live and at that epoch; otherwise it fails with `FencedError`. That is what stops a zombie
