@@ -115,7 +115,7 @@ variable "enable_budget" {
 }
 
 variable "billing_account_id" {
-  description = "Billing account ID for the budget, only used when enable_budget is true."
+  description = "Billing account ID for the budget, only used when enable_budget is true. The bare ID (XXXXXX-XXXXXX-XXXXXX, the ACCOUNT_ID column of `gcloud billing accounts list`); a leading `billingAccounts/` is accepted and stripped (#159)."
   type        = string
   default     = ""
 }

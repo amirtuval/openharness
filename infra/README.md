@@ -266,7 +266,9 @@ sequence and the callback URLs: [`docs/DEPLOYMENT.md`](../docs/DEPLOYMENT.md#tur
 **4. The billing grant, for the budget.** The `budget` module is off until
 `TF_BILLING_ACCOUNT_ID` is set, because budgets live on the billing account and `deploy@` holds
 no rights there. Grant the role **first**, then set the variable — every deploy and PR plan then
-passes `-var enable_budget=true -var billing_account_id=<id>`:
+passes `-var enable_budget=true -var billing_account_id=<id>`, where `<id>` is the bare account
+ID from the `list` output (`0107DE-963D05-222D0A`), not `billingAccounts/0107DE-963D05-222D0A`:
+the provider adds that prefix itself, and a second one is the 404 this fixes (#159):
 
 ```bash
 gcloud billing accounts list
@@ -313,7 +315,7 @@ Every environment input, its default, and where a non-default value comes from. 
 | `trace_sample_rate`                 | `0.1`                                                           | `OPENHARNESS_TRACE_SAMPLE_RATE` (#158): fraction of traces sent to Cloud Trace.                                                                                 |
 | `alert_email`                       | `""`                                                            | GitHub variable `TF_ALERT_EMAIL_STAGING` / `_PRODUCTION`. Empty creates no channel and no alert policies (#158).                                                |
 | `enable_budget`                     | `false`                                                         | The deploy workflows pass `true` exactly when `TF_BILLING_ACCOUNT_ID` is set, `false` otherwise — turn it on with the billing grant above, never by hand.       |
-| `billing_account_id`                | `""`                                                            | GitHub variable `TF_BILLING_ACCOUNT_ID` (`gcloud billing accounts list`); one account for both projects, used only with `enable_budget`.                        |
+| `billing_account_id`                | `""`                                                            | GitHub variable `TF_BILLING_ACCOUNT_ID` (`gcloud billing accounts list`); the bare ID, no `billingAccounts/` prefix (#159), used only with `enable_budget`.     |
 | `budget_amount`                     | `100`                                                           | Monthly budget in USD.                                                                                                                                          |
 
 ### Staging only
