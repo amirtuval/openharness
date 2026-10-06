@@ -8,6 +8,8 @@ import type {
   MicrosoftOptions,
 } from 'better-auth/social-providers'
 
+import type { Logger } from './types'
+
 /**
  * Who a sign-in is: the verified email (epic #65, A3), enforced per provider.
  *
@@ -29,6 +31,11 @@ import type {
  * The rules themselves are pure functions over the provider's profile, so a test can hand
  * them a mocked profile without a network; {@link providerOptions} wires them into the
  * provider clients Better Auth calls.
+ *
+ * A Microsoft refusal also writes one structured warning — {@link microsoftRefusalDetail}
+ * through the logger {@link providerOptions} is handed — because the refusal is otherwise
+ * silent, and "the optional claim is configured but it still refuses" can only be answered by
+ * what the token actually carried. The line holds claim names and types, never values.
  */
 
 /** The `provider` names the social sign-in exposes; also what `GET /v1/auth-config` lists. */
@@ -61,6 +68,14 @@ export interface MicrosoftClaims {
   /** Entra's lists of addresses Microsoft has verified ownership of. */
   readonly verified_primary_email?: string | string[]
   readonly verified_secondary_email?: string | string[]
+  /**
+   * The tenant the token was issued to. Carries no personal data, and the one fixed consumer
+   * tenant id tells a personal account from a work/school one — read by the refusal
+   * diagnostics ({@link microsoftRefusalDetail}), never by the rule.
+   */
+  readonly tid?: string
+  /** The issuer, which names the token's tenant; diagnostics only, like {@link tid}. */
+  readonly iss?: string
 }
 
 /** The Google ID-token claims this rule needs. */
@@ -102,6 +117,88 @@ export function microsoftEmailVerified(claims: MicrosoftClaims): boolean {
   )
 }
 
+/**
+ * What a refused Microsoft sign-in records about the token it refused.
+ *
+ * A refusal is otherwise silent — the caller gets the 403 and nothing says *which* claims
+ * Microsoft actually sent — so the guard logs this instead. It is built to be safe to log:
+ * claim **names** and **types**, never values, plus the two identifiers that are not personal
+ * data and are the whole question when a personal account is involved (`tid`/`iss`). The
+ * address itself, the display name, the tokens and the profile photo never appear; a test
+ * asserts the serialized line contains no email address.
+ *
+ * The types are what the "I added the optional claims and it still refuses" case turns on: a
+ * type of `absent` says the claim did not reach the token, while a `boolean`/`array(n)` says
+ * it arrived and the rule read its value.
+ */
+export interface MicrosoftRefusalDetail {
+  readonly provider: 'microsoft'
+  /** Every claim name in the decoded profile, sorted — names only, never values. */
+  readonly claimNames: readonly string[]
+  /** The tenant id, which distinguishes consumer from work/school accounts, or `null`. */
+  readonly tid: string | null
+  /** The issuer, which names the token's tenant, or `null`. */
+  readonly iss: string | null
+  /** The shape of each claim the rule reads; see {@link microsoftClaimType}. */
+  readonly claimTypes: {
+    readonly email_verified: string
+    readonly xms_edov: string
+    readonly verified_primary_email: string
+    readonly verified_secondary_email: string
+  }
+  /** Whether the lowercased `email` appears in `verified_primary_email` (false when absent). */
+  readonly emailInVerifiedPrimary: boolean
+  /** Whether the lowercased `email` appears in `verified_secondary_email` (false when absent). */
+  readonly emailInVerifiedSecondary: boolean
+  /** Whether the profile carries a non-empty `email` at all. */
+  readonly hasEmail: boolean
+}
+
+/**
+ * A claim's shape — never its value.
+ *
+ * `absent` is the one that matters most: it means the app registration did not put the claim
+ * in the token, which is a portal configuration question rather than a rule question. A list
+ * reports its length (`array(1)`), because a bare `array` cannot say whether the claim was
+ * empty. Anything other than a boolean, a string or an array reports its `typeof`.
+ */
+export function microsoftClaimType(value: unknown): string {
+  if (value === undefined) {
+    return 'absent'
+  }
+  if (Array.isArray(value)) {
+    return `array(${value.length})`
+  }
+  return typeof value
+}
+
+/** The diagnostic payload for a Microsoft sign-in that was refused (see {@link MicrosoftRefusalDetail}). */
+export function microsoftRefusalDetail(claims: MicrosoftClaims): MicrosoftRefusalDetail {
+  const email = claims.email?.toLowerCase()
+  const hasEmail = email !== undefined && email !== ''
+  return {
+    provider: 'microsoft',
+    claimNames: Object.keys(claims).sort(),
+    tid: textOrNull(claims.tid),
+    iss: textOrNull(claims.iss),
+    claimTypes: {
+      email_verified: microsoftClaimType(claims.email_verified),
+      xms_edov: microsoftClaimType(claims.xms_edov),
+      verified_primary_email: microsoftClaimType(claims.verified_primary_email),
+      verified_secondary_email: microsoftClaimType(claims.verified_secondary_email),
+    },
+    // Only meaningful when there is an address to look for: an absent `email` is reported by
+    // `hasEmail`, and `false` here would otherwise read as "not in the list".
+    emailInVerifiedPrimary: hasEmail && includesEmail(claims.verified_primary_email, email),
+    emailInVerifiedSecondary: hasEmail && includesEmail(claims.verified_secondary_email, email),
+    hasEmail,
+  }
+}
+
+/** The message of the refusal warning; the detail is the payload beside it. */
+export const MICROSOFT_REFUSAL_LOG =
+  'microsoft sign-in refused: the id_token asserts no verified email'
+
 /** Whether Google verified this email address. */
 export function googleEmailVerified(claims: GoogleClaims): boolean {
   return truthyClaim(claims.email_verified)
@@ -141,9 +238,15 @@ export interface SocialProviderCredentials {
  * A3 rule as its `getUserInfo`: the profile is read normally, the rule decides, and a profile
  * without a verified email refuses the whole sign-in. `mapProfileToUser` is not used, because
  * a rule that only rewrites fields cannot say no.
+ *
+ * @param credentials the client id/secret of each enabled provider
+ * @param logger where a Microsoft refusal records what the token carried; the server passes
+ *   its own logger. Absent, the refusal is made exactly as before, silently — diagnostics
+ *   must never be the thing that decides a sign-in.
  */
 export function providerOptions(
   credentials: SocialProviderCredentials,
+  logger?: Logger,
 ): NonNullable<BetterAuthOptions['socialProviders']> {
   const providers: Record<string, GoogleOptions | GithubOptions | MicrosoftOptions> = {}
   if (credentials.google !== undefined) {
@@ -153,7 +256,7 @@ export function providerOptions(
     providers['github'] = githubProviderOptions(credentials.github)
   }
   if (credentials.microsoft !== undefined) {
-    providers['microsoft'] = microsoftProviderOptions(credentials.microsoft)
+    providers['microsoft'] = microsoftProviderOptions(credentials.microsoft, logger)
   }
   return providers
 }
@@ -220,11 +323,14 @@ function githubProviderOptions(credentials: {
 }
 
 /** Microsoft: refuse unless the claims assert a verified email — the nOAuth guard (A3). */
-function microsoftProviderOptions(credentials: {
-  clientId: string
-  clientSecret: string
-  tenantId: string
-}): MicrosoftOptions {
+function microsoftProviderOptions(
+  credentials: {
+    clientId: string
+    clientSecret: string
+    tenantId: string
+  },
+  logger?: Logger,
+): MicrosoftOptions {
   const base = microsoft({ ...credentials })
   return {
     ...credentials,
@@ -234,6 +340,10 @@ function microsoftProviderOptions(credentials: {
         return null
       }
       if (!microsoftEmailVerified(info.data)) {
+        // The refusal itself is unchanged; this only records *what* was refused, because a
+        // silent 403 cannot tell "Microsoft sent no such claim" from "the rule did not read
+        // it". Names and types only — see {@link microsoftRefusalDetail}.
+        logger?.warn(MICROSOFT_REFUSAL_LOG, microsoftRefusalDetail(info.data))
         throw refusedEmailError(
           'microsoft',
           'the id_token asserts no verified email (no email_verified, xms_edov or verified list)',
@@ -264,11 +374,24 @@ function truthyClaim(value: boolean | string | undefined): boolean {
   return value === true || value === 'true'
 }
 
-/** Whether an Entra verified-address claim (a string or a list) holds this address. */
-function includesEmail(claim: string | string[] | undefined, email: string): boolean {
-  if (claim === undefined) {
+/**
+ * Whether an Entra verified-address claim (a string or a list) holds this address.
+ *
+ * Total on purpose: `claims` is whatever the token carried, not what the type says, and this
+ * runs on the refuse path — a malformed claim must read as "not verified" (still refused)
+ * rather than throw something that is not the refusal.
+ */
+function includesEmail(claim: unknown, email: string): boolean {
+  if (typeof claim === 'string') {
+    return claim.toLowerCase() === email
+  }
+  if (!Array.isArray(claim)) {
     return false
   }
-  const addresses = Array.isArray(claim) ? claim : [claim]
-  return addresses.some((address) => address.toLowerCase() === email)
+  return claim.some((address) => typeof address === 'string' && address.toLowerCase() === email)
+}
+
+/** A string claim as itself, or `null` when it is absent or not a string. */
+function textOrNull(value: unknown): string | null {
+  return typeof value === 'string' ? value : null
 }

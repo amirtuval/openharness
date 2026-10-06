@@ -2,13 +2,18 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { GithubOptions, GoogleOptions, MicrosoftOptions } from 'better-auth/social-providers'
 
 import {
+  MICROSOFT_REFUSAL_LOG,
   githubVerifiedPrimaryEmail,
   googleEmailVerified,
+  microsoftClaimType,
   microsoftEmailVerified,
+  microsoftRefusalDetail,
   providerOptions,
   refusedEmailError,
   type GithubEmail,
 } from './auth-profile'
+import { jsonLogger } from './observability/logging'
+import type { Logger } from './types'
 
 /**
  * The identity rules (epic #65, A3), with mocked provider profiles.
@@ -236,5 +241,163 @@ describe('providerOptions', () => {
     expect(error.body?.code).toBe('email_not_verified')
     expect(error.body?.message).toContain('microsoft')
     expect(error.body?.message).toContain('verified')
+  })
+})
+
+/**
+ * The warning a refused Microsoft sign-in writes.
+ *
+ * A refusal is otherwise silent, so "the optional claim is configured in the portal and it
+ * still refuses" has no answer anywhere. This line has to answer it while keeping the same
+ * rule as every other log line: it says what the token *carried* — names and types — and
+ * never what the claims meant. The tests parse the real Cloud Logging logger, so what they
+ * assert is the line the deployment would actually write.
+ */
+describe('the Microsoft refusal warning', () => {
+  /** The consumer tenant id: every personal Microsoft account carries it as `tid`. */
+  const CONSUMER_TENANT_ID = '9188040d-6c67-4c5b-b112-36a304b66dad'
+  const ISSUER = `https://login.microsoftonline.com/${CONSUMER_TENANT_ID}/v2.0`
+  const credentials = {
+    microsoft: { clientId: 'ms-id', clientSecret: 'ms-secret', tenantId: 'common' },
+  }
+
+  /** A {@link jsonLogger} whose parsed lines are kept, with a fixed clock. */
+  function capturing(): { logger: Logger; lines: Record<string, unknown>[] } {
+    const lines: Record<string, unknown>[] = []
+    const logger = jsonLogger({
+      write: (line) => lines.push(JSON.parse(line) as Record<string, unknown>),
+      now: () => new Date('2026-10-05T12:34:56.789Z'),
+      projectId: 'openharness-staging',
+    })
+    return { logger, lines }
+  }
+
+  it('logs a warning with the claim names and types of the refused token, and no value', async () => {
+    const { logger, lines } = capturing()
+    const microsoft = providerOptions(credentials, logger)['microsoft'] as MicrosoftOptions
+
+    await expect(
+      microsoft.getUserInfo?.({
+        idToken: idToken({
+          aud: 'ms-id',
+          iss: ISSUER,
+          tid: CONSUMER_TENANT_ID,
+          oid: 'oid-1',
+          email: 'Victim@Example.com',
+          name: 'Victim Person',
+          preferred_username: 'victim@example.com',
+          verified_primary_email: ['someone-else@example.com'],
+        }),
+        accessToken: undefined,
+      }),
+    ).rejects.toMatchObject({ body: { code: 'email_not_verified' } })
+
+    expect(lines).toHaveLength(1)
+    const line = lines[0] ?? {}
+    // The line is a Cloud Logging warning, and the claim *names* are sorted and complete.
+    expect(line['severity']).toBe('WARNING')
+    expect(line['message']).toBe(MICROSOFT_REFUSAL_LOG)
+    expect(line['provider']).toBe('microsoft')
+    expect(line['claimNames']).toEqual([
+      'aud',
+      'email',
+      'iss',
+      'name',
+      'oid',
+      'preferred_username',
+      'tid',
+      'verified_primary_email',
+    ])
+    // The two identifiers that are not personal data, and that say which account class this
+    // was: the consumer tenant, so a personal account, not a work/school one.
+    expect(line['tid']).toBe(CONSUMER_TENANT_ID)
+    expect(line['iss']).toBe(ISSUER)
+    // Every claim the rule reads is absent from this token — which is exactly the answer the
+    // portal question needs.
+    expect(line['claimTypes']).toEqual({
+      email_verified: 'absent',
+      xms_edov: 'absent',
+      verified_primary_email: 'array(1)',
+      verified_secondary_email: 'absent',
+    })
+    expect(line['emailInVerifiedPrimary']).toBe(false)
+    expect(line['emailInVerifiedSecondary']).toBe(false)
+    expect(line['hasEmail']).toBe(true)
+
+    // The whole point of the payload: nothing that identifies the person is on the line.
+    const serialized = JSON.stringify(line)
+    expect(serialized).not.toContain('Victim@Example.com')
+    expect(serialized).not.toContain('victim@example.com')
+    expect(serialized).not.toContain('Victim Person')
+    expect(serialized).not.toContain('someone-else@example.com')
+  })
+
+  it('reports the type of every claim that did arrive, not only the absent ones', async () => {
+    const { logger, lines } = capturing()
+    const microsoft = providerOptions(credentials, logger)['microsoft'] as MicrosoftOptions
+
+    // A token that carries all four claims and still proves nothing: `'false'`/`false` are
+    // not affirmative, and neither list holds this address.
+    await expect(
+      microsoft.getUserInfo?.({
+        idToken: idToken({
+          oid: 'oid-2',
+          tid: CONSUMER_TENANT_ID,
+          iss: ISSUER,
+          email: 'victim@example.com',
+          email_verified: 'false',
+          xms_edov: false,
+          verified_primary_email: ['one@example.com', 'two@example.com'],
+          verified_secondary_email: 'three@example.com',
+        }),
+        accessToken: undefined,
+      }),
+    ).rejects.toMatchObject({ body: { code: 'email_not_verified' } })
+
+    expect(lines).toHaveLength(1)
+    expect(lines[0]?.['claimTypes']).toEqual({
+      email_verified: 'string',
+      xms_edov: 'boolean',
+      verified_primary_email: 'array(2)',
+      verified_secondary_email: 'string',
+    })
+    expect(lines[0]?.['hasEmail']).toBe(true)
+  })
+
+  it('writes nothing when the sign-in is accepted', async () => {
+    const { logger, lines } = capturing()
+    const microsoft = providerOptions(credentials, logger)['microsoft'] as MicrosoftOptions
+
+    const accepted = await microsoft.getUserInfo?.({
+      idToken: idToken({ oid: 'oid-3', email: 'ada@example.com', email_verified: true }),
+      accessToken: undefined,
+    })
+
+    expect(accepted?.user.email).toBe('ada@example.com')
+    expect(lines).toEqual([])
+  })
+
+  it('describes a bare token without reading a value out of it', () => {
+    // The shape is fixed, so a log query does not have to cope with missing fields.
+    expect(microsoftRefusalDetail({})).toEqual({
+      provider: 'microsoft',
+      claimNames: [],
+      tid: null,
+      iss: null,
+      claimTypes: {
+        email_verified: 'absent',
+        xms_edov: 'absent',
+        verified_primary_email: 'absent',
+        verified_secondary_email: 'absent',
+      },
+      emailInVerifiedPrimary: false,
+      emailInVerifiedSecondary: false,
+      hasEmail: false,
+    })
+    // A claim whose type is neither the boolean nor the list the rule expects still reports
+    // its shape rather than its value.
+    expect(microsoftClaimType(true)).toBe('boolean')
+    expect(microsoftClaimType([])).toBe('array(0)')
+    expect(microsoftClaimType(7)).toBe('number')
   })
 })
