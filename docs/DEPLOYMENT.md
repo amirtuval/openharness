@@ -384,6 +384,7 @@ Beyond them, every workflow reads these. **They are not set by the setup script.
 | `OAUTH_MICROSOFT_TENANT_ID_STAGING` / `_PRODUCTION` | repository | plan job, deploys                  | Microsoft tenant ID, used only with the client ID above.                                                                                                                                                                                       |
 | `TF_ALERT_EMAIL_STAGING` / `_PRODUCTION`            | repository | plan job, deploys                  | Address the monitoring alerts go to (#158). Empty creates no notification channel and no alert policies.                                                                                                                                       |
 | `TF_BILLING_ACCOUNT_ID`                             | repository | plan job, deploys                  | Billing account the budget is created on, as the bare ID (`gcloud billing accounts list`) — no `billingAccounts/` prefix, which the provider adds itself (#159). One account serves both projects. Unset leaves `enable_budget` off.           |
+| `TF_BUDGET_AMOUNT_STAGING` / `_PRODUCTION`          | repository | plan job, deploys                  | Monthly budget amount, **in the billing account's currency** — not USD: the account is ILS, and the Budgets API rejects a budget in any other currency with a 400 (#159). Unset leaves Terraform's default, `100`, in that same currency.      |
 
 All of these are **repository-level** variables — no GitHub environment defines them — and every
 apply reads the same set, the deploys and the PR plan alike. That is deliberate: the plan job
@@ -408,11 +409,15 @@ over the suffixed copy; it exists so the zone name can live inside the environme
 plan job needs the repository-level one regardless.
 
 Everything else Terraform takes has a default (`infra/envs/*/variables.tf`), including the
-budget amount. The budget itself is on exactly while `TF_BILLING_ACCOUNT_ID` is set — every
-apply passes `-var enable_budget=true -var billing_account_id=<id>` when it is, and
+budget amount — `TF_BUDGET_AMOUNT_STAGING` / `_PRODUCTION` only overrides it, so an unset
+variable is the same apply as no variable at all. The budget itself is on exactly while
+`TF_BILLING_ACCOUNT_ID` is set — every apply passes
+`-var enable_budget=true -var billing_account_id=<id>` when it is, and
 `-var enable_budget=false` when it is not — so grant `roles/billing.costsManager` on the
 billing account **before** setting it
-([`infra/README.md`](../infra/README.md#manual-steps), step 4).
+([`infra/README.md`](../infra/README.md#manual-steps), step 4). The amount is denominated in
+the account's currency, and the workflows pass no currency code: the `budget` module leaves
+`currencyCode` out of the request and the Budgets API then uses the account's own (#159).
 
 ## CLI releases
 
