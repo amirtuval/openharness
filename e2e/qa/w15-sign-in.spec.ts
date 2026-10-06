@@ -59,6 +59,72 @@ test.describe('W15 sign-in', () => {
         }
       })
 
+      await test.step('the card is its own padding above the first button (#187)', async () => {
+        // The sign-in card is the only card in the app with a bare `CardContent` at the top —
+        // every other one renders a `CardHeader` first, which is what the shadcn registry's
+        // padding is designed around — and the `pt-6` that used to sit on that content put a
+        // *second* 24px above the first button: 49px from the card's top border against 25px
+        // below the last one. Measured against the card's own computed padding, so the check is
+        // the relationship and not a number copied out of `card.tsx`.
+        //
+        // On this stack the dev form always follows the providers (the QA stack runs with
+        // `OPENHARNESS_DEV_LOGIN=1`), so "below the last button" is not the card's bottom
+        // border here; `sign-in-screen.test.tsx` pins that side (`top === bottom`), off the
+        // same arithmetic, and this measures the real pixels of the top one.
+        const anonymous = await context.request.get('/v1/auth-config')
+        const config = (await anonymous.json()) as { providers: string[]; dev_login: boolean }
+        const labels: Record<string, string> = {
+          google: 'Sign in with Google',
+          github: 'Sign in with GitHub',
+          microsoft: 'Sign in with Microsoft',
+        }
+        test.skip(
+          config.providers.length === 0,
+          'the stack was started without provider client ids',
+        )
+
+        const card = page.locator('[data-slot="card"]').first()
+        const firstButton = page.getByRole('button', {
+          name: labels[config.providers[0] ?? ''] ?? '',
+        })
+        const lastButton = page.getByRole('button', {
+          name: labels[config.providers[config.providers.length - 1] ?? ''] ?? '',
+        })
+
+        // Both viewports the issue was measured at: the widths do not enter the arithmetic
+        // (the card is a fixed-width column inside a centred flex), and this proves it.
+        for (const viewport of [
+          { width: 1280, height: 800 },
+          { width: 390, height: 844 },
+        ]) {
+          await page.setViewportSize(viewport)
+          const cardBox = await card.boundingBox()
+          const firstBox = await firstButton.boundingBox()
+          const lastBox = await lastButton.boundingBox()
+          expect(cardBox, 'the card is on screen').not.toBeNull()
+          expect(firstBox, 'the first provider button is on screen').not.toBeNull()
+          expect(lastBox, 'the last provider button is on screen').not.toBeNull()
+          if (cardBox === null || firstBox === null || lastBox === null) {
+            return
+          }
+
+          const style = await card.evaluate((element) => {
+            const computed = getComputedStyle(element)
+            return {
+              paddingTop: Number.parseFloat(computed.paddingTop),
+              borderTop: Number.parseFloat(computed.borderTopWidth),
+            }
+          })
+
+          const above = firstBox.y - cardBox.y - style.borderTop
+          expect(
+            Math.abs(above - style.paddingTop),
+            `at ${String(viewport.width)}x${String(viewport.height)}: the first button sits ${String(above)}px below the card's top border, and the card's own padding is ${String(style.paddingTop)}px`,
+          ).toBeLessThanOrEqual(1)
+        }
+        await page.setViewportSize({ width: 1280, height: 800 })
+      })
+
       await test.step('a wrong password is refused, without signing anybody in', async () => {
         await page.getByLabel('Username').fill('dev@localhost')
         await page.getByLabel('Password').fill('not-the-password')
