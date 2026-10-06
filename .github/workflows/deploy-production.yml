@@ -90,6 +90,21 @@ jobs:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_DEPLOY_SA }}
 
+      # Every cluster client below — the rollout wait, and the diagnostics step when an apply
+      # fails — talks to the cluster through the `gke-gcloud-auth-plugin` exec credential that
+      # `gcloud container clusters get-credentials` writes into the kubeconfig. Without the
+      # plugin each of them dies with
+      # `getting credentials: exec: executable gke-gcloud-auth-plugin not found` (#159). The
+      # gcloud that ubuntu-latest ships is the apt build and cannot
+      # `gcloud components install` into itself, so the setup-gcloud action installs a Cloud
+      # SDK that can and leaves the plugin on PATH for the rest of the job. (`get-credentials`
+      # itself needs no plugin — it only writes the kubeconfig; the plugin is what `kubectl`
+      # and `helm` run.) The Terraform helm and kubernetes providers are unaffected: they
+      # authenticate with the google_client_config token, not this plugin.
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: 'gke-gcloud-auth-plugin'
+
       # The gate. Production deploys an image someone else built, and this is where that is
       # proved: `roles/artifactregistry.reader` on the staging project is the only reason
       # deploy@openharness-510710 can run this command at all.

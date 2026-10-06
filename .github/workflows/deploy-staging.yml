@@ -109,6 +109,21 @@ jobs:
           # only outputs `access_token` when asked for one.
           token_format: access_token
 
+      # Every cluster client below — the rollout wait, and the diagnostics step when an apply
+      # fails — talks to the cluster through the `gke-gcloud-auth-plugin` exec credential that
+      # `gcloud container clusters get-credentials` writes into the kubeconfig. Without the
+      # plugin each of them dies with
+      # `getting credentials: exec: executable gke-gcloud-auth-plugin not found` (#159). The
+      # gcloud that ubuntu-latest ships is the apt build and cannot
+      # `gcloud components install` into itself, so the setup-gcloud action installs a Cloud
+      # SDK that can and leaves the plugin on PATH for the rest of the job. (`get-credentials`
+      # itself needs no plugin — it only writes the kubeconfig; the plugin is what `kubectl`
+      # and `helm` run.) The Terraform helm and kubernetes providers are unaffected: they
+      # authenticate with the google_client_config token, not this plugin.
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: 'gke-gcloud-auth-plugin'
+
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
