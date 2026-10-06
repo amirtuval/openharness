@@ -38,6 +38,27 @@ resource "helm_release" "app" {
   chart            = local.chart_path
   timeout          = var.helm_timeout
 
+  # Self-cleaning release (#159). Without these two a rollout that never becomes
+  # ready leaves a *failed* Helm release in the cluster while Terraform records
+  # nothing, because a failed apply writes no state — and every retry then dies
+  # with "cannot re-use a name that is still in use" until someone uninstalls the
+  # release by hand. That is exactly how the first staging deploy (wave 5, #159)
+  # ended.
+  #
+  #   atomic          a failed *install* is uninstalled and a failed *upgrade* is
+  #                   rolled back to the last good revision. It also sets `wait`,
+  #                   so the release is not reported created until the pods are
+  #                   ready (and `timeout` below is how long that is allowed to
+  #                   take).
+  #   cleanup_on_fail delete the resources the failed attempt created, so the
+  #                   rollback leaves no half-applied objects behind.
+  #
+  # Both are top-level boolean arguments in the pinned provider (hashicorp/helm
+  # 3.3.0 — infra/envs/*/.terraform.lock.hcl), not blocks; v2 spells them the same
+  # way, so there is no syntax change to make here.
+  atomic          = true
+  cleanup_on_fail = true
+
   # env and secrets go in as one YAML document, not as `set` entries: `secrets`
   # is a list of objects, which `set` cannot express.
   values = [yamlencode(local.values)]

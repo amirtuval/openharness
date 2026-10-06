@@ -120,7 +120,7 @@ variable "chart_path" {
 }
 
 variable "helm_timeout" {
-  description = "Seconds helm_release waits for the release to become ready."
+  description = "Seconds helm_release waits for the release to become ready before it gives up and (with atomic = true) rolls the release back. 600 rather than the old 900 (#159): a rollout that has not converged in ten minutes is broken, and every second past that is a second the failed release is held open. A cold environment is slower — a first deploy's nodes still have to pull the image before the pods can start — so raise it with -var helm_timeout=<seconds> if one needs longer."
   type        = number
-  default     = 900
+  default     = 600
 }
