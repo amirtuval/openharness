@@ -154,11 +154,39 @@ jobs:
           # after the first production deploy and re-run this workflow to turn the grant on:
           # docs/DEPLOYMENT.md, "The first deploy".
           PRODUCTION_NODE_SA: ${{ vars.TF_PRODUCTION_NODE_SA }}
+          # The sign-in providers and the alert address (#159). Repository-level variables with
+          # an environment suffix — one naming scheme for the deploys and the PR plan, which
+          # runs outside any GitHub environment and so can only read repository-level ones.
+          # An unset variable still reaches Terraform, as its own default: the -var below always
+          # passes a value, and "" is the default of each of these.
+          GOOGLE_CLIENT_ID: ${{ vars.OAUTH_GOOGLE_CLIENT_ID_STAGING }}
+          GITHUB_CLIENT_ID: ${{ vars.OAUTH_GITHUB_CLIENT_ID_STAGING }}
+          MICROSOFT_CLIENT_ID: ${{ vars.OAUTH_MICROSOFT_CLIENT_ID_STAGING }}
+          MICROSOFT_TENANT_ID: ${{ vars.OAUTH_MICROSOFT_TENANT_ID_STAGING }}
+          ALERT_EMAIL: ${{ vars.TF_ALERT_EMAIL_STAGING }}
+          # One billing account for both projects, so this one carries no environment suffix.
+          BILLING_ACCOUNT_ID: ${{ vars.TF_BILLING_ACCOUNT_ID }}
         run: |
           set -euo pipefail
-          terraform apply -auto-approve -input=false -no-color -lock-timeout=10m \
-            -var "image_tag=$IMAGE_TAG" \
-            -var "production_node_service_account=${PRODUCTION_NODE_SA:-}" \
+          args=(
+            -auto-approve -input=false -no-color -lock-timeout=10m
+            -var "image_tag=$IMAGE_TAG"
+            -var "production_node_service_account=${PRODUCTION_NODE_SA:-}"
+            -var "google_client_id=${GOOGLE_CLIENT_ID:-}"
+            -var "github_client_id=${GITHUB_CLIENT_ID:-}"
+            -var "microsoft_client_id=${MICROSOFT_CLIENT_ID:-}"
+            -var "microsoft_tenant_id=${MICROSOFT_TENANT_ID:-}"
+            -var "alert_email=${ALERT_EMAIL:-}"
+          )
+          # The budget is off unless there is a billing account to put it on — and the account
+          # needs roles/billing.costsManager, granted by hand (infra/README.md, "Manual steps").
+          # enable_budget is passed either way so the value applied is the one the plan showed.
+          if [[ -n "${BILLING_ACCOUNT_ID:-}" ]]; then
+            args+=(-var "enable_budget=true" -var "billing_account_id=$BILLING_ACCOUNT_ID")
+          else
+            args+=(-var "enable_budget=false")
+          fi
+          terraform apply "${args[@]}" \
             -target=google_project_service.services \
             -target=module.network \
             -target=module.gke \
@@ -214,11 +242,33 @@ jobs:
           # Same value as the targeted apply above; on a first deploy the first stage already
           # granted it, and this apply is the one that adds it on every re-run after that.
           PRODUCTION_NODE_SA: ${{ vars.TF_PRODUCTION_NODE_SA }}
+          # Same values as the targeted apply above — every apply reads the same inputs, so a
+          # re-deploy cannot drift from the first one (#159).
+          GOOGLE_CLIENT_ID: ${{ vars.OAUTH_GOOGLE_CLIENT_ID_STAGING }}
+          GITHUB_CLIENT_ID: ${{ vars.OAUTH_GITHUB_CLIENT_ID_STAGING }}
+          MICROSOFT_CLIENT_ID: ${{ vars.OAUTH_MICROSOFT_CLIENT_ID_STAGING }}
+          MICROSOFT_TENANT_ID: ${{ vars.OAUTH_MICROSOFT_TENANT_ID_STAGING }}
+          ALERT_EMAIL: ${{ vars.TF_ALERT_EMAIL_STAGING }}
+          BILLING_ACCOUNT_ID: ${{ vars.TF_BILLING_ACCOUNT_ID }}
         run: |
           set -euo pipefail
-          terraform apply -auto-approve -input=false -no-color -lock-timeout=10m \
-            -var "image_tag=$IMAGE_TAG" \
+          args=(
+            -auto-approve -input=false -no-color -lock-timeout=10m
+            -var "image_tag=$IMAGE_TAG"
             -var "production_node_service_account=${PRODUCTION_NODE_SA:-}"
+            -var "google_client_id=${GOOGLE_CLIENT_ID:-}"
+            -var "github_client_id=${GITHUB_CLIENT_ID:-}"
+            -var "microsoft_client_id=${MICROSOFT_CLIENT_ID:-}"
+            -var "microsoft_tenant_id=${MICROSOFT_TENANT_ID:-}"
+            -var "alert_email=${ALERT_EMAIL:-}"
+          )
+          # As in the targeted apply: the budget is on only with a billing account.
+          if [[ -n "${BILLING_ACCOUNT_ID:-}" ]]; then
+            args+=(-var "enable_budget=true" -var "billing_account_id=$BILLING_ACCOUNT_ID")
+          else
+            args+=(-var "enable_budget=false")
+          fi
+          terraform apply "${args[@]}"
 
       # What a failed apply left behind (#159). The release is installed `atomic = true`
       # (infra/modules/app/main.tf), so a rollout that never became ready has **already been

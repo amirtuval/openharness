@@ -159,10 +159,6 @@ module "secrets" {
   db_user     = module.cloudsql.db_user
   db_password = module.cloudsql.db_password
 
-  google_client_id    = var.google_client_id
-  github_client_id    = var.github_client_id
-  microsoft_client_id = var.microsoft_client_id
-
   deletion_protection = var.deletion_protection
 
   depends_on = [google_project_service.services]

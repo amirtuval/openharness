@@ -40,7 +40,8 @@ Terraform. Prerequisites, usage, the role list, how to run the test and how to u
 
 The billing budget is the one grant this cannot carry: budgets live on the billing
 account, so `roles/billing.costsManager` on the billing account is granted separately, by
-hand — no project-level role reaches it.
+hand — no project-level role reaches it. Grant it before setting `TF_BILLING_ACCOUNT_ID`, which
+is what turns the budget on ([Variables the workflows read](#variables-the-workflows-read)).
 
 ## Infrastructure
 
@@ -69,7 +70,7 @@ from `gcloud dns managed-zones list --project openharness-510710` — passed on 
 The four things Terraform cannot do alone — re-running the setup script after this change,
 finding the production zone name, adding the OAuth client secrets with
 `gcloud secrets versions add`, and granting the billing account `roles/billing.costsManager`
-before the budget module is enabled — are steps in
+before setting `TF_BILLING_ACCOUNT_ID` — are steps in
 [`infra/README.md`](../infra/README.md#manual-steps), which also carries the full variable
 reference and the resource → `deploy@` role mapping.
 
@@ -206,9 +207,12 @@ from staging's registry.
    variables the script cannot know: `TF_EXISTING_ZONE_NAME_PRODUCTION` and — after step 3
    below — `TF_STAGING_NAME_SERVERS`. See
    [Variables the workflows read](#variables-the-workflows-read).
-2. **Add the OAuth client secrets** you intend to use before they are turned on: a provider's
-   secret with no version blocks its pod from starting
-   ([`infra/README.md`](../infra/README.md#manual-steps), step 3).
+2. **Decide who signs in.** The first deploy creates all three provider secret containers —
+   `google-client-secret`, `github-client-secret`, `microsoft-client-secret` — empty, whatever
+   the client ID variables say (#159). A provider is therefore turned on _between_ deploys:
+   create the OAuth app, add its client secret, set its client ID variable, and re-run. The
+   sequence is [Turning on a sign-in provider](#turning-on-a-sign-in-provider) and
+   [`infra/README.md`](../infra/README.md#manual-steps), step 3.
 3. **Deploy staging** — merge to `main`, let CI pass, and `deploy-staging` runs. The first run
    is a _two-stage apply_: the `helm` and `kubernetes` providers are configured from the
    cluster endpoint, which does not exist on a first plan, so the workflow first applies
@@ -255,6 +259,44 @@ whether `tf-plan@` really can refresh every resource the plan walks. Everything 
 workflows do — building, pushing, applying, waiting for the rollout — is exercised on every
 deploy after it.
 
+### Turning on a sign-in provider
+
+A provider is off until its client ID is set. Its secret container, though, exists from the
+first deploy — all three are created empty, whatever the client ID variables say (#159), so
+there is somewhere to put the value _before_ the deploy that mounts it. Doing it the other way
+round is what used to be impossible: the deploy that turned a provider on was also the one that
+created its secret, and a secret with no version blocks the pod from starting, so that deploy
+created an empty secret, failed, and rolled itself back.
+
+1. **Create the OAuth app** with the provider. The callback URL is
+   `https://<host>/api/auth/callback/<provider>`, where the host is `staging.oharness.dev` or
+   `app.oharness.dev` and the provider is `google`, `github` or `microsoft` — so
+   `https://staging.oharness.dev/api/auth/callback/google`, for instance. `/api/auth` is Better
+   Auth's base path (`basePath` in `apps/server/src/auth.ts`) and the provider ids are the ones
+   that file enables.
+2. **Add the client secret** to the container Terraform created, filling in the provider and
+   the project (`openharness-dev` for staging, `openharness-510710` for production):
+
+   ```bash
+   printf %s "$SECRET" | gcloud secrets versions add google-client-secret \
+     --data-file=- --project openharness-dev
+   ```
+
+3. **Set the client ID variable** for the environment — and the tenant, for Microsoft, which is
+   required by that provider:
+
+   ```bash
+   gh variable set OAUTH_GOOGLE_CLIENT_ID_STAGING --body <client id>
+   gh variable set OAUTH_MICROSOFT_CLIENT_ID_STAGING --body <client id>
+   gh variable set OAUTH_MICROSOFT_TENANT_ID_STAGING --body <tenant id>
+   ```
+
+4. **Re-run the deploy** — dispatch `deploy-staging` by hand, or move the `production` tag.
+   The next apply passes the client ID, the app module mounts the secret, and the provider
+   appears on the sign-in page. Re-running is safe: the apply is idempotent and the build step
+   skips an image that is already in the registry
+   ([Re-running a staging deploy](#re-running-a-staging-deploy)).
+
 **A first deploy is slow, and the smoke test is capped.** Creating the cluster takes about ten
 minutes before the release is even rendered, and the Google-managed certificate for the domain
 only issues once DNS resolves to the load balancer — on a genuinely first deploy that can take
@@ -290,33 +332,46 @@ written into a workflow.
 
 Beyond them, every workflow reads these. **They are not set by the setup script.**
 
-| Variable                           | Scope                                          | Read by                            | What it is                                                                                                                                                                                                                                     |
-| ---------------------------------- | ---------------------------------------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `TF_EXISTING_ZONE_NAME_PRODUCTION` | repository                                     | plan job, `deploy-production`      | **Required for production.** Resource name of the existing `oharness.dev` zone, from `gcloud dns managed-zones list`.                                                                                                                          |
-| `TF_STAGING_NAME_SERVERS`          | repository                                     | plan job, `deploy-production`      | Staging's `terraform output -json name_servers`, printed by the first staging deploy. Unset (or `[]`) skips the delegation.                                                                                                                    |
-| `TF_PRODUCTION_NODE_SA`            | repository                                     | staging plan job, `deploy-staging` | Production's GKE node service account email, granted read on staging's registry. **Empty until production's first deploy has created the account** — setting it earlier names a member GCP rejects. See [The first deploy](#the-first-deploy). |
-| `GOOGLE_CLIENT_ID`                 | environment, and repo `_STAGING`/`_PRODUCTION` | plan job, deploys                  | Google OAuth client ID. Empty disables Google sign-in.                                                                                                                                                                                         |
-| `GITHUB_CLIENT_ID`                 | environment, and repo `_STAGING`/`_PRODUCTION` | plan job, deploys                  | GitHub OAuth client ID. Empty disables GitHub sign-in.                                                                                                                                                                                         |
-| `MICROSOFT_CLIENT_ID`              | environment, and repo `_STAGING`/`_PRODUCTION` | plan job, deploys                  | Microsoft OAuth client ID. Empty disables Microsoft sign-in.                                                                                                                                                                                   |
-| `MICROSOFT_TENANT_ID`              | environment, and repo `_STAGING`/`_PRODUCTION` | plan job, deploys                  | Microsoft tenant ID, used only with the client ID above.                                                                                                                                                                                       |
+| Variable                                            | Scope      | Read by                            | What it is                                                                                                                                                                                                                                     |
+| --------------------------------------------------- | ---------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TF_EXISTING_ZONE_NAME_PRODUCTION`                  | repository | plan job, `deploy-production`      | **Required for production.** Resource name of the existing `oharness.dev` zone, from `gcloud dns managed-zones list`.                                                                                                                          |
+| `TF_STAGING_NAME_SERVERS`                           | repository | plan job, `deploy-production`      | Staging's `terraform output -json name_servers`, printed by the first staging deploy. Unset (or `[]`) skips the delegation.                                                                                                                    |
+| `TF_PRODUCTION_NODE_SA`                             | repository | staging plan job, `deploy-staging` | Production's GKE node service account email, granted read on staging's registry. **Empty until production's first deploy has created the account** — setting it earlier names a member GCP rejects. See [The first deploy](#the-first-deploy). |
+| `OAUTH_GOOGLE_CLIENT_ID_STAGING` / `_PRODUCTION`    | repository | plan job, deploys                  | Google OAuth client ID. Empty disables Google sign-in.                                                                                                                                                                                         |
+| `OAUTH_GITHUB_CLIENT_ID_STAGING` / `_PRODUCTION`    | repository | plan job, deploys                  | GitHub OAuth client ID. Empty disables GitHub sign-in.                                                                                                                                                                                         |
+| `OAUTH_MICROSOFT_CLIENT_ID_STAGING` / `_PRODUCTION` | repository | plan job, deploys                  | Microsoft OAuth client ID. Empty disables Microsoft sign-in.                                                                                                                                                                                   |
+| `OAUTH_MICROSOFT_TENANT_ID_STAGING` / `_PRODUCTION` | repository | plan job, deploys                  | Microsoft tenant ID, used only with the client ID above.                                                                                                                                                                                       |
+| `TF_ALERT_EMAIL_STAGING` / `_PRODUCTION`            | repository | plan job, deploys                  | Address the monitoring alerts go to (#158). Empty creates no notification channel and no alert policies.                                                                                                                                       |
+| `TF_BILLING_ACCOUNT_ID`                             | repository | plan job, deploys                  | Billing account the budget is created on. One account serves both projects. Unset leaves `enable_budget` off.                                                                                                                                  |
 
-A deploy job runs inside its environment, so it reads the environment-scoped copy of an OAuth
-variable; the plan job runs outside any environment and reads the repository-level
-`_STAGING`/`_PRODUCTION` copy. If only one is set, the deploy jobs fall back to the
-repository-level one — so setting the suffixed copy is enough, and the environment-scoped copy
-is there for the case where staging and production should differ per environment rather than
-per repository.
+All of these are **repository-level** variables — no GitHub environment defines them — and every
+apply reads the same set, the deploys and the PR plan alike. That is deliberate: the plan job
+runs outside any GitHub environment and so can only read repository-level variables, and a
+single naming scheme is what makes the plan the PR shows the plan of what the deploy will do.
+The `_STAGING` / `_PRODUCTION` suffix on most of them is an environment marker, not a scope;
+`TF_BILLING_ACCOUNT_ID` carries none because one billing account serves both projects. The OAuth
+names are not the Terraform variables' own (`google_client_id`, …) for one reason: GitHub
+rejects a configuration variable whose name starts with `GITHUB_`, so `github_client_id` cannot
+be spelled that way.
 
+These are also the values that cannot be derived — an OAuth client ID is the provider's, the
+zone name is whatever the maintainer created it as — so they are set by hand rather than
+written into a workflow.
+
+The six the setup script sets are the one place the environment-scoped copies are read: a
+deploy job runs _inside_ its environment, so `vars.GCP_PROJECT_ID`, `vars.GCP_WIF_PROVIDER` and
+`vars.GCP_DEPLOY_SA` resolve to the environment-scoped values the script wrote there, while the
+plan job reads the repository-level `_STAGING` / `_PRODUCTION` copies for the same values.
 `TF_EXISTING_ZONE_NAME` (environment `production`) is read the same way and takes precedence
 over the suffixed copy; it exists so the zone name can live inside the environment, but the
 plan job needs the repository-level one regardless.
 
 Everything else Terraform takes has a default (`infra/envs/*/variables.tf`), including the
-whole budget module, which stays **off**: turning it on needs `roles/billing.costsManager` on
-the billing account, which is a manual grant
-([`infra/README.md`](../infra/README.md#manual-steps), step 4). To enable it, apply by hand
-with `-var enable_budget=true -var billing_account_id=<id>` — the workflows deliberately do
-not carry it.
+budget amount. The budget itself is on exactly while `TF_BILLING_ACCOUNT_ID` is set — every
+apply passes `-var enable_budget=true -var billing_account_id=<id>` when it is, and
+`-var enable_budget=false` when it is not — so grant `roles/billing.costsManager` on the
+billing account **before** setting it
+([`infra/README.md`](../infra/README.md#manual-steps), step 4).
 
 ## CLI releases
 
@@ -396,7 +451,14 @@ nothing.
 
 `alert_email` is empty by default, and an empty value creates **no channel and no alert
 policies** — so the first apply of an environment succeeds before anyone has decided who is on
-call. Set it to turn alerting on:
+call. Set it to turn alerting on: the repository variable `TF_ALERT_EMAIL_STAGING` or
+`TF_ALERT_EMAIL_PRODUCTION`, which every deploy and every PR plan passes as `-var alert_email`:
+
+```bash
+gh variable set TF_ALERT_EMAIL_PRODUCTION --body oncall@example.com
+```
+
+From a laptop the Terraform variable is `alert_email`:
 
 ```bash
 terraform -chdir=infra/envs/production apply -var alert_email=oncall@example.com -var image_tag=<sha>

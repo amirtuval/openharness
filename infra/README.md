@@ -38,8 +38,8 @@ by hand. Terraform never grants a role to either account and never touches their
   workflow does this through Workload Identity; from a laptop,
   `gcloud auth application-default login` as a user who holds the same roles works too.
 - The setup script has run for both projects, so the state buckets exist.
-- `roles/billing.costsManager` on the billing account, **only** if `enable_budget` is turned
-  on (see [Manual steps](#manual-steps)).
+- `roles/billing.costsManager` on the billing account, **only** if the budget is turned on —
+  that is, only if `TF_BILLING_ACCOUNT_ID` is set (see [Manual steps](#manual-steps)).
 
 ## Apply order
 
@@ -238,24 +238,35 @@ Put the name in the repository variable `TF_EXISTING_ZONE_NAME_PRODUCTION`
 where `deploy-production.yml` and the PR plan job read it from — it cannot be derived, so it
 cannot be committed.
 
-**3. Add the OAuth client secrets.** Terraform creates `google-client-secret`,
-`github-client-secret` and `microsoft-client-secret` — but only for a provider whose client
-ID variable is non-empty — with no version, because the value is the provider's and not
-Terraform's. Fill each one in with:
+**3. Turn on a sign-in provider.** Terraform creates `google-client-secret`,
+`github-client-secret` and `microsoft-client-secret` with no version, because the value is the
+provider's and not Terraform's. All three containers are created **unconditionally** (#159) —
+whatever the client ID variables say — so there is somewhere to put the version _before_ the
+apply that mounts it. Turning a provider on is:
 
-```bash
-printf '%s' '<the client secret>' | gcloud secrets versions add google-client-secret \
-  --project=openharness-dev --data-file=-
-```
+1. Create the OAuth app with the provider, with the callback URL
+   `https://<host>/api/auth/callback/<google|github|microsoft>` (`/api/auth` is Better Auth's
+   base path — `basePath` in `apps/server/src/auth.ts`).
+2. Fill the container in with the provider's secret:
 
-Do this _before_ the apply that first sets that provider's client ID: the chart mounts each
-secret as a file, and a secret with no version blocks the pod from starting. Client IDs go in
-as variables (`google_client_id`, `github_client_id`, `microsoft_client_id`,
-`microsoft_tenant_id`); they are not secrets.
+   ```bash
+   printf '%s' '<the client secret>' | gcloud secrets versions add google-client-secret \
+     --project=openharness-dev --data-file=-
+   ```
 
-**4. The billing grant, for the budget.** The `budget` module is off by default
-(`enable_budget = false`) because budgets live on the billing account and `deploy@` holds no
-rights there. Grant it, then turn the module on:
+3. Set the client ID — and, for Microsoft, the tenant — as a GitHub variable, e.g.
+   `gh variable set OAUTH_GOOGLE_CLIENT_ID_STAGING --body <client id>`.
+4. Re-run the deploy. The app module mounts the secret once the client ID is set; a secret with
+   no version blocks the pod from starting, which is why steps 2 and 3 come in that order.
+
+Client IDs go in as variables (`google_client_id`, `github_client_id`, `microsoft_client_id`,
+`microsoft_tenant_id`); they are not secrets. The exact GitHub variable names, the full
+sequence and the callback URLs: [`docs/DEPLOYMENT.md`](../docs/DEPLOYMENT.md#turning-on-a-sign-in-provider).
+
+**4. The billing grant, for the budget.** The `budget` module is off until
+`TF_BILLING_ACCOUNT_ID` is set, because budgets live on the billing account and `deploy@` holds
+no rights there. Grant the role **first**, then set the variable — every deploy and PR plan then
+passes `-var enable_budget=true -var billing_account_id=<id>`:
 
 ```bash
 gcloud billing accounts list
@@ -263,6 +274,13 @@ gcloud billing accounts add-iam-policy-binding <BILLING_ACCOUNT_ID> \
   --member="serviceAccount:deploy@openharness-510710.iam.gserviceaccount.com" \
   --role="roles/billing.costsManager"
 
+gh variable set TF_BILLING_ACCOUNT_ID --body <BILLING_ACCOUNT_ID>
+```
+
+One billing account serves both projects. Setting the variable without the grant fails the
+apply. From a laptop the same thing is a `-var`:
+
+```bash
 terraform apply -var enable_budget=true -var billing_account_id=<BILLING_ACCOUNT_ID>
 ```
 
@@ -275,28 +293,28 @@ Every environment input, its default, and where a non-default value comes from. 
 
 ### Both environments
 
-| Variable                            | Default                                                         | Where the value comes from                                                                  |
-| ----------------------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| `project_id`                        | `openharness-dev` / `openharness-510710`                        | The project's **ID**; staging and production differ. Never the display name.                |
-| `region`                            | `us-central1`                                                   | Fixed by the epic.                                                                          |
-| `image_repository`                  | `us-central1-docker.pkg.dev/openharness-dev/openharness/server` | The registry in `openharness-dev`; production pulls from it.                                |
-| `image_tag`                         | _(none — required)_                                             | `-var image_tag=<git sha>`, passed by the deploy workflow (#155).                           |
-| `host`                              | `staging.oharness.dev` / `app.oharness.dev`                     | The environment's public hostname.                                                          |
-| `app_service_account_id`            | `openharness-app`                                               | Account ID of the app's GCP service account.                                                |
-| `google_client_id`                  | `""`                                                            | GitHub variable `GOOGLE_CLIENT_ID`; also creates `google-client-secret`.                    |
-| `github_client_id`                  | `""`                                                            | GitHub variable `GITHUB_CLIENT_ID`; also creates `github-client-secret`.                    |
-| `microsoft_client_id`               | `""`                                                            | GitHub variable `MICROSOFT_CLIENT_ID`; also creates `microsoft-client-secret`.              |
-| `microsoft_tenant_id`               | `""`                                                            | GitHub variable `MICROSOFT_TENANT_ID`; passed to the app only when non-empty.               |
-| `db_tier`                           | `db-g1-small` / `db-custom-1-3840`                              | Cloud SQL tier: shared-core in staging, a small dedicated tier in production.               |
-| `db_availability_type`              | `ZONAL` / `ZONAL`                                               | Single zone in both. HA (`REGIONAL`) in production was deferred (#153).                     |
-| `db_backup_enabled`                 | `false` / `true`                                                | Automated backups.                                                                          |
-| `db_point_in_time_recovery_enabled` | `false` / `true`                                                | Point-in-time recovery.                                                                     |
-| `deletion_protection`               | `false` / `true`                                                | Blocks destroy of the cluster, the database and the secrets.                                |
-| `trace_sample_rate`                 | `0.1`                                                           | `OPENHARNESS_TRACE_SAMPLE_RATE` (#158): fraction of traces sent to Cloud Trace.             |
-| `alert_email`                       | `""`                                                            | Address the monitoring alerts go to (#158). Empty creates no channel and no alert policies. |
-| `enable_budget`                     | `false`                                                         | Turn on after the billing grant above.                                                      |
-| `billing_account_id`                | `""`                                                            | `gcloud billing accounts list`; only used when `enable_budget` is true.                     |
-| `budget_amount`                     | `100`                                                           | Monthly budget in USD.                                                                      |
+| Variable                            | Default                                                         | Where the value comes from                                                                                                                                      |
+| ----------------------------------- | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `project_id`                        | `openharness-dev` / `openharness-510710`                        | The project's **ID**; staging and production differ. Never the display name.                                                                                    |
+| `region`                            | `us-central1`                                                   | Fixed by the epic.                                                                                                                                              |
+| `image_repository`                  | `us-central1-docker.pkg.dev/openharness-dev/openharness/server` | The registry in `openharness-dev`; production pulls from it.                                                                                                    |
+| `image_tag`                         | _(none — required)_                                             | `-var image_tag=<git sha>`, passed by the deploy workflow (#155).                                                                                               |
+| `host`                              | `staging.oharness.dev` / `app.oharness.dev`                     | The environment's public hostname.                                                                                                                              |
+| `app_service_account_id`            | `openharness-app`                                               | Account ID of the app's GCP service account.                                                                                                                    |
+| `google_client_id`                  | `""`                                                            | GitHub variable `OAUTH_GOOGLE_CLIENT_ID_STAGING` / `_PRODUCTION`; empty disables Google sign-in. The `google-client-secret` container exists either way (#159). |
+| `github_client_id`                  | `""`                                                            | GitHub variable `OAUTH_GITHUB_CLIENT_ID_STAGING` / `_PRODUCTION`; empty disables GitHub sign-in.                                                                |
+| `microsoft_client_id`               | `""`                                                            | GitHub variable `OAUTH_MICROSOFT_CLIENT_ID_STAGING` / `_PRODUCTION`; empty disables Microsoft sign-in.                                                          |
+| `microsoft_tenant_id`               | `""`                                                            | GitHub variable `OAUTH_MICROSOFT_TENANT_ID_STAGING` / `_PRODUCTION`; passed to the app only when non-empty.                                                     |
+| `db_tier`                           | `db-g1-small` / `db-custom-1-3840`                              | Cloud SQL tier: shared-core in staging, a small dedicated tier in production.                                                                                   |
+| `db_availability_type`              | `ZONAL` / `ZONAL`                                               | Single zone in both. HA (`REGIONAL`) in production was deferred (#153).                                                                                         |
+| `db_backup_enabled`                 | `false` / `true`                                                | Automated backups.                                                                                                                                              |
+| `db_point_in_time_recovery_enabled` | `false` / `true`                                                | Point-in-time recovery.                                                                                                                                         |
+| `deletion_protection`               | `false` / `true`                                                | Blocks destroy of the cluster, the database and the secrets.                                                                                                    |
+| `trace_sample_rate`                 | `0.1`                                                           | `OPENHARNESS_TRACE_SAMPLE_RATE` (#158): fraction of traces sent to Cloud Trace.                                                                                 |
+| `alert_email`                       | `""`                                                            | GitHub variable `TF_ALERT_EMAIL_STAGING` / `_PRODUCTION`. Empty creates no channel and no alert policies (#158).                                                |
+| `enable_budget`                     | `false`                                                         | The deploy workflows pass `true` exactly when `TF_BILLING_ACCOUNT_ID` is set, `false` otherwise — turn it on with the billing grant above, never by hand.       |
+| `billing_account_id`                | `""`                                                            | GitHub variable `TF_BILLING_ACCOUNT_ID` (`gcloud billing accounts list`); one account for both projects, used only with `enable_budget`.                        |
+| `budget_amount`                     | `100`                                                           | Monthly budget in USD.                                                                                                                                          |
 
 ### Staging only
 
@@ -387,13 +405,19 @@ one variable — `-var db_availability_type=REGIONAL`, or change the default in
 
 ### Secrets
 
-| Secret                    | Created                           | Value                                                                                     |
-| ------------------------- | --------------------------------- | ----------------------------------------------------------------------------------------- |
-| `better-auth-secret`      | always, with a version            | `random_password`, 48 characters, no specials                                             |
-| `database-url`            | always, with a version            | `postgres://user:pass@<private ip>:5432/openharness?sslmode=require` — built by Terraform |
-| `google-client-secret`    | when `google_client_id` is set    | none; `gcloud secrets versions add` (manual step 3)                                       |
-| `github-client-secret`    | when `github_client_id` is set    | none; manual                                                                              |
-| `microsoft-client-secret` | when `microsoft_client_id` is set | none; manual                                                                              |
+| Secret                    | Created                | Value                                                                                     |
+| ------------------------- | ---------------------- | ----------------------------------------------------------------------------------------- |
+| `better-auth-secret`      | always, with a version | `random_password`, 48 characters, no specials                                             |
+| `database-url`            | always, with a version | `postgres://user:pass@<private ip>:5432/openharness?sslmode=require` — built by Terraform |
+| `google-client-secret`    | always, empty          | none; `gcloud secrets versions add` (manual step 3)                                       |
+| `github-client-secret`    | always, empty          | none; manual                                                                              |
+| `microsoft-client-secret` | always, empty          | none; manual                                                                              |
+
+All three provider containers are created whatever the client ID variables say (#159), and the
+app's service account is granted `roles/secretmanager.secretAccessor` on each of them. The chart
+mounts one only while that provider's client ID is set (`infra/modules/app/locals.tf`), so an
+empty container is inert — and it exists early enough for the version to be added before the
+provider is turned on.
 
 There is no `OPENHARNESS_SECRETS_KEY`: the vault's master key is the Cloud KMS key, and the
 app is told `OPENHARNESS_KEY_PROVIDER=gcp-kms`.
@@ -472,6 +496,11 @@ PR**: refreshing a `google_secret_manager_secret_version` reads the secret's pay
 (`secretmanager.versions.access`), which Viewer does not carry — Viewer stops at the secret's
 metadata. The plan job already reads those same values out of the state bucket, so this
 widens how it reads them, not what it can reach.
+
+An **empty** provider secret (#159) needs none of that: with no version there is no payload to
+read, so refreshing `google_secret_manager_secret` stays a metadata read that plain Viewer
+covers. The three versionless containers this adds therefore do not raise what `tf-plan@` has
+to hold — only the two generated secrets, which have versions, need the role at all.
 
 ## Checks
 
