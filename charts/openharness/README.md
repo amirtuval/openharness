@@ -2,8 +2,16 @@
 
 The openharness server on GKE: the API under `/v1` and the web app at `/`, from the one image
 `docker/Dockerfile` builds, behind Google's global external HTTPS load balancer with Cloud CDN
-(deployment epic [#148](https://github.com/amirtuval/openharness/issues/148), issue
-[#154](https://github.com/amirtuval/openharness/issues/154)).
+(deployment epic [#148](https://github.com/amirtuval/openharness/issues/148), issues
+[#154](https://github.com/amirtuval/openharness/issues/154) and
+[#159](https://github.com/amirtuval/openharness/issues/159)).
+
+The load balancer is a **GKE Gateway** (GatewayClass `gke-l7-global-external-managed`), not a
+`networking.k8s.io/v1` Ingress. The Ingress the chart used to render was never claimed: its
+`spec.ingressClassName: gce` names an `IngressClass` object, the cluster has none
+(`kubectl get ingressclass` → No resources found), and no forwarding rule or backend service
+was ever created. A GatewayClass is owned by the controller by name, so nothing has to be
+looked up.
 
 Terraform installs this chart with `helm_release` — **Terraform is the only thing that
 deploys** — and passes every environment-specific value in from its own variables. The chart
@@ -12,27 +20,43 @@ itself holds safe defaults for no environment in particular and renders on its o
 ```bash
 helm lint charts/openharness
 helm template openharness charts/openharness -n openharness \
-  -f charts/openharness/ci/staging-values.yaml | kubeconform -strict -summary -ignore-missing-schemas
+  -f charts/openharness/ci/staging-values.yaml \
+  | kubeconform -strict -summary -ignore-missing-schemas \
+      -schema-location default \
+      -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
 ```
+
+The second `-schema-location` is what gets the Gateway API and GKE policy objects _validated_
+rather than skipped: the CRDs-catalog has `gateway.networking.k8s.io/{gateway,httproute}_v1`,
+`networking.gke.io/{healthcheckpolicy,gcpbackendpolicy}_v1` and the `secrets-store.csi.x-k8s.io`
+`SecretProviderClass`, so every field name in this chart is checked against a real schema.
+`-ignore-missing-schemas` stays for `GCPHTTPFilter`, which the catalog does not carry yet.
 
 ## What it creates
 
-| object                    | why                                                                                                                                                                                                                  |
-| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Deployment`              | the server: non-root, read-only rootfs, no capabilities, `/health` liveness, `/ready` readiness, a startup probe that outlives migrations; plus the Cloud SQL Auth Proxy native sidecar when `cloudSqlProxy.enabled` |
-| `Service`                 | ClusterIP, with the NEG annotation (container-native load balancing) and the BackendConfig annotation                                                                                                                |
-| `ServiceAccount`          | `openharness`, annotated with the app GSA — the pod's Workload Identity                                                                                                                                              |
-| `Ingress`                 | class `gce`, the host, the global static IP, the managed certificate and the HTTP→HTTPS FrontendConfig                                                                                                               |
-| `ManagedCertificate`      | a Google-managed TLS certificate for the host (`networking.gke.io/v1`)                                                                                                                                               |
-| `FrontendConfig`          | redirects HTTP to HTTPS                                                                                                                                                                                              |
-| `BackendConfig`           | Cloud CDN (`USE_ORIGIN_HEADERS`), the `/ready` health check, `timeoutSec` for SSE, connection draining                                                                                                               |
-| `HorizontalPodAutoscaler` | CPU-based scale between `minReplicas` and `maxReplicas`                                                                                                                                                              |
-| `PodDisruptionBudget`     | `minAvailable: 1` — a drain or an upgrade never takes the last pod                                                                                                                                                   |
-| `SecretProviderClass`     | only when `secrets` is non-empty: the Secret Manager secrets the CSI volume mounts                                                                                                                                   |
+| object                      | why                                                                                                                                                                                                                  |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Deployment`                | the server: non-root, read-only rootfs, no capabilities, `/health` liveness, `/ready` readiness, a startup probe that outlives migrations; plus the Cloud SQL Auth Proxy native sidecar when `cloudSqlProxy.enabled` |
+| `Service`                   | ClusterIP, **no annotations** — the Gateway controller creates the standalone NEG itself and owns the annotation it uses for it                                                                                      |
+| `ServiceAccount`            | `openharness`, annotated with the app GSA — the pod's Workload Identity                                                                                                                                              |
+| `Gateway`                   | class `gke-l7-global-external-managed`, the `https` (443) and `http` (80) listeners, the global static IP (`spec.addresses`, `NamedAddress`) and the `networking.gke.io/certmap` annotation                          |
+| `HTTPRoute` (`openharness`) | everything on the `https` listener → the Service on port 3000, with the CDN `ExtensionRef` filter while the CDN is on                                                                                                |
+| `HTTPRoute` (`…-redirect`)  | the `http` listener: a `RequestRedirect` filter to `https`, 301 — the FrontendConfig's job                                                                                                                           |
+| `GCPHTTPFilter`             | Cloud CDN on the route, `cacheMode: USE_ORIGIN_HEADERS` (only while `gateway.cdn.enabled`)                                                                                                                           |
+| `HealthCheckPolicy`         | the backend service's health check: HTTP, port 3000, `/ready`                                                                                                                                                        |
+| `GCPBackendPolicy`          | `timeoutSec` for SSE, connection draining; no access logging                                                                                                                                                         |
+| `HorizontalPodAutoscaler`   | CPU-based scale between `minReplicas` and `maxReplicas`                                                                                                                                                              |
+| `PodDisruptionBudget`       | `minAvailable: 1` — a drain or an upgrade never takes the last pod                                                                                                                                                   |
+| `SecretProviderClass`       | only when `secrets` is non-empty: the Secret Manager secrets the CSI volume mounts                                                                                                                                   |
 
-With the default values — an empty `ingress.host` — the `Ingress` and `ManagedCertificate` are
-not rendered; with `secrets: []` the `SecretProviderClass`, the CSI volume and the volume mount
-are not rendered either.
+With the default values — an empty `gateway.host` — none of the six networking objects above is
+rendered; with `secrets: []` the `SecretProviderClass`, the CSI volume and the volume mount are
+not rendered either.
+
+TLS is **not** in this chart: the Gateway names a [Certificate Manager](https://docs.cloud.google.com/certificate-manager/docs/overview)
+certificate map, and `infra/modules/certs` creates the authorization, the certificate and the
+map. That is why there is no `spec.listeners[].tls` block — naming a map in the annotation _and_
+a `tls.certificateRefs` on one Gateway is an error GKE rejects.
 
 ## The chart ⇄ Terraform contract
 
@@ -43,37 +67,38 @@ Kubernetes service account is named `openharness`.
 
 ### Values
 
-| key                                          | (TF) | default        | what it does                                                                               |
-| -------------------------------------------- | :--: | -------------- | ------------------------------------------------------------------------------------------ |
-| `image.repository`                           |  ✔   | `""`           | the image, without a tag: `us-central1-docker.pkg.dev/<project>/openharness/server`        |
-| `image.tag`                                  |  ✔   | `""`           | the tag — a git sha, one image per commit, promoted by digest. **Required in practice**    |
-| `image.pullPolicy`                           |      | `IfNotPresent` | the tag is immutable per commit, so a node never needs to re-pull it                       |
-| `replicaCount`                               |      | `2`            | the pods the Deployment declares; the HPA owns the count when `autoscaling.enabled`        |
-| `autoscaling.enabled`                        |      | `true`         | render the HPA                                                                             |
-| `autoscaling.minReplicas`                    |      | `2`            | the floor                                                                                  |
-| `autoscaling.maxReplicas`                    |  ✔   | `4`            | the ceiling                                                                                |
-| `autoscaling.targetCPUUtilizationPercentage` |      | `70`           | scale on CPU, as a percentage of the **request** below                                     |
-| `resources.requests.cpu`                     |      | `250m`         | Autopilot schedules and bills on requests; 250m is Autopilot's floor for a container       |
-| `resources.requests.memory`                  |      | `512Mi`        | the other half of Autopilot's floor                                                        |
-| `resources.limits.memory`                    |      | `512Mi`        | equal to the request: a steady footprint, so a higher limit buys nothing                   |
-| `serviceAccount.name`                        |      | `openharness`  | the KSA the pods run as — and the name the Workload Identity binding uses                  |
-| `serviceAccount.gcpServiceAccount`           |  ✔   | `""`           | the app GSA's email → the `iam.gke.io/gcp-service-account` annotation                      |
-| `cloudSqlProxy.enabled`                      |  ✔   | `false`        | render the Cloud SQL Auth Proxy as a native sidecar in the pod                             |
-| `cloudSqlProxy.instanceConnectionName`       |  ✔   | `""`           | `<project>:<region>:<instance>` — the proxy's target. **Required when `enabled`**          |
-| `cloudSqlProxy.image.repository`             |      | the connector  | `gcr.io/cloud-sql-connectors/cloud-sql-proxy`                                              |
-| `cloudSqlProxy.image.tag`                    |      | `2.26.0`       | pinned to a release, never `latest`                                                        |
-| `cloudSqlProxy.port`                         |      | `5432`         | the loopback port the proxy listens on, and the port in `database_url`                     |
-| `cloudSqlProxy.privateIp`                    |      | `true`         | pass `--private-ip`: the instance has no public address                                    |
-| `cloudSqlProxy.resources`                    |      | `100m`/`128Mi` | requests for the forwarder; Autopilot rounds them up to its container floor                |
-| `ingress.host`                               |  ✔   | `""`           | the serving host. Empty ⇒ no Ingress, no ManagedCertificate                                |
-| `ingress.staticIpName`                       |  ✔   | `""`           | the `google_compute_global_address` name → `kubernetes.io/ingress.global-static-ip-name`   |
-| `cdn.enabled`                                |      | `true`         | Cloud CDN on the backend service, `cacheMode: USE_ORIGIN_HEADERS`                          |
-| `backend.timeoutSec`                         |      | `3600`         | the load balancer's request timeout — long, because SSE streams live for a turn            |
-| `backend.drainingTimeoutSec`                 |      | `30`           | connection draining; at least the server's `OPENHARNESS_DRAIN_TIMEOUT_MS`                  |
-| `terminationGracePeriodSeconds`              |      | `60`           | longer than the drain timeout and the connection draining, so shutdown finishes cleanly    |
-| `gcpProject`                                 |  ✔   | `""`           | the GCP project in each Secret Manager `resourceName`; unused when `secrets` is empty      |
-| `env`                                        |  ✔   | `{}`           | plain, non-secret env vars, name → string                                                  |
-| `secrets`                                    |  ✔   | `[]`           | `{ env: NAME, secret: <id> }` — Secret Manager secrets, mounted and read via `<NAME>_FILE` |
+| key                                          | (TF) | default        | what it does                                                                                 |
+| -------------------------------------------- | :--: | -------------- | -------------------------------------------------------------------------------------------- |
+| `image.repository`                           |  ✔   | `""`           | the image, without a tag: `us-central1-docker.pkg.dev/<project>/openharness/server`          |
+| `image.tag`                                  |  ✔   | `""`           | the tag — a git sha, one image per commit, promoted by digest. **Required in practice**      |
+| `image.pullPolicy`                           |      | `IfNotPresent` | the tag is immutable per commit, so a node never needs to re-pull it                         |
+| `replicaCount`                               |      | `2`            | the pods the Deployment declares; the HPA owns the count when `autoscaling.enabled`          |
+| `autoscaling.enabled`                        |      | `true`         | render the HPA                                                                               |
+| `autoscaling.minReplicas`                    |      | `2`            | the floor                                                                                    |
+| `autoscaling.maxReplicas`                    |  ✔   | `4`            | the ceiling                                                                                  |
+| `autoscaling.targetCPUUtilizationPercentage` |      | `70`           | scale on CPU, as a percentage of the **request** below                                       |
+| `resources.requests.cpu`                     |      | `250m`         | Autopilot schedules and bills on requests; 250m is Autopilot's floor for a container         |
+| `resources.requests.memory`                  |      | `512Mi`        | the other half of Autopilot's floor                                                          |
+| `resources.limits.memory`                    |      | `512Mi`        | equal to the request: a steady footprint, so a higher limit buys nothing                     |
+| `serviceAccount.name`                        |      | `openharness`  | the KSA the pods run as — and the name the Workload Identity binding uses                    |
+| `serviceAccount.gcpServiceAccount`           |  ✔   | `""`           | the app GSA's email → the `iam.gke.io/gcp-service-account` annotation                        |
+| `cloudSqlProxy.enabled`                      |  ✔   | `false`        | render the Cloud SQL Auth Proxy as a native sidecar in the pod                               |
+| `cloudSqlProxy.instanceConnectionName`       |  ✔   | `""`           | `<project>:<region>:<instance>` — the proxy's target. **Required when `enabled`**            |
+| `cloudSqlProxy.image.repository`             |      | the connector  | `gcr.io/cloud-sql-connectors/cloud-sql-proxy`                                                |
+| `cloudSqlProxy.image.tag`                    |      | `2.26.0`       | pinned to a release, never `latest`                                                          |
+| `cloudSqlProxy.port`                         |      | `5432`         | the loopback port the proxy listens on, and the port in `database_url`                       |
+| `cloudSqlProxy.privateIp`                    |      | `true`         | pass `--private-ip`: the instance has no public address                                      |
+| `cloudSqlProxy.resources`                    |      | `100m`/`128Mi` | requests for the forwarder; Autopilot rounds them up to its container floor                  |
+| `gateway.host`                               |  ✔   | `""`           | the serving host. Empty ⇒ none of the Gateway objects is rendered                            |
+| `gateway.staticIpName`                       |  ✔   | `""`           | the `google_compute_global_address` name → the Gateway's `spec.addresses` (`NamedAddress`)   |
+| `gateway.certificateMapName`                 |  ✔   | `""`           | the Certificate Manager map → `networking.gke.io/certmap` on the Gateway                     |
+| `gateway.cdn.enabled`                        |      | `true`         | render the `GCPHTTPFilter` and attach it to the HTTPS route, `cacheMode: USE_ORIGIN_HEADERS` |
+| `backend.timeoutSec`                         |      | `3600`         | the load balancer's request timeout — long, because SSE streams live for a turn              |
+| `backend.drainingTimeoutSec`                 |      | `30`           | connection draining; at least the server's `OPENHARNESS_DRAIN_TIMEOUT_MS`                    |
+| `terminationGracePeriodSeconds`              |      | `60`           | longer than the drain timeout and the connection draining, so shutdown finishes cleanly      |
+| `gcpProject`                                 |  ✔   | `""`           | the GCP project in each Secret Manager `resourceName`; unused when `secrets` is empty        |
+| `env`                                        |  ✔   | `{}`           | plain, non-secret env vars, name → string                                                    |
+| `secrets`                                    |  ✔   | `[]`           | `{ env: NAME, secret: <id> }` — Secret Manager secrets, mounted and read via `<NAME>_FILE`   |
 
 `helm lint` renders an extra pass for `ci/staging-values.yaml`, and the CI job renders it
 before `kubeconform` validates it, so the examples below are checked on every change to
@@ -83,16 +108,16 @@ before `kubeconform` validates it, so the examples below are checked on every ch
 
 Terraform passes, per environment:
 
-| variable                         | value                                                            |
-| -------------------------------- | ---------------------------------------------------------------- |
-| `BETTER_AUTH_URL`                | `https://<ingress.host>`                                         |
-| `OPENHARNESS_TRUSTED_PROXY_HOPS` | `1` — GCLB appends one entry to `x-forwarded-for` (#151)         |
-| `OPENHARNESS_KEY_PROVIDER`       | `gcp-kms` — Cloud KMS wraps the vault's keys (#150)              |
-| `OPENHARNESS_KMS_KEY`            | the `cryptoKeys/…` resource name (a resource name, not a secret) |
-| `OPENHARNESS_LOG_FORMAT`         | `json` — Cloud Logging reads the server's stdout as JSON (#158)  |
-| `OPENHARNESS_TRACING`            | `cloud-trace` — spans go to Cloud Trace (#158)                   |
-| `OPENHARNESS_TRACE_SAMPLE_RATE`  | `0.1` — the fraction of traces kept (#158)                       |
-| a provider's `*_CLIENT_ID`       | only when that provider is set for the environment               |
+| variable                         | value                                                                 |
+| -------------------------------- | --------------------------------------------------------------------- |
+| `BETTER_AUTH_URL`                | `https://<gateway.host>`                                              |
+| `OPENHARNESS_TRUSTED_PROXY_HOPS` | `1` — the load balancer appends one entry to `x-forwarded-for` (#151) |
+| `OPENHARNESS_KEY_PROVIDER`       | `gcp-kms` — Cloud KMS wraps the vault's keys (#150)                   |
+| `OPENHARNESS_KMS_KEY`            | the `cryptoKeys/…` resource name (a resource name, not a secret)      |
+| `OPENHARNESS_LOG_FORMAT`         | `json` — Cloud Logging reads the server's stdout as JSON (#158)       |
+| `OPENHARNESS_TRACING`            | `cloud-trace` — spans go to Cloud Trace (#158)                        |
+| `OPENHARNESS_TRACE_SAMPLE_RATE`  | `0.1` — the fraction of traces kept (#158)                            |
+| a provider's `*_CLIENT_ID`       | only when that provider is set for the environment                    |
 
 The chart also sets `PORT=3000`, `TMPDIR=/tmp` and `HOME=/tmp` itself: the container's port,
 and where the two writable paths point on a read-only root filesystem. `env` is for the app's
@@ -166,16 +191,32 @@ environments.
 
 ### Probes and health checks
 
-| where                | path      | what it means                                                                |
-| -------------------- | --------- | ---------------------------------------------------------------------------- |
-| `livenessProbe`      | `/health` | the process is alive — never touches the database                            |
-| `readinessProbe`     | `/ready`  | 503 while the store is down or the pod is draining (#151)                    |
-| `startupProbe`       | `/health` | generous (5s × 60), so a first boot's migrations are not killed as unhealthy |
-| BackendConfig health | `/ready`  | the load balancer and the NEG follow readiness, so a draining pod leaves     |
+| where               | path      | what it means                                                                                                                                            |
+| ------------------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `livenessProbe`     | `/health` | the process is alive — never touches the database                                                                                                        |
+| `readinessProbe`    | `/ready`  | 503 while the store is down or the pod is draining (#151)                                                                                                |
+| `startupProbe`      | `/health` | generous (5s × 60), so a first boot's migrations are not killed as unhealthy                                                                             |
+| `HealthCheckPolicy` | `/ready`  | GKE does **not** infer the backend service's health check from the readiness probe, so the policy names it explicitly; a draining pod leaves the backend |
 
 `terminationGracePeriodSeconds` must stay longer than the server's drain timeout
 (`OPENHARNESS_DRAIN_TIMEOUT_MS`, 5s by default) and than `backend.drainingTimeoutSec`; the
 defaults are 60 > 30 > 5.
+
+### The CDN (`gateway.cdn`)
+
+`GCPHTTPFilter` is GKE's Cloud CDN extension for a Gateway, attached to a route the standard
+Gateway API way — an `ExtensionRef` in the rule's filters, and one filter at most per path rule.
+It requires **GKE ≥ 1.35.2-gke.1751000**; the cluster is 1.35.8-gke.
+
+`cacheMode: USE_ORIGIN_HEADERS` is the mode the old `BackendConfig` asked for, and the reason
+the server's per-route `Cache-Control` is a guarantee rather than a hint: in this mode the CDN
+caches exactly what the origin says, and a response carrying `Cache-Control: no-store` — which
+is `index.html`, `/v1/*`, `/api/auth/*`, `/health`, `/ready`, `/device` and **every** non-2xx —
+is never stored. Only `FORCE_CACHE_ALL`, which this filter does not ask for, overrides that.
+
+The CDN is inline on the same hostname: there is no separate CDN domain and the Vite base stays
+`/`. Turning `gateway.cdn.enabled` off renders no `GCPHTTPFilter` and no filter on the route —
+the load balancer then serves straight from the pods.
 
 ## Security
 

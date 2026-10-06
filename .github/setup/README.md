@@ -101,7 +101,7 @@ Per project, in `us-central1` except where noted:
 | Workload Identity  | pool `github` (global)                                                                                                                                                                                                                                 |
 | OIDC provider      | `github`, issuer `https://token.actions.githubusercontent.com`, attribute condition `assertion.repository == 'amirtuval/openharness'`; the mapping exposes `attribute.repository`, `attribute.environment`, `attribute.ref` and `attribute.event_name` |
 | Service account    | `deploy@<project>` — Terraform apply, the least-privilege role list of [Deploy roles](#deploy-roles-least-privilege)                                                                                                                                   |
-| Service account    | `tf-plan@<project>` — `terraform plan` on PRs, `roles/viewer` + `roles/iam.securityReviewer` + `roles/secretmanager.secretAccessor`, and `roles/storage.objectAdmin` on the state bucket only                                                          |
+| Service account    | `tf-plan@<project>` — `terraform plan` on PRs: `roles/viewer` + `roles/iam.securityReviewer` + `roles/secretmanager.secretAccessor` + `roles/certificatemanager.viewer`, and `roles/storage.objectAdmin` on the state bucket only                      |
 | Terraform state    | bucket `gs://<project>-tfstate` with versioning, uniform bucket-level access and public access prevention                                                                                                                                              |
 | GitHub environment | `staging` or `production`, with the variables below                                                                                                                                                                                                    |
 
@@ -167,6 +167,7 @@ by the maintainer; a re-run of this script does not create or touch them.
 | `roles/secretmanager.admin`             | secrets, versions, and IAM on secrets                                                                                  |
 | `roles/cloudkms.admin`                  | the key ring, key, and IAM on the key (no encrypt/decrypt)                                                             |
 | `roles/dns.admin`                       | DNS zones and records, the import of the existing `oharness.dev` zone in production included                           |
+| `roles/certificatemanager.editor`       | the Certificate Manager DNS authorization, managed certificate, certificate map and map entry for the host (#159)      |
 | `roles/monitoring.editor`               | uptime checks, alert policies and notification channels                                                                |
 | `roles/browser`                         | `resourcemanager.projects.get`, for the `google_project` data sources                                                  |
 | `roles/logging.viewer`                  | `logging.logEntries.list` — the `gcloud logging read` the deploy workflows run when a rollout fails (#159)             |
@@ -176,6 +177,30 @@ The list is completed by the Terraform work (#153): a role a later wave turns ou
 is added to `DEPLOY_PROJECT_ROLES` (or `DEPLOY_PROJECT_ROLES_STAGING`) in that issue's PR,
 and the maintainer re-runs this script — the run grants what is new, and `--prune` drops
 any binding the lists no longer declare.
+
+#### Certificate Manager, and the one role without delete
+
+`roles/certificatemanager.editor` (#159) is the **narrowest** of Certificate Manager's four
+predefined roles that covers the four resource groups `infra/modules/certs` creates: DNS
+authorizations, certificates, certificate maps and map entries. There is no per-resource
+role narrower than it — Certificate Manager ships only `.viewer`, `.editor`, `.admin`,
+`.owner` and `.serviceAgent`.
+
+It is worth knowing what it deliberately does **not** carry: **no `delete` permission on any
+of the four** (only `.admin` and `.owner` have those). An ordinary apply is fully covered —
+create, get, update and use are all there — so the first deploy of the Gateway's TLS works
+with this role alone. Two things would not:
+
+- `terraform destroy` of an environment — the certificate resources could not be deleted;
+- a change Terraform can only realize by **replacing** a resource, such as the certificate map
+  entry's `hostname`, which is ForceNew — the old entry could not be deleted.
+
+Both are recoverable by adding `roles/certificatemanager.admin` to `DEPLOY_PROJECT_ROLES` and
+re-running the script. Neither is part of this deploy, so the account holds the smaller role
+until one of them is actually needed.
+
+The Gateway API objects themselves need no new role at all: the `helm` provider creates them
+through the Kubernetes API, which `roles/container.admin` (already held) covers.
 
 ### The conditional project-IAM admin
 
@@ -232,13 +257,17 @@ script.
 ## The plan account, and its risk
 
 **`plan` gets `roles/viewer`, `roles/iam.securityReviewer`,
-`roles/secretmanager.secretAccessor` and `roles/storage.objectAdmin` on the state bucket
-only.** Viewer reads the project; securityReviewer adds read-only IAM policy reads, which a
-plan that refreshes IAM resources needs and Viewer alone does not give; secretAccessor adds
-`secretmanager.versions.access`, reading a secret's payload, which a plan needs to refresh a
+`roles/secretmanager.secretAccessor`, `roles/certificatemanager.viewer` and
+`roles/storage.objectAdmin` on the state bucket only.** Viewer reads the project;
+securityReviewer adds read-only IAM policy reads, which a plan that refreshes IAM resources
+needs and Viewer alone does not give; secretAccessor adds `secretmanager.versions.access`,
+reading a secret's payload, which a plan needs to refresh a
 `google_secret_manager_secret_version` (#153) and which neither of the other two carries —
-Viewer deliberately stops at the secret's metadata. objectAdmin on the one bucket is what the
-Terraform lock needs (create/delete of `.tflock`).
+Viewer deliberately stops at the secret's metadata; certificatemanager.viewer (#159) is what
+lets a plan refresh the DNS authorization, the certificate, the certificate map and its entry
+the `certs` module creates — a metadata read of four resources Viewer's broad coverage does not
+actually include; objectAdmin on the one bucket is what the Terraform lock needs
+(create/delete of `.tflock`).
 
 **The plan binding's risk.** `attribute.event_name/pull_request` matches any `pull_request`
 run of this repository. That includes a PR from a fork, whose workflow can request an OIDC

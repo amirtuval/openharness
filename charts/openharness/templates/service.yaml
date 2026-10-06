@@ -1,20 +1,23 @@
-# The pod's address, and the two annotations that wire it into the load balancer:
+# The pod's address. The Gateway's HTTPRoute names this Service as its backend, and GKE
+# resolves it to a **standalone NEG** of its own — so traffic still goes pod-IP → pod-IP
+# (container-native load balancing) with no iptables hop, and the readiness probe is still what
+# removes a draining pod from it.
 #
-#   cloud.google.com/neg            "ingress": true — the GKE ingress creates a NEG for this
-#                                   Service, so traffic goes pod-IP → pod-IP (container-native
-#                                   load balancing) instead of through an extra iptables hop.
-#                                   The readiness probe is what removes a draining pod from it.
-#   cloud.google.com/backend-config "default": <name> — the BackendConfig that shapes the
-#                                   backend service (timeouts, CDN, the /ready health check).
+# There are deliberately **no annotations** here any more (#159). The Ingress stack needed two:
+#
+#   cloud.google.com/neg            `{"ingress": true}` — ask the *Ingress* controller to make a
+#                                   NEG for this Service. A Gateway does that itself, and GKE
+#                                   documents that the annotation must not be modified on a
+#                                   Service the Gateway references.
+#   cloud.google.com/backend-config the BackendConfig that shaped the backend service. The
+#                                   Gateway controller reads GCPBackendPolicy and
+#                                   HealthCheckPolicy for that, not this annotation.
 apiVersion: v1
 kind: Service
 metadata:
   name: {{ include "openharness.fullname" . }}
   labels:
     {{- include "openharness.labels" . | nindent 4 }}
-  annotations:
-    cloud.google.com/neg: '{"ingress": true}'
-    cloud.google.com/backend-config: '{"default": "{{ include "openharness.fullname" . }}"}'
 spec:
   type: ClusterIP
   selector:

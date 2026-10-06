@@ -25,6 +25,12 @@ variable "a_records" {
   default     = {}
 }
 
+variable "cname_records" {
+  description = "CNAME records to write, keyed by fully qualified name with a trailing dot, e.g. { \"_token.staging.oharness.dev.\" = \"token.certificatemanager.goog.\" }. The Certificate Manager DNS authorization's validation record is the one this module is given today; empty writes none."
+  type        = map(string)
+  default     = {}
+}
+
 variable "ns_records" {
   description = "NS delegation records, keyed by the delegated name with a trailing dot, valued with the child zone's name servers. Empty skips the delegation."
   type        = map(list(string))

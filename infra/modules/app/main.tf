@@ -2,14 +2,14 @@
 # Identity binding and its project roles, and the helm_release of the chart
 # (issue #153, epic #148 D1/D2/D4).
 
-# The address the Ingress claims by name
-# (kubernetes.io/ingress.global-static-ip-name). Reserved here, so the chart
-# never races the load balancer for an ephemeral address.
+# The address the Gateway claims by name (its `spec.addresses`, `type:
+# NamedAddress`). Reserved here, so the chart never races the load balancer for an
+# ephemeral address.
 resource "google_compute_global_address" "static_ip" {
   project      = var.project_id
   name         = local.static_ip_name
   address_type = "EXTERNAL"
-  description  = "openharness ${var.release_name} ingress address"
+  description  = "openharness ${var.release_name} gateway address"
 }
 
 # Workload Identity: the Kubernetes service account the chart creates may

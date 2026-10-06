@@ -41,12 +41,14 @@ cloudSqlProxy:
   enabled: true
   instanceConnectionName: openharness-dev:us-central1:openharness
 
-ingress:
+gateway:
   host: staging.oharness.dev
   staticIpName: openharness-staging-ip
-
-cdn:
-  enabled: true
+  # The Certificate Manager certificate map Terraform creates for the host
+  # (`infra/modules/certs`) and puts in the Gateway's `networking.gke.io/certmap` annotation.
+  certificateMapName: openharness-staging-certmap
+  cdn:
+    enabled: true
 
 backend:
   timeoutSec: 3600

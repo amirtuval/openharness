@@ -13,11 +13,12 @@ infra/
   modules/
     registry/          # Artifact Registry (docker); instantiated in staging only
     network/           # VPC, subnet, private services access for Cloud SQL, Cloud NAT for egress
-    gke/               # Autopilot cluster, Workload Identity, Secret Manager add-on
+    gke/               # Autopilot cluster, Workload Identity, Secret Manager add-on, Gateway API CRDs
     cloudsql/          # Postgres, private IP, database + user, generated password
     secrets/           # Secret Manager secrets (generated and empty-for-manual), IAM for the app SA
     kms/               # key ring + key for the vault, encrypter/decrypter for the app SA
-    dns/               # zone, A records, staging delegation
+    certs/             # Certificate Manager: DNS authorization, managed certificate, certificate map + entry (#159)
+    dns/               # zone, A records, the certificate CNAME, staging delegation
     app/               # global static IP, Workload Identity binding, app project roles, helm_release
     monitoring/        # uptime check + alert policies + email channel (#158, optional alerts)
     budget/            # billing budget with 50/90/100% alerts (optional)
@@ -210,14 +211,24 @@ builds everywhere. Regenerate after changing a provider version with
 
 Everything else is Terraform; these four are not.
 
-**1. Re-run the setup script.** This PR adds `roles/secretmanager.secretAccessor` to
-`PLAN_PROJECT_ROLES` (see [the plan account](#the-plan-account)) — re-run it for both
-projects, or `terraform plan` on a PR will fail to refresh the secret versions:
+**1. Re-run the setup script.** This PR adds two roles — `roles/certificatemanager.editor` to
+`DEPLOY_PROJECT_ROLES` and `roles/certificatemanager.viewer` to `PLAN_PROJECT_ROLES` (see
+[the plan account](#the-plan-account) and
+[`../.github/setup/README.md`](../.github/setup/README.md#certificate-manager-and-the-one-role-without-delete))
+— so re-run it for **both** projects before this plan or apply means anything:
 
 ```bash
 ./.github/setup/workload-identity.sh staging
 ./.github/setup/workload-identity.sh production
 ```
+
+Without it, two different things fail, and they look nothing alike:
+
+- the **apply** cannot create the Certificate Manager resources, because `deploy@` does not hold
+  `certificatemanager.*` yet — the `certs` module fails with a permission error;
+- the **PR plan** cannot refresh them, because `tf-plan@` does not hold
+  `roles/certificatemanager.viewer` — the plan job fails while refreshing, which is why
+  `terraform-pr.yml` will be red until the staging re-run has happened.
 
 **2. Find the existing production zone.** `oharness.dev` already exists in
 `openharness-510710`; production adopts it with an `import` block rather than creating a
@@ -338,7 +349,7 @@ Every environment input, its default, and where a non-default value comes from. 
 | Output                | Environment | What it is                                                                                |
 | --------------------- | ----------- | ----------------------------------------------------------------------------------------- |
 | `image_tag`           | both        | The tag actually deployed — PR plans read it so a plan without `-var` reuses it.          |
-| `static_ip`           | both        | The reserved global address behind the Ingress.                                           |
+| `static_ip`           | both        | The reserved global address behind the Gateway.                                           |
 | `url`                 | both        | `https://<host>`.                                                                         |
 | `name_servers`        | staging     | The zone's name servers, fed to production as `staging_name_servers`.                     |
 | `dns_zone_name`       | production  | The zone production manages.                                                              |
@@ -361,9 +372,10 @@ serviceAccount:
 cloudSqlProxy:
   enabled: true # always, in a deployed environment (#159)
   instanceConnectionName: <project>:<region>:<instance> # cloudsql's instance_connection_name
-ingress:
+gateway:
   host: staging.oharness.dev | app.oharness.dev
   staticIpName: <the reserved global address's name>
+  certificateMapName: <the certificate map's name, from the certs module>
 env:
   BETTER_AUTH_URL: https://<host>
   OPENHARNESS_TRUSTED_PROXY_HOPS: '1'
@@ -386,6 +398,41 @@ secrets:
 
 The pod reads each secret through the GKE Secret Manager add-on (CSI driver) as
 `<env>_FILE`. `OPENHARNESS_KMS_KEY` is the crypto key's resource name, not a version.
+
+### The Gateway's TLS: Certificate Manager, and why not ManagedCertificate (#159)
+
+The chart renders a GKE **Gateway**, not an Ingress, and a Gateway takes its certificates from
+[Certificate Manager](https://docs.cloud.google.com/certificate-manager/docs/overview) rather
+than from the `ManagedCertificate` CRD the Ingress used. `infra/modules/certs` is the four
+resources that produces, in the order they depend on each other:
+
+| resource                                           | what it is                                                                  |
+| -------------------------------------------------- | --------------------------------------------------------------------------- |
+| `google_certificate_manager_dns_authorization`     | proves control of the host; hands back the CNAME the `dns` module publishes |
+| `google_certificate_manager_certificate`           | the Google-managed certificate, `managed { domains, dns_authorizations }`   |
+| `google_certificate_manager_certificate_map`       | the container the Gateway's `networking.gke.io/certmap` annotation names    |
+| `google_certificate_manager_certificate_map_entry` | binds the hostname to that certificate inside the map                       |
+
+Three things about the shape of it:
+
+- **The certificate stays `PROVISIONING` until the CNAME resolves**, and the CNAME is a DNS
+  authorization record (`_acme-challenge.<host>.` → a `certificatemanager.goog` target), not the
+  A record. The A record is what makes the host resolve; the CNAME is what lets Google issue.
+  Both are written by the `dns` module, from `certs`' and `app`'s outputs respectively.
+- **`certs` depends on nothing.** The obvious design — let `certs` write its own record into the
+  DNS zone — closes the loop `app.static_ip → dns → certs → app`, because `dns` needs the static
+  IP from `app` and `app` needs the map name from `certs`. So the record is written by `dns`
+  (its `cname_records` input) and `certs` stays a leaf. The comments on `module "certs"` in both
+  environment roots say the same thing.
+- **A destroy, or a replacement, needs a role `deploy@` does not hold.** `certs` sets
+  `deletion_policy` from the environment's `deletion_protection` (PREVENT in production), and
+  the role that creates these resources, `roles/certificatemanager.editor`, has no delete
+  permission at all — see
+  [`../.github/setup/README.md`](../.github/setup/README.md#certificate-manager-and-the-one-role-without-delete).
+
+The map's name is what `gateway.certificateMapName` above carries, and the Gateway has no `tls`
+block on purpose: naming a map in the annotation _and_ a `tls.certificateRefs` on the same
+Gateway is an error GKE rejects.
 
 ### Cloud SQL
 
@@ -465,24 +512,26 @@ Every resource type this configuration adds, and the role in the setup script th
 Nothing needed a new role for the apply itself; the one role added in this PR is for
 `tf-plan@` ([below](#the-plan-account)).
 
-| Resource(s)                                                                                                      | Role covering it                                                                   |
-| ---------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `google_project_service`                                                                                         | `roles/serviceusage.serviceUsageAdmin`                                             |
-| `google_compute_network`, `_subnetwork`, `google_compute_router`, `_router_nat`, `google_compute_global_address` | `roles/compute.networkAdmin`                                                       |
-| `google_service_networking_connection` and its peering range                                                     | `roles/servicenetworking.networksAdmin` (+ `compute.networkAdmin`)                 |
-| `google_container_cluster`, and the objects `helm_release` creates in it                                         | `roles/container.admin`                                                            |
-| `google_service_account` (node and app) and `google_service_account_iam_member`                                  | `roles/iam.serviceAccountAdmin`                                                    |
-| Creating the cluster as the custom node service account                                                          | `roles/iam.serviceAccountUser`                                                     |
-| `google_sql_database_instance`, `_database`, `_user`                                                             | `roles/cloudsql.admin`                                                             |
-| `google_secret_manager_secret`, `_secret_version`, `_secret_iam_member`                                          | `roles/secretmanager.admin`                                                        |
-| `google_kms_key_ring`, `_crypto_key`, `_crypto_key_iam_member`                                                   | `roles/cloudkms.admin`                                                             |
-| `google_dns_managed_zone` (production's import included), `google_dns_record_set`                                | `roles/dns.admin`                                                                  |
-| `data.google_project`                                                                                            | `roles/browser`                                                                    |
-| `google_project_iam_member` (the app SA's four project roles)                                                    | `roles/resourcemanager.projectIamAdmin`, **conditionally** — see below             |
-| `google_artifact_registry_repository` and its IAM (staging only)                                                 | `roles/artifactregistry.admin` (staging only)                                      |
-| Reading/writing the state and taking the lock                                                                    | `roles/storage.objectAdmin` on the state bucket                                    |
-| `google_monitoring_uptime_check_config`, `_alert_policy`, `_notification_channel` (monitoring module)            | `roles/monitoring.editor` (already held — no new grant)                            |
-| `google_billing_budget` (budget module)                                                                          | none on the project — `roles/billing.costsManager` on the billing account, by hand |
+| Resource(s)                                                                                                        | Role covering it                                                                                                                                                                       |
+| ------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `google_project_service`                                                                                           | `roles/serviceusage.serviceUsageAdmin`                                                                                                                                                 |
+| `google_compute_network`, `_subnetwork`, `google_compute_router`, `_router_nat`, `google_compute_global_address`   | `roles/compute.networkAdmin`                                                                                                                                                           |
+| `google_service_networking_connection` and its peering range                                                       | `roles/servicenetworking.networksAdmin` (+ `compute.networkAdmin`)                                                                                                                     |
+| `google_container_cluster`, and the objects `helm_release` creates in it                                           | `roles/container.admin`                                                                                                                                                                |
+| `google_service_account` (node and app) and `google_service_account_iam_member`                                    | `roles/iam.serviceAccountAdmin`                                                                                                                                                        |
+| Creating the cluster as the custom node service account                                                            | `roles/iam.serviceAccountUser`                                                                                                                                                         |
+| `google_sql_database_instance`, `_database`, `_user`                                                               | `roles/cloudsql.admin`                                                                                                                                                                 |
+| `google_secret_manager_secret`, `_secret_version`, `_secret_iam_member`                                            | `roles/secretmanager.admin`                                                                                                                                                            |
+| `google_kms_key_ring`, `_crypto_key`, `_crypto_key_iam_member`                                                     | `roles/cloudkms.admin`                                                                                                                                                                 |
+| `google_dns_managed_zone` (production's import included), `google_dns_record_set`                                  | `roles/dns.admin`                                                                                                                                                                      |
+| `google_certificate_manager_dns_authorization`, `_certificate`, `_certificate_map`, `_certificate_map_entry`       | `roles/certificatemanager.editor` — the narrowest role covering all four; it has **no delete** ([why](../.github/setup/README.md#certificate-manager-and-the-one-role-without-delete)) |
+| the `Gateway`, `HTTPRoute`, `HealthCheckPolicy`, `GCPBackendPolicy` and `GCPHTTPFilter` the `helm_release` creates | `roles/container.admin` — already held, no new grant: they are Kubernetes objects                                                                                                      |
+| `data.google_project`                                                                                              | `roles/browser`                                                                                                                                                                        |
+| `google_project_iam_member` (the app SA's four project roles)                                                      | `roles/resourcemanager.projectIamAdmin`, **conditionally** — see below                                                                                                                 |
+| `google_artifact_registry_repository` and its IAM (staging only)                                                   | `roles/artifactregistry.admin` (staging only)                                                                                                                                          |
+| Reading/writing the state and taking the lock                                                                      | `roles/storage.objectAdmin` on the state bucket                                                                                                                                        |
+| `google_monitoring_uptime_check_config`, `_alert_policy`, `_notification_channel` (monitoring module)              | `roles/monitoring.editor` (already held — no new grant)                                                                                                                                |
+| `google_billing_budget` (budget module)                                                                            | none on the project — `roles/billing.costsManager` on the billing account, by hand                                                                                                     |
 
 One role covers no resource: `roles/logging.viewer` (#159) is what lets a deploy workflow run
 `gcloud logging read` on the container's logs when a rollout fails. It is in the setup
@@ -525,12 +574,21 @@ after production's first apply is what turns the grant on
 
 ### The plan account
 
-`tf-plan@` gets `roles/viewer`, `roles/iam.securityReviewer`, `roles/secretmanager.secretAccessor`
-and `roles/storage.objectAdmin` on the state bucket. **The secretAccessor role is new in this
-PR**: refreshing a `google_secret_manager_secret_version` reads the secret's payload
-(`secretmanager.versions.access`), which Viewer does not carry — Viewer stops at the secret's
-metadata. The plan job already reads those same values out of the state bucket, so this
-widens how it reads them, not what it can reach.
+`tf-plan@` gets `roles/viewer`, `roles/iam.securityReviewer`, `roles/secretmanager.secretAccessor`,
+`roles/certificatemanager.viewer` and `roles/storage.objectAdmin` on the state bucket. **The
+secretAccessor role is new in the #159 PR**: refreshing a `google_secret_manager_secret_version`
+reads the secret's payload (`secretmanager.versions.access`), which Viewer does not carry —
+Viewer stops at the secret's metadata. The plan job already reads those same values out of the
+state bucket, so this widens how it reads them, not what it can reach.
+
+**`roles/certificatemanager.viewer` is new in this PR**, and it is the same shape of fact:
+`certs` creates four Certificate Manager resources, and a plan that refreshes them reads their
+metadata (`certificatemanager.certs.get`, `certificatemanager.certmaps.get`,
+`certificatemanager.dnsauthorizations.get`, `certificatemanager.certmapentries.get`). Whether
+the broad `roles/viewer` happens to carry those is not something the Certificate Manager docs
+state — they document read access through `roles/certificatemanager.viewer`, and the role
+exists for exactly this — so the plan account is given it explicitly rather than relying on
+Viewer's coverage. It is read-only: get and list, nothing else.
 
 An **empty** provider secret (#159) needs none of that: with no version there is no payload to
 read, so refreshing `google_secret_manager_secret` stays a metadata read that plain Viewer

@@ -1,0 +1,55 @@
+{{- if .Values.gateway.host }}
+# The GKE Gateway (GatewayClass `gke-l7-global-external-managed`): the global external
+# Application Load Balancer, Envoy-based, answering on the reserved static IP and terminating
+# TLS with a Certificate Manager certificate map.
+#
+# This replaces the `networking.k8s.io/v1` Ingress the chart used to render (#159). The Ingress
+# was never claimed: `spec.ingressClassName: gce` names a class that has to exist as an
+# `IngressClass` object, and the cluster has none (`kubectl get ingressclass` → No resources
+# found). Nothing ever created a forwarding rule or a backend service, and the only event was
+# the managed-certificate controller's. The Gateway API does not depend on that lookup — the
+# controller owns GatewayClass `gke-l7-global-external-managed` by name — so it is the supported
+# way to ask GKE for a load balancer here.
+#
+# Two annotations' worth of settings are gone with it:
+#   kubernetes.io/ingress.global-static-ip-name  → spec.addresses (NamedAddress), below
+#   networking.gke.io/managed-certificates       → networking.gke.io/certmap, below
+# and the HTTP→HTTPS redirect is now a RequestRedirect filter on an HTTPRoute, not a
+# FrontendConfig (templates/httproute-redirect.yaml).
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ include "openharness.fullname" . }}
+  labels:
+    {{- include "openharness.labels" . | nindent 4 }}
+  annotations:
+    # The Certificate Manager certificate map (TF) that holds the host's certificate. GKE
+    # terminates TLS with whatever the map's entries match, so there is deliberately **no**
+    # `spec.listeners[].tls` block: naming a certificate map in this annotation *and* writing
+    # `tls.certificateRefs` on the same Gateway is an error the controller rejects.
+    {{- with .Values.gateway.certificateMapName }}
+    networking.gke.io/certmap: {{ . | quote }}
+    {{- end }}
+spec:
+  gatewayClassName: gke-l7-global-external-managed
+  # The reserved global address the load balancer answers on — the same
+  # `google_compute_global_address` the Ingress used to claim (TF). Without it GKE allocates an
+  # address of its own, which no DNS record points at.
+  {{- with .Values.gateway.staticIpName }}
+  addresses:
+    - type: NamedAddress
+      value: {{ . | quote }}
+  {{- end }}
+  listeners:
+    # HTTPS: the certificate map above supplies the certificate. The hostname binds the listener
+    # to the one host the certificate covers.
+    - name: https
+      protocol: HTTPS
+      port: 443
+      hostname: {{ .Values.gateway.host | quote }}
+    # HTTP: exists only so the redirect route has somewhere to arrive. A visitor who typed
+    # `{{ .Values.gateway.host }}` lands on the secure origin rather than a dead port.
+    - name: http
+      protocol: HTTP
+      port: 80
+{{- end }}

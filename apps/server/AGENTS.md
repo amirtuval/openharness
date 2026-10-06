@@ -736,9 +736,10 @@ served from the same origin does not.
 
 ## Behind a load balancer (deployment epic #148, #151)
 
-The target deployment is GKE behind Google's global external HTTPS load balancer, with Cloud
-CDN on the backend (`cacheMode: USE_ORIGIN_HEADERS`), one image serving the API at `/v1` and
-the built web app at `/`. Three things in this package exist for it.
+The target deployment is GKE behind Google's global external HTTPS load balancer — a **GKE
+Gateway** (GatewayClass `gke-l7-global-external-managed`, #159), not an Ingress — with Cloud CDN
+on the backend (`cacheMode: USE_ORIGIN_HEADERS`), one image serving the API at `/v1` and the
+built web app at `/`. Three things in this package exist for it.
 
 **The client IP.** `x-forwarded-for` is a list proxies append to, so the leftmost entries are
 the client's to write and only what the deployment's own proxies appended can be trusted.
@@ -762,8 +763,9 @@ store answers trivially) **and** the instance is not draining, 503 `{status:"una
 otherwise — point the startup and readiness probes, and the load balancer's health check, at
 it. `startServer` flips the drain flag the instant `shutdown()` is called, before the listener
 closes, so the load balancer stops sending new requests while the turns in flight finish.
-Neither probe needs a session and neither logs a hit. (The Kubernetes probe manifests and the
-BackendConfig belong to the Helm chart, a later issue.)
+Neither probe needs a session and neither logs a hit. (The Kubernetes probe manifests, and the
+`HealthCheckPolicy` that points the load balancer's health check at `/ready` — a Gateway does
+not infer it from the readiness probe — belong to the Helm chart, #154/#159.)
 
 **The cache headers.** Cloud CDN with `USE_ORIGIN_HEADERS` caches exactly what a response
 says, so every response class has a directive:

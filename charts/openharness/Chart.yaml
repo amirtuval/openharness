@@ -1,7 +1,7 @@
 # The openharness server, deployed to GKE (deployment epic #148, issue #154).
 #
 # One image serves the API under `/v1` and the web app at `/` on port 3000; this chart
-# describes the workload, the GKE ingress in front of it, and the Secret Manager mount that
+# describes the workload, the GKE Gateway in front of it, and the Secret Manager mount that
 # feeds it its secrets. Terraform installs it with `helm_release` — Terraform is the only
 # thing that deploys — and passes every environment-specific value (the image, the host, the
 # project) in from its own variables.

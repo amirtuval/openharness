@@ -1,5 +1,5 @@
 output "static_ip_name" {
-  description = "Name of the reserved global address, as the Ingress claims it."
+  description = "Name of the reserved global address, as the Gateway claims it."
   value       = google_compute_global_address.static_ip.name
 }
 

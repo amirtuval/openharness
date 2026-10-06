@@ -7,6 +7,7 @@ locals {
   services = [
     "artifactregistry.googleapis.com",
     "billingbudgets.googleapis.com",
+    "certificatemanager.googleapis.com",
     "cloudkms.googleapis.com",
     "cloudtrace.googleapis.com",
     "compute.googleapis.com",
@@ -142,6 +143,29 @@ module "secrets" {
   depends_on = [google_project_service.services]
 }
 
+# TLS for the Gateway (#159). A module of its own, and deliberately *not* depended
+# on by `dns` or `app`: it creates the DNS authorization, the managed certificate,
+# the certificate map and the map entry for the host, and hands the authorization's
+# CNAME record out for `dns` to publish.
+#
+# The graph stays acyclic because of which way each edge points: `certs` depends on
+# nothing here, `app` takes its map name, and `dns` takes both the A record's value
+# (from `app`) and the CNAME (from `certs`). Making `certs` depend on `dns` — the
+# obvious-looking thing, since the record lands in that zone — would close the
+# loop `app.static_ip → dns → certs → app`, so the record is written by `dns`
+# instead (its `cname_records`), where the zone already is.
+module "certs" {
+  source = "../../modules/certs"
+
+  project_id = var.project_id
+  host       = var.host
+
+  # Staging can be torn down, so its certificate resources can be too.
+  deletion_protection = var.deletion_protection
+
+  depends_on = [google_project_service.services]
+}
+
 module "registry" {
   source = "../../modules/registry"
 
@@ -178,6 +202,10 @@ module "app" {
   image_repository = var.image_repository
   image_tag        = var.image_tag
   host             = var.host
+
+  # The Gateway's TLS (#159): the certificate map the Gateway names in its
+  # `networking.gke.io/certmap` annotation.
+  certificate_map_name = module.certs.certificate_map_name
 
   kms_key_id             = module.kms.crypto_key_id
   database_url_secret_id = module.secrets.database_url_secret_id
@@ -235,6 +263,15 @@ module "dns" {
   # staging.oharness.dev is the zone's apex.
   a_records = {
     "${var.host}." = module.app.static_ip_address
+  }
+
+  # Certificate Manager's proof that this project controls the host, published in
+  # this environment's own zone (#159). The certificate stays PROVISIONING until
+  # this record resolves. The name comes back from the authorization as a
+  # fully-qualified name with a trailing dot (`_acme-challenge.<host>.`), which is
+  # the form Cloud DNS takes.
+  cname_records = {
+    (module.certs.dns_authorization_cname_name) = module.certs.dns_authorization_cname_data
   }
 
   depends_on = [google_project_service.services]

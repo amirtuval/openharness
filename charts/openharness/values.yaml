@@ -1,11 +1,12 @@
 # Default values for the openharness chart (#154).
 #
 # These are **safe defaults for no environment in particular**, and they render on their own:
-# `helm template charts/openharness` produces a valid Deployment, Service, BackendConfig and
-# autoscaler with none of the keys marked (TF) set. Every key marked (TF) below is filled in
-# by Terraform per environment — staging and production — and nothing else should fill them:
-# Terraform is the only thing that deploys. The chart ⇄ Terraform contract is written out in
-# `README.md`, and a realistic staging rendering lives in `ci/staging-values.yaml`.
+# `helm template charts/openharness` produces a valid Deployment, Service, PodDisruptionBudget
+# and autoscaler — and, with no host, no Gateway at all — with none of the keys marked (TF)
+# set. Every key marked (TF) below is filled in by Terraform per environment — staging and
+# production — and nothing else should fill them: Terraform is the only thing that deploys.
+# The chart ⇄ Terraform contract is written out in `README.md`, and a realistic staging
+# rendering lives in `ci/staging-values.yaml`.
 
 # The one image (docker/Dockerfile): the API under /v1 and the web app at /, on port 3000.
 image:
@@ -95,22 +96,30 @@ cloudSqlProxy:
     limits:
       memory: 256Mi
 
-# The external HTTPS ingress (GKE ingress class `gce`). Both keys are empty by default: with no
-# host there is nothing to route, so the Ingress and its ManagedCertificate are not rendered.
-ingress:
+# The external HTTPS load balancer, as a GKE **Gateway** (GatewayClass
+# `gke-l7-global-external-managed`) rather than a `networking.k8s.io/v1` Ingress (#159): the
+# Ingress was never claimed by the controller, because `spec.ingressClassName: gce` needs an
+# `IngressClass` object that does not exist on the cluster, while a GatewayClass is owned by
+# name. An empty `host` renders no Gateway at all.
+gateway:
   # The serving host, staging.oharness.dev | app.oharness.dev. (TF)
   host: ''
-  # The name of the `google_compute_global_address` the load balancer answers on. (TF) It is
-  # the `kubernetes.io/ingress.global-static-ip-name` annotation; without it GKE allocates an
-  # address of its own, which no DNS record points at.
+  # The name of the `google_compute_global_address` the load balancer answers on. (TF) It becomes
+  # `spec.addresses` (`type: NamedAddress`); without it GKE allocates an address of its own,
+  # which no DNS record points at.
   staticIpName: ''
+  # The name of the Certificate Manager certificate map that holds the host's certificate. (TF)
+  # It is the `networking.gke.io/certmap` annotation on the Gateway — which is why the Gateway
+  # has no `tls` block: naming a map and a `certificateRefs` on one Gateway is an error.
+  certificateMapName: ''
+  # Cloud CDN, in front of the load balancer's backend service, as a GKE HTTPFilter extension
+  # attached to the HTTPS HTTPRoute. The server sets Cache-Control per route (W1, #151), so the
+  # CDN follows the origin's headers (`USE_ORIGIN_HEADERS`) rather than a policy of its own.
+  cdn:
+    enabled: true
 
-# Cloud CDN, in front of the load balancer's backend service. The server sets Cache-Control per
-# route (W1, #151), so the CDN follows the origin's headers rather than a policy of its own.
-cdn:
-  enabled: true
-
-# The BackendConfig that shapes how the load balancer talks to the pods.
+# How the load balancer's backend service talks to the pods: the GCPBackendPolicy the Gateway
+# controller reads (the BackendConfig's job before #159).
 backend:
   # How long the load balancer waits for a response before giving up. The SSE streams (session
   # watch, AI SDK chat) hold a connection open for the length of a turn, so this is long — an
