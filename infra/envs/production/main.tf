@@ -258,8 +258,12 @@ module "dns" {
   # Certificate Manager's proof that this project controls the host (#159),
   # published in the adopted oharness.dev zone — `_acme-challenge.<host>.` →
   # Certificate Manager. The certificate stays PROVISIONING until it resolves.
+  # Static key, apply-time value: the `dns` module's `cname_records` explains why.
   cname_records = {
-    (module.certs.dns_authorization_cname_name) = module.certs.dns_authorization_cname_data
+    certificate-authorization = {
+      name   = module.certs.dns_authorization_cname_name
+      target = module.certs.dns_authorization_cname_data
+    }
   }
 
   # Delegate staging.oharness.dev to the zone staging created. Empty skips it.

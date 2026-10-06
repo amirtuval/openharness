@@ -5,11 +5,19 @@
 # The address the Gateway claims by name (its `spec.addresses`, `type:
 # NamedAddress`). Reserved here, so the chart never races the load balancer for an
 # ephemeral address.
+#
+# `description` still says "ingress address" although the load balancer is a
+# Gateway now (#159), and that is deliberate: **every attribute of a reserved
+# address, `description` included, forces replacement**, so rewording it would
+# release the address the environment's DNS A record points at and allocate a new
+# one. A PR plan caught exactly that (`must be replaced … # forces replacement`)
+# and the wording was left alone rather than traded for an outage. Fix it in a
+# change whose plan is allowed to destroy this resource, not in passing.
 resource "google_compute_global_address" "static_ip" {
   project      = var.project_id
   name         = local.static_ip_name
   address_type = "EXTERNAL"
-  description  = "openharness ${var.release_name} gateway address"
+  description  = "openharness ${var.release_name} ingress address"
 }
 
 # Workload Identity: the Kubernetes service account the chart creates may

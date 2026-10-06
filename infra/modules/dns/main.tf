@@ -39,10 +39,12 @@ resource "google_dns_record_set" "cname" {
 
   project      = var.project_id
   managed_zone = google_dns_managed_zone.zone.name
-  name         = each.key
-  type         = "CNAME"
-  ttl          = var.ttl
-  rrdatas      = [each.value]
+  # The record's name is `each.value.name`, not the map key: the key is a static
+  # label, because this record's name is an apply-time result (see the variable).
+  name    = each.value.name
+  type    = "CNAME"
+  ttl     = var.ttl
+  rrdatas = [each.value.target]
 }
 
 # Delegation records in the parent zone: an NS set at a child name, holding the

@@ -141,6 +141,16 @@ production apply is not blocked on staging existing. Once staging has been appli
 name servers (from `terraform output name_servers`) and re-apply production. DNS delegation
 is a second apply, not a first one.
 
+### The reserved address is replaced by a change to _any_ of its attributes
+
+`google_compute_global_address.static_ip` is the address the environment's DNS A record points
+at. Every attribute of it — `description` included — forces replacement, so a cosmetic edit to
+that resource releases the address and allocates a new one, and the A record follows it. That is
+why its `description` still reads "ingress address" although the load balancer is a Gateway now
+(`infra/modules/app/main.tf` spells this out). A PR plan caught it once already; if a plan shows
+`google_compute_global_address.static_ip must be replaced`, stop and read the `# forces
+replacement` line before approving.
+
 ### The first plan cannot render the Helm release
 
 The `helm` and `kubernetes` providers are configured from the cluster's endpoint and CA, and

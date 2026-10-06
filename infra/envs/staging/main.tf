@@ -267,11 +267,17 @@ module "dns" {
 
   # Certificate Manager's proof that this project controls the host, published in
   # this environment's own zone (#159). The certificate stays PROVISIONING until
-  # this record resolves. The name comes back from the authorization as a
-  # fully-qualified name with a trailing dot (`_acme-challenge.<host>.`), which is
-  # the form Cloud DNS takes.
+  # this record resolves. It comes back as a fully-qualified name with a trailing
+  # dot (`_acme-challenge.<host>.`), which is the form Cloud DNS takes.
+  #
+  # The key is a static label, and the record's own name and target are the value:
+  # both are apply-time results of `certs`, and a `for_each` key has to be known at
+  # plan time (the `dns` module's `cname_records` says the same).
   cname_records = {
-    (module.certs.dns_authorization_cname_name) = module.certs.dns_authorization_cname_data
+    certificate-authorization = {
+      name   = module.certs.dns_authorization_cname_name
+      target = module.certs.dns_authorization_cname_data
+    }
   }
 
   depends_on = [google_project_service.services]
