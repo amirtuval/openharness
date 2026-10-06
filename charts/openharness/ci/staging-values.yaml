@@ -44,8 +44,13 @@ backend:
 gcpProject: openharness-dev
 
 # The plain settings Terraform passes for this environment. BETTER_AUTH_URL is the host above;
-# the dev login is off (staging is not a laptop); Cloud KMS wraps the vault's keys, and its key
-# is a resource name, not a secret; GCLB appends one entry to x-forwarded-for.
+# the dev login is off because the variable is *unset* here — the server refuses to boot on any
+# value other than 1/true, so `OPENHARNESS_DEV_LOGIN: '0'` crash-looped the pod (#159); Cloud KMS
+# wraps the vault's keys, and its key is a resource name, not a secret; GCLB appends one entry
+# to x-forwarded-for; and Cloud Logging reads stdout as JSON with spans in Cloud Trace (#158).
+#
+# `infra/modules/app/locals.tf` sets the same variables, and a server test boots from this file
+# (apps/server/src/chart-values.test.ts) — so whoever edits one updates the other.
 #
 # A sign-in provider is *not* shown here: this file keeps to the two secrets below. A real
 # environment signs in with one, which Terraform passes as a client id here plus that
@@ -54,9 +59,11 @@ gcpProject: openharness-dev
 env:
   BETTER_AUTH_URL: https://staging.oharness.dev
   OPENHARNESS_TRUSTED_PROXY_HOPS: '1'
-  OPENHARNESS_DEV_LOGIN: '0'
   OPENHARNESS_KEY_PROVIDER: gcp-kms
   OPENHARNESS_KMS_KEY: projects/openharness-dev/locations/global/keyRings/openharness/cryptoKeys/credentials
+  OPENHARNESS_LOG_FORMAT: json
+  OPENHARNESS_TRACING: cloud-trace
+  OPENHARNESS_TRACE_SAMPLE_RATE: '0.1'
 
 # Two secrets, mounted from Secret Manager: the database URL and the Better Auth signing
 # secret, each landing under /var/run/secrets/openharness/ and read through its `_FILE`

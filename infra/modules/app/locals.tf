@@ -20,13 +20,19 @@ locals {
 
   # Plain, non-secret environment. A provider's client ID is set only when the
   # variable is non-empty; the same condition creates its client secret below.
+  #
+  # OPENHARNESS_DEV_LOGIN is deliberately absent: *unset* is how the dev login is
+  # off, and the server refuses to boot on any value other than `1`/`true` — a
+  # `"0"` here crash-looped every staging pod (#159). The chart's CI values
+  # (charts/openharness/ci/staging-values.yaml) mirror this map, and a server test
+  # boots from them (apps/server/src/chart-values.test.ts), so whoever edits one
+  # updates the other.
   env = merge(
     {
       BETTER_AUTH_URL                = "https://${var.host}"
       OPENHARNESS_TRUSTED_PROXY_HOPS = "1"
       OPENHARNESS_KEY_PROVIDER       = "gcp-kms"
       OPENHARNESS_KMS_KEY            = var.kms_key_id
-      OPENHARNESS_DEV_LOGIN          = "0"
       # Observability (#158): Cloud Logging reads these lines as JSON, and spans go
       # to Cloud Trace at the configured sample rate. The exporter and the SDK are
       # loaded lazily by the server, so these two strings are the whole cost of

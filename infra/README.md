@@ -346,7 +346,8 @@ env:
   OPENHARNESS_TRUSTED_PROXY_HOPS: '1'
   OPENHARNESS_KEY_PROVIDER: gcp-kms
   OPENHARNESS_KMS_KEY: projects/<p>/locations/us-central1/keyRings/openharness/cryptoKeys/credentials
-  OPENHARNESS_DEV_LOGIN: '0'
+  # OPENHARNESS_DEV_LOGIN is not set: unset is how the dev login is off, and the
+  # server refuses to boot on any value other than 1/true (#159).
   # observability (#158): JSON logs, Cloud Trace at the configured sample rate
   OPENHARNESS_LOG_FORMAT: json
   OPENHARNESS_TRACING: cloud-trace

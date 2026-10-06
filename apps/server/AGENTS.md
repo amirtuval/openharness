@@ -1042,6 +1042,10 @@ parallel with each other.
 - `config.test.ts`, `main.test.ts` — the environment (including the three required variables
   and the dev-login guard), startup, recovery and shutdown, and `SCHEDULER=postgres` wiring
   the partitioned scheduler.
+- `chart-values.test.ts` — the deployment's environment, booted: the chart's staging CI values
+  (`charts/openharness/ci/staging-values.yaml`) with a `_FILE` for each `secrets` entry, the
+  `OPENHARNESS_DEV_LOGIN=0` that crash-looped staging refused (#159), and the file's variables
+  equal to the ones `infra/modules/app/locals.tf` sets for every environment.
 - `client-ip.test.ts` — the helper behind #151: the socket address with no trusted hops (the
   header is not read at all), the `trustedProxyHops + 1`-from-the-right entry with hops (the
   GCLB shape, spoofed entries to the left ignored, whitespace, IPv6), the socket fallback for
