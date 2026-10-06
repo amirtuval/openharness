@@ -220,6 +220,86 @@ jobs:
             -var "image_tag=$IMAGE_TAG" \
             -var "production_node_service_account=${PRODUCTION_NODE_SA:-}"
 
+      # What a failed apply left behind (#159). The release is installed `atomic = true`
+      # (infra/modules/app/main.tf), so a rollout that never became ready has **already been
+      # rolled back** by the time this runs: the pods are usually gone, and `helm history` may
+      # report no release at all. That is why the Kubernetes events (which the cluster keeps
+      # for about an hour) and Cloud Logging (which outlives the rollback entirely) are read
+      # alongside the live objects — they are the parts of a rolled-back rollout that survive.
+      #
+      # Every probe is best-effort: the step attaches evidence to a failure that has already
+      # happened and must never fail the job a second time. It prints names, statuses, events
+      # and container logs — never a secret value. `helm history` and the log probes are
+      # expected to error on a rolled-back release, which is why each one tolerates a non-zero
+      # exit rather than stopping the report.
+      - name: Rollout diagnostics (on failure)
+        if: failure()
+        env:
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          # The app module's defaults (infra/modules/app/variables.tf) — the same release and
+          # namespace the rollout wait below names.
+          NAMESPACE: openharness
+          RELEASE_NAME: openharness
+          # The chart's selector labels (charts/openharness/templates/_helpers.tpl), scoped by
+          # release instance so this never picks up another release's pods.
+          POD_SELECTOR: app.kubernetes.io/instance=openharness
+        run: |
+          set -uo pipefail
+
+          if ! gcloud container clusters get-credentials "$CLUSTER_NAME" \
+            --region "$REGION" --project "$PROJECT_ID" 2>&1; then
+            echo "::warning title=No cluster credentials::Could not fetch credentials for $CLUSTER_NAME — skipping the Kubernetes diagnostics."
+            {
+              echo '### Rollout diagnostics'
+              echo
+              echo "Could not fetch credentials for \`$CLUSTER_NAME\` in \`$PROJECT_ID\` — there is"
+              echo "nothing to report from the cluster. The apply's own error is above."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          report="$RUNNER_TEMP/rollout-diagnostics.txt"
+
+          # probe <title> <shell>: a heading, then the command's output from both streams, then
+          # the exit code if it failed. Nothing here is allowed to end the step early.
+          probe() {
+            local title="$1" shell="$2" status=0
+            printf '\n===== %s =====\n' "$title"
+            bash -c "$shell" 2>&1 || status=$?
+            if (( status != 0 )); then printf '(exited %d — continuing)\n' "$status"; fi
+          }
+
+          {
+            probe "helm -n $NAMESPACE list -a" \
+              'helm -n "$NAMESPACE" list -a'
+            probe "helm -n $NAMESPACE history $RELEASE_NAME" \
+              'helm -n "$NAMESPACE" history "$RELEASE_NAME"'
+            probe "kubectl -n $NAMESPACE get pods -o wide" \
+              'kubectl -n "$NAMESPACE" get pods -o wide'
+            probe "kubectl -n $NAMESPACE describe pods" \
+              'kubectl -n "$NAMESPACE" describe pods'
+            probe "kubectl -n $NAMESPACE get events --sort-by=.lastTimestamp (last 50)" \
+              'kubectl -n "$NAMESPACE" get events --sort-by=.lastTimestamp | tail -50'
+            probe "kubectl -n $NAMESPACE logs (current, all containers, tail 200)" \
+              'for pod in $(kubectl -n "$NAMESPACE" get pods -l "$POD_SELECTOR" -o name); do echo "--- $pod"; kubectl -n "$NAMESPACE" logs "$pod" --all-containers=true --tail=200; done'
+            probe "kubectl -n $NAMESPACE logs --previous (all containers, tail 200)" \
+              'for pod in $(kubectl -n "$NAMESPACE" get pods -l "$POD_SELECTOR" -o name); do echo "--- $pod (previous)"; kubectl -n "$NAMESPACE" logs "$pod" --previous --all-containers=true --tail=200; done'
+            probe "Cloud Logging — k8s_container in $NAMESPACE, last 30m (needs roles/logging.viewer)" \
+              'gcloud logging read "resource.type=\"k8s_container\" AND resource.labels.namespace_name=\"$NAMESPACE\"" --project "$PROJECT_ID" --freshness=30m --limit=200 --format="value(timestamp,resource.labels.pod_name,textPayload,jsonPayload.message)"'
+          } > "$report" 2>&1
+
+          cat "$report"
+          {
+            echo '### Rollout diagnostics'
+            echo
+            echo 'The release is installed `atomic`, so a failed rollout has already been rolled'
+            echo 'back — the events and the Cloud Logging entries are the parts that outlive it.'
+            echo
+            echo '```'
+            cat "$report"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Print the staging name servers
         # Production delegates staging.oharness.dev to these. It cannot read this state
         # (deploy@openharness-510710 holds no rights on this project's bucket) and the
