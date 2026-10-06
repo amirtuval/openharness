@@ -87,8 +87,12 @@ export function SignInScreen({ returnHash }: { returnHash: string }) {
           />
         )}
 
+        {/* No `pt-6` on the content: the card is already `py-6`, and in this app's
+            `CardContent` (`px-6`) that padding *is* the space inside the border. A second
+            top padding here doubled it above the buttons — the gap this card was reported
+            for (#187). */}
         <Card>
-          <CardContent className="space-y-4 pt-6">
+          <CardContent className="space-y-4">
             {loading ? (
               <p role="status" className="text-sm text-muted-foreground">
                 Loading sign-in options…
@@ -96,7 +100,10 @@ export function SignInScreen({ returnHash }: { returnHash: string }) {
             ) : null}
 
             {config !== null && config.providers.length > 0 ? (
-              <div className="flex flex-col gap-2">
+              // `gap-6` is the card's own rhythm — its `py-6` padding and the `gap-6`
+              // between its sections — so the space above the first button, between the
+              // buttons and below the last one is the same 24px (#187).
+              <div className="flex flex-col gap-6">
                 {config.providers.map((provider) => (
                   <Button
                     key={provider}
