@@ -20,9 +20,10 @@ resource "google_service_account_iam_member" "workload_identity" {
   member             = "serviceAccount:${var.project_id}.svc.id.goog[${var.namespace}/${var.kubernetes_service_account}]"
 }
 
-# The app's project-level roles — traces, logs, metrics, and nothing more. All
-# three are in the setup script's DEPLOY_GRANTABLE_PROJECT_ROLES, which is what
-# deploy@ may hand out at project level.
+# The app's project-level roles — traces, logs, metrics and connecting the Cloud
+# SQL Auth Proxy sidecar (#159), and nothing more. All of them are in the setup
+# script's DEPLOY_GRANTABLE_PROJECT_ROLES, which is what deploy@ may hand out at
+# project level.
 resource "google_project_iam_member" "app" {
   for_each = toset(var.project_roles)
 

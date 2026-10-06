@@ -1,4 +1,6 @@
-# The server — one container, one port, the API and the web app together.
+# The server — one container, one port, the API and the web app together. With
+# `cloudSqlProxy.enabled` a second container joins it as a native sidecar (below), so the pod is
+# two containers and the app still has one port.
 #
 # Hardened for a shared cluster: it runs as the image's non-root `node` user (uid 1000), with a
 # read-only root filesystem, no Linux capabilities, no way to gain privilege, and the default
@@ -42,6 +44,82 @@ spec:
         fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
+      {{- if .Values.cloudSqlProxy.enabled }}
+      # The Cloud SQL Auth Proxy, as a **native sidecar**: an init container with
+      # `restartPolicy: Always` (Kubernetes 1.29+, so GKE 1.29+; the cluster is 1.35). It is
+      # started before the app container and, because it declares a startup probe, the app
+      # container does not start until that probe passes — which is what the app needs, since
+      # it runs the session store's migrations at boot and must find the database immediately.
+      # Unlike a plain init container it is not reaped when it exits: it stays up for the
+      # pod's lifetime alongside the app.
+      #
+      # It authenticates with the pod's Workload Identity (the annotated ServiceAccount above),
+      # so the app GSA needs `roles/cloudsql.client` — a Terraform grant, not the chart's.
+      initContainers:
+        - name: cloud-sql-proxy
+          image: "{{ .Values.cloudSqlProxy.image.repository }}:{{ .Values.cloudSqlProxy.image.tag }}"
+          imagePullPolicy: {{ .Values.cloudSqlProxy.image.pullPolicy }}
+          restartPolicy: Always
+          args:
+            # The instance to connect to: <project>:<region>:<instance>, from the cloudsql
+            # module's `instance_connection_name` output. Terraform always sets it; an empty
+            # value fails the render here rather than shipping a proxy with no target.
+            - {{ required "cloudSqlProxy.enabled is true but cloudSqlProxy.instanceConnectionName is empty — set it to the instance's connection name (<project>:<region>:<instance>), the cloudsql module's instance_connection_name output" .Values.cloudSqlProxy.instanceConnectionName | quote }}
+            {{- if .Values.cloudSqlProxy.privateIp }}
+            # The instance has no public address (`ipv4_enabled = false`), so the only way in
+            # is over the private services access peering.
+            - --private-ip
+            {{- end }}
+            # Listen on the pod's loopback only, on the port `database_url` names; nothing
+            # outside the pod can reach it.
+            - --port={{ .Values.cloudSqlProxy.port }}
+            - --address=127.0.0.1
+            # JSON logs to stdout, which Cloud Logging reads (#158), and the health-check
+            # server the probes below use.
+            - --structured-logs
+            - --health-check
+            - --http-address=0.0.0.0
+            - --http-port=9090
+          # The container is prevented from gaining anything it did not start with, cannot
+          # write the root filesystem, and holds no Linux capabilities — the same hardening the
+          # app container uses below. It runs as the image's non-root user.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            privileged: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+            runAsUser: 1000
+          ports:
+            # The health-check server. The proxy's own listener is on 127.0.0.1 and is not
+            # declared: it is not reachable from outside the pod.
+            - name: proxy-http
+              containerPort: 9090
+              protocol: TCP
+          # Startup: the proxy is listening and ready to forward. This is the probe the kubelet
+          # waits for before it starts the app container, so it must not be generous — the app
+          # is blocked behind it. 5s × 30 = 2.5 minutes, past a cold instance's first connect.
+          startupProbe:
+            httpGet:
+              path: /startup
+              port: proxy-http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30
+          # Liveness: the proxy's own event loop is alive. A tunnel that drops reconnects on its
+          # own, so this only trips on a wedged process.
+          livenessProbe:
+            httpGet:
+              path: /liveness
+              port: proxy-http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.cloudSqlProxy.resources | nindent 12 }}
+      {{- end }}
       containers:
         - name: openharness
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"

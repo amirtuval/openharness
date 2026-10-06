@@ -154,7 +154,6 @@ module "secrets" {
   environment               = local.environment
   app_service_account_email = google_service_account.app.email
 
-  db_host     = module.cloudsql.private_ip
   db_name     = module.cloudsql.db_name
   db_user     = module.cloudsql.db_user
   db_password = module.cloudsql.db_password
@@ -179,6 +178,11 @@ module "app" {
   database_url_secret_id = module.secrets.database_url_secret_id
   better_auth_secret_id  = module.secrets.better_auth_secret_id
   provider_secret_ids    = module.secrets.provider_secret_ids
+
+  # #159: the Cloud SQL Auth Proxy sidecar's target. The app does not reach the
+  # instance's private IP itself — its `database_url` names 127.0.0.1, and this
+  # is what the proxy in front of it connects to.
+  cloudsql_instance_connection_name = module.cloudsql.instance_connection_name
 
   google_client_id    = var.google_client_id
   github_client_id    = var.github_client_id

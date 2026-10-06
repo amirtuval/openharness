@@ -45,8 +45,10 @@ resource "google_secret_manager_secret_version" "better_auth" {
 }
 
 # ---------------------------------------------------------------------------
-# Generated: database-url, built from the Cloud SQL instance's private IP
+# Generated: database-url, built against the Cloud SQL Auth Proxy sidecar
 # ---------------------------------------------------------------------------
+# The URL names 127.0.0.1: the app connects to the proxy in its own pod, and the
+# proxy makes the TLS connection to the instance (#159). See locals.tf.
 resource "google_secret_manager_secret" "database_url" {
   project   = var.project_id
   secret_id = "database-url"

@@ -27,9 +27,10 @@ variable "app_service_account_email" {
 }
 
 variable "project_roles" {
-  description = "Project-level roles for the app service account. Every one of them must be in the setup script's DEPLOY_GRANTABLE_PROJECT_ROLES or the apply is denied."
+  description = "Project-level roles for the app service account. Every one of them must be in the setup script's DEPLOY_GRANTABLE_PROJECT_ROLES or the apply is denied. roles/cloudsql.client is what the Cloud SQL Auth Proxy sidecar connects as (#159): cloudsql.instances.connect, and nothing more."
   type        = list(string)
   default = [
+    "roles/cloudsql.client",
     "roles/cloudtrace.agent",
     "roles/logging.logWriter",
     "roles/monitoring.metricWriter",
@@ -64,6 +65,11 @@ variable "kms_key_id" {
 
 variable "database_url_secret_id" {
   description = "Secret ID of the database-url secret, from the secrets module."
+  type        = string
+}
+
+variable "cloudsql_instance_connection_name" {
+  description = "Cloud SQL instance connection name (project:region:instance), from the cloudsql module's instance_connection_name output. It is the Cloud SQL Auth Proxy sidecar's target (#159)."
   type        = string
 }
 

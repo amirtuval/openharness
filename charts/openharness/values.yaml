@@ -55,6 +55,46 @@ serviceAccount:
   # neither Cloud KMS nor Secret Manager answers.
   gcpServiceAccount: ''
 
+# The Cloud SQL Auth Proxy, run as a native sidecar in the app pod (#159). Off by default, so
+# the chart still renders for anyone who is not on Cloud SQL (`helm template
+# charts/openharness` with the defaults produces no sidecar).
+#
+# Why it is here: Cloud SQL's private-IP server certificate is signed by a per-instance Google
+# CA that is not in Node's trust store, so `node-postgres` cannot verify it — connecting to the
+# instance's IP with `sslmode=require` (which node-postgres treats as verify-full) dies at boot
+# with `UNABLE_TO_VERIFY_LEAF_SIGNATURE` during the session store's migration. Rather than turn
+# verification off, the proxy terminates that TLS for the pod: the app connects to it on
+# `127.0.0.1` with plain Postgres (`sslmode=disable`) and the proxy speaks TLS to the instance
+# over its private IP, authenticated by the pod's Workload Identity.
+cloudSqlProxy:
+  # Render the sidecar. False by default: an environment without Cloud SQL is unaffected.
+  enabled: false
+  # The instance's connection name, `<project>:<region>:<instance>` — the `instance_connection_name`
+  # output of `infra/modules/cloudsql`, not its IP. (TF) Required when `enabled`, and rendering
+  # fails with a clear message if it is missing.
+  instanceConnectionName: ''
+  image:
+    # The connector's own image, from its own registry — the proxy is not part of the app image.
+    repository: gcr.io/cloud-sql-connectors/cloud-sql-proxy
+    # Pinned to a release, never `latest`: the sidecar is a container in production, so its
+    # version moves when someone changes it here and not when Google pushes a tag.
+    tag: '2.26.0'
+    pullPolicy: IfNotPresent
+  # The port the proxy listens on, on the pod's loopback. `database_url` in
+  # `infra/modules/secrets/locals.tf` must name the same port.
+  port: 5432
+  # Connect to the instance over its private IP — there is no public one (`ipv4_enabled = false`).
+  privateIp: true
+  # The proxy is a TCP forwarder: it holds no state and does almost no work, so its resources are
+  # the smallest that will schedule. On GKE Autopilot, requests below its container floor
+  # (250m / 512Mi) are rounded up, so treat these as a statement of intent rather than a saving.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
 # The external HTTPS ingress (GKE ingress class `gce`). Both keys are empty by default: with no
 # host there is nothing to route, so the Ingress and its ManagedCertificate are not rendered.
 ingress:

@@ -127,6 +127,13 @@ content. The rule that an empty value is unset holds here too: an empty file is 
 setting. Local dev and docker compose are unaffected — with no `_FILE` variable, nothing reads
 a file. `OPENHARNESS_KMS_KEY` is a resource name, not a secret, and stays inline.
 
+On GKE the `DATABASE_URL` the chart mounts names **`127.0.0.1`**, not a database host: the
+Cloud SQL Auth Proxy runs as a sidecar in the app's own pod and makes the TLS connection to
+the instance itself (#159), so the server's `sslmode=disable` there is about a loopback hop
+and not about the connection that leaves the pod. See
+[`docs/DEPLOYMENT.md`](../../docs/DEPLOYMENT.md#the-database-url-and-why-the-pod-runs-a-proxy-159).
+Nothing in this package changes because of it — `readServerConfig` treats the URL as opaque.
+
 Provider credentials (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) are **not read at all**
 (epic #65, A5), and the server keeps none of its own: every model request is made with the
 credential the session-bound resolver answered — the owner's stored, sealed key, opened per

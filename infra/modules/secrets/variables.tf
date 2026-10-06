@@ -13,13 +13,8 @@ variable "app_service_account_email" {
   type        = string
 }
 
-variable "db_host" {
-  description = "Cloud SQL private IP, from the cloudsql module."
-  type        = string
-}
-
 variable "db_port" {
-  description = "Cloud SQL port."
+  description = "Port the Cloud SQL Auth Proxy sidecar listens on in the app pod. The database-url secret names 127.0.0.1:<this>; it must match the chart's `cloudSqlProxy.port`."
   type        = number
   default     = 5432
 }

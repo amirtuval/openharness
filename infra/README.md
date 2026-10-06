@@ -333,14 +333,14 @@ Every environment input, its default, and where a non-default value comes from. 
 
 ## Outputs
 
-| Output                | Environment | What it is                                                                       |
-| --------------------- | ----------- | -------------------------------------------------------------------------------- |
-| `image_tag`           | both        | The tag actually deployed — PR plans read it so a plan without `-var` reuses it. |
-| `static_ip`           | both        | The reserved global address behind the Ingress.                                  |
-| `url`                 | both        | `https://<host>`.                                                                |
-| `name_servers`        | staging     | The zone's name servers, fed to production as `staging_name_servers`.            |
-| `dns_zone_name`       | production  | The zone production manages.                                                     |
-| `database_private_ip` | both        | Cloud SQL's private IP, for debugging from inside the VPC.                       |
+| Output                | Environment | What it is                                                                                |
+| --------------------- | ----------- | ----------------------------------------------------------------------------------------- |
+| `image_tag`           | both        | The tag actually deployed — PR plans read it so a plan without `-var` reuses it.          |
+| `static_ip`           | both        | The reserved global address behind the Ingress.                                           |
+| `url`                 | both        | `https://<host>`.                                                                         |
+| `name_servers`        | staging     | The zone's name servers, fed to production as `staging_name_servers`.                     |
+| `dns_zone_name`       | production  | The zone production manages.                                                              |
+| `database_private_ip` | both        | Cloud SQL's private IP, for debugging from inside the VPC. Not what the app dials (#159). |
 
 ## What Terraform sets on the chart
 
@@ -356,6 +356,9 @@ image:
 gcpProject: <project id> # Secret Manager resource names
 serviceAccount:
   gcpServiceAccount: <app GSA email>
+cloudSqlProxy:
+  enabled: true # always, in a deployed environment (#159)
+  instanceConnectionName: <project>:<region>:<instance> # cloudsql's instance_connection_name
 ingress:
   host: staging.oharness.dev | app.oharness.dev
   staticIpName: <the reserved global address's name>
@@ -386,9 +389,8 @@ The pod reads each secret through the GKE Secret Manager add-on (CSI driver) as
 
 Postgres **18** — the newest major the provider's `database_version` accepts
 (`POSTGRES_18`). Both environments are private-IP only: no public address at all
-(`ipv4_enabled = false`), reachable over the private services access peering, and
-`ssl_mode = ENCRYPTED_ONLY`, which is why the app's connection string ends in
-`sslmode=require`.
+(`ipv4_enabled = false`), reachable over the private services access peering, with
+`ssl_mode = ENCRYPTED_ONLY`.
 
 |              | staging                     | production                     |
 | ------------ | --------------------------- | ------------------------------ |
@@ -403,15 +405,46 @@ doubles the instance's cost, and nothing in the deploy path depends on it. Turni
 one variable — `-var db_availability_type=REGIONAL`, or change the default in
 `envs/production/variables.tf` — and the next apply updates the instance in place.
 
+#### The app reaches it through the Cloud SQL Auth Proxy (#159)
+
+**The app does not connect to the instance's address.** It connects to the Cloud SQL Auth Proxy
+running as a native sidecar in its own pod — `postgres://…@127.0.0.1:5432/openharness?sslmode=disable`
+— and the proxy makes the TLS connection to the instance over its private IP, authenticated by
+the pod's Workload Identity. There is no direct path from the app to the instance.
+
+That is a fix, not a preference. Cloud SQL's server certificate is signed by a per-instance
+Google CA that is not in Node's trust store, and `node-postgres` treats `sslmode=require` as
+verify-full, so connecting to the instance's private IP fails the session store's boot migration
+with `UNABLE_TO_VERIFY_LEAF_SIGNATURE` — every staging pod died there. The alternatives were to
+stop verifying the instance's certificate (turning TLS's guarantee into nothing) or to
+terminate that TLS somewhere that _can_ verify it. The sidecar is the second one. `sslmode=disable`
+describes only the pod-local loopback hop, which is why it is not a downgrade: the traffic that
+leaves the pod is encrypted by the proxy.
+
+- The proxy is rendered by the chart (`cloudSqlProxy` in
+  [`charts/openharness/README.md`](../charts/openharness/README.md#the-cloud-sql-auth-proxy-sidecar-cloudsqlproxy)),
+  enabled from the `app` module with the connection name from `cloudsql`'s
+  `instance_connection_name` output. Nothing here configures it directly beyond those two.
+- The app GSA needs **`roles/cloudsql.client`** (`cloudsql.instances.connect`, and nothing
+  more). It is granted through the `app` module's `project_roles`, so it is drawn from the setup
+  script's `DEPLOY_GRANTABLE_PROJECT_ROLES` like every other project-level grant.
+- **`database_url` therefore names `127.0.0.1`**, and the `secrets` module no longer takes
+  `db_host` — the instance's private IP is the proxy's business, not the app's.
+- The instance's `ssl_mode` is left at `ENCRYPTED_ONLY`. Hardening it to
+  `TRUSTED_CLIENT_CERTIFICATE_REQUIRED` — so only the proxy, which presents a client
+  certificate, may connect, rather than anyone who can reach the private IP — is a **deliberate
+  follow-up**: it is an instance change, and riskier than the change that fixed the boot. Do it
+  on its own, with its own plan reviewed.
+
 ### Secrets
 
-| Secret                    | Created                | Value                                                                                     |
-| ------------------------- | ---------------------- | ----------------------------------------------------------------------------------------- |
-| `better-auth-secret`      | always, with a version | `random_password`, 48 characters, no specials                                             |
-| `database-url`            | always, with a version | `postgres://user:pass@<private ip>:5432/openharness?sslmode=require` — built by Terraform |
-| `google-client-secret`    | always, empty          | none; `gcloud secrets versions add` (manual step 3)                                       |
-| `github-client-secret`    | always, empty          | none; manual                                                                              |
-| `microsoft-client-secret` | always, empty          | none; manual                                                                              |
+| Secret                    | Created                | Value                                                                                                                                |
+| ------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `better-auth-secret`      | always, with a version | `random_password`, 48 characters, no specials                                                                                        |
+| `database-url`            | always, with a version | `postgres://user:pass@127.0.0.1:5432/openharness?sslmode=disable` — built by Terraform; the proxy sidecar is on the other end (#159) |
+| `google-client-secret`    | always, empty          | none; `gcloud secrets versions add` (manual step 3)                                                                                  |
+| `github-client-secret`    | always, empty          | none; manual                                                                                                                         |
+| `microsoft-client-secret` | always, empty          | none; manual                                                                                                                         |
 
 All three provider containers are created whatever the client ID variables say (#159), and the
 app's service account is granted `roles/secretmanager.secretAccessor` on each of them. The chart
@@ -443,7 +476,7 @@ Nothing needed a new role for the apply itself; the one role added in this PR is
 | `google_kms_key_ring`, `_crypto_key`, `_crypto_key_iam_member`                                                   | `roles/cloudkms.admin`                                                             |
 | `google_dns_managed_zone` (production's import included), `google_dns_record_set`                                | `roles/dns.admin`                                                                  |
 | `data.google_project`                                                                                            | `roles/browser`                                                                    |
-| `google_project_iam_member` (the app SA's three project roles)                                                   | `roles/resourcemanager.projectIamAdmin`, **conditionally** — see below             |
+| `google_project_iam_member` (the app SA's four project roles)                                                    | `roles/resourcemanager.projectIamAdmin`, **conditionally** — see below             |
 | `google_artifact_registry_repository` and its IAM (staging only)                                                 | `roles/artifactregistry.admin` (staging only)                                      |
 | Reading/writing the state and taking the lock                                                                    | `roles/storage.objectAdmin` on the state bucket                                    |
 | `google_monitoring_uptime_check_config`, `_alert_policy`, `_notification_channel` (monitoring module)            | `roles/monitoring.editor` (already held — no new grant)                            |
@@ -459,15 +492,15 @@ re-run for it (`.github/setup/README.md`, "Deploy roles: least privilege").
 Terraform grants nothing to `deploy@` or `tf-plan@`. It grants roles **to the two service
 accounts it creates**:
 
-| Grantee              | Role                                                                                 | Scope                                                                                 |
-| -------------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
-| node SA              | `roles/container.defaultNodeServiceAccount`                                          | project                                                                               |
-| app SA               | `roles/cloudtrace.agent`, `roles/logging.logWriter`, `roles/monitoring.metricWriter` | project                                                                               |
-| app SA               | `roles/secretmanager.secretAccessor`                                                 | each secret, resource-level                                                           |
-| app SA               | `roles/cloudkms.cryptoKeyEncrypterDecrypter`                                         | the crypto key, resource-level                                                        |
-| app SA               | `roles/iam.workloadIdentityUser`                                                     | on itself, for the `openharness/openharness` KSA                                      |
-| staging's node SA    | `roles/artifactregistry.reader`                                                      | the staging repository, resource-level                                                |
-| production's node SA | `roles/artifactregistry.reader`                                                      | the staging repository, resource-level, **only while `TF_PRODUCTION_NODE_SA` is set** |
+| Grantee              | Role                                                                                                          | Scope                                                                                 |
+| -------------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| node SA              | `roles/container.defaultNodeServiceAccount`                                                                   | project                                                                               |
+| app SA               | `roles/cloudsql.client`, `roles/cloudtrace.agent`, `roles/logging.logWriter`, `roles/monitoring.metricWriter` | project                                                                               |
+| app SA               | `roles/secretmanager.secretAccessor`                                                                          | each secret, resource-level                                                           |
+| app SA               | `roles/cloudkms.cryptoKeyEncrypterDecrypter`                                                                  | the crypto key, resource-level                                                        |
+| app SA               | `roles/iam.workloadIdentityUser`                                                                              | on itself, for the `openharness/openharness` KSA                                      |
+| staging's node SA    | `roles/artifactregistry.reader`                                                                               | the staging repository, resource-level                                                |
+| production's node SA | `roles/artifactregistry.reader`                                                                               | the staging repository, resource-level, **only while `TF_PRODUCTION_NODE_SA` is set** |
 
 Every **project-level** grant above is a role inside the setup script's
 `DEPLOY_GRANTABLE_PROJECT_ROLES` — that is the only thing the condition on `deploy@`'s
