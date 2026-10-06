@@ -50,19 +50,19 @@ variable "production_node_service_account" {
 }
 
 variable "google_client_id" {
-  description = "Google OAuth client ID. Empty disables Google sign-in and its client secret."
+  description = "Google OAuth client ID. Empty disables Google sign-in; the google-client-secret container is created either way (#159), and the app mounts it only while this is set."
   type        = string
   default     = ""
 }
 
 variable "github_client_id" {
-  description = "GitHub OAuth client ID. Empty disables GitHub sign-in and its client secret."
+  description = "GitHub OAuth client ID. Empty disables GitHub sign-in; the github-client-secret container is created either way (#159), and the app mounts it only while this is set."
   type        = string
   default     = ""
 }
 
 variable "microsoft_client_id" {
-  description = "Microsoft OAuth client ID. Empty disables Microsoft sign-in and its client secret."
+  description = "Microsoft OAuth client ID. Empty disables Microsoft sign-in; the microsoft-client-secret container is created either way (#159), and the app mounts it only while this is set."
   type        = string
   default     = ""
 }

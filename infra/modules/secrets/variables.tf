@@ -40,24 +40,6 @@ variable "db_password" {
   sensitive   = true
 }
 
-variable "google_client_id" {
-  description = "Google OAuth client ID. Not a secret; when empty, no google-client-secret is created."
-  type        = string
-  default     = ""
-}
-
-variable "github_client_id" {
-  description = "GitHub OAuth client ID. Not a secret; when empty, no github-client-secret is created."
-  type        = string
-  default     = ""
-}
-
-variable "microsoft_client_id" {
-  description = "Microsoft OAuth client ID. Not a secret; when empty, no microsoft-client-secret is created."
-  type        = string
-  default     = ""
-}
-
 variable "deletion_protection" {
   description = "Block Terraform from deleting the secrets. false in staging, true in production."
   type        = bool

@@ -9,7 +9,7 @@ output "database_url_secret_id" {
 }
 
 output "provider_secret_ids" {
-  description = "Secret IDs of the empty, manually filled provider client secrets, keyed by provider (google, github, microsoft)."
+  description = "Secret IDs of the empty, manually filled provider client secrets, keyed by provider (google, github, microsoft). All three are always present (#159); the app module mounts the ones whose client ID is set."
   value       = { for name, secret in google_secret_manager_secret.provider : name => secret.secret_id }
 }
 

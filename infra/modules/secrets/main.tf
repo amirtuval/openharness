@@ -4,6 +4,13 @@
 # password that goes into database-url — and creates the three provider client
 # secrets empty for the maintainer to fill in with
 # `gcloud secrets versions add`. KMS, not a secrets key, protects the vault.
+#
+# All three provider containers are created up front, whatever the client ID
+# variables say (#159). The app module mounts a provider's secret only once its
+# client ID is set, so a provider that is turned on later finds its container
+# already there to be filled in — which is what breaks the chicken-and-egg of
+# the old behaviour, where the deploy that turned a provider on was also the
+# one that created the secret it needed a version of.
 
 # ---------------------------------------------------------------------------
 # Generated: better-auth-secret
@@ -62,10 +69,10 @@ resource "google_secret_manager_secret_version" "database_url" {
 }
 
 # ---------------------------------------------------------------------------
-# Empty for manual: one per sign-in provider whose client ID is configured
+# Empty for manual: one per sign-in provider, always
 # ---------------------------------------------------------------------------
 resource "google_secret_manager_secret" "provider" {
-  for_each = local.enabled_providers
+  for_each = local.provider_secret_ids
 
   project   = var.project_id
   secret_id = local.provider_secret_ids[each.key]
@@ -84,7 +91,10 @@ resource "google_secret_manager_secret" "provider" {
 
 # ---------------------------------------------------------------------------
 # The app service account may read each secret it is given (resource-level, not
-# project-level: it holds no secretmanager role on the project at large)
+# project-level: it holds no secretmanager role on the project at large). This
+# covers all three provider secrets, including one whose client ID is not set
+# yet: the binding is what lets the release mount it the moment that provider is
+# turned on, and reading a secret that is not mounted grants nothing.
 # ---------------------------------------------------------------------------
 resource "google_secret_manager_secret_iam_member" "app" {
   for_each = local.secrets

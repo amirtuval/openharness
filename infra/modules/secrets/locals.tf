@@ -1,21 +1,14 @@
 locals {
   # The three sign-in providers whose client secret the maintainer supplies by
-  # hand, keyed by the provider name the app module uses.
-  provider_client_ids = {
-    google    = var.google_client_id
-    github    = var.github_client_id
-    microsoft = var.microsoft_client_id
-  }
-
+  # hand, keyed by the provider name the app module uses. All three containers
+  # are created unconditionally (#159) — the app module decides which of them to
+  # mount from the client ID variables, so creating one early costs nothing and
+  # gives the maintainer somewhere to put the version before the provider is on.
   provider_secret_ids = {
     google    = "google-client-secret"
     github    = "github-client-secret"
     microsoft = "microsoft-client-secret"
   }
-
-  # A secret is created only for a provider that is actually configured: a
-  # secret with no version would block the pod from starting.
-  enabled_providers = toset([for name, client_id in local.provider_client_ids : name if client_id != ""])
 
   # Every secret this module owns, by secret_id. The IAM binding below and the
   # app module's `secrets` list both key off these.
