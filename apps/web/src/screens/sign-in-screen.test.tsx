@@ -55,6 +55,33 @@ describe('SignInScreen', () => {
     expect(screen.queryByRole('button', { name: 'Sign in with GitHub' })).not.toBeInTheDocument()
   })
 
+  it('leaves the space above the first provider button to the card itself (#187)', async () => {
+    serveAuthConfig({ providers: ['google', 'github', 'microsoft'], dev_login: false })
+
+    renderApp(makeFake({ authenticated: false }))
+
+    const buttons = await screen.findAllByRole('button', { name: /^Sign in with / })
+    expect(buttons).toHaveLength(3)
+    const first = screen.getByRole('button', { name: 'Sign in with Google' })
+    const last = screen.getByRole('button', { name: 'Sign in with Microsoft' })
+    const card = first.closest('[data-slot="card"]')
+    expect(card).not.toBeNull()
+    if (card === null) {
+      throw new Error('the provider buttons are not inside a card')
+    }
+
+    // The regression: a `pt-6` on the `CardContent` the buttons live in put a second 24px on
+    // top of the card's own `py-6`, so the first button sat 48px from the top border against
+    // 24px below the last one. jsdom has no layout (see `App.test.tsx`), so the offsets are
+    // computed from the classes that make them — the same arithmetic the browser does — and
+    // `e2e/qa/w15-sign-in.spec.ts` measures the pixels of the same two offsets.
+    expect(spaceFromCardBorder(card, first, 'top')).toBe(spaceFromCardBorder(card, last, 'bottom'))
+
+    // Still 8px apart, which is deliberate: stacked buttons sit close, and only the
+    // top/bottom asymmetry was the bug.
+    expect(first.parentElement).toHaveClass('gap-2')
+  })
+
   it('shows the dev form only when the server reports dev_login', async () => {
     serveAuthConfig({ providers: ['github'], dev_login: true })
     const withDev = makeFake({ authenticated: false })
@@ -211,3 +238,42 @@ describe('SignInScreen', () => {
     expect(within(alert).getByText(/502/)).toBeInTheDocument()
   })
 })
+
+/**
+ * The space, in px, between a card's own border and a button inside it, on one edge.
+ *
+ * jsdom has no layout, so the offsets a browser would measure are computed from the Tailwind
+ * classes that make them: the spacing scale is 4px a step (`py-6` is 24px) and an arbitrary
+ * value (`pt-[18px]`, `py-[1.5rem]`) is read as written. Every element from the card down to
+ * the button contributes its padding on that edge — a class the reader below cannot parse
+ * becomes `NaN`, which fails the comparison rather than silently passing it.
+ */
+function spaceFromCardBorder(card: Element, button: Element, edge: 'top' | 'bottom'): number {
+  const names = edge === 'top' ? ['p', 'pt', 'py'] : ['p', 'pb', 'py']
+  let total = 0
+  for (
+    let element: Element | null = button.parentElement;
+    element !== null;
+    element = element.parentElement
+  ) {
+    for (const name of element.classList) {
+      const [prefix, ...rest] = name.split('-')
+      if (prefix !== undefined && names.includes(prefix)) {
+        total += spacingPx(rest.join('-'))
+      }
+    }
+    if (element === card) {
+      return total
+    }
+  }
+  throw new Error('the button is not inside the card')
+}
+
+/** A Tailwind spacing value in px: a scale step (`6`), or an arbitrary `[18px]`/`[1.5rem]`. */
+function spacingPx(value: string): number {
+  const arbitrary = /^\[(\d+(?:\.\d+)?)(px|rem)\]$/u.exec(value)
+  if (arbitrary !== null) {
+    return arbitrary[2] === 'rem' ? Number(arbitrary[1]) * 16 : Number(arbitrary[1])
+  }
+  return Number(value) * 4
+}

@@ -88,7 +88,12 @@ export function SignInScreen({ returnHash }: { returnHash: string }) {
         )}
 
         <Card>
-          <CardContent className="space-y-4 pt-6">
+          {/* No `pt-*` here: the card's own `py-6` is the padding inside its border, and this
+              is the only card in the app with a bare `CardContent` at the top (every other one
+              renders a `CardHeader` first, which is what the registry's top padding is for).
+              A second 24px on top made the space above the first button 48px against the 24px
+              below the last one (#187). */}
+          <CardContent className="space-y-4">
             {loading ? (
               <p role="status" className="text-sm text-muted-foreground">
                 Loading sign-in options…
