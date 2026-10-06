@@ -4,12 +4,12 @@ output "instance_name" {
 }
 
 output "instance_connection_name" {
-  description = "Connection name (project:region:instance), the Cloud SQL Auth Proxy's target if it is ever used."
+  description = "Connection name (project:region:instance). The Cloud SQL Auth Proxy sidecar's target (#159); the app module passes it to the chart."
   value       = google_sql_database_instance.main.connection_name
 }
 
 output "private_ip" {
-  description = "Private IP the app connects to. Always private: the instance has no public address."
+  description = "Private IP the Cloud SQL Auth Proxy sidecar reaches the instance on. Always private: the instance has no public address. Not what the app connects to — its `database_url` names 127.0.0.1."
   value       = tolist([for ip in google_sql_database_instance.main.ip_address : ip.ip_address if ip.type == "PRIVATE"])[0]
 }
 

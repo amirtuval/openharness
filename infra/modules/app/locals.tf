@@ -73,6 +73,15 @@ locals {
     serviceAccount = {
       gcpServiceAccount = var.app_service_account_email
     }
+    # The Cloud SQL Auth Proxy sidecar (#159) is always on in a deployed
+    # environment: it is the only path the app has to the instance. The app
+    # connects to it on 127.0.0.1 — `database_url` in the secrets module names
+    # exactly that — and the proxy makes the TLS connection to the instance over
+    # its private IP, as the pod's Workload Identity.
+    cloudSqlProxy = {
+      enabled                = true
+      instanceConnectionName = var.cloudsql_instance_connection_name
+    }
     ingress = {
       host         = var.host
       staticIpName = local.static_ip_name

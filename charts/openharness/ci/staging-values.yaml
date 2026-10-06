@@ -3,7 +3,8 @@
 # `helm lint` renders an extra pass for every `ci/*-values.yaml`, and the CI job renders this
 # one before `kubeconform` validates it — so this file is what proves the chart renders the way
 # staging is deployed, not just its empty defaults. Production differs only in the project, the
-# host, the static IP and the secret names; the image tag is a git sha in both.
+# host, the static IP, the Cloud SQL instance's connection name and the secret names; the image
+# tag is a git sha in both.
 
 image:
   repository: us-central1-docker.pkg.dev/openharness-dev/openharness/server
@@ -29,6 +30,16 @@ serviceAccount:
   name: openharness
   # The app GSA Terraform creates in openharness-dev.
   gcpServiceAccount: openharness-app@openharness-dev.iam.gserviceaccount.com
+
+# The Cloud SQL Auth Proxy sidecar (#159), on in both environments: the app has no way to reach
+# the instance's private IP over TLS the way `node-postgres` wants it (Cloud SQL's server
+# certificate is signed by a per-instance CA Node does not trust), so it connects to this proxy
+# on 127.0.0.1 instead. The connection name is the staging instance's — Cloud SQL's
+# `connection_name` for the `openharness` instance in `openharness-dev`, `us-central1` — which
+# Terraform passes from `infra/modules/cloudsql`'s `instance_connection_name` output.
+cloudSqlProxy:
+  enabled: true
+  instanceConnectionName: openharness-dev:us-central1:openharness
 
 ingress:
   host: staging.oharness.dev
@@ -67,7 +78,9 @@ env:
 
 # Two secrets, mounted from Secret Manager: the database URL and the Better Auth signing
 # secret, each landing under /var/run/secrets/openharness/ and read through its `_FILE`
-# variable (#154).
+# variable (#154). `database-url` points at the proxy sidecar above —
+# `postgres://…@127.0.0.1:5432/openharness?sslmode=disable` — not at the instance's private IP;
+# `infra/modules/secrets/locals.tf` builds it.
 secrets:
   - env: DATABASE_URL
     secret: database-url

@@ -67,6 +67,47 @@ backend hardcoded per environment. The production root adopts the pre-existing `
 zone with an `import` block, so it needs `existing_zone_name` — the zone's resource name,
 from `gcloud dns managed-zones list --project openharness-510710` — passed on the apply.
 
+### The database URL, and why the pod runs a proxy (#159)
+
+The app does not dial the Cloud SQL instance. It dials the **Cloud SQL Auth Proxy**, a native
+sidecar container in its own pod, and the proxy makes the TLS connection to the instance over
+its private IP as the pod's Workload Identity. `database_url` — built in
+`infra/modules/secrets/locals.tf` — therefore reads
+`postgres://…@127.0.0.1:5432/openharness?sslmode=disable`, and the instance's private IP never
+appears in it.
+
+The first real staging deploy died the other way round. Pointed at the instance's private IP
+with `sslmode=require`, the server's session-store migration failed at boot on every pod:
+
+```
+the server could not start Error: unable to verify the first certificate
+  at pg-pool ... at migrate (packages/session) ... code: 'UNABLE_TO_VERIFY_LEAF_SIGNATURE'
+```
+
+`node-postgres` reads `sslmode=require` as verify-full, and Cloud SQL's server certificate is
+signed by a per-instance Google CA that is not in Node's trust store — so verification can
+never succeed by configuration alone. The sidecar is the fix that keeps verification: the proxy
+is the thing that speaks TLS to Cloud SQL, and it is the thing that can be told what to trust.
+`sslmode=disable` describes only the pod-local loopback hop, which nothing outside the pod can
+reach; it is not a downgrade of the connection that leaves the pod.
+
+The chart renders the sidecar from `cloudSqlProxy` (see
+[`charts/openharness/README.md`](../charts/openharness/README.md#the-cloud-sql-auth-proxy-sidecar-cloudsqlproxy));
+Terraform enables it in the `app` module with the connection name from the `cloudsql` module.
+Both are in [`infra/README.md`](../infra/README.md#the-app-reaches-it-through-the-cloud-sql-auth-proxy-159).
+
+Two things worth knowing about rolling it out:
+
+- **The `database-url` secret version is replaced, and new pods do see it.** The chart's
+  `SecretProviderClass` names each secret's `versions/latest`
+  (`charts/openharness/templates/secretproviderclass.yaml`), not a pinned version, and the CSI
+  driver resolves that at pod start — so the pods of the new ReplicaSet mount the new URL. No
+  extra step is needed; the rollout itself is the fix.
+- **Tightening the instance is a follow-up, not part of this change.** `ssl_mode` stays
+  `ENCRYPTED_ONLY`. Moving it to `TRUSTED_CLIENT_CERTIFICATE_REQUIRED` — so only the proxy,
+  which presents a client certificate, may connect, rather than anyone who can reach the
+  private IP — is an instance change and is deliberately left to its own reviewed plan.
+
 The four things Terraform cannot do alone — re-running the setup script after this change,
 finding the production zone name, adding the OAuth client secrets with
 `gcloud secrets versions add`, and granting the billing account `roles/billing.costsManager`

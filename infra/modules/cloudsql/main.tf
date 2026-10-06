@@ -34,7 +34,14 @@ resource "google_sql_database_instance" "main" {
 
     ip_configuration {
       # No public IP at all, and TLS required for the connections that do reach
-      # it — the app connects with sslmode=require.
+      # it — the Cloud SQL Auth Proxy sidecar is the connection that does, and it
+      # presents a client certificate (#159).
+      #
+      # ENCRYPTED_ONLY is what is set today. Tightening this to
+      # TRUSTED_CLIENT_CERTIFICATE_REQUIRED — so *only* the proxy can connect,
+      # not merely anyone who can reach the private IP — is a deliberate
+      # follow-up: it is an instance change, and it is riskier than the change
+      # that fixed the boot. See infra/README.md, "Cloud SQL".
       ipv4_enabled    = false
       private_network = var.network_id
       ssl_mode        = "ENCRYPTED_ONLY"

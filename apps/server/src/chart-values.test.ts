@@ -29,10 +29,17 @@ const STAGING_VALUES = join(REPO_ROOT, 'charts', 'openharness', 'ci', 'staging-v
 /** The app module's Terraform locals — the other, unconditional side of the same pair. */
 const TERRAFORM_LOCALS = join(REPO_ROOT, 'infra', 'modules', 'app', 'locals.tf')
 
+/** The Cloud SQL Auth Proxy sidecar, the part of the values document that changes the database. */
+interface CloudSqlProxyValues {
+  readonly enabled?: boolean
+  readonly instanceConnectionName?: string
+}
+
 /** The parts of the values document this test reads. */
 interface ChartValues {
   readonly env: Record<string, string>
   readonly secrets: readonly { readonly env: string; readonly secret: string }[]
+  readonly cloudSqlProxy?: CloudSqlProxyValues
 }
 
 /** The chart's staging values, parsed. */
@@ -131,6 +138,18 @@ describe('the chart values staging boots with (#159)', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+
+  it('give the Cloud SQL Auth Proxy sidecar an instance to connect to (#159)', () => {
+    // The app no longer dials the database's address itself: its `database_url` names
+    // 127.0.0.1 and the sidecar in its own pod is the only thing that speaks TLS to Cloud SQL.
+    // Terraform sets `cloudSqlProxy.enabled = true` for every environment
+    // (`infra/modules/app/locals.tf`), so the values staging boots with have it on — and a
+    // sidecar that is on without an instance connection name is a proxy with nothing to
+    // connect to, which `helm template` refuses through `required`.
+    const values = readStagingValues()
+    expect(values.cloudSqlProxy?.enabled).toBe(true)
+    expect(values.cloudSqlProxy?.instanceConnectionName).toMatch(/^[^:]+:[^:]+:[^:]+$/u)
   })
 
   it('name the same variables Terraform sets for every environment', () => {

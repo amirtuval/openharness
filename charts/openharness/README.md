@@ -17,18 +17,18 @@ helm template openharness charts/openharness -n openharness \
 
 ## What it creates
 
-| object                    | why                                                                                                                                       |
-| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `Deployment`              | the server: non-root, read-only rootfs, no capabilities, `/health` liveness, `/ready` readiness, a startup probe that outlives migrations |
-| `Service`                 | ClusterIP, with the NEG annotation (container-native load balancing) and the BackendConfig annotation                                     |
-| `ServiceAccount`          | `openharness`, annotated with the app GSA — the pod's Workload Identity                                                                   |
-| `Ingress`                 | class `gce`, the host, the global static IP, the managed certificate and the HTTP→HTTPS FrontendConfig                                    |
-| `ManagedCertificate`      | a Google-managed TLS certificate for the host (`networking.gke.io/v1`)                                                                    |
-| `FrontendConfig`          | redirects HTTP to HTTPS                                                                                                                   |
-| `BackendConfig`           | Cloud CDN (`USE_ORIGIN_HEADERS`), the `/ready` health check, `timeoutSec` for SSE, connection draining                                    |
-| `HorizontalPodAutoscaler` | CPU-based scale between `minReplicas` and `maxReplicas`                                                                                   |
-| `PodDisruptionBudget`     | `minAvailable: 1` — a drain or an upgrade never takes the last pod                                                                        |
-| `SecretProviderClass`     | only when `secrets` is non-empty: the Secret Manager secrets the CSI volume mounts                                                        |
+| object                    | why                                                                                                                                                                                                                  |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Deployment`              | the server: non-root, read-only rootfs, no capabilities, `/health` liveness, `/ready` readiness, a startup probe that outlives migrations; plus the Cloud SQL Auth Proxy native sidecar when `cloudSqlProxy.enabled` |
+| `Service`                 | ClusterIP, with the NEG annotation (container-native load balancing) and the BackendConfig annotation                                                                                                                |
+| `ServiceAccount`          | `openharness`, annotated with the app GSA — the pod's Workload Identity                                                                                                                                              |
+| `Ingress`                 | class `gce`, the host, the global static IP, the managed certificate and the HTTP→HTTPS FrontendConfig                                                                                                               |
+| `ManagedCertificate`      | a Google-managed TLS certificate for the host (`networking.gke.io/v1`)                                                                                                                                               |
+| `FrontendConfig`          | redirects HTTP to HTTPS                                                                                                                                                                                              |
+| `BackendConfig`           | Cloud CDN (`USE_ORIGIN_HEADERS`), the `/ready` health check, `timeoutSec` for SSE, connection draining                                                                                                               |
+| `HorizontalPodAutoscaler` | CPU-based scale between `minReplicas` and `maxReplicas`                                                                                                                                                              |
+| `PodDisruptionBudget`     | `minAvailable: 1` — a drain or an upgrade never takes the last pod                                                                                                                                                   |
+| `SecretProviderClass`     | only when `secrets` is non-empty: the Secret Manager secrets the CSI volume mounts                                                                                                                                   |
 
 With the default values — an empty `ingress.host` — the `Ingress` and `ManagedCertificate` are
 not rendered; with `secrets: []` the `SecretProviderClass`, the CSI volume and the volume mount
@@ -58,6 +58,13 @@ Kubernetes service account is named `openharness`.
 | `resources.limits.memory`                    |      | `512Mi`        | equal to the request: a steady footprint, so a higher limit buys nothing                   |
 | `serviceAccount.name`                        |      | `openharness`  | the KSA the pods run as — and the name the Workload Identity binding uses                  |
 | `serviceAccount.gcpServiceAccount`           |  ✔   | `""`           | the app GSA's email → the `iam.gke.io/gcp-service-account` annotation                      |
+| `cloudSqlProxy.enabled`                      |  ✔   | `false`        | render the Cloud SQL Auth Proxy as a native sidecar in the pod                             |
+| `cloudSqlProxy.instanceConnectionName`       |  ✔   | `""`           | `<project>:<region>:<instance>` — the proxy's target. **Required when `enabled`**          |
+| `cloudSqlProxy.image.repository`             |      | the connector  | `gcr.io/cloud-sql-connectors/cloud-sql-proxy`                                              |
+| `cloudSqlProxy.image.tag`                    |      | `2.26.0`       | pinned to a release, never `latest`                                                        |
+| `cloudSqlProxy.port`                         |      | `5432`         | the loopback port the proxy listens on, and the port in `database_url`                     |
+| `cloudSqlProxy.privateIp`                    |      | `true`         | pass `--private-ip`: the instance has no public address                                    |
+| `cloudSqlProxy.resources`                    |      | `100m`/`128Mi` | requests for the forwarder; Autopilot rounds them up to its container floor                |
 | `ingress.host`                               |  ✔   | `""`           | the serving host. Empty ⇒ no Ingress, no ManagedCertificate                                |
 | `ingress.staticIpName`                       |  ✔   | `""`           | the `google_compute_global_address` name → `kubernetes.io/ingress.global-static-ip-name`   |
 | `cdn.enabled`                                |      | `true`         | Cloud CDN on the backend service, `cacheMode: USE_ORIGIN_HEADERS`                          |
@@ -108,12 +115,54 @@ Each entry mounts one Secret Manager secret through the GKE Secret Manager add-o
   given `<env>_FILE=/var/run/secrets/openharness/<secret>` — the server reads the file
   ([#154](https://github.com/amirtuval/openharness/issues/154); see the server's `AGENTS.md`).
 
+`latest` is deliberate and not pinned: the driver resolves the version at pod start, so a
+secret version Terraform replaces — `database-url`, every time the instance's private IP or
+password changes — reaches the pods of the next rollout with no extra step. A pinned version
+would leave new pods mounting the old value.
+
 Terraform passes `{env: DATABASE_URL, secret: database-url}` and
 `{env: BETTER_AUTH_SECRET, secret: better-auth-secret}`, plus a provider's client secret
 (`{env: <PROVIDER>_CLIENT_SECRET, secret: <provider>-client-secret}`) only when that provider's
 client ID is set. The GSA needs `roles/secretmanager.secretAccessor` on each secret — a
 Terraform grant, not the chart's. With `secrets: []` there is no CSI volume, no volume mount
 and no `SecretProviderClass`.
+
+### The Cloud SQL Auth Proxy sidecar (`cloudSqlProxy`)
+
+Off by default — with the defaults, or `enabled: false`, nothing below is rendered and the pod
+has its single container.
+
+Why it exists ([#159](https://github.com/amirtuval/openharness/issues/159)): the instance is
+private-IP only with `ssl_mode = ENCRYPTED_ONLY`, and its server certificate is signed by a
+per-instance Google CA. `node-postgres` reads `sslmode=require` as verify-full, so connecting
+to the instance's IP directly fails the session store's boot migration with
+`UNABLE_TO_VERIFY_LEAF_SIGNATURE`. The fix is a proxy that terminates that TLS for the pod
+rather than turning verification off: the app connects to the proxy on `127.0.0.1` with plain
+Postgres (`sslmode=disable` — the hop is pod-local, over a loopback nothing else can reach), and
+the proxy speaks TLS to Cloud SQL over the instance's private IP.
+
+With `enabled: true` the chart renders an **init container with `restartPolicy: Always`** — a
+[native sidecar](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/)
+(Kubernetes 1.29+, so GKE 1.29+; the cluster is 1.35):
+
+- it starts before the app container, and because it declares a `startupProbe` the app
+  container does not start until that probe passes — which is what the app needs, since it runs
+  the session store's migrations at boot and must find the database immediately;
+- it is not reaped when it exits: a native sidecar stays up for the pod's lifetime;
+- it authenticates as the pod's **Workload Identity**, so the app GSA needs
+  `roles/cloudsql.client` — a Terraform grant, not the chart's.
+
+| part            | value                                                                                                                                                                   |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| args            | `<instanceConnectionName>`, `--private-ip`, `--port=<port>`, `--address=127.0.0.1`, `--structured-logs`, `--health-check`, `--http-address=0.0.0.0`, `--http-port=9090` |
+| `startupProbe`  | `/startup` on 9090 — the gate the app container waits behind                                                                                                            |
+| `livenessProbe` | `/liveness` on 9090 — the proxy's own event loop                                                                                                                        |
+| securityContext | the app container's: `runAsNonRoot`, `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`, all capabilities dropped                                              |
+
+`instanceConnectionName` is **required** when `enabled` is true: rendering fails with a
+`required` message rather than shipping a proxy with nothing to connect to. Terraform passes
+the `cloudsql` module's `instance_connection_name` output and turns it on for both
+environments.
 
 ### Probes and health checks
 

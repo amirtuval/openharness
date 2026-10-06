@@ -20,13 +20,24 @@ locals {
     { for name, secret in google_secret_manager_secret.provider : secret.secret_id => secret },
   )
 
-  # sslmode=require matches the instance's ENCRYPTED_ONLY SSL mode; the user and
-  # password are percent-encoded so a generated password can never break the URL.
+  # The app does not talk to the Cloud SQL instance directly: it talks to the
+  # Cloud SQL Auth Proxy running as a sidecar in its own pod (#159), so the host
+  # is the pod's loopback and the port is the proxy's listener. The proxy is what
+  # speaks TLS to the instance over the private IP, using the pod's Workload
+  # Identity — so `sslmode=disable` is correct here and is *not* a downgrade:
+  # the only hop it describes is the pod-local one, over a loopback interface
+  # nothing else can reach. Turning verification off against the *instance*
+  # (the old `sslmode=require` against its private IP, which node-postgres reads
+  # as verify-full) is what failed with UNABLE_TO_VERIFY_LEAF_SIGNATURE:
+  # Cloud SQL's server certificate is signed by a per-instance Google CA that is
+  # not in Node's trust store.
+  #
+  # The user and password are percent-encoded so a generated password can never
+  # break the URL.
   database_url = format(
-    "postgres://%s:%s@%s:%d/%s?sslmode=require",
+    "postgres://%s:%s@127.0.0.1:%d/%s?sslmode=disable",
     urlencode(var.db_user),
     urlencode(var.db_password),
-    var.db_host,
     var.db_port,
     var.db_name,
   )
