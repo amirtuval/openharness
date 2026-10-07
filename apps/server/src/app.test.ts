@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -678,6 +678,8 @@ describe('static web assets', () => {
     directory = await mkdtemp(join(tmpdir(), 'openharness-web-'))
     await writeFile(join(directory, 'index.html'), '<html>the app</html>')
     await writeFile(join(directory, 'app.js'), 'console.log(1)')
+    await mkdir(join(directory, 'assets'))
+    await writeFile(join(directory, 'assets', 'index-a1b2c3d4.js'), 'console.log(2)')
     return directory
   }
 
@@ -750,6 +752,62 @@ describe('static web assets', () => {
     const response = await test.request('/')
 
     expect(response.status).toBe(404)
+  })
+
+  it('serves HEAD exactly like GET, with no body (#196)', async () => {
+    const test = setup({ webDir: await webDir() })
+
+    // The shell, a hashed asset, an SPA route and a root file: every class the server hands
+    // out. A HEAD used to fall past the static fallback to the API's `404 no-store` — which
+    // is what stopped Cloud CDN from caching the file the GET serves.
+    for (const path of ['/', '/assets/index-a1b2c3d4.js', '/sessions/abc', '/app.js']) {
+      const get = await test.request(path)
+      const head = await test.request(path, { method: 'HEAD' })
+
+      expect(get.status, path).toBe(200)
+      expect(head.status, path).toBe(get.status)
+      for (const header of ['content-type', 'content-length', 'cache-control']) {
+        expect(head.headers.get(header), `${path} ${header}`).toBe(get.headers.get(header))
+      }
+      await expect(head.text(), path).resolves.toBe('')
+      await expect(get.text(), path).resolves.not.toBe('')
+    }
+  })
+
+  it('answers HEAD for a missing asset like the GET it falls back to', async () => {
+    const test = setup({ webDir: await webDir() })
+
+    // The request names `assets/`, the response *is* `index.html`: the same shell a GET gets,
+    // headers and all, with nothing in the body.
+    const get = await test.request('/assets/gone-00000000.js')
+    const head = await test.request('/assets/gone-00000000.js', { method: 'HEAD' })
+
+    expect(get.status).toBe(200)
+    expect(head.status).toBe(get.status)
+    expect(head.headers.get('content-type')).toBe(get.headers.get('content-type'))
+    expect(head.headers.get('content-length')).toBe(get.headers.get('content-length'))
+    expect(head.headers.get('cache-control')).toBe('no-cache')
+    expect(head.headers.get('cache-control')).toBe(get.headers.get('cache-control'))
+    await expect(head.text()).resolves.toBe('')
+  })
+
+  it('still 404s HEAD for a path with no web app behind it', async () => {
+    const test = setup()
+
+    const response = await test.request('/nothing-here', { method: 'HEAD' })
+
+    expect(response.status).toBe(404)
+    expect(response.headers.get('cache-control')).toBe('no-store')
+  })
+
+  it('redirects HEAD /device the way it redirects GET', async () => {
+    const test = setup({ webDir: await webDir() })
+
+    const head = await test.request('/device?user_code=WXYZ-1234', { method: 'HEAD' })
+
+    expect(head.status).toBe(302)
+    expect(head.headers.get('location')).toBe('/#/device?user_code=WXYZ-1234')
+    await expect(head.text()).resolves.toBe('')
   })
 })
 

@@ -442,8 +442,15 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
   }
 
   app.notFound(async (c) => {
-    if (options.webDir !== undefined && c.req.method === 'GET' && !isApiPath(c.req.path)) {
-      const asset = await serveWebAsset(options.webDir, c.req.path)
+    // The web app's files are served to `HEAD` exactly as to `GET` (#196): a link checker, an
+    // uptime probe, `curl -I` or Cloud CDN revalidating a cached entry asks the same question
+    // with `HEAD`, and the `404 no-store` it used to get — for a file the `GET` beside it
+    // serves — is what kept the CDN from caching one. Hono routes a `HEAD` through the `GET`
+    // handlers and drops the body of what comes back, but `c.req.method` is still `HEAD` here,
+    // so the gate has to name it; `serveWebAsset` answers it without a body.
+    const reads = c.req.method === 'GET' || c.req.method === 'HEAD'
+    if (options.webDir !== undefined && reads && !isApiPath(c.req.path)) {
+      const asset = await serveWebAsset(options.webDir, c.req.path, c.req.method)
       if (asset !== null) {
         return asset
       }

@@ -12,8 +12,12 @@ import { extname, join, relative, resolve, sep } from 'node:path'
  * Two rules for *what* is served, and nothing else:
  *
  * - a request that names a file in the directory gets that file;
- * - any other GET that is not under `/v1` gets `index.html`, because the web app routes with
+ * - any other read that is not under `/v1` gets `index.html`, because the web app routes with
  *   the URL hash and only ever asks the server for `/` and its assets.
+ *
+ * A **read** is `GET` or its bodyless twin `HEAD` (#196): a link checker, an uptime probe or a
+ * CDN revalidating an entry asks the same question with `HEAD`, and answering it `404` here
+ * would both be a lie and stop Cloud CDN from caching a file the `GET` serves.
  *
  * ## Caching (#151, deployment epic #148)
  *
@@ -97,21 +101,28 @@ export function contentTypeOf(path: string): string {
  *
  * @param root the directory `OPENHARNESS_WEB_DIR` points at
  * @param requestPath the request path, percent-encoded, as it arrived
+ * @param method the request's method; `HEAD` is served the same file as `GET`, with the same
+ *   status and the same headers, and no body (#196)
  * @returns the file's response, `index.html` for a path that names no file, or `null` when
  *   there is no index either — which is what leaves the request to the API's 404
  */
-export async function serveWebAsset(root: string, requestPath: string): Promise<Response | null> {
+export async function serveWebAsset(
+  root: string,
+  requestPath: string,
+  method: string,
+): Promise<Response | null> {
+  const withBody = method !== 'HEAD'
   const directory = resolve(root)
   const target = resolveTarget(directory, requestPath)
   if (target !== null) {
     const file = await fileTarget(target)
     if (file !== null) {
-      return fileResponse(directory, file)
+      return fileResponse(directory, file, withBody)
     }
   }
   // The web app routes on the hash, so every other path is the app itself: hand it the shell
   // and let it decide what to render.
-  return fileResponse(directory, join(directory, INDEX_FILE))
+  return fileResponse(directory, join(directory, INDEX_FILE), withBody)
 }
 
 /**
@@ -158,15 +169,23 @@ async function fileTarget(target: string): Promise<string | null> {
  * `path` is always inside `directory` (`resolveTarget` and the fallback built it), so the
  * cache class can be read off the path relative to the directory: the *served* file decides
  * it, not the requested path.
+ *
+ * With `withBody` false the file is still read — `content-length` is one of the headers a
+ * `HEAD` has to answer with — but the response carries no body, which is the only difference
+ * between the two reads (#196).
  */
-async function fileResponse(directory: string, path: string): Promise<Response | null> {
+async function fileResponse(
+  directory: string,
+  path: string,
+  withBody: boolean,
+): Promise<Response | null> {
   let body: Uint8Array<ArrayBuffer>
   try {
     body = new Uint8Array(await readFile(path))
   } catch {
     return null
   }
-  return new Response(body, {
+  return new Response(withBody ? body : null, {
     status: 200,
     headers: {
       'content-type': contentTypeOf(path),
