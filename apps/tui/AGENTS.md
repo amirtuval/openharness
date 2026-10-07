@@ -183,6 +183,42 @@ the model the log last said the session runs (`transcript.model`, falling back t
 session's own). Switching provider mid-chat is supported; the history is rebuilt per
 request. Ctrl+C in the picker closes it and changes nothing.
 
+### Slash commands, the menu, and the prompt slot (#207)
+
+Every command is an entry in one registry (`src/chat/commands.ts`): a `name`, optional
+`aliases`, a one-line `description`, an optional `args` hint, and `run(context, args)`. The
+menu, the completion, `/help` and `oh --help` all read it, so a new command is one entry and
+no other file knows its name.
+
+`/model` picks a model (pending until the next message, as above), `/new` starts a new chat on
+the current model (the app opens the session the way a first chat does, and the old screen's
+stream is disposed with it), `/clear` wipes the screen with the Ctrl+L mechanism and keeps the
+session, `/help` prints the commands and the keys above the prompt, and `/exit` (alias
+`/quit`) leaves — the same leave as the second idle Ctrl+C.
+
+What the prompt submitted is read by `parseChatInput`: `//…` is a message whose first slash is
+dropped (the escape hatch for a literal `/`), `/name args` runs a command with the rest of the
+line as its arguments, an unknown `/name` is named back with the closest match (edit distance,
+ties by registry order) and sent nowhere, and anything else is a message. The command must
+start the line — a line with a leading space is a message — which is the menu's rule too.
+
+Typing `/` on an empty buffer opens the filtered list under the prompt. ↑/↓ highlight (they do
+not walk the history while it is up), Tab completes the highlighted command into the buffer,
+Enter runs it, Esc closes the menu and keeps the text. The menu closes once the command word
+is over: at the first space, or as soon as the word is a command. Its rows are ANSI colours
+(`cyan` for the highlighted one), and the usage column is padded to the whole registry's
+widest label so the descriptions do not move as the filter narrows.
+
+**The inline prompt slot** (`src/components/prompt-slot.tsx`) is the one mechanism through
+which a flow takes the input area over and gives it back with a result:
+`const answer = await slot.request<string | null>((settle) => <ModelPicker … onSelect={settle}
+onCancel={() => settle(null)} />)`. The prompt is not rendered while a flow is up, so the flow
+owns the keys (the screen's Ctrl+C/Ctrl+L stands down), and one flow at a time is a property
+of the layout rather than a lock. The model picker is the first user; a `question` part, an
+approval, and the `/providers` key entry (#210, X7) fit without changing the slot, because how
+many steps a flow takes is the flow's business and it settles once, at the end. See
+[`docs/commands.md`](./docs/commands.md).
+
 ### Deleting a chat
 
 `oh sessions delete <id>` asks `Delete chat <id>? This cannot be undone [y/N] ` (read from
@@ -303,19 +339,21 @@ install, because there is nothing here for npm to replace.
 
 ## In the chat
 
-| key                     | what it does                                                     |
-| ----------------------- | ---------------------------------------------------------------- |
-| `/model` + Enter        | pick a model; it applies from the next message and sticks        |
-| Enter                   | send — also while a reply streams, which is what steering is     |
-| Ctrl+J, Alt+Enter       | insert a newline                                                 |
-| ←/→, Home/End, Ctrl+A/E | move the cursor; Home/End and Ctrl+A/Ctrl+E take the line's ends |
-| Backspace / Delete      | delete behind the cursor, and at it                              |
-| Ctrl+U / Ctrl+K         | delete to the start of the line, and to its end                  |
-| Ctrl+W, Alt+Backspace   | delete the word before the cursor                                |
-| Alt+B / Alt+F, Ctrl+←/→ | jump a word back and forward                                     |
-| ↑/↓                     | the buffer's own lines first, then the history (#206)            |
-| Ctrl+L                  | clear the screen; the session stays (#206)                       |
-| Ctrl+C                  | interrupt the running turn; pressed again when idle, leave       |
+| key                     | what it does                                                                                          |
+| ----------------------- | ----------------------------------------------------------------------------------------------------- |
+| `/` + Enter             | the command menu: `/model`, `/new`, `/clear`, `/help`, `/exit` (#207)                                 |
+| Enter                   | send — also while a reply streams, which is what steering is                                          |
+| Ctrl+J, Alt+Enter       | insert a newline                                                                                      |
+| ←/→, Home/End, Ctrl+A/E | move the cursor; Home/End and Ctrl+A/Ctrl+E take the line's ends                                      |
+| Backspace / Delete      | delete behind the cursor, and at it                                                                   |
+| Ctrl+U / Ctrl+K         | delete to the start of the line, and to its end                                                       |
+| Ctrl+W, Alt+Backspace   | delete the word before the cursor                                                                     |
+| Alt+B / Alt+F, Ctrl+←/→ | jump a word back and forward                                                                          |
+| ↑/↓                     | the menu's rows while it is open (#207), otherwise the buffer's own lines and then the history (#206) |
+| Tab                     | complete the highlighted command into the buffer (#207)                                               |
+| Esc                     | close the menu, keeping the text (#207)                                                               |
+| Ctrl+L                  | clear the screen; the session stays (#206)                                                            |
+| Ctrl+C                  | interrupt the running turn; pressed again when idle, leave                                            |
 
 "Shift+Enter" is not a key a terminal can send — most send the same `\r` for both — so the
 newline is bound to **Ctrl+J** (line feed, `0x0A`, against Enter's `0x0D`), which every
@@ -330,7 +368,8 @@ keypress: a pasted line ending does not send. A paste over 2,000 characters is s
 as `[pasted N lines]` and sent in full. ↑/↓ walk what this user has sent to this server, kept
 in `~/.config/openharness/history.json` under the server and the user, capped at 500 entries;
 the full list of bindings, the file's shape and the "don't record" seam the hidden-input issue
-(#207, X7) will use are in [`docs/prompt.md`](./docs/prompt.md).
+(#207, X7) will use are in [`docs/prompt.md`](./docs/prompt.md); the slash menu that shares the
+↑/↓ keys with the history is in [`docs/commands.md`](./docs/commands.md).
 
 On the way out the CLI prints `Resume this session with: oh -s <id>` — unless the session
 was deleted while the chat was open, when it prints `This chat was deleted; it is gone.`
@@ -394,7 +433,10 @@ src/
   chat/
     session.ts           the runtime: transcript + stream + send/interrupt/dispose,
                          the pending `/model` pick, and the deleted-session end state
-    screen.tsx           the chat screen (transcript, status line, prompt, `/model`)
+    screen.tsx           the chat screen (transcript, status line, prompt, the slash
+                         commands), and the prompt slot's first flow
+    commands.ts          the slash-command registry, `parseChatInput`, the "did you mean",
+                         the keys `/help` and `oh --help` both list (#207)
     target.ts            which session to open, and the model/agent-selection rules
     ctrl-c.ts            the Ctrl+C rules (interrupt / arm / exit)
   markdown/
@@ -405,7 +447,9 @@ src/
     render.ts            mdast → lines of spans: headings, lists, tables, quotes, code (#205)
   components/            message-view (a message, and the renderer per part type, #201),
                          theme (the context the transcript reads), transcript-view,
-                         status-line, prompt-input, notice-view, model-picker
+                         status-line, prompt-input (and its command menu), prompt-slot
+                         (what takes the input area over, #207), notice-view,
+                         model-picker
   update/
     index.ts             the auto-update: the notice, and the decision to check
     decide.ts            the off switches (env / config / CI), the hourly throttle, the claim
@@ -514,39 +558,42 @@ command), and `src/commands/auth.ts` against the fake's scripted device flow (ap
 denial, cancellation, revoke failures); `src/index.test.ts` drives `run()` all the way through
 `login` / `whoami` / `logout` with `XDG_CONFIG_HOME` pointed at a temp directory.
 
-| file                                              | covers                                                                                                                        |
-| ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `src/index.test.ts`                               | `run()` end to end: the exit codes, login / whoami / logout, signals, `default-model` and `sessions delete`                   |
-| `src/args.test.ts`                                | `parseArgs` and `readVersion`: every command, unknown and conflicting flags                                                   |
-| `src/config.test.ts`                              | the precedence chain, and the errors a bad config file produces                                                               |
-| `src/credentials.test.ts`                         | the credentials file: atomic write, `0600`/`0700`, per-server tokens, a write that failed                                     |
-| `src/history.test.ts`                             | `history.json`: the list, the cap, consecutive duplicates, per server _and_ user, `record: false`, and the reads it tolerates |
-| `src/components/prompt-input.test.tsx`            | every prompt binding, the cursor's line, history browsing with a draft, multi-line navigation, and paste (#206)               |
-| `src/markdown/text.test.ts`                       | the wrapper: prose and pasted indentation, wide characters, long words, truncation and alignment (#205)                       |
-| `src/markdown/theme.test.ts`                      | `COLORFGBG`, `NO_COLOR`, the config's `theme`, and the two syntax palettes (#205)                                             |
-| `src/markdown/highlight.test.ts`                  | highlight.js → spans: tokens, nested scopes, entities, a language it does not know, half a snippet (#205)                     |
-| `src/markdown/render.test.ts`                     | mdast → lines: every element, the table in the room it has, the frame, NO_COLOR, no line wider than its box (#205)            |
-| `src/components/message-view.test.tsx`            | the frame: the label, the hanging indent, a reply rendered as Markdown, wide characters, the cursor and `(queued)` (#205)     |
-| `src/browser.test.ts`                             | the skip rules and the per-platform command, with an injected spawn                                                           |
-| `src/commands/auth.test.ts`                       | `oh login` / `logout` / `whoami` against the fake's scripted device flow, mid-poll cancellation included                      |
-| `src/commands/preferences.test.ts`                | `oh default-model`: print, set, replace, the failures                                                                         |
-| `src/commands/list.test.ts`, `src/paging.test.ts` | the listings, their formatting, `sessions delete`, and the `next_page` walk                                                   |
-| `src/chat/session.test.ts`                        | the runtime: transcript, stream, send, `/model`, deleted sessions, dispose                                                    |
-| `src/chat/target.test.ts`                         | session/model/agent selection, the default model, and the paging it needs                                                     |
-| `src/chat/ctrl-c.test.ts`                         | the Ctrl+C rules: interrupt, arm, exit                                                                                        |
-| `src/components/model-picker.test.tsx`            | the picker: windowing, number keys, the free-text row                                                                         |
-| `src/app.test.tsx`                                | the Ink screens through `ink-testing-library` and `createFakeClient()`                                                        |
-| `src/errors.test.ts`                              | `describeError`: the 401 line, the connection hints, 403/429, `--debug`                                                       |
-| `src/signals.test.ts`, `src/terminal.test.ts`     | the signal handlers and `restoreTerminal`                                                                                     |
-| `src/update/semver.test.ts`                       | the comparator: the three numbers, prereleases, and what is not a version                                                     |
-| `src/update/decide.test.ts`                       | the off switches, the hourly throttle, and the claim (the pid liveness included)                                              |
-| `src/update/state.test.ts`                        | `update-state.json`: the write, the tolerant read, and the once-only consume                                                  |
-| `src/update/detect.test.ts`                       | the global-install check, `bin` symlink and case-insensitivity included                                                       |
-| `src/update/notice.test.ts`                       | the one line: its two shapes, the stream it goes to, and that it never repeats                                                |
-| `src/update/npm.test.ts`                          | npm over a fake `npm` on `PATH`: the lookup, the timeout, and the detached check's whole program                              |
-| `src/update/check.test.ts`                        | the foreground decision: the gate, the throttle, the claim, and the spawn, against a fake runner                              |
-| `src/commands/update.test.ts`                     | `oh update`: up to date, installed, failed, and refused                                                                       |
-| `src/dev/fake.test.ts`                            | the fake-mode gate and the seeded dev client                                                                                  |
+| file                                              | covers                                                                                                                                                        |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/index.test.ts`                               | `run()` end to end: the exit codes, login / whoami / logout, signals, `default-model` and `sessions delete`                                                   |
+| `src/args.test.ts`                                | `parseArgs` and `readVersion`: every command, unknown and conflicting flags                                                                                   |
+| `src/config.test.ts`                              | the precedence chain, and the errors a bad config file produces                                                                                               |
+| `src/credentials.test.ts`                         | the credentials file: atomic write, `0600`/`0700`, per-server tokens, a write that failed                                                                     |
+| `src/history.test.ts`                             | `history.json`: the list, the cap, consecutive duplicates, per server _and_ user, `record: false`, and the reads it tolerates                                 |
+| `src/components/prompt-input.test.tsx`            | every prompt binding, the cursor's line, history browsing with a draft, multi-line navigation, paste (#206), and the command menu's keys and filtering (#207) |
+| `src/chat/commands.test.ts`                       | the registry, the parse (`//`, unknown, aliases), the filter, the closest match, `currentModelOf`, and every command's `run` (#207)                           |
+| `src/components/command-menu.test.tsx`            | the menu's rows, the highlight, and the usage column padded to the whole registry (#207)                                                                      |
+| `src/components/prompt-slot.test.tsx`             | a flow in the prompt's place, its result, its steps, and a flow that replaces one that is up (#207)                                                           |
+| `src/markdown/text.test.ts`                       | the wrapper: prose and pasted indentation, wide characters, long words, truncation and alignment (#205)                                                       |
+| `src/markdown/theme.test.ts`                      | `COLORFGBG`, `NO_COLOR`, the config's `theme`, and the two syntax palettes (#205)                                                                             |
+| `src/markdown/highlight.test.ts`                  | highlight.js → spans: tokens, nested scopes, entities, a language it does not know, half a snippet (#205)                                                     |
+| `src/markdown/render.test.ts`                     | mdast → lines: every element, the table in the room it has, the frame, NO_COLOR, no line wider than its box (#205)                                            |
+| `src/components/message-view.test.tsx`            | the frame: the label, the hanging indent, a reply rendered as Markdown, wide characters, the cursor and `(queued)` (#205)                                     |
+| `src/browser.test.ts`                             | the skip rules and the per-platform command, with an injected spawn                                                                                           |
+| `src/commands/auth.test.ts`                       | `oh login` / `logout` / `whoami` against the fake's scripted device flow, mid-poll cancellation included                                                      |
+| `src/commands/preferences.test.ts`                | `oh default-model`: print, set, replace, the failures                                                                                                         |
+| `src/commands/list.test.ts`, `src/paging.test.ts` | the listings, their formatting, `sessions delete`, and the `next_page` walk                                                                                   |
+| `src/chat/session.test.ts`                        | the runtime: transcript, stream, send, `/model`, deleted sessions, dispose                                                                                    |
+| `src/chat/target.test.ts`                         | session/model/agent selection, the default model, and the paging it needs                                                                                     |
+| `src/chat/ctrl-c.test.ts`                         | the Ctrl+C rules: interrupt, arm, exit                                                                                                                        |
+| `src/components/model-picker.test.tsx`            | the picker: windowing, number keys, the free-text row                                                                                                         |
+| `src/app.test.tsx`                                | the Ink screens through `ink-testing-library` and `createFakeClient()`                                                                                        |
+| `src/errors.test.ts`                              | `describeError`: the 401 line, the connection hints, 403/429, `--debug`                                                                                       |
+| `src/signals.test.ts`, `src/terminal.test.ts`     | the signal handlers and `restoreTerminal`                                                                                                                     |
+| `src/update/semver.test.ts`                       | the comparator: the three numbers, prereleases, and what is not a version                                                                                     |
+| `src/update/decide.test.ts`                       | the off switches, the hourly throttle, and the claim (the pid liveness included)                                                                              |
+| `src/update/state.test.ts`                        | `update-state.json`: the write, the tolerant read, and the once-only consume                                                                                  |
+| `src/update/detect.test.ts`                       | the global-install check, `bin` symlink and case-insensitivity included                                                                                       |
+| `src/update/notice.test.ts`                       | the one line: its two shapes, the stream it goes to, and that it never repeats                                                                                |
+| `src/update/npm.test.ts`                          | npm over a fake `npm` on `PATH`: the lookup, the timeout, and the detached check's whole program                                                              |
+| `src/update/check.test.ts`                        | the foreground decision: the gate, the throttle, the claim, and the spawn, against a fake runner                                                              |
+| `src/commands/update.test.ts`                     | `oh update`: up to date, installed, failed, and refused                                                                                                       |
+| `src/dev/fake.test.ts`                            | the fake-mode gate and the seeded dev client                                                                                                                  |
 
 Every `run()` test gets its own `XDG_CONFIG_HOME` (`index.test.ts` creates one per test):
 without it the suite reads the developer's real `~/.config/openharness`, where a hand-written

@@ -279,6 +279,27 @@ describe('App', () => {
     expect(app.exits).toEqual([])
   })
 
+  it('gives the input area to the picker, which is the only thing taking keys', async () => {
+    const fake = createFakeClient()
+    const app = renderApp(fake, chatOptions({ session: fake.session.id }))
+    await waitForChat(app, fake.session.id)
+
+    submit(app, '/model')
+    await waitForScreen(app, 'Which model?')
+
+    // The prompt is not mounted while a flow is up, so what is typed reaches nothing: the
+    // picker's own keys (its Ctrl+C cancel included) are the only ones that do anything.
+    typeText(app, 'zz')
+    pressKey(app, 'ctrlC')
+    await waitFor(() => !frameOf(app).includes('Which model?'), { describe: () => frameOf(app) })
+
+    expect(frameOf(app)).not.toContain('zz')
+    // And the prompt it gave back is the one that was there: empty, and ready.
+    submit(app, 'Back on the prompt.')
+    await waitForFrame(app, 'you › Back on the prompt.')
+    expect(app.exits).toEqual([])
+  })
+
   it('reports a catalog the picker could not load, and keeps chatting', async () => {
     const fake = createFakeClient()
     const client: Client = {
@@ -292,6 +313,114 @@ describe('App', () => {
 
     await waitForFrame(app, 'error: the catalog is down')
     expect(frameOf(app)).not.toContain('Which model?')
+  })
+
+  // --- the slash commands and the menu (#207) ------------------------------------------------
+
+  it('opens the command menu on /, and runs the row Enter picks', async () => {
+    const fake = createFakeClient()
+    const app = renderApp(fake, chatOptions({ session: fake.session.id }))
+    await waitForChat(app, fake.session.id)
+
+    typeText(app, '/')
+
+    await waitForFrame(app, 'Tab to complete')
+    expect(frameOf(app)).toContain('/model')
+    expect(frameOf(app)).toContain('/new')
+    expect(frameOf(app)).toContain('/help')
+    expect(frameOf(app)).toContain('/exit (/quit)')
+
+    // `/model` is the first row, so a bare `/` and Enter is the picker.
+    pressKey(app, 'enter')
+    await waitForScreen(app, 'Which model?')
+  })
+
+  it('starts a new chat on the current model with /new, leaving the old one behind', async () => {
+    const fake = createFakeClient()
+    const previous = fake.session.id
+    const modelId = fake.session.model.id
+    const app = renderApp(fake, chatOptions({ session: previous }))
+    await waitForChat(app, previous)
+
+    submit(app, '/new')
+
+    // The status line names a session that did not exist a moment ago, on the same model.
+    await waitFor(() => !frameOf(app).includes(previous), { describe: () => frameOf(app) })
+    const [newest] = (await fake.sessions.list()).data
+    expect(newest?.id).not.toBe(previous)
+    expect(newest?.model.id).toBe(modelId)
+    expect(frameOf(app)).toContain(newest?.id ?? '')
+    // The chat carries on in the new session, which is the point of `/new`.
+    submit(app, 'A message in the new chat.')
+    await waitForFrame(app, 'you › A message in the new chat.')
+    expect(userTexts(fake, newest?.id ?? '')).toEqual(['A message in the new chat.'])
+  })
+
+  it('clears the screen with /clear, and keeps the chat', async () => {
+    const fake = createFakeClient()
+    const app = renderApp(fake, chatOptions({ session: fake.session.id }))
+    await waitForChat(app, fake.session.id)
+    submit(app, 'Hi.')
+    await waitForFrame(app, 'you › Hi.')
+
+    submit(app, '/clear')
+
+    // A test's stdout is not a terminal, so the wipe itself does nothing here — what it
+    // must not do is end the chat or lose the session behind it.
+    expect(app.exits).toEqual([])
+    expect(frameOf(app)).toContain('you › Hi.')
+    submit(app, 'Still here.')
+    await waitForFrame(app, 'you › Still here.')
+  })
+
+  it('lists the commands and the keys with /help, and sends nothing', async () => {
+    const fake = createFakeClient()
+    const app = renderApp(fake, chatOptions({ session: fake.session.id }))
+    await waitForChat(app, fake.session.id)
+
+    submit(app, '/help')
+
+    await waitForFrame(app, 'Commands and keys')
+    const frame = frameOf(app)
+    expect(frame).toContain('/model')
+    expect(frame).toContain('/exit (/quit)')
+    expect(frame).toContain('Ctrl+C')
+    expect(userTexts(fake, fake.session.id)).toEqual([])
+  })
+
+  it('names an unknown command back, with the closest match, and sends nothing', async () => {
+    const fake = createFakeClient()
+    const app = renderApp(fake, chatOptions({ session: fake.session.id }))
+    await waitForChat(app, fake.session.id)
+
+    submit(app, '/modl')
+
+    await waitForFrame(app, 'error: Unknown command /modl. Did you mean /model?')
+    expect(frameOf(app)).not.toContain('Which model?')
+    expect(userTexts(fake, fake.session.id)).toEqual([])
+  })
+
+  it('sends a literal slash for a message that starts with //', async () => {
+    const fake = createFakeClient()
+    const app = renderApp(fake, chatOptions({ session: fake.session.id }))
+    await waitForChat(app, fake.session.id)
+
+    submit(app, '//model')
+
+    await waitForFrame(app, 'you › /model')
+    expect(userTexts(fake, fake.session.id)).toEqual(['/model'])
+    expect(frameOf(app)).not.toContain('Which model?')
+  })
+
+  it('leaves with /exit, and with its alias /quit', async () => {
+    const fake = createFakeClient()
+    const app = renderApp(fake, chatOptions({ session: fake.session.id }))
+    await waitForChat(app, fake.session.id)
+
+    submit(app, '/quit')
+
+    await waitFor(() => app.exits.length === 1)
+    expect(app.exits).toEqual([{ code: 0, sessionId: fake.session.id }])
   })
 
   it('leaves cleanly with a notice when the chat is deleted elsewhere (#114, U5)', async () => {

@@ -5,19 +5,21 @@ rather than a text field, and this is what it does — issue #206.
 
 ## Keys
 
-| key                        | what it does                                                 |
-| -------------------------- | ------------------------------------------------------------ |
-| Enter                      | send — also while a reply streams, which is what steering is |
-| Ctrl+J, Alt+Enter          | insert a newline                                             |
-| ←/→                        | move the cursor                                              |
-| Home/End, Ctrl+A/Ctrl+E    | the start and the end of the line                            |
-| Backspace / Delete         | delete behind the cursor, and at it                          |
-| Ctrl+U / Ctrl+K            | delete to the start of the line, and to its end              |
-| Ctrl+W, Alt+Backspace      | delete the word before the cursor                            |
-| Alt+B/Alt+F, Ctrl+←/Ctrl+→ | jump a word back and forward                                 |
-| ↑/↓                        | the buffer's own lines first, then the history               |
-| Ctrl+L                     | clear the screen — the session stays                         |
-| Ctrl+C                     | interrupt the running turn; when idle, press twice to leave  |
+| key                        | what it does                                                                                              |
+| -------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Enter                      | send — also while a reply streams, which is what steering is                                              |
+| Ctrl+J, Alt+Enter          | insert a newline                                                                                          |
+| ←/→                        | move the cursor                                                                                           |
+| Home/End, Ctrl+A/Ctrl+E    | the start and the end of the line                                                                         |
+| Backspace / Delete         | delete behind the cursor, and at it                                                                       |
+| Ctrl+U / Ctrl+K            | delete to the start of the line, and to its end                                                           |
+| Ctrl+W, Alt+Backspace      | delete the word before the cursor                                                                         |
+| Alt+B/Alt+F, Ctrl+←/Ctrl+→ | jump a word back and forward                                                                              |
+| ↑/↓                        | the command menu's rows while it is open (#207); otherwise the buffer's own lines first, then the history |
+| Tab                        | complete the highlighted command, keeping it in the buffer (#207)                                         |
+| Esc                        | close the command menu, keeping what is typed (#207)                                                      |
+| Ctrl+L                     | clear the screen — the session stays                                                                      |
+| Ctrl+C                     | interrupt the running turn; when idle, press twice to leave                                               |
 
 "Shift+Enter" is not a key a terminal can send: most terminals send the same `\r` for Enter
 and Shift+Enter, so the newline is bound to **Ctrl+J** (line feed, `0x0A`, against Enter's
@@ -34,6 +36,16 @@ The cursor is drawn as an **inverse-video cell** — on its own cell at the end 
 is visible in an empty buffer too. Where it is drawn, and on which line, is what `promptLines`
 answers, which is how the tests can see it: Ink drops styling when the output is not a
 terminal, so a test's frame has no inverse video in it.
+
+## The command menu
+
+A buffer that starts with `/` and has no whitespace in it yet is a command being typed, and the
+menu of matching commands appears **under** the prompt — so it is also under the prompt's ↑/↓,
+which highlight a row instead of walking the history while it is up. Tab completes the
+highlighted command into the buffer, Enter runs it, Esc closes the menu and keeps the text, and
+the menu closes by itself once the word is over (at the first space, or as soon as the word is
+a command). The prompt itself decides none of what a command _is_: it submits the name, and the
+screen parses the line. [`commands.md`](./commands.md) has the whole of it.
 
 ## History
 

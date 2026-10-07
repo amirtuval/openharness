@@ -5,9 +5,17 @@ import type { ModelEntry, Session } from '@openharness/protocol'
 import { describeError, type ErrorContext } from '../errors'
 import { CTRL_C_WINDOW_MS, decideCtrlC, type CtrlCAction } from './ctrl-c'
 
-/** A line the chat shows above the status bar: a hint, or something that went wrong. */
+/**
+ * A line the chat shows above the status bar.
+ *
+ * - `hint` is transient: typing drops it, which is what makes "press Ctrl+C again to exit"
+ *   a thing that goes away rather than a thing to dismiss.
+ * - `error` is something that went wrong, kept until the next message.
+ * - `info` is a command's own output (`/help`) — also kept until the next message, and
+ *   deliberately not dropped by a keystroke: what a command printed is not a hint.
+ */
 export interface Notice {
-  readonly kind: 'hint' | 'error'
+  readonly kind: 'hint' | 'error' | 'info'
   readonly text: string
   readonly hints: readonly string[]
 }
@@ -80,6 +88,11 @@ export interface ChatSession {
   readonly listModels: () => Promise<readonly ModelEntry[]>
   /** Show an error the screen hit itself, e.g. a catalog that would not load. */
   readonly reportError: (error: unknown) => void
+  /**
+   * Show a line of the caller's own — a command's output (`/help`), or an unknown command's
+   * suggestion (#207). It replaces whatever was there, and the next message clears it.
+   */
+  readonly showNotice: (notice: Notice) => void
   /** Ask a running turn to stop, keeping what it has produced so far. */
   readonly interrupt: () => Promise<void>
   /** Apply the Ctrl+C rules; the caller exits when this returns `exit`. */
@@ -197,6 +210,12 @@ export function createChatSession(options: ChatSessionOptions): ChatSession {
 
     reportError(error) {
       setState({ notice: noticeFor(error) })
+    },
+
+    showNotice(notice) {
+      // A command is activity, the way picking a model is: it disarms an armed exit.
+      armedAt = null
+      setState({ notice })
     },
 
     async interrupt() {

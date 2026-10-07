@@ -267,6 +267,9 @@ function AppScreen({
           session={screen.session}
           banner={banner}
           history={history}
+          // `/new` opens a session the way a first chat does — `openModel` — and the screen
+          // for the old one unmounts with it, which disposes its stream (the effect below).
+          onNewChat={openModel}
           onExit={() => {
             const { session } = screen
             session.dispose()
