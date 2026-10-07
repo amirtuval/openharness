@@ -59,6 +59,7 @@ export { createAuthGuard, type AuthGuardOptions } from './auth-guard'
 export {
   MICROSOFT_REFUSAL_LOG,
   SOCIAL_PROVIDERS,
+  affirmativeClaim,
   githubVerifiedPrimaryEmail,
   googleEmailVerified,
   microsoftClaimType,
@@ -66,6 +67,7 @@ export {
   microsoftRefusalDetail,
   providerOptions,
   refusedEmailError,
+  xmsEdovLogValue,
   type GoogleClaims,
   type GithubEmail,
   type GithubProfile,

@@ -24,9 +24,10 @@ import type { Logger } from './types'
  * - **github** — the *primary* email must be verified; a verified secondary address does not
  *   stand in for it, and neither does the profile's public email.
  * - **microsoft** — the claims must assert ownership: `email_verified`, the
- *   `verified_primary_email`/`verified_secondary_email` lists (personal accounts), or the
- *   `xms_edov` claim Entra sets when the email ownership was verified. Anything else is
- *   refused.
+ *   `verified_primary_email`/`verified_secondary_email` lists, or the `xms_edov` claim Entra
+ *   sets when the email domain owner was verified. The two flags are read through
+ *   {@link affirmativeClaim}, which accepts the string `"1"` Microsoft actually sends — a
+ *   personal account gets `xms_edov`, **not** the verified lists. Anything else is refused.
  *
  * The rules themselves are pure functions over the provider's profile, so a test can hand
  * them a mocked profile without a network; {@link providerOptions} wires them into the
@@ -35,7 +36,8 @@ import type { Logger } from './types'
  * A Microsoft refusal also writes one structured warning — {@link microsoftRefusalDetail}
  * through the logger {@link providerOptions} is handed — because the refusal is otherwise
  * silent, and "the optional claim is configured but it still refuses" can only be answered by
- * what the token actually carried. The line holds claim names and types, never values.
+ * what the token actually carried. The line holds claim names and types, and the one flag value
+ * that can never identify anyone (`xms_edov`, {@link MicrosoftRefusalDetail.xmsEdovValue}).
  */
 
 /** The `provider` names the social sign-in exposes; also what `GET /v1/auth-config` lists. */
@@ -63,8 +65,13 @@ export interface GithubProfile {
 /** The Microsoft ID-token claims this rule needs. */
 export interface MicrosoftClaims {
   readonly email?: string
-  readonly email_verified?: boolean | string
-  readonly xms_edov?: boolean | string
+  readonly email_verified?: boolean | number | string
+  /**
+   * Entra's "email domain owner verified" flag. Microsoft documents it as a boolean, but a
+   * token carries it as a string — the staging token this guard was refusing is
+   * `xms_edov: "1"` — so it is read through {@link affirmativeClaim}, not a truthiness test.
+   */
+  readonly xms_edov?: boolean | number | string
   /** Entra's lists of addresses Microsoft has verified ownership of. */
   readonly verified_primary_email?: string | string[]
   readonly verified_secondary_email?: string | string[]
@@ -81,7 +88,7 @@ export interface MicrosoftClaims {
 /** The Google ID-token claims this rule needs. */
 export interface GoogleClaims {
   readonly email?: string
-  readonly email_verified?: boolean | string
+  readonly email_verified?: boolean | number | string
   readonly name?: string
   readonly picture?: string
 }
@@ -103,7 +110,7 @@ export function githubVerifiedPrimaryEmail(emails: readonly GithubEmail[]): stri
 
 /** Whether Microsoft asserted that it verified this email address. */
 export function microsoftEmailVerified(claims: MicrosoftClaims): boolean {
-  if (truthyClaim(claims.email_verified) || truthyClaim(claims.xms_edov)) {
+  if (affirmativeClaim(claims.email_verified) || affirmativeClaim(claims.xms_edov)) {
     return true
   }
   const email = claims.email?.toLowerCase()
@@ -123,13 +130,16 @@ export function microsoftEmailVerified(claims: MicrosoftClaims): boolean {
  * A refusal is otherwise silent — the caller gets the 403 and nothing says *which* claims
  * Microsoft actually sent — so the guard logs this instead. It is built to be safe to log:
  * claim **names** and **types**, never values, plus the two identifiers that are not personal
- * data and are the whole question when a personal account is involved (`tid`/`iss`). The
- * address itself, the display name, the tokens and the profile photo never appear; a test
- * asserts the serialized line contains no email address.
+ * data and are the whole question when a personal account is involved (`tid`/`iss`). The one
+ * value it does carry is `xms_edov` ({@link MicrosoftRefusalDetail.xmsEdovValue}), and only
+ * because it is a flag — a boolean, a number, or at most eight characters — so it can never be
+ * an address or a name. The address itself, the display name, the tokens and the profile photo
+ * never appear; a test asserts the serialized line contains no email address.
  *
  * The types are what the "I added the optional claims and it still refuses" case turns on: a
  * type of `absent` says the claim did not reach the token, while a `boolean`/`array(n)` says
- * it arrived and the rule read its value.
+ * it arrived and the rule read its value. When the type is `string`, `xmsEdovValue` says
+ * *which* string arrived — the answer to "Microsoft sent something, why is it not verified".
  */
 export interface MicrosoftRefusalDetail {
   readonly provider: 'microsoft'
@@ -146,6 +156,11 @@ export interface MicrosoftRefusalDetail {
     readonly verified_primary_email: string
     readonly verified_secondary_email: string
   }
+  /**
+   * The raw `xms_edov` value, or `'<omitted>'` when it is not a loggable flag; see
+   * {@link xmsEdovLogValue}. This is the one claim value the line carries, and it is a flag.
+   */
+  readonly xmsEdovValue: boolean | number | string
   /** Whether the lowercased `email` appears in `verified_primary_email` (false when absent). */
   readonly emailInVerifiedPrimary: boolean
   /** Whether the lowercased `email` appears in `verified_secondary_email` (false when absent). */
@@ -172,6 +187,32 @@ export function microsoftClaimType(value: unknown): string {
   return typeof value
 }
 
+/** What a claim value that is not a loggable flag is reported as. */
+const OMITTED_CLAIM_VALUE = '<omitted>'
+
+/** The longest string {@link xmsEdovLogValue} will log verbatim — a flag, never an address. */
+const XMS_EDOV_VALUE_MAX_LENGTH = 8
+
+/**
+ * The raw `xms_edov` value when it is safe to log, or `'<omitted>'`.
+ *
+ * `xms_edov` is a flag — a boolean, a number, or the short string `"1"`/`"0"` — so its value
+ * is the whole answer to "Microsoft sent the claim and the guard still refuses", and logging it
+ * leaks nothing. The rule is still value-free by default: only a boolean, a number, or a string
+ * of at most {@link XMS_EDOV_VALUE_MAX_LENGTH} characters is written out; anything else —
+ * including an absent claim — reports `'<omitted>'`, so a claim that somehow carried an address
+ * or a name can never reach the line.
+ */
+export function xmsEdovLogValue(value: unknown): boolean | number | string {
+  if (typeof value === 'boolean' || typeof value === 'number') {
+    return value
+  }
+  if (typeof value === 'string' && value.length <= XMS_EDOV_VALUE_MAX_LENGTH) {
+    return value
+  }
+  return OMITTED_CLAIM_VALUE
+}
+
 /** The diagnostic payload for a Microsoft sign-in that was refused (see {@link MicrosoftRefusalDetail}). */
 export function microsoftRefusalDetail(claims: MicrosoftClaims): MicrosoftRefusalDetail {
   const email = claims.email?.toLowerCase()
@@ -187,6 +228,7 @@ export function microsoftRefusalDetail(claims: MicrosoftClaims): MicrosoftRefusa
       verified_primary_email: microsoftClaimType(claims.verified_primary_email),
       verified_secondary_email: microsoftClaimType(claims.verified_secondary_email),
     },
+    xmsEdovValue: xmsEdovLogValue(claims.xms_edov),
     // Only meaningful when there is an address to look for: an absent `email` is reported by
     // `hasEmail`, and `false` here would otherwise read as "not in the list".
     emailInVerifiedPrimary: hasEmail && includesEmail(claims.verified_primary_email, email),
@@ -201,7 +243,7 @@ export const MICROSOFT_REFUSAL_LOG =
 
 /** Whether Google verified this email address. */
 export function googleEmailVerified(claims: GoogleClaims): boolean {
-  return truthyClaim(claims.email_verified)
+  return affirmativeClaim(claims.email_verified)
 }
 
 /**
@@ -342,7 +384,7 @@ function microsoftProviderOptions(
       if (!microsoftEmailVerified(info.data)) {
         // The refusal itself is unchanged; this only records *what* was refused, because a
         // silent 403 cannot tell "Microsoft sent no such claim" from "the rule did not read
-        // it". Names and types only — see {@link microsoftRefusalDetail}.
+        // it". Names and types, plus the `xms_edov` flag — see {@link microsoftRefusalDetail}.
         logger?.warn(MICROSOFT_REFUSAL_LOG, microsoftRefusalDetail(info.data))
         throw refusedEmailError(
           'microsoft',
@@ -369,9 +411,31 @@ async function githubJson<T>(url: string, accessToken: string): Promise<T | null
   return (await response.json()) as T
 }
 
-/** A claim that may be a boolean or a string: `true` only for an explicit affirmative. */
-function truthyClaim(value: boolean | string | undefined): boolean {
-  return value === true || value === 'true'
+/**
+ * A claim that may be a boolean, a number or a string: `true` only for an explicit affirmative.
+ *
+ * Microsoft documents `xms_edov` as a Boolean optional claim, but a JWT commonly serializes it
+ * as the string `"1"` / `"0"` — the staging token this guard refused carried
+ * `xms_edov: "1"` with `claimTypes.xms_edov: "string"` — so an exact `=== true` test refuses a
+ * sign-in Microsoft did vouch for. The affirmative set is therefore `true`, the number `1`, and
+ * (trimmed, case-insensitively) the strings `"true"` and `"1"`. Everything else — `false`, `0`,
+ * `"0"`, `"false"`, the empty string, any other string, absent — is **not** verified.
+ *
+ * Reading those spellings as a yes is not a loosening: the claim is only ever consulted on a
+ * signature-verified id token, and each spelling is an explicit affirmative rather than a bare
+ * truthiness test (which `"0"` would pass). Google's `email_verified` goes through the same
+ * parser — it is a boolean there, but the spelling rule is the same one, and one parser is what
+ * keeps them from drifting apart.
+ */
+export function affirmativeClaim(value: boolean | number | string | undefined): boolean {
+  if (value === true || value === 1) {
+    return true
+  }
+  if (typeof value !== 'string') {
+    return false
+  }
+  const normalized = value.trim().toLowerCase()
+  return normalized === 'true' || normalized === '1'
 }
 
 /**

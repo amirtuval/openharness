@@ -3,6 +3,7 @@ import type { GithubOptions, GoogleOptions, MicrosoftOptions } from 'better-auth
 
 import {
   MICROSOFT_REFUSAL_LOG,
+  affirmativeClaim,
   githubVerifiedPrimaryEmail,
   googleEmailVerified,
   microsoftClaimType,
@@ -10,6 +11,7 @@ import {
   microsoftRefusalDetail,
   providerOptions,
   refusedEmailError,
+  xmsEdovLogValue,
   type GithubEmail,
 } from './auth-profile'
 import { jsonLogger } from './observability/logging'
@@ -47,10 +49,15 @@ describe('the Microsoft rule (the nOAuth guard)', () => {
         verified_secondary_email: ['ada@example.com'],
       }),
     ).toBe(true)
-    // The `xms_edov` claim Entra sets when email ownership was verified; it may be a string
-    // in a token that went through a JSON boundary.
+    // The `xms_edov` claim Entra sets when the email domain owner was verified. Microsoft
+    // documents it as a boolean, but a JWT serializes it as a string — `"1"` for a personal
+    // account — so every affirmative spelling counts.
     expect(microsoftEmailVerified({ email: 'ada@example.com', xms_edov: true })).toBe(true)
     expect(microsoftEmailVerified({ email: 'ada@example.com', xms_edov: 'true' })).toBe(true)
+    expect(microsoftEmailVerified({ email: 'ada@example.com', xms_edov: 1 })).toBe(true)
+    expect(microsoftEmailVerified({ email: 'ada@example.com', xms_edov: '1' })).toBe(true)
+    expect(microsoftEmailVerified({ email: 'ada@example.com', xms_edov: 'TRUE' })).toBe(true)
+    expect(microsoftEmailVerified({ email: 'ada@example.com', xms_edov: ' 1 ' })).toBe(true)
     // A verified list that is a single string rather than an array.
     expect(
       microsoftEmailVerified({
@@ -80,6 +87,22 @@ describe('the Microsoft rule (the nOAuth guard)', () => {
     ).toBe(false)
     expect(microsoftEmailVerified({})).toBe(false)
     expect(microsoftEmailVerified({ email: '' })).toBe(false)
+    // Every spelling that is not an explicit affirmative is refused: a `false`-shaped flag, an
+    // empty string, and any other string (`"yes"` is not a flag Microsoft sends, and reading it
+    // as one would be the loosening this rule exists to prevent).
+    expect(microsoftEmailVerified({ email: 'victim@example.com', xms_edov: false })).toBe(false)
+    expect(microsoftEmailVerified({ email: 'victim@example.com', xms_edov: 'false' })).toBe(false)
+    expect(microsoftEmailVerified({ email: 'victim@example.com', xms_edov: 0 })).toBe(false)
+    expect(microsoftEmailVerified({ email: 'victim@example.com', xms_edov: '0' })).toBe(false)
+    expect(microsoftEmailVerified({ email: 'victim@example.com', xms_edov: '' })).toBe(false)
+    expect(microsoftEmailVerified({ email: 'victim@example.com', xms_edov: 'yes' })).toBe(false)
+    // The same spellings are refused on `email_verified` and on Google.
+    expect(microsoftEmailVerified({ email: 'victim@example.com', email_verified: '0' })).toBe(false)
+    expect(microsoftEmailVerified({ email: 'victim@example.com', email_verified: 0 })).toBe(false)
+    expect(microsoftEmailVerified({ email: 'victim@example.com', email_verified: '' })).toBe(false)
+    expect(microsoftEmailVerified({ email: 'victim@example.com', email_verified: 'yes' })).toBe(
+      false,
+    )
     // The comparison is case-insensitive, like every email.
     expect(
       microsoftEmailVerified({
@@ -120,6 +143,49 @@ describe('the Google rule', () => {
     expect(googleEmailVerified({ email: 'ada@example.com', email_verified: false })).toBe(false)
     expect(googleEmailVerified({ email: 'ada@example.com' })).toBe(false)
     expect(googleEmailVerified({ email: 'ada@example.com', email_verified: 'true' })).toBe(true)
+    // The same parser reads the flag, so the affirmative spellings count here too — Google
+    // sends a boolean, but a rule that accepted `"1"` from Microsoft and not from Google would
+    // be two rules, and there is one.
+    expect(googleEmailVerified({ email: 'ada@example.com', email_verified: 1 })).toBe(true)
+    expect(googleEmailVerified({ email: 'ada@example.com', email_verified: '1' })).toBe(true)
+    expect(googleEmailVerified({ email: 'ada@example.com', email_verified: 'TRUE' })).toBe(true)
+    expect(googleEmailVerified({ email: 'ada@example.com', email_verified: '0' })).toBe(false)
+    expect(googleEmailVerified({ email: 'ada@example.com', email_verified: 'yes' })).toBe(false)
+  })
+})
+
+/**
+ * The one parser both providers' flags are read through.
+ *
+ * Microsoft documents `xms_edov` as a boolean but serializes it as a string; a rule that only
+ * accepted `true` refused a personal account Microsoft had vouched for. The accepted set is
+ * exactly the affirmative spellings, and the point of the table below is that nothing else —
+ * least of all the *falsy-looking* `"0"` — slips through.
+ */
+describe('affirmativeClaim', () => {
+  it('accepts every affirmative spelling', () => {
+    for (const value of [true, 1, '1', 'true', 'TRUE', 'True', ' true ', ' 1 '] as const) {
+      expect(affirmativeClaim(value), `${JSON.stringify(value)} is affirmative`).toBe(true)
+    }
+  })
+
+  it('refuses everything else', () => {
+    for (const value of [
+      false,
+      0,
+      '0',
+      'false',
+      'FALSE',
+      '',
+      ' ',
+      'yes',
+      'on',
+      '2',
+      -1,
+      undefined,
+    ] as const) {
+      expect(affirmativeClaim(value), `${JSON.stringify(value)} is not affirmative`).toBe(false)
+    }
   })
 })
 
@@ -323,6 +389,8 @@ describe('the Microsoft refusal warning', () => {
     expect(line['emailInVerifiedPrimary']).toBe(false)
     expect(line['emailInVerifiedSecondary']).toBe(false)
     expect(line['hasEmail']).toBe(true)
+    // No `xms_edov` at all in this token, so there is no flag to report.
+    expect(line['xmsEdovValue']).toBe('<omitted>')
 
     // The whole point of the payload: nothing that identifies the person is on the line.
     const serialized = JSON.stringify(line)
@@ -362,6 +430,37 @@ describe('the Microsoft refusal warning', () => {
       verified_secondary_email: 'string',
     })
     expect(lines[0]?.['hasEmail']).toBe(true)
+    // The flag arrived as a boolean `false`, and that is what the line says — "Microsoft sent
+    // the claim and said no" is a different answer from "the claim is not in the token".
+    expect(lines[0]?.['xmsEdovValue']).toBe(false)
+  })
+
+  it('logs the string form of the flag when that is what Microsoft sent', async () => {
+    const { logger, lines } = capturing()
+    const microsoft = providerOptions(credentials, logger)['microsoft'] as MicrosoftOptions
+
+    // The staging shape: the consumer tenant, `xms_edov` as the string `"0"`, and no verified
+    // list. The line has to say *that* — the flag arrived and said no — not merely that the
+    // claim's type was `string`.
+    await expect(
+      microsoft.getUserInfo?.({
+        idToken: idToken({
+          oid: 'oid-1',
+          tid: CONSUMER_TENANT_ID,
+          iss: ISSUER,
+          email: 'ada@outlook.com',
+          name: 'Ada Person',
+          xms_edov: '0',
+        }),
+        accessToken: undefined,
+      }),
+    ).rejects.toMatchObject({ body: { code: 'email_not_verified' } })
+
+    expect(lines).toHaveLength(1)
+    expect(lines[0]?.['claimTypes']).toMatchObject({ xms_edov: 'string' })
+    expect(lines[0]?.['xmsEdovValue']).toBe('0')
+    expect(lines[0]?.['hasEmail']).toBe(true)
+    expect(JSON.stringify(lines[0])).not.toContain('ada@outlook.com')
   })
 
   it('writes nothing when the sign-in is accepted', async () => {
@@ -390,6 +489,7 @@ describe('the Microsoft refusal warning', () => {
         verified_primary_email: 'absent',
         verified_secondary_email: 'absent',
       },
+      xmsEdovValue: '<omitted>',
       emailInVerifiedPrimary: false,
       emailInVerifiedSecondary: false,
       hasEmail: false,
@@ -399,5 +499,80 @@ describe('the Microsoft refusal warning', () => {
     expect(microsoftClaimType(true)).toBe('boolean')
     expect(microsoftClaimType([])).toBe('array(0)')
     expect(microsoftClaimType(7)).toBe('number')
+  })
+
+  it('logs the flag the string form carries, and nothing longer than a flag', () => {
+    // The one value the line may carry is `xms_edov`, and only in its flag shapes.
+    expect(xmsEdovLogValue(true)).toBe(true)
+    expect(xmsEdovLogValue(false)).toBe(false)
+    expect(xmsEdovLogValue(1)).toBe(1)
+    expect(xmsEdovLogValue(0)).toBe(0)
+    expect(xmsEdovLogValue('1')).toBe('1')
+    expect(xmsEdovLogValue('0')).toBe('0')
+    expect(xmsEdovLogValue('false')).toBe('false')
+    expect(xmsEdovLogValue('true')).toBe('true')
+    // A string too long to be a flag — an address, say — is reported as absent-to-the-log,
+    // exactly like a value of a shape the claim never takes.
+    expect(xmsEdovLogValue('victim@example.com')).toBe('<omitted>')
+    expect(xmsEdovLogValue('')).toBe('')
+    expect(xmsEdovLogValue(undefined)).toBe('<omitted>')
+    expect(xmsEdovLogValue(null)).toBe('<omitted>')
+    expect(xmsEdovLogValue(['1'])).toBe('<omitted>')
+    expect(xmsEdovLogValue({ value: '1' })).toBe('<omitted>')
+  })
+})
+
+/**
+ * The real token from staging, as the log recorded it (#159).
+ *
+ * A personal Microsoft account signs in through the consumer tenant and carries `xms_edov`
+ * — not the `verified_*` lists, which are an Entra work/school thing — and the claim is the
+ * string `"1"`, which the guard used to read as unverified. These are the end-to-end cases the
+ * fix exists for.
+ */
+describe('the staging token (a personal Microsoft account)', () => {
+  const CONSUMER_TENANT_ID = '9188040d-6c67-4c5b-b112-36a304b66dad'
+  const ISSUER = `https://login.microsoftonline.com/${CONSUMER_TENANT_ID}/v2.0`
+  const credentials = {
+    microsoft: { clientId: 'ms-id', clientSecret: 'ms-secret', tenantId: 'common' },
+  }
+
+  /** The claim set the staging log named, with the flag as the token serialized it. */
+  function stagingClaims(xmsEdov: string): Record<string, unknown> {
+    return {
+      aud: 'ms-id',
+      iss: ISSUER,
+      tid: CONSUMER_TENANT_ID,
+      oid: 'oid-1',
+      email: 'ada@outlook.com',
+      name: 'Ada',
+      preferred_username: 'ada@outlook.com',
+      xms_edov: xmsEdov,
+    }
+  }
+
+  it('accepts the personal account the string "1" vouches for', async () => {
+    const microsoft = providerOptions(credentials)['microsoft'] as MicrosoftOptions
+
+    const accepted = await microsoft.getUserInfo?.({
+      idToken: idToken(stagingClaims('1')),
+      accessToken: undefined,
+    })
+
+    expect(accepted?.user.email).toBe('ada@outlook.com')
+    expect(accepted?.user.emailVerified).toBe(true)
+  })
+
+  it('still refuses when the flag is the string "0"', async () => {
+    const microsoft = providerOptions(credentials)['microsoft'] as MicrosoftOptions
+
+    // The same token with the flag false: the domain is not verified, so the address is not
+    // proven and the sign-in is refused, exactly as before the fix.
+    await expect(
+      microsoft.getUserInfo?.({
+        idToken: idToken(stagingClaims('0')),
+        accessToken: undefined,
+      }),
+    ).rejects.toMatchObject({ body: { code: 'email_not_verified' } })
   })
 })
