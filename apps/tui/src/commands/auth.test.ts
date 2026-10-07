@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { Readable } from 'node:stream'
 
 import type { Client } from '@openharness/client'
 import { AuthenticationError } from '@openharness/client'
@@ -8,7 +9,17 @@ import { createFakeClient, FAKE_SESSION_TOKEN } from '@openharness/client/testin
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { openCredentials, type CredentialStore } from '../credentials'
-import { runLogin, runLogout, runWhoami, type AuthIo, type LoginIo } from './auth'
+import {
+  isSignInAnswer,
+  offerSignIn,
+  runLogin,
+  runLogout,
+  runWhoami,
+  SIGN_IN_QUESTION,
+  type AuthIo,
+  type LoginIo,
+  type OfferSignInIo,
+} from './auth'
 
 const SERVER = 'http://localhost:3000'
 const OTHER_SERVER = 'https://oh.example.test'
@@ -279,6 +290,82 @@ describe('runLogin', () => {
 
     expect(code).toBe(1)
     expect(err.join('\n')).toContain('could not reach the server')
+  })
+})
+
+describe('offerSignIn (#210)', () => {
+  /** The offer's IO: a harness whose stdin answers `answer`, plus the question it asked. */
+  function offerHarness(client: Client, store: CredentialStore, answer: string) {
+    const out: string[] = []
+    const err: string[] = []
+    const asked: string[] = []
+    const io: OfferSignInIo = {
+      stdout: (line) => out.push(line),
+      stderr: (line) => err.push(line),
+      context: { server: SERVER },
+      server: SERVER,
+      store,
+      createApiClient: () => client,
+      stdin: Readable.from([`${answer}\n`]) as unknown as NodeJS.ReadStream,
+      prompt: (text) => asked.push(text),
+      openBrowser: () => ({ opened: false, reason: 'ci' }),
+    }
+    return { io, out, err, asked }
+  }
+
+  it('asks, runs the device flow, and hands back the stored token', async () => {
+    const fake = createFakeClient({ authenticated: false })
+    fake.scriptDeviceLogin({ outcome: 'approved' })
+    const store = credentials()
+    const { io, out, asked } = offerHarness(fake, store, 'y')
+
+    const token = await offerSignIn(io)
+
+    expect(asked).toEqual([SIGN_IN_QUESTION])
+    expect(token).toBe(FAKE_SESSION_TOKEN)
+    // The token is where every other command looks for it, so the chat that follows finds it.
+    expect(store.tokenFor(SERVER)).toBe(FAKE_SESSION_TOKEN)
+    expect(out.join('\n')).toContain('Logged in as')
+  })
+
+  it('takes Enter as a yes — the capital Y in the question is the default', async () => {
+    const fake = createFakeClient({ authenticated: false })
+    fake.scriptDeviceLogin({ outcome: 'approved' })
+    const { io } = offerHarness(fake, credentials(), '')
+
+    expect(await offerSignIn(io)).toBe(FAKE_SESSION_TOKEN)
+  })
+
+  it('a no signs nothing in, and asks the server nothing', async () => {
+    const fake = createFakeClient({ authenticated: false })
+    const store = credentials()
+    const { io, out } = offerHarness(fake, store, 'n')
+
+    expect(await offerSignIn(io)).toBeUndefined()
+    expect(store.tokenFor(SERVER)).toBeUndefined()
+    expect(out).toEqual([])
+  })
+
+  it('reports a login that failed rather than handing back a token', async () => {
+    const fake = createFakeClient({ authenticated: false })
+    fake.scriptDeviceLogin({ outcome: 'denied' })
+    const store = credentials()
+    const { io } = offerHarness(fake, store, 'y')
+
+    expect(await offerSignIn(io)).toBeUndefined()
+    expect(store.tokenFor(SERVER)).toBeUndefined()
+  })
+})
+
+describe('isSignInAnswer', () => {
+  it('reads Enter, y and yes as yes, in any case, and everything else as no', () => {
+    for (const answer of ['', '  ', 'y', 'Y', 'yes', 'YES', 'Yes']) {
+      expect(isSignInAnswer(answer)).toBe(true)
+    }
+    // An end-of-input from a pipe nobody wrote to is a no, the rule `sessions delete` has.
+    for (const answer of ['n', 'no', 'q', 'yeah', 'yep']) {
+      expect(isSignInAnswer(answer)).toBe(false)
+    }
   })
 })
 

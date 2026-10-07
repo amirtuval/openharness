@@ -22,11 +22,13 @@ This installs the `oh` command. The npm package is **`@openh/cli`** (npm refuses
 
 ## Use
 
-Sign in, and chat:
+Sign in, add a provider key, and chat — `oh` will offer the first two itself if you just run
+it:
 
 ```bash
-oh login   # the device flow: prints a URL and a code, then signs you in
-oh         # a new chat on your default model
+oh                 # signed out? it asks, then runs the device flow
+                   # no provider key? it asks for one right here, then opens a chat
+oh providers list  # what you have stored: provider, last four, when it was added
 ```
 
 `oh` talks to **`https://app.oharness.dev`** unless you point it somewhere else. `--server` is
@@ -54,6 +56,9 @@ builds the CLI and runs it against `http://localhost:3000` (`yarn oh:staging` an
 | `oh -c` / `oh -s <id>`                 | resume the most recent session, or a particular one                    |
 | `oh sessions`                          | list your sessions; `oh sessions delete <id>` deletes one (asks first) |
 | `oh agents`                            | list saved agent presets; start one with `--agent <id\|name>`          |
+| `oh providers`                         | list the model-provider keys you have stored                           |
+| `oh providers add [provider]`          | connect a provider — paste its key into a hidden prompt                |
+| `oh providers remove <provider>`       | forget a key (asks first; `--yes` skips the question)                  |
 | `oh default-model [provider/model]`    | print or set the model a new chat starts on                            |
 | `oh login` / `oh logout` / `oh whoami` | sign in (browser device flow), revoke, who am I                        |
 | `oh update`                            | install the newest published version now                               |
@@ -61,13 +66,19 @@ builds the CLI and runs it against `http://localhost:3000` (`yarn oh:staging` an
 
 Inside a chat: Enter sends (a message sent mid-reply steers it), and Ctrl+J or Alt+Enter
 inserts a newline. Type `/` for the command menu — ↑/↓ choose, Tab completes, Enter runs, Esc
-closes — which holds `/model` (switch models), `/new` (start a new chat on the current model),
+closes — which holds `/model` (switch models), `/providers` (connect a provider without leaving
+the chat), `/new` (start a new chat on the current model),
 `/clear` (clear the screen, keeping the session), `/help`, and `/exit`. A message that starts
 with `//` sends a literal `/`. Ctrl+C interrupts the reply; pressed again when idle, it leaves.
 On the way out, `oh` prints the `oh -s <id>` line that resumes the chat.
 
 The session token is stored per server in `~/.config/openharness/credentials.json` (mode
 `0600`). `oh logout` revokes it server-side and forgets it locally.
+
+Your provider keys are **not** stored on this machine. A key typed into `oh providers add` goes
+over HTTPS to the same credentials API the web app uses, is validated once against the provider,
+and is stored encrypted on the server — `oh` keeps no copy, and the prompt that takes it echoes
+nothing.
 
 ## Updating
 

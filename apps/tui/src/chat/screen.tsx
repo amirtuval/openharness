@@ -1,4 +1,4 @@
-import type { TranscriptError } from '@openharness/client'
+import { providerName, type Client, type TranscriptError } from '@openharness/client'
 import type { ModelEntry } from '@openharness/protocol'
 import { Box, Text, useApp, useInput, useStdout } from 'ink'
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
@@ -7,9 +7,11 @@ import { ModelPicker } from '../components/model-picker'
 import { NoticeView } from '../components/notice-view'
 import { PromptInput } from '../components/prompt-input'
 import { usePromptSlot } from '../components/prompt-slot'
+import { ProviderSetup } from '../components/provider-setup'
 import { modelLabel, StatusLine } from '../components/status-line'
 import { TranscriptView } from '../components/transcript-view'
 import type { PromptHistory } from '../history'
+import type { ErrorContext } from '../errors'
 import { clearScreen } from '../terminal'
 import {
   CHAT_COMMANDS,
@@ -24,6 +26,21 @@ import type { ChatSession, Notice } from './session'
 export interface ChatScreenProps {
   /** The running chat: transcript, stream, and the operations on them. */
   readonly session: ChatSession
+  /**
+   * The client the chat talks to — the same one the session was built over. `/providers`
+   * (#210) needs it directly: the credential write and the catalog refresh are not things the
+   * session runtime does.
+   */
+  readonly client: Client
+  /** What the error messages should mention — the provider flow's failures among them. */
+  readonly context: ErrorContext
+  /** Open a URL in the browser; the provider flow's "get a key" page (`o`). */
+  readonly openUrl: (url: string) => boolean
+  /**
+   * The session was refused as stale while connecting a provider (#210): leave so the run can
+   * offer to sign in again, exactly as a 401 before the chat does.
+   */
+  readonly onSignIn: () => void
   /** Shown in the status line, e.g. that this is the dev fake. */
   readonly banner?: string | undefined
   /** What ↑ and ↓ in the prompt walk back through (#206). */
@@ -59,6 +76,10 @@ export interface ChatScreenProps {
  */
 export function ChatScreen({
   session,
+  client,
+  context,
+  openUrl,
+  onSignIn,
   banner,
   history,
   catalog: known,
@@ -134,17 +155,65 @@ export function ChatScreen({
     })()
   }, [request, session])
 
+  /**
+   * Connect a provider without leaving the chat (#210, epic #201 X7) — `/providers`, the flow
+   * the prompt slot was built for.
+   *
+   * After a save the catalog is read again, so `/model` offers the models the provider just
+   * connected (the server has already dropped that provider's cache entry, so a plain read is
+   * enough — see the client's model-catalog note), and the default the server picked for an
+   * account that had none (U4) is named in a notice, which is the same "You're set" the
+   * first-run flow ends on. The prompt comes back either way: a cancelled flow settles `null`
+   * and changes nothing.
+   */
+  const openProviders = useCallback(
+    (provider?: string): void => {
+      void (async () => {
+        const saved = await request<string | null>((settle) => (
+          <ProviderSetup
+            client={client}
+            context={context}
+            initialProvider={provider}
+            openUrl={openUrl}
+            onSaved={settle}
+            onCancel={() => {
+              settle(null)
+            }}
+            onStaleSession={onSignIn}
+          />
+        ))
+        if (saved === null) return
+
+        try {
+          const catalog = await session.listModels()
+          setCatalog(catalog)
+          const { default_model: picked } = await client.preferences.get()
+          session.showNotice({
+            kind: 'info',
+            text: `Connected ${providerName(saved)}.`,
+            hints:
+              picked === null ? [] : [`You're set: default model ${modelLabel(picked, catalog)}`],
+          })
+        } catch (error) {
+          session.reportError(error)
+        }
+      })()
+    },
+    [client, context, onSignIn, openUrl, request, session],
+  )
+
   /** Run a command the prompt parsed, with what only this screen can do (#207). */
   const runCommand = (command: ChatCommand, args: string): void => {
-    const context: CommandContext = {
+    const commandContext: CommandContext = {
       session,
       pickModel: openModelPicker,
       newChat: onNewChat,
+      setupProviders: openProviders,
       clearScreen: clear,
       exit: onExit,
       showNotice: session.showNotice,
     }
-    void command.run(context, args)
+    void command.run(commandContext, args)
   }
 
   /**

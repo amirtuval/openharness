@@ -130,12 +130,19 @@ trial, nothing survives a restart (it says so at startup).
 
 ```bash
 npm i -g @openh/cli    # the published CLI, as the `oh` command
-oh login && oh         # once installed: signs in and chats on https://app.oharness.dev
+
+oh                     # once installed: chats on https://app.oharness.dev
+                       #   signed out, it offers to sign you in (the device flow)
+                       #   with no provider key, it asks for one right there in the terminal
+                       #   and then opens the chat on the default model it picked
 
 yarn oh                # from a checkout of this repo: builds the CLI and runs it against
                        # the local server on http://localhost:3000 (`yarn oh:staging` /
                        # `yarn oh:prod` for staging and production)
 ```
+
+`oh` is the whole onboarding: sign in → a provider key → a chat, with the browser opened only
+for the sign-in (and not even then, over SSH, in CI or with `--no-browser`).
 
 The npm package is **`@openh/cli`** and the command stays **`oh`** (#194, #152) — npm refuses
 the unscoped `openharness` name. It is one self-contained bundle — Ink, React and the client
@@ -147,7 +154,18 @@ it (skipped with `--no-browser`, in CI, over SSH, or when there is no display), 
 the session token per server in `~/.config/openharness/credentials.json`, mode `0600`.
 `oh whoami` prints the signed-in email and server, and `oh logout` revokes the token on the
 server and forgets it locally. Every other command sends the stored token as
-`Authorization: Bearer`.
+`Authorization: Bearer`. Signed out, a chat asks `Sign in now? [Y/n]` and runs the same flow
+rather than telling you to run another command.
+
+A chat runs on a model from a provider you have a key for, and `oh` takes the key itself —
+no trip to the web app: `oh providers add` (or `/providers` in a chat, or the first-run screen
+`oh` shows when it has no key at all) offers the providers with their free-tier hints, prints
+the URL where a key comes from (`o` opens it) and takes the key in a **hidden prompt** — no
+echo, masked, pasted straight in. The key goes over HTTPS to the same credentials API the web
+app uses, is validated once against the provider and stored encrypted on the server; it is
+never written to this machine. On success `oh` says `You're set: default model X` and opens a
+chat on it. `oh providers` lists what is stored (provider, last four, when it was added) and
+`oh providers remove <provider>` forgets one.
 
 `oh` starts a new chat against `https://app.oharness.dev` — the default since #192, so a
 fresh `npm i -g @openh/cli` works with nothing to configure. Point it elsewhere with

@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest'
 
-import { createDevClient, DEV_DEFAULT_MODEL, DEV_REPLIES, FAKE_MODE_ENV, isFakeMode } from './fake'
+import {
+  createDevClient,
+  DEV_DEFAULT_MODEL,
+  DEV_REPLIES,
+  FAKE_MODE_ENV,
+  FAKE_SIGNED_OUT_ENV,
+  isFakeMode,
+  isFakeSignedOut,
+} from './fake'
 
 describe('isFakeMode', () => {
   it('is on for the values a person would set', () => {
@@ -17,7 +25,28 @@ describe('isFakeMode', () => {
   })
 })
 
+describe('isFakeSignedOut (#210)', () => {
+  it('is off unless it is asked for, and on for the same values as the fake gate', () => {
+    expect(isFakeSignedOut({})).toBe(false)
+    expect(isFakeSignedOut({ [FAKE_SIGNED_OUT_ENV]: '0' })).toBe(false)
+    expect(isFakeSignedOut({ [FAKE_SIGNED_OUT_ENV]: 'yes' })).toBe(true)
+  })
+})
+
 describe('createDevClient', () => {
+  it('is signed in unless OPENHARNESS_FAKE_SIGNED_OUT asks otherwise (#210)', async () => {
+    const signedIn = await createDevClient()
+    await expect(signedIn.me()).resolves.toMatchObject({ id: signedIn.user.id })
+
+    const signedOut = await createDevClient({ [FAKE_SIGNED_OUT_ENV]: '1' })
+    await expect(signedOut.me()).rejects.toThrow()
+    // The device flow is not behind the 401, which is what makes the sign-in offer testable.
+    signedOut.scriptDeviceLogin({ outcome: 'approved' })
+    const start = await signedOut.auth.startDeviceLogin()
+    await expect(signedOut.auth.pollDeviceLogin(start.deviceCode)).resolves.toBeDefined()
+    await expect(signedOut.me()).resolves.toMatchObject({ id: signedOut.user.id })
+  })
+
   it('seeds several agents, so `oh agents` and --agent have something to show', async () => {
     const fake = await createDevClient()
 

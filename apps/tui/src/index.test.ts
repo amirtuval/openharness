@@ -135,6 +135,47 @@ describe('run', () => {
     expect(out).toContain('A session with history')
   })
 
+  it('lists the provider keys of the dev fake — none, with how to add one (#210)', async () => {
+    const { code, out, err } = await runCaptured(['providers'], FAKE_ENV)
+
+    expect(code).toBe(0)
+    expect(err).toBe('')
+    expect(out).toContain('No provider keys yet')
+    expect(out).toContain('oh providers add')
+  })
+
+  it('removes a key from the dev fake without asking, with --yes (#210)', async () => {
+    const { code, out } = await runCaptured(
+      ['providers', 'remove', 'anthropic', '--yes'],
+      FAKE_ENV,
+      { stdin: PIPED_STDIN },
+    )
+
+    expect(code).toBe(0)
+    expect(out).toContain('Removed the Anthropic key.')
+  })
+
+  it('asks before removing, and a piped answer nobody wrote is a no (#210)', async () => {
+    const { code, out } = await runCaptured(['providers', 'remove', 'anthropic'], FAKE_ENV, {
+      // A pipe that closes: the question is asked, and end-of-input answers no.
+      stdin: Readable.from([]) as unknown as NodeJS.ReadStream,
+    })
+
+    expect(code).toBe(0)
+    expect(out).toContain('Not removed.')
+  })
+
+  it('says `oh providers add` needs a terminal when stdin is a pipe (#210)', async () => {
+    const { code, out, err } = await runCaptured(['providers', 'add'], FAKE_ENV, {
+      stdin: PIPED_STDIN,
+    })
+
+    expect(code).toBe(2)
+    expect(out).toBe('')
+    expect(err).toContain('needs a terminal')
+    expect(err).toContain('hidden prompt')
+  })
+
   it('says where the settings came from under --debug', async () => {
     // Deliberately no OPENHARNESS_URL: this is the test that watches the default itself.
     const { err } = await runCaptured(['agents', '--debug'], { OPENHARNESS_FAKE: '1' })
