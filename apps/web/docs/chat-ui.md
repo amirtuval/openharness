@@ -200,8 +200,10 @@ panel for a `provider/model` text field instead of closing over a selection.
 - refresh's 429 (once a minute per user, C4) is not an error state: `refresh()` answers with
   `{ ok: false, kind: 'rate_limit' }`, the picker shows the server's sentence inline
   (`role="status"`) and the list that is already on screen stays exactly as it was;
-- no keys at all → New chat shows the "Add a provider key to start" state that links to
-  Settings → Model providers, and there is nothing to type into;
+- no credentials at all → the root route is the **first-run screen** (epic #201, X5): tiles,
+  a key form, the default model the server picked, Start chatting. Once a key exists but the
+  catalog is still empty, New chat shows the "Add a provider key to start" state that links to
+  Settings → Providers, and there is nothing to type into;
 - keys but no default (#146) → the composer is there with the picker, nothing selected, and
   the send is refused until a pick ("Pick a model to start", with a link to Settings); a
   one-model catalog is preselected, because there is no choice in it. A catalog that is

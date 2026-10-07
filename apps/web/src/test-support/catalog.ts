@@ -1,4 +1,5 @@
-import type { ModelEntry, ProviderCatalogStatus } from '@openharness/protocol'
+import { newProviderCredentialId } from '@openharness/protocol'
+import type { ModelEntry, ProviderCatalogStatus, ProviderCredential } from '@openharness/protocol'
 
 /**
  * Catalog fixtures, shared by the tests that render a model picker: the shell's one catalog
@@ -46,10 +47,32 @@ export const OPENAI: ModelEntry = modelEntry({
   context_window: 128_000,
 })
 
+/**
+ * A stored credential, metadata only.
+ *
+ * What a screen with a key decides differently is whether the reader has one at all — the
+ * first-run check (#209) — so a fixture that means "this account can run chats" seeds these
+ * rather than putting them, which a synchronous `makeFake` cannot do.
+ */
+export function credential(provider: string, last4 = 'ab12'): ProviderCredential {
+  return {
+    // A real `pcred_` id: the schemas that parse a credential back (the fake's own `put`)
+    // reject anything that is not a ULID, and a fixture that cannot round-trip is a trap.
+    id: newProviderCredentialId(),
+    type: 'api_key',
+    provider,
+    last4,
+    created_at: '2026-10-01T10:00:00.000Z',
+    updated_at: '2026-10-01T10:00:00.000Z',
+    validated_at: '2026-10-01T10:00:00.000Z',
+  }
+}
+
 /** Two providers, so grouping, search and switching have something to tell apart. */
 export const TWO_PROVIDERS = {
   models: [ANTHROPIC, OPENAI],
   providers: [providerStatus('anthropic'), providerStatus('openai')],
+  credentials: [credential('anthropic', '1111'), credential('openai', '2222')],
 } as const
 
 /** Two providers plus the server's default: an account that can start a chat immediately. */

@@ -1,6 +1,6 @@
 # Authentication in the web app
 
-Why the sign-in page, the device-approval page and the Model providers card are shaped the way
+Why the sign-in page, the device-approval page and the provider-key form are shaped the way
 they are (issue #62, epic #65). `AGENTS.md` has the tour and the commands; this is the
 reasoning behind the choices.
 
@@ -45,7 +45,7 @@ whose own state only changed the settings keep it — Settings' "Saved" confirma
 one to need the guarantee (issue #81). Only the very first check of a page load has nothing to
 keep, and it is the one that shows "Checking your session…".
 
-**Two failures are deliberately not routed.** The Model providers card handles a 401 from a
+**Two failures are deliberately not routed.** The provider-key form handles a 401 from a
 _credential write_ itself, because the server wants a **fresh** session there (Better Auth's
 `freshAge`) and "your session is too old" is a different message from "you are signed out" —
 the card shows it with a link to sign in again and leaves the reader where they were. And a
@@ -82,7 +82,7 @@ the tests mock.
 route _is_ the URL: `callbackURL` is the current `location.href` resolved to an absolute URL
 (`absoluteUrl(returnHash)`), which carries the hash through the provider round trip. The dev
 form needs no redirect at all — signing in re-checks `me()`, and the shell renders the route
-again, which never moved. A `#/signin?next=…` link (the Model providers prompt uses one) names
+again, which never moved. A `#/signin?next=…` link (the credential prompt uses one) names
 its destination explicitly, and the shell follows it once a session exists.
 
 ## Device approval (`src/screens/device-screen.tsx`, `#/device?user_code=…`)
@@ -122,32 +122,43 @@ when the answer names one). Everything else falls back to the server's `error_de
 the bare code, then the stand-in "The sign-in request failed." — and a 401 still means "sign in
 again" rather than a printed code (issue #80).
 
-## Model providers (`src/components/settings/model-providers.tsx`)
+## Provider keys (`src/components/providers/provider-key-form.tsx`)
 
-Settings → Model providers is the write-only credential API (A5) with a UI:
+The write-only credential API (A5) with a UI. **One form** is the whole of it —
+`ProviderKeyForm`, built from the provider's credential type (epic #201, X6) — and three
+surfaces render it: the first-run screen, the Add-provider dialog, and Settings → Providers.
+Since #209 the dialog is what the picker's "+ Add provider" and a `missing_provider_credential`
+banner open, so a key can be added without leaving a chat.
 
-- `providerCredentials.list()` → the rows: provider, `…last4`, when it was validated.
+- `providerCredentials.list()` → the rows Settings shows: provider, `…last4`, when it was
+  validated. The read happens per surface that needs it; there is no shared credential store.
 - `providerCredentials.put(provider, { type: 'api_key', api_key })` → add **or** replace;
-  there is one credential per provider per user, which is why the form has one button that
-  says "Save key" or "Replace key".
+  there is one credential per provider per user, which is why the button says "Save key" or
+  "Replace key".
 - `providerCredentials.delete(provider)` → the row's Delete, confirmed in the page (a
   `window.confirm` would block the page and cannot be tested or styled like the rest of the
   app).
+
+A fresh sign-in is required for a write (A2), and a reader who has one lands back where they
+were: each form is handed a `returnHash` — `#/new` in the first-run flow, the current hash in
+the dialog, `#/settings` on the card.
 
 The password field is cleared the moment a save succeeds, and the key is never rendered
 anywhere: not in a list, not in a status line, not in an error. The tests assert exactly that
 against the DOM after a save.
 
-The provider picker offers the common router providers and a "Custom…" entry with a free-text
-id, because the API takes any provider name Mastra's router knows — the list is a convenience,
-not a limit.
+Which providers are offered comes from `@openharness/client`'s `PROVIDERS` (name, key URL,
+free-tier hint, credential type) and is **the same set as the server's `VALIDATABLE_PROVIDERS`**
+— `e2e/src/provider-metadata.test.ts` is what holds the two together. That is also why the old
+"Custom…" free-text provider id is gone: with the list complete, a typed id could only name a
+provider whose key the server refuses on save.
 
 Two failures get words of their own, because they are the two a reader can act on:
 
 - **422 `invalid_provider_credential`** — the provider refused the key (the server validates on
   save with one cheap call). Shown next to the form, in the server's words.
 - **401 on a write** — the session is not fresh enough for a credential write. Shown with a
-  link to sign in again, and the reader stays on Settings.
+  link to sign in again, and the reader stays where they were.
 
 ## Where credentials show up elsewhere
 
@@ -156,11 +167,15 @@ instead of letting the server say it after:
 
 - **The New chat picker** is fed by `GET /v1/models`, which answers for exactly the providers
   the caller has credentials for (C5) — a model whose provider has no key is never offered.
-  With no keys at all, the screen shows an empty state linking to Settings → Model providers
-  instead of a picker.
+  With no credentials at all, the root route is the first-run screen (#209) — the tiles, the
+  key form, the default the server picks — and once a key exists but the catalog is still empty,
+  New chat shows its own empty state linking to Settings → Providers.
 - **A chat** whose turn ended with `session.error` of type `missing_provider_credential` (A5)
-  renders that error with the same link — the one error in the log the reader can fix
-  themselves, and no retry will help until they do.
+  renders that error with the fix in place: the Add-provider dialog opens on the provider the
+  failed model names (#209). It is the one error in the log the reader can fix themselves, and
+  no retry will help until they do. (The server's own message still says "Add one in Settings →
+  Model providers" — a string in `packages/brain`, left alone here because this issue's packages
+  are `apps/web` and `packages/client`.)
 
 ## The dev login (A7)
 
@@ -172,7 +187,8 @@ field is labelled "Username" because that is what the reader types, but the valu
 
 ## Testing
 
-`sign-in-screen.test.tsx`, `device-screen.test.tsx` and `settings-screen.test.tsx` drive the
+`sign-in-screen.test.tsx`, `device-screen.test.tsx`, `settings-screen.test.tsx` and
+`components/settings/providers.test.tsx` drive the
 real app against the client's fake server, with two seams:
 
 - **Better Auth** is mocked at the module boundary in `vitest.setup.ts` (both

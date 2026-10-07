@@ -1,7 +1,11 @@
 import {
+  addProviderKey,
   composeServer,
   createAgent,
   createSession,
+  deleteProviderKey,
+  openProviders,
+  savedKeys,
   expect,
   isRealModel,
   readEvents,
@@ -66,36 +70,25 @@ test.describe('W25 §8 environment keys are ignored', () => {
     })
     const session = await createSession(request, agent.id)
 
-    /** Store `ENV_KEY` through Settings, the one documented door for a key. */
+    /** Store `ENV_KEY` through Settings → Providers, the one documented door for a key. */
     const storeKey = async (): Promise<void> => {
-      await page.goto('/#/settings')
-      const rows = page
-        .getByRole('region', { name: 'Saved provider keys' })
-        .locator('[data-slot="provider-credential"]')
-      await expect(page.getByText('Model providers')).toBeVisible()
+      await openProviders(page)
+      const rows = savedKeys(page).locator('[data-slot="provider-credential"]')
       if ((await rows.filter({ hasText: 'openai' }).count()) > 0) {
-        await page.getByRole('button', { name: 'Delete the openai key' }).click()
-        await page.getByRole('button', { name: 'Delete', exact: true }).click()
-        await expect(rows.filter({ hasText: 'openai' })).toHaveCount(0)
+        await deleteProviderKey(page, 'openai')
       }
-      await page.locator('#provider-picker').selectOption('openai')
-      await page.locator('#provider-api-key').fill(ENV_KEY)
-      await page.getByRole('button', { name: /^(Save|Replace) key$/ }).click()
+      // #209: adding is the Add-provider dialog, the same one the picker and the first-run
+      // screen open.
+      await addProviderKey(page, 'OpenAI', ENV_KEY)
       await expect(page.getByRole('status').filter({ hasText: 'Saved the' })).toBeVisible()
       await expect(rows.filter({ hasText: 'openai' })).toContainText(`…${ENV_KEY.slice(-4)}`)
     }
 
     /** Delete the stored key through Settings, with the in-page confirmation. */
     const deleteKey = async (): Promise<void> => {
-      await page.goto('/#/settings')
-      const rows = page
-        .getByRole('region', { name: 'Saved provider keys' })
-        .locator('[data-slot="provider-credential"]')
-      await expect(page.getByText('Model providers')).toBeVisible()
-      await page.getByRole('button', { name: 'Delete the openai key' }).click()
-      await page.getByRole('button', { name: 'Delete', exact: true }).click()
+      await openProviders(page)
+      await deleteProviderKey(page, 'openai')
       await expect(page.getByRole('status').filter({ hasText: 'Deleted the' })).toBeVisible()
-      await expect(rows.filter({ hasText: 'openai' })).toHaveCount(0)
     }
 
     /** Recreate the server, optionally with the §8 key in its environment. */

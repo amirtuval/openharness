@@ -10,12 +10,23 @@ import type { FakeClient } from '@openharness/client/testing'
  * developed, clicked through and QA'd before the server exists.
  *
  * Two things keep the fake out of a production build: `import.meta.env.DEV` is replaced by
- * `false`, which leaves the branch below statically dead so it (and the dynamic import inside
- * it) is dropped, and the fake itself is a dynamic import, so it can only ever be a separate
- * chunk.
+ * `false`, which leaves the branch below statically dead so (and the dynamic import inside it)
+ * is dropped, and the fake itself is a dynamic import, so it can only ever be a separate chunk.
  */
 export function isFakeMode(): boolean {
   return import.meta.env.DEV && import.meta.env.VITE_OPENHARNESS_FAKE === '1'
+}
+
+/**
+ * Which fake account to run: the seeded one, or a first run with nothing configured.
+ *
+ * `VITE_OPENHARNESS_FAKE_STATE=empty` is the state the first-run screen exists for (epic #201,
+ * X5): an account with no provider key, so no catalog, no default and no chat that could run.
+ * Without it fake mode is the seeded account (`seedFakeScenario`), which is the state to
+ * *develop* in — the empty one is the state to look at.
+ */
+function fakeState(): 'seeded' | 'empty' {
+  return import.meta.env.VITE_OPENHARNESS_FAKE_STATE === 'empty' ? 'empty' : 'seeded'
 }
 
 /**
@@ -30,6 +41,50 @@ export async function createDevFakeClient(): Promise<Client | null> {
   }
 
   const { createFakeClient } = await import('@openharness/client/testing')
+
+  if (fakeState() === 'empty') {
+    const fresh = createFakeClient({
+      // No credentials and no default: the first-run screen is decided by the credentials list
+      // alone (#209), so this is the state it exists for.
+      //
+      // The catalog is seeded anyway, which a real server would not do (C5 lists models for
+      // the providers the caller has a key for) — the fake's catalog is a fixed list that a
+      // saved key cannot change, and without it the screen *after* the flow would have
+      // nothing to name and nothing to run: `createFakeClient` picks the first catalog model
+      // of the provider just saved, the way the server does (U4). Clicking the flow through
+      // therefore ends where it would against a real server, which is the point of the state.
+      models: [
+        {
+          id: 'anthropic/claude-sonnet-5',
+          provider: 'anthropic',
+          name: 'Claude Sonnet 5',
+          context_window: 200_000,
+          max_output_tokens: 64_000,
+          source: 'provider',
+        },
+        {
+          id: 'openai/gpt-5.1-mini',
+          provider: 'openai',
+          name: 'GPT-5.1 mini',
+          context_window: 400_000,
+          max_output_tokens: 128_000,
+          source: 'provider',
+        },
+        {
+          id: 'google/gemini-2.5-pro',
+          provider: 'google',
+          name: 'Gemini 2.5 Pro',
+          context_window: 1_000_000,
+          max_output_tokens: 65_536,
+          source: 'provider',
+        },
+      ],
+      preferences: { default_model: null },
+    })
+    Object.assign(globalThis, { __openharnessFake: fresh })
+    return fresh
+  }
+
   // A small catalog across two providers — one of them fallen back to the registry — so the
   // New chat picker's grouping, context windows and fallback note are all visible in fake
   // mode (#91), not just a single row.

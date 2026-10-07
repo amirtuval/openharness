@@ -222,13 +222,21 @@ describe('App', () => {
     await user.click(screen.getByRole('button', { name: 'Send message' }))
 
     // The error is the agent's, not the request's — and there is exactly one thing to do
-    // about it, so the banner says where (epic #65, A5).
+    // about it, so the banner offers it (epic #65, A5).
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent('missing_provider_credential')
     expect(alert).toHaveTextContent('No anthropic credential is saved for this account.')
-    expect(
-      within(alert).getByRole('link', { name: 'Add a key in Settings → Model providers' }),
-    ).toHaveAttribute('href', '#/settings')
+
+    // Since #209 the fix happens **here**: the seeded session runs a model whose provider is
+    // `anthropic`, so the Add-provider dialog opens on that provider's form rather than on a
+    // link to another screen.
+    await user.click(within(alert).getByRole('button', { name: 'Add a provider key' }))
+
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText('Connect Anthropic')).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('API key')).toBeInTheDocument()
+    // Still on the chat underneath: this is a dialog, not a navigation.
+    expect(window.location.hash).toMatch(/^#\/s\/sesn_/)
   })
 
   it('keeps a terminal error on screen until something replaces it', async () => {
@@ -453,18 +461,19 @@ describe('model-first labels, hidden agents', () => {
     ).toBeInTheDocument()
   })
 
-  it('keeps the agents screen out of navigation, and its old route lands home', async () => {
-    const fake = makeFake()
+  it('keeps the agents screen out of navigation, and its old route lands on the root', async () => {
+    const fake = makeFake(WITH_DEFAULT)
     renderApp(fake, { hash: '#/' })
 
     const sidebar = await screen.findByRole('complementary', { name: 'Navigation' })
     expect(within(sidebar).queryByRole('link', { name: /Agents/ })).not.toBeInTheDocument()
     expect(within(sidebar).getByRole('link', { name: /Settings/ })).toBeInTheDocument()
 
-    // An old bookmark to the screen: the route is gone, so it opens the home screen.
+    // An old bookmark to the screen: the route is gone, so it opens the root route — which is
+    // New chat since #209 (the Home screen is gone), not a dead end.
     window.location.hash = '#/agents'
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: 'openharness' })).toBeInTheDocument()
+      expect(screen.getByRole('heading', { name: 'New chat' })).toBeInTheDocument()
     })
     expect(screen.queryByRole('heading', { name: 'Agents' })).not.toBeInTheDocument()
   })
@@ -674,7 +683,8 @@ describe('the sidebar below md', () => {
   })
 
   it('puts the menu button on every screen', async () => {
-    const fake = makeFake()
+    // An account with a key, so `#/new` is New chat rather than the first-run flow (#209).
+    const fake = makeFake(WITH_DEFAULT)
     renderApp(fake, { hash: '#/' })
 
     const screens: ReadonlyArray<readonly [hash: string, heading: string]> = [

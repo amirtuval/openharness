@@ -4,7 +4,7 @@ import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 
-import { OPENAI, TWO_PROVIDERS, WITH_DEFAULT } from '../test-support/catalog'
+import { OPENAI, TWO_PROVIDERS, WITH_DEFAULT, credential } from '../test-support/catalog'
 import { makeFake, renderApp } from '../test-support/render-app'
 
 /**
@@ -81,11 +81,11 @@ describe('New chat', () => {
 
   it('says to add a provider key when there is no default, and links to Settings', async () => {
     // The one account where that claim is true (#146): no providers and no models either.
-    const fake = makeFake({ models: [], providers: [] })
+    const fake = makeFake({ models: [], providers: [], credentials: [credential('anthropic')] })
     renderApp(fake, { hash: '#/new' })
 
     expect(await screen.findByText('Add a provider key to start')).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'Settings → Model providers' })).toHaveAttribute(
+    expect(screen.getByRole('link', { name: 'Settings → Providers' })).toHaveAttribute(
       'href',
       '#/settings',
     )
@@ -97,7 +97,7 @@ describe('New chat', () => {
     const user = userEvent.setup({ delay: null })
     // A key saved before automatic picking existed, or one whose pick failed at save time:
     // the catalog has models, the preferences have no default.
-    const fake = makeFake({ models: TWO_PROVIDERS.models, providers: TWO_PROVIDERS.providers })
+    const fake = makeFake({ ...TWO_PROVIDERS, preferences: { default_model: null } })
     const creates = recordCreates(fake)
     renderApp(fake, { hash: '#/new' })
 
@@ -136,7 +136,7 @@ describe('New chat', () => {
   it('preselects the only catalog model when there is no default (#146)', async () => {
     const user = userEvent.setup({ delay: null })
     // One model is no choice at all, so it stands in the way a default would.
-    const fake = makeFake({ models: [OPENAI] })
+    const fake = makeFake({ models: [OPENAI], credentials: TWO_PROVIDERS.credentials })
     const creates = recordCreates(fake)
     renderApp(fake, { hash: '#/new' })
 
@@ -150,7 +150,7 @@ describe('New chat', () => {
   })
 
   it('waits for the catalog instead of saying there are no keys (#146)', async () => {
-    const fake = makeFake({ models: TWO_PROVIDERS.models, providers: TWO_PROVIDERS.providers })
+    const fake = makeFake(TWO_PROVIDERS)
     // Hold the catalog request open until the test releases it, the way the sidebar test
     // holds its later pages: "loading, not empty" is only observable while it is late.
     let releaseCatalog: (() => void) | undefined
@@ -177,7 +177,7 @@ describe('New chat', () => {
   })
 
   it('shows a failed catalog load rather than claiming there are no keys (#146)', async () => {
-    const fake = makeFake()
+    const fake = makeFake({ credentials: TWO_PROVIDERS.credentials })
     fake.models.list = () => Promise.reject(new ApiError(500, 'The catalog is unavailable.'))
     renderApp(fake, { hash: '#/new' })
 

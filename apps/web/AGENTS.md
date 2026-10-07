@@ -36,10 +36,17 @@ the client's fake server.
 # UI only, in-memory server, seeded scenario, scripted replies
 VITE_OPENHARNESS_FAKE=1 yarn dev
 
+# the other account: no provider key, so `#/` is the first-run flow (#209)
+VITE_OPENHARNESS_FAKE=1 VITE_OPENHARNESS_FAKE_STATE=empty yarn dev
+
 # against a real server (defaults to http://localhost:3000 for /v1)
 yarn dev
 OPENHARNESS_PROXY_TARGET=http://localhost:8787 yarn dev
 ```
+
+`VITE_OPENHARNESS_FAKE_STATE=empty` runs the fake with no credentials, and therefore no models,
+no providers and no default — the state the first-run screen exists for. Without it fake mode is
+the seeded account, which is the state to develop in; the empty one is the state to look at.
 
 `yarn dev` proxies `/v1` to `http://localhost:3000` (the target comes from
 `OPENHARNESS_PROXY_TARGET`, read in `vite.config.ts`). With an empty server URL in the
@@ -71,15 +78,23 @@ src/
   components/
     client-provider.tsx        the client in context, so screens can use it
     auth-provider.tsx          the Better Auth browser client in context
-    provider-icon.tsx          the Google / GitHub / Microsoft marks, inline
+    provider-icon.tsx          the sign-in marks (Google / GitHub / Microsoft) and the
+                               model providers' marks, inline; a monogram where a brand's
+                               mark could not be confirmed
     sidebar.tsx                session list (newest first), New chat, Settings,
                                the row's kebab menu (Delete chat, in-page confirm),
                                and the signed-in user with Sign out at the foot;
                                the column from `md` up, the overlay drawer below it
     settings/
-      model-providers.tsx      Settings -> Model providers: the list, add/replace, delete
+      providers.tsx            Settings -> Providers: the list, Replace, Delete, Add provider
       default-model.tsx        Settings -> Default model: the picker, saved to preferences
       appearance.tsx           Settings -> Appearance: the four-way theme picker (#203)
+    providers/
+      provider-tiles.tsx       the provider grid: one tile per PROVIDER, free-tier hint (X5/X8)
+      provider-key-form.tsx    THE key form, built from the credential type (X6); the same
+                               component in the first-run screen, the dialog and Settings
+      add-provider-dialog.tsx  the Add-provider dialog (Radix), opened by the picker and the
+                               missing-key banner (X5)
     theme-menu.tsx             the sidebar's theme quick switch (#203)
     theme-preference.tsx       the theme's one server read and write, rendered nowhere
     chat/
@@ -99,31 +114,38 @@ src/
       status-indicator.tsx     running / idle / retrying
       error-banner.tsx         inline errors (from the log, or from a failed request)
     models/
-      model-picker.tsx         THE model control: grouped, searchable, free text, refresh;
-                               `full` in Settings, `compact` in the composer (#91, #113)
-    ui/                        shadcn/ui primitives, copied from the registry
+      model-picker.tsx         THE model control: grouped, searchable, free text, refresh,
+                               and "+ Add provider"; `full` in Settings, `compact` in the
+                               composer (#91, #113)
+    ui/                        shadcn/ui primitives, copied from the registry (dialog and
+                               collapsible among them, for #209)
   screens/
-    home-screen.tsx            no chat open
+    start-screen.tsx           what `#/` and `#/new` show: New chat, or the first-run flow
+                               when the account has no provider key (#209)
+    first-run-screen.tsx       Connect a model provider: tiles -> key form -> the default the
+                               server picked -> Start chatting (X5)
     new-chat-screen.tsx        an empty composer on the default model; the session is
                                created with the first message (#113); with no default the
                                catalog decides (#146): the picker with a pick required, a
                                preselected sole model, a loading state, the catalog's
                                error, or the "add a provider key" state when there are
                                no providers and no models
-    settings-screen.tsx        the server URL (localStorage), Default model, Appearance,
-                               Model providers
+    settings-screen.tsx        Providers, Default model, Appearance, and Advanced — the
+                               server URL, collapsed (#209)
     sign-in-screen.tsx         one button per provider, the dev form when offered
     device-screen.tsx          the device-approval page `oh login` opens
   hooks/
     use-session.ts             THE session hook: history, live stream, send (with a model), interrupt
     use-sessions.ts            the sidebar's list, plus create and remove (and forget)
     use-session-refresh.ts     the re-read after a first message, shared by both of those
-    use-models.ts              the catalog (GET /v1/models), once for the whole shell
+    use-models.ts              the catalog (GET /v1/models), once for the whole shell; reload()
+                               after a credential change, refresh() to bypass the cache
     use-preferences.ts         GET/PUT /v1/me/preferences: the default model
     use-theme.ts               the theme store's React binding (#203)
     use-auth.ts                the auth store's React binding
     use-auth-config.ts         GET /v1/auth-config for the sign-in page
-    use-provider-credentials.ts  the credentials list, plus save and delete
+    use-provider-credentials.ts  the credentials list, plus put (a whole request body), the
+                               api_key shorthand, remove and reload
     use-notice.ts              the shell's one-line notice (a chat deleted elsewhere)
     use-stick-to-bottom.ts     auto-scroll that stays put when the reader scrolls up
     use-route.ts, use-settings.ts   thin React bindings over the two small stores
@@ -137,15 +159,15 @@ src/
     theme.ts                   the theme: the choice, the `data-theme` it resolves to, the
                                `localStorage` cache the first paint reads (#203)
     notice.ts                  the shell's notice, a one-line store
-    providers.ts               the provider names the *credentials* form offers
     session-refresh.ts         the one re-read of a session whose first message named it
     highlight.ts               the code highlighter: lazy Shiki, three themes, one
                                grammar at a time, and the tokens the code block draws
                                (#204)
     dev-fake-client.ts         dev-only fake client + the seeded scenario, which carries
-                               the markdown the QA screenshots are taken of (#204)
-    models.ts                  helpers over the catalog: grouping, name lookup
+                               the markdown the QA screenshots are taken of (#204); the
+                               `empty` state is the first-run account (#209)
     paging.ts                  walking `next_page` for the two lists, with a safety cap
+    models.ts                  helpers over the catalog: grouping, name lookup, providerOf
     errors.ts, format.ts, utils.ts
   test-support/render-app.tsx  render the app against a fake client; DOM readers
   test-support/stream.ts       gate the fake's stream, one event at a time
@@ -154,17 +176,20 @@ src/
 
 ### Routes
 
-| route                       | screen                                           |
-| --------------------------- | ------------------------------------------------ |
-| `#/`                        | home (no chat open)                              |
-| `#/s/<sessionId>`           | the chat                                         |
-| `#/new`                     | new chat: an empty composer on the default model |
-| `#/settings`                | server URL, Default model, Appearance, providers |
-| `#/signin`                  | sign in (`?next=<hash>` to return there)         |
-| `#/device?user_code=<code>` | the device-approval page `oh login` opens        |
+| route                       | screen                                              |
+| --------------------------- | --------------------------------------------------- |
+| `#/`                        | New chat — or the first-run flow with no key (#209) |
+| `#/s/<sessionId>`           | the chat                                            |
+| `#/new`                     | new chat: an empty composer on the default model    |
+| `#/settings`                | Providers, Default model, Appearance, Advanced      |
+| `#/signin`                  | sign in (`?next=<hash>` to return there)            |
+| `#/device?user_code=<code>` | the device-approval page `oh login` opens           |
 
 There is no `#/agents` route since #91: chatting is model-first, agents are hidden from the
-UI, and an old bookmark to that screen lands on home.
+UI, and an old bookmark to that screen lands on the root route. There is no **Home** screen
+since #209 either: the root of a signed-in app is New chat, or the first-run flow for an
+account with no provider key, so an old `#/` link — the sidebar's own logo among them — lands
+where a reader meant to go.
 
 Signed out — a 401 from `client.me()` at startup or from any later call — the shell renders the
 sign-in page in place of everything else, and signing in puts the reader back on the route they
@@ -323,6 +348,78 @@ every surface that offers the catalog can rebuild it where the list is. It has t
 `full` (Settings) and `compact` — the composer's quiet "gpt-4.1-mini ▾" control, whose panel
 opens upward.
 
+### Onboarding: one flow, from sign-in to a first chat (#209, epic #201 X5/X6/X8)
+
+An account with **no provider key** lands on the first-run screen instead of New chat, at both
+`#/` and `#/new`:
+
+    tiles -> the key form -> "You're set: your default model is X" -> Start chatting
+
+`StartScreen` (`src/screens/start-screen.tsx`) is the gate: it reads the credentials list once
+and decides once. Deciding once matters — saving a key makes the list non-empty, and a live
+condition would swap the screen out from under the confirmation the reader is reading — so the
+reader leaves when they say so, by Start chatting or Skip, and the next mount decides again.
+
+- **Tiles** come from `@openharness/client`'s `PROVIDERS`, one per provider, each with its mark
+  and its free-tier hint (X8). The list is complete by construction: it is the same set as the
+  server's `VALIDATABLE_PROVIDERS`, held together by `e2e/src/provider-metadata.test.ts`.
+- **The form** is `components/providers/provider-key-form.tsx`, and it is the only place a key is
+  typed in this app — the first-run screen, the Add-provider dialog and Settings all render it,
+  so "paste and validate" means the same thing everywhere. **Its fields come from the credential
+  type** (X6): `CREDENTIAL_FORMS` is a `Record<ProviderCredentialType, …>` holding the fields and
+  the request body they build, and `api_key` is the only member today. A new member of the
+  protocol's credential union is a compile error there until it has a form — which is where
+  Bedrock, Vertex and Azure land in phase 4.
+- **Errors are inline**, in the three classes the credentials API has: a refused key
+  (`invalid_provider_credential`, "The key was rejected"), a stale session (401, with a link to
+  sign in again and back to where the reader is), and everything else as one line.
+- **Skip** leaves for New chat, whose own empty state still says what is missing — the flow
+  prompts, it does not block.
+
+The two writes a save causes are both re-reads, because the server owns them: saving the first
+key makes the server pick a default model (U4), so `usePreferences` is asked again for the model
+to name, and the catalog is read again (`useModels.reload`, not `refresh`) so the models the new
+provider lists are in the picker before the first message. `reload` is the plain read on purpose:
+saving a key already invalidates that provider's cache entry server-side (C4), while `refresh`
+is the deliberate cache bypass the reader asks for and is rate-limited to once a minute.
+
+### Add provider: a dialog, not a detour (#209, X5)
+
+The same form, in `components/providers/add-provider-dialog.tsx`, reachable **without leaving
+the chat**:
+
+- from the model picker's foot ("+ Add provider"), on the tiles;
+- from a `missing_provider_credential` banner, **preselected to the provider the failed model
+  names** (`providerOf(sessionModel)`) — it used to be a link to Settings → Model providers and
+  a walk back.
+
+It is Radix Dialog (`components/ui/dialog.tsx`) for the focus trap, Escape and the modal
+semantics. Two things about how it is written are load-bearing:
+
+- **The root stays mounted; only `open` moves.** Radix restores focus when its `FocusScope`
+  unmounts, and a caller that unmounted the whole dialog would take that with it, leaving the
+  reader on `document.body`. `AddProviderDialog` also has no `DialogTrigger` to hand focus back
+  to — the three things that open it live in three different components — so it remembers the
+  last focused element while it is closed and focuses it again on close.
+- **The body is its own component**, because Radix keeps dialog content out of the tree while it
+  is closed: the credentials read happens on open, not once per mounted chat.
+
+After a save the dialog closes, the shell says so (`showNotice`), and the caller re-reads the
+catalog — so the provider just connected is in the picker immediately, with no reload and no
+Settings trip.
+
+### Settings, in the order a reader needs it (#209, X5)
+
+**Providers**, **Default model**, **Appearance**, then **Advanced** — the server URL, collapsed.
+The screen used to open on a Connection card only a self-hoster has a use for, with the thing
+everyone needs below the fold. The Providers card is the **list**: it shows each key by display
+name and last four (`providerName`), and rows carry Replace (which opens the dialog on that
+provider) and Delete (in-page confirm). Adding is the dialog, so there is one form in one place.
+
+The free-text provider id the card used to offer is gone with `lib/providers.ts`: now that the
+metadata list is the complete set the server can validate, a typed id could only name a provider
+whose key the server refuses on save — a dead end dressed as an escape hatch.
+
 ### New chat is immediate (#113, epic #116 U2)
 
 `#/new` is an empty chat, not a picker screen: `NewChatScreen` renders the composer with the
@@ -472,22 +569,25 @@ sign-in is built against the same `settings.serverUrl` as the API client — and
 origin, with no `baseURL` at all, when none is set. `GET /v1/auth-config` — the one request
 outside `@openharness/client` — is stubbed at `fetch` where a test needs it.
 
-| file                                          | covers                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/App.test.tsx`                            | open a session, send → streamed reply, Stop → interrupted, reload → history, steering, retry → success, terminal error, the composer model switch + its marker, a title arriving without a reload, request error, a 401 sending the reader to sign in, the missing-provider-credential message, model-first labels, deleting chats (header, sidebar, failure, deleted elsewhere)                                                                     |
-| `src/screens/new-chat-screen.test.tsx`        | New chat is immediate (#113): the default shown and created with the first message, a pick before the first send, the no-default states the catalog decides (#146 — the picker with the send refused until a pick, then created with the picked model; a sole model preselected; no-key, loading and failed-catalog states), a failed create (keeping the text) and a failed send (reusing the session), a failed preferences load                   |
-| `src/screens/settings-screen.test.tsx`        | settings round-trip, an empty URL as same-origin, the confirmation surviving a client rebuild (#81), credentials add/replace/delete, a failed keys load, no key in the DOM, the rejected-key and fresh-session errors, and the default model (server-chosen, saved, failed load/save)                                                                                                                                                                |
-| `src/screens/sign-in-screen.test.tsx`         | the 401 landing, provider buttons per auth-config, the card's own padding above the first button and below the last one (#187), the dev form gating and sign-in, returning to the route, sign-out, a later 401                                                                                                                                                                                                                                       |
-| `src/screens/device-screen.test.tsx`          | approve, deny, an invalid code, an expired code, a rate-limited one and the server's other error bodies (#80), an already-decided code, signing in first, the code through a social sign-in                                                                                                                                                                                                                                                          |
-| `src/components/chat/composer.test.tsx`       | the keyboard rules (#105, P1): Enter sends, Shift+Enter newlines, empty/whitespace sends nothing, Send disabled while empty, a failed send keeps the text                                                                                                                                                                                                                                                                                            |
-| `src/components/chat/markdown.test.tsx`       | the agent's markdown (#204): GFM headings/lists/tables/inline code, a fenced block highlighted with a variable per theme (against the real Shiki), an unshipped language falling back to plain text, Copy putting the code on a mocked clipboard and saying so, raw HTML staying text, links opening in a new tab, and an unfinished fence — and an unfinished `**bold`/link — mid-stream, both rendered directly and through the app's gated stream |
-| `src/components/models/model-picker.test.tsx` | the picker itself: grouping, search, the keyboard rule, free text, the fallback note, refresh (429 and failure), the compact trigger                                                                                                                                                                                                                                                                                                                 |
-| `src/hooks/use-session.test.tsx`              | the hook's own contract: a failed load, and no duplicated message                                                                                                                                                                                                                                                                                                                                                                                    |
-| `src/hooks/use-stick-to-bottom.test.tsx`      | the auto-scroll rule, with a scroll geometry jsdom does not have                                                                                                                                                                                                                                                                                                                                                                                     |
-| `src/components/sidebar.test.tsx`             | the session list: first page then the rest, the cap note, and the row's delete action (in-page confirm, cancel, Escape, failure)                                                                                                                                                                                                                                                                                                                     |
-| `src/components/theme-menu.test.tsx`          | the sidebar's theme quick switch: a pick paints and saves, Escape closes without choosing (#203)                                                                                                                                                                                                                                                                                                                                                     |
-| `src/components/settings/appearance.test.tsx` | the Appearance picker (#203): a pick is saved to the account and painted at once, the cached theme paints first and the account's stored one takes over once it answers                                                                                                                                                                                                                                                                              |
-| `src/lib/*.test.ts`                           | routes, the settings store, the theme store (`system` following `matchMedia`, the cache, the attribute; #203), the fake-mode scenario, the paging walk, the session re-read, the label rules, the context-window formatting, the auth store's rules, and the auth-config schema's unknown-provider filter                                                                                                                                            |
+| file                                                    | covers                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/App.test.tsx`                                      | open a session, send → streamed reply, Stop → interrupted, reload → history, steering, retry → success, terminal error, the composer model switch + its marker, a title arriving without a reload, request error, a 401 sending the reader to sign in, the missing-provider-credential message, model-first labels, deleting chats (header, sidebar, failure, deleted elsewhere)                                                                              |
+| `src/screens/new-chat-screen.test.tsx`                  | New chat is immediate (#113), for an account with a key: the default shown and created with the first message, a pick before the first send, the no-default states the catalog decides (#146 — the picker with the send refused until a pick, then created with the picked model; a sole model preselected; no-key, loading and failed-catalog states), a failed create (keeping the text) and a failed send (reusing the session), a failed preferences load |
+| `src/screens/settings-screen.test.tsx`                  | the four sections in order and Advanced collapsed by default (and opening on demand), the server-URL round trip, an empty URL as same-origin, the confirmation surviving a client rebuild (#81), and the default model (server-chosen, saved, failed load/save)                                                                                                                                                                                               |
+| `src/screens/first-run-screen.test.tsx`                 | the first-run flow (#209): shown with no credentials and not with one, the tiles and their free-tier hints, a save that names the server's pick and lands on New chat with the cursor in the box, changing that pick, a rejected key, the stale-session prompt and where it returns to, Skip, and back-from-the-form                                                                                                                                          |
+| `src/components/providers/add-provider-dialog.test.tsx` | the dialog (#209): opened from the picker without leaving the chat, a save that closes it and re-reads the catalog, the preselected provider from a row's Replace, and Escape returning focus to what opened it                                                                                                                                                                                                                                               |
+| `src/components/settings/providers.test.tsx`            | the Providers card: metadata-only rows with display names, Add provider opening the dialog, Replace through it with the list following, the in-page delete (confirm, cancel, failure), the stale-session prompt and the failed-list banner                                                                                                                                                                                                                    |
+| `src/screens/sign-in-screen.test.tsx`                   | the 401 landing, provider buttons per auth-config, the card's own padding above the first button and below the last one (#187), the dev form gating and sign-in, returning to the route, sign-out, a later 401                                                                                                                                                                                                                                                |
+| `src/screens/device-screen.test.tsx`                    | approve, deny, an invalid code, an expired code, a rate-limited one and the server's other error bodies (#80), an already-decided code, signing in first, the code through a social sign-in                                                                                                                                                                                                                                                                   |
+| `src/components/chat/composer.test.tsx`                 | the keyboard rules (#105, P1): Enter sends, Shift+Enter newlines, empty/whitespace sends nothing, Send disabled while empty, a failed send keeps the text                                                                                                                                                                                                                                                                                                     |
+| `src/components/chat/markdown.test.tsx`                 | the agent's markdown (#204): GFM headings/lists/tables/inline code, a fenced block highlighted with a variable per theme (against the real Shiki), an unshipped language falling back to plain text, Copy putting the code on a mocked clipboard and saying so, raw HTML staying text, links opening in a new tab, and an unfinished fence — and an unfinished `**bold`/link — mid-stream, both rendered directly and through the app's gated stream |
+| `src/components/models/model-picker.test.tsx`           | the picker itself: grouping, search, the keyboard rule, free text, the fallback note, refresh (429 and failure), the compact trigger                                                                                                                                                                                                                                                                                                                          |
+| `src/hooks/use-session.test.tsx`                        | the hook's own contract: a failed load, and no duplicated message                                                                                                                                                                                                                                                                                                                                                                                             |
+| `src/hooks/use-stick-to-bottom.test.tsx`                | the auto-scroll rule, with a scroll geometry jsdom does not have                                                                                                                                                                                                                                                                                                                                                                                              |
+| `src/components/sidebar.test.tsx`                       | the session list: first page then the rest, the cap note, and the row's delete action (in-page confirm, cancel, Escape, failure)                                                                                                                                                                                                                                                                                                                              |
+| `src/components/theme-menu.test.tsx`                    | the sidebar's theme quick switch: a pick paints and saves, Escape closes without choosing (#203)                                                                                                                                                                                                                                                                                                                                                              |
+| `src/components/settings/appearance.test.tsx`           | the Appearance picker (#203): a pick is saved to the account and painted at once, the cached theme paints first and the account's stored one takes over once it answers                                                                                                                                                                                                                                                                                       |
+| `src/lib/*.test.ts`                                     | routes (including `#/` and its fallbacks, #209), the settings store, the theme store (`system` following `matchMedia`, the cache, the attribute; #203), the fake-mode scenario, the paging walk, the session re-read, the label rules, the context-window formatting, the auth store's rules, and the auth-config schema's unknown-provider filter                                                                                                            |
 
 Timing: streaming tests do not race the clock. `src/test-support/stream.ts` gates the fake's
 stream so the test releases **one event at a time** and asserts between events — the fake

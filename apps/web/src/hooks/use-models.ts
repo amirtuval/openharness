@@ -37,6 +37,16 @@ export interface ModelsView {
    * list it already had.
    */
   readonly refresh: () => Promise<RefreshOutcome>
+  /**
+   * Read the catalog again, the plain way.
+   *
+   * This is what a **credential change** asks for (#209): saving a key changes what the caller
+   * can run, and the shell has to see it before the picker can offer it. It is deliberately not
+   * {@link refresh}: a refresh bypasses the server's cache and is rate-limited to once a
+   * minute, while saving a key already invalidates that provider's cache entry server-side
+   * (C4), so an ordinary read is both fresh where it matters and unbounded.
+   */
+  readonly reload: () => Promise<void>
   /** Clear the load error. */
   readonly dismissError: () => void
 }
@@ -82,29 +92,41 @@ export function useModels(client: Client): ModelsView {
     [],
   )
 
-  useEffect(() => {
-    const controller = new AbortController()
-    setLoading(true)
-    void client.models.list(undefined, { signal: controller.signal }).then(
-      (response) => {
-        if (controller.signal.aborted) {
-          return
-        }
+  /** One ordinary read of the catalog: the mount's, and every {@link reload}. */
+  const load = useCallback(
+    async (signal?: AbortSignal): Promise<void> => {
+      try {
+        const response = await client.models.list(
+          undefined,
+          signal === undefined ? undefined : { signal },
+        )
         apply(response)
-        setLoading(false)
-      },
-      (caught: unknown) => {
-        if (controller.signal.aborted) {
+      } catch (caught) {
+        if (signal?.aborted === true) {
           return
         }
         if (!noteAuthenticationError(client, caught)) {
           setError(describeError(caught, { serverUrl }))
         }
+      }
+    },
+    [client, serverUrl, apply],
+  )
+
+  useEffect(() => {
+    const controller = new AbortController()
+    setLoading(true)
+    void load(controller.signal).finally(() => {
+      if (!controller.signal.aborted) {
         setLoading(false)
-      },
-    )
+      }
+    })
     return () => controller.abort()
-  }, [client, serverUrl, apply])
+  }, [load])
+
+  const reload = useCallback(async (): Promise<void> => {
+    await load()
+  }, [load])
 
   const refresh = useCallback(async (): Promise<RefreshOutcome> => {
     setRefreshing(true)
@@ -132,5 +154,5 @@ export function useModels(client: Client): ModelsView {
     setError(null)
   }, [])
 
-  return { models, providers, loading, error, refreshing, refresh, dismissError }
+  return { models, providers, loading, error, refreshing, refresh, reload, dismissError }
 }
