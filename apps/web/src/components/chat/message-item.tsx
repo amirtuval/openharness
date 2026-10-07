@@ -6,6 +6,8 @@ import type { ModelNameLookup } from '../../lib/models'
 import { cn } from '../../lib/utils'
 import { Badge } from '../ui/badge'
 import { Markdown } from './markdown'
+import { MessageActions } from './message-actions'
+import { MessageMeta } from './message-meta'
 
 /**
  * How one part of a message is drawn (epic #201, X1).
@@ -41,23 +43,49 @@ const PART_RENDERERS: Record<MessagePart['type'], PartRenderer> = {
  * A `user.message` that switched the session's model carries `modelChangedTo` (epic #116,
  * U3); the marker above the bubble is what says so — "Switched to Claude Sonnet" — so a
  * reader can see where the conversation changed engines without opening the log.
+ *
+ * Under the bubble is the message's **foot**: what the reply cost ({@link MessageMeta}, #212)
+ * and what can be done with it ({@link MessageActions}, #212). It is one row, and it is part
+ * of every message including the user's plain text — which is what keeps the transcript's
+ * rhythm even and the action row from moving anything when it appears on hover.
+ *
+ * `group/message` is what that hover is: the row's opacity is keyed off the whole message, so
+ * the actions belong to it rather than to the buttons.
  */
 export function MessageItem({
   message,
   nameOf,
+  previousModel,
+  onEdit,
 }: {
   message: TranscriptMessage
   /** The catalog lookup for the marker's display name; the id when the catalog does not know it. */
   nameOf?: ModelNameLookup | undefined
+  /** The previous reply's model, so the meta line names one only when it changed (#212). */
+  previousModel?: string | undefined
+  /** Pre-fill the composer with this message — given for the last user message, and no other. */
+  onEdit?: (() => void) | undefined
 }) {
   const isUser = message.role === 'user'
+
+  // A reply that has started streaming but has drawn nothing yet is the empty preview the
+  // working row at the foot of the transcript already speaks for (#212): drawn here as well,
+  // it is an empty agent bubble with a bare caret in it, saying the same thing twice with a
+  // grey block. The first delta brings the message — and the caret, which is then the only
+  // thing that says the reply is *still* arriving.
+  if (!isUser && message.streaming && message.text.trim() === '') {
+    return null
+  }
 
   return (
     <article
       data-role={message.role}
       data-streaming={message.streaming}
       data-pending={message.pending}
-      className={cn('flex w-full flex-col gap-1', isUser ? 'items-end' : 'items-start')}
+      className={cn(
+        'group/message flex w-full flex-col gap-0.5',
+        isUser ? 'items-end' : 'items-start',
+      )}
     >
       {message.modelChangedTo === undefined ? null : (
         <p data-slot="model-change" className="self-center text-xs text-muted-foreground">
@@ -77,10 +105,21 @@ export function MessageItem({
         {message.streaming ? <StreamingCaret /> : null}
       </div>
       {message.pending ? (
-        <Badge variant="outline" className="text-[0.65rem] text-muted-foreground">
+        <Badge variant="outline" className="text-2xs text-muted-foreground">
           queued
         </Badge>
       ) : null}
+      {/* The row is always the same height, whether or not anything is in it: a message that
+          has neither metadata nor actions would otherwise be a shorter message. */}
+      <div
+        data-slot="message-foot"
+        className="flex h-6 max-w-full min-w-0 items-center gap-control"
+      >
+        {isUser ? null : (
+          <MessageMeta message={message} previousModel={previousModel} nameOf={nameOf} />
+        )}
+        <MessageActions text={message.text} onEdit={onEdit} />
+      </div>
     </article>
   )
 }

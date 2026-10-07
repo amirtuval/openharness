@@ -67,8 +67,36 @@ describe('the markdown renderer', () => {
     expect(screen.getByRole('table')).toBeInTheDocument()
     expect(screen.getByText('pnpm test').tagName).toBe('CODE')
     // A wide table scrolls rather than squashing the message — the same rule the code block
-    // follows on a long line.
-    expect(screen.getByRole('table').parentElement?.className).toContain('overflow-x-auto')
+    // follows on a long line. It also keeps its columns (`w-max`) instead of being flattened
+    // into a column of single words, which is what asking for exactly the message's width
+    // does to a table that cannot fit in it (#212).
+    const table = screen.getByRole('table')
+    expect(table.parentElement?.className).toContain('overflow-x-auto')
+    expect(table.className).toContain('w-max')
+    expect(table.className).toContain('min-w-full')
+  })
+
+  it('keeps a long unbroken run inside the message, and code lines scrolling (#212)', () => {
+    // The narrow-screen report: a URL, a hash, a pasted token — a run with no space in it sets
+    // the width of the line it is on, and a line wider than the bubble is *clipped at the
+    // transcript's right edge*, because the transcript's scroll container is `overflow: auto`
+    // on both axes and cannot be `visible` on one of them. `break-words` on the wrapper is
+    // what keeps it in, and it is inherited: one rule reaches every element markdown can
+    // produce, in every message, without each renderer having to remember.
+    render(
+      <Markdown
+        text={`See https://example.com/${'a'.repeat(120)}\n\n\`\`\`ts\nconst x = 1\n\`\`\`\n`}
+      />,
+    )
+
+    const wrapper = document.querySelector('[data-slot="markdown"]')
+    expect(wrapper?.className).toContain('break-words')
+    // And the message body can be narrower than what is in it, which is what a scrollable
+    // block inside it needs.
+    expect(wrapper?.className).toContain('min-w-0')
+    // A code line opts back out: wrapped code would stop being the line the code has, so the
+    // block scrolls inside itself instead (its `pre`, under the header).
+    expect(codeBlock().querySelector('pre')?.className).toContain('break-normal')
   })
 
   it('highlights a fenced block, with a theme variable for each app theme', async () => {

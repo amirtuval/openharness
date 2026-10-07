@@ -1,6 +1,7 @@
 import { Check, Copy } from 'lucide-react'
-import { Fragment, memo, useEffect, useRef, useState } from 'react'
+import { Fragment, memo, useEffect, useState } from 'react'
 
+import { useCopy } from '../../hooks/use-copy'
 import type { HighlightedCode } from '../../lib/highlight'
 import { Button } from '../ui/button'
 
@@ -20,9 +21,6 @@ import { Button } from '../ui/button'
  * is not re-tokenized. Only the block the reply is still writing pays for anything.
  */
 
-/** How long the Copy button says "Copied". */
-const COPIED_MS = 1500
-
 export const CodeBlock = memo(function CodeBlock({
   code,
   language,
@@ -33,21 +31,9 @@ export const CodeBlock = memo(function CodeBlock({
   language: string | null
 }) {
   const highlighted = useHighlighted(code, language)
-  const [copied, setCopied] = useState(false)
-  const copiedTimer = useRef<number | undefined>(undefined)
-
-  useEffect(() => () => window.clearTimeout(copiedTimer.current), [])
-
-  async function copy() {
-    if (!(await writeToClipboard(code))) {
-      return
-    }
-    setCopied(true)
-    window.clearTimeout(copiedTimer.current)
-    copiedTimer.current = window.setTimeout(() => {
-      setCopied(false)
-    }, COPIED_MS)
-  }
+  // The clipboard and its "Copied" are the app's one copy gesture (#212); this block only
+  // decides what the button looks like.
+  const { copied, copy } = useCopy(code)
 
   return (
     <div
@@ -71,17 +57,17 @@ export const CodeBlock = memo(function CodeBlock({
           size="xs"
           data-slot="code-copy"
           className="text-muted-foreground"
-          onClick={() => {
-            void copy()
-          }}
+          onClick={copy}
         >
           {copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
           {copied ? 'Copied' : 'Copy'}
         </Button>
       </div>
       {/* `white-space: pre` is the `<pre>` default and the reason a long line scrolls here
-          instead of wrapping into the message. */}
-      <pre className="overflow-x-auto px-3 py-2.5 font-mono leading-relaxed">
+          instead of wrapping into the message. `break-normal` undoes the prose rule the
+          message's wrapper sets (`overflow-wrap: break-word`, #212) for the one place it must
+          not reach: a code line that wrapped would stop being the line the code has. */}
+      <pre className="overflow-x-auto px-3 py-2.5 font-mono leading-relaxed break-normal">
         <code>
           {highlighted.lines.map((line, lineIndex) => (
             // A line is its index: the sixth line of a block is the sixth line of a block.
@@ -157,21 +143,5 @@ function plainCode(code: string): HighlightedCode {
   return {
     lines: code.split('\n').map((line) => (line === '' ? [] : [{ content: line, style: {} }])),
     style: {},
-  }
-}
-
-/**
- * Put `text` on the clipboard and answer whether it worked.
- *
- * The async clipboard API needs a secure context, and a browser that will not give it one (a
- * refused permission, a plain-http origin) is not something to explain in a chat message — the
- * button simply does not claim to have copied.
- */
-async function writeToClipboard(text: string): Promise<boolean> {
-  try {
-    await navigator.clipboard.writeText(text)
-    return true
-  } catch {
-    return false
   }
 }

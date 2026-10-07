@@ -88,6 +88,40 @@ export function formatElapsed(milliseconds: number): string {
   return minutes > 0 ? `${minutes}m ${two(seconds)}s` : `${seconds}s`
 }
 
+/**
+ * How long a reply took, in a sentence: `0.4s`, `4.2s`, `12s`, `1m 05s`.
+ *
+ * The meta line under a reply (#212). Milliseconds are the whole story while a reply is fast —
+ * 0.4s and 4.2s are different experiences — and stop being one once it is slow: nobody reads
+ * "12.4s". So the tenth is kept below ten seconds, the number is rounded above it, and past a
+ * minute the line becomes {@link formatElapsed}'s clock, which is what the working row counts
+ * in. The two are computed the same way (round first, then choose the shape) so the line can
+ * never step backwards as the number grows.
+ */
+export function formatDuration(milliseconds: number): string {
+  const ms = Math.max(0, milliseconds)
+  const tenths = Math.round(ms / 100) / 10
+  if (tenths < 10) {
+    return `${tenths.toFixed(1)}s`
+  }
+  const seconds = Math.round(ms / 1000)
+  return seconds < 60 ? `${seconds}s` : formatElapsed(ms)
+}
+
+/**
+ * A count as a reader reads it: `1,312`.
+ *
+ * Pinned to `en-US` rather than the runtime's locale: this is a number inside a sentence that
+ * has already been written in English ("1,312 tokens"), and a value that changed its commas
+ * with the machine's locale would be a different sentence.
+ */
+const COUNT_FORMAT = new Intl.NumberFormat('en-US')
+
+/** Group thousands, the way a token count is read out loud. */
+export function formatCount(value: number): string {
+  return COUNT_FORMAT.format(value)
+}
+
 /** The last path segment of a resource id, for a compact label. */
 export function shortId(id: string): string {
   const [prefix = '', suffix = ''] = id.split('_')

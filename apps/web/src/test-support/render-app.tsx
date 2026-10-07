@@ -141,17 +141,32 @@ export function messageElement(role: 'user' | 'agent'): Element | null {
 }
 
 /**
+ * Every message for a role, in transcript order.
+ *
+ * `messageElement` answers "the message" for a conversation with one of them; a test about
+ * something that is true of *one* of several — the last user message, the second reply's
+ * metadata (#212) — needs the list, and the last is `.at(-1)`.
+ */
+export function messageElements(role: 'user' | 'agent'): HTMLElement[] {
+  return [...document.querySelectorAll<HTMLElement>(`[data-role="${role}"]`)]
+}
+
+/**
  * A message's text as a reader sees it.
  *
- * `textContent` would also pick up the screen-reader note next to a streaming reply ("The
- * assistant is replying…"), which is not part of what the model wrote.
+ * Two things inside a message are not what it says, and both are stripped: the screen-reader
+ * note next to a streaming reply ("The assistant is replying…"), and the **foot** every
+ * message carries since #212 — the metadata line and the action row, which are about the
+ * message rather than in it. What is left is the message.
  */
 export function visibleText(element: Element | null): string {
   if (element === null) {
     return ''
   }
   const clone = element.cloneNode(true) as Element
-  for (const hidden of clone.querySelectorAll('.sr-only')) {
+  for (const hidden of clone.querySelectorAll(
+    '.sr-only, [data-slot="message-meta"], [data-slot="message-actions"]',
+  )) {
     hidden.remove()
   }
   return clone.textContent ?? ''

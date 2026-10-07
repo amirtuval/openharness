@@ -12,7 +12,7 @@ import { showNotice } from '../../lib/notice'
 import { ModelPicker } from '../models/model-picker'
 import { AddProviderDialog } from '../providers/add-provider-dialog'
 import { Button } from '../ui/button'
-import { Composer } from './composer'
+import { Composer, focusComposer } from './composer'
 import { ErrorBanner } from './error-banner'
 import { MessageList } from './message-list'
 import { StatusIndicator } from './status-indicator'
@@ -36,6 +36,11 @@ import { workingState } from './working-row'
  *   leaves the chat after it (the open chat goes to New chat). A chat deleted somewhere else
  *   announces itself through the stream's `session.deleted`: the app shows the notice and
  *   leaves, so the reader is never left typing into a log that no longer exists.
+ * - **The draft is the screen's (#212).** The composer has been able to take its text from
+ *   the caller since U10; what needed it here is Edit and resend, which puts a message that is
+ *   already in the transcript back in the box. A send clears it the same way the composer's
+ *   own text used to be cleared — through `onValueChange('')` — so there is still exactly one
+ *   rule about what is in the box.
  */
 export function ChatView({
   sessionId,
@@ -73,6 +78,10 @@ export function ChatView({
     dismissError,
   } = useSession(client, sessionId)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  // The draft, owned here rather than by the composer (#212): "Edit and resend" puts the
+  // reader's own words back in the box, and a screen that wants to put words in the box owns
+  // its text (U10) — the composer is the box, not the thing that decides what is in it.
+  const [draft, setDraft] = useState('')
 
   // The model the session runs as the log last said it; a session created with a model shows
   // it through the header resource until a message carries one (the transcript's `model`).
@@ -131,6 +140,14 @@ export function ChatView({
     setInterrupted(true)
     await interrupt()
   }, [interrupt])
+
+  // "Edit and resend" (#212): the message goes back in the box, with the cursor in it, and
+  // that is the whole of it — nothing here removes the message it came from, because the log
+  // is append-only (#201) and the reader is writing a new message, not repairing an old one.
+  const editFromTranscript = useCallback((text: string): void => {
+    setDraft(text)
+    focusComposer()
+  }, [])
 
   // The transcript's own foot (U10). "No text has arrived" means the turn has not drawn
   // anything yet: an agent message is the newest one and it is still empty, so an ordinary
@@ -215,6 +232,7 @@ export function ChatView({
         loading={loadingHistory}
         nameOf={nameOf}
         working={statusRow}
+        onEdit={editFromTranscript}
       />
 
       <div className="border-t px-4 py-3">
@@ -262,6 +280,8 @@ export function ChatView({
             onSend={sendFromComposer}
             onStop={stop}
             inputRef={inputRef}
+            value={draft}
+            onValueChange={setDraft}
             modelSelector={
               <ModelPicker
                 variant="compact"

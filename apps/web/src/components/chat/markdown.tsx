@@ -62,9 +62,15 @@ const components: Components = {
   hr: () => <hr className="my-4 border-border" />,
   table: ({ children }) => (
     // A table is a grid: give it a scroll container of its own rather than let a wide one
-    // squash the message (and every column in it) narrower than its content.
+    // squash the message (and every column in it) narrower than its content — and let the
+    // table be **as wide as its content wants** (`min-w-full`, not `w-full`, #212). `w-full`
+    // asks for exactly the column's width, which an auto-layout table can only honour by
+    // narrowing every column until the cells wrap one word per line, and then overflowing
+    // anyway when a cell cannot shrink that far: squashed *and* clipped. `min-w-full` fills
+    // the column when the table is narrow and scrolls inside the wrapper above when it is not,
+    // which is what the wrapper is for.
     <div className="my-3 overflow-x-auto">
-      <table className="w-full border-collapse text-xs">{children}</table>
+      <table className="w-max min-w-full border-collapse text-xs">{children}</table>
     </div>
   ),
   th: ({ children }) => <th className="border-b px-2 py-1 text-left font-medium">{children}</th>,
@@ -136,10 +142,31 @@ function textOf(children: ReactNode): string {
     .join('')
 }
 
-/** Render message text as GitHub-flavored Markdown. */
+/**
+ * Render message text as GitHub-flavored Markdown.
+ *
+ * **The wrapper wraps.** `break-words` is on the root rather than on each element because
+ * `overflow-wrap` is inherited: one rule reaches every paragraph, list item, heading, table
+ * cell and inline `<code>` in the message, and none of them can be forgotten. What it fixes is
+ * the reply that carries a long unbreakable run — a URL, a hash, a pasted token, a long
+ * identifier, all of which a coding assistant emits constantly: without it the run sets the
+ * line's width, the line leaves the bubble, and the transcript's scroll container — which is
+ * `overflow: auto` on both axes, because a scroll container cannot be `visible` on one and not
+ * the other — **clips it at the right edge** (#212). That is the whole of the narrow-screen
+ * report: at 400px the same run is a much larger share of the width, so it is where it was
+ * noticed, not where it starts.
+ *
+ * It is `break-word` and not `anywhere`: a word is only broken when it would not fit on a line
+ * of its own, and — the part that matters — the *intrinsic* width of the text is unchanged, so
+ * a short message's bubble is still as small as its words. Code blocks opt out explicitly
+ * (`break-normal` on the `pre`) and keep scrolling inside themselves.
+ */
 export function Markdown({ text, className }: { text: string; className?: string }) {
   return (
-    <div className={cn('text-sm text-foreground', className)}>
+    <div
+      data-slot="markdown"
+      className={cn('min-w-0 text-sm break-words text-foreground', className)}
+    >
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
         {text}
       </ReactMarkdown>

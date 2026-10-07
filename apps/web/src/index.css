@@ -25,6 +25,15 @@
   [data-theme='dim'] *
 ));
 
+/*
+ * `no-hover:` is "a device that cannot hover" — a touch screen (#212). The message actions
+ * are revealed by hovering the message, and there is no hover there to reveal them with; the
+ * variant is what makes them permanently visible instead. It is the inversion of the media
+ * query Tailwind already wraps `hover:` in, and deliberately not `pointer-coarse`: a laptop
+ * with a touch screen hovers with its mouse and should keep its hover.
+ */
+@custom-variant no-hover (@media (hover: none));
+
 @theme inline {
   /*
    * The type scale (epic #201, U10). One scale for the whole app, and `text-2xs` is the one
