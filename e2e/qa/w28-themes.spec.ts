@@ -1,6 +1,7 @@
 import {
   expect,
   expectNoErrorBanner,
+  openThemeSubmenu,
   paintedTheme,
   setStoredTheme,
   shot,
@@ -55,14 +56,25 @@ test.describe('W28 the web themes', () => {
         await expectNoErrorBanner(page)
       })
 
-      await test.step('the sidebar’s quick switch is the same setting', async () => {
-        await page.getByRole('button', { name: 'Theme: Light' }).click()
+      await test.step('the account menu’s quick switch is the same setting', async () => {
+        // Since #211 the four choices are a submenu of the account menu at the foot of the
+        // sidebar (#201, U10): one menu for the person, rather than a theme button, a
+        // sign-out button and an email sharing the corner.
+        await openThemeSubmenu(page)
         await page.getByRole('menuitemradio', { name: 'Dim' }).click()
 
         await expect(page.locator('html')).toHaveAttribute('data-theme', 'dim')
         expect(await storedTheme(request)).toBe('dim')
-        await expect(page.getByRole('button', { name: 'Theme: Dim' })).toBeVisible()
-        await shot(page, 'w28-03-sidebar-dim')
+        await shot(page, 'w28-03-account-menu-dim')
+
+        // And it reads back: the submenu opens on the choice the account holds.
+        await openThemeSubmenu(page)
+        await expect(page.getByRole('menuitemradio', { name: 'Dim' })).toHaveAttribute(
+          'aria-checked',
+          'true',
+        )
+        await shot(page, 'w28-04-account-menu-theme')
+        await page.keyboard.press('Escape')
       })
 
       await test.step('a browser with no cache still ends up on the account’s theme', async () => {

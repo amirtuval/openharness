@@ -1,6 +1,6 @@
 import { createClient, type Client } from '@openharness/client'
 import type { User } from '@openharness/protocol'
-import { Menu, X } from 'lucide-react'
+import { Menu, PanelLeft, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 
 import { AuthProvider, useBrowserAuth } from './components/auth-provider'
@@ -204,6 +204,10 @@ function AppFrame({
   )
 
   const [drawerOpen, setDrawerOpen] = useState(false)
+  // Whether the desktop column is put away (U10). Shell state rather than a stored
+  // preference: it is a thing about this window's width more than about the reader, and the
+  // mobile drawer — the same panel, another layout — has always been state too.
+  const [collapsed, setCollapsed] = useState(false)
   const panelRef = useRef<HTMLElement>(null)
   const menuButtonRef = useRef<HTMLButtonElement>(null)
   const wasOpen = useRef(false)
@@ -271,6 +275,10 @@ function AppFrame({
           onSignOut={onSignOut}
           fakeClient={fakeClient}
           open={drawerOpen}
+          collapsed={collapsed}
+          onToggleCollapsed={() => {
+            setCollapsed(true)
+          }}
           onNavigate={closeDrawer}
           panelRef={panelRef}
           nameOf={nameOf}
@@ -294,6 +302,26 @@ function AppFrame({
             </Button>
             <span className="truncate text-sm font-medium">openharness</span>
           </div>
+
+          {/* The way back to a column that was put away (U10). It only exists from `md` up —
+              below that the sidebar is the drawer, and the drawer is opened from the bar
+              above — and only while the column is actually gone. */}
+          {collapsed ? (
+            <div className="hidden items-center gap-2 border-b px-3 py-2 md:flex">
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                aria-label="Show sidebar"
+                onClick={() => {
+                  setCollapsed(false)
+                }}
+              >
+                <PanelLeft aria-hidden="true" />
+              </Button>
+              <span className="truncate text-sm font-medium">openharness</span>
+            </div>
+          ) : null}
 
           {notice === null ? null : (
             <div

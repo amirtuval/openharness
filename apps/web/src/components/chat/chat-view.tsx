@@ -16,6 +16,7 @@ import { Composer } from './composer'
 import { ErrorBanner } from './error-banner'
 import { MessageList } from './message-list'
 import { StatusIndicator } from './status-indicator'
+import { workingState } from './working-row'
 
 /**
  * An open session: header, conversation, errors, composer.
@@ -85,6 +86,11 @@ export function ChatView({
   // open with the provider left to the reader (the picker's "+ Add provider"), and a provider
   // id is open on that provider's form (the missing-key banner, which knows which one failed).
   const [addingProvider, setAddingProvider] = useState<string | null | undefined>(undefined)
+  // The reader has pressed Stop on this turn (U10). Nothing in the log says a request was
+  // interrupted *by the reader* — the log says the turn ended — so the screen remembers the one
+  // action that can only have come from here, and drops it the moment a new message is sent:
+  // "Interrupted" belongs to the turn it stopped, not to the chat.
+  const [interrupted, setInterrupted] = useState(false)
 
   // A chat opens with the cursor in the box: whether it was picked from the sidebar or just
   // created from New chat, the next thing the user does is type.
@@ -104,6 +110,9 @@ export function ChatView({
 
   const sendFromComposer = useCallback(
     async (text: string): Promise<boolean> => {
+      // Sending is the start of a new turn: whatever the last one was stopped short of is no
+      // longer what the foot of the transcript is about.
+      setInterrupted(false)
       const switching = chosen !== null && chosen !== sessionModel
       const stored = await send(text, switching ? { model: chosen } : undefined)
       if (stored && switching) {
@@ -115,6 +124,25 @@ export function ChatView({
     },
     [chosen, sessionModel, send],
   )
+
+  // Stop, and the word for it (U10): the interrupt request goes out, and the row at the foot
+  // of the transcript says what was done — until the next message.
+  const stop = useCallback(async (): Promise<void> => {
+    setInterrupted(true)
+    await interrupt()
+  }, [interrupt])
+
+  // The transcript's own foot (U10). "No text has arrived" means the turn has not drawn
+  // anything yet: an agent message is the newest one and it is still empty, so an ordinary
+  // reply in flight (which is text on screen) gets no row.
+  const newest = messages.at(-1)
+  const statusRow = workingState({
+    status,
+    retrying: lastError?.retryStatus === 'retrying',
+    retryReason: lastError?.message,
+    interrupted,
+    hasReplyText: newest?.role === 'agent' && newest.text.trim() !== '',
+  })
 
   const confirmDelete = async (): Promise<void> => {
     setDeleting(true)
@@ -182,7 +210,12 @@ export function ChatView({
         </div>
       ) : null}
 
-      <MessageList messages={messages} loading={loadingHistory} nameOf={nameOf} />
+      <MessageList
+        messages={messages}
+        loading={loadingHistory}
+        nameOf={nameOf}
+        working={statusRow}
+      />
 
       <div className="border-t px-4 py-3">
         <div className="mx-auto w-full max-w-3xl space-y-2">
@@ -227,7 +260,7 @@ export function ChatView({
           <Composer
             running={status === 'running'}
             onSend={sendFromComposer}
-            onStop={interrupt}
+            onStop={stop}
             inputRef={inputRef}
             modelSelector={
               <ModelPicker

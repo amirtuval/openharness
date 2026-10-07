@@ -271,6 +271,174 @@ rots, and the API still has agents as optional presets. The compatibility requir
 _sessions_: one created from an agent still opens and works, because `Session.agent` is
 nullable (#93) and nothing in the chat renders it.
 
+## The visual pass, and the working state (#211, epic #201 U10)
+
+Everything above was built to work. This is the pass that made it look finished, and the
+reasoning behind the choices that were choices.
+
+### Tokens, not classes
+
+The app had a scale in practice — `gap-2` here, `px-3.5 py-2.5` there, `text-[0.65rem]` in
+three components — and no scale in writing. `src/index.css` now names one, and the two halves
+of it are deliberately different:
+
+- **Type, spacing and radii are one set for the whole app.** They are `@theme inline` entries
+  (`--text-2xs`, `--spacing-inline`/`-control`/`-block`/`-section`, `--radius-2xl`), which
+  Tailwind turns into utilities — `text-2xs`, `gap-block`, `rounded-2xl`. The spacing ones are
+  **aliases of Tailwind's own numbers** rather than new sizes: 6px is still 6px, and
+  `gap-inline` exists so a component can say what the distance is _for_. A scale nobody reads
+  is a scale nobody keeps.
+- **Elevation is not**, and that is the point. `--elevation-raised`, `-popover` and `-panel`
+  are defined **in each of the four theme blocks**, because a shadow is a relationship between
+  a surface and what is behind it: on Light a soft 6% black reads, on Dark it is invisible, and
+  Dim is somewhere between. One shadow for all four would have been a shadow that works in one
+  of them. `--shadow-*` maps the three names for utilities (`shadow-popover` on every menu).
+
+The type scale keeps Tailwind's steps for `text-sm` and up: re-declaring them would have
+changed every line height in the app for a naming exercise. `text-2xs` (11px) is the one step
+Tailwind does not ship, and it is what the metadata lines — a model id, a timestamp, a badge —
+are drawn in. `text-[0.65rem]` is gone.
+
+### Motion
+
+`prefers-reduced-motion: reduce` collapses every animation to a single frame with one global
+rule in `@layer base`. It has to be global: an `animate-pulse` on the header's status dot or a
+spinner three levels inside the composer cannot be reached by a variant on the component that
+happens to use it, and the list of things that pulse will keep growing. Nothing here is
+_revealed_ by an animation (no `animate-in` enters from nowhere), so collapsing them loses no
+information — which is also why the dialog and menu sources dropped the registry's
+`animate-in`/`animate-out` classes back in #209.
+
+### The sidebar
+
+Four changes, each with a reason:
+
+- **Date headings** (`lib/session-groups.ts`). One flat column of chats with "3d ago" under
+  each is readable at six and useless at sixty. Today / Yesterday / Previous 7 days / Older is
+  the shape people already know, and it needs no state: the server pages the list newest-first
+  by `created_at`, which is the field its cursor is built from, so the buckets are contiguous
+  slices of what arrived — nothing is sorted here. The buckets are **local calendar days**
+  (the date parts, compared through `Date.UTC` of the local y/m/d, so a 23- or 25-hour
+  daylight-saving day is still one day): something said at 23:50 is under Yesterday at 00:10,
+  where "20m ago" would have been a worse answer. A timestamp the app cannot read is **Older**
+  rather than dropped — the sidebar is the only way to an older chat — and one in the future is
+  Today rather than a fifth bucket nobody named. Empty buckets are omitted: a heading over
+  nothing reads as a bug.
+- **A marked open chat.** `aria-current="page"` is the accessible half and a bar at the row's
+  leading edge is the visible one. The tint alone was neither: it is a background shift between
+  two similar grays, and it says nothing at all to a reader who cannot see it.
+- **A real menu** (`components/ui/dropdown-menu.tsx`, Radix). The row's kebab was a local
+  `role="menu"` with a document-level pointerdown listener; Radix brings the arrow keys, the
+  roving tabindex, type-ahead, Escape, focus returned to the trigger, and a **portal** — the
+  list scrolls, and a menu drawn inside it would be clipped by it. The one visible consequence
+  in the tests: menu content is in `document.body`, so a test queries it with `screen`, not
+  `within(row)`.
+- **One account menu.** The foot used to hold three controls that were all "things I can do as
+  me": a Settings link, the theme button, and a Sign out button, next to an email. They are one
+  menu now, behind a trigger labelled **"Account menu"** — labelled for the account rather than
+  the email, because the email changes with the account and a test (or a QA pass) should not
+  have to know it to open the menu. The theme is a **submenu** (a radio group, `theme-menu.tsx`
+  is the items now), which keeps one menu in that corner instead of five rows of a different
+  subject.
+
+**Rename** is deliberately not there. The epic asks for it later, and the sessions API has no
+rename: a disabled row would be a promise the backend cannot keep, and dead UI rots.
+
+### Collapsible on the desktop
+
+The drawer is how a phone reaches the list; the collapse is how a wide screen gives the chat
+the whole width. They are separate, and they do not interact: the collapse is `md:hidden` and
+nothing else, so a window that had the column put away and then narrowed to a phone still gets
+its drawer. The state is the shell's (`AppFrame`) rather than a stored preference — it is a
+thing about this window more than about the reader, and the drawer has always been state too.
+The way back is a "Show sidebar" bar at the top of the content column, `hidden md:flex`, so it
+exists exactly where the collapse does; on a phone it is the existing top bar's button.
+
+### Loading, empty and error
+
+`components/ui/skeleton.tsx` is the one placeholder, used three times: the sidebar's rows
+(four of them, each a title line and a metadata line), the transcript's history (three bubbles,
+alternating alignment, because a conversation is what is arriving), and the two reads New chat
+waits on (preferences, then the catalog). A skeleton may carry a `label`, which becomes
+`role="status"` plus screen-reader text — **one label per group**, so a reader hears
+"Loading your chats" once rather than once per bar. That label is also what the tests read,
+which is how "still loading" stopped being prose in four different places.
+
+**The empty state on New chat** is a greeting (`NEW_CHAT_GREETING`), the model the chat would
+run on, and four openers from `lib/suggestions.ts`. Two decisions in it:
+
+- **An opener fills the composer and stops.** Nothing is created, nothing is sent, the text is
+  editable. A first visit is not a commitment, and a suggestion that auto-sent would be the
+  app deciding what the reader meant.
+- **They are about kinds of work, not about this app.** The catalog is whatever the reader's
+  own keys list: a prompt naming a model, a provider or a file would be wrong for most
+  accounts. (The four are generic on purpose, and the first is the one worth showing alone if
+  only one fits.)
+
+The composer's text became a **prop** (`value`/`onValueChange`, both optional) for exactly
+this: the screen that wants to put words in the box owns the box's text. The alternative —
+reaching into the `<textarea>` and dispatching an input event — fights React for control of a
+controlled input. Omitted, the composer is unchanged, which is why `composer.test.tsx` did not
+move.
+
+### The working row, and where "the reader stopped it" comes from
+
+While a turn is running and **nothing has arrived yet**, a row at the foot of the transcript
+says so, with a clock. The header's `StatusIndicator` stays exactly as it was: the row is the
+same fact placed where the answer is going to appear, and the dot is still the thing that is
+visible when the reader has scrolled up.
+
+Three states, and one of them is not in the log:
+
+    working      the turn is running and the newest message is either the user's or an empty
+                 agent one — "no text has arrived" is a question about the transcript, not
+                 about the clock, so a reply visibly being written gets no row
+    retrying     the same, but the last error says `retrying` — "Retrying… (the server's
+                 reason)", the reason clipped rather than allowed to push the clock off the row
+    interrupted  STOP. Nothing in the event log distinguishes "the reader stopped this" from
+                 "the turn ended on its own" — the log says the turn ended — so `ChatView`
+                 remembers the one action that could only have come from here, and drops it on
+                 the next send. It belongs to the turn it stopped.
+
+The clock starts when the row appears and is dropped when it goes, so a turn that moves from
+working to retrying **keeps counting**: the reader waited through both. It is a live region so
+"Working…" is announced once, and the ticking number is `aria-hidden` — a clock that announced
+itself every second would be unusable, and the words are what matter.
+
+The rule is a pure function, `workingState(input)`, tested as one (`working-row.test.tsx`); the
+component's half is the clock, under fake timers. Splitting them is what makes "which row, for
+which session state" an assertion instead of a render.
+
+### The composer
+
+- **It grows, up to 200px, then scrolls.** The height is measured and set by hand rather than
+  left to `field-sizing-content`, which only recent Chromium implements — and the cap is what
+  keeps a pasted stack trace from pushing the conversation off the screen.
+- **It is one surface.** The border, the focus ring and the shadow belong to the whole form
+  (`focus-within:`), so the model control reads as part of the composer rather than as a
+  control that happens to be near it, and the ring appears when focus is anywhere inside —
+  textarea, model button, Stop or Send. The `Textarea`'s own border and ring are switched off
+  inside it, so there is one focus indicator on screen and not two.
+- **Stop carries the word.** Stop-and-Send used to be two unlabelled icons whose difference
+  was a colour. It is still Send _and_ Stop while running — a message sent mid-turn is a
+  steering message — but the destructive one now says "Stop".
+
+### Accessibility
+
+- **Landmarks**: `<aside aria-label="Navigation">` (the sidebar), `<nav aria-label="Chats">`
+  (the list), `role="log"` (the transcript, which scrolls), `<main>` (the content column).
+- **Names**: every icon-only control has an `aria-label`; the two the sidebar gained (collapse,
+  row actions) also carry a `Tooltip`, as a _description_ — never as the name, because a name
+  that only exists on hover is a name a keyboard user does not have.
+- **Focus**: visible on everything (the shadcn primitives' rings, the composer's
+  `focus-within` ring). Radix hands focus back to the trigger when a menu closes, which is the
+  bug the hand-rolled menu had to be careful about and this one cannot have.
+- **Contrast**: the colours are #203's palettes unchanged. Everything new is built from token
+  pairs those palettes already carried (`bg-muted` skeletons, `text-muted-foreground` metadata,
+  `bg-foreground`/`text-background` tooltips), so no new pair was introduced and none of the
+  measured ratios moved. The one pre-existing exception is still Dark's
+  `--destructive-foreground` on `--destructive` at 2.8:1, unchanged by #203 and by this.
+
 ## Auto-scroll
 
 `use-stick-to-bottom.ts` is ~40 lines and does exactly one thing: while the reader is at (or

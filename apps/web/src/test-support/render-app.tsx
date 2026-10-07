@@ -3,7 +3,8 @@ import {
   type FakeClient,
   type FakeClientOptions,
 } from '@openharness/client/testing'
-import { render, type RenderResult } from '@testing-library/react'
+import { render, screen, type RenderResult } from '@testing-library/react'
+import type userEvent from '@testing-library/user-event'
 
 import { App } from '../App'
 
@@ -120,6 +121,20 @@ export function sessionRows(): HTMLElement[] {
   return [...document.querySelectorAll<HTMLElement>('nav[aria-label="Chats"] li')]
 }
 
+/**
+ * Open the account menu at the foot of the sidebar (U10).
+ *
+ * Settings, the theme and Sign out live inside it, and a Radix menu keeps its content out of
+ * the DOM until it opens — so a test that wants one of them has to open it the way a reader
+ * does, and this is that one step in one place. The menu itself is portalled to `document.body`,
+ * which is why its items are queried with `screen`, not `within` the sidebar.
+ */
+export async function openAccountMenu(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+  // `findBy`, not `getBy`: the shell is behind the session check, so the sidebar — and the menu
+  // in its foot — does not exist for the first frames of a render.
+  await user.click(await screen.findByRole('button', { name: 'Account menu' }))
+}
+
 /** The message element for a role — the first one, for the single-message cases. */
 export function messageElement(role: 'user' | 'agent'): Element | null {
   return document.querySelector(`[data-role="${role}"]`)
@@ -150,4 +165,15 @@ export function agentText(): string {
 /** Whether a reply is on screen and still arriving. */
 export function isStreaming(): boolean {
   return document.querySelector('[data-role="agent"][data-streaming="true"]') !== null
+}
+
+/**
+ * The row at the foot of the transcript — "Working…", "Retrying…" or "Interrupted" — or `null`
+ * when there is none (U10).
+ *
+ * Read off `data-slot` rather than by role: it is a `role="status"` live region, and so is the
+ * header's indicator, so a role query would find whichever came first in the document.
+ */
+export function workingRow(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('[data-slot="working-row"]')
 }

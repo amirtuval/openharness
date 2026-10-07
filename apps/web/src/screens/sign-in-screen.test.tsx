@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { TWO_PROVIDERS } from '../test-support/catalog'
 import { mockAuthClient } from '../test-support/better-auth-client-mock'
-import { makeFake, renderApp, signInFake } from '../test-support/render-app'
+import { makeFake, openAccountMenu, renderApp, signInFake } from '../test-support/render-app'
 
 /**
  * Signing in, and the states around it.
@@ -193,10 +193,11 @@ describe('SignInScreen', () => {
     const fake = makeFake()
 
     renderApp(fake, { hash: '#/settings' })
-    expect(await screen.findByRole('link', { name: 'Settings' })).toBeInTheDocument()
+    await openAccountMenu(user)
+    expect(await screen.findByRole('menuitem', { name: 'Settings' })).toBeInTheDocument()
     expect(screen.getByText(fake.user.email)).toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: 'Sign out' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Sign out' }))
 
     expect(mockAuthClient.signOut).toHaveBeenCalled()
     expect(
