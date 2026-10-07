@@ -123,6 +123,34 @@ describe('openHistory keys', () => {
   })
 })
 
+describe('openHistory with two chats open', () => {
+  it("keeps the lines both chats added, rather than the last writer's snapshot", () => {
+    const first = storeAt()
+    const second = storeAt()
+    first.add('from the first chat')
+    second.add('from the second chat')
+    first.add('the first chat again')
+
+    expect(storeAt().entries()).toEqual([
+      'from the first chat',
+      'from the second chat',
+      'the first chat again',
+    ])
+    // Each open chat walks the lines it sent itself; the next `oh` sees them all.
+    expect(second.entries()).toEqual(['from the second chat'])
+  })
+
+  it("leaves another server's list alone when it was written after this chat opened", () => {
+    const local = storeAt()
+    openHistory({ path: path(), server: OTHER_SERVER, user: USER }).add('on production')
+    local.add('on localhost')
+
+    expect(openHistory({ path: path(), server: OTHER_SERVER, user: USER }).entries()).toEqual([
+      'on production',
+    ])
+  })
+})
+
 describe('openHistory file', () => {
   it('writes it 0600 in a 0700 directory', () => {
     const nested = join(directory, 'openharness')

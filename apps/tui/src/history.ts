@@ -48,8 +48,9 @@ export interface HistoryAddOptions {
  * One user's prompts on one server, as the prompt reads and writes them.
  *
  * Every method is synchronous and small, the way {@link CredentialStore} is: the CLI is
- * short-lived, no second process is expected to be editing the file, and the prompt needs
- * the list in the same keystroke it is browsing in.
+ * short-lived, and the prompt needs the list in the same keystroke it is browsing in. A second
+ * `oh` may be writing the same file: each write re-reads it and appends, so neither chat
+ * erases the other's lines.
  */
 export interface PromptHistory {
   /** The file this history lives in, for messages and for tests. */
@@ -86,13 +87,18 @@ export function openHistory(inputs: HistoryInputs): PromptHistory {
   const env = inputs.env ?? process.env
   const path = inputs.path ?? historyFilePath(env)
 
-  const file = readHistoryFile(path)
-  const servers = file.servers
-  const users = servers[inputs.server] ?? {}
-  const entries = [...(users[inputs.user] ?? [])]
+  const entries = [...(readHistoryFile(path).servers[inputs.server]?.[inputs.user] ?? [])]
 
-  const save = (): void => {
-    servers[inputs.server] = { ...users, [inputs.user]: [...entries] }
+  // Appends `line` to what the file holds *now*, not to what it held when this chat opened:
+  // two `oh` sessions open side by side are ordinary, and writing back a snapshot taken at
+  // startup would erase every line the other one added since — for every server and user in
+  // the file, not only this one. Each chat browses its own list; the file is the union.
+  const save = (line: string): void => {
+    const servers = readHistoryFile(path).servers
+    const users = servers[inputs.server] ?? {}
+    const stored = users[inputs.user] ?? []
+    const next = stored[stored.length - 1] === line ? stored : [...stored, line]
+    servers[inputs.server] = { ...users, [inputs.user]: next.slice(-HISTORY_LIMIT) }
     try {
       writeFileAtomically(path, serialize(servers))
     } catch {
@@ -115,7 +121,7 @@ export function openHistory(inputs: HistoryInputs): PromptHistory {
       if (entries[entries.length - 1] === line) return
       entries.push(line)
       entries.splice(0, Math.max(0, entries.length - HISTORY_LIMIT))
-      save()
+      save(line)
     },
   }
 }
