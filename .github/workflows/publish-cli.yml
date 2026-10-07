@@ -1,6 +1,6 @@
 name: publish-cli
 
-# The public CLI — `apps/tui`, the `oh` command, npm package `openharness` — is released by
+# The public CLI — `apps/tui`, the `oh` command, npm package `@openh/cli` — is released by
 # hand, and only from this file (#156, deployment epic #148). It is the one artefact the
 # deployment does not build, promote or touch: the server image never carries it, no deploy
 # job publishes it, and its npm dist-tags stay the maintainer's to move (D9).
@@ -108,7 +108,7 @@ jobs:
           {
             echo "### publish-cli"
             echo
-            echo "\`openharness@$VERSION\` — dry run: \`$DRY_RUN\`"
+            echo "\`@openh/cli@$VERSION\` — dry run: \`$DRY_RUN\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # Bump first, build second: tsdown inlines the package version into the bundle
@@ -116,13 +116,13 @@ jobs:
       # new version if the bump came first. The `...` also builds the CLI's workspace
       # dependencies (protocol, client).
       - name: Build the CLI and its workspace dependencies
-        run: yarn turbo run build --filter=openharness...
+        run: yarn turbo run build --filter=@openh/cli...
 
       # The published shape, proved (#152): npm pack, install the tarball in a clean directory
       # outside the workspace, and run the installed `oh --version`/`--help`. It also re-checks
       # the version, since `oh --version` is compared against the bumped package.json.
       - name: Check the packed CLI
-        run: yarn workspace openharness check:pack
+        run: yarn workspace @openh/cli check:pack
 
       # Trusted publishing needs npm CLI 11.5.1+ (https://docs.npmjs.com/trusted-publishers).
       # Node 24 already bundles npm 11.19, so this is normally a no-op — but the runner image
@@ -174,6 +174,6 @@ jobs:
           git commit -m "cli: v$VERSION"
           git tag "cli-v$VERSION"
           if ! git push origin HEAD:main || ! git push origin "cli-v$VERSION"; then
-            echo "::error::openharness@$VERSION is already published to npm, but pushing its version bump to main failed. Commit apps/tui/package.json as 'cli: v$VERSION' and push the tag cli-v$VERSION by hand — do not re-run this workflow, it would try to publish $VERSION a second time. If main refuses direct pushes, see the branch-protection note in docs/RELEASING.md."
+            echo "::error::@openh/cli@$VERSION is already published to npm, but pushing its version bump to main failed. Commit apps/tui/package.json as 'cli: v$VERSION' and push the tag cli-v$VERSION by hand — do not re-run this workflow, it would try to publish $VERSION a second time. If main refuses direct pushes, see the branch-protection note in docs/RELEASING.md."
             exit 1
           fi

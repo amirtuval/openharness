@@ -102,14 +102,14 @@ const shared = {
 export default defineConfig([
   {
     ...shared,
-    name: 'openharness',
+    name: '@openh/cli',
     dts: false,
     clean: true,
     sourcemap: true,
   },
   {
     ...shared,
-    name: 'openharness:dts',
+    name: '@openh/cli:dts',
     dts: { emitDtsOnly: true },
     clean: false,
   },

@@ -540,7 +540,7 @@ the account's currency, and the workflows pass no currency code: the `budget` mo
 
 The CLI (`apps/tui`, the `oh` command) is the one artefact that does not leave through GCP: it
 is published to npm as the public package
-[`openharness`](https://www.npmjs.com/package/openharness), by hand, from
+[`@openh/cli`](https://www.npmjs.com/package/@openh/cli), by hand, from
 [`.github/workflows/publish-cli.yml`](../.github/workflows/publish-cli.yml) (decision D9). No
 deploy job builds, publishes or tags it, and its npm dist-tags are the maintainer's to move —
 server deploys never touch them. The workflow itself, the one-time npm setup it needs, and how

@@ -110,7 +110,7 @@ describe('runUpdate', () => {
 
     expect(code).toBe(1)
     expect(err.join('\n')).toContain('could not update itself: npm exited with code 1: 404')
-    expect(err.join('\n')).toContain('run npm i -g openharness')
+    expect(err.join('\n')).toContain('run npm i -g @openh/cli')
     expect(err.join('\n')).not.toContain(PERMISSION_HINT)
   })
 
@@ -130,7 +130,7 @@ describe('runUpdate', () => {
     expect(code).toBe(2)
     expect(out).toEqual([])
     expect(err.join('\n')).toContain('not a global npm install')
-    expect(err.join('\n')).toContain('npm i -g openharness')
+    expect(err.join('\n')).toContain('npm i -g @openh/cli')
     // Nothing was asked of npm: the refusal is the whole command.
     expect(installed).toEqual([])
   })

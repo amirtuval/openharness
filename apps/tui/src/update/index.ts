@@ -11,7 +11,7 @@ import { patchUpdateState, readUpdateState, updateLogPath, updateStatePath } fro
  * The auto-update, as the rest of the CLI sees it (issue #157, decision D10).
  *
  * The shape of the feature follows from one property of the package: the CLI is a single
- * self-contained file, so a global `npm install -g openharness@<v>` may replace it on disk
+ * self-contained file, so a global `npm install -g @openh/cli@<v>` may replace it on disk
  * while the running copy keeps going. That makes the update a *background* act — this process
  * never becomes the new version and never waits for it:
  *

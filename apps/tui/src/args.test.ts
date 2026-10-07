@@ -224,6 +224,6 @@ describe('parseArgs', () => {
 
 describe('readVersion', () => {
   it('reads the version from this package.json', () => {
-    expect(readVersion()).toBe('0.0.0')
+    expect(readVersion()).toBe('0.0.1')
   })
 })

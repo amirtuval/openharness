@@ -1,6 +1,6 @@
 {
-  "name": "openharness",
-  "version": "0.0.0",
+  "name": "@openh/cli",
+  "version": "0.0.1",
   "description": "The openharness terminal UI: an Ink (React) chat client installed as the `oh` command.",
   "license": "MIT",
   "type": "module",
@@ -8,7 +8,7 @@
     "node": ">=24"
   },
   "bin": {
-    "oh": "./dist/index.js"
+    "oh": "dist/index.js"
   },
   "exports": {
     ".": {
@@ -47,7 +47,7 @@
   },
   "scripts": {
     "build": "tsdown",
-    "build:deps": "turbo run build --filter=openharness^...",
+    "build:deps": "turbo run build --filter=@openh/cli^...",
     "dev": "tsdown --watch",
     "check:pack": "node scripts/check-pack.mjs",
     "typecheck": "tsc --noEmit",

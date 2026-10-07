@@ -8,8 +8,8 @@ import { isGlobalInstall, looksLikeGlobalLayout, packageRootOf } from './detect'
 
 /**
  * The two layouts the check has to tell apart, made real on disk: a global install (the
- * package under a global `node_modules`, reached through the `bin` symlink npm creates) and
- * the built checkout (`apps/tui/dist/index.js`).
+ * scoped package under a global `node_modules`, reached through the `bin` symlink npm
+ * creates) and the built checkout (`apps/tui/dist/index.js`).
  */
 let root: string
 
@@ -21,11 +21,11 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true })
 })
 
-/** Create `<prefix>/node_modules/openharness/dist/index.js` and answer both paths. */
+/** Create `<prefix>/node_modules/@openh/cli/dist/index.js` and answer both paths. */
 function installPackage(prefix: string): { readonly bundle: string; readonly moduleRoot: string } {
   const moduleRoot = join(prefix, 'node_modules')
-  const bundle = join(moduleRoot, 'openharness', 'dist', 'index.js')
-  mkdirSync(join(moduleRoot, 'openharness', 'dist'), { recursive: true })
+  const bundle = join(moduleRoot, '@openh', 'cli', 'dist', 'index.js')
+  mkdirSync(join(moduleRoot, '@openh', 'cli', 'dist'), { recursive: true })
   writeFileSync(bundle, '// the built bundle, standing in\n')
   return { bundle, moduleRoot }
 }
@@ -42,14 +42,16 @@ describe('packageRootOf', () => {
   it('is the package folder the bundle lives in', () => {
     const { bundle } = installPackage(join(root, 'prefix'))
 
-    expect(packageRootOf(bundle)).toBe(join(root, 'prefix', 'node_modules', 'openharness'))
+    expect(packageRootOf(bundle)).toBe(join(root, 'prefix', 'node_modules', '@openh', 'cli'))
   })
 
   it('resolves the bin symlink npm installs', () => {
     const prefix = join(root, 'prefix')
     const { bundle } = installPackage(prefix)
 
-    expect(packageRootOf(binLink(prefix, bundle))).toBe(join(prefix, 'node_modules', 'openharness'))
+    expect(packageRootOf(binLink(prefix, bundle))).toBe(
+      join(prefix, 'node_modules', '@openh', 'cli'),
+    )
   })
 
   it('is undefined for a path that says nothing', () => {
@@ -60,7 +62,7 @@ describe('packageRootOf', () => {
 })
 
 describe('looksLikeGlobalLayout', () => {
-  it('is true for a package under a module directory, however it is reached', () => {
+  it('is true for a scoped package under a module directory, however it is reached', () => {
     const prefix = join(root, 'prefix')
     const { bundle } = installPackage(prefix)
 
@@ -76,10 +78,20 @@ describe('looksLikeGlobalLayout', () => {
     expect(looksLikeGlobalLayout(bundle)).toBe(false)
   })
 
-  it('is false when the package folder is not named openharness', () => {
+  it('is false for the folder the package was called before it was scoped', () => {
+    // `<module dir>/openharness` is the shape the unscoped name had; nothing installs that
+    // any more, so it must not read as a global install of this CLI (#194).
+    const bundle = join(root, 'node_modules', 'openharness', 'dist', 'index.js')
+    mkdirSync(join(root, 'node_modules', 'openharness', 'dist'), { recursive: true })
+    writeFileSync(bundle, '// the old layout\n')
+
+    expect(looksLikeGlobalLayout(bundle)).toBe(false)
+  })
+
+  it('is false under some other scope', () => {
     // A fork or a vendored copy: `npm i -g` did not put it there, so it is left alone.
-    const bundle = join(root, 'node_modules', 'not-openharness', 'dist', 'index.js')
-    mkdirSync(join(root, 'node_modules', 'not-openharness', 'dist'), { recursive: true })
+    const bundle = join(root, 'node_modules', '@other', 'cli', 'dist', 'index.js')
+    mkdirSync(join(root, 'node_modules', '@other', 'cli', 'dist'), { recursive: true })
     writeFileSync(bundle, '// vendored\n')
 
     expect(looksLikeGlobalLayout(bundle)).toBe(false)

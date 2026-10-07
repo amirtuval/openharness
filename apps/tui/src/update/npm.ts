@@ -12,8 +12,8 @@ import type { Socket } from 'node:net'
  * npm's own output, and a shell would make that output executable.
  */
 
-/** This package's published name — the unscoped `openharness` (#152). */
-const PACKAGE_NAME = 'openharness'
+/** This package's published name — the scoped `@openh/cli` (#194, #152). */
+const PACKAGE_NAME = '@openh/cli'
 
 /**
  * How long a check may take before it is killed. The checks are background work with nothing
@@ -80,7 +80,7 @@ export function npmCommandFor(platform: NodeJS.Platform = process.platform): {
     : { command: 'npm', shell: false }
 }
 
-/** The published version, or a failure: `npm view openharness version`. */
+/** The published version, or a failure: `npm view @openh/cli version`. */
 export async function viewPublishedVersion(options: NpmOptions = {}): Promise<NpmOutcome> {
   const outcome = await runNpm(['view', PACKAGE_NAME, 'version'], options)
   return outcome.ok ? { ...outcome, output: firstLine(outcome.output) } : outcome
@@ -92,7 +92,7 @@ export async function resolveGlobalRoot(options: NpmOptions = {}): Promise<NpmOu
   return outcome.ok ? { ...outcome, output: firstLine(outcome.output) } : outcome
 }
 
-/** `npm install -g openharness@<version>`, captured — the foreground `oh update` streams it. */
+/** `npm install -g @openh/cli@<version>`, captured — the foreground `oh update` streams it. */
 export async function installGlobally(
   version: string,
   options: NpmOptions = {},
@@ -115,7 +115,7 @@ export function looksLikePermissionError(text: string): boolean {
  * The one hint that makes a permission failure actionable.
  *
  * Both the background notice and `oh update` print it, because in both cases the command the
- * message repeats — `npm i -g openharness` — would fail the same way, and neither sudo nor a
+ * message repeats — `npm i -g @openh/cli` — would fail the same way, and neither sudo nor a
  * prefix of one's own is obvious from the error npm prints.
  */
 export const PERMISSION_HINT =
@@ -260,7 +260,7 @@ export interface DetachedInstallPaths {
 export interface UpdateRunner {
   /** `npm root -g` — the directory a global install lives in. */
   resolveGlobalRoot(): Promise<NpmOutcome>
-  /** `npm view openharness version` — the published version. */
+  /** `npm view @openh/cli version` — the published version. */
   viewPublishedVersion(): Promise<NpmOutcome>
   /** Start the detached install; `true` when the child was started. */
   startDetachedInstall(version: string, paths: DetachedInstallPaths): boolean
@@ -276,7 +276,7 @@ export function createUpdateRunner(options: NpmOptions = {}): UpdateRunner {
 }
 
 /**
- * Start `npm install -g openharness@<version>` in the background, detached, and return at
+ * Start `npm install -g @openh/cli@<version>` in the background, detached, and return at
  * once.
  *
  * The install is the one thing in the auto-update that outlives the run: it is a fresh node
@@ -334,7 +334,7 @@ export function installWrapperSource(): string {
   const path = await import('node:path')
 
   const [statePath, version, logPath] = process.argv.slice(1)
-  const spec = 'openharness@' + version
+  const spec = '@openh/cli@' + version
 
   // Read-modify-write: the CLI wrote lastCheck into this file just before spawning us, and
   // it must survive. A file that cannot be parsed starts over — reporting the install matters

@@ -32,7 +32,7 @@ export function noticeLines(result: UpdateResult): readonly string[] {
   const reason = result.reason?.trim()
   const line = `oh could not update itself: ${
     reason === undefined || reason === '' ? 'the install failed' : reason
-  }; run npm i -g openharness`
+  }; run npm i -g @openh/cli`
 
   if (result.permission !== true) return [line]
   return [line, PERMISSION_HINT]

@@ -6,7 +6,7 @@ architecture (a stateless brain, a durable session log, pluggable hands). An Ink
 client that talks to an openharness server, installed as the **`oh`** command.
 
 One self-contained file, no runtime dependencies: `oh` loads everything at startup, so an
-`npm install -g openharness@next` — including the one `oh` runs for itself — may replace it on
+`npm install -g @openh/cli@next` — including the one `oh` runs for itself — may replace it on
 disk while a chat is running.
 
 ## Install
@@ -14,10 +14,11 @@ disk while a chat is running.
 Requires Node.js 24 or newer.
 
 ```bash
-npm i -g openharness
+npm i -g @openh/cli
 ```
 
-This installs the `oh` command.
+This installs the `oh` command. The npm package is **`@openh/cli`** (npm refuses the unscoped
+`openharness` name, #194); the command it installs is `oh`.
 
 ## Use
 
@@ -67,7 +68,7 @@ The session token is stored per server in `~/.config/openharness/credentials.jso
 
 ## Updating
 
-Installed with `npm i -g openharness`, `oh` keeps itself current: at most once an hour it asks
+Installed with `npm i -g @openh/cli`, `oh` keeps itself current: at most once an hour it asks
 npm for the published version and, when that one is newer, installs it for the next run — in
 the background, without interrupting the chat you are in. The next run prints one line about
 how it went. Because the package is a single self-contained file, the copy running right now is

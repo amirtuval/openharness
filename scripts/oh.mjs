@@ -8,7 +8,7 @@
  * rather than a line of `package.json` because setting an environment variable portably
  * would otherwise mean a dependency (`cross-env`), and this repo takes none it does not need.
  *
- * The build comes first — `turbo run build --filter=openharness...`, the CLI and its
+ * The build comes first — `turbo run build --filter=@openh/cli...`, the CLI and its
  * workspace dependencies — and its output is held back: turbo writes progress to **stdout**,
  * and stdout belongs to the CLI, where `yarn oh --version` has to print a version and nothing
  * else. A build that fails is the one case where that output is the thing to read, so it is
@@ -49,7 +49,7 @@ if (server === undefined) {
 const turboBin = join(repoRoot, 'node_modules', '.bin', 'turbo')
 const turbo = existsSync(turboBin) ? turboBin : 'turbo'
 
-const build = spawnSync(turbo, ['run', 'build', '--filter=openharness...'], {
+const build = spawnSync(turbo, ['run', 'build', '--filter=@openh/cli...'], {
   cwd: repoRoot,
   encoding: 'utf8',
   stdio: ['ignore', 'pipe', 'pipe'],

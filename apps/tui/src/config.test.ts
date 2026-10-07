@@ -42,7 +42,7 @@ describe('resolveConfig', () => {
     const config = configOf({ env: {}, readFile: () => undefined })
 
     // The literal, as well as the constant: an `oh` that nothing has pointed anywhere must
-    // reach the server an `npm i -g openharness` can actually talk to.
+    // reach the server an `npm i -g @openh/cli` can actually talk to.
     expect(DEFAULT_SERVER_URL).toBe('https://app.oharness.dev')
     expect(config.server).toBe('https://app.oharness.dev')
     expect(config.sources).toEqual({ server: 'default' })

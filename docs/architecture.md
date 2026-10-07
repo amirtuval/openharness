@@ -110,12 +110,12 @@ envelope encryption from `@openharness/vault` under a master key that comes from
 | `@openharness/client`   | `packages/client`   | client for the server, used by the web app and the TUI     |
 | `@openharness/server`   | `apps/server`       | Hono HTTP server: the chat API, SSE, the scheduler         |
 | `@openharness/web`      | `apps/web`          | Vite + React chat UI (Tailwind + shadcn/ui)                |
-| `openharness`           | `apps/tui`          | Ink + React terminal UI, installed as `oh`                 |
+| `@openh/cli`            | `apps/tui`          | Ink + React terminal UI, installed as `oh`                 |
 | `@openharness/e2e`      | `e2e`               | cross-package tests: real servers, real Postgres           |
 
-The TUI is the one workspace published to npm — as the unscoped **`openharness`**, its bundle
-self-contained (#152) — which is why its name is not `@openharness/cli`; the other workspaces
-are private to the repo.
+The TUI is the one workspace published to npm — as **`@openh/cli`**, its bundle self-contained
+(#152; the name is scoped because npm refuses the unscoped `openharness`, #194) — which is why
+its name is not `@openharness/cli`; the other workspaces are private to the repo.
 
 `@openharness/hands` is a placeholder today — the tools phase builds it, and the seam is
 `execute(name, input)` ([`docs/ROADMAP.md`](./ROADMAP.md), "Tools").
@@ -135,7 +135,7 @@ The rules cover `dependencies`, `devDependencies`, `peerDependencies` and
 | `@openharness/brain`    | protocol, session, hands               |
 | `@openharness/server`   | protocol, session, brain, hands, vault |
 | `@openharness/web`      | protocol, client                       |
-| `openharness` (the CLI) | protocol, client                       |
+| `@openh/cli` (the CLI)  | protocol, client                       |
 | `@openharness/e2e`      | anything                               |
 
 `yarn check:deps` enforces this table and fails with the offending package, the dependency and

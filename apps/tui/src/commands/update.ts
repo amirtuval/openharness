@@ -95,7 +95,7 @@ export interface UpdateCommandIo {
 export async function runUpdate(io: UpdateCommandIo): Promise<number> {
   if (!io.isGlobalInstall) {
     io.stderr('oh: this `oh` is not a global npm install, so it cannot update itself.')
-    io.stderr('  install it with `npm i -g openharness` to get self-updates.')
+    io.stderr('  install it with `npm i -g @openh/cli` to get self-updates.')
     return 2
   }
 
@@ -114,7 +114,7 @@ export async function runUpdate(io: UpdateCommandIo): Promise<number> {
   io.stdout(`Updating to v${view.version}…`)
   const install = await io.npm.install(view.version)
   if (!install.ok) {
-    io.stderr(`oh: could not update itself: ${install.detail}; run npm i -g openharness`)
+    io.stderr(`oh: could not update itself: ${install.detail}; run npm i -g @openh/cli`)
     if (install.permission) io.stderr(PERMISSION_HINT)
     return 1
   }

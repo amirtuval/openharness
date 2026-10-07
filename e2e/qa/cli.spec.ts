@@ -164,7 +164,7 @@ async function startChat(
  *
  * Opt-in with `QA_WITH_CLI=1`, because it needs `tmux` and a built CLI:
  *
- *   yarn turbo run build --filter=openharness...
+ *   yarn turbo run build --filter=@openh/cli...
  *   QA_WITH_CLI=1 yarn qa:web qa/cli.spec.ts
  */
 test.describe('cli scenarios', () => {
