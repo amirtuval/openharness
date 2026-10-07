@@ -123,7 +123,7 @@ jobs:
       # any of them is a turbo cache hit. It runs on both the affected and the all-packages
       # paths, since a cached hit there is what lets it run on every PR cheaply.
       - name: Check the CLI package (npm pack, install it, run the installed `oh`)
-        run: yarn turbo run check:pack --filter=openharness --cache-dir=.turbo/cache
+        run: yarn turbo run check:pack --filter=@openh/cli --cache-dir=.turbo/cache
 
   # The provider-credential success path, end to end with a real key (#120). `PUT
   # /v1/provider-credentials` validates the key with one real provider call, and no test seam
