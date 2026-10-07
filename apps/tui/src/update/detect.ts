@@ -2,7 +2,7 @@ import { realpathSync } from 'node:fs'
 import { basename, dirname, normalize } from 'node:path'
 
 /**
- * Is the running `oh` the one a global `npm i -g openharness` installed? (issue #157, D10)
+ * Is the running `oh` the one a global `npm i -g @openh/cli` installed? (issue #157, D10)
  *
  * The auto-update only makes sense there. `node apps/tui/dist/index.js` from a checkout, or a
  * copy of the published package inside some project's `node_modules`, must be left alone: npm
@@ -11,9 +11,11 @@ import { basename, dirname, normalize } from 'node:path'
  * The check has two halves, deliberately, because one of them is cheap and the other is not:
  *
  * 1. {@link looksLikeGlobalLayout} — the running bundle sits at
- *    `<somewhere>/<module dir>/openharness/dist/index.js`, which is the shape npm gives a
- *    global install. This is a `realpath` and two string comparisons, so a checkout (whose
- *    package folder is `apps/tui`, not `openharness`) answers "no" without spawning anything.
+ *    `<somewhere>/<module dir>/@openh/cli/dist/index.js`, which is the shape npm gives a
+ *    global install of a *scoped* package: the scope is one folder deeper than an unscoped
+ *    name, so the folder to compare is two levels up from the bundle, not one. This is a
+ *    `realpath` and a few string comparisons, so a checkout (whose package folder is
+ *    `apps/tui`, not `@openh/cli`) answers "no" without spawning anything.
  * 2. {@link isGlobalInstall} — that `<module dir>` is the one `npm root -g` names. This is
  *    the authoritative answer, and the one that separates a global install from a dependency
  *    of some project; the caller runs `npm root -g` **once** and caches its answer in the
@@ -21,11 +23,18 @@ import { basename, dirname, normalize } from 'node:path'
  */
 
 /**
- * This package's published name — the unscoped `openharness` (#152). `index.ts` exports the
+ * This package's published name — the scoped `@openh/cli` (#194, #152). `index.ts` exports the
  * same string as `PACKAGE_NAME`; the constant is repeated rather than imported so this module
  * stays a leaf the bundle can order freely.
  */
-const CLI_PACKAGE_NAME = 'openharness'
+const CLI_PACKAGE_NAME = '@openh/cli'
+
+/**
+ * The name's segments, outermost first: `['@openh', 'cli']`. The folder npm places the
+ * package in is the name split on `/`, so a scoped name costs one more directory level than
+ * an unscoped one — and that level is exactly what the layout check has to account for.
+ */
+const PACKAGE_SEGMENTS = CLI_PACKAGE_NAME.split('/')
 
 /**
  * The bare directory name npm puts global packages under.
@@ -38,7 +47,7 @@ const CLI_PACKAGE_NAME = 'openharness'
 const MODULE_DIRECTORY = ['node', 'modules'].join('_')
 
 /**
- * The package folder the running bundle belongs to, realpath'd: `/x/node_modules/openharness`
+ * The package folder the running bundle belongs to, realpath'd: `/x/node_modules/@openh/cli`
  * for a global install, `apps/tui` for the built checkout.
  *
  * `undefined` when the path says nothing — no argv[1] (an embedding caller), or a path that
@@ -52,21 +61,38 @@ export function packageRootOf(scriptPath: string | undefined): string | undefine
   } catch {
     return undefined
   }
-  // …/openharness/dist/index.js → …/openharness: two levels up from the bundle.
+  // …/@openh/cli/dist/index.js → …/@openh/cli: two levels up from the bundle, the same two
+  // whatever the package is called — `dist/` is always the folder the build writes.
   return dirname(dirname(real))
+}
+
+/**
+ * The module directory the package sits under, when it sits where a global install would put
+ * it: `<module dir>/@openh/cli` — `node_modules/@openh/cli` for a global install.
+ *
+ * `undefined` when the layout is not that shape, which is what a checkout or a vendored copy
+ * answers. It strips the name's own segments off the package folder and then requires a
+ * module directory above them, so it reads the scoped layout without naming it twice.
+ */
+function moduleDirectoryOf(packageRoot: string): string | undefined {
+  let current = packageRoot
+  for (const segment of [...PACKAGE_SEGMENTS].reverse()) {
+    if (basename(current) !== segment) return undefined
+    current = dirname(current)
+  }
+  return basename(current) === MODULE_DIRECTORY ? current : undefined
 }
 
 /**
  * The cheap half: does the running bundle have the *shape* of a global install?
  *
- * True when its package folder is named `openharness` and sits directly inside a module
- * directory. Says nothing about whether that module directory is the global one — that is
- * {@link isGlobalInstall}'s job — but it is free, and it is what a checkout fails.
+ * True when its package folder is `@openh/cli` under a module directory. Says nothing about
+ * whether that module directory is the global one — that is {@link isGlobalInstall}'s job —
+ * but it is free, and it is what a checkout fails.
  */
 export function looksLikeGlobalLayout(scriptPath: string | undefined): boolean {
   const root = packageRootOf(scriptPath)
-  if (root === undefined) return false
-  return basename(root) === CLI_PACKAGE_NAME && basename(dirname(root)) === MODULE_DIRECTORY
+  return root !== undefined && moduleDirectoryOf(root) !== undefined
 }
 
 /**
@@ -85,10 +111,8 @@ export function isGlobalInstall(
 
   const root = packageRootOf(scriptPath)
   if (root === undefined) return false
-  if (basename(root) !== CLI_PACKAGE_NAME) return false
-
-  const parent = dirname(root)
-  if (basename(parent) !== MODULE_DIRECTORY) return false
+  const parent = moduleDirectoryOf(root)
+  if (parent === undefined) return false
 
   let resolved: string
   try {

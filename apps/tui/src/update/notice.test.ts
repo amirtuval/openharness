@@ -47,7 +47,7 @@ describe('noticeLines', () => {
   it('says what failed and repeats the command that would fix it', () => {
     expect(
       lines({ status: 'failure', version: '0.4.0', reason: 'npm exited with code 1', at: 'now' }),
-    ).toEqual(['oh could not update itself: npm exited with code 1; run npm i -g openharness'])
+    ).toEqual(['oh could not update itself: npm exited with code 1; run npm i -g @openh/cli'])
   })
 
   it('adds the sudo/prefix hint when npm could not write to its prefix', () => {
@@ -61,7 +61,7 @@ describe('noticeLines', () => {
 
     expect(notice).toHaveLength(2)
     expect(notice[0]).toContain('oh could not update itself:')
-    expect(notice[0]).toContain('run npm i -g openharness')
+    expect(notice[0]).toContain('run npm i -g @openh/cli')
     expect(notice[1]).toBe(PERMISSION_HINT)
     // The two things a person can actually do about it, named.
     expect(notice[1]).toContain('sudo')
@@ -70,7 +70,7 @@ describe('noticeLines', () => {
 
   it('still says something when the reason went missing', () => {
     expect(lines({ status: 'failure', version: '0.4.0', at: 'now' })[0]).toBe(
-      'oh could not update itself: the install failed; run npm i -g openharness',
+      'oh could not update itself: the install failed; run npm i -g @openh/cli',
     )
   })
 })
@@ -101,7 +101,7 @@ describe('printPendingNotice', () => {
     printPendingNotice(statePath, recorded)
 
     expect(recorded.out).toEqual([])
-    expect(recorded.err).toEqual(['oh could not update itself: boom; run npm i -g openharness'])
+    expect(recorded.err).toEqual(['oh could not update itself: boom; run npm i -g @openh/cli'])
   })
 
   it('prints nothing when there is no outcome waiting', () => {

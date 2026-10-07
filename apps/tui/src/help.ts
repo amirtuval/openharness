@@ -36,7 +36,7 @@ Config:
     { "server": "https://app.oharness.dev", "autoUpdate": true }
 
 Updating:
-  Installed with \`npm i -g openharness\`, oh keeps itself current: at most once an
+  Installed with \`npm i -g @openh/cli\`, oh keeps itself current: at most once an
   hour a background check asks npm for the published version and, when it is newer,
   installs it for the next run. It is off in CI, with OH_NO_AUTO_UPDATE set, and with
   autoUpdate false in the config. The next run prints one line about it. \`oh update\`

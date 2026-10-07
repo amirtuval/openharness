@@ -2,7 +2,7 @@
 /**
  * `yarn check:pack` — the published package, proved (#152).
  *
- * The point of #152 is that `npm i -g openharness` yields **one self-contained file**: no
+ * The point of #152 is that `npm i -g @openh/cli` yields **one self-contained file**: no
  * runtime `dependencies`, nothing resolved from `node_modules` while `oh` runs — which is
  * what makes D10's background `npm install -g` able to replace the file on disk under a
  * running process. That property is invisible to the unit tests (they import `src/`), so
@@ -34,6 +34,10 @@ const pkg = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'))
 
 /** The files npm is expected to pack: the `files` field, minus README/LICENSE duplicates. */
 const EXPECTED_FILES = ['LICENSE', 'README.md', 'dist/index.d.ts', 'dist/index.js', 'package.json']
+
+/** What npm names the tarball for a scoped package: `@openh/cli@0.0.1` → `openh-cli-0.0.1.tgz`. */
+const expectedTarball = (name, version) =>
+  `${name.replace(/^@/u, '').replace('/', '-')}-${version}.tgz`
 
 /** Specifiers the bundle may import at runtime: the node built-ins, and nothing else. */
 const BUILTINS = new Set([...builtinModules, ...builtinModules.map((name) => `node:${name}`)])
@@ -100,6 +104,11 @@ try {
     JSON.stringify(packedFiles) === JSON.stringify([...EXPECTED_FILES].sort()),
     packedFiles.join(', '),
   )
+  check(
+    'the tarball is named for the published package and version',
+    packed.filename === expectedTarball(pkg.name, version),
+    packed.filename,
+  )
 
   // --- 2. install the tarball into a fresh directory outside the workspace ----------------------
   const installDir = join(tmp, 'install')
@@ -147,7 +156,7 @@ try {
   const help = runOh(['--help'])
   check(
     'the installed `oh --help` prints the usage',
-    help.includes('Usage:') && help.includes('openharness'),
+    help.includes('Usage:') && help.includes(pkg.name),
   )
 
   // --- 4. the bundle resolves nothing from node_modules -----------------------------------------

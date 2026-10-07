@@ -4,12 +4,13 @@ The openharness terminal UI: an Ink (React) chat client, installed as the `oh` c
 talks to the server through `@openharness/client` only — the same client the web app uses —
 so there is no second transport to keep honest.
 
-The package is published to npm as the unscoped, public **`openharness`** (#152) — the one
-workspace whose name is not `@openharness/*`. The build is **one self-contained file**:
-`dist/index.js` inlines the workspace packages and every third-party dependency, so the
-published `package.json` has no runtime `dependencies` and `npm install -g openharness@next`
-may replace the file under a running `oh` (that is the ground the D10 auto-update stands on).
-See "Packaging" below.
+The package is published to npm as the public **`@openh/cli`** (#194, #152) — the one
+workspace whose name is not `@openharness/*`. npm refuses the unscoped `openharness` (too
+similar to the existing `open-harness`), and the maintainer's npm org is `openh`; the command
+it installs stays `oh`. The build is **one self-contained file**: `dist/index.js` inlines the
+workspace packages and every third-party dependency, so the published `package.json` has no
+runtime `dependencies` and `npm install -g @openh/cli@next` may replace the file under a
+running `oh` (that is the ground the D10 auto-update stands on). See "Packaging" below.
 
 ## Commands
 
@@ -77,7 +78,7 @@ Highest first:
    `{ "server": "https://app.oharness.dev", "autoUpdate": true }`
 4. `https://app.oharness.dev`
 
-The default is **production** (#192): `npm i -g openharness` lands on a machine with no server
+The default is **production** (#192): `npm i -g @openh/cli` lands on a machine with no server
 of its own, so an `oh` nobody has pointed anywhere talks to the one that is always there.
 Working from a checkout, `yarn oh` runs this CLI against `http://localhost:3000`; `--server`,
 `OPENHARNESS_URL` or the config file point it anywhere else.
@@ -212,11 +213,12 @@ at most nine long, with the same "12" rule as before.
 
 ### Updating itself
 
-The CLI is published to npm as `openharness` (#152) and installed with `npm i -g openharness`,
-so there is no launcher to keep it current: it updates itself (epic #148, decision D10). The
-ground it stands on is that the published package is one self-contained file — `npm install -g
-openharness@<v>` may replace it on disk while the running copy keeps going, which is why the
-running process is never the one that changes and the next run is simply the new version.
+The CLI is published to npm as `@openh/cli` (#194, #152) and installed with `npm i -g
+@openh/cli`, so there is no launcher to keep it current: it updates itself (epic #148,
+decision D10). The ground it stands on is that the published package is one self-contained
+file — `npm install -g @openh/cli@<v>` may replace it on disk while the running copy keeps
+going, which is why the running process is never the one that changes and the next run is
+simply the new version.
 
 On startup — for every command except `--version`, `--help` and `oh update`, and before the
 chat's Ink UI mounts or `oh login` starts its device flow, so a notice is never printed into a
@@ -225,12 +227,12 @@ screen — the updater does two things:
 1. **The notice.** A finished install leaves its outcome in the state file; the next run prints
    it **once** and forgets it. A success is one line on stdout, `oh updated to v0.4.0`. A
    failure is one line on stderr — `oh could not update itself: <reason>; run npm i -g
-openharness` — plus, when npm could not write to its global prefix, a hint about sudo or
+@openh/cli` — plus, when npm could not write to its global prefix, a hint about sudo or
    `npm config set prefix`.
 2. **The check.** At most once an hour (`lastCheck` in the same state file), it asks `npm view
-openharness version` in the background — never awaited, with a timeout — and if that version
+@openh/cli version` in the background — never awaited, with a timeout — and if that version
    is newer (a small comparator in `semver.ts`, prereleases included, since the bundle cannot
-   take a runtime dependency) starts a **detached** `npm install -g openharness@<v>`: a fresh
+   take a runtime dependency) starts a **detached** `npm install -g @openh/cli@<v>`: a fresh
    `node` process, `unref`'d, its output redirected to the log file. The running process is
    untouched.
 
@@ -263,7 +265,8 @@ The auto-update is **off** when any of these says so:
 - this `oh` is not a global npm install.
 
 The last is the one that matters and it is deliberately two questions, because one of them is
-free. The running bundle must sit at `<somewhere>/<module dir>/openharness/dist/index.js`
+free. The running bundle must sit at `<somewhere>/<module dir>/@openh/cli/dist/index.js` — the
+scope is a folder of its own, so the package folder is two levels above the bundle, not one
 (reached through the `bin` symlink npm installs, so the check realpaths first) — which
 `node apps/tui/dist/index.js` from this repo does not, and that answer costs nothing. Then that
 module directory must be the one `npm root -g` names; only this needs npm, and its answer is
@@ -371,7 +374,7 @@ out; `oh whoami` reads what the login stored.
 
 ## Public API
 
-| `openharness` (npm) | `PACKAGE_NAME`, `App`, `parseArgs()`, `readVersion()`, `run()`, `createChatSession()`, `resolveConfig()`, `describeError()` |
+| `@openh/cli` (npm) | `PACKAGE_NAME`, `App`, `parseArgs()`, `readVersion()`, `run()`, `createChatSession()`, `resolveConfig()`, `describeError()` |
 | `oh` (bin) | the commands above |
 
 The version is injected at build time from `package.json` as `__CLI_VERSION__`
@@ -380,7 +383,7 @@ working directory and cannot drift from `package.json`.
 
 ## Packaging
 
-`npm i -g openharness` installs the package as the `oh` command. The published package is
+`npm i -g @openh/cli` installs the package as the `oh` command. The published package is
 the `package.json` (`private` removed, `bin`, `files`, `publishConfig`) plus
 `dist/index.js`, `dist/index.d.ts`, `README.md` and `LICENSE`. There are **no runtime
 `dependencies`**: everything — `@openharness/client`, `@openharness/protocol`, Ink, React —

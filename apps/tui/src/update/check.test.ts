@@ -34,8 +34,8 @@ afterEach(() => {
 /** A global install on disk, and the paths that describe it. */
 function globalInstall(): { scriptPath: string; moduleRoot: string } {
   const moduleRoot = join(root, 'prefix', 'node_modules')
-  const bundle = join(moduleRoot, 'openharness', 'dist', 'index.js')
-  mkdirSync(join(moduleRoot, 'openharness', 'dist'), { recursive: true })
+  const bundle = join(moduleRoot, '@openh', 'cli', 'dist', 'index.js')
+  mkdirSync(join(moduleRoot, '@openh', 'cli', 'dist'), { recursive: true })
   writeFileSync(bundle, '// the built bundle, standing in\n')
   return { scriptPath: bundle, moduleRoot }
 }

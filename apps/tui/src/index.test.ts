@@ -92,7 +92,7 @@ describe('run', () => {
     const { code, out } = await runCaptured(['--version'])
 
     expect(code).toBe(0)
-    expect(out.trim()).toBe('0.0.0')
+    expect(out.trim()).toBe('0.0.1')
   })
 
   it('exits 2 on a flag it does not know, before doing anything', async () => {
@@ -429,7 +429,7 @@ describe('run: auto-update (#157)', () => {
     expect(code).toBe(0)
     expect(out).not.toContain('could not update')
     expect(err).toContain('oh could not update itself: npm exited with code 1: EACCES')
-    expect(err).toContain('run npm i -g openharness')
+    expect(err).toContain('run npm i -g @openh/cli')
     expect(err).toContain('sudo')
   })
 
@@ -437,7 +437,7 @@ describe('run: auto-update (#157)', () => {
     seedResult({ status: 'success', version: '0.4.0', at: '2026-10-05T12:00:00.000Z' })
 
     const version = await runCaptured(['--version'])
-    expect(version.out.trim()).toBe('0.0.0')
+    expect(version.out.trim()).toBe('0.0.1')
 
     const help = await runCaptured(['--help'])
     expect(help.out).not.toContain('oh updated')
@@ -511,7 +511,7 @@ describe('isDirectRun (#152)', () => {
   })
 
   it('is the entry point when argv names the npm `bin` symlink', () => {
-    // What `npm i -g` produces: `<prefix>/bin/oh` → `…/openharness/dist/index.js`. Node
+    // What `npm i -g` produces: `<prefix>/bin/oh` → `…/@openh/cli/dist/index.js`. Node
     // resolves the entry to its real path, so `import.meta.url` is the target while
     // `process.argv[1]` keeps the symlink — a string comparison alone would say "not the
     // entry point" and the installed `oh` would silently do nothing.

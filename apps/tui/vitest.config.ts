@@ -14,5 +14,5 @@ export default defineConfig({
   // The Ink tests drive real timers and a real event loop, so a machine under load is
   // slower, not broken (the review of #105, P1): the waits poll with conditions, and this
   // looser ceiling is headroom for a contended CI runner rather than a licence to hang.
-  test: reactVitestTestConfig({ name: 'openharness', testTimeout: 20_000 }),
+  test: reactVitestTestConfig({ name: '@openh/cli', testTimeout: 20_000 }),
 })

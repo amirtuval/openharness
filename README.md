@@ -129,7 +129,7 @@ trial, nothing survives a restart (it says so at startup).
 ### The terminal client, `oh`
 
 ```bash
-npm i -g openharness   # the published CLI, as the `oh` command
+npm i -g @openh/cli    # the published CLI, as the `oh` command
 oh login && oh         # once installed: signs in and chats on https://app.oharness.dev
 
 yarn oh                # from a checkout of this repo: builds the CLI and runs it against
@@ -137,10 +137,10 @@ yarn oh                # from a checkout of this repo: builds the CLI and runs i
                        # `yarn oh:prod` for staging and production)
 ```
 
-The npm package is **`openharness`** and the command stays **`oh`** (#152). It is one
-self-contained bundle — Ink, React and the client inlined, nothing resolved from
-`node_modules` at runtime — so `npm install -g openharness@next` can replace it on disk while
-a running `oh` keeps working.
+The npm package is **`@openh/cli`** and the command stays **`oh`** (#194, #152) — npm refuses
+the unscoped `openharness` name. It is one self-contained bundle — Ink, React and the client
+inlined, nothing resolved from `node_modules` at runtime — so `npm install -g @openh/cli@next`
+can replace it on disk while a running `oh` keeps working.
 
 `oh` signs in with `oh login`: the device flow prints a URL and a code, opens the browser at
 it (skipped with `--no-browser`, in CI, over SSH, or when there is no display), and stores
@@ -150,7 +150,7 @@ server and forgets it locally. Every other command sends the stored token as
 `Authorization: Bearer`.
 
 `oh` starts a new chat against `https://app.oharness.dev` — the default since #192, so a
-fresh `npm i -g openharness` works with nothing to configure. Point it elsewhere with
+fresh `npm i -g @openh/cli` works with nothing to configure. Point it elsewhere with
 `--server`, with `OPENHARNESS_URL`, or in `~/.config/openharness/config.json`; from a checkout,
 `yarn oh` builds it and points it at the local server. A new chat opens **your
 default model** immediately, with no picker: `oh default-model` prints it, `oh

@@ -1,7 +1,7 @@
 # Releasing the CLI
 
-The CLI (`apps/tui`, the `oh` command) ships to npm as the public package
-[`openharness`](https://www.npmjs.com/package/openharness) — the one artefact in this repo that
+The CLI (`apps/tui`, the `oh` command) ships to npm as the public scoped package
+[`@openh/cli`](https://www.npmjs.com/package/@openh/cli) — the one artefact in this repo that
 leaves through npm rather than through GCP. It is released **by hand**, from
 [`.github/workflows/publish-cli.yml`](../.github/workflows/publish-cli.yml) and nowhere else
 ([#156](https://github.com/amirtuval/openharness/issues/156), deployment epic
@@ -32,8 +32,8 @@ What a real run does, in order:
 
 1. checks out `main` with full history, Node 24, `yarn install --immutable`;
 2. `npm version <input> --no-git-tag-version` in `apps/tui`, and reads the resulting version;
-3. builds the CLI and its workspace dependencies (`yarn turbo run build --filter=openharness...`);
-4. runs `yarn workspace openharness check:pack` — npm-packs the tarball, installs it into a clean
+3. builds the CLI and its workspace dependencies (`yarn turbo run build --filter=@openh/cli...`);
+4. runs `yarn workspace @openh/cli check:pack` — npm-packs the tarball, installs it into a clean
    directory outside the workspace, and runs the installed `oh --version`/`--help` (#152);
 5. `npm publish --provenance --access public` from `apps/tui`. No `NPM_TOKEN`: npm authenticates
    with the OIDC token the job's `id-token: write` grants. No `--tag`: the publish lands on npm's
@@ -67,24 +67,35 @@ workflow can be allowed to publish it, and only the account that owns the name c
 
 1. **An npm account** with 2FA enabled — <https://www.npmjs.com/signup>.
 
-2. **Claim the `openharness` name with a first, manual publish.** Trusted publishing cannot
-   create a package: _"The package you're configuring must already exist on the npm registry"_
-   ([`npm trust`](https://docs.npmjs.com/cli/v11/commands/npm-trust)). From a checkout of `main`:
+2. **Claim the name with a first, manual publish.** Trusted publishing cannot create a
+   package: _"The package you're configuring must already exist on the npm registry"_
+   ([`npm trust`](https://docs.npmjs.com/cli/v11/commands/npm-trust)). The name took a second
+   attempt, and the history is worth keeping (#194): npm refuses the unscoped `openharness`
+   outright — _"Package name too similar to existing package open-harness"_ (E403) — and the
+   npm orgs `openharness` and `oharness` were both taken, so the maintainer created the org
+   **`openh`** and the CLI publishes as **`@openh/cli`**. The command is unchanged: `oh`.
+
+   The first publish was **`0.0.1`**, by hand from a checkout of `main`, and it carried
+   **`--provenance=false`**: a provenance attestation is signed by the OIDC token a CI job
+   presents, and a laptop `npm publish` has none to present. Every release after it goes
+   through the workflow below, whose publishes are `--provenance` because the job's
+   `id-token: write` grants that token.
 
    ```bash
    corepack enable
    yarn install --immutable
-   yarn turbo run build --filter=openharness...
-   yarn workspace openharness check:pack        # optional — proves the tarball before you publish it
+   yarn turbo run build --filter=@openh/cli...
+   yarn workspace @openh/cli check:pack            # proves the tarball before you publish it
    cd apps/tui
-   npm login                                    # as the account that will own the package
-   npm version 1.0.0 --no-git-tag-version       # pick the version this first release carries
-   npm publish --access public
+   npm login                                       # as the account that owns the `openh` org
+   npm publish --access public --provenance=false  # 0.0.1: claims the name, no CI token
    ```
 
-   Then commit that bump to `main` as `cli: v1.0.0` with the tag `cli-v1.0.0`, so the first
-   workflow release bumps from the version npm already has rather than from the `0.0.0`
-   placeholder.
+   `apps/tui/package.json` carries the published version, so the two have to agree: it is at
+   **`0.0.1`**, the version that first publish put on npm, and the workflow's first `patch`
+   release therefore lands on `0.0.2`. A manual publish at some other version has to be
+   committed to `main` as `cli: v<version>` with the tag `cli-v<version>`, or the workflow
+   would try to publish a version npm already has.
 
 3. **Configure the trusted publisher.** On the package page: **Settings → Trusted Publisher →
    GitHub Actions**, and fill in:
@@ -107,7 +118,7 @@ workflow can be allowed to publish it, and only the account that owns the name c
    with npm ≥ 11.15.0:
 
    ```bash
-   npm trust github openharness \
+   npm trust github @openh/cli \
      --file publish-cli.yml \
      --repo amirtuval/openharness \
      --allow-publish
@@ -126,8 +137,8 @@ workflow can be allowed to publish it, and only the account that owns the name c
 touches another dist-tag. To move one by hand (as the package owner, with 2FA):
 
 ```bash
-npm dist-tag add openharness@1.4.1 latest   # point `latest` at a published version
-npm dist-tag ls openharness                 # what the tags point at now
+npm dist-tag add @openh/cli@1.4.1 latest   # point `latest` at a published version
+npm dist-tag ls @openh/cli                 # what the tags point at now
 ```
 
 ## Verifying provenance

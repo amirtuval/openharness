@@ -5,7 +5,7 @@ import { isAbsolute, join } from 'node:path'
 /**
  * Where the server lives when nothing says otherwise: production (#192).
  *
- * An `npm i -g openharness` has to work out of the box, and the machine it lands on has no
+ * An `npm i -g @openh/cli` has to work out of the box, and the machine it lands on has no
  * server of its own — so the default is the one that is always there. A checkout points `oh`
  * at its own server with `yarn oh` (or `--server` / `OPENHARNESS_URL`).
  */

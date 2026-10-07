@@ -26,7 +26,7 @@ import {
 import { readVersion } from './version'
 
 /** This package's name; lets a dependent prove the import resolved. */
-export const PACKAGE_NAME = 'openharness'
+export const PACKAGE_NAME = '@openh/cli'
 
 export { App } from './app'
 export type { AppProps, ExitPayload } from './app'
@@ -403,7 +403,7 @@ function report(write: (line: string) => void, error: unknown, context: ErrorCon
  * Is this module the process's entry point?
  *
  * Usually a plain URL comparison is enough, but npm installs a package's `bin` as a
- * **symlink** (`node_modules/.bin/oh` → `../openharness/dist/index.js`, and the same shape
+ * **symlink** (`node_modules/.bin/oh` → `../@openh/cli/dist/index.js`, and the same shape
  * under a global prefix), and Node resolves the entry to its real path: `import.meta.url` is
  * `apps/tui/dist/index.js` while `process.argv[1]` is still the `.bin/oh` symlink — so the
  * string comparison says "not the entry point" and an installed `oh` would silently do
