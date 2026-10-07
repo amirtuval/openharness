@@ -10,12 +10,14 @@ import { basename, dirname, normalize } from 'node:path'
  *
  * The check has two halves, deliberately, because one of them is cheap and the other is not:
  *
- * 1. {@link looksLikeGlobalLayout} — the running bundle sits at
- *    `<somewhere>/<module dir>/@openh/cli/dist/index.js`, which is the shape npm gives a
- *    global install of a *scoped* package: the scope is one folder deeper than an unscoped
- *    name, so the folder to compare is two levels up from the bundle, not one. This is a
- *    `realpath` and a few string comparisons, so a checkout (whose package folder is
- *    `apps/tui`, not `@openh/cli`) answers "no" without spawning anything.
+ * 1. {@link looksLikeGlobalLayout} (through {@link globalModuleDirectory}) — the running
+ *    bundle sits at `<somewhere>/<module dir>/@openh/cli/dist/index.js`, which is the shape npm
+ *    gives a global install of a *scoped* package: the scope is one folder deeper than an
+ *    unscoped name, so the folder to compare is two levels up from the bundle, not one. This is
+ *    a `realpath` and a few string comparisons, so a checkout (whose package folder is
+ *    `apps/tui`, not `@openh/cli`) answers "no" without spawning anything. This half is also
+ *    the one a detached check can be handed: the other half needs npm, and the child (#197)
+ *    asks it there.
  * 2. {@link isGlobalInstall} — that `<module dir>` is the one `npm root -g` names. This is
  *    the authoritative answer, and the one that separates a global install from a dependency
  *    of some project; the caller runs `npm root -g` **once** and caches its answer in the
@@ -84,6 +86,21 @@ function moduleDirectoryOf(packageRoot: string): string | undefined {
 }
 
 /**
+ * The module directory the running bundle sits under, when the layout is that of a global
+ * install: `/x/node_modules` for `/x/node_modules/@openh/cli/dist/index.js`.
+ *
+ * This is the free half of the global-install check, and the half the detached check needs
+ * handed to it (#197): the child is a `node -e` program with no bundle to import, so the
+ * folder comparison is split — the CLI decides this side from `process.argv[1]`, and the child
+ * compares that answer with `npm root -g`'s. `undefined` when the layout is not that shape,
+ * which is what a checkout or a vendored copy answers.
+ */
+export function globalModuleDirectory(scriptPath: string | undefined): string | undefined {
+  const root = packageRootOf(scriptPath)
+  return root === undefined ? undefined : moduleDirectoryOf(root)
+}
+
+/**
  * The cheap half: does the running bundle have the *shape* of a global install?
  *
  * True when its package folder is `@openh/cli` under a module directory. Says nothing about
@@ -91,8 +108,7 @@ function moduleDirectoryOf(packageRoot: string): string | undefined {
  * but it is free, and it is what a checkout fails.
  */
 export function looksLikeGlobalLayout(scriptPath: string | undefined): boolean {
-  const root = packageRootOf(scriptPath)
-  return root !== undefined && moduleDirectoryOf(root) !== undefined
+  return globalModuleDirectory(scriptPath) !== undefined
 }
 
 /**
@@ -109,9 +125,7 @@ export function isGlobalInstall(
 ): boolean {
   if (globalRoot === undefined || globalRoot.trim() === '') return false
 
-  const root = packageRootOf(scriptPath)
-  if (root === undefined) return false
-  const parent = moduleDirectoryOf(root)
+  const parent = globalModuleDirectory(scriptPath)
   if (parent === undefined) return false
 
   let resolved: string

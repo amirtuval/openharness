@@ -1,11 +1,16 @@
+import type { UpdateCheck } from './state'
+
 /**
- * When the auto-update runs at all (issue #157, D10), as plain decisions over plain values.
+ * When the auto-update runs at all (issue #157, D10; #197), as plain decisions over plain
+ * values.
  *
- * There are two independent questions, and keeping them apart is what makes the feature
- * testable without spawning anything: *may this run update?* (the off switches, below) and
- * *is it time to check again?* (the throttle). Both answer from values the caller has already
- * read — the environment, the config file, the state file's timestamp — so every combination
- * is a unit test rather than a subprocess.
+ * There are three independent questions, and keeping them apart is what makes the feature
+ * testable without spawning anything: *may this run update?* (the off switches, below), *is it
+ * time to check again?* (the throttle), and *is someone already checking?* (the claim, #197).
+ * Each answers from values the caller has already read — the environment, the config file, the
+ * state file — so every combination is a unit test rather than a subprocess. The one thing the
+ * caller has to bring is the process table, for the claim: whether the check that wrote it is
+ * still running is not something this file can know on its own.
  */
 
 /**
@@ -55,6 +60,59 @@ export function isCheckDue(nowMs: number, lastCheck: string | undefined): boolea
   const last = Date.parse(lastCheck)
   if (Number.isNaN(last)) return true
   return nowMs - last >= CHECK_INTERVAL_MS
+}
+
+/**
+ * How long a claim is believed when nothing can say whether its process is still there.
+ *
+ * A check spends at most two npm lookups, each with a 15 s timeout, so a claim that is minutes
+ * old belongs to a child that is gone — a machine that rebooted mid-check, a pid that was
+ * recycled. This is the backstop, not the rule: {@link isCheckInProgress} asks the process
+ * table first, which is what makes a killed check let go immediately instead of at the end of
+ * a fixed wait.
+ */
+export const CHECK_CLAIM_TTL_MS = 5 * 60 * 1000
+
+/**
+ * Is a check already under way, and still running?
+ *
+ * The claim in the state file is what keeps two `oh` started at once from both installing the
+ * same version: the second sees a claim whose process is alive and stands down. A claim left
+ * by a check that was killed says nothing — its process is gone — so the next run claims the
+ * check and looks again, which is the whole of "a killed lookup does not burn the hour".
+ *
+ * @param nowMs the clock, in milliseconds
+ * @param checking the state file's claim, if any
+ * @param isAlive the process table; injectable so the decision is a unit test
+ */
+export function isCheckInProgress(
+  nowMs: number,
+  checking: UpdateCheck | undefined,
+  isAlive: (pid: number) => boolean = processIsAlive,
+): boolean {
+  if (checking === undefined) return false
+  const claimed = Date.parse(checking.at)
+  if (Number.isNaN(claimed) || nowMs - claimed >= CHECK_CLAIM_TTL_MS) return false
+  return checking.pid !== undefined && isAlive(checking.pid)
+}
+
+/**
+ * Is there a process with this pid?
+ *
+ * A signal of `0` is the portable "does it exist" — nothing is sent, and the error says
+ * whether there is anything to send it to. `ESRCH` is the only answer that means no: a pid
+ * that exists but belongs to somebody else's process raises `EPERM` on Linux, and on Windows
+ * an unopenable process raises an error of its own, and neither of those is a process that
+ * stopped running.
+ */
+export function processIsAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH'
+  }
 }
 
 /**

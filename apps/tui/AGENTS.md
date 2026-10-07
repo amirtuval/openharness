@@ -229,33 +229,50 @@ screen — the updater does two things:
    failure is one line on stderr — `oh could not update itself: <reason>; run npm i -g
 @openh/cli` — plus, when npm could not write to its global prefix, a hint about sudo or
    `npm config set prefix`.
-2. **The check.** At most once an hour (`lastCheck` in the same state file), it asks `npm view
-@openh/cli version` in the background — never awaited, with a timeout — and if that version
-   is newer (a small comparator in `semver.ts`, prereleases included, since the bundle cannot
-   take a runtime dependency) starts a **detached** `npm install -g @openh/cli@<v>`: a fresh
-   `node` process, `unref`'d, its output redirected to the log file. The running process is
-   untouched.
+2. **The check.** At most once an hour (`lastCheck` in the same state file), it starts a
+   **detached child** that does the whole check: `npm root -g`, `npm view @openh/cli version`,
+   the comparison, and `npm install -g @openh/cli@<v>` when the published version is newer. The
+   running process is untouched and never waits for any of it.
 
-   "Never awaited" is not enough for "does not block": npm is spawned with its pipes and the
-   timeout `unref`'d as well. A child's pipes are event-loop handles of their own, and with a
-   `'data'` listener attached they hold a finished command open until npm exits — a second of
-   npm before the shell prompt comes back, for a lookup nobody asked for. The check therefore
-   simply does not finish for a command that exits first, which is why updates land during
-   chats and logins and not during `oh agents`. A test proves it against a slow fake npm, by
-   timing the process itself.
+   The child is what makes the check work for a quick command (#197). A lookup is a network
+   call nobody is waiting for, and `oh whoami` is over in microseconds — so anything the
+   foreground kept doing died with the process before npm had answered, and the hour was spent
+   anyway. The child is a fresh `node`, `unref`'d, its stdout and stderr on the null device;
+   it is the only thing in the auto-update that outlives the run.
+
+   So the foreground only decides _whether_ to start one, out of things that need no npm at
+   all: the layout of the bundle it is running from (`detect.ts` — a checkout, or the package
+   vendored inside somebody else's `node_modules`, is not a global install), the global root
+   when the state file has one cached for this node, the hour, and the claim below. Most runs
+   therefore spawn nothing, and the ones that spawn pay a few milliseconds for it — no npm, no
+   network, nothing awaited.
+
+   The comparison in the child is a copy of `semver.ts`'s (a small comparator, prereleases
+   included, since the bundle cannot take a runtime dependency and a detached child has no
+   module to import it from); `npm.test.ts` drives that copy through the wrapper over the same
+   version pairs `semver.test.ts` asserts on, so the two cannot drift apart quietly.
+
+A claim — `checking` in the state file: when, and the pid of the child that holds it — is what
+keeps two `oh` started at once from both installing the same version: the second sees a claim
+whose process is still running and stands down. The pid is the whole point of it: a claim whose
+process is gone is stale — a check that was killed, a machine that went down — so the next run
+claims the check itself and looks again, at once, rather than waiting the hour out. Its
+timestamp is only a backstop, for a pid that has been recycled.
 
 A detached child has no way to report back, so it is a tiny `node -e` program (`npm.ts`'s
-`installWrapperSource`) that runs npm, waits for it, and writes npm's exit code and the tail of
-its output into the state file, where the next run picks it up. The wrapper is spawned as
+`updateWrapperSource`) that does the check, runs npm, waits for it, and writes the published
+version and npm's exit code and output tail into the state file, where the next run picks it
+up. It writes `lastCheck` itself, when the lookup has actually answered: a lookup that failed
+or was killed leaves the hour unspent, and the next run asks again. The wrapper is spawned as
 either CommonJS or ESM (the input type of `-e` depends on the nearest `package.json`), which is
 why its imports are `await import()`.
 
 Both files live in the CLI's config directory, beside `config.json` and `credentials.json`:
 
-| file                              | what it holds                                                        |
-| --------------------------------- | -------------------------------------------------------------------- |
-| `…/openharness/update-state.json` | `lastCheck`, the cached global root, and the pending install outcome |
-| `…/openharness/update.log`        | npm's output from the last detached install                          |
+| file                              | what it holds                                                           |
+| --------------------------------- | ----------------------------------------------------------------------- |
+| `…/openharness/update-state.json` | `lastCheck`, the claim, the cached global root, and the pending outcome |
+| `…/openharness/update.log`        | npm's output from the last detached install                             |
 
 The auto-update is **off** when any of these says so:
 
@@ -269,11 +286,13 @@ free. The running bundle must sit at `<somewhere>/<module dir>/@openh/cli/dist/i
 scope is a folder of its own, so the package folder is two levels above the bundle, not one
 (reached through the `bin` symlink npm installs, so the check realpaths first) — which
 `node apps/tui/dist/index.js` from this repo does not, and that answer costs nothing. Then that
-module directory must be the one `npm root -g` names; only this needs npm, and its answer is
-cached in the state file beside the `node` that produced it, so a checkout never spawns npm and
-an installed `oh` spawns it at most once per node installation. A `realpath` that fails, a
-missing `npm`, a mangled state file: every one of them ends the same way, as "no update", never
-as a failed command.
+module directory must be the one `npm root -g` names; only this needs npm. The free half is
+answered in the foreground (`globalModuleDirectory`), and the half that needs npm is answered
+in the child — which caches its answer in the state file beside the `node` that produced it, so
+a checkout never spawns npm at all, an installed `oh` spawns it at most once per node
+installation, and a package that is _not_ the global one spawns one child, once, ever. A
+`realpath` that fails, a missing `npm`, a mangled state file: every one of them ends the same
+way, as "no update", never as a failed command.
 
 `oh update` does the same thing in the foreground: the version lookup, then npm's own install
 output as the progress, `0` when the CLI is current or just became so and `1` when npm could
@@ -335,12 +354,12 @@ src/
   components/            message-view, transcript-view, status-line, prompt-input,
                          notice-view, model-picker
   update/
-    index.ts             the auto-update: the notice, the background check, detection
-    decide.ts            the off switches (env / config / CI) and the hourly throttle
+    index.ts             the auto-update: the notice, and the decision to check
+    decide.ts            the off switches (env / config / CI), the hourly throttle, the claim
     semver.ts            the version comparator — the bundle cannot borrow one
-    detect.ts            is this `oh` a global npm install?
-    npm.ts               spawning npm, and the detached installer's `node -e` wrapper
-    state.ts             update-state.json: the timestamp, the cached root, the outcome
+    detect.ts            is this `oh` a global npm install, and the module dir the child needs
+    npm.ts               spawning npm, and the detached check's `node -e` program
+    state.ts             update-state.json: the timestamp, the claim, the root, the outcome
     notice.ts            the one line the next run prints, once
   commands/list.ts       `oh sessions` / `oh agents` / `oh sessions delete`
   commands/preferences.ts  `oh default-model`
@@ -348,7 +367,8 @@ src/
   commands/auth.ts       `oh login` / `oh logout` / `oh whoami`
   commands/update.ts     `oh update` — the auto-update, in the foreground
   dev/fake.ts            OPENHARNESS_FAKE: the fake client, seeded, dev only
-  test-support/          test-only helpers (fake clients, keystrokes, frame waits)
+  test-support/          test-only helpers (fake clients, keystrokes, frame waits, and this
+                         package's own version, which `--version` prints)
 ```
 
 ## Fake mode (dev only)
@@ -423,12 +443,12 @@ also seeds long lists and serves them a page at a time (`seedAgents`, `pagedAgen
 tested without Ink at all.
 
 The auto-update is tested without a registry: `src/update/`'s decisions are plain values
-(the off switches, the throttle, the version comparison, the cached global root) tested against
-fakes, and the one thing that _must_ be exercised through a real subprocess — the spawn, the
-detached installer's log and state file, the exit code it records — runs against a **fake
-`npm` on `PATH`**, a small shell script, rather than a mocked `spawn`. `run()` itself takes the
-updater as a `RunOptions` seam, so its tests watch which commands reach it without anything
-spawning npm.
+(the off switches, the throttle, the claim, the version comparison, the cached global root)
+tested against fakes, and the one thing that _must_ be exercised through a real subprocess —
+the spawn, the detached child's check, its log and state file, the exit code it records, and
+that it outlives the process that started it — runs against a **fake `npm` on `PATH`**, a small
+shell script, rather than a mocked `spawn`. `run()` itself takes the updater as a `RunOptions`
+seam, so its tests watch which commands reach it without anything spawning npm.
 
 The auth side is tested at both levels: `src/credentials.ts` against a temp directory (the
 atomic write, `0600`/`0700`, per-server tokens, the errors a broken file produces),
@@ -455,12 +475,12 @@ denial, cancellation, revoke failures); `src/index.test.ts` drives `run()` all t
 | `src/errors.test.ts`                              | `describeError`: the 401 line, the connection hints, 403/429, `--debug`                                     |
 | `src/signals.test.ts`, `src/terminal.test.ts`     | the signal handlers and `restoreTerminal`                                                                   |
 | `src/update/semver.test.ts`                       | the comparator: the three numbers, prereleases, and what is not a version                                   |
-| `src/update/decide.test.ts`                       | the off switches, and the hourly throttle                                                                   |
+| `src/update/decide.test.ts`                       | the off switches, the hourly throttle, and the claim (the pid liveness included)                            |
 | `src/update/state.test.ts`                        | `update-state.json`: the write, the tolerant read, and the once-only consume                                |
 | `src/update/detect.test.ts`                       | the global-install check, `bin` symlink and case-insensitivity included                                     |
 | `src/update/notice.test.ts`                       | the one line: its two shapes, the stream it goes to, and that it never repeats                              |
-| `src/update/npm.test.ts`                          | npm over a fake `npm` on `PATH`: the lookup, the timeout, and the detached installer's state file           |
-| `src/update/check.test.ts`                        | the background check's decisions, against a fake npm runner                                                 |
+| `src/update/npm.test.ts`                          | npm over a fake `npm` on `PATH`: the lookup, the timeout, and the detached check's whole program            |
+| `src/update/check.test.ts`                        | the foreground decision: the gate, the throttle, the claim, and the spawn, against a fake runner            |
 | `src/commands/update.test.ts`                     | `oh update`: up to date, installed, failed, and refused                                                     |
 | `src/dev/fake.test.ts`                            | the fake-mode gate and the seeded dev client                                                                |
 

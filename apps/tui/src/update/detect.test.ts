@@ -4,7 +4,12 @@ import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { isGlobalInstall, looksLikeGlobalLayout, packageRootOf } from './detect'
+import {
+  globalModuleDirectory,
+  isGlobalInstall,
+  looksLikeGlobalLayout,
+  packageRootOf,
+} from './detect'
 
 /**
  * The two layouts the check has to tell apart, made real on disk: a global install (the
@@ -58,6 +63,27 @@ describe('packageRootOf', () => {
     expect(packageRootOf(undefined)).toBeUndefined()
     expect(packageRootOf('')).toBeUndefined()
     expect(packageRootOf(join(root, 'nowhere', 'index.js'))).toBeUndefined()
+  })
+})
+
+describe('globalModuleDirectory (#197)', () => {
+  it('is the module directory a global install puts the package under', () => {
+    const prefix = join(root, 'prefix')
+    const { bundle, moduleRoot } = installPackage(prefix)
+
+    // The half of the global-install check the CLI does, and hands to the detached child: the
+    // child compares this with `npm root -g` and has no bundle of its own to work it out from.
+    expect(globalModuleDirectory(bundle)).toBe(moduleRoot)
+    expect(globalModuleDirectory(binLink(prefix, bundle))).toBe(moduleRoot)
+  })
+
+  it('is undefined for a layout that is not one, or a path that says nothing', () => {
+    const bundle = join(root, 'apps', 'tui', 'dist', 'index.js')
+    mkdirSync(join(root, 'apps', 'tui', 'dist'), { recursive: true })
+    writeFileSync(bundle, '// built from a checkout\n')
+
+    expect(globalModuleDirectory(bundle)).toBeUndefined()
+    expect(globalModuleDirectory(undefined)).toBeUndefined()
   })
 })
 
