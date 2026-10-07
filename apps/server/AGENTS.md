@@ -735,7 +735,7 @@ regenerate semantics, and answering the same prompt again is the closest honest 
 ## Static web assets
 
 With `OPENHARNESS_WEB_DIR` set, the server serves that directory at `/`: a request that names a
-file gets it, and any other GET outside `/v1` gets `index.html`, because the web app routes on
+file gets it, and any other read outside `/v1` gets `index.html`, because the web app routes on
 the URL hash. Paths that climb out of the directory are refused. The one exception is the
 plain device path: `GET /device?user_code=…` answers a `302` to `/#/device?user_code=…`, the
 hash route the device-approval page actually lives on (an older `verification_uri` shape, or
@@ -748,6 +748,14 @@ balancer"): the content-hashed files under `assets/` are immutable for a year, `
 (and the fallback that serves it) revalidates every time, and the other root files get an
 hour — decided by the file that is actually served, so a request for a missing asset falls
 back to the shell and is cached like the shell.
+
+`HEAD` is served wherever `GET` is (#196), the `/device` redirect included: the same status,
+the same `content-type`, `content-length` and `Cache-Control`, and no body. Browsers only
+`GET`, but a link checker, an uptime probe, `curl -I` and a CDN revalidating a cached entry
+all ask with `HEAD`, and the `404 no-store` it used to fall through to is what stopped Cloud
+CDN from caching the file the `GET` beside it serves. The body is left out in `static.ts`
+rather than by Hono's own `HEAD` handling, so the response this module builds is honest about
+what it is; a path that is not the web app's still 404s exactly as before.
 
 ## CORS
 
@@ -987,8 +995,10 @@ suites that run against the same Postgres — `partition-scheduler.test.ts`,
 so two of them in flight at once would delete each other's data. Packages still run in
 parallel with each other.
 
-- `app.test.ts` — every route, the error envelopes, auth, CORS, static assets, and the title a
-  session gets from its first message.
+- `app.test.ts` — every route, the error envelopes, auth, CORS, static assets (HEAD answered
+  exactly like GET — status, headers, no body — for the shell, an asset, an SPA route, a
+  missing asset and the `/device` redirect, #196), and the title a session gets from its first
+  message.
 - `sse.test.ts` — replay and live with no gaps or duplicates, `last-event-id` resume, the
   chunk opt-in (live and replay), keepalive, disconnect cleanup, and the D9 paths: a connection
   that opens mid-reply replaying the chunks in flight, a resume from inside a reply's chunks
