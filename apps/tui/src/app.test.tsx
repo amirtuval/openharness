@@ -5,13 +5,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { makeModelEntry } from '@openharness/protocol/fixtures'
+import { makeModelEntry, makeProviderCredential } from '@openharness/protocol/fixtures'
 
-import { App, type ExitPayload } from './app'
+import { App, type AppProps, type ExitPayload } from './app'
 import type { ChatOptions } from './args'
 import { shortSessionId } from './components/status-line'
 import type { PromptHistory } from './history'
-import { listingAgents } from './test-support/fake'
+import { firstRunFake, listingAgents } from './test-support/fake'
 import {
   frameOf,
   pressKey,
@@ -31,7 +31,12 @@ function chatOptions(overrides: Partial<ChatOptions> = {}): ChatOptions {
 }
 
 /** Render the app against a client and record how it leaves. */
-function renderApp(client: Client, options: ChatOptions = chatOptions(), history?: PromptHistory) {
+function renderApp(
+  client: Client,
+  options: ChatOptions = chatOptions(),
+  history?: PromptHistory,
+  props: Partial<AppProps> = {},
+) {
   const exits: ExitPayload[] = []
   const instance = render(
     <App
@@ -42,6 +47,7 @@ function renderApp(client: Client, options: ChatOptions = chatOptions(), history
       onExit={(payload) => {
         exits.push(payload)
       }}
+      {...props}
     />,
   )
 
@@ -405,6 +411,50 @@ describe('App', () => {
     expect(userTexts(fake, fake.session.id)).toEqual([])
   })
 
+  it('connects a provider from inside the chat with /providers (#210)', async () => {
+    // A chat on a stored default, with no credential yet: the flow is reachable from the
+    // prompt, not only from the first run.
+    const catalog = [makeModelEntry({ id: 'anthropic/claude-sonnet-5' })]
+    const fake = createFakeClient({
+      models: catalog,
+      preferences: { default_model: 'anthropic/claude-sonnet-5' },
+    })
+    const app = renderApp(firstRunFake(fake, catalog), chatOptions({ session: fake.session.id }))
+    await waitForChat(app, fake.session.id)
+
+    submit(app, '/providers')
+    await waitForScreen(app, 'No provider key yet')
+    pressKey(app, 'enter')
+    await waitForScreen(app, 'Connect Anthropic')
+    typeText(app, 'sk-test-0000')
+    pressKey(app, 'enter')
+
+    // The save is a notice in the chat, the prompt comes back, and nothing was sent to the
+    // model — the conversation is untouched.
+    await waitForFrame(app, 'Connected Anthropic.')
+    await waitForFrame(app, "You're set: default model Claude Sonnet 5")
+    // The prompt is back: the flow handed the input area over and gave it back.
+    expect(frameOf(app)).toContain('❯')
+    expect(userTexts(fake, fake.session.id)).toEqual([])
+
+    const { data } = await fake.providerCredentials.list()
+    expect(data).toEqual([expect.objectContaining({ provider: 'anthropic', last4: '0000' })])
+  })
+
+  it('leaves the chat unchanged when /providers is cancelled', async () => {
+    const fake = createFakeClient({ preferences: { default_model: 'anthropic/claude-sonnet-5' } })
+    const app = renderApp(fake, chatOptions({ session: fake.session.id }))
+    await waitForChat(app, fake.session.id)
+
+    submit(app, '/providers')
+    await waitForScreen(app, 'No provider key yet')
+    pressKey(app, 'escape')
+
+    await waitForFrame(app, '❯')
+    expect((await fake.providerCredentials.list()).data).toEqual([])
+    expect(app.exits).toEqual([])
+  })
+
   it('names an unknown command back, with the closest match, and sends nothing', async () => {
     const fake = createFakeClient()
     const app = renderApp(fake, chatOptions({ session: fake.session.id }))
@@ -541,16 +591,139 @@ describe('App', () => {
     expect(frameOf(app)).not.toContain('Which model?')
   })
 
-  it('says where to add a provider key when the account has no models', async () => {
-    const fake = createFakeClient({ models: [], providers: [] })
+  it('offers to connect a provider when the account has no key (#210)', async () => {
+    const fake = createFakeClient({ models: [makeModelEntry()] })
+    const app = renderApp(firstRunFake(fake, [makeModelEntry()]))
+
+    await waitForScreen(app, 'No provider key yet')
+    // The list is built from PROVIDERS, free-tier hints and all (X8).
+    await waitForFrame(app, 'Anthropic')
+    await waitForFrame(app, 'Google · Free tier in Google AI Studio')
+    await waitForFrame(app, 'OpenRouter · Free models available')
+  })
+
+  it('connects a provider, names the default model, and opens the chat (#210)', async () => {
+    const catalog = [makeModelEntry({ id: 'anthropic/claude-sonnet-5' })]
+    const fake = createFakeClient({ models: catalog })
+    const app = renderApp(firstRunFake(fake, catalog))
+    const key = 'sk-test-0000'
+
+    await waitForScreen(app, 'No provider key yet')
+    pressKey(app, 'enter')
+    await waitForScreen(app, 'Connect Anthropic')
+    await waitForFrame(app, 'Get a key: https://console.anthropic.com/settings/keys')
+
+    typeText(app, key)
+    await waitForFrame(app, '❯ •••••••••••')
+    // The key is nowhere on screen — the input masks it, character for character.
+    expect(frameOf(app)).not.toContain(key)
+
+    pressKey(app, 'enter')
+    await waitForScreen(app, "You're set: default model Claude Sonnet 5.")
+    expect(app.exits).toEqual([])
+
+    pressKey(app, 'enter')
+    await waitForChat(app)
+
+    const { data } = await fake.providerCredentials.list()
+    expect(data).toHaveLength(1)
+    expect(data[0]).toMatchObject({ provider: 'anthropic', last4: '0000' })
+  })
+
+  it('keeps a saved key out of the prompt history and the config directory (#210)', async () => {
+    const catalog = [makeModelEntry({ id: 'anthropic/claude-sonnet-5' })]
+    const fake = createFakeClient({ models: catalog })
+    const history = fakeHistory()
+    const app = renderApp(firstRunFake(fake, catalog), chatOptions(), history)
+    const key = 'sk-test-0000'
+
+    await waitForScreen(app, 'No provider key yet')
+    pressKey(app, 'enter')
+    await waitForScreen(app, 'Connect Anthropic')
+    typeText(app, key)
+    pressKey(app, 'enter')
+    await waitForScreen(app, "You're set: default model Claude Sonnet 5.")
+    pressKey(app, 'enter')
+    await waitForChat(app)
+
+    // Nothing typed into the hidden input is a prompt: the history is for messages, and a
+    // secret never reaches `history.json` (the seam #206 left for exactly this).
+    expect(history.entries()).toEqual([])
+  })
+
+  it('says a rejected key was rejected, without echoing it (#210)', async () => {
+    const catalog = [makeModelEntry({ id: 'anthropic/claude-sonnet-5' })]
+    const fake = createFakeClient({ models: catalog })
+    // An empty key is the one rejection the fake can spell with no provider behind it.
+    const client: Client = {
+      ...firstRunFake(fake, catalog),
+      providerCredentials: {
+        ...fake.providerCredentials,
+        put: () =>
+          Promise.reject(
+            new ApiError(422, 'The anthropic credential was rejected by the provider.', {
+              type: 'invalid_provider_credential',
+            }),
+          ),
+      },
+    }
+    const app = renderApp(client)
+    const key = 'sk-test-0000'
+
+    await waitForScreen(app, 'No provider key yet')
+    pressKey(app, 'enter')
+    await waitForScreen(app, 'Connect Anthropic')
+    typeText(app, key)
+    pressKey(app, 'enter')
+
+    await waitForFrame(app, 'The key was rejected: The anthropic credential was rejected')
+    // The error is the server's, and the key is not in it, in the frame, or anywhere else.
+    expect(frameOf(app)).not.toContain(key)
+    expect(frameOf(app)).not.toContain('sk-test')
+  })
+
+  it('says where a key comes from when keys exist but no model does (#210)', async () => {
+    const fake = createFakeClient({
+      models: [],
+      providers: [],
+      credentials: [makeProviderCredential({ provider: 'anthropic' })],
+    })
     const app = renderApp(fake)
 
-    await waitForFrame(app, 'No model providers yet')
-    await waitForFrame(app, `Add a key in the web app at ${CONTEXT.server}`)
-    await waitForFrame(app, 'Settings → Model providers')
+    await waitForFrame(app, 'No model yet — your keys did not list one to chat with.')
+    await waitForFrame(app, `Add or replace a key with \`oh providers add\``)
 
     await waitFor(() => app.exits.length === 1)
     expect(app.exits[0]).toEqual({ code: 1 })
+  })
+
+  it('leaves with needsSignIn when the session is refused and this run can sign in (#210)', async () => {
+    const fake = createFakeClient({ authenticated: false })
+    const app = renderApp(fake, chatOptions(), undefined, { offerSignIn: true })
+
+    await waitFor(() => app.exits.length === 1)
+    // The signal the run turns into "Sign in now? [Y/n]" and a second mount — the app does not
+    // run the device flow itself.
+    expect(app.exits[0]).toEqual({ code: 1, needsSignIn: true })
+  })
+
+  it('shows the not-signed-in error when the run cannot sign in (#210)', async () => {
+    const fake = createFakeClient({ authenticated: false })
+    const app = renderApp(fake)
+
+    await waitForFrame(app, `not signed in to ${CONTEXT.server}`)
+    await waitFor(() => app.exits.length === 1)
+    expect(app.exits[0]).toEqual({ code: 1 })
+  })
+
+  it('offers the sign-in again when connecting a provider hits a stale session (#210)', async () => {
+    const fake = createFakeClient({ authenticated: false })
+    const app = renderApp(firstRunFake(fake, [makeModelEntry()]), chatOptions(), undefined, {
+      offerSignIn: true,
+    })
+
+    await waitFor(() => app.exits.length === 1)
+    expect(app.exits[0]).toEqual({ code: 1, needsSignIn: true })
   })
 
   it('explains an --agent that matches nothing', async () => {

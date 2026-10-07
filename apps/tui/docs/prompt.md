@@ -70,9 +70,11 @@ The entries live in `~/.config/openharness/history.json` (or `$XDG_CONFIG_HOME/â
   credentials file is (both go through `src/atomic-write.ts`).
 - The list is capped at `HISTORY_LIMIT` (500) entries, oldest dropped first, and a line that
   repeats the one before it is not stored twice.
-- `add(text, { record: false })` is the explicit **don't record** (#206): the hidden input that
-  asks for an API key in the terminal (#207, X7) goes through the same call, and a secret never
-  reaches the file.
+- `add(text, { record: false })` is the explicit **don't record** (#206). The hidden input that
+  asks for an API key in the terminal is `components/secret-input.tsx` (#210, X7), and it is a
+  component of its own rather than this prompt â€” so it is not that call that keeps a secret out
+  of the file, it is that the secret is never typed into anything that has a history to write
+  to. The seam is still the right one for a line this prompt's own submit should keep out.
 - Unlike the config and credentials files, a history file that cannot be read is **not** an
   error. What it holds is a convenience for the next keystroke; losing a chat over a mangled
   cache of old prompts would be the wrong trade. A failed read starts empty, and the next write

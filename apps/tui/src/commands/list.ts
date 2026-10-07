@@ -1,9 +1,8 @@
 import type { Client } from '@openharness/client'
 import type { Agent, Session } from '@openharness/protocol'
-import { createInterface } from 'node:readline'
 
 import { listAllAgents, listAllSessions } from '../paging'
-import { reportFailure, type CommandIo } from './io'
+import { isYes, readLine, reportFailure, type CommandIo } from './io'
 
 export type { CommandIo }
 
@@ -75,34 +74,6 @@ export async function runSessionDelete(
   }
 }
 
-/** One line from `stdin`, without its line terminator; `''` at end of input. */
-function readLine(stdin: NodeJS.ReadStream): Promise<string> {
-  return new Promise((resolve) => {
-    const lines = createInterface({ input: stdin, crlfDelay: Number.POSITIVE_INFINITY })
-    // Whichever comes first settles it. `close()` can emit 'close' synchronously, so the
-    // guard is what keeps a read line from being overwritten by the close it caused.
-    let settled = false
-    const finish = (line: string): void => {
-      if (settled) return
-      settled = true
-      lines.close()
-      resolve(line)
-    }
-
-    lines.once('line', (line) => {
-      finish(line)
-    })
-    lines.once('close', () => {
-      finish('')
-    })
-  })
-}
-
-/** What the confirmation accepts as yes. */
-function isYes(answer: string): boolean {
-  return /^y(es)?$/iu.test(answer.trim())
-}
-
 /**
  * One line per session: id, title, status, updated — the columns the issue asks for.
  *
@@ -134,7 +105,7 @@ export function formatAgents(agents: readonly Agent[]): readonly string[] {
 }
 
 /** Pad to a width, cutting with an ellipsis when the value is longer. */
-function pad(value: string, width: number): string {
+export function pad(value: string, width: number): string {
   return value.length > width ? `${value.slice(0, width - 1)}…` : value.padEnd(width)
 }
 

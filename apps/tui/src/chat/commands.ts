@@ -33,6 +33,11 @@ export interface CommandContext {
   readonly pickModel: () => void
   /** Leave this chat and open a new one in `modelId` — `/new`. */
   readonly newChat: (modelId: string) => void
+  /**
+   * Connect a model provider from the terminal — `/providers` (#210, epic #201 X7). The flow
+   * runs in the prompt slot; `provider` is the one to start on, when the line named it.
+   */
+  readonly setupProviders: (provider: string | undefined) => void
   /** Wipe the screen, the session untouched — the Ctrl+L wipe, by another name. */
   readonly clearScreen: () => void
   /** Leave the chat, the way the second idle Ctrl+C does. */
@@ -73,6 +78,14 @@ export const CHAT_COMMANDS: readonly ChatCommand[] = [
     description: 'pick a model; it applies from the next message',
     run: (context) => {
       context.pickModel()
+    },
+  },
+  {
+    name: 'providers',
+    description: 'connect a model provider with a key',
+    args: '[provider]',
+    run: (context, args) => {
+      context.setupProviders(args.trim() === '' ? undefined : args.trim())
     },
   },
   {

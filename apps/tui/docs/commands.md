@@ -28,13 +28,14 @@ runs through the slot), starting a new chat, clearing the screen, leaving, and p
 above the status bar (`showNotice`). Nothing else — the screen builds the context, so a
 command that wants a new power has to grow the context, where it can be seen.
 
-| command  | what it does                                                   |
-| -------- | -------------------------------------------------------------- |
-| `/model` | pick a model; the choice rides the next message (epic #116 U3) |
-| `/new`   | start a new chat on the current model                          |
-| `/clear` | clear the screen; the session stays (the same wipe as Ctrl+L)  |
-| `/help`  | print the commands and the keys above the prompt               |
-| `/exit`  | leave the chat (`/quit` is the same command)                   |
+| command                 | what it does                                                            |
+| ----------------------- | ----------------------------------------------------------------------- |
+| `/model`                | pick a model; the choice rides the next message (epic #116 U3)          |
+| `/providers [provider]` | connect a model provider — paste its key into a hidden input (#210, X7) |
+| `/new`                  | start a new chat on the current model                                   |
+| `/clear`                | clear the screen; the session stays (the same wipe as Ctrl+L)           |
+| `/help`                 | print the commands and the keys above the prompt                        |
+| `/exit`                 | leave the chat (`/quit` is the same command)                            |
 
 ## What a line is
 
@@ -111,23 +112,31 @@ about steps: the model picker reads the catalog first (with `loading models…` 
 a catalog that will not load settles `null` with the error already reported) and a multi-step
 key entry would do the same.
 
-That is what makes the next pieces fit **without changes to the slot**:
+`/providers` (#210, X7) is the second flow, and it is what the last paragraph is about: one
+element that picks a provider from the list, asks for its key through `SecretInput` — a hidden
+input with **its own buffer**, never `PromptInput`'s, which is why nothing typed into it is
+echoed and why it is never handed to the history — saves it with
+`client.providerCredentials.put`, and settles once, with the provider id. A rejected key is
+shown in the server's words and the same view asks again; a stale session settles through the
+screen's sign-in path. All of that is steps inside one view, so the slot did not change.
+
+That is what makes the next pieces fit the same way:
 
 - **a `question` part** (phase 5) — a view that renders the choices or a text field and
   settles with the answer;
 - **an `approval`** — a view that renders allow-once / allow-always / deny and settles with
-  which one, so the caller decides what to send;
-- **`/providers`** (#210, X7) — one view that picks from a list, then asks for the key with
-  the input hidden (a local buffer, never `PromptInput`'s — which is why nothing typed into it
-  is echoed, and why it is never added to the history), then awaits the credentials call and
-  settles with the outcome.
+  which one, so the caller decides what to send.
+
+After a `/providers` save the screen reads the catalog again, so `/model` offers the models the
+provider just connected, and the default the server picked is named in a notice.
 
 ## Tests
 
-| file                                   | covers                                                               |
-| -------------------------------------- | -------------------------------------------------------------------- |
-| `src/chat/commands.test.ts`            | the registry, the parse, the filter, the closest match, each command |
-| `src/components/command-menu.test.tsx` | the rows, the highlight, the aligned usage column                    |
-| `src/components/prompt-input.test.tsx` | the menu's keys, filtering, and its precedence over the history      |
-| `src/components/prompt-slot.test.tsx`  | an element in the prompt's place, settling, and a replaced flow      |
-| `src/app.test.tsx`                     | each command end to end, the unknown command, `//`, and the picker   |
+| file                                     | covers                                                                                  |
+| ---------------------------------------- | --------------------------------------------------------------------------------------- |
+| `src/chat/commands.test.ts`              | the registry, the parse, the filter, the closest match, each command                    |
+| `src/components/command-menu.test.tsx`   | the rows, the highlight, the aligned usage column                                       |
+| `src/components/prompt-input.test.tsx`   | the menu's keys, filtering, and its precedence over the history                         |
+| `src/components/prompt-slot.test.tsx`    | an element in the prompt's place, settling, and a replaced flow                         |
+| `src/components/provider-setup.test.tsx` | the `/providers` flow itself: the list, the key entry, a save, a rejection (#210)       |
+| `src/app.test.tsx`                       | each command end to end, the unknown command, `//`, the picker, and `/providers` (#210) |

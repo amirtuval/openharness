@@ -4,13 +4,32 @@ import type { ModelEntry } from '@openharness/protocol'
 /** Set this (to `1`, `true` or `yes`) and `oh` runs against the in-memory fake client. */
 export const FAKE_MODE_ENV = 'OPENHARNESS_FAKE'
 
+/**
+ * Set this beside {@link FAKE_MODE_ENV} and the dev fake starts **signed out** (#210).
+ *
+ * The fake is signed in by default, which is the state to develop in — but the sign-in a chat
+ * offers when it finds no session, and the 401 a stale one gets, are paths a dev otherwise
+ * cannot see without a server and a second terminal. With this, `oh` asks `Sign in now? [Y/n]`
+ * against the fake's scripted device flow, which approves it.
+ */
+export const FAKE_SIGNED_OUT_ENV = 'OPENHARNESS_FAKE_SIGNED_OUT'
+
 /** What the status line says while the fake is answering: nobody should mistake it for real. */
 export const FAKE_BANNER = 'fake client (dev)'
 
 /** Is the CLI in fake mode? Empty, `0` and `false` all mean "no". */
 export function isFakeMode(env: Record<string, string | undefined> = process.env): boolean {
-  const value = env[FAKE_MODE_ENV]?.trim().toLowerCase()
-  return value === '1' || value === 'true' || value === 'yes'
+  return isTruthy(env[FAKE_MODE_ENV])
+}
+
+/** Does the dev fake start signed out? The same spelling as {@link isFakeMode}. */
+export function isFakeSignedOut(env: Record<string, string | undefined> = process.env): boolean {
+  return isTruthy(env[FAKE_SIGNED_OUT_ENV])
+}
+
+function isTruthy(value: string | undefined): boolean {
+  const normalized = value?.trim().toLowerCase()
+  return normalized === '1' || normalized === 'true' || normalized === 'yes'
 }
 
 /**
@@ -119,12 +138,19 @@ export const DEV_DEFAULT_MODEL = 'anthropic/claude-sonnet-5'
  *
  * @see {@link FAKE_MODE_ENV}
  */
-export async function createDevClient(): Promise<FakeClient> {
+export async function createDevClient(
+  env: Record<string, string | undefined> = process.env,
+): Promise<FakeClient> {
   const { createFakeClient } = await import('@openharness/client/testing')
   const fake = createFakeClient({
     delayMs: 12,
     models: DEV_MODELS,
     preferences: { default_model: DEV_DEFAULT_MODEL },
+    // The seeded order is the order they were created in, and the fake orders a list by
+    // `(created_at, id)`. A clock that only moves when it is asked — `new Date()` returns the
+    // same millisecond twice under a fast seeding run — leaves the two agents below tied, and
+    // the tie broken by the random half of their ids: a coin flip a test would flake on.
+    now: tickingClock(),
   })
 
   await fake.agents.create({
@@ -156,5 +182,25 @@ export async function createDevClient(): Promise<FakeClient> {
     fake.respondWith(reply, { sessionId: resumed.id, chunks: 8, delayMs: 20 })
   }
 
+  // Signing out happens last, on purpose: a signed-out fake refuses every `/v1` call, so the
+  // seeding above could not have run. What is left is an account with the dev catalog and the
+  // dev default model that still has to be signed into — the state `oh`'s sign-in offer is for
+  // (#210), and the one the fake's scripted device flow can approve.
+  if (isFakeSignedOut(env)) {
+    await fake.auth.signOut()
+  }
+
   return fake
+}
+
+/**
+ * A clock that advances a millisecond per call, for seeding order that does not depend on how
+ * fast the machine is. See {@link createDevClient}.
+ */
+function tickingClock(): () => Date {
+  let at = Date.now()
+  return () => {
+    at += 1
+    return new Date(at)
+  }
 }

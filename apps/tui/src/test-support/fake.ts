@@ -1,6 +1,6 @@
 import type { Client } from '@openharness/client'
 import type { FakeClient } from '@openharness/client/testing'
-import type { Agent, Session } from '@openharness/protocol'
+import type { Agent, ModelEntry, Session } from '@openharness/protocol'
 
 /** How many rows one page holds in {@link pagedAgents} and {@link pagedSessions}. */
 const PAGE_SIZE = 20
@@ -37,6 +37,32 @@ export function listingSessions(fake: FakeClient, ids: readonly string[]): Clien
           })),
           next_page: null,
         }),
+    },
+  }
+}
+
+/**
+ * A fake that looks like an account with no provider key yet (#210): the catalog is **empty**
+ * until a credential exists, and the models it then lists are `models`.
+ *
+ * The fake's own catalog is a fixed list, so `put` always makes it non-empty — which is the
+ * wrong shape for the onboarding flow, whose whole premise is that there is nothing to chat
+ * with until a key is saved. This wrapper is the server's rule (the catalog is the models the
+ * caller's keys can use) restated for a test: `models.list` answers nothing until
+ * `providerCredentials.list` does, and `models` after.
+ *
+ * The credential store itself is the fake's — `put` still records the metadata and still picks
+ * a default model for an account that has none (U4) — so the flow after a save is the real one.
+ */
+export function firstRunFake(fake: FakeClient, models: readonly ModelEntry[]): Client {
+  return {
+    ...fake,
+    models: {
+      ...fake.models,
+      list: async (_params, options) => {
+        const { data } = await fake.providerCredentials.list(options)
+        return { data: data.length === 0 ? [] : [...models], providers: [] }
+      },
     },
   }
 }

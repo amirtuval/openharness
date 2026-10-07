@@ -7,14 +7,16 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { App, type ExitPayload } from './app'
 import { parseArgs, type ChatOptions } from './args'
 import { openBrowser } from './browser'
-import { runLogin, runLogout, runWhoami, type AuthIo } from './commands/auth'
+import { offerSignIn, runLogin, runLogout, runWhoami, type AuthIo } from './commands/auth'
 import { runAgents, runSessionDelete, runSessions } from './commands/list'
 import { runDefaultModel } from './commands/preferences'
+import { mountProvidersAdd, runProvidersList, runProvidersRemove } from './commands/providers'
 import { createNpmPort, runUpdate } from './commands/update'
+import { modelLabel } from './components/status-line'
 import { resolveConfig, type ResolvedConfig } from './config'
 import { openCredentials, type CredentialStore } from './credentials'
 import { createDevClient, FAKE_BANNER, isFakeMode } from './dev/fake'
-import { describeError, type ErrorContext } from './errors'
+import { describeError, notSignedInMessage, type ErrorContext } from './errors'
 import { HELP_TEXT } from './help'
 import { openHistory, type PromptHistory } from './history'
 import { resolveTerminalTheme } from './markdown/theme'
@@ -161,6 +163,33 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
         )
       case 'agents':
         return await runAgents(connected.client, { stdout: out, stderr: err, context })
+      case 'providers':
+        return await runProvidersList(connected.client, { stdout: out, stderr: err, context })
+      case 'providers-add':
+        return await runProvidersAdd(
+          connected,
+          config,
+          command.provider,
+          context,
+          credentials.store,
+          { stdin, stdout, stderr, env },
+        )
+      case 'providers-remove':
+        return await runProvidersRemove(
+          connected.client,
+          {
+            stdout: out,
+            stderr: err,
+            context,
+            // The question goes out without a newline so the answer lands on its line.
+            prompt: (text) => {
+              stdout.write(text)
+            },
+            stdin,
+          },
+          command.provider,
+          { yes: command.yes },
+        )
       case 'default-model':
         return await runDefaultModel(
           connected.client,
@@ -168,7 +197,7 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
           command.model,
         )
       case 'chat':
-        return await runChat(connected, config, command.options, context, {
+        return await runChat(connected, config, command.options, context, credentials.store, {
           stdin,
           stdout,
           stderr,
@@ -255,7 +284,7 @@ async function connect(
   if (isFakeMode(env)) {
     // The fake ignores the token entirely — it answers for its seeded user — and its device
     // flow is scripted, so `login`, `logout` and `whoami` run against it like against a server.
-    const fake = await createDevClient()
+    const fake = await createDevClient(env)
     return { client: fake, clientFor: () => fake, banner: FAKE_BANNER }
   }
   const clientFor = (token: string | undefined): Client =>
@@ -292,18 +321,24 @@ interface ChatStreams {
 }
 
 /**
- * Mount the chat and wait for it to end.
+ * The chat, and the sign-in it may have to do first (#210, epic #201 X7).
  *
- * The terminal is the thing to be careful with here. `exitOnCtrlC` is off because Ctrl+C
- * means "interrupt" before it means "quit", so Ink will not unmount itself: the app asks
- * for the exit when the rules say so, and every other way out — a signal, an exception —
- * goes through {@link quit} or the `finally` below, each of which gives the terminal back.
+ * A signed-out `oh` used to end at "not signed in … Run `oh login`." — a command the reader
+ * had to know and run, from a prompt that could have just asked. Now the 401 the chat's first
+ * request gets is an offer: `Sign in now? [Y/n]`, the device flow the CLI already has, and the
+ * chat again on the token it stored. The offer and the flow are plain terminal IO, outside the
+ * Ink UI, which is why the app leaves with `needsSignIn` and this loop mounts it a second time
+ * rather than a screen inside it doing the work.
+ *
+ * A run with no terminal never reaches any of that: the chat needs a TTY to read a key, and
+ * that check — with today's message and exit code — is the first thing here.
  */
 async function runChat(
   connected: Connected,
   config: ResolvedConfig,
   options: ChatOptions,
   context: ErrorContext,
+  store: CredentialStore,
   streams: ChatStreams,
 ): Promise<number> {
   if (streams.stdin.isTTY !== true) {
@@ -316,19 +351,83 @@ async function runChat(
     return 2
   }
 
-  // The prompt's history (#206). It is handed over as a function rather than awaited here:
-  // it needs a `client.me()`, and waiting for that before the screen is drawn would leave
-  // `oh` silent, instead of saying "connecting to <server>…", for as long as the server
-  // takes to answer.
-  const loadHistory = (): Promise<PromptHistory | undefined> =>
-    openChatHistory(connected.client, config.server, streams.env)
-
   // The theme the transcript is drawn with (epic #201, X4): the config file's `theme` key,
   // resolved against what the environment says — `NO_COLOR`, and the background the terminal
   // reports. It is resolved once, here, rather than read per message: neither the environment
   // nor the config file changes under a running chat, and a settled message keeps the theme
   // it was drawn with, exactly as it keeps its width.
   const theme = resolveTerminalTheme(config.theme, streams.env)
+  const openUrl = (url: string): boolean => openBrowser(url, { env: streams.env }).opened
+
+  let current = connected
+  for (;;) {
+    const mounted = await mountChat(current, config, options, context, {
+      ...streams,
+      theme,
+      openUrl,
+    })
+
+    if (mounted.payload?.needsSignIn !== true) {
+      announceSession(streams, mounted)
+      return mounted.code
+    }
+
+    // The session was refused, or there was none: ask, and run the device flow here rather
+    // than inside the UI. A "no" (or a failed sign-in) ends it the way it always did — the
+    // not-signed-in line, exit 1 — rather than printing a resume hint for a chat that never
+    // started.
+    const token = await askToSignIn(config, store, connected, context, streams)
+    if (token === undefined) {
+      streams.stderr.write(`oh: ${notSignedInMessage(config.server)}\n`)
+      return 1
+    }
+    current = { ...current, client: connected.clientFor(token) }
+  }
+}
+
+/** Say what happened to the session on the way out — the resume hint, or that it is gone. */
+function announceSession(streams: ChatStreams, mounted: ChatMount): void {
+  if (mounted.payload?.deleted === true && mounted.code === 0) {
+    // The chat was deleted while it was open (epic #116 U5): there is no id to resume.
+    streams.stdout.write('\nThis chat was deleted; it is gone.\n')
+  } else if (mounted.payload?.sessionId !== undefined && mounted.code === 0) {
+    streams.stdout.write(`\nResume this session with: oh -s ${mounted.payload.sessionId}\n`)
+  }
+}
+
+/** How one mount of the chat ended. */
+interface ChatMount {
+  readonly code: number
+  readonly payload: ExitPayload | undefined
+}
+
+/** What {@link mountChat} needs on top of the streams: the theme and the browser opener. */
+interface ChatMountOptions extends ChatStreams {
+  readonly theme: ReturnType<typeof resolveTerminalTheme>
+  readonly openUrl: (url: string) => boolean
+}
+
+/**
+ * Mount the chat once and wait for it to end.
+ *
+ * The terminal is the thing to be careful with here. `exitOnCtrlC` is off because Ctrl+C
+ * means "interrupt" before it means "quit", so Ink will not unmount itself: the app asks
+ * for the exit when the rules say so, and every other way out — a signal, an exception —
+ * goes through {@link quit} or the `finally` below, each of which gives the terminal back.
+ */
+async function mountChat(
+  connected: Connected,
+  config: ResolvedConfig,
+  options: ChatOptions,
+  context: ErrorContext,
+  streams: ChatMountOptions,
+): Promise<ChatMount> {
+  // The prompt's history (#206). It is handed over as a function rather than awaited here:
+  // it needs a `client.me()`, and waiting for that before the screen is drawn would leave
+  // `oh` silent, instead of saying "connecting to <server>…", for as long as the server
+  // takes to answer.
+  const loadHistory = (): Promise<PromptHistory | undefined> =>
+    openChatHistory(connected.client, config.server, streams.env)
 
   const restore = (): void => {
     restoreTerminal({ stdin: streams.stdin, stdout: streams.stdout })
@@ -371,7 +470,9 @@ async function runChat(
         options={options}
         context={context}
         banner={connected.banner}
-        theme={theme}
+        theme={streams.theme}
+        openUrl={streams.openUrl}
+        offerSignIn
         loadHistory={loadHistory}
       />,
       {
@@ -383,20 +484,141 @@ async function runChat(
     )
 
     const payload = toExitPayload(await instance.waitUntilExit())
-    const code = signalCode ?? payload?.code ?? 0
-
-    if (payload?.deleted === true && code === 0) {
-      // The chat was deleted while it was open (epic #116 U5): there is no id to resume.
-      streams.stdout.write('\nThis chat was deleted; it is gone.\n')
-    } else if (payload?.sessionId !== undefined && code === 0) {
-      streams.stdout.write(`\nResume this session with: oh -s ${payload.sessionId}\n`)
-    }
-
-    return code
+    return { code: signalCode ?? payload?.code ?? 0, payload }
   } finally {
     stopSignals()
     process.off('exit', onProcessExit)
     restore()
+  }
+}
+
+/**
+ * Ask `Sign in now? [Y/n]` and run the device flow, in plain terminal IO (#210).
+ *
+ * The prompt and the flow are deliberately outside Ink: the device flow prints a URL and a
+ * code, and a screen that owned the input area would have to grow a second rendering of all
+ * of it. `oh login` is the same code (`commands/auth.ts`), reached from a chat that found no
+ * session — and Ctrl+C during the poll cancels it with the code the signal deserves, exactly
+ * as `oh login` does.
+ *
+ * @returns the token the run stored, or `undefined` when the reader said no or the login did
+ *   not finish.
+ */
+async function askToSignIn(
+  config: ResolvedConfig,
+  store: CredentialStore,
+  connected: Connected,
+  context: ErrorContext,
+  streams: ChatStreams,
+): Promise<string | undefined> {
+  const controller = new AbortController()
+  const stopSignals = installSignals(process, {
+    onInterrupt: () => {
+      controller.abort(130)
+    },
+    onTerminate: () => {
+      controller.abort(143)
+    },
+  })
+
+  try {
+    return await offerSignIn({
+      stdout: (line) => {
+        streams.stdout.write(`${line}\n`)
+      },
+      stderr: (line) => {
+        streams.stderr.write(`${line}\n`)
+      },
+      prompt: (text) => {
+        streams.stdout.write(text)
+      },
+      context,
+      server: config.server,
+      store,
+      createApiClient: connected.clientFor,
+      openBrowser: (url) => openBrowser(url, { env: streams.env }),
+      stdin: streams.stdin,
+      signal: controller.signal,
+    })
+  } finally {
+    stopSignals()
+  }
+}
+
+/**
+ * `oh providers add [provider]` (#210): the connect flow, and the sign-in it may need first.
+ *
+ * A credential write requires a **fresh** session (epic #65, A2), so the flow's own 401 is
+ * the same offer the chat makes: the screen leaves with `stale-session`, the run signs in
+ * outside the UI, and the flow is mounted again. A reader who has never signed in therefore
+ * reaches a stored key without ever typing `oh login`.
+ */
+async function runProvidersAdd(
+  connected: Connected,
+  config: ResolvedConfig,
+  provider: string | undefined,
+  context: ErrorContext,
+  store: CredentialStore,
+  streams: ChatStreams,
+): Promise<number> {
+  if (streams.stdin.isTTY !== true) {
+    streams.stderr.write(
+      'oh: `oh providers add` needs a terminal, and stdin is not one.\n' +
+        '  a key is typed into a hidden prompt, which a pipe cannot answer.\n',
+    )
+    return 2
+  }
+
+  const openUrl = (url: string): boolean => openBrowser(url, { env: streams.env }).opened
+  let current = connected
+
+  for (;;) {
+    const outcome = await mountProvidersAdd({
+      client: current.client,
+      context,
+      provider,
+      openUrl,
+      stdin: streams.stdin,
+      stdout: streams.stdout,
+      stderr: streams.stderr,
+    })
+
+    if (outcome.kind === 'cancelled') {
+      streams.stdout.write('Not added.\n')
+      return 0
+    }
+    if (outcome.kind === 'saved') {
+      streams.stdout.write(`${await describeSavedDefault(current.client)}\n`)
+      return 0
+    }
+
+    const token = await askToSignIn(config, store, connected, context, streams)
+    if (token === undefined) {
+      streams.stderr.write(`oh: ${notSignedInMessage(config.server)}\n`)
+      return 1
+    }
+    current = { ...current, client: connected.clientFor(token) }
+  }
+}
+
+/**
+ * The line `oh providers add` ends a successful save on (#210): the default the server picked,
+ * named the way the catalog names it.
+ *
+ * The read is best-effort — the key is already stored, and the confirmation is a courtesy —
+ * so a server that cannot answer costs the sentence, not the exit code.
+ */
+async function describeSavedDefault(client: Client): Promise<string> {
+  try {
+    const [preferences, catalog] = await Promise.all([
+      client.preferences.get(),
+      client.models.list(),
+    ])
+    return preferences.default_model === null
+      ? "You're set: no default model was picked — `oh` will ask which to use."
+      : `You're set: default model ${modelLabel(preferences.default_model, catalog.data)}.`
+  } catch {
+    return "You're set: the key is saved."
   }
 }
 
@@ -428,12 +650,18 @@ async function openChatHistory(
 /** What `exit()` was called with, when it looks like ours. */
 function toExitPayload(result: unknown): ExitPayload | undefined {
   if (typeof result !== 'object' || result === null) return undefined
-  const candidate = result as { code?: unknown; sessionId?: unknown; deleted?: unknown }
+  const candidate = result as {
+    code?: unknown
+    sessionId?: unknown
+    deleted?: unknown
+    needsSignIn?: unknown
+  }
   if (typeof candidate.code !== 'number') return undefined
   return {
     code: candidate.code,
     sessionId: typeof candidate.sessionId === 'string' ? candidate.sessionId : undefined,
     deleted: candidate.deleted === true ? true : undefined,
+    needsSignIn: candidate.needsSignIn === true ? true : undefined,
   }
 }
 

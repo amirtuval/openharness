@@ -174,6 +174,59 @@ describe('parseArgs', () => {
     expect(errorOf(['agents', '--yes'])).toContain('--yes')
     expect(errorOf(['--yes'])).toContain('--yes')
     expect(errorOf(['login', '--yes'])).toContain('--yes')
+    expect(errorOf(['providers', '--yes'])).toContain('--yes')
+    expect(errorOf(['providers', 'list', '--yes'])).toContain('--yes')
+    expect(errorOf(['providers', 'add', '--yes'])).toContain('--yes')
+  })
+
+  it('recognises `oh providers` in all three shapes (#210)', () => {
+    // A bare `oh providers` is the listing, the way a bare `oh sessions` is.
+    expect(commandOf(['providers'])).toEqual({
+      kind: 'providers',
+      options: { debug: false, server: undefined },
+    })
+    expect(commandOf(['providers', 'list'])).toEqual({
+      kind: 'providers',
+      options: { debug: false, server: undefined },
+    })
+
+    expect(commandOf(['providers', 'add'])).toEqual({
+      kind: 'providers-add',
+      provider: undefined,
+      options: { debug: false, server: undefined },
+    })
+    expect(commandOf(['providers', 'add', 'anthropic'])).toMatchObject({
+      kind: 'providers-add',
+      provider: 'anthropic',
+    })
+
+    expect(commandOf(['providers', 'remove', 'anthropic'])).toEqual({
+      kind: 'providers-remove',
+      provider: 'anthropic',
+      yes: false,
+      options: { debug: false, server: undefined },
+    })
+    expect(commandOf(['providers', 'remove', 'anthropic', '--yes'])).toMatchObject({
+      kind: 'providers-remove',
+      provider: 'anthropic',
+      yes: true,
+    })
+  })
+
+  it('rejects a `providers` line that names nothing', () => {
+    expect(errorOf(['providers', 'list', 'extra'])).toContain('takes no arguments')
+    expect(errorOf(['providers', 'add', 'anthropic', 'openai'])).toContain('at most one provider')
+    expect(errorOf(['providers', 'add', ''])).toContain('needs a provider name')
+    expect(errorOf(['providers', 'remove'])).toContain('needs the provider')
+    expect(errorOf(['providers', 'remove', 'a', 'b'])).toContain('takes one provider')
+    expect(errorOf(['providers', 'connect'])).toContain('unknown `oh providers` argument')
+  })
+
+  it('rejects the chat flags on every `providers` shape', () => {
+    expect(errorOf(['providers', '-c'])).toContain('--continue')
+    expect(errorOf(['providers', 'list', '--model', 'x/y'])).toContain('--model')
+    expect(errorOf(['providers', 'add', 'anthropic', '-s', 'sesn_1'])).toContain('--session <id>')
+    expect(errorOf(['providers', 'remove', 'anthropic', '--agent', 'a'])).toContain('--agent')
   })
 
   it('rejects the chat flags on `sessions delete`', () => {

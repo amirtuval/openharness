@@ -50,6 +50,7 @@ function fakeContext(session: ChatSession) {
   const calls = {
     picked: 0,
     newChats: [] as string[],
+    providers: [] as (string | undefined)[],
     clears: 0,
     exits: 0,
     notices: [] as { readonly kind: string; readonly text: string }[],
@@ -61,6 +62,9 @@ function fakeContext(session: ChatSession) {
     },
     newChat: (modelId) => {
       calls.newChats.push(modelId)
+    },
+    setupProviders: (provider) => {
+      calls.providers.push(provider)
     },
     clearScreen: () => {
       calls.clears += 1
@@ -282,6 +286,26 @@ describe('running a command', () => {
     await run('clear', context)
 
     expect(calls.clears).toBe(1)
+  })
+
+  it('/providers opens the connect flow on the list (#210)', async () => {
+    const { session } = chatSession()
+    const { context, calls } = fakeContext(session)
+
+    await run('providers', context)
+
+    expect(calls.providers).toEqual([undefined])
+  })
+
+  it('/providers with a provider starts on that provider’s form', async () => {
+    const { session } = chatSession()
+    const { context, calls } = fakeContext(session)
+
+    await run('providers', context, 'anthropic')
+
+    // The name is trimmed and passed through; the flow rejects one nobody knows the same way
+    // the credentials API does — by asking for a key and letting the server answer.
+    expect(calls.providers).toEqual(['anthropic'])
   })
 
   it('/help prints the commands and the keys', async () => {

@@ -41,6 +41,9 @@ repo.
 | `oh sessions`                           | list every session: id, title, status, updated           |
 | `oh sessions delete <id>`               | delete a chat and everything in it (asks; `--yes` skips) |
 | `oh agents`                             | list the saved agents (optional presets): id, name       |
+| `oh providers`                          | list the stored model-provider keys: provider, last 4    |
+| `oh providers add [provider]`           | connect a provider — paste its key into a hidden prompt  |
+| `oh providers remove <provider>`        | forget a key (asks; `--yes` skips the question)          |
 | `oh default-model [provider/model]`     | print or set the model a new chat starts on              |
 | `oh login`                              | sign in through the browser (the device flow)            |
 | `oh logout`                             | revoke the session on the server, forget the token       |
@@ -49,18 +52,21 @@ repo.
 | `oh -v` / `--version`, `oh -h`/`--help` | print and stop                                           |
 
 Global flags: `--server <url>`, `--debug`; `oh login` also takes `--no-browser`, and
-`oh sessions delete` takes `--yes`. The chat flags are `-s`/`-c`, `--agent` and `--model`;
-the other commands take none of them (and reject them loudly).
+`oh sessions delete` / `oh providers remove` take `--yes`. The chat flags are `-s`/`-c`,
+`--agent` and `--model`; the other commands take none of them (and reject them loudly).
 
 Exit codes: `0` did what it was asked (including a chat the user ended, a chat that was
-deleted elsewhere, a delete answer of "no", and a `logout` whose server-side revoke could
+deleted elsewhere, a delete or remove answer of "no", a `providers add` the user cancelled,
+and a `logout` whose server-side revoke could
 not be reached — the token is still gone locally); `1` the server,
 the network or the sign-in state said no — a 401 is the not-signed-in error described under
-"Signing in" below, and an account with no provider keys ends there too, as "Choosing a
+"Signing in" below (or, in a chat that can sign in, the offer described there), and an
+account that ends up with no provider key ends there too, as "Choosing a
 model" describes; `2`
 the command line or the configuration was wrong (including an unusable config or credentials
-file, named in the message) — and also a chat asked for without a terminal, since stdin has
-to be a TTY to read a key, and an `oh update` in an `oh` that is not a global npm install;
+file, named in the message) — and also a chat or an `oh providers add` asked for without a
+terminal, since stdin has to be a TTY to read a key, and an `oh update` in an `oh` that is not
+a global npm install;
 and `130`/`143` when the process was signalled, which is also how
 a running `oh login` is cancelled.
 
@@ -133,6 +139,17 @@ from another terminal, a sign-out in the browser — closes the server's stream 
 second; the client's reconnect is then refused with a 401, which ends the stream loop rather
 than retrying. The chat shows the not-signed-in error, the same one any 401 gets.
 
+**`oh` can sign in itself** (#210, epic #201 X7). A chat that finds no session — no stored
+token, or one the server has revoked — does not stop at "Run `oh login`": it asks
+`Sign in now? [Y/n]` (Enter takes the default `Y`), runs the device flow above through
+`offerSignIn` (`src/commands/auth.ts`), and mounts the chat again on the token it stored. The
+prompt and the flow are plain terminal IO outside the Ink UI — the app leaves with
+`needsSignIn` on its exit payload and the run decides — so the question is asked once, on a
+terminal it owns, and the reader who says no gets the not-signed-in line and exit `1` as
+before. `oh providers add` makes the same offer when its write is refused with a 401, because
+a credential write needs a fresh session. A run with no TTY never gets as far as asking: the
+chat exits `2` with today's message, and so does `oh providers add`.
+
 ### Choosing a model
 
 Chatting is model-first (epic #92) and starts on the **default model** (epic #116): a new
@@ -161,9 +178,9 @@ chat picks a model, not an agent, and usually picks it with no dialog at all. In
 chats? [y/N]` — and a `y` writes it with `preferences.put`; the chat opens either way,
    and a save that failed says so and steps aside on the next Enter.
 5. With no provider keys at all — `client.models.list()` answers with no entries and there
-   is no default — there is nothing to chat with: `oh` prints where to add a key (the web
-   app's Settings → Model providers) and exits `1`, the documented code for the server
-   saying no.
+   is no default — there is nothing to chat with, and `oh` connects one in the terminal
+   instead (the next section). An account that has keys but still no models gets the message
+   that says so, and exits `1`.
 
 `oh default-model` prints the stored default (`Default model: …`, or that there is none and
 a new chat will ask); `oh default-model <provider/model>` stores it and prints what the
@@ -184,6 +201,57 @@ session's own), by its catalog name when the catalog is known and its id otherwi
 Switching provider mid-chat is supported; the history is rebuilt per request. Ctrl+C in the
 picker closes it and changes nothing.
 
+### Model providers in the terminal (#210, epic #201 X7/X8)
+
+A chat runs on a model from a provider you have a key for, and until now the only way to give
+`oh` one was the web app's Settings → Model providers. It happens here now, in three places
+that are one component (`src/components/provider-setup.tsx`):
+
+- **the first run** — a signed-in account with no credentials lands on it instead of "add a key
+  in the web app". The screen reads `client.providerCredentials.list()` once: **empty** is the
+  flow; **non-empty** (keys, but a catalog that listed nothing) is the message that says so;
+- **`/providers [provider]`** in a chat, through the inline prompt slot — so the flow takes the
+  input area over and gives it back, and no new mechanism was needed for a multi-step form;
+- **`oh providers add [provider]`**, on its own.
+
+The flow is two steps. It picks a provider from the list built from `PROVIDERS` (the metadata
+both frontends share, #209), each row with its **free-tier hint** (X8), and then asks for the
+key. The "get a key" URL is printed and `o` opens it in the browser (the same `openBrowser`
+rules as `oh login`; a terminal that cannot open one says so and leaves the URL on screen).
+The key goes into **`components/secret-input.tsx`** — a hidden input: `•` per character, never
+the characters, and a bracketed paste taken as one value because a pasted key is the normal
+case. It is deliberately not `PromptInput`: that echoes what it holds, hands every line to the
+history and treats a pasted file as a feature, and none of that may happen to a secret.
+
+The write is `client.providerCredentials.put(provider, { type: 'api_key', api_key })` — the
+_same_ call the web app makes, over HTTPS, to the server that validates it once and seals it.
+**Nothing is written to this machine**: there is no config-directory file a key could land in,
+and the input never reaches `history.json` (the `record: false` seam #206 left is not even
+needed — the secret is typed into a component that has no history to hand it to). What the
+server refuses — a 422 `invalid_provider_credential` — is shown in the server's own words, and
+the box asks again, because the usual mistake is a key copied with a space on it. A 401 is a
+stale session: the flow hands that to its caller, which signs in again (above) rather than a
+screen running a login itself.
+
+The **form is built from the credential type** (X6), mirroring the web app: `CREDENTIAL_FORMS`
+in `src/providers/credential-form.ts` is a `Record<ProviderCredentialType, …>` of the fields
+and the request body they build, with `api_key` the only member today. A new member of the
+protocol's union is a compile error there until it has a form, which is where Bedrock, Vertex
+and Azure land.
+
+On success the server has picked a default model — the first key saved makes it do so (U4) —
+and it is named back: `You're set: default model X`, the sentence the web app's first-run flow
+ends on. The chat then opens on it (`oh` asks for Enter first, so the confirmation is read
+rather than flashed past). `/providers` reads the catalog again in the background, so `/model`
+offers the models the provider just connected — a plain read, not a `refresh`, because saving a
+key already drops that provider's cache entry server-side.
+
+`oh providers` lists what is stored: the display name, the credential type, the last four
+characters and when it was added. That is the whole of what the API can say — it is
+**write-only** (epic #65, A5) — and `oh providers remove <provider>` forgets a key after a
+`[y/N]` question (`--yes` skips it); deleting one that is not there is not an error, because
+the route answers `204` either way.
+
 ### Slash commands, the menu, and the prompt slot (#207)
 
 Every command is an entry in one registry (`src/chat/commands.ts`): a `name`, optional
@@ -193,7 +261,8 @@ no other file knows its name.
 
 `/model` picks a model (pending until the next message, as above), `/new` starts a new chat on
 the current model (the app opens the session the way a first chat does, and the old screen's
-stream is disposed with it), `/clear` wipes the screen with the Ctrl+L mechanism and keeps the
+stream is disposed with it), `/providers [provider]` connects a provider without leaving the
+chat (#210), `/clear` wipes the screen with the Ctrl+L mechanism and keeps the
 session, `/help` prints the commands and the keys above the prompt, and `/exit` (alias
 `/quit`) leaves — the same leave as the second idle Ctrl+C.
 
@@ -215,9 +284,10 @@ which a flow takes the input area over and gives it back with a result:
 `const answer = await slot.request<string | null>((settle) => <ModelPicker … onSelect={settle}
 onCancel={() => settle(null)} />)`. The prompt is not rendered while a flow is up, so the flow
 owns the keys (the screen's Ctrl+C/Ctrl+L stands down), and one flow at a time is a property
-of the layout rather than a lock. The model picker is the first user; a `question` part, an
-approval, and the `/providers` key entry (#210, X7) fit without changing the slot, because how
-many steps a flow takes is the flow's business and it settles once, at the end. See
+of the layout rather than a lock. The model picker and the `/providers` key entry are its two users today — the latter (#210, X7)
+picks a provider, asks for a secret and saves it as one flow, settling once, which is why it
+needed no change to the slot; a `question` part and an approval fit the same way, because how
+many steps a flow takes is the flow's business. See
 [`docs/commands.md`](./docs/commands.md).
 
 ### Deleting a chat
@@ -342,7 +412,7 @@ install, because there is nothing here for npm to replace.
 
 | key                     | what it does                                                                                          |
 | ----------------------- | ----------------------------------------------------------------------------------------------------- |
-| `/` + Enter             | the command menu: `/model`, `/new`, `/clear`, `/help`, `/exit` (#207)                                 |
+| `/` + Enter             | the command menu: `/model`, `/providers`, `/new`, `/clear`, `/help`, `/exit` (#207, #210)             |
 | Enter                   | send — also while a reply streams, which is what steering is                                          |
 | Ctrl+J, Alt+Enter       | insert a newline                                                                                      |
 | ←/→, Home/End, Ctrl+A/E | move the cursor; Home/End and Ctrl+A/Ctrl+E take the line's ends                                      |
@@ -456,6 +526,8 @@ src/
   browser.ts             open the sign-in page (xdg-open / open / start), and when not to
   errors.ts              ApiError / fetch failures → a message and hints
   help.ts                the --help text
+  providers/
+    credential-form.ts   CREDENTIAL_FORMS: the key form, built from the credential type (#210)
   signals.ts             SIGINT/SIGTERM/SIGHUP → handlers, and a disposer
   terminal.ts            restoreTerminal (raw mode off, cursor shown), and clearScreen
   version.ts             the version injected at build time
@@ -481,7 +553,9 @@ src/
                          reads), transcript-view (the static/live split, #208), status-line
                          (the line, the working indicator and its clock, #208), prompt-input
                          (and its command menu), prompt-slot (what takes the input area
-                         over, #207), notice-view, model-picker
+                         over, #207), secret-input (a masked, non-echoing one-line input,
+                         #210), provider-setup (the connect-a-provider flow, #210),
+                         notice-view, model-picker
   update/
     index.ts             the auto-update: the notice, and the decision to check
     decide.ts            the off switches (env / config / CI), the hourly throttle, the claim
@@ -491,9 +565,12 @@ src/
     state.ts             update-state.json: the timestamp, the claim, the root, the outcome
     notice.ts            the one line the next run prints, once
   commands/list.ts       `oh sessions` / `oh agents` / `oh sessions delete`
+  commands/providers.tsx `oh providers` / `add` / `remove` (#210)
   commands/preferences.ts  `oh default-model`
-  commands/io.ts         what a print-and-stop command writes, and how it fails
-  commands/auth.ts       `oh login` / `oh logout` / `oh whoami`
+  commands/io.ts         what a print-and-stop command writes, how it fails, and the
+                         read-line / y-or-n pair the commands that ask share
+  commands/auth.ts       `oh login` / `oh logout` / `oh whoami`, and offerSignIn — the
+                         device flow a chat that found no session offers to run (#210)
   commands/update.ts     `oh update` — the auto-update, in the foreground
   dev/fake.ts            OPENHARNESS_FAKE: the fake client, seeded, dev only
   test-support/          test-only helpers (fake clients, keystrokes, frame waits, and this
@@ -524,6 +601,16 @@ The auth commands run against the fake too: `oh login` asks it for the (determin
 polls it once, and stores its `FAKE_SESSION_TOKEN` in the real credentials file — point
 `XDG_CONFIG_HOME` at a scratch directory when you do that by hand. `oh logout` signs the fake
 out; `oh whoami` reads what the login stored.
+
+`OPENHARNESS_FAKE_SIGNED_OUT=1` (beside `OPENHARNESS_FAKE=1`) makes the fake start **signed
+out**, which is how the sign-in a chat offers with no session — and the 401 a stale one gets —
+is seen without a server and a second terminal (#210). The seeding happens first and the
+sign-out last, so the catalog and the default model are the dev ones; `oh` then asks
+`Sign in now? [Y/n]`, and the fake's scripted device flow approves.
+
+The dev fake's clock ticks a millisecond a call, so the agents and sessions it seeds have a
+known order: a list is ordered by `(created_at, id)`, and two rows created inside one
+millisecond are tied and then ordered by the random half of their ULIDs.
 
 ## Public API
 
@@ -601,6 +688,10 @@ denial, cancellation, revoke failures); `src/index.test.ts` drives `run()` all t
 | `src/chat/commands.test.ts`                       | the registry, the parse (`//`, unknown, aliases), the filter, the closest match, `currentModelOf`, and every command's `run` (#207)                                                       |
 | `src/components/command-menu.test.tsx`            | the menu's rows, the highlight, and the usage column padded to the whole registry (#207)                                                                                                  |
 | `src/components/prompt-slot.test.tsx`             | a flow in the prompt's place, its result, its steps, and a flow that replaces one that is up (#207)                                                                                       |
+| `src/providers/credential-form.test.ts`           | the form table: a form per credential type, the body it builds, and the fallback for an unknown provider (#210, X6)                                                                       |
+| `src/components/secret-input.test.tsx`            | the hidden input: no echo, the mask's length, paste (newline and all), Enter/Esc, and the character the flow claims before it is inserted (#210)                                          |
+| `src/components/provider-setup.test.tsx`          | the connect flow: the provider list and its free-tier hints, the key page and `o`, a save, a rejected key asking again, a stale session, Esc back and Esc out (#210)                      |
+| `src/commands/providers.test.tsx`                 | `oh providers`: the list's columns, the remove question, `--yes`, and the connect screen end to end (#210)                                                                                |
 | `src/markdown/text.test.ts`                       | the wrapper: prose and pasted indentation, wide characters, long words, truncation and alignment (#205)                                                                                   |
 | `src/markdown/theme.test.ts`                      | `COLORFGBG`, `NO_COLOR`, the config's `theme`, and the two syntax palettes (#205)                                                                                                         |
 | `src/markdown/highlight.test.ts`                  | highlight.js → spans: tokens, nested scopes, entities, a language it does not know, half a snippet (#205)                                                                                 |
@@ -609,7 +700,7 @@ denial, cancellation, revoke failures); `src/index.test.ts` drives `run()` all t
 | `src/components/reply-meta.test.ts`               | durations and token counts, and the line they compose: the model only when it is news, nothing invented, no line when there is nothing to say (#208)                                      |
 | `src/components/status-line.test.tsx`             | the line's parts and colours, the shortened id, the model's display name, the spinner on fake timers, the quiet window, retrying and interrupted, and what a narrow terminal drops (#208) |
 | `src/browser.test.ts`                             | the skip rules and the per-platform command, with an injected spawn                                                                                                                       |
-| `src/commands/auth.test.ts`                       | `oh login` / `logout` / `whoami` against the fake's scripted device flow, mid-poll cancellation included                                                                                  |
+| `src/commands/auth.test.ts`                       | `oh login` / `logout` / `whoami` against the fake's scripted device flow, mid-poll cancellation included, and `offerSignIn` — the chat's offer, and the answers it takes as yes (#210)    |
 | `src/commands/preferences.test.ts`                | `oh default-model`: print, set, replace, the failures                                                                                                                                     |
 | `src/commands/list.test.ts`, `src/paging.test.ts` | the listings, their formatting, `sessions delete`, and the `next_page` walk                                                                                                               |
 | `src/chat/session.test.ts`                        | the runtime: transcript, stream, send, `/model`, deleted sessions, dispose, and the turn clock the status line reads (#208)                                                               |

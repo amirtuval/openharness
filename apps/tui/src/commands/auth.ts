@@ -4,6 +4,7 @@ import { AuthenticationError, DeviceLoginError } from '@openharness/client'
 import type { BrowserOutcome } from '../browser'
 import type { CredentialStore } from '../credentials'
 import { describeError, notSignedInMessage, type ErrorContext } from '../errors'
+import { readLine } from './io'
 
 /**
  * `oh login` / `oh logout` / `oh whoami` (epic #65, A6).
@@ -97,6 +98,53 @@ export async function runLogin(io: LoginIo): Promise<number> {
   } catch (error) {
     return reportFailure(io, error)
   }
+}
+
+/** The prompt `oh` puts before a device flow it started because something said 401. */
+export const SIGN_IN_QUESTION = 'Sign in now? [Y/n] '
+
+/** Everything {@link offerSignIn} needs on top of {@link AuthIo}. */
+export interface OfferSignInIo extends AuthIo {
+  /** Where the answer to {@link SIGN_IN_QUESTION} is read from. */
+  readonly stdin: NodeJS.ReadStream
+  /** Write the question without a trailing newline: the answer belongs on the same line. */
+  readonly prompt: (text: string) => void
+  /** Open the sign-in page. Injectable so tests never launch a browser. */
+  readonly openBrowser: (url: string) => BrowserOutcome
+  /** Ctrl+C: stops the poll, and the offer reports itself declined. */
+  readonly signal?: AbortSignal | undefined
+}
+
+/**
+ * The sign-in `oh` offers before it gives up (#210, epic #201 X7).
+ *
+ * A reader who runs `oh` with no session is told to run `oh login` — a command they have to
+ * know, from a prompt that could simply have asked. This asks: `Sign in now? [Y/n]`, Enter
+ * taking the default `Y` because the question only comes up when there is no session at all.
+ * A yes is {@link runLogin}, the same device flow, so the URL, the code, the browser and the
+ * token store are one implementation with two front doors.
+ *
+ * @returns the session token now stored for the server, or `undefined` when the reader said no
+ *   or the login did not finish — the caller then reports "not signed in" as it always did.
+ */
+export async function offerSignIn(io: OfferSignInIo): Promise<string | undefined> {
+  io.prompt(SIGN_IN_QUESTION)
+  const answer = await readLine(io.stdin)
+  if (!isSignInAnswer(answer)) return undefined
+
+  const code = await runLogin({ ...io, noBrowser: false })
+  if (code !== 0) return undefined
+  return io.store.tokenFor(io.server)
+}
+
+/**
+ * Whether an answer to {@link SIGN_IN_QUESTION} means yes: Enter (the capital `Y` in the
+ * prompt is the default), `y`, or `yes`, in any case. Everything else — including an
+ * end-of-input from a pipe nobody wrote to — is a no.
+ */
+export function isSignInAnswer(answer: string): boolean {
+  const trimmed = answer.trim().toLowerCase()
+  return trimmed === '' || trimmed === 'y' || trimmed === 'yes'
 }
 
 /**
