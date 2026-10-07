@@ -1,3 +1,16 @@
+import { chatReferenceLines } from './chat/commands'
+
+/**
+ * The in-chat reference, indented to sit inside {@link HELP_TEXT}.
+ *
+ * It is the same list `/help` prints, from the same place (`chat/commands.ts`): the commands
+ * the chat has and the keys it binds, so the help text and the chat cannot come to disagree
+ * about either.
+ */
+const CHAT_REFERENCE = chatReferenceLines()
+  .map((line) => `  ${line}`)
+  .join('\n')
+
 /** The `oh --help` text, and what a usage error is followed by. */
 export const HELP_TEXT = `openharness — chat with an agent from the terminal
 
@@ -62,15 +75,8 @@ New chats:
   directly; --agent starts from a saved agent preset instead.
 
 In the chat:
-  /model                       pick a model; it applies from the next message
-  Enter                        send (works while the agent is replying — steering)
-  Ctrl+J / Alt+Enter           insert a newline
-  ←/→, Home/End                move the cursor; Ctrl+A, Ctrl+E for the ends of the line
-  ↑/↓                          walk what you have sent before, and a draft's own lines
-  Backspace, Delete            delete behind the cursor, and at it
-  Ctrl+U, Ctrl+K               delete to the start of the line, and to its end
-  Ctrl+W, Alt+Backspace        delete the word before the cursor
-  Alt+B, Alt+F, Ctrl+←/→       jump a word back and forward
-  Ctrl+L                       clear the screen; the session stays
-  Ctrl+C                       interrupt the reply; press twice when idle to exit
+${CHAT_REFERENCE}
+
+  Type / at the start of a line to see the commands, and /help inside the chat
+  for this list. A message that starts with // sends a literal /.
 `

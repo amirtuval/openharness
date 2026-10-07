@@ -1,7 +1,15 @@
 import { Box, Text, useInput, usePaste } from 'ink'
 import { useRef, useState } from 'react'
 
+import {
+  commandQuery,
+  commandUsageWidth,
+  filterCommands,
+  findCommand,
+  type ChatCommand,
+} from '../chat/commands'
 import type { PromptHistory } from '../history'
+import { CommandMenu } from './command-menu'
 
 /**
  * How many characters a paste may hold before the prompt shows it collapsed (#206).
@@ -54,6 +62,19 @@ interface Display {
 
 const EMPTY: Buffer = { value: '', cursor: 0, collapsed: [] }
 
+/**
+ * Which command the menu has highlighted, and whether Esc has closed it (#207).
+ *
+ * `dismissed` is not tied to a query: any change to the buffer's query starts the menu over
+ * from the top, dismissed or not, so one boolean is the whole of it (see `commit`).
+ */
+interface MenuState {
+  readonly index: number
+  readonly dismissed: boolean
+}
+
+const FRESH_MENU: MenuState = { index: 0, dismissed: false }
+
 export interface PromptInputProps {
   /** Called with the buffer on Enter; an empty buffer is not sent, but is cleared. */
   readonly onSubmit: (text: string) => void
@@ -61,6 +82,11 @@ export interface PromptInputProps {
   readonly onActivity?: (() => void) | undefined
   /** What ↑ and ↓ walk back through; without one the arrows only move between lines (#206). */
   readonly history?: PromptHistory | undefined
+  /**
+   * The slash commands a `/` line completes to (#207); without them `/` is just a character
+   * and no menu opens.
+   */
+  readonly commands?: readonly ChatCommand[] | undefined
 }
 
 /**
@@ -91,9 +117,17 @@ export interface PromptInputProps {
  * bracketed paste mode on for as long as this prompt is up — so an embedded `\r` in what
  * was pasted is a newline in the buffer, never a send. The cursor is drawn as an
  * inverse-video cell, so it is visible on every line including an empty one.
+ *
+ * With a {@link PromptInputProps.commands} registry, a buffer that starts with `/` and has
+ * no whitespace in it yet is a command being typed, and the menu appears under the prompt
+ * (#207): ↑/↓ highlight — they do not walk the history while it is up — Tab completes the
+ * highlighted command into the buffer, Enter runs it, and Esc closes the menu and leaves the
+ * text alone. The prompt decides none of what a command *is*: it submits the name, and the
+ * screen parses the line against the same registry.
  */
-export function PromptInput({ onSubmit, onActivity, history }: PromptInputProps) {
+export function PromptInput({ onSubmit, onActivity, history, commands }: PromptInputProps) {
   const [buffer, setBuffer] = useState<Buffer>(EMPTY)
+  const [menu, setMenu] = useState<MenuState>(FRESH_MENU)
 
   // The buffer the handlers read.
   //
@@ -108,12 +142,56 @@ export function PromptInput({ onSubmit, onActivity, history }: PromptInputProps)
   // otherwise the history entry on screen and the draft to go back to.
   const browsingRef = useRef<{ readonly index: number; readonly draft: Buffer } | null>(null)
 
+  // The menu's state, for the same reason: the handler below must read what is committed,
+  // or two keystrokes inside one render would both move the highlight to the same place.
+  const menuRef = useRef<MenuState>(menu)
+  const setMenuState = (next: MenuState): void => {
+    menuRef.current = next
+    setMenu(next)
+  }
+
   const commit = (next: Buffer, options: { readonly activity?: boolean } = {}): void => {
+    // The menu is a function of the buffer, and its state is the part that is not: a
+    // different query is a different list, so the highlight goes back to the top and an Esc
+    // that closed the old list is forgotten.
+    if (commandQuery(next.value) !== commandQuery(bufferRef.current.value)) {
+      setMenuState(FRESH_MENU)
+    }
     bufferRef.current = next
     setBuffer(next)
     if (options.activity !== false) {
       onActivity?.()
     }
+  }
+
+  /**
+   * The commands the menu is offering for a buffer, or `null` when it is not up: no registry,
+   * not a command line, closed with Esc, a name that is already a command, or a query that
+   * matches nothing at all.
+   *
+   * A query that *is* a command name — `/model`, or the alias `/quit` — needs no list: the
+   * line already says what it runs, and a one-row menu under it is noise. The menu is for
+   * the prefixes on the way there.
+   */
+  const menuRows = (value: string, dismissed: boolean): readonly ChatCommand[] | null => {
+    if (commands === undefined) return null
+    const query = commandQuery(value)
+    if (query === null || dismissed) return null
+    if (findCommand(query, commands) !== undefined) return null
+    const matches = filterCommands(query, commands)
+    return matches.length === 0 ? null : matches
+  }
+
+  /** The highlighted row, from an index that a shrinking filter may have left behind. */
+  const highlighted = (rows: readonly ChatCommand[]): ChatCommand | undefined =>
+    rows[clamp(menuRef.current.index, 0, rows.length - 1)]
+
+  /** ↑/↓ in the menu: move the highlight, which stops at both ends. */
+  const moveMenu = (delta: number, rows: readonly ChatCommand[]): void => {
+    setMenuState({
+      ...menuRef.current,
+      index: clamp(menuRef.current.index + delta, 0, rows.length - 1),
+    })
   }
 
   const edit = (
@@ -144,13 +222,30 @@ export function PromptInput({ onSubmit, onActivity, history }: PromptInputProps)
     )
   }
 
+  /**
+   * Tab: put the highlighted command in the buffer, cursor at its end, as if it had been
+   * typed. A command that takes arguments gets a space after its name, so the next keystroke
+   * lands where its arguments go.
+   */
+  const completeWith = (rows: readonly ChatCommand[]): void => {
+    const command = highlighted(rows)
+    if (command === undefined) return
+    const text = `/${command.name}${command.args === undefined ? '' : ' '}`
+    edit(() => ({ value: text, cursor: text.length, collapsed: [] }))
+  }
+
   const submit = (): void => {
-    const { value } = bufferRef.current
-    history?.add(value)
+    const rows = menuRows(bufferRef.current.value, menuRef.current.dismissed)
+    // Enter with the menu up runs what is highlighted rather than what has been typed so
+    // far: `/mo` is not a command, and the list on screen is what the user is choosing from.
+    // The row's name goes, not the row's usage — arguments are the user's to type.
+    const chosen = rows === null ? undefined : highlighted(rows)
+    const text = chosen === undefined ? bufferRef.current.value : `/${chosen.name}`
+    history?.add(text)
     browsingRef.current = null
     commit(EMPTY, { activity: false })
-    if (value.trim() !== '') {
-      onSubmit(value)
+    if (text.trim() !== '') {
+      onSubmit(text)
     }
   }
 
@@ -243,6 +338,20 @@ export function PromptInput({ onSubmit, onActivity, history }: PromptInputProps)
     // Ctrl+C is the screen's: it interrupts, and it exits on the second idle press.
     if (key.ctrl && input === 'c') return
 
+    // The menu's keys come before the buffer's, because they are the buffer's keys (#207):
+    // ↑/↓ would walk the history out from under the list, Tab is otherwise unbound, and Esc
+    // would leave a highlighted row on screen that the user has just dismissed.
+    const rows = menuRows(bufferRef.current.value, menuRef.current.dismissed)
+    if (rows !== null) {
+      if (key.upArrow) return moveMenu(-1, rows)
+      if (key.downArrow) return moveMenu(1, rows)
+      if (key.tab) return completeWith(rows)
+      if (key.escape) {
+        setMenuState({ ...menuRef.current, dismissed: true })
+        return
+      }
+    }
+
     // Ctrl+J arrives as a bare line feed: it is a newline, not a send.
     if (input === '\n') {
       insert('\n')
@@ -317,7 +426,25 @@ export function PromptInput({ onSubmit, onActivity, history }: PromptInputProps)
     insert(pasted)
   })
 
-  return <BufferView buffer={buffer} />
+  const rows = menuRows(buffer.value, menu.dismissed)
+
+  return (
+    <Box flexDirection="column">
+      <BufferView buffer={buffer} />
+      {rows !== null && (
+        <CommandMenu
+          commands={rows}
+          selected={clamp(menu.index, 0, rows.length - 1)}
+          width={commands === undefined ? 0 : commandUsageWidth(commands)}
+        />
+      )}
+    </Box>
+  )
+}
+
+/** Keep a number inside `[low, high]`. */
+function clamp(value: number, low: number, high: number): number {
+  return Math.min(Math.max(value, low), high)
 }
 
 /** One line of the prompt as it is drawn. */

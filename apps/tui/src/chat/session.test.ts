@@ -158,6 +158,29 @@ describe('createChatSession', () => {
     session.dispose()
   })
 
+  it('shows a line a command wrote, and keeps it until the next message', async () => {
+    const fake = createFakeClient()
+    fake.respondWith('Answered.')
+    const session = createChatSession({ client: fake, session: fake.session })
+    await session.start()
+
+    session.showNotice({ kind: 'info', text: 'Commands and keys', hints: ['/model'] })
+    expect(session.getState().notice).toEqual({
+      kind: 'info',
+      text: 'Commands and keys',
+      hints: ['/model'],
+    })
+
+    // A hint goes away when the user types; what a command printed is not a hint.
+    session.dismissHint()
+    expect(session.getState().notice?.text).toBe('Commands and keys')
+
+    await session.send('Hello.')
+    await fake.waitForIdle()
+    expect(session.getState().notice).toBeNull()
+    session.dispose()
+  })
+
   it('sends a model picked with /model on the next message, and clears it', async () => {
     const fake = createFakeClient()
     fake.respondWith('Switched.', { sessionId: fake.session.id })

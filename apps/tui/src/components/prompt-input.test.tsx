@@ -1,6 +1,7 @@
 import { cleanup, render } from 'ink-testing-library'
 import { afterEach, describe, expect, it } from 'vitest'
 
+import type { ChatCommand } from '../chat/commands'
 import type { PromptHistory } from '../history'
 import {
   frameOf,
@@ -8,10 +9,18 @@ import {
   pressKey,
   typeText,
   waitFor,
+  waitForFrame,
   waitForScreen,
   type TestInstance,
 } from '../test-support/input'
 import { LARGE_PASTE_CHARS, PromptInput, promptLines } from './prompt-input'
+
+/** A registry the menu assertions can talk about, two plain commands and one alias. */
+const COMMANDS: readonly ChatCommand[] = [
+  { name: 'model', description: 'pick a model', run: () => undefined },
+  { name: 'new', description: 'start a new chat', run: () => undefined },
+  { name: 'exit', aliases: ['quit'], description: 'leave the chat', run: () => undefined },
+]
 
 /** A history that is only a list: the file side is covered in `history.test.ts`. */
 function fakeHistory(entries: readonly string[] = []): PromptHistory {
@@ -26,12 +35,13 @@ function fakeHistory(entries: readonly string[] = []): PromptHistory {
 }
 
 /** Render the prompt and record what it submitted. */
-function renderPrompt(history?: PromptHistory) {
+function renderPrompt(history?: PromptHistory, commands?: readonly ChatCommand[]) {
   const submitted: string[] = []
   let activity = 0
   const instance = render(
     <PromptInput
       history={history}
+      {...(commands === undefined ? {} : { commands })}
       onSubmit={(text) => {
         submitted.push(text)
       }}
@@ -42,6 +52,11 @@ function renderPrompt(history?: PromptHistory) {
   )
 
   return { ...instance, submitted, activityCount: () => activity }
+}
+
+/** Render the prompt with the registry, the way the chat screen mounts it. */
+function renderMenuPrompt(history?: PromptHistory) {
+  return renderPrompt(history, COMMANDS)
 }
 
 type TestPrompt = TestInstance & { readonly submitted: string[]; activityCount: () => number }
@@ -506,6 +521,178 @@ describe('PromptInput paste', () => {
     // Ctrl+U from the end takes the word, the label, and everything between.
     pressKey(prompt, 'ctrlU')
     await waitForScreen(prompt, '❯')
+  })
+})
+
+describe('PromptInput command menu', () => {
+  it('opens on a bare / and lists every command', async () => {
+    const prompt = renderMenuPrompt()
+    await waitForScreen(prompt, '❯')
+
+    typeText(prompt, '/')
+    await waitForFrame(prompt, '❯ /model')
+
+    const frame = frameOf(prompt)
+    expect(frame).toContain('pick a model')
+    expect(frame).toContain('/new')
+    expect(frame).toContain('start a new chat')
+    expect(frame).toContain('/exit (/quit)')
+    expect(frame).toContain('leave the chat')
+    // The one line that names the keys, so Tab and Esc are discoverable.
+    expect(frame).toContain('Tab to complete')
+  })
+
+  it('filters as the command word is typed', async () => {
+    const prompt = renderMenuPrompt()
+    await waitForScreen(prompt, '❯')
+
+    typeText(prompt, '/')
+    await waitForFrame(prompt, '❯ /model')
+    typeText(prompt, 'ne')
+
+    await waitForFrame(prompt, '❯ /new')
+    await waitFor(() => !frameOf(prompt).includes('pick a model'), {
+      describe: () => frameOf(prompt),
+    })
+  })
+
+  it('leaves the arrows to the history when the query matches no command', async () => {
+    const prompt = renderMenuPrompt(fakeHistory(['a previous prompt']))
+    await waitForScreen(prompt, '❯')
+
+    typeText(prompt, '/zzz')
+    pressKey(prompt, 'up')
+
+    // ↑ is the history's again: no menu, so nothing takes the key from it.
+    await waitForFrame(prompt, '❯ a previous prompt')
+    expect(frameOf(prompt)).not.toContain('Tab to complete')
+  })
+
+  it('moves the highlight with ↑/↓, and never walks the history while it is up', async () => {
+    const prompt = renderMenuPrompt(fakeHistory(['a previous prompt']))
+    await waitForScreen(prompt, '❯')
+
+    typeText(prompt, '/')
+    await waitForFrame(prompt, '❯ /model')
+    pressKey(prompt, 'down')
+    await waitForFrame(prompt, '❯ /new')
+    pressKey(prompt, 'down')
+    await waitForFrame(prompt, '❯ /exit (/quit)')
+    pressKey(prompt, 'up')
+    await waitForFrame(prompt, '❯ /new')
+
+    // ↑ at the top of the list stays there; ↓ then lands on the second row, which is where
+    // the highlight would be if the ↑ had gone into the history instead.
+    pressKey(prompt, 'up')
+    pressKey(prompt, 'up')
+    pressKey(prompt, 'down')
+    await waitForFrame(prompt, '❯ /new')
+
+    expect(frameOf(prompt)).not.toContain('a previous prompt')
+    expect(promptLine(prompt)).toBe('❯ /')
+  })
+
+  it('completes the highlighted command into the buffer on Tab', async () => {
+    const prompt = renderMenuPrompt()
+    await waitForScreen(prompt, '❯')
+
+    typeText(prompt, '/ne')
+    await waitForFrame(prompt, 'start a new chat')
+    pressKey(prompt, 'tab')
+    // Completing leaves the menu closed — `/new` is a command, and a one-row list under it
+    // is noise — so what Enter submits is the buffer: this is how the test tells the
+    // completed `/new` from the `/ne` that was typed.
+    await waitFor(() => !frameOf(prompt).includes('start a new chat'), {
+      describe: () => frameOf(prompt),
+    })
+    pressKey(prompt, 'enter')
+
+    await waitFor(() => prompt.submitted.length === 1)
+    expect(prompt.submitted).toEqual(['/new'])
+  })
+
+  it('runs the highlighted command on Enter, not the half-typed name', async () => {
+    const prompt = renderMenuPrompt()
+    await waitForScreen(prompt, '❯')
+
+    typeText(prompt, '/ne')
+    await waitForFrame(prompt, 'start a new chat')
+    pressKey(prompt, 'enter')
+
+    await waitFor(() => prompt.submitted.length === 1)
+    expect(prompt.submitted).toEqual(['/new'])
+  })
+
+  it('closes once the typed name is a command in its own right', async () => {
+    const prompt = renderMenuPrompt()
+    await waitForScreen(prompt, '❯')
+
+    typeText(prompt, '/mo')
+    await waitForFrame(prompt, 'pick a model')
+    typeText(prompt, 'del')
+
+    // `/model` needs no list: the line already says what it runs.
+    await waitFor(() => !frameOf(prompt).includes('pick a model'), {
+      describe: () => frameOf(prompt),
+    })
+    expect(promptLine(prompt)).toBe('❯ /model')
+    pressKey(prompt, 'enter')
+    await waitFor(() => prompt.submitted.length === 1)
+    expect(prompt.submitted).toEqual(['/model'])
+  })
+
+  it('closes on Esc and keeps what is typed', async () => {
+    const prompt = renderMenuPrompt()
+    await waitForScreen(prompt, '❯')
+
+    typeText(prompt, '/ne')
+    await waitForFrame(prompt, 'start a new chat')
+    pressKey(prompt, 'escape')
+    await waitFor(() => !frameOf(prompt).includes('start a new chat'), {
+      describe: () => frameOf(prompt),
+    })
+
+    expect(promptLine(prompt)).toBe('❯ /ne')
+    pressKey(prompt, 'enter')
+    await waitFor(() => prompt.submitted.length === 1)
+    // Nothing was completed for it: an Esc'd `/ne` is the text the user typed, and the
+    // screen is what decides that no command is called that.
+    expect(prompt.submitted).toEqual(['/ne'])
+  })
+
+  it('closes once the command word is over, and types the rest as arguments', async () => {
+    const prompt = renderMenuPrompt()
+    await waitForScreen(prompt, '❯')
+
+    typeText(prompt, '/ne')
+    await waitForFrame(prompt, 'start a new chat')
+    typeText(prompt, ' ')
+
+    await waitFor(() => !frameOf(prompt).includes('start a new chat'), {
+      describe: () => frameOf(prompt),
+    })
+    // The space is in the buffer (Ink trims it out of the frame, so Enter is what shows
+    // it), and the menu left as soon as the command word was over.
+    pressKey(prompt, 'enter')
+    await waitFor(() => prompt.submitted.length === 1)
+    expect(prompt.submitted).toEqual(['/ne '])
+  })
+
+  it('opens no menu without a registry, or for a line that is not a command', async () => {
+    const plain = renderPrompt()
+    await waitForScreen(plain, '❯')
+    typeText(plain, '/')
+    await waitForFrame(plain, '❯ /')
+    expect(frameOf(plain)).not.toContain('Tab to complete')
+    cleanup()
+
+    // `//` is the escape hatch, and an ordinary message is none of the menu's business.
+    const escaped = renderMenuPrompt()
+    await waitForScreen(escaped, '❯')
+    typeText(escaped, '//')
+    typeText(escaped, 'hello')
+    await waitForFrame(escaped, '❯ //hello')
+    expect(frameOf(escaped)).not.toContain('Tab to complete')
   })
 })
 

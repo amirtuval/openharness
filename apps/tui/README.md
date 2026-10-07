@@ -59,9 +59,12 @@ builds the CLI and runs it against `http://localhost:3000` (`yarn oh:staging` an
 | `oh update`                            | install the newest published version now                               |
 | `oh --help`, `oh --version`            | print and stop                                                         |
 
-Inside a chat: Enter sends (a message sent mid-reply steers it), `/model` switches models,
-Ctrl+J or Alt+Enter inserts a newline, and Ctrl+C interrupts — pressed again when idle, it
-leaves. On the way out, `oh` prints the `oh -s <id>` line that resumes the chat.
+Inside a chat: Enter sends (a message sent mid-reply steers it), and Ctrl+J or Alt+Enter
+inserts a newline. Type `/` for the command menu — ↑/↓ choose, Tab completes, Enter runs, Esc
+closes — which holds `/model` (switch models), `/new` (start a new chat on the current model),
+`/clear` (clear the screen, keeping the session), `/help`, and `/exit`. A message that starts
+with `//` sends a literal `/`. Ctrl+C interrupts the reply; pressed again when idle, it leaves.
+On the way out, `oh` prints the `oh -s <id>` line that resumes the chat.
 
 The session token is stored per server in `~/.config/openharness/credentials.json` (mode
 `0600`). `oh logout` revokes it server-side and forgets it locally.
