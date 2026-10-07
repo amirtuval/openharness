@@ -35,6 +35,11 @@ export interface SecretInputProps {
    * its own — `o` for "open the provider's key page" — without the letter ending up in the key.
    * Returning `true` means it was handled and is not inserted.
    *
+   * It is asked only while the input is **empty**: once a key is being typed, every character
+   * is part of it. A key typed by hand — or pasted one character at a time by a terminal
+   * without bracketed paste — holds `o`s like any other letter, and claiming them mid-key
+   * would open the browser and silently drop them from the secret.
+   *
    * One channel rather than a second `useInput`: Ink delivers every key to every mounted
    * handler, so a sibling hook binding `o` would open the page *and* put an `o` in the key.
    */
@@ -101,7 +106,7 @@ export function SecretInput({
   /** Insert what arrived, minus line endings, giving the flow first refusal on `o`. */
   function insert(text: string): void {
     const stripped = text.replace(/[\r\n]+/gu, '')
-    if (stripped.length === 1 && onChar?.(stripped) === true) return
+    if (stripped.length === 1 && value.current === '' && onChar?.(stripped) === true) return
     set(value.current + stripped)
   }
 

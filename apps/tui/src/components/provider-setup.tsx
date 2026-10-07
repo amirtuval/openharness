@@ -232,7 +232,7 @@ export function ProviderSetup({
         <Text dimColor>saving…</Text>
       ) : (
         <Text dimColor>
-          {`Enter to save, Esc to go back${info?.keyUrl === undefined ? '' : ', o for the key page'}.`}
+          {`Enter to save, Esc to go back${info?.keyUrl === undefined ? '' : ', o (before typing) for the key page'}.`}
         </Text>
       )}
     </Box>

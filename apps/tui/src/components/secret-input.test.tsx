@@ -142,4 +142,23 @@ describe('SecretInput', () => {
     pressKey(input, 'enter')
     expect(input.submitted).toEqual(['k'])
   })
+
+  it('stops asking once a key is being typed, so a typed key keeps its own letters', async () => {
+    let claimed = 0
+    const input = renderInput({
+      onChar: (character) => {
+        if (character !== 'o') return false
+        claimed += 1
+        return true
+      },
+    })
+
+    // One character at a time, as typing by hand (or a paste without bracketed paste) sends it.
+    typeText(input, 'sk-foo-0')
+    await waitForFrame(input, SECRET_MASK.repeat(8))
+    pressKey(input, 'enter')
+
+    expect(input.submitted).toEqual(['sk-foo-0'])
+    expect(claimed).toBe(0)
+  })
 })
