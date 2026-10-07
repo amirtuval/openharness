@@ -104,7 +104,7 @@ export function paint(theme: TerminalTheme, color: string | undefined): string |
 }
 
 /**
- * The named colours the message view draws with.
+ * The named colours the transcript and the status line draw with.
  *
  * Every one of them is one of the sixteen the terminal theme defines, so `oh` wears the
  * terminal's colours and not its own. `chrome` is bright black — the one a reader reads as
@@ -124,6 +124,13 @@ export const PALETTE = {
   code: 'magenta',
   /** Rules, table borders, quote bars, code frames, a link's URL. */
   chrome: 'gray',
+  /**
+   * The status line's "something is happening": a turn that is working or retrying (#208).
+   * Amber rather than anything louder — a chat spends most of its life here.
+   */
+  busy: 'yellow',
+  /** A turn that did not finish the way anyone wanted: an interrupt (#208). */
+  alarm: 'red',
 } as const
 
 /** One colour of a syntax theme, as highlight.js classifies code. */

@@ -9,6 +9,7 @@ import { makeModelEntry } from '@openharness/protocol/fixtures'
 
 import { App, type ExitPayload } from './app'
 import type { ChatOptions } from './args'
+import { shortSessionId } from './components/status-line'
 import type { PromptHistory } from './history'
 import { listingAgents } from './test-support/fake'
 import {
@@ -70,11 +71,12 @@ type TestApp = TestInstance & { exits: ExitPayload[] }
  * Wait for the chat screen.
  *
  * Its status line is the proof it is up: passing a session id also proves *which* session
- * the app opened, which for a new chat is one the test did not know in advance.
+ * the app opened, which for a new chat is one the test did not know in advance. The line
+ * shows the shortened id (#208), so that is what is matched.
  */
 async function waitForChat(app: TestApp, sessionId?: string): Promise<void> {
   if (sessionId !== undefined) {
-    await waitForFrame(app, sessionId)
+    await waitForFrame(app, shortSessionId(sessionId))
   }
   await waitForScreen(app, / · (idle|running)$/mu)
 }
@@ -166,8 +168,19 @@ describe('App', () => {
     await waitForScreen(app, 'as your default model for new chats?')
     typeText(app, 'n')
 
-    await waitForFrame(app, 'anthropic/claude-sonnet-5 · sesn_')
-    await waitForFrame(app, /sesn_[0-9A-Z]+ · idle/u)
+    // The picker read the catalog, so the line names the model the way the picker did (#208).
+    await waitForFrame(app, 'Claude Sonnet 5 · sesn_')
+    // …and the session is named by a short id, not the whole `sesn_` ULID.
+    await waitForFrame(app, /sesn_…[0-9A-Z]{6} · idle/u)
+  })
+
+  it('names the model by its id when no catalog was read (#208)', async () => {
+    // `--model` skips the catalog by design: there is nothing to look a display name up in.
+    const fake = createFakeClient()
+    const app = renderApp(fake, chatOptions({ model: 'anthropic/claude-opus-5-5' }))
+
+    await waitForFrame(app, 'anthropic/claude-opus-5-5 · sesn_…')
+    expect(frameOf(app)).not.toContain('Claude Opus 5.5')
   })
 
   it('starts on the default model with no picker (#114, U1)', async () => {
@@ -252,8 +265,9 @@ describe('App', () => {
     await waitForFrame(app, '❯ 2. GPT-4.1 Mini')
     pressKey(app, 'enter')
 
-    // The pick is not sent until a message is: the status line says when it applies.
-    await waitForFrame(app, 'openai/gpt-4.1-mini (next message)')
+    // The pick is not sent until a message is: the status line says when it applies, naming
+    // the model as the picker did (the catalog is loaded by now).
+    await waitForFrame(app, 'GPT-4.1 Mini (next message)')
     expect(fake.history(sessionId).filter((event) => event.type === 'user.message')).toEqual([])
 
     submit(app, 'On the other model.')
@@ -261,7 +275,7 @@ describe('App', () => {
     await waitForFrame(app, 'you › On the other model.')
     const sent = fake.history(sessionId).find((event) => event.type === 'user.message')
     expect(sent?.type === 'user.message' && sent.model?.id).toBe('openai/gpt-4.1-mini')
-    await waitForFrame(app, /openai\/gpt-4\.1-mini · sesn_/)
+    await waitForFrame(app, /GPT-4\.1 Mini · sesn_/)
   })
 
   it('leaves the chat with /model on Ctrl+C, changing nothing', async () => {
@@ -345,11 +359,14 @@ describe('App', () => {
     submit(app, '/new')
 
     // The status line names a session that did not exist a moment ago, on the same model.
-    await waitFor(() => !frameOf(app).includes(previous), { describe: () => frameOf(app) })
+    await waitFor(() => !frameOf(app).includes(shortSessionId(previous)), {
+      describe: () => frameOf(app),
+    })
     const [newest] = (await fake.sessions.list()).data
     expect(newest?.id).not.toBe(previous)
     expect(newest?.model.id).toBe(modelId)
-    expect(frameOf(app)).toContain(newest?.id ?? '')
+    // The line shows the shortened handle (#208); the whole id is in the exit payload.
+    expect(frameOf(app)).toContain(shortSessionId(newest?.id ?? ''))
     // The chat carries on in the new session, which is the point of `/new`.
     submit(app, 'A message in the new chat.')
     await waitForFrame(app, 'you › A message in the new chat.')
@@ -466,7 +483,7 @@ describe('App', () => {
     await waitForScreen(app, 'Save openai/gpt-4.1-mini as your default model for new chats?')
     typeText(app, 'n')
 
-    await waitForFrame(app, 'openai/gpt-4.1-mini · sesn_')
+    await waitForFrame(app, 'GPT-4.1 Mini · sesn_')
     const created = (await fake.sessions.list()).data[0]
     expect(created?.model.id).toBe('openai/gpt-4.1-mini')
     // Model-first: the session has no agent, and is identified by its model.
@@ -584,15 +601,23 @@ describe('App', () => {
 
     await waitForChat(app, fake.session.id)
     submit(app, 'Go.')
-    await waitForFrame(app, '· running')
+    // Nothing has arrived yet, so the status field shows the spinner rather than `running`
+    // (#208); the word comes back once the reply's first chunk lands.
+    await waitForFrame(app, 'Working… ')
     await waitForFrame(app, /agent › One two/u)
 
     pressKey(app, 'ctrlC')
 
-    // The turn stops, the reply so far stays, and the app keeps running.
-    await waitForFrame(app, '· idle')
+    // The turn stops, the reply so far stays, and the app keeps running — and the status
+    // line says what happened to it.
+    await waitForFrame(app, 'Interrupted')
     await waitForFrame(app, /agent › One two three/u)
     expect(app.exits).toEqual([])
+
+    // …until there is something newer to say: the next send turns the line over.
+    submit(app, 'Again.')
+    await waitForFrame(app, 'you › Again.')
+    await waitFor(() => !frameOf(app).includes('Interrupted'))
   })
 
   it('leaves on the second Ctrl+C when idle, pointing at the session', async () => {
@@ -609,7 +634,9 @@ describe('App', () => {
     pressKey(app, 'ctrlC')
     await waitFor(() => app.exits.length === 1)
     expect(app.exits[0]).toEqual({ code: 0, sessionId })
-    expect(frameOf(app)).toContain(sessionId)
+    // The exit payload carries the whole id — it is what `oh -s` takes — where the line shows
+    // the shortened one on the way out (#208).
+    expect(frameOf(app)).toContain(shortSessionId(sessionId))
   })
 
   it('drops the exit hint once the user types again', async () => {
@@ -696,13 +723,18 @@ describe('App', () => {
     await waitForChat(app, sessionId)
 
     submit(app, 'One.')
-    await waitForFrame(app, '· running')
+    await waitForFrame(app, 'Working… ')
     await waitForFrame(app, /agent › First/u)
 
     submit(app, 'Two.')
 
-    await waitForFrame(app, 'you › Two.')
+    // Queued: the brain has not reached it yet, and the line says so (#208).
+    await waitForFrame(app, 'you › Two. (queued)')
+
     await waitForFrame(app, 'agent › Second reply.')
+    await waitForFrame(app, 'you › Two.')
+    // Delivered: the request that folded it in claimed it, so the tag is gone.
+    await waitFor(() => !frameOf(app).includes('(queued)'))
     expect(userTexts(fake, sessionId)).toEqual(['One.', 'Two.'])
   })
 
@@ -723,7 +755,7 @@ describe('App', () => {
     expect(app.exits).toEqual([])
   })
 
-  it('says a retrying turn is retrying, and drops the error once a reply lands', async () => {
+  it('says a retrying turn is retrying in the status line, and drops it once a reply lands', async () => {
     const fake = createFakeClient({ delayMs: 40 })
     fake.failWith({ message: 'the model is overloaded', delayMs: 40 })
     fake.respondWith('Second time lucky.', { chunks: 2, delayMs: 30 })
@@ -732,7 +764,10 @@ describe('App', () => {
 
     submit(app, 'Hello.')
 
-    await waitForFrame(app, 'error: the model is overloaded — the server is retrying')
+    // A retry is the status line's news (#208), so it is said there and not in a notice of
+    // its own: `error:` would be a second line about the same thing.
+    await waitForFrame(app, 'Retrying… the model is overloaded')
+    expect(frameOf(app)).not.toContain('error: the model is overloaded')
     await waitForFrame(app, 'agent › Second time lucky.')
     await waitFor(() => !frameOf(app).includes('the model is overloaded'))
   })

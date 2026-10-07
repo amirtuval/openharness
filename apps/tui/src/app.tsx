@@ -109,6 +109,11 @@ function AppScreen({
   const { exit } = useApp()
   const [screen, setScreen] = useState<Screen>({ kind: 'resolving' })
   const [history, setHistory] = useState<PromptHistory | undefined>(undefined)
+  // The catalog, when resolving the target happened to read it (#116 U1) — the picker a chat
+  // with no default opens on. It rides down to the chat so the status line can name the model
+  // the way the picker did (#208); a chat that started from `--model` or a stored default
+  // never read a catalog and has none, which is why nothing is fetched for this.
+  const [catalog, setCatalog] = useState<readonly ModelEntry[]>([])
   const resolved = useRef(false)
   const left = useRef(false)
 
@@ -205,6 +210,7 @@ function AppScreen({
             beginChat(target.session)
             break
           case 'choose-model':
+            setCatalog(target.models)
             setScreen({ kind: 'choose-model', models: target.models })
             break
           case 'no-models':
@@ -267,6 +273,7 @@ function AppScreen({
           session={screen.session}
           banner={banner}
           history={history}
+          catalog={catalog}
           // `/new` opens a session the way a first chat does — `openModel` — and the screen
           // for the old one unmounts with it, which disposes its stream (the effect below).
           onNewChat={openModel}
