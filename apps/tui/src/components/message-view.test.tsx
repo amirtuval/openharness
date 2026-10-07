@@ -189,6 +189,22 @@ describe('MessageView', () => {
     expect(lines(frame)).toEqual(['agent › • one', '        • two'])
   })
 
+  it('hangs the metadata line under the reply, indented with its text (#208)', () => {
+    const { lastFrame } = render(
+      <ThemeProvider theme={DARK}>
+        <MessageView message={message('hello there')} width={40} metaLine="4.2s · 1.3k tokens" />
+      </ThemeProvider>,
+    )
+
+    // The same eight columns of indent as the reply's own wrapped lines, so the metadata
+    // reads as belonging to the message above it.
+    expect(lines(lastFrame() ?? '')).toEqual(['agent › hello there', '        4.2s · 1.3k tokens'])
+  })
+
+  it('has no metadata line to draw when the caller has none (#208)', () => {
+    expect(lines(frameOf(message('hello there'), 40))).toEqual(['agent › hello there'])
+  })
+
   it('lays the message out at the width it is given', () => {
     const reply = 'one two three four five six'
 

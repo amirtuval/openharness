@@ -70,8 +70,21 @@ export const PART_RENDERERS: Record<MessagePart['type'], PartRenderer> = {
  *
  * @param props.width how wide the terminal is, when the caller knows better than Ink does —
  * the test seam the frame tests use to draw a message at a width a test can read.
+ * @param props.metaLine what the reply cost, as the one dim line under a settled agent
+ * message (issue #208). Formatted by `reply-meta.ts`, which is where the rules about
+ * durations and tokens live; it is drawn here because the indent under the `agent › ` label
+ * is this component's business, and because the line has to be written in the same `<Static>`
+ * pass as the message it belongs to.
  */
-export function MessageView({ message, width }: { message: TranscriptMessage; width?: number }) {
+export function MessageView({
+  message,
+  width,
+  metaLine,
+}: {
+  message: TranscriptMessage
+  width?: number
+  metaLine?: string | undefined
+}) {
   const theme = useTerminalTheme()
   const { stdout } = useStdout()
   const style = STYLE[message.role]
@@ -120,6 +133,12 @@ export function MessageView({ message, width }: { message: TranscriptMessage; wi
           </Text>
         )
       })}
+      {metaLine !== undefined && (
+        // Under the reply, and under the same indent as its text, so the metadata reads as
+        // belonging to the message above it rather than as a line of its own. Dim: it is a
+        // footnote about the reply, not something the model said.
+        <Text dimColor>{`${indent}${metaLine}`}</Text>
+      )}
     </>
   )
 }
