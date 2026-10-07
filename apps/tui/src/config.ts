@@ -2,8 +2,14 @@ import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 
-/** Where the server lives when nothing says otherwise. */
-export const DEFAULT_SERVER_URL = 'http://localhost:3000'
+/**
+ * Where the server lives when nothing says otherwise: production (#192).
+ *
+ * An `npm i -g openharness` has to work out of the box, and the machine it lands on has no
+ * server of its own — so the default is the one that is always there. A checkout points `oh`
+ * at its own server with `yarn oh` (or `--server` / `OPENHARNESS_URL`).
+ */
+export const DEFAULT_SERVER_URL = 'https://app.oharness.dev'
 
 /** The environment variable holding the server root. */
 export const ENV_SERVER_URL = 'OPENHARNESS_URL'
@@ -64,9 +70,9 @@ export function configFilePath(env: Record<string, string | undefined> = process
 
 /**
  * The precedence, highest first: `--server`, then `OPENHARNESS_URL`, then the config file,
- * then the default `http://localhost:3000`.
+ * then the default `https://app.oharness.dev`.
  *
- * A missing config file is fine — the CLI runs against a local server out of the box — but a
+ * A missing config file is fine — the CLI runs against production out of the box — but a
  * file that exists and cannot be used is an error, reported with its path. The static API
  * key is gone (epic #65, A8): `oh login` is the only way in.
  */
@@ -207,7 +213,7 @@ function normalizeServerUrl(value: string | undefined, source: ConfigSource): Ur
   if (!/^https?:\/\//iu.test(value)) {
     return {
       ok: false,
-      error: `the server URL ${describeSource(source)} is '${value}', which is not a URL. Expected something like http://localhost:3000.`,
+      error: `the server URL ${describeSource(source)} is '${value}', which is not a URL. Expected something like https://app.oharness.dev.`,
     }
   }
 

@@ -61,6 +61,19 @@ function stdoutText(spy: { mock: { calls: unknown[][] } }): string {
 
 const stderrText = stdoutText
 
+/**
+ * The server the fake-mode tests name by hand.
+ *
+ * The CLI's default is production since #192, and no test may resolve to it — not even with
+ * the dev fake in front of it, where nothing would be sent anyway. Naming the server here is
+ * what makes that a property of the suite rather than of the fake; the one test that does
+ * want the default says so on its own.
+ */
+const FAKE_SERVER = 'http://localhost:3000'
+
+/** Fake mode, pointed at {@link FAKE_SERVER} rather than at the default. */
+const FAKE_ENV = { OPENHARNESS_FAKE: '1', OPENHARNESS_URL: FAKE_SERVER }
+
 afterEach(() => {
   vi.restoreAllMocks()
 })
@@ -106,7 +119,7 @@ describe('run', () => {
   })
 
   it('lists the agents of the dev fake', async () => {
-    const { code, out } = await runCaptured(['agents'], { OPENHARNESS_FAKE: '1' })
+    const { code, out } = await runCaptured(['agents'], FAKE_ENV)
 
     expect(code).toBe(0)
     expect(out).toContain('Summarizer')
@@ -114,7 +127,7 @@ describe('run', () => {
   })
 
   it('lists the sessions of the dev fake', async () => {
-    const { code, out } = await runCaptured(['sessions'], { OPENHARNESS_FAKE: '1' })
+    const { code, out } = await runCaptured(['sessions'], FAKE_ENV)
 
     expect(code).toBe(0)
     expect(out).toContain('sesn_')
@@ -122,9 +135,11 @@ describe('run', () => {
   })
 
   it('says where the settings came from under --debug', async () => {
+    // Deliberately no OPENHARNESS_URL: this is the test that watches the default itself.
     const { err } = await runCaptured(['agents', '--debug'], { OPENHARNESS_FAKE: '1' })
 
-    expect(err).toContain('server http://localhost:3000 (default)')
+    // Nothing pointed it anywhere, so the resolved server is the default — production (#192).
+    expect(err).toContain('server https://app.oharness.dev (default)')
   })
 
   it('points at the server when nothing is listening', async () => {
@@ -157,13 +172,9 @@ describe('run', () => {
   })
 
   it('says a chat needs a terminal when stdin is a pipe', async () => {
-    const { code, out, err } = await runCaptured(
-      ['--agent', 'Summarizer'],
-      { OPENHARNESS_FAKE: '1' },
-      {
-        stdin: PIPED_STDIN,
-      },
-    )
+    const { code, out, err } = await runCaptured(['--agent', 'Summarizer'], FAKE_ENV, {
+      stdin: PIPED_STDIN,
+    })
 
     expect(code).toBe(2)
     expect(out).toBe('')
@@ -180,7 +191,7 @@ describe('run', () => {
 })
 
 describe('run: default-model (#114)', () => {
-  const fakeEnv = { OPENHARNESS_FAKE: '1' }
+  const fakeEnv = FAKE_ENV
 
   it('prints the stored default', async () => {
     const { code, out, err } = await runCaptured(['default-model'], fakeEnv)
@@ -216,7 +227,7 @@ describe('run: default-model (#114)', () => {
 })
 
 describe('run: sessions delete (#114)', () => {
-  const fakeEnv = { OPENHARNESS_FAKE: '1' }
+  const fakeEnv = FAKE_ENV
 
   it('asks and deletes nothing on a piped no', async () => {
     const { code, out, err } = await runCaptured(['sessions', 'delete', 'sesn_missing'], fakeEnv, {
@@ -281,7 +292,7 @@ describe('run: auth', () => {
 
   /** The environment pointing the CLI at the dev fake and a throwaway config directory. */
   function fakeEnv(): Record<string, string> {
-    return { OPENHARNESS_FAKE: '1', XDG_CONFIG_HOME: directory }
+    return { ...FAKE_ENV, XDG_CONFIG_HOME: directory }
   }
 
   /** The credentials file, as the CLI wrote it. */
@@ -395,11 +406,11 @@ describe('run: auto-update (#157)', () => {
   it('prints the pending outcome once, and never again', async () => {
     seedResult({ status: 'success', version: '0.4.0', at: '2026-10-05T12:00:00.000Z' })
 
-    const first = await runCaptured(['agents'], { OPENHARNESS_FAKE: '1' })
+    const first = await runCaptured(['agents'], FAKE_ENV)
     expect(first.code).toBe(0)
     expect(first.out).toContain('oh updated to v0.4.0')
 
-    const second = await runCaptured(['agents'], { OPENHARNESS_FAKE: '1' })
+    const second = await runCaptured(['agents'], FAKE_ENV)
     expect(second.code).toBe(0)
     expect(second.out).not.toContain('oh updated')
   })
@@ -413,7 +424,7 @@ describe('run: auto-update (#157)', () => {
       at: '2026-10-05T12:00:00.000Z',
     })
 
-    const { code, out, err } = await runCaptured(['agents'], { OPENHARNESS_FAKE: '1' })
+    const { code, out, err } = await runCaptured(['agents'], FAKE_ENV)
 
     expect(code).toBe(0)
     expect(out).not.toContain('could not update')
@@ -431,7 +442,7 @@ describe('run: auto-update (#157)', () => {
     const help = await runCaptured(['--help'])
     expect(help.out).not.toContain('oh updated')
     // The notice is still pending for the next command that is not one of those two.
-    const after = await runCaptured(['agents'], { OPENHARNESS_FAKE: '1' })
+    const after = await runCaptured(['agents'], FAKE_ENV)
     expect(after.out).toContain('oh updated to v0.4.0')
   })
 
@@ -445,14 +456,14 @@ describe('run: auto-update (#157)', () => {
       seen.push(context)
     }
 
-    await runCaptured(['agents'], { OPENHARNESS_FAKE: '1' }, { autoUpdate })
+    await runCaptured(['agents'], FAKE_ENV, { autoUpdate })
     expect(seen).toHaveLength(1)
     expect(seen[0]).toMatchObject({ command: 'agents', configAutoUpdate: true })
 
-    await runCaptured(['default-model'], { OPENHARNESS_FAKE: '1' }, { autoUpdate })
+    await runCaptured(['default-model'], FAKE_ENV, { autoUpdate })
     expect(seen[1]).toMatchObject({ command: 'default-model' })
 
-    await runCaptured(['update'], { OPENHARNESS_FAKE: '1' }, { autoUpdate })
+    await runCaptured(['update'], FAKE_ENV, { autoUpdate })
     expect(seen[2]).toMatchObject({ command: 'update' })
   })
 
@@ -473,15 +484,11 @@ describe('run: auto-update (#157)', () => {
     writeFileSync(join(configHome, 'openharness', 'config.json'), '{"autoUpdate": false}', 'utf8')
 
     const seen: unknown[] = []
-    await runCaptured(
-      ['agents'],
-      { OPENHARNESS_FAKE: '1' },
-      {
-        autoUpdate: (context) => {
-          seen.push(context.configAutoUpdate)
-        },
+    await runCaptured(['agents'], FAKE_ENV, {
+      autoUpdate: (context) => {
+        seen.push(context.configAutoUpdate)
       },
-    )
+    })
 
     expect(seen).toEqual([false])
   })

@@ -45,7 +45,16 @@ Run from the repo root; they all delegate to turbo:
 | `yarn format:check`      | Prettier `--check`, per package via turbo                   |
 | `yarn format:check:repo` | Prettier `--check` over the whole repo (includes root docs) |
 | `yarn dev`               | watch mode for every package that has a `dev` script        |
+| `yarn oh`                | builds the CLI and runs it against `http://localhost:3000`  |
+| `yarn oh:staging`        | the same, against `https://staging.oharness.dev`            |
+| `yarn oh:prod`           | the same, against `https://app.oharness.dev`                |
 | `yarn check:deps`        | enforces the `@openharness/*` dependency table              |
+
+`yarn oh` and its two siblings are the checkout's `oh` (`node apps/tui/dist/index.js`, built
+first). Arguments pass through — `yarn oh:staging login` — and the build's output is held
+back so the CLI's own is what you read; the server each name points at is one
+`OPENHARNESS_URL` on the child (`scripts/oh.mjs`), because the CLI's default is production
+(#192).
 
 `typecheck`, `lint` and `test` depend on `^build`: turbo builds a package's dependencies
 before type-checking, linting or testing it, so imports of `@openharness/*` always resolve.

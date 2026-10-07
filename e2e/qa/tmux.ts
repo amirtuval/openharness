@@ -39,8 +39,14 @@ export function oh(
       cwd: CLI_CWD,
       encoding: 'utf8',
       // The QA run's own config directory, so the developer's stored tokens are never read or
-      // written by a scenario.
-      env: { ...process.env, XDG_CONFIG_HOME: options.configHome ?? CLI_CONFIG_HOME },
+      // written by a scenario — and the stack under test in `OPENHARNESS_URL`, which a
+      // `--server` still wins over: this is the net under a scenario that forgot it, because
+      // what the CLI would fall back to is production (#192).
+      env: {
+        ...process.env,
+        XDG_CONFIG_HOME: options.configHome ?? CLI_CONFIG_HOME,
+        OPENHARNESS_URL: CLI_SERVER,
+      },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     return { stdout, status: 0 }
@@ -76,6 +82,12 @@ const SHOT_DIR = process.env.QA_SHOT_DIR ?? 'qa-output'
 /** Where the CLI is run from. `apps/tui/dist/index.js` relative to the `e2e` package. */
 export const CLI_CWD = process.env.QA_OH_CWD ?? '../'
 export const CLI_COMMAND = process.env.QA_OH_CLI ?? 'node apps/tui/dist/index.js'
+/**
+ * The server the specs point `oh` at: the stack under test, always passed as `--server`.
+ *
+ * It is not the CLI's default — that is production since #192 — so nothing here may leave
+ * this out and hope.
+ */
 export const CLI_SERVER = process.env.QA_BASE_URL ?? 'http://localhost:3000'
 
 /**

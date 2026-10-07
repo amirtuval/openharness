@@ -117,8 +117,9 @@ test.describe('W26 §10 oh login and friends', () => {
       await test.step('10.5 whoami', () => {
         const whoami = oh(['whoami', '--server', CLI_SERVER])
         expect(whoami.status).toBe(0)
+        // The server is the one the command named, not the CLI's default (#192).
         expect(whoami.stdout).toMatch(
-          /^Logged in as dev@localhost\.localdomain on http:\/\/localhost:3000/,
+          new RegExp(`^Logged in as dev@localhost\\.localdomain on ${CLI_SERVER}`),
         )
       })
     } finally {
