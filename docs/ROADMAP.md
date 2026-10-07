@@ -7,7 +7,7 @@ plan between phases.
 For a survey of what other harnesses offer (Claude Code, Managed Agents, OpenCode, Codex, pi),
 see the [harness feature inventory](./research/harness-features.md).
 
-_Last updated: 2026-10-07._
+_Last updated: 2026-10-07 (UX pass 1 added)._
 
 ## Where we are
 
@@ -37,8 +37,9 @@ _Last updated: 2026-10-07._
 1. Finish v1 — done: the epic is closed.
 2. Authentication — done
 3. Deployment and CI/CD — done
-4. Model selection and provider keys
-5. Tools
+4. Chat and TUI UX, pass 1 ([epic #201](https://github.com/amirtuval/openharness/issues/201)) — in progress
+5. Model selection and provider keys
+6. Tools
 
 **Why this order:** identity and a running deployment are the foundations. Every later feature
 needs to know who owns what. The features that cost money or can act on the world (paid model
@@ -114,7 +115,29 @@ is in [`DEPLOYMENT.md`](./DEPLOYMENT.md) and [`RELEASING.md`](./RELEASING.md).
 - the CLI's background update can be cut short by quick commands
   ([#197](https://github.com/amirtuval/openharness/issues/197)).
 
-## 4. Model selection
+## 4. Chat and TUI UX, pass 1 ([epic #201](https://github.com/amirtuval/openharness/issues/201))
+
+**Why now:** the tools phase is mostly UI (tool calls, approvals, `ask_user`), and production
+has real users. Pass 1 builds the foundation those features render on; **pass 2**, a finishing
+pass, comes after tools step 3.
+
+**Scope** (the decisions and the 11 sub-issues are on the epic):
+
+- typed message parts in the client transcript, rendered through a lookup from part type to
+  renderer in both clients, plus per-reply metadata (model, duration, tokens);
+- web themes: System, Light, Dim and Dark, stored in the user's preferences;
+- markdown that renders cleanly while streaming, with highlighted, copyable code, on the web
+  and in the TUI (which stays inline, not fullscreen);
+- the TUI prompt (history, editing keys), a `/` command menu with an inline prompt slot, and a
+  working spinner and status line;
+- onboarding: a first-run "connect a provider" flow on the web, and provider keys entered in
+  `oh` itself;
+- a web visual pass, message actions and keyboard shortcuts.
+
+**Not in pass 1:** showing reasoning (it goes with phase 5's reasoning effort and modes), a
+fullscreen TUI, and session rename, archive and fork.
+
+## 5. Model selection
 
 **Scope:**
 
@@ -158,7 +181,7 @@ is in [`DEPLOYMENT.md`](./DEPLOYMENT.md) and [`RELEASING.md`](./RELEASING.md).
 - **Modes are part of this phase.** Each request records the mode it ran under alongside the
   resolved model, so the log stays accurate when a mode's mapping changes later.
 
-## 5. Tools
+## 6. Tools
 
 The third pillar of the architecture (the "hands"), built in steps that are each useful on their
 own.
