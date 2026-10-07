@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Readable } from 'node:stream'
 
 import { isDirectRun, run, type RunOptions } from './index'
+import { packageVersion } from './test-support/version'
 
 /**
  * A fresh config directory for the test at hand.
@@ -92,7 +93,7 @@ describe('run', () => {
     const { code, out } = await runCaptured(['--version'])
 
     expect(code).toBe(0)
-    expect(out.trim()).toBe('0.0.1')
+    expect(out.trim()).toBe(packageVersion())
   })
 
   it('exits 2 on a flag it does not know, before doing anything', async () => {
@@ -437,7 +438,7 @@ describe('run: auto-update (#157)', () => {
     seedResult({ status: 'success', version: '0.4.0', at: '2026-10-05T12:00:00.000Z' })
 
     const version = await runCaptured(['--version'])
-    expect(version.out.trim()).toBe('0.0.1')
+    expect(version.out.trim()).toBe(packageVersion())
 
     const help = await runCaptured(['--help'])
     expect(help.out).not.toContain('oh updated')

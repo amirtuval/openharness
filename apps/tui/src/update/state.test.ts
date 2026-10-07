@@ -60,6 +60,7 @@ describe('readUpdateState', () => {
   it('reads back what was written', () => {
     writeUpdateState(statePath, {
       lastCheck: '2026-10-05T12:00:00.000Z',
+      checking: { at: '2026-10-05T12:00:00.000Z', pid: 4242 },
       globalRoot: '/usr/local/lib/node_modules',
       globalRootNode: '/usr/bin/node',
       result: success(),
@@ -67,6 +68,7 @@ describe('readUpdateState', () => {
 
     expect(readUpdateState(statePath)).toEqual({
       lastCheck: '2026-10-05T12:00:00.000Z',
+      checking: { at: '2026-10-05T12:00:00.000Z', pid: 4242 },
       globalRoot: '/usr/local/lib/node_modules',
       globalRootNode: '/usr/bin/node',
       result: success(),
@@ -93,6 +95,24 @@ describe('readUpdateState', () => {
     seed(JSON.stringify({ lastCheck: 42, globalRoot: '/g', result: { status: 'nope' } }))
 
     expect(readUpdateState(statePath)).toEqual({ globalRoot: '/g' })
+  })
+
+  it('keeps a check claim, and drops one that names no time (#197)', () => {
+    seed(JSON.stringify({ checking: { at: '2026-10-05T12:00:00.000Z', pid: 4242 } }))
+    expect(readUpdateState(statePath).checking).toEqual({
+      at: '2026-10-05T12:00:00.000Z',
+      pid: 4242,
+    })
+
+    // The pid is what says the claim still holds; without one it is read as stale rather than
+    // as a file that cannot be used.
+    seed(JSON.stringify({ checking: { at: '2026-10-05T12:00:00.000Z' } }))
+    expect(readUpdateState(statePath).checking).toEqual({ at: '2026-10-05T12:00:00.000Z' })
+
+    for (const checking of [undefined, null, 'now', 42, [], { pid: 1 }, { at: '' }, { at: 42 }]) {
+      seed(JSON.stringify({ checking }))
+      expect(readUpdateState(statePath), JSON.stringify(checking)).toEqual({})
+    }
   })
 
   it('drops a result that is missing what the notice needs', () => {

@@ -56,10 +56,28 @@ export interface UpdateResult {
   readonly at: string
 }
 
+/**
+ * A check that is under way, as the run that started it left it behind (#197).
+ *
+ * The background check is a detached child, so nothing stops a second `oh` from starting a
+ * second one while the first is still asking npm — and two checks that both see a newer
+ * version both install it. The marker is how one of them stands down: the claim says when it
+ * was made and which process holds it, and a claim whose process is gone is stale, so a check
+ * that was killed does not keep the next run from trying.
+ */
+export interface UpdateCheck {
+  /** When the check was claimed, ISO 8601. */
+  readonly at: string
+  /** The process holding it — the detached child. An absent pid is a stale claim. */
+  readonly pid?: number
+}
+
 /** What the state file holds. Every field is optional: any of it may be missing. */
 export interface UpdateState {
   /** When the last background check ran, ISO 8601. */
   readonly lastCheck?: string
+  /** The check that is claimed right now, if any (#197). */
+  readonly checking?: UpdateCheck
   /**
    * `npm root -g`'s answer — the directory `npm i -g` installs into — cached so the
    * global-install check does not have to spawn npm on every startup.
@@ -74,6 +92,7 @@ export interface UpdateState {
 /** The mutable shape {@link readUpdateState} builds up before returning it read-only. */
 interface MutableState {
   lastCheck?: string
+  checking?: UpdateCheck
   globalRoot?: string
   globalRootNode?: string
   result?: UpdateResult
@@ -107,6 +126,8 @@ export function readUpdateState(path: string): UpdateState {
 
   const lastCheck = stringField(record, 'lastCheck')
   if (lastCheck !== undefined) state.lastCheck = lastCheck
+  const checking = parseCheck(record['checking'])
+  if (checking !== undefined) state.checking = checking
   const globalRoot = stringField(record, 'globalRoot')
   if (globalRoot !== undefined) state.globalRoot = globalRoot
   const globalRootNode = stringField(record, 'globalRootNode')
@@ -131,6 +152,7 @@ export function writeUpdateState(path: string, state: UpdateState): boolean {
   const contents = `${JSON.stringify(
     {
       lastCheck: state.lastCheck,
+      checking: state.checking,
       globalRoot: state.globalRoot,
       globalRootNode: state.globalRootNode,
       result: state.result,
@@ -193,6 +215,21 @@ export function consumeUpdateResult(path: string): UpdateResult | undefined {
 function stringField(record: Record<string, unknown>, key: string): string | undefined {
   const value = record[key]
   return typeof value === 'string' && value.trim() !== '' ? value : undefined
+}
+
+/**
+ * The `checking` field, when it says enough to act on: a claim has to name *when* it was made
+ * before anything can decide whether it is stale. The pid is optional — a claim without one is
+ * read, and treated as stale, rather than as a mangled file.
+ */
+function parseCheck(value: unknown): UpdateCheck | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+
+  const at = stringField(record, 'at')
+  if (at === undefined) return undefined
+  const pid = record['pid']
+  return { at, ...(typeof pid === 'number' && Number.isInteger(pid) ? { pid } : {}) }
 }
 
 /** The `result` field, when it has everything a notice needs. */

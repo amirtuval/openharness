@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { parseArgs } from './args'
+import { packageVersion } from './test-support/version'
 import { readVersion } from './version'
 
 /** The parsed command, failing the test with the error message when there is not one. */
@@ -224,6 +225,6 @@ describe('parseArgs', () => {
 
 describe('readVersion', () => {
   it('reads the version from this package.json', () => {
-    expect(readVersion()).toBe('0.0.1')
+    expect(readVersion()).toBe(packageVersion())
   })
 })

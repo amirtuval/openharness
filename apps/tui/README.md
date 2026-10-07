@@ -74,6 +74,11 @@ the background, without interrupting the chat you are in. The next run prints on
 how it went. Because the package is a single self-contained file, the copy running right now is
 never the one that changes.
 
+The check runs in a process of its own, detached from the one you started it with, so it sees
+itself through whether or not the command you typed sticks around: `oh whoami` sets an update
+in motion just as a long chat does. A check that fails — no network, no answer from npm — is
+not counted as this hour's: the next run asks again.
+
 ```bash
 oh update     # the same thing now, in the foreground, with npm's own progress
 ```
