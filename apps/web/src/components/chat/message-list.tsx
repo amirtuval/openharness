@@ -6,6 +6,7 @@ import type { ModelNameLookup } from '../../lib/models'
 import { Button } from '../ui/button'
 import { Skeleton } from '../ui/skeleton'
 import { MessageItem } from './message-item'
+import { previousReplyModels } from './message-meta'
 import { WorkingRow, type WorkingState } from './working-row'
 
 /**
@@ -21,12 +22,18 @@ import { WorkingRow, type WorkingState } from './working-row'
  * they will become, an empty chat is a designed invitation, and a turn in flight is the
  * {@link WorkingRow} at the foot — in the same scroll column, so it moves with the transcript
  * and stays where the reply is about to appear.
+ *
+ * It is also the one component that can answer the two questions a single message cannot
+ * (#212): what the reply *before* this one ran on (so the meta line names a model only when it
+ * changed) and which user message is the last one (so Edit and resend appears exactly once).
+ * Both are read off the list here and handed down, rather than carried out of the map.
  */
 export function MessageList({
   messages,
   loading,
   nameOf,
   working = null,
+  onEdit,
 }: {
   messages: readonly TranscriptMessage[]
   loading: boolean
@@ -34,11 +41,22 @@ export function MessageList({
   nameOf?: ModelNameLookup | undefined
   /** The state row at the foot of the transcript, or `null` for none ({@link workingState}). */
   working?: WorkingState | null
+  /** Put a message's text back in the composer — offered on the last user message (#212). */
+  onEdit?: ((text: string) => void) | undefined
 }) {
   const last = messages.at(-1)
   const { ref, onScroll, isStuck, scrollToLatest } = useStickToBottom(
     `${messages.length}:${last?.text.length ?? 0}`,
   )
+
+  // What each reply's meta line compares its model against (#212). The list is the only place
+  // that has the neighbouring replies, so it is computed here rather than guessed at in the
+  // item; {@link previousReplyModels} keeps the rule itself out of this component.
+  const previousModels = previousReplyModels(messages)
+  // The reader's own last message: the one "Edit and resend" belongs to. A steering message
+  // waiting its turn is still the last one they said — there is nothing after it yet — so it
+  // gets the action too, which is right: rewriting it is exactly what they would want.
+  const lastUserIndex = messages.findLastIndex((message) => message.role === 'user')
 
   return (
     <div className="relative min-h-0 flex-1">
@@ -57,8 +75,20 @@ export function MessageList({
               <EmptyConversation />
             )
           ) : (
-            messages.map((message) => (
-              <MessageItem key={message.id} message={message} nameOf={nameOf} />
+            messages.map((message, index) => (
+              <MessageItem
+                key={message.id}
+                message={message}
+                nameOf={nameOf}
+                previousModel={previousModels[index]}
+                onEdit={
+                  index === lastUserIndex && onEdit !== undefined
+                    ? () => {
+                        onEdit(message.text)
+                      }
+                    : undefined
+                }
+              />
             ))
           )}
           {working === null ? null : <WorkingRow state={working} />}

@@ -15,6 +15,29 @@ import { Textarea } from '../ui/textarea'
 const MAX_INPUT_HEIGHT = 200
 
 /**
+ * The message box's id.
+ *
+ * The one stable handle on the box: three screens render a {@link Composer} — a chat, New chat
+ * and the first-run flow — so a keyboard shortcut that wants to put the cursor in it ("/" and
+ * the first-run screen's own focus-on-mount, #212) has nothing to hold a ref to that exists on
+ * all three. Exported so the shell and the screen never spell it twice.
+ */
+export const COMPOSER_INPUT_ID = 'composer-input'
+
+/**
+ * Put the cursor in the message box, on whatever screen is showing one (#212).
+ *
+ * Looked up by id rather than through a ref because there is no one place that holds the box:
+ * a chat renders its own {@link Composer}, New chat renders another, and the shortcuts live in
+ * the shell above both. Threading a ref down three screens would be three props and a
+ * `useImperativeHandle` between them for one key. A screen with no composer — Settings — has
+ * nothing to focus and the shortcut quietly does nothing, which is what it should do.
+ */
+export function focusComposer(): void {
+  document.getElementById(COMPOSER_INPUT_ID)?.focus()
+}
+
+/**
  * The message box, and the model control that sits with it.
  *
  * Enter sends, Shift+Enter starts a new line. It stays **enabled while the agent is running**:
@@ -135,11 +158,11 @@ export function Composer({
         void submit()
       }}
     >
-      <Label htmlFor="composer-input" className="sr-only">
+      <Label htmlFor={COMPOSER_INPUT_ID} className="sr-only">
         Message
       </Label>
       <Textarea
-        id="composer-input"
+        id={COMPOSER_INPUT_ID}
         ref={ownRef}
         rows={1}
         value={text}
@@ -153,6 +176,14 @@ export function Composer({
           if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
             event.preventDefault()
             void submit()
+          }
+          // Stop from the keyboard (#212). It lives here rather than in the shell's shortcut
+          // handler because the box *is* half the condition — "Escape, while the composer has
+          // focus, while a turn is running" — and the other half is a prop this component
+          // already has. Escape anywhere else is still the overlays': the drawer, a dialog.
+          if (event.key === 'Escape' && running && onStop !== undefined) {
+            event.preventDefault()
+            void onStop()
           }
         }}
       />
