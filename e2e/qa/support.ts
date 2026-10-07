@@ -95,8 +95,19 @@ export const LONG_REPLY_COUNT = 60
 /** A prompt a real provider answers at length. */
 export const LONG_REPLY_PROMPT = `Count from 1 to ${String(LONG_REPLY_COUNT)}, one number per line. Nothing else.`
 
-/** The line the long reply ends with, which is how "it finished" reads on screen. */
-export const LONG_REPLY_END = new RegExp(`^\\s*${String(LONG_REPLY_COUNT)}\\s*$`, 'm')
+/**
+ * What "the long reply finished" reads as on screen.
+ *
+ * The reply is a count, one number per line — and a reply is Markdown, so those newlines are
+ * the soft breaks CommonMark says they are and the numbers end up flowing together, wrapped
+ * by the client to the width it has. The end is therefore the last two numbers next to each
+ * other, whatever line the wrapping put them on (`\s+` covers a line break and the hanging
+ * indent after it). The prompt's own `1 to 60` cannot satisfy it: nothing precedes that
+ * number but a space.
+ */
+export const LONG_REPLY_END = new RegExp(
+  `\\b${String(LONG_REPLY_COUNT - 1)}\\s+${String(LONG_REPLY_COUNT)}\\b`,
+)
 
 /**
  * A longer reply still, for the scenario that kills the server in the middle of one.

@@ -235,8 +235,8 @@ test.describe('cli scenarios', () => {
       expect(narrow).toMatch(/idle/)
       expect(narrow).toContain('❯')
       if (isRealModel) {
-        // The whole reply went through an 80x24 pane: the last number it was asked for is in
-        // the scrollback, so nothing was dropped on the way.
+        // The whole reply went through an 80x24 pane: the count reaches its end in the
+        // scrollback, so nothing was dropped on the way.
         expect(terminal.capture(400), 'the reply arrived in full').toMatch(LONG_REPLY_END)
       } else {
         expect(narrow).toContain('part 40/40')
@@ -385,8 +385,8 @@ test.describe('cli scenarios', () => {
           isRealModel ? /agent › / : /part 1\/40/,
         )
         if (isRealModel) {
-          // The reply was asked to count, one number per line, so the last number on a line of
-          // its own means it finished — which an interrupt mid-stream must prevent.
+          // The reply was asked to count to the end of the range, so the last two numbers
+          // arriving together means it finished — which an interrupt mid-stream must prevent.
           expect(interrupted, 'the reply stopped short of the end').not.toMatch(LONG_REPLY_END)
         } else {
           expect(interrupted, 'the reply stopped short').not.toContain('part 40/40')

@@ -968,16 +968,22 @@ __metadata:
     "@openharness/client": "workspace:*"
     "@openharness/config": "workspace:*"
     "@openharness/protocol": "workspace:*"
+    "@types/mdast": "npm:4.0.4"
     "@types/node": "npm:26.6.3"
     "@types/react": "npm:19.3.0"
     eslint: "npm:10.11.0"
+    highlight.js: "npm:11.12.0"
     ink: "npm:7.1.1"
     ink-testing-library: "npm:4.0.0"
     prettier: "npm:3.9.9"
     react: "npm:19.3.0"
+    remark-gfm: "npm:4.0.1"
+    remark-parse: "npm:11.0.0"
+    string-width: "npm:8.3.0"
     tsdown: "npm:0.23.0"
     turbo: "npm:2.11.4"
     typescript: "npm:6.0.3"
+    unified: "npm:11.0.5"
     vite: "npm:8.3.1"
     vitest: "npm:5.0.2"
   bin:
@@ -3317,7 +3323,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@types/mdast@npm:^4.0.0":
+"@types/mdast@npm:4.0.4, @types/mdast@npm:^4.0.0":
   version: 4.0.4
   resolution: "@types/mdast@npm:4.0.4"
   dependencies:
@@ -5760,6 +5766,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"highlight.js@npm:11.12.0":
+  version: 11.12.0
+  resolution: "highlight.js@npm:11.12.0"
+  checksum: 10c0/c62ebfad125b541790412374a15ae1ca15a45fdfac0fae2b5c96b6a10dc8d5d15380adf748584fb08cfeb4db2b3a749a170e2afd0b640e9fad86445b1c435777
+  languageName: node
+  linkType: hard
+
 "hono-openapi@npm:^1.3.1":
   version: 1.3.3
   resolution: "hono-openapi@npm:1.3.3"
@@ -8141,7 +8154,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"remark-parse@npm:^11.0.0":
+"remark-parse@npm:11.0.0, remark-parse@npm:^11.0.0":
   version: 11.0.0
   resolution: "remark-parse@npm:11.0.0"
   dependencies:
@@ -8569,6 +8582,16 @@ __metadata:
   languageName: node
   linkType: hard
 
+"string-width@npm:8.3.0, string-width@npm:^8.1.0, string-width@npm:^8.2.0":
+  version: 8.3.0
+  resolution: "string-width@npm:8.3.0"
+  dependencies:
+    get-east-asian-width: "npm:^1.5.0"
+    strip-ansi: "npm:^7.1.2"
+  checksum: 10c0/bc354b27772777c314e6792106f01586e959f36abb3d4b8ad46c4d4ee92d5e906acb10c1f3be97a85ae0ba1b11389094bc5672999fc5f03f12d22a4725fa30fe
+  languageName: node
+  linkType: hard
+
 "string-width@npm:^5.0.1, string-width@npm:^5.1.2":
   version: 5.1.2
   resolution: "string-width@npm:5.1.2"
@@ -8577,16 +8600,6 @@ __metadata:
     emoji-regex: "npm:^9.2.2"
     strip-ansi: "npm:^7.0.1"
   checksum: 10c0/ab9c4264443d35b8b923cbdd513a089a60de339216d3b0ed3be3ba57d6880e1a192b70ae17225f764d7adbf5994e9bb8df253a944736c15a0240eff553c678ca
-  languageName: node
-  linkType: hard
-
-"string-width@npm:^8.1.0, string-width@npm:^8.2.0":
-  version: 8.3.0
-  resolution: "string-width@npm:8.3.0"
-  dependencies:
-    get-east-asian-width: "npm:^1.5.0"
-    strip-ansi: "npm:^7.1.2"
-  checksum: 10c0/bc354b27772777c314e6792106f01586e959f36abb3d4b8ad46c4d4ee92d5e906acb10c1f3be97a85ae0ba1b11389094bc5672999fc5f03f12d22a4725fa30fe
   languageName: node
   linkType: hard
 
@@ -9139,7 +9152,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"unified@npm:^11.0.0, unified@npm:^11.0.5":
+"unified@npm:11.0.5, unified@npm:^11.0.0, unified@npm:^11.0.5":
   version: 11.0.5
   resolution: "unified@npm:11.0.5"
   dependencies:

@@ -17,6 +17,7 @@ import { createDevClient, FAKE_BANNER, isFakeMode } from './dev/fake'
 import { describeError, type ErrorContext } from './errors'
 import { HELP_TEXT } from './help'
 import { openHistory, type PromptHistory } from './history'
+import { resolveTerminalTheme } from './markdown/theme'
 import { installSignals } from './signals'
 import { restoreTerminal } from './terminal'
 import {
@@ -322,6 +323,13 @@ async function runChat(
   const loadHistory = (): Promise<PromptHistory | undefined> =>
     openChatHistory(connected.client, config.server, streams.env)
 
+  // The theme the transcript is drawn with (epic #201, X4): the config file's `theme` key,
+  // resolved against what the environment says — `NO_COLOR`, and the background the terminal
+  // reports. It is resolved once, here, rather than read per message: neither the environment
+  // nor the config file changes under a running chat, and a settled message keeps the theme
+  // it was drawn with, exactly as it keeps its width.
+  const theme = resolveTerminalTheme(config.theme, streams.env)
+
   const restore = (): void => {
     restoreTerminal({ stdin: streams.stdin, stdout: streams.stdout })
   }
@@ -363,6 +371,7 @@ async function runChat(
         options={options}
         context={context}
         banner={connected.banner}
+        theme={theme}
         loadHistory={loadHistory}
       />,
       {
@@ -430,7 +439,7 @@ function toExitPayload(result: unknown): ExitPayload | undefined {
 
 /** The `--debug` line: the settings that were resolved, and where each came from. */
 function describeConfig(config: ResolvedConfig): string {
-  return `server ${config.server} (${config.sources.server})`
+  return `server ${config.server} (${config.sources.server}), theme ${config.theme}`
 }
 
 /** Print a failure: the message, the hints worth acting on, and the stack under `--debug`. */

@@ -75,7 +75,7 @@ Highest first:
 2. `OPENHARNESS_URL`
 3. `~/.config/openharness/config.json` (or `$XDG_CONFIG_HOME/openharness/config.json`, which
    is ignored when it is not an absolute path):
-   `{ "server": "https://app.oharness.dev", "autoUpdate": true }`
+   `{ "server": "https://app.oharness.dev", "autoUpdate": true, "theme": "auto" }`
 4. `https://app.oharness.dev`
 
 The default is **production** (#192): `npm i -g @openh/cli` lands on a machine with no server
@@ -84,8 +84,9 @@ Working from a checkout, `yarn oh` runs this CLI against `http://localhost:3000`
 `OPENHARNESS_URL` or the config file point it anywhere else.
 
 `autoUpdate` is the config file's own off switch for the background self-update (it defaults to
-`true`); `server` is the only other key the file takes, and either may be left out. See
-"Updating itself" below.
+`true`), and `theme` picks the code theme's background — `auto` reads the terminal, `light`
+and `dark` say so — for a terminal that reports nothing (#201, X4). Every key may be left
+out. See "Updating itself" below and [`docs/markdown.md`](./docs/markdown.md).
 
 A missing config file is fine. A file that exists and does not parse, holds the wrong types,
 or names a key that does not exist is an error (exit `2`) naming the file and the problem. An
@@ -341,10 +342,26 @@ instead (epic #116 U5).
 block cursor while a reply streams, the `(queued)` note — and draws its content part by part
 through `PART_RENDERERS` (epic #201, X1), a `Record<MessagePart['type'], …>` that holds the
 text renderer today and is where the next phases' parts — a tool call, a question, an approval
-— get theirs. A renderer returns the characters its part contributes, not a `<Text>`: one
-terminal line is one `<Text>` here (the label and the text beside it have to arrive in one
-escape-ridden string, or a test's `toContain('you › hello')` breaks), so the layout stays with
-the view and a part renders inline.
+— get theirs. A renderer returns **lines of styled spans**, not characters and not a `<Text>`:
+Markdown needs more than a string (a heading is bold, a table is a box, a code block is a
+frame) and less than a `<Text>` (the label and the indent are not its business), and the
+renderer is handed the columns it has after the label so that its own wrapping is the layout.
+Each line is one `<Text>` whose children are the spans — nested text nodes are one line of
+output, where sibling ones in a column would be two — so the label and the text beside it
+arrive as one line, which is what a test's `toContain('you › hello')` rests on.
+
+Messages are separated by one blank line, drawn as part of the next message's output rather
+than as a thing of its own — a reply arrives as one `<Static>` write, and a separator of its
+own would be written twice: once while that message was live, and again when it settled.
+
+An **agent** message is rendered as Markdown and a **user** message as typed, and both are
+wrapped to the terminal width with a hanging indent — the label on the first line, that many
+spaces under it on the rest. The width is read when the message is drawn, which is what makes
+a resize leave the scrollback alone (#201, X2): settled messages are Ink's `<Static>` and are
+never re-rendered, so they keep the width they had. Colours are ANSI named colours only, the
+code theme is chosen from the terminal's background, and `NO_COLOR` drops the lot (#201, X4).
+The renderer, the tables, the code frame and the theme are
+[`docs/markdown.md`](./docs/markdown.md); the wrapping itself is `src/markdown/text.ts`.
 
 ### Terminal hygiene
 
@@ -380,9 +397,15 @@ src/
     screen.tsx           the chat screen (transcript, status line, prompt, `/model`)
     target.ts            which session to open, and the model/agent-selection rules
     ctrl-c.ts            the Ctrl+C rules (interrupt / arm / exit)
+  markdown/
+    text.ts              spans and lines: what a rendered line is, and the ANSI-free wrapper
+    theme.ts             named colours, the light/dark code palettes, NO_COLOR, COLORFGBG
+    highlight.ts         highlight.js → coloured spans, for the code blocks
+    parse.ts             a reply's text → mdast (remark-parse + remark-gfm)
+    render.ts            mdast → lines of spans: headings, lists, tables, quotes, code (#205)
   components/            message-view (a message, and the renderer per part type, #201),
-                         transcript-view, status-line, prompt-input,
-                         notice-view, model-picker
+                         theme (the context the transcript reads), transcript-view,
+                         status-line, prompt-input, notice-view, model-picker
   update/
     index.ts             the auto-update: the notice, and the decision to check
     decide.ts            the off switches (env / config / CI), the hourly throttle, the claim
@@ -413,7 +436,11 @@ stream in. The fake is seeded with a three-provider model catalog
 (`DEV_MODELS`) — for the `/model` picker and for a chat with the default cleared — the
 default model itself (`DEV_DEFAULT_MODEL`, so `oh` starts chatting with no dialog, the way
 an account that has saved one does), three agents for `oh agents` and the `--agent` path, a
-scripted conversation, and a session with history behind it for `--continue` and `-s <id>`.
+session with history behind it for `--continue` and `-s <id>`, and the scripted conversation
+that session gives — `oh -c` is how you see it, which is why the replies are scripted on that
+session and not on the fake's own: a chat the CLI opens is a session of its own, created at
+run time, with an id nobody could have scripted for. One of the replies is a Markdown
+showcase, so the transcript's rendering is visible from the first run.
 It is a development and QA aid — the entry point is loaded lazily, so a normal `oh` never
 reads it, and nothing in this package enables it on its own. See `src/dev/fake.ts`.
 
@@ -495,6 +522,11 @@ denial, cancellation, revoke failures); `src/index.test.ts` drives `run()` all t
 | `src/credentials.test.ts`                         | the credentials file: atomic write, `0600`/`0700`, per-server tokens, a write that failed                                     |
 | `src/history.test.ts`                             | `history.json`: the list, the cap, consecutive duplicates, per server _and_ user, `record: false`, and the reads it tolerates |
 | `src/components/prompt-input.test.tsx`            | every prompt binding, the cursor's line, history browsing with a draft, multi-line navigation, and paste (#206)               |
+| `src/markdown/text.test.ts`                       | the wrapper: prose and pasted indentation, wide characters, long words, truncation and alignment (#205)                       |
+| `src/markdown/theme.test.ts`                      | `COLORFGBG`, `NO_COLOR`, the config's `theme`, and the two syntax palettes (#205)                                             |
+| `src/markdown/highlight.test.ts`                  | highlight.js → spans: tokens, nested scopes, entities, a language it does not know, half a snippet (#205)                     |
+| `src/markdown/render.test.ts`                     | mdast → lines: every element, the table in the room it has, the frame, NO_COLOR, no line wider than its box (#205)            |
+| `src/components/message-view.test.tsx`            | the frame: the label, the hanging indent, a reply rendered as Markdown, wide characters, the cursor and `(queued)` (#205)     |
 | `src/browser.test.ts`                             | the skip rules and the per-platform command, with an injected spawn                                                           |
 | `src/commands/auth.test.ts`                       | `oh login` / `logout` / `whoami` against the fake's scripted device flow, mid-poll cancellation included                      |
 | `src/commands/preferences.test.ts`                | `oh default-model`: print, set, replace, the failures                                                                         |

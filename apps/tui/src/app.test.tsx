@@ -427,6 +427,24 @@ describe('App', () => {
     expect(app.exits[0]).toEqual({ code: 1 })
   })
 
+  it('draws an agent reply as markdown, all the way through the chat (epic #201, U4)', async () => {
+    const fake = createFakeClient({ delayMs: 5 })
+    fake.respondWith('# Report\n\n- one\n- two\n\n| a | b |\n| --- | --- |\n| 1 | 2 |', {
+      chunks: 4,
+      delayMs: 10,
+    })
+    const app = renderApp(fake, chatOptions({ session: fake.session.id }))
+
+    await waitForChat(app, fake.session.id)
+    submit(app, 'Go.')
+    // The heading is a heading, the list is bulleted and the table is drawn: what the
+    // transcript renders is what `message-view` renders (see `message-view.test.tsx`).
+    await waitForFrame(app, 'agent › Report')
+    await waitForFrame(app, /• one\n\s+• two/u)
+    await waitForFrame(app, /│ a │ b │/u)
+    expect(app.exits).toEqual([])
+  })
+
   it('interrupts a running turn with Ctrl+C, keeping the partial reply', async () => {
     const fake = createFakeClient({ delayMs: 10 })
     fake.respondWith('One two three four five six seven eight', { chunks: 8, delayMs: 40 })
