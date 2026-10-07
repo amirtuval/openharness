@@ -315,9 +315,12 @@ async function runChat(
     return 2
   }
 
-  // The prompt's history (#206), read before the UI mounts so the first ↑ has something to
-  // walk. Two requests' worth of care went into the key — see openChatHistory.
-  const history = await openChatHistory(connected.client, config.server, streams.env)
+  // The prompt's history (#206). It is handed over as a function rather than awaited here:
+  // it needs a `client.me()`, and waiting for that before the screen is drawn would leave
+  // `oh` silent, instead of saying "connecting to <server>…", for as long as the server
+  // takes to answer.
+  const loadHistory = (): Promise<PromptHistory | undefined> =>
+    openChatHistory(connected.client, config.server, streams.env)
 
   const restore = (): void => {
     restoreTerminal({ stdin: streams.stdin, stdout: streams.stdout })
@@ -360,7 +363,7 @@ async function runChat(
         options={options}
         context={context}
         banner={connected.banner}
-        history={history}
+        loadHistory={loadHistory}
       />,
       {
         stdin: streams.stdin,

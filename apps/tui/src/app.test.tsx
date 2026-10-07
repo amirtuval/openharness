@@ -37,7 +37,7 @@ function renderApp(client: Client, options: ChatOptions = chatOptions(), history
       client={client}
       options={options}
       context={CONTEXT}
-      history={history}
+      loadHistory={history === undefined ? undefined : () => Promise.resolve(history)}
       onExit={(payload) => {
         exits.push(payload)
       }}
