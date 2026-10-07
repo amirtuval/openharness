@@ -63,6 +63,9 @@ describe('the caller’s default model (U1)', () => {
       default_model: 'openai/gpt-4.1-mini',
       theme: 'dim',
     })
+
+    // The harness shares this user with the tests below, which start from the default theme.
+    await client.preferences.put({ theme: 'system' })
   })
 
   it('keeps one person’s default out of another’s way, on the same server', async () => {
