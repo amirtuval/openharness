@@ -22,7 +22,7 @@ Options:
       --agent <id|name>        start from a saved agent instead of the default model
       --model <provider/model> the model to run, skipping the picker
       --yes                    with \`oh sessions delete\`: do not ask to confirm
-      --server <url>           server root (default http://localhost:3000)
+      --server <url>           server root (default https://app.oharness.dev)
       --no-browser             with \`oh login\`: print the URL and code instead of
                                opening a browser
       --debug                  show stack traces and the resolved configuration
@@ -33,7 +33,7 @@ Environment:
 
 Config:
   ~/.config/openharness/config.json (or $XDG_CONFIG_HOME/openharness/config.json):
-    { "server": "http://localhost:3000", "autoUpdate": true }
+    { "server": "https://app.oharness.dev", "autoUpdate": true }
 
 Updating:
   Installed with \`npm i -g openharness\`, oh keeps itself current: at most once an

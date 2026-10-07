@@ -70,8 +70,14 @@ function oh(
       cwd: CLI_CWD,
       encoding: 'utf8',
       // The QA run's own config directory, so the developer's stored tokens are never read
-      // or written by a scenario.
-      env: { ...process.env, XDG_CONFIG_HOME: options.configHome ?? CLI_CONFIG_HOME },
+      // or written by a scenario — and the stack under test in `OPENHARNESS_URL`, which a
+      // `--server` still wins over: the net under a scenario that forgot it, because what the
+      // CLI would fall back to is production (#192).
+      env: {
+        ...process.env,
+        XDG_CONFIG_HOME: options.configHome ?? CLI_CONFIG_HOME,
+        OPENHARNESS_URL: CLI_SERVER,
+      },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     return { stdout, status: 0 }
@@ -691,7 +697,8 @@ test.describe('cli scenarios', () => {
     await ensureCliSignedIn(page)
     const whoami = oh(['whoami', '--server', CLI_SERVER])
     expect(whoami.status).toBe(0)
-    expect(whoami.stdout).toMatch(/^Logged in as \S+ on http:\/\/localhost:3000/)
+    // The server is the one the command named, not the CLI's default (#192).
+    expect(whoami.stdout).toMatch(new RegExp(`^Logged in as \\S+ on ${CLI_SERVER}`))
   })
 
   test('C14 oh logout revokes the token, and the next command says so', async ({ page }) => {

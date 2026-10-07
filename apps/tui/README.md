@@ -21,23 +21,29 @@ This installs the `oh` command.
 
 ## Use
 
-Point it at a server (see the [repo](https://github.com/amirtuval/openharness) for how to run
-one), sign in, and chat:
+Sign in, and chat:
 
 ```bash
-oh --server http://localhost:3000 login   # the device flow: prints a URL and a code
-oh --server http://localhost:3000         # a new chat on your default model
+oh login   # the device flow: prints a URL and a code, then signs you in
+oh         # a new chat on your default model
 ```
 
-`--server` is per-run; to keep it, either export it or write it to the config file:
+`oh` talks to **`https://app.oharness.dev`** unless you point it somewhere else. `--server` is
+per-run; to keep it, either export it or write it to the config file:
 
 ```bash
+oh --server http://localhost:3000 login        # a server of your own (see the repo for one)
 export OPENHARNESS_URL=http://localhost:3000   # or, persistent:
 # ~/.config/openharness/config.json → { "server": "http://localhost:3000" }
 ```
 
 Resolution order, highest first: `--server`, `OPENHARNESS_URL`,
-`~/.config/openharness/config.json`, then `http://localhost:3000` as the default.
+`~/.config/openharness/config.json`, then `https://app.oharness.dev` as the default.
+
+Working from a checkout of the [repo](https://github.com/amirtuval/openharness), `yarn oh`
+builds the CLI and runs it against `http://localhost:3000` (`yarn oh:staging` and
+`yarn oh:prod` run it against staging and production); arguments pass straight through, so
+`yarn oh:staging login` works.
 
 ## Commands
 

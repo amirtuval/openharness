@@ -258,6 +258,9 @@ and they spend their time waiting rather than computing.
   var in `playwright.config.ts`), e.g. `OPENHARNESS_TEST_MODEL=mock docker compose up --build`.
 - Opt-ins: `QA_WITH_CLI=1` runs the CLI specs (needs `tmux` and a built `apps/tui`);
   `QA_ALLOW_SERVER_RESTART=1` runs the scenarios that stop, kill and recreate the server.
+- Every `oh` a CLI spec runs names its server (`--server`, through `ohCommand`/`ohCommandIn`,
+  from `QA_BASE_URL`). The CLI's default is production since #192, so a spec that forgot it
+  would talk to the real deployment instead of the stack under test.
 - Screenshots go to `e2e/qa-output/` (gitignored; override with `QA_SHOT_DIR`).
 - Results of each pass are reported as a comment on the QA issue, not committed.
 - A spec marked `test.fail` documents a known bug; remove the marker once the bug is fixed.

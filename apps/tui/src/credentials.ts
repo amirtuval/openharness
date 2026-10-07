@@ -22,7 +22,7 @@ import { configDirPath } from './config'
  * by default, the same directory as the config file):
  *
  * ```json
- * { "servers": { "http://localhost:3000": "<session token>" } }
+ * { "servers": { "https://app.oharness.dev": "<session token>" } }
  * ```
  *
  * The file is written atomically — a temp file beside it, then a rename — and with

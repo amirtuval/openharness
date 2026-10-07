@@ -38,10 +38,13 @@ describe('configFilePath', () => {
 })
 
 describe('resolveConfig', () => {
-  it('defaults to a local server', () => {
+  it('defaults to production (#192)', () => {
     const config = configOf({ env: {}, readFile: () => undefined })
 
-    expect(config.server).toBe(DEFAULT_SERVER_URL)
+    // The literal, as well as the constant: an `oh` that nothing has pointed anywhere must
+    // reach the server an `npm i -g openharness` can actually talk to.
+    expect(DEFAULT_SERVER_URL).toBe('https://app.oharness.dev')
+    expect(config.server).toBe('https://app.oharness.dev')
     expect(config.sources).toEqual({ server: 'default' })
   })
 
@@ -111,7 +114,7 @@ describe('resolveConfig', () => {
     const error = errorOf({ env: { OPENHARNESS_URL: 'localhost:3000' }, readFile: () => undefined })
 
     expect(error).toContain('localhost:3000')
-    expect(error).toContain('http://localhost:3000')
+    expect(error).toContain('https://app.oharness.dev')
     expect(error).toContain('OPENHARNESS_URL')
   })
 

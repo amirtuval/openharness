@@ -129,11 +129,12 @@ trial, nothing survives a restart (it says so at startup).
 ### The terminal client, `oh`
 
 ```bash
-npm i -g openharness                              # the published CLI, as the `oh` command
-oh login && oh                                    # once installed
+npm i -g openharness   # the published CLI, as the `oh` command
+oh login && oh         # once installed: signs in and chats on https://app.oharness.dev
 
-yarn turbo run build --filter=openharness         # from a checkout of this repo
-node apps/tui/dist/index.js                       # the same `oh`, built locally
+yarn oh                # from a checkout of this repo: builds the CLI and runs it against
+                       # the local server on http://localhost:3000 (`yarn oh:staging` /
+                       # `yarn oh:prod` for staging and production)
 ```
 
 The npm package is **`openharness`** and the command stays **`oh`** (#152). It is one
@@ -148,8 +149,10 @@ the session token per server in `~/.config/openharness/credentials.json`, mode `
 server and forgets it locally. Every other command sends the stored token as
 `Authorization: Bearer`.
 
-`oh` starts a new chat against `http://localhost:3000` (override with `--server`, with
-`OPENHARNESS_URL`, or in `~/.config/openharness/config.json`). A new chat opens **your
+`oh` starts a new chat against `https://app.oharness.dev` — the default since #192, so a
+fresh `npm i -g openharness` works with nothing to configure. Point it elsewhere with
+`--server`, with `OPENHARNESS_URL`, or in `~/.config/openharness/config.json`; from a checkout,
+`yarn oh` builds it and points it at the local server. A new chat opens **your
 default model** immediately, with no picker: `oh default-model` prints it, `oh
 default-model provider/model` sets it (`--model` overrides it for one run). Without a
 default, `oh` asks once — from the models **your own provider keys** can use, grouped by

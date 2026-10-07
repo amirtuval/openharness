@@ -74,8 +74,13 @@ Highest first:
 2. `OPENHARNESS_URL`
 3. `~/.config/openharness/config.json` (or `$XDG_CONFIG_HOME/openharness/config.json`, which
    is ignored when it is not an absolute path):
-   `{ "server": "http://localhost:3000", "autoUpdate": true }`
-4. `http://localhost:3000`
+   `{ "server": "https://app.oharness.dev", "autoUpdate": true }`
+4. `https://app.oharness.dev`
+
+The default is **production** (#192): `npm i -g openharness` lands on a machine with no server
+of its own, so an `oh` nobody has pointed anywhere talks to the one that is always there.
+Working from a checkout, `yarn oh` runs this CLI against `http://localhost:3000`; `--server`,
+`OPENHARNESS_URL` or the config file point it anywhere else.
 
 `autoUpdate` is the config file's own off switch for the background self-update (it defaults to
 `true`); `server` is the only other key the file takes, and either may be left out. See
@@ -101,7 +106,7 @@ The session token is stored **per server URL** in
 `~/.config/openharness/credentials.json` (XDG rules as for the config file):
 
 ```json
-{ "servers": { "http://localhost:3000": "<session token>" } }
+{ "servers": { "https://app.oharness.dev": "<session token>" } }
 ```
 
 The file is written atomically (a temp file beside it, then a rename), with permissions
