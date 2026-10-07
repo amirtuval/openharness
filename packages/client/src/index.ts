@@ -58,6 +58,16 @@ export {
   selectMessages,
   selectStreamingMessage,
 } from './transcript'
-export type { Transcript, TranscriptError, TranscriptMessage, TranscriptState } from './transcript'
+export type {
+  MessagePart,
+  PendingModelRequest,
+  TextPart,
+  Transcript,
+  TranscriptError,
+  TranscriptMessage,
+  TranscriptMessageMeta,
+  TranscriptState,
+  TranscriptUsage,
+} from './transcript'
 
 export type { StreamOptions } from './events/stream'

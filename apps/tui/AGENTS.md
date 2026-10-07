@@ -319,6 +319,17 @@ On the way out the CLI prints `Resume this session with: oh -s <id>` — unless 
 was deleted while the chat was open, when it prints `This chat was deleted; it is gone.`
 instead (epic #116 U5).
 
+### How a message is drawn
+
+`MessageView` lays a message out — the `you ›` / `agent ›` label, the indent under it, the
+block cursor while a reply streams, the `(queued)` note — and draws its content part by part
+through `PART_RENDERERS` (epic #201, X1), a `Record<MessagePart['type'], …>` that holds the
+text renderer today and is where the next phases' parts — a tool call, a question, an approval
+— get theirs. A renderer returns the characters its part contributes, not a `<Text>`: one
+terminal line is one `<Text>` here (the label and the text beside it have to arrive in one
+escape-ridden string, or a test's `toContain('you › hello')` breaks), so the layout stays with
+the view and a part renders inline.
+
 ### Terminal hygiene
 
 Ink restores raw mode and the cursor when it unmounts, and the CLI unmounts on every path out:
@@ -351,7 +362,8 @@ src/
     screen.tsx           the chat screen (transcript, status line, prompt, `/model`)
     target.ts            which session to open, and the model/agent-selection rules
     ctrl-c.ts            the Ctrl+C rules (interrupt / arm / exit)
-  components/            message-view, transcript-view, status-line, prompt-input,
+  components/            message-view (a message, and the renderer per part type, #201),
+                         transcript-view, status-line, prompt-input,
                          notice-view, model-picker
   update/
     index.ts             the auto-update: the notice, and the decision to check

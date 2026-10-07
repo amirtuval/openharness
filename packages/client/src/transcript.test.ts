@@ -62,6 +62,11 @@ function messageById(state: TranscriptState, id: string): TranscriptMessage {
   return found
 }
 
+/** The messages without their per-reply metadata: what every view of the log must agree on. */
+function withoutMeta(messages: readonly TranscriptMessage[]): unknown[] {
+  return messages.map(({ meta: _meta, ...rest }) => rest)
+}
+
 describe('reduceTranscript', () => {
   it('loads a whole session history', () => {
     const state = reduceEvents(sampleSessionHistory)
@@ -93,6 +98,7 @@ describe('reduceTranscript', () => {
       lastSeq: 0,
       deleted: false,
       model: null,
+      pendingRequests: [],
     })
   })
 
@@ -137,7 +143,7 @@ describe('reduceTranscript', () => {
     expect(messageById(state, messageId)).toMatchObject({
       role: 'agent',
       text: 'Hello, world',
-      blocks: ['Hello, world'],
+      parts: [{ type: 'text', text: 'Hello, world' }],
       streaming: true,
       pending: false,
     })
@@ -159,7 +165,10 @@ describe('reduceTranscript', () => {
       }),
     ])
 
-    expect(messageById(state, messageId).blocks).toEqual(['first block', 'second'])
+    expect(messageById(state, messageId).parts).toEqual([
+      { type: 'text', text: 'first block' },
+      { type: 'text', text: 'second' },
+    ])
     expect(messageById(state, messageId).text).toBe('first blocksecond')
   })
 
@@ -597,6 +606,216 @@ describe('positions (D9)', () => {
   })
 })
 
+describe('typed parts (#201, X1)', () => {
+  it('gives a user message one text part per content block, and keeps text as their join', () => {
+    const message = makeUserMessage('', {
+      seq: 1,
+      id: idA,
+      processed_at: fixtureTimestamp(1),
+      content: [
+        { type: 'text', text: 'one ' },
+        { type: 'text', text: 'two' },
+      ],
+    })
+
+    const state = reduceEvents([message])
+
+    expect(messageById(state, idA).parts).toEqual([
+      { type: 'text', text: 'one ' },
+      { type: 'text', text: 'two' },
+    ])
+    expect(messageById(state, idA).text).toBe('one two')
+  })
+
+  it('gives an agent message one text part per content block', () => {
+    const message = makeAgentMessage('', {
+      seq: 1,
+      id: idA,
+      content: [
+        { type: 'text', text: 'first block' },
+        { type: 'text', text: 'second' },
+      ],
+    })
+
+    const state = reduceEvents([message])
+
+    expect(messageById(state, idA).parts).toEqual([
+      { type: 'text', text: 'first block' },
+      { type: 'text', text: 'second' },
+    ])
+    expect(messageById(state, idA).text).toBe('first blocksecond')
+  })
+
+  it('carries the same parts whether the reply was streamed or stored whole', () => {
+    const stored = makeAgentMessage('Hello, world', { seq: 3, id: idA })
+    const streamed = reduceEvents([
+      makeStoredEventStart(stored.id, { seq: 1 }),
+      makeStoredEventDelta(stored.id, 'Hello, ', { seq: 2 }),
+      makeStoredEventDelta(stored.id, 'world', { seq: 3 }),
+    ])
+
+    expect(messageById(streamed, idA).parts).toEqual([{ type: 'text', text: 'Hello, world' }])
+    expect(messageById(reduceEvents([stored]), idA).parts).toEqual(messageById(streamed, idA).parts)
+  })
+})
+
+describe('per-reply metadata (#201, U1)', () => {
+  /** A span end that reports `input` / `output` tokens. */
+  function endOf(
+    start: ReturnType<typeof makeModelRequestStart>,
+    overrides: Partial<ReturnType<typeof makeModelRequestEnd>> = {},
+  ): ReturnType<typeof makeModelRequestEnd> {
+    return makeModelRequestEnd(start, {
+      model_usage: {
+        input_tokens: 10,
+        output_tokens: 4,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      },
+      ...overrides,
+    })
+  }
+
+  it('reads a reply’s model, duration and tokens off the turn’s spans', () => {
+    const start = makeModelRequestStart({
+      seq: 2,
+      id: idB,
+      model: 'anthropic/claude-sonnet-5',
+      processed_at: fixtureTimestamp(2),
+    })
+    const reply = makeAgentMessage('Hello.', { seq: 3, id: idA })
+    const end = endOf(start, { seq: 4, id: idC, processed_at: fixtureTimestamp(4) })
+
+    const state = reduceEvents([start, reply, end])
+
+    expect(messageById(state, idA).meta).toEqual({
+      model: 'anthropic/claude-sonnet-5',
+      durationMs: 2000,
+      usage: { input: 10, output: 4, total: 14 },
+    })
+  })
+
+  it('writes the tokens when the span end arrives, after the reply that it closes', () => {
+    const start = makeModelRequestStart({
+      seq: 2,
+      id: idB,
+      model: 'anthropic/claude-sonnet-5',
+      processed_at: fixtureTimestamp(2),
+    })
+    const reply = makeAgentMessage('Hello.', { seq: 3, id: idA })
+
+    // A reply whose span has not closed yet knows the model it is running on and nothing else:
+    // the tokens and the time are on an event that has not arrived.
+    const streaming = reduceEvents([start, reply])
+    expect(messageById(streaming, idA).meta).toEqual({ model: 'anthropic/claude-sonnet-5' })
+
+    const ended = reduceTranscript(
+      streaming,
+      endOf(start, { seq: 4, id: idC, processed_at: fixtureTimestamp(4) }),
+    )
+    expect(messageById(ended, idA).meta).toMatchObject({ durationMs: 2000 })
+  })
+
+  it('adds up a reply the brain retried, and runs it on the model that answered', () => {
+    const failedStart = makeModelRequestStart({
+      seq: 2,
+      id: idB,
+      model: 'anthropic/claude-sonnet-5',
+      processed_at: fixtureTimestamp(2),
+    })
+    const failedEnd = endOf(failedStart, {
+      seq: 3,
+      id: idC,
+      processed_at: fixtureTimestamp(3),
+      is_error: true,
+      error: { type: 'model_error', message: 'The model is overloaded.' },
+    })
+    const retryStart = makeModelRequestStart({
+      seq: 4,
+      id: idD,
+      model: 'anthropic/claude-opus-5-5',
+      processed_at: fixtureTimestamp(4),
+    })
+    const reply = makeAgentMessage('Second time lucky.', { seq: 5, id: idA })
+    const retryEnd = endOf(retryStart, { seq: 6, id: idE, processed_at: fixtureTimestamp(6) })
+
+    // The reply the retry produced already carries the failed attempt's tokens: they belong to
+    // the same reply, and the request that spent them is still open.
+    const beforeEnd = reduceEvents([failedStart, failedEnd, retryStart, reply])
+    expect(messageById(beforeEnd, idA).meta).toEqual({
+      model: 'anthropic/claude-opus-5-5',
+      durationMs: 1000,
+      usage: { input: 10, output: 4, total: 14 },
+    })
+
+    const state = reduceEvents([failedStart, failedEnd, retryStart, reply, retryEnd])
+    expect(messageById(state, idA).meta).toEqual({
+      model: 'anthropic/claude-opus-5-5',
+      durationMs: 4000,
+      usage: { input: 20, output: 8, total: 28 },
+    })
+  })
+
+  it('leaves the tokens of a request no reply ever claimed out of the next turn', () => {
+    const start = makeModelRequestStart({ seq: 1, id: idB, processed_at: fixtureTimestamp(1) })
+    const end = endOf(start, { seq: 2, id: idC, processed_at: fixtureTimestamp(2) })
+    const idle = makeStatusIdle({ seq: 3 })
+    // The next turn: its reply has no request of its own — a log whose spans are missing — and
+    // must not inherit the tokens the turn before it spent.
+    const reply = makeAgentMessage('A later reply.', { seq: 4, id: idA })
+
+    const state = reduceEvents([start, end, idle, reply])
+
+    expect(messageById(state, idA).meta).toBeUndefined()
+    expect(state.pendingRequests).toEqual([])
+  })
+
+  it('reports nothing rather than zero when the log says nothing', () => {
+    const reply = makeAgentMessage('No span ever wrapped this.', { seq: 1, id: idA })
+
+    const state = reduceEvents([reply])
+
+    expect(messageById(state, idA).meta).toBeUndefined()
+  })
+
+  it('keeps the metadata it has when the span start names no model', () => {
+    // A span start from before D9 carries no `model`, and the model is not something to guess:
+    // the tokens and the time are still the log's word.
+    const start = makeModelRequestStart({ seq: 1, id: idB, processed_at: fixtureTimestamp(1) })
+    const reply = makeAgentMessage('Hello.', { seq: 2, id: idA })
+    const end = endOf(start, { seq: 3, id: idC, processed_at: fixtureTimestamp(3) })
+
+    const state = reduceEvents([start, reply, end])
+
+    expect(messageById(state, idA).meta).toEqual({
+      durationMs: 2000,
+      usage: { input: 10, output: 4, total: 14 },
+    })
+  })
+
+  it('reads the sample history’s replies the way the log spells them', () => {
+    const state = reduceEvents(sampleSessionHistory)
+    const metaOf = (text: string): unknown =>
+      state.messages.find((message) => message.text === text)?.meta
+
+    // Turn 1: one request, 2 s of span, the fixture's tokens.
+    expect(metaOf('openharness is an open-source implementation of Managed Agents.')).toEqual({
+      durationMs: 2000,
+      usage: { input: 640, output: 24, total: 664 },
+    })
+    // Turn 3: an interrupt keeps the partial reply, and its span's tokens with it.
+    expect(metaOf('Events in a log,')).toEqual({
+      durationMs: 3000,
+      usage: { input: 720, output: 6, total: 726 },
+    })
+    // Turn 4: the failed attempt reported nothing and the retry reported the answer.
+    expect(metaOf('MIT.')).toEqual({
+      durationMs: 7000,
+      usage: { input: 768, output: 2, total: 770 },
+    })
+  })
+})
+
 describe('one reply, five clients (D9 convergence)', () => {
   const REPLY = 'openharness streams a reply in fragments'
 
@@ -685,12 +904,32 @@ describe('one reply, five clients (D9 convergence)', () => {
     }
 
     const expected = reduceEvents(events)
+    const joinedLate = 'joined mid-chunks'
 
     for (const [client, eventsSeen] of Object.entries(views)) {
       const state = reduceEvents(eventsSeen)
-      expect(state.messages, client).toEqual(expected.messages)
+      // The reply's model and its duration are on its `span.model_request_start`, so the view
+      // that joined after that event has neither (#201, U1): its metadata is compared without.
+      // The conversation, and everything the span end reports, is the same for all five.
+      const messages = client === joinedLate ? withoutMeta(state.messages) : state.messages
+      expect(messages, client).toEqual(
+        client === joinedLate ? withoutMeta(expected.messages) : expected.messages,
+      )
       expect(state.lastSeq, client).toBe(27)
     }
+
+    // The reply's metadata, for a view that saw the whole turn: the model the request named,
+    // and the tokens and the time its end reported. (`durationMs` is 0 because the scripted
+    // turn's span start and end carry the fixtures' own timestamp.)
+    expect(expected.messages[0]?.meta).toEqual({
+      model: 'anthropic/claude-sonnet-5',
+      durationMs: 0,
+      usage: { input: 512, output: 64, total: 576 },
+    })
+    // A client that joined after the span start cannot tie the span end it *did* see to the
+    // reply — the end names the request that opened it, which is the event it missed — so the
+    // reply keeps no metadata at all rather than a guess at one.
+    expect(reduceEvents(views[joinedLate] ?? []).messages[0]?.meta).toBeUndefined()
 
     expect(expected.messages.map((message) => `${message.role}:${message.text}`)).toEqual([
       `agent:${REPLY}`,
@@ -960,8 +1199,25 @@ describe('the state a UI reads', () => {
 
     expect(message).not.toBeNull()
     expect(Object.keys(message ?? {}).sort()).toEqual([
-      'blocks',
       'id',
+      'parts',
+      'pending',
+      'position',
+      'role',
+      'streaming',
+      'text',
+    ])
+  })
+
+  it('adds a reply’s metadata to an agent message, and to no other', () => {
+    const state = reduceEvents(sampleSessionHistory.slice(0, 6))
+    const [user, reply] = state.messages
+
+    expect(user?.meta).toBeUndefined()
+    expect(Object.keys(reply ?? {}).sort()).toEqual([
+      'id',
+      'meta',
+      'parts',
       'pending',
       'position',
       'role',
