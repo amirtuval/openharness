@@ -8,8 +8,10 @@ import { ChatScreen } from './chat/screen'
 import { createChatSession, type ChatSession } from './chat/session'
 import { resolveTarget } from './chat/target'
 import { ModelPicker } from './components/model-picker'
+import { ThemeProvider } from './components/theme'
 import { describeError, type ErrorContext, type ErrorReport } from './errors'
 import type { PromptHistory } from './history'
+import { DEFAULT_THEME, type TerminalTheme } from './markdown/theme'
 
 /** What the CLI should do once the app is done, and which session to point at on the way out. */
 export interface ExitPayload {
@@ -61,8 +63,31 @@ export interface AppProps {
    * answer. This way it starts beside the session lookup and arrives when it arrives.
    */
   readonly loadHistory?: (() => Promise<PromptHistory | undefined>) | undefined
+  /**
+   * The theme the transcript is drawn with (epic #201, X4): the config file's `theme`, the
+   * environment's `NO_COLOR`, and the background the terminal reports, resolved once at
+   * startup. Omitted, it is the dark one in colour — what a component rendered on its own
+   * gets, and what a terminal that reports nothing falls back to.
+   */
+  readonly theme?: TerminalTheme | undefined
   /** How to leave; Ink's `exit` by default. Tests pass a spy to observe the payload. */
   readonly onExit?: ((payload: ExitPayload) => void) | undefined
+}
+
+/**
+ * The whole `oh` chat, and the theme everything under it draws with (epic #201, X4).
+ *
+ * A two-line component on purpose: the theme is context rather than a prop because of where
+ * it is *used* — the message view, which Ink's `<Static>` renders once per settled message —
+ * and threading it down would mean the transcript view and the chat screen both carrying a
+ * value neither of them reads.
+ */
+export function App({ theme = DEFAULT_THEME, ...rest }: AppProps) {
+  return (
+    <ThemeProvider theme={theme}>
+      <AppScreen {...rest} />
+    </ThemeProvider>
+  )
 }
 
 /**
@@ -73,7 +98,14 @@ export interface AppProps {
  * second session — so the guard is a ref rather than a dependency list that object
  * identities would keep re-triggering.
  */
-export function App({ client, options, context, banner, loadHistory, onExit }: AppProps) {
+function AppScreen({
+  client,
+  options,
+  context,
+  banner,
+  loadHistory,
+  onExit,
+}: Omit<AppProps, 'theme'>) {
   const { exit } = useApp()
   const [screen, setScreen] = useState<Screen>({ kind: 'resolving' })
   const [history, setHistory] = useState<PromptHistory | undefined>(undefined)

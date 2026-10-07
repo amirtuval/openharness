@@ -36,14 +36,15 @@ describe('createDevClient', () => {
     expect((await fake.models.list()).data.map((model) => model.id)).toContain(DEV_DEFAULT_MODEL)
   })
 
-  it('scripts the replies the seeded session gives', async () => {
+  it('scripts the replies for the session --continue opens', async () => {
     const fake = await createDevClient()
+    const [newest] = (await fake.sessions.list()).data
 
-    await fake.sendMessage(fake.session.id, 'Anything.')
-    await fake.waitForIdle()
+    await fake.sendMessage(newest?.id ?? '', 'Anything.')
+    await fake.waitForIdle(newest?.id)
 
     const replied = fake
-      .history()
+      .history(newest?.id)
       .flatMap((event) =>
         event.type === 'agent.message'
           ? event.content.flatMap((block) => (block.type === 'text' ? [block.text] : []))

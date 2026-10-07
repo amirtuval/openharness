@@ -65,6 +65,33 @@ export const DEV_REPLIES: readonly string[] = [
   'Hello from the openharness dev fake. Nothing here leaves your machine: no server, no model, just a scripted reply stream.',
   'While this streams you can steer it: type another message and press Enter before the reply finishes, and it is queued for the next request. Ctrl+J (or Alt+Enter) inserts a newline instead.',
   'Ctrl+C interrupts a reply in flight and keeps what it has produced. Press it twice when idle to leave — the CLI then prints the exact `oh -s <id>` that resumes this session.',
+  [
+    '## Markdown, rendered',
+    '',
+    'A scripted reply that exercises the renderer — **strong**, *emphasis*, `inline code`, a',
+    '[link](https://github.com/amirtuval/openharness), a list, a quote, a table and a fenced',
+    'code block. Replies are Markdown; what you type is not.',
+    '',
+    '- a list item',
+    '  - nested one level deeper',
+    '- and a second one',
+    '',
+    '> Quoted, dimmed, behind its own bar.',
+    '',
+    '| what | where |',
+    '| --- | --- |',
+    '| the renderer | `src/markdown/render.ts` |',
+    '| the theme | `src/markdown/theme.ts` |',
+    '',
+    '```ts',
+    'export function markdownLines(text: string, layout: RenderLayout) {',
+    '  return renderBlocks(parseMarkdown(text).children, layout)',
+    '}',
+    '```',
+    '',
+    'And a paragraph long enough that it has to wrap, so that the hanging indent under the',
+    '`agent › ` label is visible on every one of its lines rather than only the first.',
+  ].join('\n'),
 ]
 
 /** The default model the dev fake stores, so a new chat starts without the picker (#114). */
@@ -83,9 +110,12 @@ export const DEV_DEFAULT_MODEL = 'anthropic/claude-sonnet-5'
  *   saved one looks: `oh` starts chatting on it, no picker;
  * - three agents, for `oh agents` and the `--agent` preset path — a new chat without
  *   `--agent` runs a model, not an agent;
- * - a scripted conversation, so replies stream in visibly;
- * - a second session with history in it, so `oh --continue` and `oh -s <id>` have something
- *   to resume.
+ * - a scripted conversation ({@link DEV_REPLIES}), so replies stream in visibly — scripted
+ *   on the session with history, which is the one `oh --continue` opens, because that is the
+ *   only session a dev can name: a chat the CLI opens is a session of its own, created at
+ *   run time, with an id nobody could have scripted for;
+ * - a session with history in it, so `oh --continue` and `oh -s <id>` have something to
+ *   resume.
  *
  * @see {@link FAKE_MODE_ENV}
  */
@@ -110,11 +140,9 @@ export async function createDevClient(): Promise<FakeClient> {
     system: null,
   })
 
-  for (const reply of DEV_REPLIES) {
-    fake.respondWith(reply, { chunks: 8, delayMs: 20 })
-  }
-
-  // Created last, so `oh --continue` finds it: the list is newest first.
+  // Created after the fake's own session, so `oh --continue` finds it (the list is newest
+  // first) — and the replies are scripted on it once its history is settled, so that a dev
+  // running `oh -c` gets the conversation below rather than an echo.
   const resumed = await fake.sessions.create({
     agent: fake.agent.id,
     title: 'A session with history',
@@ -123,6 +151,10 @@ export async function createDevClient(): Promise<FakeClient> {
     ],
   })
   await fake.waitForIdle(resumed.id)
+
+  for (const reply of DEV_REPLIES) {
+    fake.respondWith(reply, { sessionId: resumed.id, chunks: 8, delayMs: 20 })
+  }
 
   return fake
 }

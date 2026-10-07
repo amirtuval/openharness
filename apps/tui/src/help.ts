@@ -33,7 +33,14 @@ Environment:
 
 Config:
   ~/.config/openharness/config.json (or $XDG_CONFIG_HOME/openharness/config.json):
-    { "server": "https://app.oharness.dev", "autoUpdate": true }
+    { "server": "https://app.oharness.dev", "autoUpdate": true, "theme": "auto" }
+
+Display:
+  An agent's reply is rendered as Markdown: headings, emphasis, lists, quotes,
+  links, tables and fenced code blocks, which are syntax-highlighted. The user's
+  own message is shown as typed. Every colour is one of the terminal's own.
+  theme picks the code block theme: 'auto' follows the terminal's background
+  (COLORFGBG), 'light' and 'dark' say so outright. NO_COLOR turns colour off.
 
 Updating:
   Installed with \`npm i -g @openh/cli\`, oh keeps itself current: at most once an
