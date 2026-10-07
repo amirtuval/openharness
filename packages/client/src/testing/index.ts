@@ -143,6 +143,16 @@ export interface FakeClientOptions {
    * says only that: `{ default_model: 'openai/gpt-5-mini' }` leaves the theme at `system`.
    */
   preferences?: Partial<UserPreferences>
+  /**
+   * The provider credentials {@link Client.providerCredentials} starts with, over the default
+   * of none.
+   *
+   * Metadata only, the way the store holds them: the key itself never exists here. A test of a
+   * screen that behaves differently for an account with a key — the first-run check is the one
+   * that made this an option (#209) — seeds one instead of putting it before rendering, which
+   * `put` cannot do synchronously.
+   */
+  credentials?: readonly ProviderCredential[]
 }
 
 /** A device flow, as {@link FakeClient.scriptDeviceLogin} takes it. */
@@ -336,7 +346,9 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
 
   const agents = new Map<string, Agent>()
   const brains = new Map<string, FakeBrain>()
-  const credentials = new Map<string, ProviderCredential>()
+  const credentials = new Map<string, ProviderCredential>(
+    (options.credentials ?? []).map((credential) => [credential.provider, credential]),
+  )
   const user = options.user ?? makeUser()
   const models: readonly ModelEntry[] = options.models ?? [makeModelEntry()]
   const providers: readonly ProviderCatalogStatus[] =
@@ -730,6 +742,16 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
         validated_at: timestamp,
       })
       credentials.set(provider, stored)
+      // The server picks a default model for an account that has none when its first key is
+      // saved (epic #116, U4), which is the model the onboarding screens name back to the
+      // reader (#209). The fake restates the rule without the recommendation table the server
+      // keeps: the saved provider's first catalog model, else the catalog's first. A default
+      // that is already stored — the reader's own, or an earlier pick — is never replaced.
+      if (preferences.default_model === null) {
+        const picked =
+          models.find((entry) => entry.provider === provider)?.id ?? models[0]?.id ?? null
+        preferences = UserPreferencesSchema.parse({ ...preferences, default_model: picked })
+      }
       return stored
     },
 
