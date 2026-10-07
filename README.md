@@ -139,8 +139,8 @@ yarn oh                # from a checkout of this repo: builds the CLI and runs i
 
 The npm package is **`@openh/cli`** and the command stays **`oh`** (#194, #152) — npm refuses
 the unscoped `openharness` name. It is one self-contained bundle — Ink, React and the client
-inlined, nothing resolved from `node_modules` at runtime — so `npm install -g @openh/cli@next`
-can replace it on disk while a running `oh` keeps working.
+inlined, nothing resolved from `node_modules` at runtime — so `npm install -g @openh/cli` can
+replace it on disk while a running `oh` keeps working.
 
 `oh` signs in with `oh login`: the device flow prints a URL and a code, opens the browser at
 it (skipped with `--no-browser`, in CI, over SSH, or when there is no display), and stores

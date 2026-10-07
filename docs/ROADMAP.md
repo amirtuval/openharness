@@ -109,10 +109,7 @@ is in [`DEPLOYMENT.md`](./DEPLOYMENT.md) and [`RELEASING.md`](./RELEASING.md).
 - Cloud SQL high availability for production;
 - a preview environment per PR;
 - shared rate-limit storage: the counters are per instance today, so the effective limit grows
-  with the replica count;
-- `HEAD` on the web app's files returns 404 ([#196](https://github.com/amirtuval/openharness/issues/196));
-- the CLI's background update can be cut short by quick commands
-  ([#197](https://github.com/amirtuval/openharness/issues/197)).
+  with the replica count.
 
 ## 4. Model selection
 
