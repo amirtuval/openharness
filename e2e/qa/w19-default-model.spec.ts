@@ -90,10 +90,17 @@ test.describe('W19 the default model in Settings', () => {
       await expect(page.getByRole('button', { name: /^Model\b/ })).toContainText('Choose a model')
 
       const catalog = (await (await request.get('/v1/models')).json()) as { data: unknown[] }
+      const credentials = (await (await request.get('/v1/provider-credentials')).json()) as {
+        data: unknown[]
+      }
       await page.goto('/#/new')
-      if (catalog.data.length === 0) {
+      if (credentials.data.length === 0) {
+        // #209: no key at all is the first-run flow, whatever default is stored — there is
+        // nothing that could run it. This is the road the mock pass starts on.
+        await expect(page.getByRole('heading', { name: 'Connect a model provider' })).toBeVisible()
+      } else if (catalog.data.length === 0) {
         await expect(page.getByText('Add a provider key to start')).toBeVisible()
-        await expect(page.getByRole('link', { name: /Model providers/ })).toBeVisible()
+        await expect(page.getByRole('link', { name: 'Settings → Providers' })).toBeVisible()
       } else {
         // Keys but no default (#146): the composer offers the catalog — waiting for a pick,
         // or with a sole model preselected — and never the claim about keys.

@@ -117,7 +117,9 @@ test.describe('W27 §11 cross-client and robustness', () => {
   test('W27b Settings and the device page at 390x844', async ({ context, page }) => {
     await page.setViewportSize({ width: 390, height: 844 })
     await page.goto('/#/settings')
-    await expect(page.getByText('Model providers')).toBeVisible()
+    await expect(page.getByText('Providers', { exact: true })).toBeVisible()
+    // #209: the URL is Settings → Advanced, collapsed until it is asked for.
+    await page.getByRole('button', { name: /Advanced/ }).click()
     await expect(page.getByLabel('Server URL')).toBeVisible()
     const settingsOverflow = await page.evaluate(
       () => document.documentElement.scrollWidth - document.documentElement.clientWidth,

@@ -21,10 +21,9 @@ import { beginSessionCheck, signOutSession } from './lib/auth-store'
 import { modelNameLookup } from './lib/models'
 import { navigate, routeToHash, type Route } from './lib/router'
 import { DeviceScreen } from './screens/device-screen'
-import { HomeScreen } from './screens/home-screen'
-import { NewChatScreen } from './screens/new-chat-screen'
 import { SettingsScreen } from './screens/settings-screen'
 import { SignInScreen } from './screens/sign-in-screen'
+import { StartScreen } from './screens/start-screen'
 
 /** What the root takes. `client` is the seam every test uses. */
 export interface AppProps {
@@ -325,8 +324,6 @@ function AppFrame({
               onDelete={deleteSession}
               onDeleted={forgetSession}
             />
-          ) : route.name === 'new' ? (
-            <NewChatScreen createSession={create} catalog={catalog} />
           ) : route.name === 'settings' ? (
             <SettingsScreen catalog={catalog} />
           ) : route.name === 'device' ? (
@@ -336,7 +333,10 @@ function AppFrame({
             // screen shows for the frame or two that takes.
             <SignInScreen returnHash={signInReturnHash(route)} />
           ) : (
-            <HomeScreen />
+            // `#/` and `#/new` are the same screen (X5): New chat, or the first-run flow when
+            // the account has no provider key. The Home screen is gone, and an old `#/` link —
+            // the sidebar's own logo among them — lands where a reader meant to go.
+            <StartScreen createSession={create} catalog={catalog} />
           )}
         </main>
       </div>

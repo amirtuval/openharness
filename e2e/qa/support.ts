@@ -762,6 +762,61 @@ export async function sendFromComposer(page: Page, text: string): Promise<void> 
   await input.press('Enter')
 }
 
+// --- provider keys (#209) --------------------------------------------------------------------------
+
+/** The Add-provider dialog, addressed by the label it carries (`aria-label`). */
+export function providerDialog(page: Page) {
+  return page.getByRole('dialog', { name: 'Add a model provider' })
+}
+
+/** The keys already stored, as Settings → Providers lists them. */
+export function savedKeys(page: Page) {
+  return page.getByRole('region', { name: 'Saved provider keys' })
+}
+
+/**
+ * Open Settings → Providers and wait for the card to have loaded.
+ *
+ * The card is a list since #209: adding and replacing go through the dialog
+ * ({@link addProviderKey}), and the list itself is what a scenario about stored keys reads.
+ */
+export async function openProviders(page: Page): Promise<void> {
+  await page.goto('/#/settings')
+  await expect(page.getByText('Providers', { exact: true })).toBeVisible()
+  await expect(savedKeys(page).getByText('Loading your keys…')).toHaveCount(0)
+}
+
+/**
+ * Store a provider key through Settings → Providers → Add provider.
+ *
+ * @param displayName the provider's display name, which is what the tile is labelled with
+ *   (`OpenAI`, not `openai`).
+ */
+export async function addProviderKey(page: Page, displayName: string, key: string): Promise<void> {
+  await page.getByRole('button', { name: 'Add provider' }).click()
+  await providerDialog(page)
+    .getByRole('button', { name: new RegExp(displayName) })
+    .click()
+  await providerDialog(page).getByLabel('API key').fill(key)
+  await providerDialog(page)
+    .getByRole('button', { name: /^(Save|Replace) key$/ })
+    .click()
+  await expect(providerDialog(page)).toHaveCount(0)
+}
+
+/**
+ * Delete a provider's key through Settings → Providers, with the in-page confirmation.
+ *
+ * @param provider the router id, which is what the row's action is labelled with
+ *   (`Delete the openai key`).
+ */
+export async function deleteProviderKey(page: Page, provider: string): Promise<void> {
+  await page.getByRole('button', { name: `Delete the ${provider} key` }).click()
+  await page.getByRole('button', { name: 'Delete', exact: true }).click()
+  // The row's own actions are the row: there is no "delete this provider" left to click.
+  await expect(page.getByRole('button', { name: `Delete the ${provider} key` })).toHaveCount(0)
+}
+
 /**
  * Wait for a long reply to be genuinely under way.
  *

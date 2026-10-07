@@ -1,4 +1,4 @@
-import { ApiError, AuthenticationError } from '@openharness/client'
+import { ApiError } from '@openharness/client'
 import { createFakeClient } from '@openharness/client/testing'
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -9,11 +9,56 @@ import { SETTINGS_STORAGE_KEY, getSettings } from '../lib/settings'
 import { TWO_PROVIDERS } from '../test-support/catalog'
 import { makeFake, renderApp } from '../test-support/render-app'
 
-/** The settings screen: the server URL, and the model-provider keys this account runs on. */
+/**
+ * Settings, in the order #209 gave it: Providers, Default model, Appearance, and Advanced —
+ * collapsed — last. The card tests live with the cards (`components/settings/providers.test.tsx`,
+ * `components/settings/appearance.test.tsx`); what is here is the screen itself.
+ */
 describe('SettingsScreen', () => {
-  it('starts from the defaults and says an empty URL means this origin', async () => {
-    const fake = makeFake()
+  it('lays the sections out in order, with Advanced collapsed', async () => {
+    const fake = makeFake(TWO_PROVIDERS)
     renderApp(fake, { hash: '#/settings' })
+
+    const headings = await screen.findAllByRole('heading', { level: 1 })
+    expect(headings.map((heading) => heading.textContent)).toEqual(['Settings'])
+
+    // The four sections, in the order a reader needs them (X5), and the provider key — the
+    // thing everyone needs — is no longer below a developer-only card.
+    const titles = (
+      await Promise.all(
+        ['Providers', 'Default model', 'Appearance', 'Advanced'].map((name) =>
+          screen.findByText(name),
+        ),
+      )
+    ).map((element) => element.textContent)
+    expect(titles).toEqual(['Providers', 'Default model', 'Appearance', 'Advanced'])
+
+    // Collapsed by default: the trigger says so, and the section's own field is not in the DOM
+    // at all — a collapsed section must not hold a focusable field.
+    const trigger = screen.getByRole('button', { name: /Advanced/ })
+    expect(trigger).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByLabelText('Server URL')).not.toBeInTheDocument()
+  })
+
+  it('opens Advanced on demand, and closes it again', async () => {
+    const user = userEvent.setup({ delay: null })
+    renderApp(makeFake(TWO_PROVIDERS), { hash: '#/settings' })
+
+    const trigger = await screen.findByRole('button', { name: /Advanced/ })
+    await user.click(trigger)
+
+    expect(trigger).toHaveAttribute('aria-expanded', 'true')
+    expect(await screen.findByLabelText('Server URL')).toBeInTheDocument()
+
+    await user.click(trigger)
+    expect(screen.queryByLabelText('Server URL')).not.toBeInTheDocument()
+  })
+
+  it('starts from the defaults and says an empty URL means this origin', async () => {
+    const user = userEvent.setup({ delay: null })
+    renderApp(makeFake(TWO_PROVIDERS), { hash: '#/settings' })
+
+    await user.click(await screen.findByRole('button', { name: /Advanced/ }))
 
     expect(await screen.findByLabelText('Server URL')).toHaveValue('')
     expect(screen.getByLabelText('Server URL')).toHaveAttribute(
@@ -24,9 +69,10 @@ describe('SettingsScreen', () => {
 
   it('keeps the save confirmation when the rebuilt client re-checks the session', async () => {
     const user = userEvent.setup({ delay: null })
-    const fake = makeFake()
+    const fake = makeFake(TWO_PROVIDERS)
     const first = renderApp(fake, { hash: '#/settings' })
 
+    await user.click(await screen.findByRole('button', { name: /Advanced/ }))
     // A first-time save: the field was empty, so the URL really changes — which, in the app,
     // rebuilds the client from it (`App`'s `useMemo`) and re-runs the session check for the
     // new one, because another server means another session (issue #81).
@@ -53,16 +99,17 @@ describe('SettingsScreen', () => {
 
     answer?.()
 
-    // And it survives the answer too: the screen was never remounted.
-    expect(await screen.findByLabelText('Server URL')).toHaveValue('http://localhost:8787')
+    // And it survives the answer too: the screen was never remounted. (Advanced is collapsed
+    // again, as a fresh mount leaves it — its state is not persisted anywhere.)
+    expect(await screen.findByRole('button', { name: /Advanced/ })).toBeInTheDocument()
     expect(screen.getByText('Saved — the next request uses it.')).toBeInTheDocument()
   })
 
   it('saves the server URL to localStorage under the settings key', async () => {
     const user = userEvent.setup({ delay: null })
-    const fake = makeFake()
-    renderApp(fake, { hash: '#/settings' })
+    renderApp(makeFake(TWO_PROVIDERS), { hash: '#/settings' })
 
+    await user.click(await screen.findByRole('button', { name: /Advanced/ }))
     await user.type(await screen.findByLabelText('Server URL'), 'http://localhost:8787')
     await user.click(screen.getByRole('button', { name: 'Save' }))
 
@@ -86,6 +133,7 @@ describe('SettingsScreen', () => {
 
     renderApp(fake, { hash: '#/settings' })
 
+    await user.click(await screen.findByRole('button', { name: /Advanced/ }))
     expect(await screen.findByLabelText('Server URL')).toHaveValue('https://api.example.com')
 
     await user.clear(screen.getByLabelText('Server URL'))
@@ -96,167 +144,19 @@ describe('SettingsScreen', () => {
     })
   })
 
-  it('lists a saved key as metadata only, never the key itself', async () => {
-    const fake = makeFake()
-    await fake.providerCredentials.put('anthropic', {
-      type: 'api_key',
-      api_key: 'sk-ant-abcdefgh1234',
-    })
-    renderApp(fake, { hash: '#/settings' })
-
-    const list = within(await screen.findByRole('region', { name: 'Saved provider keys' }))
-
-    expect(await list.findByText('anthropic')).toBeInTheDocument()
-    expect(list.getByText('…1234')).toBeInTheDocument()
-    expect(list.getByText(/Validated/)).toBeInTheDocument()
-    // The key itself is nowhere: the API returns metadata, and the UI cannot show more.
-    expect(document.body.textContent ?? '').not.toContain('sk-ant-abcdefgh1234')
-  })
-
-  it('adds a key, clears the field, and never renders the key back', async () => {
-    const user = userEvent.setup({ delay: null })
-    const fake = makeFake()
-    renderApp(fake, { hash: '#/settings' })
-
-    const key = 'sk-ant-super-secret-4321'
-    const field = await screen.findByLabelText('API key')
-    await user.type(field, key)
-    await user.click(screen.getByRole('button', { name: 'Save key' }))
-
-    expect(await screen.findByText(/Saved the anthropic key/)).toBeInTheDocument()
-    expect(field).toHaveValue('')
-
-    // What the server stored is metadata; what the page shows is metadata.
-    await waitFor(async () => {
-      const stored = await fake.providerCredentials.list()
-      expect(stored.data.map((credential) => credential.last4)).toEqual(['4321'])
-    })
-    const list = within(screen.getByRole('region', { name: 'Saved provider keys' }))
-    expect(await list.findByText('…4321')).toBeInTheDocument()
-    expect(document.body.textContent ?? '').not.toContain(key)
-    expect(document.body.innerHTML).not.toContain('super-secret')
-  })
-
-  it('replaces a saved key instead of adding a second one', async () => {
-    const user = userEvent.setup({ delay: null })
-    const fake = makeFake()
-    await fake.providerCredentials.put('anthropic', { type: 'api_key', api_key: 'sk-ant-old-1111' })
-    renderApp(fake, { hash: '#/settings' })
-
-    // The button knows a key exists: saving is a replacement, and the list says so after.
-    expect(await screen.findByRole('button', { name: 'Replace key' })).toBeInTheDocument()
-    await user.type(screen.getByLabelText('API key'), 'sk-ant-new-2222')
-    await user.click(screen.getByRole('button', { name: 'Replace key' }))
-
-    expect(await screen.findByText(/Saved the anthropic key/)).toBeInTheDocument()
-    await waitFor(async () => {
-      const stored = await fake.providerCredentials.list()
-      expect(stored.data).toHaveLength(1)
-      expect(stored.data[0]?.last4).toBe('2222')
-    })
-    expect(screen.queryByText('…1111')).not.toBeInTheDocument()
-    expect(document.body.textContent ?? '').not.toContain('sk-ant-new-2222')
-  })
-
-  it('takes a free-text provider id for any router provider', async () => {
-    const user = userEvent.setup({ delay: null })
-    const fake = makeFake()
-    renderApp(fake, { hash: '#/settings' })
-
-    await user.selectOptions(await screen.findByLabelText('Provider'), 'Custom…')
-    await user.type(screen.getByLabelText('Provider id'), 'mistral')
-    await user.type(screen.getByLabelText('API key'), 'sk-mistral-9999')
-    await user.click(screen.getByRole('button', { name: 'Save key' }))
-
-    expect(await screen.findByText(/Saved the mistral key/)).toBeInTheDocument()
-    await waitFor(async () => {
-      const stored = await fake.providerCredentials.list()
-      expect(stored.data.map((credential) => credential.provider)).toEqual(['mistral'])
-    })
-  })
-
-  it('shows a rejected key next to the form, in the server’s words', async () => {
-    const user = userEvent.setup({ delay: null })
-    const fake = makeFake()
-    renderApp(fake, { hash: '#/settings' })
-
-    // The fake's one scriptable rejection: a key that is only whitespace fails the provider
-    // call the server makes on save (422 invalid_provider_credential).
-    const field = await screen.findByLabelText('API key')
-    await user.type(field, '   ')
-    await user.click(screen.getByRole('button', { name: 'Save key' }))
-
-    const alert = await screen.findByRole('alert')
-    expect(alert).toHaveTextContent('The key was rejected')
-    expect(alert).toHaveTextContent('rejected by the provider')
-    // Nothing was stored, so nothing is listed.
-    expect(screen.queryByText(/Saved the/)).not.toBeInTheDocument()
-  })
-
-  it('asks for a fresh sign-in when the server requires one for a credential write', async () => {
-    const user = userEvent.setup({ delay: null })
-    const fake = makeFake()
-    // A stale session: reads still work, the write is refused the way the server refuses one
-    // older than `freshAge` (epic #65, A2) — 401.
-    fake.providerCredentials.put = () => Promise.reject(new AuthenticationError('Not signed in.'))
-    renderApp(fake, { hash: '#/settings' })
-
-    await user.type(await screen.findByLabelText('API key'), 'sk-ant-late-0000')
-    await user.click(screen.getByRole('button', { name: 'Save key' }))
-
-    const alert = await screen.findByRole('alert')
-    expect(alert).toHaveTextContent('Sign in again')
-    expect(within(alert).getByRole('link', { name: 'Sign in again' })).toHaveAttribute(
-      'href',
-      '#/signin?next=%23%2Fsettings',
-    )
-    // And the app is still on Settings: this is a prompt, not a sign-out.
-    expect(screen.getByLabelText('Server URL')).toBeInTheDocument()
-  })
-
-  it('shows a failed provider-keys load as a banner with what went wrong', async () => {
-    const fake = makeFake()
+  it('shows the list error on the Providers card, and the default-model error on its own', async () => {
+    const fake = makeFake(TWO_PROVIDERS)
     fake.providerCredentials.list = () =>
       Promise.reject(new ApiError(500, 'The key store is down.'))
+    fake.preferences.get = () => Promise.reject(new ApiError(500, 'The preferences store is down.'))
     renderApp(fake, { hash: '#/settings' })
 
-    const title = await screen.findByText('Could not load your provider keys')
-    expect(title.closest('[role="alert"]')).toHaveTextContent('The key store is down.')
+    const keys = await screen.findByText('Could not load your provider keys')
+    expect(keys.closest('[role="alert"]')).toHaveTextContent('The key store is down.')
+    const model = await screen.findByText('Could not load your default model')
+    expect(model.closest('[role="alert"]')).toHaveTextContent('The preferences store is down.')
   })
 
-  it('deletes a key after confirming in the page, not in a window.confirm', async () => {
-    const user = userEvent.setup({ delay: null })
-    const fake = makeFake()
-    await fake.providerCredentials.put('openai', { type: 'api_key', api_key: 'sk-openai-7777' })
-    renderApp(fake, { hash: '#/settings' })
-
-    const list = within(await screen.findByRole('region', { name: 'Saved provider keys' }))
-    await user.click(await list.findByRole('button', { name: 'Delete the openai key' }))
-
-    // The confirmation is in the page: the key is still there, and Delete/Cancel are too.
-    expect(list.getByText('Delete this key?')).toBeInTheDocument()
-    await user.click(list.getByRole('button', { name: 'Cancel' }))
-    expect(screen.queryByText('Delete this key?')).not.toBeInTheDocument()
-    await waitFor(async () => {
-      expect((await fake.providerCredentials.list()).data).toHaveLength(1)
-    })
-
-    await user.click(list.getByRole('button', { name: 'Delete the openai key' }))
-    await user.click(list.getByRole('button', { name: 'Delete' }))
-
-    expect(await screen.findByText(/Deleted the openai key/)).toBeInTheDocument()
-    await waitFor(async () => {
-      expect((await fake.providerCredentials.list()).data).toEqual([])
-    })
-    expect(list.queryByText('openai')).not.toBeInTheDocument()
-  })
-})
-
-/**
- * Settings → Default model (epic #116, U1/U4): the account's one default, as the server holds
- * it — including a default the server chose itself — changed through `preferences.put`.
- */
-describe('Settings: the default model', () => {
   it('shows the default the server chose, and saves a new one', async () => {
     const user = userEvent.setup({ delay: null })
     const fake = makeFake({
@@ -319,5 +219,17 @@ describe('Settings: the default model', () => {
     const title = await screen.findByText('Could not load your default model')
     expect(title.closest('[role="alert"]')).toHaveTextContent('The preferences store is down.')
     expect(screen.getByRole('button', { name: /Model/ })).toBeInTheDocument()
+  })
+
+  it('keeps the default-model picker out of the collapsed Advanced section', async () => {
+    const fake = makeFake(TWO_PROVIDERS)
+    renderApp(fake, { hash: '#/settings' })
+
+    // The two controls that look alike — the Default model picker and the picker inside the
+    // first-run confirmation — are different components on different screens; here there is
+    // exactly one, and it is the card's.
+    const pickers = await screen.findAllByRole('button', { name: /^Model/ })
+    expect(pickers).toHaveLength(1)
+    expect(within(pickers[0] as HTMLElement).getByText('Choose a model')).toBeInTheDocument()
   })
 })

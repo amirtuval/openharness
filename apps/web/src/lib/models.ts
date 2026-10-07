@@ -30,6 +30,21 @@ export function modelNameLookup(models: readonly ModelEntry[]): ModelNameLookup 
 }
 
 /**
+ * The provider half of a `provider/model` id, or `null` when the id has no slash.
+ *
+ * The same split the server makes when it looks a model's credential up (`providerOf`), which
+ * is why the missing-key message can name a provider this app then offers to collect a key for
+ * (#209).
+ */
+export function providerOf(modelId: string | null): string | null {
+  if (modelId === null) {
+    return null
+  }
+  const slash = modelId.indexOf('/')
+  return slash <= 0 ? null : modelId.slice(0, slash)
+}
+
+/**
  * The catalog grouped by provider, in the order the server sent it (provider, then name).
  *
  * Only what `data` names appears: the server lists models for providers the caller has a key

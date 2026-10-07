@@ -1195,6 +1195,47 @@ describe("the fake's authentication", () => {
       fake.providerCredentials.put('anthropic', { type: 'api_key', api_key: '  ' }),
     ).rejects.toMatchObject({ status: 422, type: 'invalid_provider_credential' })
   })
+
+  it('picks a default model for the first key, and never replaces one (#116, U4)', async () => {
+    const fake = createFakeClient({
+      models: [
+        {
+          id: 'anthropic/claude-sonnet-5',
+          provider: 'anthropic',
+          name: 'Claude Sonnet 5',
+          context_window: 200_000,
+          max_output_tokens: 64_000,
+          source: 'provider',
+        },
+        {
+          id: 'openai/gpt-4.1-mini',
+          provider: 'openai',
+          name: 'GPT-4.1 mini',
+          context_window: 128_000,
+          max_output_tokens: 16_000,
+          source: 'provider',
+        },
+      ],
+    })
+    expect((await fake.preferences.get()).default_model).toBeNull()
+
+    await fake.providerCredentials.put('openai', { type: 'api_key', api_key: 'sk-openai-1234' })
+    // The saved provider's model, not the catalog's first.
+    expect((await fake.preferences.get()).default_model).toBe('openai/gpt-4.1-mini')
+
+    // The reader's own choice stands: a second key does not move the default.
+    await fake.preferences.put({ default_model: 'anthropic/claude-sonnet-5' })
+    await fake.providerCredentials.put('openai', { type: 'api_key', api_key: 'sk-openai-5678' })
+    expect((await fake.preferences.get()).default_model).toBe('anthropic/claude-sonnet-5')
+  })
+
+  it('leaves the default null when no catalog model can be picked', async () => {
+    const fake = createFakeClient({ models: [] })
+
+    await fake.providerCredentials.put('anthropic', { type: 'api_key', api_key: 'sk-ant-1234' })
+
+    expect((await fake.preferences.get()).default_model).toBeNull()
+  })
 })
 
 describe('the fake and the real client agree', () => {

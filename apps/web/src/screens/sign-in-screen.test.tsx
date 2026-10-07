@@ -2,6 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { TWO_PROVIDERS } from '../test-support/catalog'
 import { mockAuthClient } from '../test-support/better-auth-client-mock'
 import { makeFake, renderApp, signInFake } from '../test-support/render-app'
 
@@ -207,8 +208,12 @@ describe('SignInScreen', () => {
     const user = userEvent.setup({ delay: null })
     serveAuthConfig({ providers: ['github'], dev_login: false })
     // New chat is immediate (U2): the default is loaded while the session is still good; the
-    // create-and-send that follows is not.
-    const fake = makeFake({ preferences: { default_model: 'anthropic/claude-sonnet-5' } })
+    // create-and-send that follows is not. An account with a key, so `#/new` is New chat and
+    // not the first-run flow (#209).
+    const fake = makeFake({
+      ...TWO_PROVIDERS,
+      preferences: { default_model: 'anthropic/claude-sonnet-5' },
+    })
 
     renderApp(fake, { hash: '#/new' })
     await screen.findByLabelText('Message')

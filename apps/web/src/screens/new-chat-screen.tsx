@@ -1,3 +1,4 @@
+import { providerName } from '@openharness/client'
 import type { Session } from '@openharness/protocol'
 import { useEffect, useRef, useState } from 'react'
 
@@ -5,10 +6,12 @@ import { ErrorBanner } from '../components/chat/error-banner'
 import { Composer } from '../components/chat/composer'
 import { ModelPicker } from '../components/models/model-picker'
 import { useClient } from '../components/client-provider'
+import { AddProviderDialog } from '../components/providers/add-provider-dialog'
 import type { ModelsView } from '../hooks/use-models'
 import { usePreferences } from '../hooks/use-preferences'
 import { useSettings } from '../hooks/use-settings'
 import { describeError } from '../lib/errors'
+import { showNotice } from '../lib/notice'
 import { chatHash, navigate, settingsHash } from '../lib/router'
 import { sessionRefresh } from '../lib/session-refresh'
 
@@ -48,6 +51,8 @@ export function NewChatScreen({
   const [created, setCreated] = useState<{ id: string; model: string } | null>(null)
   const [sending, setSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
+  // The Add-provider dialog (X5): open with the provider left to the reader.
+  const [addingProvider, setAddingProvider] = useState(false)
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
   const defaultModel = preferences?.default_model ?? null
@@ -154,7 +159,7 @@ export function NewChatScreen({
               picks a default model for you.
             </p>
             <a className="text-sm underline underline-offset-2" href={settingsHash()}>
-              Settings → Model providers
+              Settings → Providers
             </a>
           </div>
         </div>
@@ -223,11 +228,24 @@ export function NewChatScreen({
                 onChange={setChosen}
                 refreshing={catalog.refreshing}
                 onRefresh={catalog.refresh}
+                onAddProvider={() => setAddingProvider(true)}
               />
             }
           />
         </div>
       </div>
+
+      <AddProviderDialog
+        open={addingProvider}
+        onSaved={(provider) => {
+          setAddingProvider(false)
+          showNotice(`Saved the ${providerName(provider)} key.`)
+          // The catalog gains the new provider's models here, before the first message is
+          // sent — which is exactly when a reader needs them (X5).
+          void catalog.reload()
+        }}
+        onClose={() => setAddingProvider(false)}
+      />
     </div>
   )
 }

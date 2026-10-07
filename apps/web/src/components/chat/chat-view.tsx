@@ -1,3 +1,4 @@
+import { providerName } from '@openharness/client'
 import { Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
@@ -6,10 +7,10 @@ import type { DeleteSessionResult } from '../../hooks/use-sessions'
 import { useSession } from '../../hooks/use-session'
 import type { ModelsView } from '../../hooks/use-models'
 import { shortId, sessionLabel } from '../../lib/format'
-import type { ModelNameLookup } from '../../lib/models'
+import { providerOf, type ModelNameLookup } from '../../lib/models'
 import { showNotice } from '../../lib/notice'
-import { settingsHash } from '../../lib/router'
 import { ModelPicker } from '../models/model-picker'
+import { AddProviderDialog } from '../providers/add-provider-dialog'
 import { Button } from '../ui/button'
 import { Composer } from './composer'
 import { ErrorBanner } from './error-banner'
@@ -80,6 +81,10 @@ export function ChatView({
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
+  // The Add-provider dialog (X5). Three states in one value: `undefined` is closed, `null` is
+  // open with the provider left to the reader (the picker's "+ Add provider"), and a provider
+  // id is open on that provider's form (the missing-key banner, which knows which one failed).
+  const [addingProvider, setAddingProvider] = useState<string | null | undefined>(undefined)
 
   // A chat opens with the cursor in the box: whether it was picked from the sidebar or just
   // created from New chat, the next thing the user does is type.
@@ -198,12 +203,20 @@ export function ChatView({
               message={lastError.message}
               // The one error in the log the reader can fix themselves: the session's owner
               // has no key for the model's provider (epic #65, A5), so the turn ended and no
-              // retry will help until one is saved.
+              // retry will help until one is saved. The fix opens **here** (X5): leaving the
+              // chat for Settings, saving, and finding the way back was the whole detour this
+              // issue removes. The provider is the one the failed model names.
               action={
                 lastError.type === 'missing_provider_credential' ? (
-                  <a className="underline underline-offset-2" href={settingsHash()}>
-                    Add a key in Settings → Model providers
-                  </a>
+                  <Button
+                    type="button"
+                    variant="link"
+                    size="xs"
+                    className="h-auto p-0 text-destructive"
+                    onClick={() => setAddingProvider(providerOf(sessionModel))}
+                  >
+                    Add a provider key
+                  </Button>
                 ) : undefined
               }
             />
@@ -226,11 +239,27 @@ export function ChatView({
                 onChange={setChosen}
                 refreshing={catalog.refreshing}
                 onRefresh={catalog.refresh}
+                // From the picker the provider is the reader's to choose, so the dialog opens
+                // on the tiles rather than on a form.
+                onAddProvider={() => setAddingProvider(null)}
               />
             }
           />
         </div>
       </div>
+
+      <AddProviderDialog
+        open={addingProvider !== undefined}
+        initialProvider={addingProvider ?? undefined}
+        onSaved={(provider) => {
+          setAddingProvider(undefined)
+          showNotice(`Saved the ${providerName(provider)} key.`)
+          // A key that was not there a moment ago is a provider's models that were not there
+          // either: the picker offers them from here, without leaving the chat (X5).
+          void catalog.reload()
+        }}
+        onClose={() => setAddingProvider(undefined)}
+      />
     </div>
   )
 }

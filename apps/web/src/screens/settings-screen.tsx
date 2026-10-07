@@ -1,10 +1,12 @@
+import { ChevronRight } from 'lucide-react'
 import { useState } from 'react'
 
 import { AppearanceCard } from '../components/settings/appearance'
 import { DefaultModelCard } from '../components/settings/default-model'
-import { ModelProvidersCard } from '../components/settings/model-providers'
+import { ProvidersCard } from '../components/settings/providers'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
 import { Button } from '../components/ui/button'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '../components/ui/collapsible'
 import { Input } from '../components/ui/input'
 import { Label } from '../components/ui/label'
 import type { ModelsView } from '../hooks/use-models'
@@ -12,21 +14,22 @@ import { useSettings } from '../hooks/use-settings'
 import { SETTINGS_STORAGE_KEY, saveSettings } from '../lib/settings'
 
 /**
- * Where the server is, the default model new chats run on, the theme the app paints with, and
- * the model-provider keys this account runs on.
+ * Settings, in the order a reader needs it (epic #201, X5).
  *
- * There used to be a second field here — the static `x-api-key` — and it is gone (epic #65,
- * A8): signing in is Better Auth's job now (the sign-in page, the device-approval page), and
- * what authentication the browser does is a cookie it cannot read, let alone store. What is
- * left in `localStorage` is the server URL, under `openharness:settings`, and an empty URL
- * means **same origin** — which is what the Vite dev proxy and a static build served next to
- * the API both want. The theme keeps a separate cache under `openharness:theme` that is only
- * there to paint the first frame (#203).
+ * **Providers** — the keys every chat runs on — first, then **Default model**, then
+ * **Appearance**, and last **Advanced**, which holds the one developer-facing setting and is
+ * collapsed. Before this, the screen opened on a Connection card that only a self-hoster has
+ * any use for, with the thing everyone needs — a provider key — below the fold; the order is
+ * the fix, and it is why the server URL moved rather than disappeared.
  *
- * The provider keys live on the server (A5), encrypted, write-only; {@link ModelProvidersCard}
- * is where they are managed. The default model ({@link DefaultModelCard}) and the theme
- * ({@link AppearanceCard}) are server state too, and the picker reads the shell's one catalog
- * rather than fetching its own.
+ * The theme keeps a `localStorage` cache under `openharness:theme` that is only there to paint
+ * the first frame (#203); the server URL lives under {@link SETTINGS_STORAGE_KEY} and is the
+ * only thing left in this browser's settings.
+ *
+ * The provider keys live on the server (A5), encrypted, write-only; {@link ProvidersCard} is
+ * where they are managed. The default model ({@link DefaultModelCard}) and the theme
+ * ({@link AppearanceCard}) are server state too, and the model picker reads the shell's one
+ * catalog rather than fetching its own.
  */
 export function SettingsScreen({ catalog }: { catalog: ModelsView }) {
   const settings = useSettings()
@@ -36,67 +39,73 @@ export function SettingsScreen({ catalog }: { catalog: ModelsView }) {
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto w-full max-w-xl space-y-6 px-6 py-6">
-        <div className="space-y-1">
-          <h1 className="text-base font-medium">Settings</h1>
-          <p className="text-sm text-muted-foreground">
-            Connection details are stored in this browser, under{' '}
-            <code className="font-mono">{SETTINGS_STORAGE_KEY}</code>.
-          </p>
-        </div>
+        <h1 className="text-base font-medium">Settings</h1>
 
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-sm">Connection</CardTitle>
-            <CardDescription>
-              An empty server URL means this origin: the app calls <code>/v1</code> on the page's
-              own host, which is what the dev server proxies and what a static build expects.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <form
-              className="flex flex-col gap-4"
-              onSubmit={(event) => {
-                event.preventDefault()
-                saveSettings({ serverUrl: serverUrl.trim() })
-                setSaved(true)
-              }}
-            >
-              <div className="flex flex-col gap-1.5">
-                <Label htmlFor="settings-server-url">Server URL</Label>
-                <Input
-                  id="settings-server-url"
-                  value={serverUrl}
-                  autoComplete="off"
-                  spellCheck={false}
-                  placeholder={`(same origin: ${window.location.origin})`}
-                  onChange={(event) => {
-                    setServerUrl(event.target.value)
-                    setSaved(false)
-                  }}
-                />
-                <p className="text-xs text-muted-foreground">
-                  Signing in, signing out and the device-approval page all happen on this server
-                  too.
-                </p>
-              </div>
-
-              <div className="flex items-center gap-3">
-                <Button type="submit">Save</Button>
-                {saved ? (
-                  <span role="status" className="text-xs text-muted-foreground">
-                    Saved — the next request uses it.
-                  </span>
-                ) : null}
-              </div>
-            </form>
-          </CardContent>
-        </Card>
+        <ProvidersCard />
 
         <DefaultModelCard catalog={catalog} />
 
         <AppearanceCard />
 
-        <ModelProvidersCard />
+        <Collapsible>
+          <Card>
+            <CardHeader>
+              <CollapsibleTrigger className="flex items-center gap-1 rounded-sm text-left outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50">
+                <ChevronRight
+                  aria-hidden="true"
+                  className="size-4 shrink-0 transition-transform [[data-state=open]_&]:rotate-90"
+                />
+                <CardTitle className="text-sm">Advanced</CardTitle>
+              </CollapsibleTrigger>
+              <CardDescription>
+                Connection details, stored in this browser under{' '}
+                <code className="font-mono">{SETTINGS_STORAGE_KEY}</code>.
+              </CardDescription>
+            </CardHeader>
+            <CollapsibleContent>
+              <CardContent>
+                <form
+                  className="flex flex-col gap-4"
+                  onSubmit={(event) => {
+                    event.preventDefault()
+                    saveSettings({ serverUrl: serverUrl.trim() })
+                    setSaved(true)
+                  }}
+                >
+                  <div className="flex flex-col gap-1.5">
+                    <Label htmlFor="settings-server-url">Server URL</Label>
+                    <Input
+                      id="settings-server-url"
+                      value={serverUrl}
+                      autoComplete="off"
+                      spellCheck={false}
+                      placeholder={`(same origin: ${window.location.origin})`}
+                      onChange={(event) => {
+                        setServerUrl(event.target.value)
+                        setSaved(false)
+                      }}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      An empty URL means this origin: the app calls <code>/v1</code> on the page's
+                      own host, which is what the dev server proxies and what a static build
+                      expects. Signing in, signing out and the device-approval page all happen on
+                      this server too.
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    <Button type="submit">Save</Button>
+                    {saved ? (
+                      <span role="status" className="text-xs text-muted-foreground">
+                        Saved — the next request uses it.
+                      </span>
+                    ) : null}
+                  </div>
+                </form>
+              </CardContent>
+            </CollapsibleContent>
+          </Card>
+        </Collapsible>
       </div>
     </div>
   )

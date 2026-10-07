@@ -27,6 +27,15 @@ export interface PreferencesView {
    * shows what the server accepted — including a default the server chose itself.
    */
   readonly save: (defaultModel: string | null) => Promise<SavePreferencesResult>
+  /**
+   * Read the stored preferences again.
+   *
+   * For the one case where the **server** changed them under us: saving a provider key makes it
+   * pick a default model for an account that had none (epic #116, U4), and the first-run screen
+   * says which model that was (#209). A picker that just wrote through {@link save} already
+   * holds the server's answer.
+   */
+  readonly reload: () => Promise<void>
   /** Clear the error. */
   readonly dismissError: () => void
 }
@@ -47,30 +56,39 @@ export function usePreferences(client: Client): PreferencesView {
   // that never arrived can say where it did not arrive.
   const { serverUrl } = useSettings()
 
-  useEffect(() => {
-    const controller = new AbortController()
-    setLoading(true)
-    void client.preferences.get({ signal: controller.signal }).then(
-      (loaded) => {
-        if (controller.signal.aborted) {
-          return
-        }
+  /** One read: the mount's, and every {@link reload}. */
+  const load = useCallback(
+    async (signal?: AbortSignal): Promise<void> => {
+      try {
+        const loaded = await client.preferences.get(signal === undefined ? undefined : { signal })
         setPreferences(loaded)
         setError(null)
-        setLoading(false)
-      },
-      (caught: unknown) => {
-        if (controller.signal.aborted) {
+      } catch (caught) {
+        if (signal?.aborted === true) {
           return
         }
         if (!noteAuthenticationError(client, caught)) {
           setError(describeError(caught, { serverUrl }))
         }
+      }
+    },
+    [client, serverUrl],
+  )
+
+  useEffect(() => {
+    const controller = new AbortController()
+    setLoading(true)
+    void load(controller.signal).finally(() => {
+      if (!controller.signal.aborted) {
         setLoading(false)
-      },
-    )
+      }
+    })
     return () => controller.abort()
-  }, [client, serverUrl])
+  }, [load])
+
+  const reload = useCallback(async (): Promise<void> => {
+    await load()
+  }, [load])
 
   const save = useCallback(
     async (defaultModel: string | null): Promise<SavePreferencesResult> => {
@@ -97,5 +115,5 @@ export function usePreferences(client: Client): PreferencesView {
     setError(null)
   }, [])
 
-  return { preferences, loading, error, saving, save, dismissError }
+  return { preferences, loading, error, saving, save, reload, dismissError }
 }

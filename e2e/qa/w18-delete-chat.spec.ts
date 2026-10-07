@@ -91,7 +91,10 @@ test.describe('W18 deleting a chat', () => {
   test('W18b the sidebar row’s menu deletes it too', async ({ page, request, consoleErrors }) => {
     const { id: sessionId, text } = await chatWithATurn(page, request, 'delete me from the sidebar')
     await page.goto('/')
-    await expect(page.getByRole('heading', { name: 'openharness' })).toBeVisible()
+    // #209: the root route of a signed-in reader is New chat (or the first-run screen for an
+    // account with no key) — the Home screen it used to be is gone.
+    await expect(page.locator('#app-sidebar')).toBeVisible()
+    await expect(page).toHaveURL(/\/$|#\/$/)
 
     await test.step('the row is deleted from its own menu, with its own confirmation', async () => {
       const row = page.locator('#app-sidebar').getByText(text)

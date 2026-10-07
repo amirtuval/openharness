@@ -56,6 +56,15 @@ export interface ModelPickerProps {
    * error — the list on screen is still the one the server last sent).
    */
   onRefresh?: (() => Promise<RefreshOutcome>) | undefined
+  /**
+   * When given, the panel's foot offers "Add provider" (epic #201, X5).
+   *
+   * Every surface that offers the catalog can point at the one thing a catalog cannot: a
+   * provider the reader has no key for yet. The dialog it opens is the caller's — the picker
+   * only closes its own panel and gets out of the way, because the dialog is a modal and a
+   * popover left open under it is a trap for the focus it just took.
+   */
+  onAddProvider?: (() => void) | undefined
 }
 
 export function ModelPicker({
@@ -67,6 +76,7 @@ export function ModelPicker({
   placement = 'below',
   refreshing = false,
   onRefresh,
+  onAddProvider,
 }: ModelPickerProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
@@ -388,17 +398,35 @@ export function ModelPicker({
                   </span>
                 </div>
               </div>
-              {onRefresh === undefined ? null : (
-                <div className="mt-2 flex items-center justify-between gap-2 border-t pt-2">
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    disabled={refreshing}
-                    onClick={() => void runRefresh()}
-                  >
-                    {refreshing ? 'Refreshing…' : 'Refresh models'}
-                  </Button>
+              {onRefresh === undefined && onAddProvider === undefined ? null : (
+                <div className="mt-2 flex flex-wrap items-center justify-between gap-2 border-t pt-2">
+                  {onRefresh === undefined ? null : (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      disabled={refreshing}
+                      onClick={() => void runRefresh()}
+                    >
+                      {refreshing ? 'Refreshing…' : 'Refresh models'}
+                    </Button>
+                  )}
+                  {onAddProvider === undefined ? null : (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="text-muted-foreground"
+                      onClick={() => {
+                        // Closed without returning focus to the trigger: the dialog takes it,
+                        // and handing it back here would race the dialog's own focus trap.
+                        close(false)
+                        onAddProvider()
+                      }}
+                    >
+                      + Add provider
+                    </Button>
+                  )}
                   {refreshNote === null ? null : (
                     <p role="status" className="min-w-0 text-xs text-muted-foreground">
                       {refreshNote}
