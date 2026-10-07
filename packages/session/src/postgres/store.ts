@@ -1,6 +1,7 @@
 import {
   DEFAULT_EVENT_ORDER,
   DEFAULT_PARTITION_COUNT,
+  DEFAULT_USER_THEME,
   EVENT_TYPES,
   encodeKeyCursor,
   encodeSeqCursor,
@@ -27,6 +28,8 @@ import {
   type UserEvent,
   type UserId,
   type UserPreferences,
+  type UserTheme,
+  UserThemeSchema,
 } from '@openharness/protocol'
 import {
   Kysely,
@@ -418,29 +421,40 @@ export class PostgresSessionStore implements SessionStore {
   async getPreferences(userId: UserId): Promise<UserPreferences> {
     const row = await this.#db
       .selectFrom('user_preferences')
-      .select('default_model')
+      .select(['default_model', 'theme'])
       .where('user_id', '=', userId)
       .executeTakeFirst()
-    // No row is "no stored default", not an error and not a null: the protocol's one shape.
-    return deepFreeze({ default_model: row?.default_model ?? null })
+    // No row is "no choice stored", not an error and not a null: the protocol's one shape,
+    // with the default theme a user who never chose one gets.
+    return deepFreeze({
+      default_model: row?.default_model ?? null,
+      theme: parseTheme(row?.theme),
+    })
   }
 
   async putPreferences(userId: UserId, preferences: UserPreferences): Promise<UserPreferences> {
     const at = instant(this.#clock())
+    const value = {
+      user_id: userId,
+      default_model: preferences.default_model,
+      theme: preferences.theme,
+      updated_at: at,
+    }
     // One statement, like the credential upsert: `user_id` is the primary key, so a second
     // put replaces the row rather than accumulating, and the replacement is atomic against a
     // concurrent one.
     await this.#db
       .insertInto('user_preferences')
-      .values({ user_id: userId, default_model: preferences.default_model, updated_at: at })
+      .values(value)
       .onConflict((conflict) =>
         conflict.column('user_id').doUpdateSet({
-          default_model: preferences.default_model,
-          updated_at: at,
+          default_model: value.default_model,
+          theme: value.theme,
+          updated_at: value.updated_at,
         }),
       )
       .execute()
-    return deepFreeze({ default_model: preferences.default_model })
+    return deepFreeze({ default_model: preferences.default_model, theme: preferences.theme })
   }
 
   async listSessions(options: ListSessionsOptions): Promise<ListSessionsResponse> {
@@ -1703,4 +1717,17 @@ function deliverTo<T>(
       // A listener that throws is the listener's problem: the store keeps delivering.
     }
   }
+}
+
+/**
+ * The `theme` the protocol names, from what the column holds.
+ *
+ * The column is text, so a database edited by hand — or one written before this column
+ * existed, where the migration's default has not been re-read yet — can hold anything. An
+ * unknown name reads as the default rather than throwing on every preferences read: a theme
+ * is a display choice, and the web app resolves `system` itself.
+ */
+function parseTheme(stored: string | undefined): UserTheme {
+  const parsed = UserThemeSchema.safeParse(stored)
+  return parsed.success ? parsed.data : DEFAULT_USER_THEME
 }

@@ -2,12 +2,14 @@ import { describe, expect, it } from 'vitest'
 
 import {
   DEFAULT_MODEL_PATTERN,
+  DEFAULT_USER_THEME,
   GetMeResponseSchema,
   GetPreferencesResponseSchema,
   PutPreferencesRequestSchema,
   UserIdSchema,
   UserPreferencesSchema,
   UserSchema,
+  UserThemeSchema,
 } from './user'
 
 const user = {
@@ -79,11 +81,27 @@ describe('GetMeResponseSchema', () => {
 })
 
 describe('UserPreferencesSchema (epic #116, U1)', () => {
-  it('parses a default model and a cleared one', () => {
-    expect(UserPreferencesSchema.parse({ default_model: 'anthropic/claude-sonnet-5' })).toEqual({
-      default_model: 'anthropic/claude-sonnet-5',
+  it('parses a default model, a cleared one, and the theme beside them', () => {
+    expect(
+      UserPreferencesSchema.parse({
+        default_model: 'anthropic/claude-sonnet-5',
+        theme: 'dark',
+      }),
+    ).toEqual({ default_model: 'anthropic/claude-sonnet-5', theme: 'dark' })
+    expect(UserPreferencesSchema.parse({ default_model: null, theme: 'system' })).toEqual({
+      default_model: null,
+      theme: 'system',
     })
-    expect(UserPreferencesSchema.parse({ default_model: null })).toEqual({ default_model: null })
+  })
+
+  it('takes only the four theme names', () => {
+    for (const theme of ['system', 'light', 'dim', 'dark']) {
+      expect(UserThemeSchema.parse(theme)).toBe(theme)
+    }
+    for (const bad of ['Dark', 'midnight', '', null, 42]) {
+      expect(UserThemeSchema.safeParse(bad).success, String(bad)).toBe(false)
+    }
+    expect(DEFAULT_USER_THEME).toBe('system')
   })
 
   it('accepts a free-text id the catalog may not have, and a slash in the model part', () => {
@@ -91,13 +109,18 @@ describe('UserPreferencesSchema (epic #116, U1)', () => {
     // model id may itself contain a slash.
     expect(DEFAULT_MODEL_PATTERN.test('mistral/codestral-latest')).toBe(true)
     expect(DEFAULT_MODEL_PATTERN.test('openrouter/meta-llama/llama-3.1-70b')).toBe(true)
-    expect(UserPreferencesSchema.safeParse({ default_model: 'some-new/model-v2' }).success).toBe(
-      true,
-    )
+    expect(
+      UserPreferencesSchema.safeParse({ default_model: 'some-new/model-v2', theme: 'system' })
+        .success,
+    ).toBe(true)
   })
 
-  it('requires default_model to be present, and an object around it', () => {
+  it('requires every field of the stored shape, and an object around it', () => {
+    // What the server holds always has both: a missing `theme` on a *read* is a server bug,
+    // not an absent preference.
     expect(UserPreferencesSchema.safeParse({}).success).toBe(false)
+    expect(UserPreferencesSchema.safeParse({ default_model: null }).success).toBe(false)
+    expect(UserPreferencesSchema.safeParse({ theme: 'dark' }).success).toBe(false)
     expect(UserPreferencesSchema.safeParse('anthropic/claude-sonnet-5').success).toBe(false)
   })
 
@@ -112,20 +135,38 @@ describe('UserPreferencesSchema (epic #116, U1)', () => {
       'anthropic/claude sonnet', // whitespace in the model
       42,
     ]) {
-      expect(UserPreferencesSchema.safeParse({ default_model: bad }).success, String(bad)).toBe(
-        false,
-      )
+      expect(
+        UserPreferencesSchema.safeParse({ default_model: bad, theme: 'system' }).success,
+        String(bad),
+      ).toBe(false)
     }
   })
 
   it('strips unknown preference fields rather than rejecting them', () => {
     expect(
       UserPreferencesSchema.parse({ default_model: null, theme: 'dark', future: { x: 1 } }),
-    ).toEqual({ default_model: null })
+    ).toEqual({ default_model: null, theme: 'dark' })
   })
 
-  it('Get and Put are the same shape', () => {
+  it('Get is the stored shape; Put is every field of it, each one optional', () => {
     expect(GetPreferencesResponseSchema).toBe(UserPreferencesSchema)
-    expect(PutPreferencesRequestSchema).toBe(UserPreferencesSchema)
+
+    // A write merges (epic #201, X3): each field may stand alone, so a caller changing one
+    // cannot clear the other, and an empty body is a no-op rather than a reset.
+    expect(PutPreferencesRequestSchema.parse({ default_model: 'openai/gpt-5-mini' })).toEqual({
+      default_model: 'openai/gpt-5-mini',
+    })
+    expect(PutPreferencesRequestSchema.parse({ theme: 'dim' })).toEqual({ theme: 'dim' })
+    expect(PutPreferencesRequestSchema.parse({ default_model: null, theme: 'dark' })).toEqual({
+      default_model: null,
+      theme: 'dark',
+    })
+    expect(PutPreferencesRequestSchema.parse({})).toEqual({})
+
+    // The same checks a whole write got: the default model's shape, and the four theme names.
+    expect(
+      PutPreferencesRequestSchema.safeParse({ default_model: 'not-a-router-id' }).success,
+    ).toBe(false)
+    expect(PutPreferencesRequestSchema.safeParse({ theme: 'midnight' }).success).toBe(false)
   })
 })

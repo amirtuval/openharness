@@ -66,18 +66,40 @@ export type GetMeResponse = User
 export const DEFAULT_MODEL_PATTERN = /^[^\s/]+\/[^\s/]+(?:\/[^\s/]+)*$/
 
 /**
- * // extension: a user's stored preferences (epic #116, U1).
+ * // extension: the theme a user has chosen for the web app (epic #201, X3).
+ *
+ * `system` follows the operating system and is the default, so a caller that never saved a
+ * theme gets the browser's own preference. `light`, `dim` and `dark` are explicit choices —
+ * `dim` a soft dark palette, darker than light and easier on the eye than near-black.
+ *
+ * The preference is a *choice*, not a resolved value: a `system` user is not rewritten to
+ * `light` or `dark` when their OS changes. There is no TUI equivalent: the terminal's own
+ * theme is the TUI's theme (epic #201, X4).
+ */
+export const UserThemeSchema = z.enum(['system', 'light', 'dim', 'dark'])
+
+export type UserTheme = z.infer<typeof UserThemeSchema>
+
+/** The theme a user who has never chosen one gets, as {@link UserPreferencesSchema} holds it. */
+export const DEFAULT_USER_THEME: UserTheme = 'system'
+
+/**
+ * // extension: a user's stored preferences (epic #116, U1; theme: epic #201, X3).
  *
  * `default_model` is the `provider/model` a new chat starts with — the free-text router id
  * described above, validated for shape only — or `null` when the user has not set one (and
- * none was chosen automatically from their provider keys). Anthropic has no equivalent: its
- * API is account-scoped by the caller's key, with no per-user settings.
+ * none was chosen automatically from their provider keys). `theme` is the web app's colour
+ * scheme, stored beside it so the choice follows the user across browsers; it is written by
+ * the settings screen, and the web app also caches it in `localStorage` so the first paint is
+ * in the right theme. Anthropic has no equivalent: its API is account-scoped by the caller's
+ * key, with no per-user settings.
  */
 export const UserPreferencesSchema = z.object({
   default_model: z
     .string()
     .regex(DEFAULT_MODEL_PATTERN, { error: 'default_model must be a provider/model router id' })
     .nullable(),
+  theme: UserThemeSchema,
 })
 
 export type UserPreferences = z.infer<typeof UserPreferencesSchema>
@@ -86,21 +108,34 @@ export type UserPreferences = z.infer<typeof UserPreferencesSchema>
  * Response of `GET /v1/me/preferences`: the caller's preferences, unwrapped.
  *
  * Owner-only, like `GET /v1/me`: the route answers for the authenticated caller and nobody
- * else. A caller who has never saved any preferences gets `{ default_model: null }` — the
- * absence of a choice, not a 404.
+ * else. A caller who has never saved any preferences gets `{ default_model: null, theme:
+ * 'system' }` — the absence of a choice, not a 404.
  */
 export const GetPreferencesResponseSchema = UserPreferencesSchema
 
 export type GetPreferencesResponse = UserPreferences
 
 /**
- * Body of `PUT /v1/me/preferences`: the caller's preferences, written whole. Response:
+ * Body of `PUT /v1/me/preferences`: the fields to change, all of them optional. Response:
  * {@link GetPreferencesResponseSchema}.
  *
- * `default_model` is required and `null` clears the stored default; there is no partial
- * update, so a caller always sets the complete value it wants. The shape is validated
- * (`provider/model` or `null`); whether the model exists is not — the catalog answers that.
+ * A write **merges**: a field the body carries is stored, a field it leaves out keeps its
+ * stored value, and `default_model: null` clears the stored default. That is what keeps the
+ * two settings from clearing each other — `{ default_model: 'openai/gpt-5-mini' }` from `oh`
+ * leaves the theme alone, and `{ theme: 'dim' }` from the settings screen leaves the default
+ * model alone — without an older client or a half-typed form having to read first. An empty
+ * body is a no-op that answers what is stored.
+ *
+ * The default model's shape is validated (`provider/model` or `null`); whether the model
+ * exists is not — the catalog answers that.
  */
-export const PutPreferencesRequestSchema = UserPreferencesSchema
+export const PutPreferencesRequestSchema = z.object({
+  default_model: z
+    .string()
+    .regex(DEFAULT_MODEL_PATTERN, { error: 'default_model must be a provider/model router id' })
+    .nullable()
+    .optional(),
+  theme: UserThemeSchema.optional(),
+})
 
-export type PutPreferencesRequest = UserPreferences
+export type PutPreferencesRequest = z.infer<typeof PutPreferencesRequestSchema>

@@ -1,5 +1,6 @@
 import { useState } from 'react'
 
+import { AppearanceCard } from '../components/settings/appearance'
 import { DefaultModelCard } from '../components/settings/default-model'
 import { ModelProvidersCard } from '../components/settings/model-providers'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
@@ -11,19 +12,21 @@ import { useSettings } from '../hooks/use-settings'
 import { SETTINGS_STORAGE_KEY, saveSettings } from '../lib/settings'
 
 /**
- * Where the server is, the default model new chats run on, and the model-provider keys this
- * account runs on.
+ * Where the server is, the default model new chats run on, the theme the app paints with, and
+ * the model-provider keys this account runs on.
  *
  * There used to be a second field here — the static `x-api-key` — and it is gone (epic #65,
  * A8): signing in is Better Auth's job now (the sign-in page, the device-approval page), and
  * what authentication the browser does is a cookie it cannot read, let alone store. What is
  * left in `localStorage` is the server URL, under `openharness:settings`, and an empty URL
  * means **same origin** — which is what the Vite dev proxy and a static build served next to
- * the API both want.
+ * the API both want. The theme keeps a separate cache under `openharness:theme` that is only
+ * there to paint the first frame (#203).
  *
  * The provider keys live on the server (A5), encrypted, write-only; {@link ModelProvidersCard}
- * is where they are managed. The default model ({@link DefaultModelCard}) is server state
- * too, and its picker reads the shell's one catalog rather than fetching its own.
+ * is where they are managed. The default model ({@link DefaultModelCard}) and the theme
+ * ({@link AppearanceCard}) are server state too, and the picker reads the shell's one catalog
+ * rather than fetching its own.
  */
 export function SettingsScreen({ catalog }: { catalog: ModelsView }) {
   const settings = useSettings()
@@ -90,6 +93,8 @@ export function SettingsScreen({ catalog }: { catalog: ModelsView }) {
         </Card>
 
         <DefaultModelCard catalog={catalog} />
+
+        <AppearanceCard />
 
         <ModelProvidersCard />
       </div>

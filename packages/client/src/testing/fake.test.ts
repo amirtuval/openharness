@@ -947,20 +947,36 @@ describe('the fake deletes a session (#111)', () => {
 })
 
 describe('the fake preferences (#111)', () => {
-  it('starts at { default_model: null } and replaces the whole value', async () => {
+  it('starts at the protocol defaults and merges what a put carries', async () => {
     const fake = createFakeClient()
 
-    await expect(fake.preferences.get()).resolves.toEqual({ default_model: null })
+    await expect(fake.preferences.get()).resolves.toEqual({ default_model: null, theme: 'system' })
 
     const stored = await fake.preferences.put({ default_model: 'openai/gpt-4.1-mini' })
-    expect(stored).toEqual({ default_model: 'openai/gpt-4.1-mini' })
-    await expect(fake.preferences.get()).resolves.toEqual({ default_model: 'openai/gpt-4.1-mini' })
+    // The default model alone: the theme it did not carry keeps its stored value.
+    expect(stored).toEqual({ default_model: 'openai/gpt-4.1-mini', theme: 'system' })
+    await expect(fake.preferences.get()).resolves.toEqual({
+      default_model: 'openai/gpt-4.1-mini',
+      theme: 'system',
+    })
 
-    // null clears the choice: the whole value is written, like the server's PUT.
+    // A theme alone likewise leaves the default model alone (#203) — the two never clear
+    // each other.
+    await expect(fake.preferences.put({ theme: 'dim' })).resolves.toEqual({
+      default_model: 'openai/gpt-4.1-mini',
+      theme: 'dim',
+    })
+    await expect(fake.preferences.get()).resolves.toEqual({
+      default_model: 'openai/gpt-4.1-mini',
+      theme: 'dim',
+    })
+
+    // null clears the choice, like the server's PUT.
     await expect(fake.preferences.put({ default_model: null })).resolves.toEqual({
       default_model: null,
+      theme: 'dim',
     })
-    await expect(fake.preferences.get()).resolves.toEqual({ default_model: null })
+    await expect(fake.preferences.get()).resolves.toEqual({ default_model: null, theme: 'dim' })
   })
 
   it('seeds the value from createFakeClient', async () => {
@@ -970,6 +986,7 @@ describe('the fake preferences (#111)', () => {
 
     await expect(fake.preferences.get()).resolves.toEqual({
       default_model: 'anthropic/claude-sonnet-5',
+      theme: 'system',
     })
   })
 })

@@ -209,6 +209,48 @@ position.
 A library (`use-stick-to-bottom`, which AI Elements uses) would also work; the rule is small
 enough to own, and owning it keeps the dependency list short.
 
+## Themes (epic #201 X3, #203)
+
+Four choices — **System** (the default), **Light**, **Dim**, **Dark** — and one attribute:
+`data-theme` on `<html>`. `src/index.css` holds one block of CSS variables per theme, and
+`@custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *, [data-theme='dim'],
+[data-theme='dim'] *))` is what keeps the shadcn components' handful of `dark:` utilities
+meaning "dark chrome" — true in Dim as much as in Dark.
+
+**`system` is resolved in JavaScript, not in a media query.** The store
+(`src/lib/theme.ts`) reads `matchMedia('(prefers-color-scheme: dark)')`, writes the concrete
+`light`/`dark` it implies, and re-writes it when the operating system fires `change`. That
+keeps one source of truth — the attribute — instead of two that can disagree, and it is why
+there is no `@media (prefers-color-scheme: dark)` block in the stylesheet any more. Where
+`matchMedia` does not exist (jsdom, and anything that is not a browser) the answer is "not
+dark", which is what `:root` renders anyway.
+
+**No flash.** The account's theme lives on the server, and a request is far too late to paint
+the first frame with. So the app also caches the _choice_ in `localStorage`
+(`openharness:theme`), and a small inline script in `index.html` reads it and sets the
+attribute in the head, before anything renders. The script is the one place that repeats the
+store's resolution rule — it is deliberately five lines, with no imports, and a comment
+pointing at `resolveTheme()`.
+
+**The server value wins, once it answers.** `src/components/theme-preference.tsx` is the only
+thing that talks to the API about the theme: one `GET /v1/me/preferences` on mount, and a
+`PUT` for every choice after it. It is mounted with the shell and renders nothing, which is
+what lets the two pickers — Settings → Appearance (`components/settings/appearance.tsx`, a
+native radio group) and the sidebar's quick switch (`components/theme-menu.tsx`, a menu beside
+the user's email) — call the same `chooseTheme()` and be saved by the same code. A preference
+write merges, so the theme and the default model never clear each other.
+
+The stored value is adopted unless the choice moved after the read left: a click that has not
+been saved yet is the reader's last word, and only the component that made the request knows
+whether it has been overtaken. If the `PUT` is refused, the previous choice is put back and
+the shell's notice says so.
+
+**Dim** is the new palette: a dark gray background (`oklch(0.3 …)`, against Dark's
+`oklch(0.145 …)`) and lower-contrast text that is still above the WCAG AA floor — the numbers
+are in the stylesheet's comment, and every pair is measured against the block it lives in.
+Light and Dark are the palettes that were already there. In Dark, `--destructive-foreground`
+on `--destructive` measures 2.8:1, below AA: it is pre-existing, and #203 does not change it.
+
 ## Settings and the server URL
 
 `localStorage`, key `openharness:settings`, two fields. The store in `src/lib/settings.ts` is

@@ -522,6 +522,45 @@ export async function setDefaultModel(
   expect(response.status(), await response.text()).toBe(200)
 }
 
+/** The four theme names, as the protocol's `UserThemeSchema` spells them (epic #201, X3). */
+const THEMES = ['system', 'light', 'dim', 'dark'] as const
+
+/** One of them. */
+export type StoredTheme = (typeof THEMES)[number]
+
+/** The account's stored theme — the web app's colour scheme (epic #201, X3). */
+export async function storedTheme(request: APIRequestContext): Promise<StoredTheme> {
+  const response = await request.get('/v1/me/preferences')
+  expect(response.status(), await response.text()).toBe(200)
+  const body = (await response.json()) as { theme: string }
+  // The route's own vocabulary: a name outside the four is a server bug, not a QA surprise.
+  expect(THEMES, `stored theme ${body.theme}`).toContain(body.theme)
+  return body.theme as StoredTheme
+}
+
+/**
+ * Store a theme through the API, the way Settings → Appearance does.
+ *
+ * A write merges (X3), so this leaves the account's default model exactly where it was.
+ */
+export async function setStoredTheme(
+  request: APIRequestContext,
+  theme: StoredTheme,
+): Promise<void> {
+  const response = await request.put('/v1/me/preferences', { data: { theme } })
+  expect(response.status(), await response.text()).toBe(200)
+}
+
+/**
+ * Which theme the page is painted with: what `data-theme` says on `<html>`.
+ *
+ * The one observable a theme has in a browser — every token block in `src/index.css` hangs off
+ * it — so specs assert this rather than the colours it stands for.
+ */
+export async function paintedTheme(page: Page): Promise<string | null> {
+  return page.evaluate(() => document.documentElement.getAttribute('data-theme'))
+}
+
 /**
  * Give the account a default model, and answer which one it now is.
  *

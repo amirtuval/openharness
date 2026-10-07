@@ -63,9 +63,11 @@ src/
   main.tsx                     bootstrap: resolve the client (fake in dev mode), render <App>
   App.tsx                      the client from the settings, the routes, the app shell:
                                sidebar (column or drawer), the top bar, the routed screen
-  index.css                    Tailwind + the shadcn design tokens (dark follows the system;
-                               `color-scheme` + the popover tokens keep the native controls —
-                               select popups, datalists, scrollbars — in the same scheme)
+  index.css                    Tailwind + the shadcn design tokens: one block per theme
+                               (Light, Dim, Dark) under `[data-theme]`, `@custom-variant dark`
+                               re-pointed at that attribute, and `color-scheme` per theme so
+                               the native controls — select popups, datalists, scrollbars —
+                               stay in the same scheme
   components/
     client-provider.tsx        the client in context, so screens can use it
     auth-provider.tsx          the Better Auth browser client in context
@@ -77,6 +79,9 @@ src/
     settings/
       model-providers.tsx      Settings -> Model providers: the list, add/replace, delete
       default-model.tsx        Settings -> Default model: the picker, saved to preferences
+      appearance.tsx           Settings -> Appearance: the four-way theme picker (#203)
+    theme-menu.tsx             the sidebar's theme quick switch (#203)
+    theme-preference.tsx       the theme's one server read and write, rendered nowhere
     chat/
       chat-view.tsx            the chat screen: header (+ delete), messages, errors,
                                composer with the model selector, the model-change marker
@@ -101,7 +106,8 @@ src/
                                preselected sole model, a loading state, the catalog's
                                error, or the "add a provider key" state when there are
                                no providers and no models
-    settings-screen.tsx        the server URL (localStorage), Default model, Model providers
+    settings-screen.tsx        the server URL (localStorage), Default model, Appearance,
+                               Model providers
     sign-in-screen.tsx         one button per provider, the dev form when offered
     device-screen.tsx          the device-approval page `oh login` opens
   hooks/
@@ -110,6 +116,7 @@ src/
     use-session-refresh.ts     the re-read after a first message, shared by both of those
     use-models.ts              the catalog (GET /v1/models), once for the whole shell
     use-preferences.ts         GET/PUT /v1/me/preferences: the default model
+    use-theme.ts               the theme store's React binding (#203)
     use-auth.ts                the auth store's React binding
     use-auth-config.ts         GET /v1/auth-config for the sign-in page
     use-provider-credentials.ts  the credentials list, plus save and delete
@@ -123,6 +130,8 @@ src/
     auth-client.ts             Better Auth's browser client, narrowed to the calls we make
     auth-store.ts              who we are signed in as, and "a 401 means sign in again"
     settings.ts                localStorage settings, a stable snapshot for React
+    theme.ts                   the theme: the choice, the `data-theme` it resolves to, the
+                               `localStorage` cache the first paint reads (#203)
     notice.ts                  the shell's notice, a one-line store
     providers.ts               the provider names the *credentials* form offers
     session-refresh.ts         the one re-read of a session whose first message named it
@@ -142,7 +151,7 @@ src/
 | `#/`                        | home (no chat open)                              |
 | `#/s/<sessionId>`           | the chat                                         |
 | `#/new`                     | new chat: an empty composer on the default model |
-| `#/settings`                | server URL, Default model, Model providers       |
+| `#/settings`                | server URL, Default model, Appearance, providers |
 | `#/signin`                  | sign in (`?next=<hash>` to return there)         |
 | `#/device?user_code=<code>` | the device-approval page `oh login` opens        |
 
@@ -387,6 +396,36 @@ joined) is what the rest of the app still reads.
 Markdown is `react-markdown` + `remark-gfm` with the elements styled by hand; no
 `rehype-raw`, so HTML in a message stays text.
 
+### Themes (#203, epic #201 X3)
+
+Four choices — **System** (the default), **Light**, **Dim**, **Dark** — set as `data-theme` on
+`<html>`, with one block of CSS variables per theme in `src/index.css` and `@custom-variant
+dark` re-pointed at that attribute so `dark:` means "dark chrome" in both Dim and Dark. Light
+and Dark are the palettes the app already shipped; Dim is the soft one, and its comment in the
+stylesheet carries the measured contrast ratios.
+
+Three pieces, and each has one job:
+
+- `src/lib/theme.ts` — the store: the choice, the `data-theme` it resolves to, and the
+  `localStorage` cache (`openharness:theme`). `system` is resolved here against
+  `matchMedia('(prefers-color-scheme: dark)')` and re-resolved when the operating system
+  changes, so the attribute always names a theme that exists and no CSS media query duplicates
+  the rule. Frozen and tiny; `use-theme.ts` is its React binding.
+- `index.html` — the inline script that reads the same cache and sets the attribute **before
+  the first paint**, so a dark-theme reader never sees a white flash. It is the only place that
+  duplicates the resolution rule; keep the two in step.
+- `src/components/theme-preference.tsx` — the one caller that knows about the client: it reads
+  `GET /v1/me/preferences` once and writes every choice back with `PUT`. It renders nothing and
+  lives in the shell, so `Settings → Appearance` (`components/settings/appearance.tsx`) and the
+  sidebar's quick switch (`components/theme-menu.tsx`) are both just `chooseTheme(...)`: applied
+  in the click, saved in one place. The account's stored value wins once it arrives — unless
+  the reader has clicked since that request left, which the component knows and the store
+  cannot.
+
+The theme is not the TUI's (there, the terminal's own colours are the theme, epic #201 X4), and
+it is why `Settings` grew a card rather than the whole app growing a context: a theme is one
+attribute and one preference, and a provider for it would be a provider for a string.
+
 ## Testing
 
 `src/**/*.test.tsx` with Vitest (jsdom) and Testing Library, driving
@@ -415,7 +454,9 @@ outside `@openharness/client` — is stubbed at `fetch` where a test needs it.
 | `src/hooks/use-session.test.tsx`              | the hook's own contract: a failed load, and no duplicated message                                                                                                                                                                                                                                                                                                                                                                  |
 | `src/hooks/use-stick-to-bottom.test.tsx`      | the auto-scroll rule, with a scroll geometry jsdom does not have                                                                                                                                                                                                                                                                                                                                                                   |
 | `src/components/sidebar.test.tsx`             | the session list: first page then the rest, the cap note, and the row's delete action (in-page confirm, cancel, Escape, failure)                                                                                                                                                                                                                                                                                                   |
-| `src/lib/*.test.ts`                           | routes, the settings store, the fake-mode scenario, the paging walk, the session re-read, the label rules, the context-window formatting, the auth store's rules, and the auth-config schema's unknown-provider filter                                                                                                                                                                                                             |
+| `src/components/theme-menu.test.tsx`          | the sidebar's theme quick switch: a pick paints and saves, Escape closes without choosing (#203)                                                                                                                                                                                                                                                                                                                                   |
+| `src/components/settings/appearance.test.tsx` | the Appearance picker (#203): a pick is saved to the account and painted at once, the cached theme paints first and the account's stored one takes over once it answers                                                                                                                                                                                                                                                            |
+| `src/lib/*.test.ts`                           | routes, the settings store, the theme store (`system` following `matchMedia`, the cache, the attribute; #203), the fake-mode scenario, the paging walk, the session re-read, the label rules, the context-window formatting, the auth store's rules, and the auth-config schema's unknown-provider filter                                                                                                                          |
 
 Timing: streaming tests do not race the clock. `src/test-support/stream.ts` gates the fake's
 stream so the test releases **one event at a time** and asserts between events — the fake

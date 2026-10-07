@@ -4,10 +4,27 @@
  * The design tokens are shadcn/ui's "neutral" theme, in Tailwind v4's CSS-first form:
  * `@theme inline` maps them to utilities (`bg-background`, `text-muted-foreground`, ...).
  *
- * Dark mode follows the system setting. There is no `.dark` class and no theme switcher:
- * Tailwind v4's `dark:` variant is `prefers-color-scheme: dark` by default, and the token
- * block below is swapped by the same media query, so both halves move together.
+ * There are four themes (epic #201, X3) and one block of variables per theme: `:root` (light,
+ * which is also what a page whose inline script never ran gets), `[data-theme='light']`,
+ * `[data-theme='dim']` and `[data-theme='dark']`. The attribute is set on `<html>` — by the
+ * inline script in `index.html` before the first paint, and by `src/lib/theme.ts` after that —
+ * so a theme is one attribute, never a class on every element.
+ *
+ * `system` is resolved to `light` or `dark` in JavaScript rather than here, and re-resolved
+ * when the operating system changes, so the attribute always names a theme that exists. There
+ * is no `prefers-color-scheme` block: the browser's own preference is the *System* choice, not
+ * a second source of truth the stylesheet would have to agree with.
+ *
+ * `dark:` still means "dark chrome": `@custom-variant` re-points it at the attribute, and both
+ * Dim and Dark count (they are both dark; Dim is the softer one).
  */
+@custom-variant dark (&:where(
+  [data-theme='dark'],
+  [data-theme='dark'] *,
+  [data-theme='dim'],
+  [data-theme='dim'] *
+));
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -34,6 +51,14 @@
   --radius-xl: calc(var(--radius) + 4px);
 }
 
+/*
+ * Light — the palette the app has always shipped, unchanged (epic #201, X3: "Light and Dark
+ * are today's palettes"). It is also what `:root` alone renders, so a page that somehow has no
+ * `data-theme` at all still looks like the app rather than like nothing.
+ *
+ * Every pair below is at or above WCAG AA (4.5:1) for body text; the tightest is
+ * `--muted-foreground` on `--background`, which is what the small print is drawn in.
+ */
 :root {
   /* Native controls (select popups, option lists, datalists, scrollbars, date inputs)
    * follow the app theme. Without this the browser paints the option list with its own
@@ -61,29 +86,66 @@
   --ring: oklch(0.708 0 0);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    color-scheme: dark;
-    --background: oklch(0.145 0 0);
-    --foreground: oklch(0.985 0 0);
-    --card: oklch(0.205 0 0);
-    --card-foreground: oklch(0.985 0 0);
-    --popover: oklch(0.205 0 0);
-    --popover-foreground: oklch(0.985 0 0);
-    --primary: oklch(0.922 0 0);
-    --primary-foreground: oklch(0.205 0 0);
-    --secondary: oklch(0.269 0 0);
-    --secondary-foreground: oklch(0.985 0 0);
-    --muted: oklch(0.269 0 0);
-    --muted-foreground: oklch(0.708 0 0);
-    --accent: oklch(0.269 0 0);
-    --accent-foreground: oklch(0.985 0 0);
-    --destructive: oklch(0.704 0.191 22.216);
-    --destructive-foreground: oklch(0.985 0 0);
-    --border: oklch(1 0 0 / 10%);
-    --input: oklch(1 0 0 / 15%);
-    --ring: oklch(0.556 0 0);
-  }
+/*
+ * Dim — the soft one (epic #201, X3): a dark gray background rather than a near-black one, and
+ * muted text that stays readable instead of going faint.
+ *
+ * The numbers behind the description, all measured against this block (sRGB relative
+ * luminance, WCAG 2.x): body text 11.4:1, muted text 6.8:1 on the background and 5.7:1 on a
+ * card, `destructive` 6.7:1 as text on the background — every one of them above the 4.5:1 AA
+ * floor, and every one of them below Dark's, which is the point.
+ */
+[data-theme='dim'] {
+  color-scheme: dark;
+  --background: oklch(0.3 0.006 285);
+  --foreground: oklch(0.94 0.004 285);
+  --card: oklch(0.35 0.007 285);
+  --card-foreground: oklch(0.94 0.004 285);
+  --popover: oklch(0.35 0.007 285);
+  --popover-foreground: oklch(0.94 0.004 285);
+  --primary: oklch(0.88 0.01 285);
+  --primary-foreground: oklch(0.26 0.006 285);
+  --secondary: oklch(0.39 0.008 285);
+  --secondary-foreground: oklch(0.95 0.003 285);
+  --muted: oklch(0.39 0.008 285);
+  --muted-foreground: oklch(0.78 0.006 285);
+  --accent: oklch(0.39 0.008 285);
+  --accent-foreground: oklch(0.95 0.003 285);
+  /* A soft red with dark ink on it: the dark theme's white-on-red is 2.8:1, which is below AA,
+   * and a new palette has no reason to inherit that. As text on the background it is 6.7:1. */
+  --destructive: oklch(0.8 0.13 25);
+  --destructive-foreground: oklch(0.24 0.03 25);
+  --border: oklch(1 0 0 / 14%);
+  --input: oklch(1 0 0 / 18%);
+  --ring: oklch(0.7 0.006 285);
+}
+
+/*
+ * Dark — also the palette the app has always shipped, and what `prefers-color-scheme: dark`
+ * used to swap in. Note that `--destructive-foreground` on `--destructive` is 2.8:1 here,
+ * below AA: it is the old palette and #203 does not change it (see the PR).
+ */
+[data-theme='dark'] {
+  color-scheme: dark;
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --destructive-foreground: oklch(0.985 0 0);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
 }
 
 @layer base {
