@@ -7,7 +7,7 @@ plan between phases.
 For a survey of what other harnesses offer (Claude Code, Managed Agents, OpenCode, Codex, pi),
 see the [harness feature inventory](./research/harness-features.md).
 
-_Last updated: 2026-10-04._
+_Last updated: 2026-10-07._
 
 ## Where we are
 
@@ -20,19 +20,23 @@ _Last updated: 2026-10-04._
   - claims are events (`consumes` on the event that claims);
   - streamed chunks are stored, superseded by the event that finishes them, skipped on replay and
     deleted after a retention window.
-- **Authentication** ([epic #65](https://github.com/amirtuval/openharness/issues/65)) is built
-  and in close-out ([#97](https://github.com/amirtuval/openharness/issues/97)): Google sign-in
-  is verified; GitHub and Microsoft checks remain.
+- **Authentication** ([epic #65](https://github.com/amirtuval/openharness/issues/65)) is done
+  (closed 2026-10-05): Google, GitHub and Microsoft sign-in are verified on the deployed
+  environments.
 - **Model catalog and model-first chat** ([epic #92](https://github.com/amirtuval/openharness/issues/92))
   are done (closed 2026-10-04): New chat picks a model, sessions carry their own model, and
   agents are optional.
-- **Flaky server tests** ([#43](https://github.com/amirtuval/openharness/issues/43)) are open.
+- **Deployment and CI/CD** ([epic #148](https://github.com/amirtuval/openharness/issues/148)) is
+  done (closed 2026-10-07): staging at <https://staging.oharness.dev> deploys from `main`,
+  production at <https://app.oharness.dev> deploys from the `production` tag, and the CLI is on
+  npm as [`@openh/cli`](https://www.npmjs.com/package/@openh/cli).
+- **Flaky server tests** ([#43](https://github.com/amirtuval/openharness/issues/43)) are fixed.
 
 ## Order
 
 1. Finish v1 — done: the epic is closed.
-2. Authentication
-3. Deployment and CI/CD
+2. Authentication — done
+3. Deployment and CI/CD — done
 4. Model selection and provider keys
 5. Tools
 
@@ -41,13 +45,10 @@ needs to know who owns what. The features that cost money or can act on the worl
 calls, tools) should land on a platform that already has users, environments and a trustworthy
 CI.
 
-## 2. Authentication (built: [epic #65](https://github.com/amirtuval/openharness/issues/65), in close-out — [#97](https://github.com/amirtuval/openharness/issues/97))
+## 2. Authentication (done: [epic #65](https://github.com/amirtuval/openharness/issues/65))
 
-**Status:** implemented and through a hands-on QA pass (#74) with no security defects; its
-three minor findings are fixed. Google sign-in has been verified by the maintainer. GitHub is
-still to confirm, and Microsoft is to be checked from a personal device (a managed work laptop
-blocks personal Microsoft accounts through tenant restrictions). Closing the epic is the
-remaining step.
+**Status:** implemented, through a hands-on QA pass (#74) with no security defects, and its
+minor findings fixed. All three providers are verified on staging and production.
 
 **Decided** (details and the sub-issues are on the epic):
 
@@ -75,49 +76,43 @@ remaining step.
 - **A username/password dev login,** only when the server's public URL is localhost.
 - **The static `OPENHARNESS_API_KEY` is removed,** and existing v1 data is deleted.
 
-## 3. Deployment and CI/CD
+## 3. Deployment and CI/CD (done: [epic #148](https://github.com/amirtuval/openharness/issues/148))
 
-Today there is CI (lint, typecheck and tests with turbo `--affected`) and `docker compose`.
+**Status:** done; the first deploy and the first CLI releases are in #159. How to operate it
+is in [`DEPLOYMENT.md`](./DEPLOYMENT.md) and [`RELEASING.md`](./RELEASING.md).
 
-**Scope:**
+**What shipped:**
 
-- build and publish images (e.g. to GHCR) on merge, and versioned releases;
-- environments: staging deployed from `main`, production on release, and possibly a preview per
-  PR;
-- migrations that are safe when several instances deploy at once (today the server migrates on
-  boot);
+- **One GCP project per environment** (staging and production), with Terraform modules and a
+  Helm chart (`infra/`, `charts/openharness`). Each project has an Autopilot GKE cluster,
+  Cloud SQL for Postgres behind the Cloud SQL Auth Proxy, Secret Manager, and Cloud KMS for
+  the vault's master key. The app is exposed through a GKE Gateway with Certificate Manager
+  and Cloud CDN.
+- **CI identity through Workload Identity Federation,** with least-privilege deploy and plan
+  accounts and no service-account keys.
+- **Deploys:** staging deploys from `main` after CI passes; production deploys from the
+  `production` tag and reuses the image staging built. PRs that touch the infrastructure run
+  `terraform plan`.
+- **Behind the load balancer:** the client IP is resolved from the trusted hop of
+  `x-forwarded-for`, so the sign-in rate limit keys per client; there are readiness probes, and
+  CDN cache headers (immutable assets, `no-store` on everything dynamic).
+- **Observability:** JSON logs, Cloud Trace, uptime checks and alerts, and a budget.
+- **OAuth apps per environment** for Google, GitHub and Microsoft.
+- **The CLI on npm** as `@openh/cli` (npm refused the unscoped `openharness` as too close to
+  `open-harness`), published by a manual workflow through trusted publishing with provenance.
+  It defaults to production and updates itself in the background.
+
+**Follow-ups:**
+
 - run the e2e and QA suites (`e2e/qa`) against staging;
-- health checks, logs, metrics and alerts at a basic level, and OpenTelemetry built from the
-  spans already in the log;
-- **rate limiting behind a reverse proxy:** configure which forwarding headers to trust for
-  the client IP. Without it, Better Auth cannot tell users apart, so everyone shares one
-  rate-limit bucket and one user's failed attempts can block everyone (seen in #74);
-- **fix the flaky tests (#43) as part of this phase.** A flaky CI cannot gate deploys. The
-  partition-lease test must be confirmed as timing-only, because it covers multi-instance
-  safety.
-
-- **one GCP project per environment** (discussed 2026-10-04): `openharness-shared` (Artifact
-  Registry, DNS, the CI identity through Workload Identity Federation, no service-account
-  keys), `openharness-staging` and `openharness-prod`, each with its own VPC, GKE cluster
-  (Autopilot is the likely fit), Cloud SQL for Postgres and Secret Manager. Separate projects
-  rather than one project with two clusters, because IAM, quotas, the Google OAuth consent
-  screen and the GKE Workload Identity pool are per project. In one shared project, a staging
-  pod with the same namespace and service-account name as production would get production's
-  GCP permissions ("identity sameness"). Build each image once and promote it by digest;
-- **OAuth apps per environment** (dev on localhost, staging and production), each with its own
-  secrets:
-  - **GitHub** allows one callback URL per OAuth app;
-  - the **Google** consent screen is per project, so dev and staging stay in Testing with
-    listed users, and production is published (it needs an authorized domain, a homepage and a
-    privacy-policy URL);
-  - **Microsoft:** configure the `email` and `xms_edov` optional claims (our verified-email
-    guard needs them for work accounts) and track secret expiry; publisher verification avoids
-    the "unverified" warning and admin-consent blocks.
-
-**Open:**
-
-- **Postgres in production:** Cloud SQL is the default assumption with GCP; confirm it when
-  the phase starts.
+- Cloud Armor in front of the load balancer;
+- Cloud SQL high availability for production;
+- a preview environment per PR;
+- shared rate-limit storage: the counters are per instance today, so the effective limit grows
+  with the replica count;
+- `HEAD` on the web app's files returns 404 ([#196](https://github.com/amirtuval/openharness/issues/196));
+- the CLI's background update can be cut short by quick commands
+  ([#197](https://github.com/amirtuval/openharness/issues/197)).
 
 ## 4. Model selection
 
