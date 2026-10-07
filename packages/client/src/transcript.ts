@@ -1,6 +1,9 @@
 import { EVENT_TYPES } from '@openharness/protocol'
 import type {
   AgentMessageEvent,
+  ModelRequestEndEvent,
+  ModelRequestStartEvent,
+  ModelUsage,
   StreamEvent,
   StoredEvent,
   UserMessageEvent,
@@ -38,6 +41,77 @@ import type {
  */
 
 /**
+ * A message's text — the one part type v1 stores (epic #201, X1).
+ *
+ * A user message carries one per content block, the agent's reply one per block it produced
+ * and a streaming preview one per block its deltas extend.
+ */
+export interface TextPart {
+  readonly type: 'text'
+  /** The text of this part. */
+  readonly text: string
+}
+
+/**
+ * One part of a message (epic #201, X1).
+ *
+ * A discriminated union on `type`. A frontend renders {@link TranscriptMessage.parts} through
+ * a lookup from `type` to a renderer, so a new kind of part is a new member here and a new
+ * entry there — never a change to how a message is laid out.
+ *
+ * Only `text` is implemented today. The members the next phases add, in the shape the epic
+ * agreed, are:
+ *
+ * - `thinking` — the model's reasoning;
+ * - `tool_use` — a tool call the agent made;
+ * - `tool_result` — what a tool answered;
+ * - `question` — an `ask_user` question waiting for the user;
+ * - `approval` — a tool call waiting for the user's approval.
+ *
+ * They are named here and deliberately not implemented: the protocol has no event for them
+ * yet, and the union is what they extend when it does. A message's `text` stays the
+ * concatenation of its text parts, so a caller that only wants the words keeps working.
+ */
+export type MessagePart = TextPart
+
+/**
+ * The tokens a reply used, summed over the model requests it took (epic #201, U1).
+ *
+ * `total` is `input + output`: the two numbers a reader thinks in. The protocol's `ModelUsage`
+ * also carries the cache creation and cache read counts; a reply's headline cost is not them,
+ * and the log itself is where a caller that wants them reads them.
+ */
+export interface TranscriptUsage {
+  readonly input: number
+  readonly output: number
+  readonly total: number
+}
+
+/**
+ * What a reply cost, read off the turn's span events (epic #201, X1).
+ *
+ * A field is **absent when the log does not say — never `0`**. A log with no span events at
+ * all (a pre-#201 session, a session whose request never opened a span) leaves the whole
+ * `meta` off the message; a request whose span start named no model leaves `model` off; a
+ * request whose span end never arrived leaves `durationMs` and `usage` off. `0` is a number a
+ * model really did report, and a UI must be able to tell that from "unknown".
+ */
+export interface TranscriptMessageMeta {
+  /** The model that served the reply: the last one the turn's requests named. */
+  readonly model?: string
+  /**
+   * How long the reply took, in milliseconds: the turn's first request start to its last
+   * request end.
+   *
+   * A retried reply therefore reports the time a reader actually waited — the failed attempt,
+   * the backoff between the two requests and the retry — not just the request that answered.
+   */
+  readonly durationMs?: number
+  /** The tokens the reply's requests reported, summed. */
+  readonly usage?: TranscriptUsage
+}
+
+/**
  * One message in the transcript.
  *
  * User and agent messages look the same on purpose: a UI renders a list, not two lists.
@@ -47,10 +121,19 @@ export interface TranscriptMessage {
   readonly id: string
   /** Who said it. */
   readonly role: 'user' | 'agent'
-  /** The message's text: the blocks below, joined. What a UI shows. */
+  /** The message's text: its text parts, joined. What a UI shows. */
   readonly text: string
-  /** The content blocks as they have arrived; `text` is `blocks.join('')`. */
-  readonly blocks: readonly string[]
+  /** The message's content, as it has arrived. `text` is this list's text parts, joined. */
+  readonly parts: readonly MessagePart[]
+  /**
+   * What the reply cost, when the log says (epic #201, U1). Agent messages only.
+   *
+   * Built from the turn's `span.model_request_start` / `span.model_request_end` events: the
+   * span start names the model, the span end the tokens, and the two timestamps the duration.
+   * A reply that took several requests (the brain retried) adds them all up, which is why a
+   * reply's metadata arrives with the *last* span end — see {@link TranscriptState.pendingRequests}.
+   */
+  readonly meta?: TranscriptMessageMeta
   /**
    * A user message the brain has not reached yet.
    *
@@ -94,6 +177,32 @@ export interface TranscriptError {
   readonly retryStatus: RetryStatusType
 }
 
+/**
+ * One model request the transcript is still accounting for (epic #201, U1).
+ *
+ * Bookkeeping for {@link TranscriptMessage.meta}, not something a UI renders. A
+ * `span.model_request_start` opens one — the model it named, when it started — and its
+ * `span.model_request_end` closes it with the tokens it used and when it ended. The reply the
+ * requests produced takes them all as its metadata; a request that produced no reply (a failed
+ * attempt the brain retried) stays here until the reply that follows picks it up, which is
+ * what makes a retried reply's tokens add up. Each one is erased as it is used: once its end
+ * has been folded into its reply, and all of them when the turn ends.
+ */
+export interface PendingModelRequest {
+  /** The `sevt_` id of the `span.model_request_start`. */
+  readonly id: string
+  /** The `provider/model` the span named that served the request; a pre-D9 span names none. */
+  readonly model?: string
+  /** When the request started, in epoch milliseconds, from the span's `processed_at`. */
+  readonly startedAt?: number
+  /** When it ended, in epoch milliseconds, from the span end's `processed_at`. */
+  readonly endedAt?: number
+  /** The tokens it reported, as {@link TranscriptMessageMeta.usage} sums them. */
+  readonly usage?: TranscriptUsage
+  /** The reply the request has been attributed to, once one has been stored. */
+  readonly messageId?: string
+}
+
 /** Everything a UI needs to render a session. */
 export interface TranscriptState {
   /** The conversation, in order (`position`). */
@@ -128,6 +237,15 @@ export interface TranscriptState {
    * message names.
    */
   readonly model: string | null
+  /**
+   * The model requests of the turn in progress, for the reply's metadata (epic #201, U1).
+   *
+   * Bookkeeping the reducer keeps for {@link TranscriptMessage.meta} — a UI renders messages,
+   * not these. A request is dropped once its span end has been folded into the reply it
+   * belongs to, and the list is emptied when the turn ends (`session.status_idle`), so it
+   * never outlives the turn that opened the requests.
+   */
+  readonly pendingRequests: readonly PendingModelRequest[]
 }
 
 /**
@@ -144,6 +262,7 @@ export function initialTranscriptState(): TranscriptState {
     lastSeq: 0,
     deleted: false,
     model: null,
+    pendingRequests: [],
   }
 }
 
@@ -198,6 +317,14 @@ export function initialTranscriptState(): TranscriptState {
  *   change — `state.model` starts at `null` — so it sets the state silently, and a message
  *   naming the model already in effect changes nothing. A message with no `model` leaves
  *   `state.model` alone.
+ * - **A reply carries what it cost** (epic #201, U1). Its {@link TranscriptMessage.meta}
+ *   comes from the turn's spans: a `span.model_request_start` names the model and opens a
+ *   tracked request, its `span.model_request_end` reports the tokens and closes it, and the
+ *   reply takes them all. Since the span end follows the reply, the metadata is written
+ *   twice — the model when the reply lands, the tokens and the duration when the end arrives
+ *   — and a reply the brain retried takes the request that failed too, so its tokens add up.
+ *   Nothing the log does not say is invented: an absent field is `undefined`, never `0`, and
+ *   a turn that ends (`session.status_idle`) drops the requests no reply claimed.
  *
  * @param state the transcript so far
  * @param event the next event, from `iterate`, `stream`, or anywhere else
@@ -244,10 +371,7 @@ function reduceStoredEvent(state: TranscriptState, event: StoredEvent): Transcri
       return fromUserMessage(state, event)
 
     case EVENT_TYPES.agentMessage:
-      return {
-        ...upsertMessage(state, messageFromAgentEvent(event, agentMessagePosition(state, event))),
-        lastError: null,
-      }
+      return fromAgentMessage(state, event)
 
     case EVENT_TYPES.userInterrupt:
       // An interrupt is not something anyone said: it cuts a reply short, and what is left of
@@ -282,8 +406,17 @@ function reduceStoredEvent(state: TranscriptState, event: StoredEvent): Transcri
       // streaming for the life of the session, drawing an empty bubble in a frontend that
       // renders it (#40). An idle that ended a turn on an interrupt also carries that
       // interrupt's claim (P4).
+      //
+      // The turn's model requests go with it (epic #201, U1): a request no reply ever claimed
+      // belongs to a reply that never happened, and leaving it behind would fold its tokens
+      // into the *next* turn's reply.
       return clearClaimedPending(
-        { ...state, status: 'idle', messages: withoutPreviews(state.messages) },
+        {
+          ...state,
+          status: 'idle',
+          messages: withoutPreviews(state.messages),
+          pendingRequests: [],
+        },
         event.consumes,
       )
 
@@ -305,7 +438,14 @@ function reduceStoredEvent(state: TranscriptState, event: StoredEvent): Transcri
       // the claims existed (or one written before P4, whose writer claimed out of band), and
       // keeps the older reading: everything pending when a request starts has just been
       // picked up.
-      return clearClaimedPending(state, event.consumes, { absentMeansAll: true })
+      //
+      // The request itself is tracked for the reply's metadata (epic #201, U1): it names the
+      // model that serves the reply and, through its `processed_at`, when the reply began.
+      return clearClaimedPending(
+        { ...state, pendingRequests: [...state.pendingRequests, openedRequest(event)] },
+        event.consumes,
+        { absentMeansAll: true },
+      )
 
     case EVENT_TYPES.modelRequestEnd:
       // A preview that was never replaced by its stored event belongs to a request that
@@ -315,9 +455,12 @@ function reduceStoredEvent(state: TranscriptState, event: StoredEvent): Transcri
       // range — the previews of the chunks it replaces sit inside it — and those previews are
       // streaming, so this is the rule that drops them. A span end that ended a request on an
       // interrupt also carries that interrupt's claim (P4).
-      return clearClaimedPending(
-        { ...state, messages: withoutPreviews(state.messages) },
-        event.consumes,
+      return closeRequest(
+        clearClaimedPending(
+          { ...state, messages: withoutPreviews(state.messages) },
+          event.consumes,
+        ),
+        event,
       )
 
     default:
@@ -383,12 +526,12 @@ function withoutPreviews(messages: readonly TranscriptMessage[]): readonly Trans
  */
 function fromUserMessage(state: TranscriptState, event: UserMessageEvent): TranscriptState {
   const model = event.model?.id
-  const blocks = event.content.map((block) => block.text)
+  const parts = textParts(event.content.map((block) => block.text))
   const message: TranscriptMessage = {
     id: event.id,
     role: 'user',
-    blocks,
-    text: blocks.join(''),
+    parts,
+    text: joinedText(parts),
     pending: event.processed_at === null,
     streaming: false,
     position: event.seq,
@@ -399,18 +542,200 @@ function fromUserMessage(state: TranscriptState, event: UserMessageEvent): Trans
   return { ...upsertMessage(state, message), model: model ?? state.model }
 }
 
+/**
+ * Fold a stored `agent.message` in: the reply, plus the model requests it answers (epic #201,
+ * U1).
+ *
+ * The reply takes every request the turn has opened and no earlier reply claimed — the failed
+ * attempt a retry followed, and the retry itself — as its {@link TranscriptMessage.meta}. The
+ * requests keep the message's id, so the span ends still to come know which reply to add their
+ * tokens and their duration to: the span end of a reply arrives *after* the reply itself.
+ */
+function fromAgentMessage(state: TranscriptState, event: AgentMessageEvent): TranscriptState {
+  const claimed = state.pendingRequests.filter((request) => request.messageId === undefined)
+  const message = messageFromAgentEvent(
+    event,
+    agentMessagePosition(state, event),
+    metaFrom(claimed),
+  )
+  const pendingRequests = [
+    // A request an earlier reply already took keeps its attribution until its end lands.
+    ...state.pendingRequests.filter((request) => request.messageId !== undefined),
+    ...claimed.map((request) => ({ ...request, messageId: event.id })),
+  ]
+  return { ...upsertMessage(state, message), lastError: null, pendingRequests }
+}
+
 /** The transcript message for a stored `agent.message`, reconciled with any preview of it. */
-function messageFromAgentEvent(event: AgentMessageEvent, position: number): TranscriptMessage {
-  const blocks = event.content.map((block) => block.text)
+function messageFromAgentEvent(
+  event: AgentMessageEvent,
+  position: number,
+  meta: TranscriptMessageMeta | undefined,
+): TranscriptMessage {
+  const parts = textParts(event.content.map((block) => block.text))
   return {
     id: event.id,
     role: 'agent',
-    blocks,
-    text: blocks.join(''),
+    parts,
+    text: joinedText(parts),
     pending: false,
     streaming: false,
     position,
+    ...(meta === undefined ? {} : { meta }),
   }
+}
+
+/** The text parts of a stored message: v1's content blocks are text only. */
+function textParts(blocks: readonly string[]): readonly MessagePart[] {
+  return blocks.map((text): MessagePart => ({ type: 'text', text }))
+}
+
+/** A message's text: its text parts, joined. */
+function joinedText(parts: readonly MessagePart[]): string {
+  return parts
+    .filter((part): part is TextPart => part.type === 'text')
+    .map((part) => part.text)
+    .join('')
+}
+
+/** The request a `span.model_request_start` opens (epic #201, U1). */
+function openedRequest(event: ModelRequestStartEvent): PendingModelRequest {
+  const startedAt = epochMs(event.processed_at)
+  return {
+    id: event.id,
+    ...(event.model === undefined ? {} : { model: event.model }),
+    ...(startedAt === undefined ? {} : { startedAt }),
+  }
+}
+
+/**
+ * Close the request a `span.model_request_end` names, and fold what it reported into the reply
+ * it belongs to (epic #201, U1).
+ *
+ * The span end arrives *after* the reply it produced, which is why the metadata is written
+ * here rather than when the reply lands: the end carries the tokens and the time. A request
+ * that no reply has claimed yet — a failed attempt the brain then retried — is only marked
+ * ended here; it stays tracked so the reply the retry produces sums both requests. A span end
+ * whose start the client never saw (it joined mid-request) still opens an entry, so a reply
+ * the turn stores after it takes those tokens; one stored *before* it is left alone, because
+ * the end names the request that opened it and a client that missed that event has nothing to
+ * tie the end to.
+ */
+function closeRequest(state: TranscriptState, event: ModelRequestEndEvent): TranscriptState {
+  const existing = state.pendingRequests.find(
+    (request) => request.id === event.model_request_start_id,
+  )
+  const endedAt = epochMs(event.processed_at)
+  const closed: PendingModelRequest = {
+    ...(existing ?? { id: event.model_request_start_id }),
+    ...(endedAt === undefined ? {} : { endedAt }),
+    usage: usageFrom(event.model_usage),
+  }
+  const requests =
+    existing === undefined
+      ? [...state.pendingRequests, closed]
+      : state.pendingRequests.map((request) => (request.id === closed.id ? closed : request))
+  const messageId = closed.messageId
+  if (messageId === undefined) {
+    return { ...state, pendingRequests: requests }
+  }
+  // The reply takes the tokens of every request attributed to it — this one included, which is
+  // why the metadata is read before the request is dropped.
+  const attributed = requests.filter((request) => request.messageId === messageId)
+  return withMeta(
+    { ...state, pendingRequests: requests.filter((request) => request.id !== closed.id) },
+    messageId,
+    metaFrom(attributed),
+  )
+}
+
+/** Write `meta` onto the reply `id`, when it is a message the transcript holds. */
+function withMeta(
+  state: TranscriptState,
+  id: string,
+  meta: TranscriptMessageMeta | undefined,
+): TranscriptState {
+  const message = meta === undefined ? undefined : state.messages.find((each) => each.id === id)
+  return message === undefined ? state : upsertMessage(state, { ...message, meta })
+}
+
+/**
+ * The metadata a set of model requests adds up to, or `undefined` when they say nothing.
+ *
+ * The model is the last one they named — a reply that took several requests ran on the model
+ * that finally answered it — and the duration runs from the first request's start to the last
+ * one's end, so a retried reply reports the time it really took. Tokens are summed over the
+ * requests that reported any, which is how a retried reply's cost includes the attempt that
+ * failed before it.
+ */
+function metaFrom(requests: readonly PendingModelRequest[]): TranscriptMessageMeta | undefined {
+  const model = requests.reduce<string | undefined>(
+    (last, request) => request.model ?? last,
+    undefined,
+  )
+  const usage = summedUsage(requests)
+  const durationMs = spanMs(requests)
+  if (model === undefined && usage === undefined && durationMs === undefined) {
+    return undefined
+  }
+  return {
+    ...(model === undefined ? {} : { model }),
+    ...(durationMs === undefined ? {} : { durationMs }),
+    ...(usage === undefined ? {} : { usage }),
+  }
+}
+
+/** The tokens the requests reported, summed; `undefined` when not one of them reported any. */
+function summedUsage(requests: readonly PendingModelRequest[]): TranscriptUsage | undefined {
+  let input = 0
+  let output = 0
+  let reported = false
+  for (const request of requests) {
+    if (request.usage === undefined) {
+      continue
+    }
+    input += request.usage.input
+    output += request.usage.output
+    reported = true
+  }
+  return reported ? { input, output, total: input + output } : undefined
+}
+
+/**
+ * How long the requests took, from the earliest start to the latest end.
+ *
+ * `undefined` when the log does not say — a client that joined after the start, a request
+ * whose span end never arrived — and for a negative span: `processed_at` is not monotonic
+ * across a crash (D9), and a reply that took less than no time is not a duration a UI can
+ * print.
+ */
+function spanMs(requests: readonly PendingModelRequest[]): number | undefined {
+  const starts = requests.flatMap((request) =>
+    request.startedAt === undefined ? [] : [request.startedAt],
+  )
+  const ends = requests.flatMap((request) =>
+    request.endedAt === undefined ? [] : [request.endedAt],
+  )
+  if (starts.length === 0 || ends.length === 0) {
+    return undefined
+  }
+  const elapsed = Math.max(...ends) - Math.min(...starts)
+  return elapsed < 0 ? undefined : elapsed
+}
+
+/** The tokens a `span.model_request_end` reported, in the shape a message's metadata takes. */
+function usageFrom(usage: ModelUsage): TranscriptUsage {
+  return {
+    input: usage.input_tokens,
+    output: usage.output_tokens,
+    total: usage.input_tokens + usage.output_tokens,
+  }
+}
+
+/** A timestamp as epoch milliseconds, or `undefined` when it is not a date at all. */
+function epochMs(timestamp: string): number | undefined {
+  const ms = Date.parse(timestamp)
+  return Number.isNaN(ms) ? undefined : ms
 }
 
 /**
@@ -451,7 +776,7 @@ function isPreviewable(state: TranscriptState, id: string): boolean {
 
 /** A preview of `id` with no text yet, so a UI can show that the reply has started. */
 function emptyPreview(id: string, position: number): TranscriptMessage {
-  return { id, role: 'agent', blocks: [], text: '', pending: false, streaming: true, position }
+  return { id, role: 'agent', parts: [], text: '', pending: false, streaming: true, position }
 }
 
 /**
@@ -476,15 +801,51 @@ function upsertMessage(state: TranscriptState, message: TranscriptMessage): Tran
   return { ...state, messages }
 }
 
-/** Whether an upsert would change nothing, so the state can keep its identity. */
+/**
+ * Whether an upsert would change nothing, so the state can keep its identity.
+ *
+ * `text` is compared through `parts` — it is their text, joined — so a message whose metadata
+ * a span end filled in is a change and one a replayed event restates is not.
+ */
 function isSameMessage(current: TranscriptMessage | undefined, next: TranscriptMessage): boolean {
   return (
     current !== undefined &&
-    current.text === next.text &&
+    sameParts(current.parts, next.parts) &&
     current.pending === next.pending &&
     current.streaming === next.streaming &&
     current.position === next.position &&
-    current.role === next.role
+    current.role === next.role &&
+    sameMeta(current.meta, next.meta)
+  )
+}
+
+/** Whether two part lists render the same. */
+function sameParts(current: readonly MessagePart[], next: readonly MessagePart[]): boolean {
+  return (
+    current.length === next.length &&
+    current.every((part, index) => {
+      const other = next[index]
+      return other !== undefined && other.type === part.type && other.text === part.text
+    })
+  )
+}
+
+/** Whether two replies report the same metadata. */
+function sameMeta(
+  current: TranscriptMessageMeta | undefined,
+  next: TranscriptMessageMeta | undefined,
+): boolean {
+  if (current === next) {
+    return true
+  }
+  return (
+    current !== undefined &&
+    next !== undefined &&
+    current.model === next.model &&
+    current.durationMs === next.durationMs &&
+    current.usage?.input === next.usage?.input &&
+    current.usage?.output === next.usage?.output &&
+    current.usage?.total === next.usage?.total
   )
 }
 
@@ -492,7 +853,7 @@ function isSameMessage(current: TranscriptMessage | undefined, next: TranscriptM
  * Extend a preview with a delta.
  *
  * Deltas carry the index of the content block they extend, so they accumulate per index and
- * `text` is the blocks in order — the same string the stored event will carry once it
+ * `text` is the parts in order — the same string the stored event will carry once it
  * replaces the preview. A delta for an event whose `event_start` was missed (a connection
  * that opened mid-reply) still lands: it opens the preview itself, at `createPosition` —
  * the delta's own `seq`. A delta for a message that is already stored changes nothing.
@@ -516,12 +877,15 @@ function appendDelta(
   const current =
     state.messages.find((message) => message.id === eventId) ??
     emptyPreview(eventId, createPosition)
-  const blocks = current.blocks.slice()
-  blocks[index] = (blocks[index] ?? '') + text
+  const parts = current.parts.slice()
+  // A block's deltas extend its part; the block a delta names is text until the protocol has
+  // another block type to stream (a `tool_use` input, say), which is when this becomes a
+  // switch rather than an append.
+  parts[index] = { type: 'text', text: (parts[index]?.text ?? '') + text }
   return upsertMessage(state, {
     ...current,
-    blocks,
-    text: blocks.join(''),
+    parts,
+    text: joinedText(parts),
     streaming: true,
   })
 }

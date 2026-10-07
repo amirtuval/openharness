@@ -81,8 +81,9 @@ src/
       chat-view.tsx            the chat screen: header (+ delete), messages, errors,
                                composer with the model selector, the model-change marker
       message-list.tsx         the scrolling conversation + stick-to-bottom
-      message-item.tsx         one message (user right / agent left, markdown), and the
-                               "Switched to …" marker when it changed the model
+      message-item.tsx         one message (user right / agent left, markdown), the
+                               "Switched to …" marker when it changed the model, and
+                               PART_RENDERERS: a renderer per message part (#201)
       markdown.tsx             react-markdown + remark-gfm, styled element by element
       composer.tsx             the input; Enter sends, Stop appears while running, and
                                the model control sits in its bottom row
@@ -374,6 +375,14 @@ rewritten — this app has no `@/` alias, because its single `tsconfig.json` is 
 program and a Vite alias needs an absolute path from a Node API it cannot see). Vercel AI
 Elements and assistant-ui were both evaluated and not used; why is in
 [`docs/chat-ui.md`](./docs/chat-ui.md).
+
+**A message is drawn part by part** (epic #201, X1). `MessageItem` owns the bubble, the
+model-change marker, the queued badge and the streaming caret; the message's own content goes
+through `PART_RENDERERS`, a `Record<MessagePart['type'], …>` that holds the text renderer
+today (the user's plain text, the agent's markdown) and is where the next phases' parts — a
+tool call, a question, an approval — get theirs. The record is what makes a new part type a
+compile error here instead of a message that renders as nothing, and `message.text` (the parts
+joined) is what the rest of the app still reads.
 
 Markdown is `react-markdown` + `remark-gfm` with the elements styled by hand; no
 `rehype-raw`, so HTML in a message stays text.

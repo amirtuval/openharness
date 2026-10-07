@@ -1197,6 +1197,23 @@ describe('the fake and the real client agree', () => {
     expect(transcript.lastSeq).toBe(fake.history().at(-1)?.seq)
   })
 
+  it('give a retried reply the same metadata live and replayed (#201, U1)', async () => {
+    const fake = createFakeClient()
+    fake.failWith({ retryStatus: 'retrying' })
+    fake.respondWith('Second time lucky.', { chunks: 3 })
+
+    const { events, transcript } = await runTurn(fake)
+    const live = transcript.messages.at(-1)?.meta
+
+    // Both requests report FAKE_MODEL_USAGE — the one that failed and the retry that answered
+    // — and a reply that took two of them ran on the model of the second.
+    expect(live).toMatchObject({
+      model: fake.session.model.id,
+      usage: { input: 1024, output: 64, total: 1088 },
+    })
+    expect((await replayThroughClient(events, fake.session.id)).messages.at(-1)?.meta).toEqual(live)
+  })
+
   it('agree after an interrupt as well', async () => {
     const fake = createFakeClient({ delayMs: 1 })
     fake.respondWith('One two three four five', { chunks: 5 })

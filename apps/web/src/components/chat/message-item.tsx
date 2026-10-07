@@ -1,4 +1,5 @@
-import type { TranscriptMessage } from '@openharness/client'
+import type { MessagePart, TranscriptMessage } from '@openharness/client'
+import { Fragment, type ReactNode } from 'react'
 
 import { modelLabel } from '../../lib/format'
 import type { ModelNameLookup } from '../../lib/models'
@@ -7,7 +8,31 @@ import { Badge } from '../ui/badge'
 import { Markdown } from './markdown'
 
 /**
+ * How one part of a message is drawn (epic #201, X1).
+ *
+ * Keyed by the part's `type`, so the next phase's parts — a tool call, a question, an approval
+ * — are an entry here and a compile error until they have one. Every entry is an inline
+ * fragment: the message's own wrapper, badge and caret stay in {@link MessageItem}.
+ */
+type PartRenderer = (props: { part: MessagePart; message: TranscriptMessage }) => ReactNode
+
+const PART_RENDERERS: Record<MessagePart['type'], PartRenderer> = {
+  // The user's text is plain, the agent's is markdown. `message.text` is these parts joined,
+  // and today every message carries exactly one — the block the server stored.
+  text: ({ part, message }) =>
+    message.role === 'user' ? (
+      <p className="text-sm break-words whitespace-pre-wrap">{part.text}</p>
+    ) : (
+      <Markdown text={part.text} />
+    ),
+}
+
+/**
  * One message: the user's right, the agent's left, markdown for the agent.
+ *
+ * The message is laid out here and its `parts` are drawn by {@link PART_RENDERERS} — a lookup
+ * from the part's type to the renderer, so a message that carries more than text renders
+ * without this component changing shape.
  *
  * The `data-*` attributes are the transcript's state made visible — `data-streaming` while a
  * reply is still arriving as deltas, `data-pending` for a message the brain has not reached
@@ -45,11 +70,10 @@ export function MessageItem({
           isUser ? 'bg-secondary text-secondary-foreground' : 'text-foreground',
         )}
       >
-        {isUser ? (
-          <p className="text-sm break-words whitespace-pre-wrap">{message.text}</p>
-        ) : (
-          <Markdown text={message.text} />
-        )}
+        {message.parts.map((part, index) => (
+          // A part carries no id of its own: its place in the message is its identity.
+          <Fragment key={index}>{PART_RENDERERS[part.type]({ part, message })}</Fragment>
+        ))}
         {message.streaming ? <StreamingCaret /> : null}
       </div>
       {message.pending ? (
