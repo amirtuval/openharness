@@ -1,4 +1,5 @@
 import { MAX_PAGE_LIMIT, type Session, type User } from '@openharness/protocol'
+import { makeSession } from '@openharness/protocol/fixtures'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
@@ -212,21 +213,9 @@ describe('the sidebar row actions', () => {
  * what it returns.
  */
 describe('the sidebar list', () => {
-  /** A session with nothing but the fields the list reads. */
-  function session(id: string, createdAt: string, model = 'openai/gpt-5.1-mini'): Session {
-    return {
-      id,
-      type: 'session',
-      owner_id: 'user_1',
-      status: 'idle',
-      title: id,
-      metadata: {},
-      model: { id: model },
-      system: null,
-      agent: null,
-      created_at: createdAt,
-      updated_at: createdAt,
-    }
+  /** A session dated when the case needs it, from the protocol's own fixture. */
+  function session(createdAt: string): Session {
+    return makeSession({ created_at: createdAt, updated_at: createdAt })
   }
 
   /** A timestamp `daysAgo` days ago, at midday. */
@@ -240,11 +229,7 @@ describe('the sidebar list', () => {
   it('draws a heading per date bucket, and only the buckets that hold something', () => {
     render(
       <Sidebar
-        sessions={[
-          session('today', daysAgo(0)),
-          session('yesterday', daysAgo(1)),
-          session('older', daysAgo(40)),
-        ]}
+        sessions={[session(daysAgo(0)), session(daysAgo(1)), session(daysAgo(40))]}
         loading={false}
         error={null}
         truncated={false}
@@ -265,13 +250,15 @@ describe('the sidebar list', () => {
   })
 
   it('marks the open chat beyond its colour', () => {
+    const open = session(daysAgo(0))
+    const other = session(daysAgo(0))
     const { container } = render(
       <Sidebar
-        sessions={[session('open', daysAgo(0)), session('other', daysAgo(0))]}
+        sessions={[open, other]}
         loading={false}
         error={null}
         truncated={false}
-        activeSessionId="open"
+        activeSessionId={open.id}
         user={null}
         onSignOut={undefined}
       />,
@@ -283,8 +270,8 @@ describe('the sidebar list', () => {
       sessionRows()
         .find((row) => row.querySelector('a')?.getAttribute('href') === `#/s/${id}`)
         ?.querySelector('a') ?? null
-    expect(linkFor('open')).toHaveAttribute('aria-current', 'page')
-    expect(linkFor('other')).not.toHaveAttribute('aria-current')
+    expect(linkFor(open.id)).toHaveAttribute('aria-current', 'page')
+    expect(linkFor(other.id)).not.toHaveAttribute('aria-current')
     expect(container.querySelectorAll('[data-slot="active-marker"]')).toHaveLength(1)
   })
 

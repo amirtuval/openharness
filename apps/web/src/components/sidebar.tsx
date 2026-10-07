@@ -207,9 +207,9 @@ export function Sidebar({
         {!loading && sessions.length === 0 && error === null ? <EmptyChatList /> : null}
 
         {groups.map((group) => (
-          <div key={group.label} role="group" aria-labelledby={`chats-${group.label}`}>
+          <div key={group.label} role="group" aria-labelledby={headingId(group.label)}>
             <h2
-              id={`chats-${group.label}`}
+              id={headingId(group.label)}
               className="px-2 pt-3 pb-1 text-2xs font-medium text-muted-foreground"
             >
               {group.label}
@@ -310,6 +310,16 @@ export function Sidebar({
       )}
     </aside>
   )
+}
+
+/**
+ * The `id` a group's heading and its `aria-labelledby` share.
+ *
+ * Slugified rather than used directly, because `aria-labelledby` is a **space-separated list of
+ * ids**: "Previous 7 days" as an id would be read as three ids, none of which exists.
+ */
+function headingId(label: string): string {
+  return `chats-${label.toLowerCase().replace(/[^a-z0-9]+/gu, '-')}`
 }
 
 /**
