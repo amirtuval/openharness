@@ -1,6 +1,7 @@
 import type { APIRequestContext, Page } from '@playwright/test'
 
 import {
+  NEW_CHAT_GREETING,
   QA_MODEL,
   createChat,
   deleteChat,
@@ -74,7 +75,7 @@ test.describe('W18 deleting a chat', () => {
       await page.getByRole('button', { name: 'Delete', exact: true }).click()
 
       await expect(page).toHaveURL(/#\/new/)
-      await expect(page.getByRole('heading', { name: 'New chat' })).toBeVisible()
+      await expect(page.getByRole('heading', { name: NEW_CHAT_GREETING })).toBeVisible()
       await expectNoErrorBanner(page)
 
       // Gone from the sidebar without a reload, and gone from the API. The text is this run's
@@ -132,7 +133,7 @@ test.describe('W18 deleting a chat', () => {
     // The open chat announces it and moves to New chat — the session behind it is gone, so
     // there is nothing left to show or to stream.
     await expect(page).toHaveURL(/#\/new/, { timeout: 15_000 })
-    await expect(page.getByRole('heading', { name: 'New chat' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: NEW_CHAT_GREETING })).toBeVisible()
     await expect(page.locator('#app-sidebar').getByText('a chat that will vanish')).toHaveCount(0)
     await shot(page, 'w18-04-deleted-elsewhere')
 

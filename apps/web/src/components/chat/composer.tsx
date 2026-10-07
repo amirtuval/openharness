@@ -1,9 +1,18 @@
 import { SendHorizontal, Square } from 'lucide-react'
-import { useState, type ReactNode, type RefObject } from 'react'
+import { useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
 
+import { cn } from '../../lib/utils'
 import { Button } from '../ui/button'
 import { Label } from '../ui/label'
 import { Textarea } from '../ui/textarea'
+
+/**
+ * How tall the box is allowed to grow before it starts scrolling instead (epic #201, U10).
+ *
+ * Ten lines of `text-sm`: enough for a paragraph or a pasted stack trace, short enough that the
+ * conversation above never disappears behind the thing being typed into.
+ */
+const MAX_INPUT_HEIGHT = 200
 
 /**
  * The message box, and the model control that sits with it.
@@ -11,13 +20,25 @@ import { Textarea } from '../ui/textarea'
  * Enter sends, Shift+Enter starts a new line. It stays **enabled while the agent is running**:
  * a message sent mid-turn is a steering message, queued by the server and folded into the
  * next model request. That is also why Stop (which sends `user.interrupt`) sits next to Send
- * rather than replacing it.
+ * rather than replacing it — but the two are told apart by more than a colour since U10: Stop
+ * carries the word, Send keeps the arrow, so "which one am I about to press" is legible without
+ * hovering.
  *
  * The model selector is a **prop, not state in here** (epic #116): which model a send carries
  * is the screen's decision — `sessions.create({ model })` on a new chat, `send(text, { model })`
  * in an open one — and the composer stays a text box that can be rendered, and tested, with or
- * without one. The cleared text is the one other rule of its own: it stays in the box until the
- * send is *stored*, because a failed send is the moment losing what you wrote hurts most.
+ * without one.
+ *
+ * Three things about how it is built are load-bearing:
+ *
+ * - **The box grows, up to {@link MAX_INPUT_HEIGHT}.** The height is measured and set by hand
+ *   rather than left to `field-sizing-content`, which only recent Chromium implements; past the
+ *   cap the textarea scrolls, so a pasted file never pushes the conversation off screen.
+ * - **The text is uncontrolled unless the caller says otherwise.** Omitted, `value` is state in
+ *   here; given, the screen owns the draft — which is how a suggested prompt on New chat fills
+ *   the box (U10) without reaching into the DOM behind React's back.
+ * - **The cleared text is the one other rule of its own**: it stays in the box until the send
+ *   is *stored*, because a failed send is the moment losing what you wrote hurts most.
  */
 export function Composer({
   running,
@@ -26,6 +47,8 @@ export function Composer({
   inputRef,
   disabled = false,
   modelSelector,
+  value,
+  onValueChange,
 }: {
   /** Whether the agent is working, which is when Stop makes sense. */
   running: boolean
@@ -41,8 +64,50 @@ export function Composer({
   disabled?: boolean
   /** The model control shown under the input — the compact {@link ModelPicker}. */
   modelSelector?: ReactNode
+  /** The draft, when the screen owns it. Omitted, the composer keeps it. */
+  value?: string | undefined
+  /** Every keystroke, and the clear after a stored send, when {@link value} is given. */
+  onValueChange?: ((text: string) => void) | undefined
 }) {
-  const [text, setText] = useState('')
+  const [ownText, setOwnText] = useState('')
+  const controlled = value !== undefined
+  const text = controlled ? value : ownText
+  const setText = (next: string): void => {
+    if (controlled) {
+      onValueChange?.(next)
+    } else {
+      setOwnText(next)
+    }
+  }
+
+  // The textarea, whether or not the caller wanted a handle on it: the growth rule below needs
+  // one either way, and the caller's ref is kept in step rather than handed around.
+  const ownRef = useRef<HTMLTextAreaElement | null>(null)
+  useLayoutEffect(() => {
+    if (inputRef !== undefined) {
+      inputRef.current = ownRef.current
+    }
+  }, [inputRef])
+
+  // Grow to fit, up to the cap. `height: auto` first, or `scrollHeight` would answer with the
+  // height the box already has and it could never shrink again. jsdom reports 0 for everything
+  // it has no layout for, and a 0-height box is worse than no measurement at all, so that case
+  // leaves the CSS height alone.
+  useLayoutEffect(() => {
+    const element = ownRef.current
+    if (element === null) {
+      return
+    }
+    element.style.height = 'auto'
+    const content = element.scrollHeight
+    if (content === 0) {
+      element.style.height = ''
+      element.style.overflowY = ''
+      return
+    }
+    element.style.height = `${Math.min(content, MAX_INPUT_HEIGHT)}px`
+    element.style.overflowY = content > MAX_INPUT_HEIGHT ? 'auto' : 'hidden'
+  }, [text])
 
   const submit = async (): Promise<void> => {
     const body = text.trim()
@@ -57,52 +122,61 @@ export function Composer({
 
   return (
     <form
-      className="flex flex-col gap-2"
+      // One surface, not a box and a row of controls: the border, the focus ring and the
+      // elevation belong to the whole composer, so the model control reads as part of it and
+      // the ring appears when focus is anywhere inside — including on the model button.
+      className={cn(
+        'flex flex-col rounded-2xl border bg-background shadow-raised transition-[color,box-shadow]',
+        'focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/50',
+        disabled && 'opacity-60',
+      )}
       onSubmit={(event) => {
         event.preventDefault()
         void submit()
       }}
     >
-      <div>
-        <Label htmlFor="composer-input" className="sr-only">
-          Message
-        </Label>
-        <Textarea
-          id="composer-input"
-          ref={inputRef}
-          rows={1}
-          value={text}
-          disabled={disabled}
-          placeholder="Send a message…  (Enter to send, Shift+Enter for a new line)"
-          className="max-h-40 min-h-9 resize-none text-sm"
-          onChange={(event) => setText(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-              event.preventDefault()
-              void submit()
-            }
-          }}
-        />
-      </div>
+      <Label htmlFor="composer-input" className="sr-only">
+        Message
+      </Label>
+      <Textarea
+        id="composer-input"
+        ref={ownRef}
+        rows={1}
+        value={text}
+        disabled={disabled}
+        placeholder="Send a message…  (Enter to send, Shift+Enter for a new line)"
+        // The primitives' own border and ring are switched off: the form above draws them, so
+        // there is one focus indicator on screen rather than two, one of them doubled.
+        className="max-h-[200px] min-h-9 resize-none border-0 bg-transparent px-3 pt-3 pb-1 text-sm shadow-none focus-visible:border-transparent focus-visible:ring-0 dark:bg-transparent"
+        onChange={(event) => setText(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+            event.preventDefault()
+            void submit()
+          }
+        }}
+      />
 
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex items-center justify-between gap-control px-2 pt-1 pb-2">
         <div className="min-w-0">{modelSelector}</div>
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="flex shrink-0 items-center gap-inline">
           {running && onStop !== undefined ? (
             <Button
               type="button"
-              variant="destructive"
-              size="icon"
+              variant="outline"
+              size="sm"
               aria-label="Stop"
+              className="text-destructive"
               onClick={() => void onStop()}
             >
               <Square aria-hidden="true" />
+              Stop
             </Button>
           ) : null}
 
           <Button
             type="submit"
-            size="icon"
+            size="icon-sm"
             aria-label="Send message"
             disabled={disabled || text.trim() === ''}
           >

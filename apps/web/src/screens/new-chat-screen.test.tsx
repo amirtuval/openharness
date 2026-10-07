@@ -4,8 +4,10 @@ import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 
+import { SUGGESTED_PROMPTS } from '../lib/suggestions'
 import { OPENAI, TWO_PROVIDERS, WITH_DEFAULT, credential } from '../test-support/catalog'
 import { makeFake, renderApp } from '../test-support/render-app'
+import { NEW_CHAT_GREETING } from './new-chat-screen'
 
 /**
  * New chat is a chat, immediately (epic #116, U2): an empty composer on the account's default
@@ -59,6 +61,38 @@ describe('New chat', () => {
     // titles the way the server does (#35) — with the cursor in the box.
     expect(await screen.findByRole('heading', { name: 'hello there' })).toBeInTheDocument()
     expect(await screen.findByLabelText('Message')).toHaveFocus()
+  })
+
+  it('offers suggested prompts that fill the box without sending anything', async () => {
+    const user = userEvent.setup({ delay: null })
+    const fake = makeFake(WITH_DEFAULT)
+    const creates = recordCreates(fake)
+    renderApp(fake, { hash: '#/new' })
+
+    // The empty state names the model the chat would run on, so the openers are not the only
+    // thing on screen that a reader has to guess about.
+    expect(await screen.findByRole('heading', { name: NEW_CHAT_GREETING })).toBeInTheDocument()
+    expect(screen.getByText(/A new chat on Claude Sonnet 5/)).toBeInTheDocument()
+
+    const opener = screen.getByRole('button', { name: SUGGESTED_PROMPTS[0] })
+    await user.click(opener)
+
+    // Filled, not sent (U10): the text is in the box, the cursor is with it, and nothing has
+    // been created — a first visit is not a commitment.
+    expect(screen.getByLabelText('Message')).toHaveValue(SUGGESTED_PROMPTS[0])
+    expect(screen.getByLabelText('Message')).toHaveFocus()
+    expect(creates).toEqual([])
+    expect((await fake.sessions.list()).data).toHaveLength(1)
+
+    // And it is a draft like any other: editable, then sendable.
+    await user.type(screen.getByLabelText('Message'), ' And in one paragraph.')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
+    await waitFor(() => {
+      expect(window.location.hash).toMatch(/^#\/s\/sesn_/)
+    })
+    expect(creates).toEqual([{ model: { id: 'anthropic/claude-sonnet-5' } }])
+    const sessionId = window.location.hash.replace('#/s/', '')
+    expect(fake.history(sessionId).filter((event) => event.type === 'user.message')).toHaveLength(1)
   })
 
   it('creates the session with a model picked in the composer, not the default', async () => {

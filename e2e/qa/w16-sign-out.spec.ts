@@ -1,4 +1,12 @@
-import { BASE_URL, expect, shot, signInWithDevForm, test } from './support'
+import {
+  BASE_URL,
+  expect,
+  openAccountMenu,
+  shot,
+  signOutFromSidebar,
+  signInWithDevForm,
+  test,
+} from './support'
 
 /**
  * W16 — signing out (epic #65, A2).
@@ -24,7 +32,9 @@ test.describe('W16 sign out', () => {
       await test.step('sign in through the page', async () => {
         await page.goto('/#/signin')
         await signInWithDevForm(page)
-        await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible()
+        await openAccountMenu(page)
+        await expect(page.getByRole('menuitem', { name: 'Sign out' })).toBeVisible()
+        await page.keyboard.press('Escape')
       })
 
       // Somewhere that is not the home screen, so "comes back here" means something.
@@ -33,7 +43,7 @@ test.describe('W16 sign out', () => {
       await shot(page, 'w16-01-signed-in')
 
       await test.step('sign out puts the sign-in page back, at the same URL', async () => {
-        await page.getByRole('button', { name: 'Sign out' }).click()
+        await signOutFromSidebar(page)
         await expect(page.getByRole('heading', { name: 'Sign in to openharness' })).toBeVisible()
         expect(new URL(page.url()).hash).toBe('#/settings')
         await shot(page, 'w16-02-signed-out')

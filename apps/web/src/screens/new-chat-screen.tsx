@@ -1,19 +1,33 @@
 import { providerName } from '@openharness/client'
 import type { Session } from '@openharness/protocol'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { ErrorBanner } from '../components/chat/error-banner'
 import { Composer } from '../components/chat/composer'
 import { ModelPicker } from '../components/models/model-picker'
 import { useClient } from '../components/client-provider'
 import { AddProviderDialog } from '../components/providers/add-provider-dialog'
+import { Skeleton } from '../components/ui/skeleton'
+import { Button } from '../components/ui/button'
 import type { ModelsView } from '../hooks/use-models'
 import { usePreferences } from '../hooks/use-preferences'
 import { useSettings } from '../hooks/use-settings'
 import { describeError } from '../lib/errors'
+import { modelLabel } from '../lib/format'
+import { modelNameLookup } from '../lib/models'
 import { showNotice } from '../lib/notice'
 import { chatHash, navigate, settingsHash } from '../lib/router'
 import { sessionRefresh } from '../lib/session-refresh'
+import { SUGGESTED_PROMPTS } from '../lib/suggestions'
+
+/**
+ * The heading of New chat, in every state this screen can be in (U10).
+ *
+ * It replaced a literal "New chat", and it is exported because it is what names the screen:
+ * the drawer tests, the first-run flow's landing and the QA pass all ask which screen they are
+ * on by reading it, so one constant is better than the same sentence typed in five files.
+ */
+export const NEW_CHAT_GREETING = 'What can I help with?'
 
 /**
  * New chat, immediately (epic #116, U2): an empty chat whose composer runs on the account's
@@ -46,6 +60,10 @@ export function NewChatScreen({
   const { serverUrl } = useSettings()
 
   const [chosen, setChosen] = useState<string | null>(null)
+  // The draft, owned here rather than by the composer (U10): a suggested prompt has to be able
+  // to put text in the box, and reaching into the DOM behind React would fight the controlled
+  // textarea the composer already is.
+  const [draft, setDraft] = useState('')
   // The session this screen has already created, if a send failed after the create: the
   // reader's retry goes to the chat that exists, not a second empty one.
   const [created, setCreated] = useState<{ id: string; model: string } | null>(null)
@@ -122,14 +140,10 @@ export function NewChatScreen({
     return true
   }
 
+  const nameOf = useMemo(() => modelNameLookup(catalog.models), [catalog.models])
+
   if (loading) {
-    return (
-      <div className="flex h-full items-center justify-center px-6">
-        <p role="status" className="text-sm text-muted-foreground">
-          Loading your default model…
-        </p>
-      </div>
-    )
+    return <CenteredSkeleton label="Loading your default model…" />
   }
 
   // No default and no session created yet: what this screen is depends on the catalog
@@ -137,13 +151,7 @@ export function NewChatScreen({
   // to run" while the first load is in flight.
   if (defaultModel === null && created === null && error === null) {
     if (catalog.loading) {
-      return (
-        <div className="flex h-full items-center justify-center px-6">
-          <p role="status" className="text-sm text-muted-foreground">
-            Loading your models…
-          </p>
-        </div>
-      )
+      return <CenteredSkeleton label="Loading your models…" />
     }
     // No providers and no models: an account that never saved a key, where a pointer to
     // Settings is the whole truth. Keys with a catalog of models fall through to the
@@ -152,7 +160,7 @@ export function NewChatScreen({
       return (
         <div className="flex h-full items-center justify-center px-6">
           <div className="max-w-md space-y-2 text-center">
-            <h1 className="text-base font-medium">New chat</h1>
+            <h1 className="text-lg font-medium">{NEW_CHAT_GREETING}</h1>
             <p className="text-sm font-medium">Add a provider key to start</p>
             <p className="text-sm text-muted-foreground">
               A chat runs on a model from a provider you have a key for. Saving the first key also
@@ -169,12 +177,35 @@ export function NewChatScreen({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex min-h-0 flex-1 items-center justify-center px-6">
-        <div className="space-y-1 text-center">
-          <h1 className="text-base font-medium">New chat</h1>
+      {/* The empty state (U10): a greeting, the model this chat would run on, and four openers.
+          The openers **fill** the composer and stop there — nothing is created and nothing is
+          sent until the reader says so, because a first visit is not a commitment. */}
+      <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-6 py-6">
+        <div className="w-full max-w-xl space-y-block text-center">
+          <h1 className="text-lg font-medium">{NEW_CHAT_GREETING}</h1>
           <p className="text-sm text-muted-foreground">
-            Start typing — the chat is created with your first message, on the model below.
+            {model === null
+              ? 'Pick a model below, and this chat starts with your first message.'
+              : `A new chat on ${modelLabel(model, nameOf)} — it starts with your first message.`}
           </p>
+          <ul className="grid gap-2 sm:grid-cols-2">
+            {SUGGESTED_PROMPTS.map((prompt) => (
+              <li key={prompt} className="flex">
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={model === null || sending}
+                  onClick={() => {
+                    setDraft(prompt)
+                    inputRef.current?.focus()
+                  }}
+                  className="h-full w-full justify-start p-3 text-start text-sm font-normal whitespace-normal"
+                >
+                  {prompt}
+                </Button>
+              </li>
+            ))}
+          </ul>
         </div>
       </div>
 
@@ -218,6 +249,8 @@ export function NewChatScreen({
             onStop={undefined}
             inputRef={inputRef}
             disabled={sending}
+            value={draft}
+            onValueChange={setDraft}
             modelSelector={
               <ModelPicker
                 variant="compact"
@@ -246,6 +279,26 @@ export function NewChatScreen({
         }}
         onClose={() => setAddingProvider(false)}
       />
+    </div>
+  )
+}
+
+/**
+ * "Still loading", drawn rather than written (U10).
+ *
+ * The two lines are the shape of the two things that arrive — a heading and the sentence under
+ * it — and the label is what a screen reader (and a test) reads instead of the prose the
+ * screen used to print. Preferences and the catalog are separate reads that can each be the
+ * one still in flight, so both go through here.
+ */
+function CenteredSkeleton({ label }: { label: string }) {
+  return (
+    <div className="flex h-full items-center justify-center px-6">
+      <div role="status" className="w-full max-w-sm space-y-2">
+        <span className="sr-only">{label}</span>
+        <Skeleton className="mx-auto h-5 w-2/5" />
+        <Skeleton className="mx-auto h-3 w-3/5" />
+      </div>
     </div>
   )
 }

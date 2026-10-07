@@ -72,6 +72,16 @@ export function uniqueName(prefix: string): string {
 export const QA_MODEL = process.env.QA_MODEL ?? 'anthropic/claude-sonnet-5'
 
 /**
+ * The heading of the web app's New chat screen (epic #201, U10, #211).
+ *
+ * `apps/web` exports it as `NEW_CHAT_GREETING` (`src/screens/new-chat-screen.tsx`), and it
+ * replaced the literal "New chat" the screen used to be headed with. That package's `exports`
+ * is its built `index.html`, though, so there is nothing for a spec to import: the string is
+ * repeated here, and changing it in the app is changing this line.
+ */
+export const NEW_CHAT_GREETING = 'What can I help with?'
+
+/**
  * Whether this run is against a real provider rather than the mock model.
  *
  * Setting `QA_MODEL` at all is the signal: the default above is the model every spec has
@@ -760,6 +770,36 @@ export async function sendFromComposer(page: Page, text: string): Promise<void> 
   await input.click()
   await input.fill(text)
   await input.press('Enter')
+}
+
+// --- the account menu (#211, U10) -----------------------------------------------------------------
+
+/**
+ * The sidebar's account menu, at the foot of the list.
+ *
+ * Since #211 Settings, the theme quick switch and Sign out live behind this one button, which
+ * is labelled for the account rather than with the email — the email in it changes, and a spec
+ * should not have to know it to open "things I can do as me".
+ */
+export async function openAccountMenu(page: Page): Promise<void> {
+  await page.getByRole('button', { name: 'Account menu' }).click()
+}
+
+/** Sign out the way a reader does: the account menu, then Sign out. */
+export async function signOutFromSidebar(page: Page): Promise<void> {
+  await openAccountMenu(page)
+  await page.getByRole('menuitem', { name: 'Sign out' }).click()
+}
+
+/**
+ * Open the account menu's Theme submenu and return it.
+ *
+ * A submenu opens on hover and on ArrowRight; Playwright's `hover` produces the real
+ * pointermove Radix listens for.
+ */
+export async function openThemeSubmenu(page: Page): Promise<void> {
+  await openAccountMenu(page)
+  await page.getByRole('menuitem', { name: 'Theme' }).hover()
 }
 
 // --- provider keys (#209) --------------------------------------------------------------------------

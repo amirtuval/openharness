@@ -3,6 +3,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 
+import { NEW_CHAT_GREETING } from './new-chat-screen'
 import { TWO_PROVIDERS, credential } from '../test-support/catalog'
 import { makeFake, renderApp } from '../test-support/render-app'
 
@@ -32,7 +33,7 @@ describe('the first-run screen', () => {
 
     // New chat, straight away: the whole point of the gate is that it is invisible to
     // everyone it does not apply to.
-    expect(await screen.findByRole('heading', { name: 'New chat' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: NEW_CHAT_GREETING })).toBeInTheDocument()
     expect(
       screen.queryByRole('heading', { name: 'Connect a model provider' }),
     ).not.toBeInTheDocument()
@@ -86,7 +87,7 @@ describe('the first-run screen', () => {
 
     // Start chatting: New chat, on the model just chosen, with the cursor in the composer.
     await user.click(screen.getByRole('button', { name: 'Start chatting' }))
-    expect(await screen.findByRole('heading', { name: 'New chat' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: NEW_CHAT_GREETING })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Model: Claude Sonnet 5' })).toBeInTheDocument()
     expect(screen.getByLabelText('Message')).toHaveFocus()
   })

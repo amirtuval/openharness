@@ -1,4 +1,4 @@
-import { MAX_PAGE_LIMIT } from '@openharness/protocol'
+import { MAX_PAGE_LIMIT, type Session, type User } from '@openharness/protocol'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
@@ -125,7 +125,7 @@ describe('the sidebar row actions', () => {
     const sessionId = row.querySelector('a')?.getAttribute('href')?.replace('#/s/', '') ?? ''
 
     await user.click(within(row).getByRole('button', { name: 'Chat actions' }))
-    await user.click(within(row).getByRole('menuitem', { name: 'Delete chat' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Delete chat' }))
 
     // The question is an element in the page — a `window.confirm` would block and cannot be
     // styled or tested like the rest of the app.
@@ -145,7 +145,7 @@ describe('the sidebar row actions', () => {
     const { user, row } = await renderSidebar(onDelete)
 
     await user.click(within(row).getByRole('button', { name: 'Chat actions' }))
-    await user.click(within(row).getByRole('menuitem', { name: 'Delete chat' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Delete chat' }))
     await user.click(within(row).getByRole('button', { name: 'Cancel' }))
 
     expect(onDelete).not.toHaveBeenCalled()
@@ -158,10 +158,10 @@ describe('the sidebar row actions', () => {
     const { user, row } = await renderSidebar(onDelete)
 
     await user.click(within(row).getByRole('button', { name: 'Chat actions' }))
-    expect(within(row).getByRole('menu', { name: 'Chat actions' })).toBeInTheDocument()
+    expect(screen.getByRole('menu')).toBeInTheDocument()
 
     await user.keyboard('{Escape}')
-    expect(within(row).queryByRole('menu')).not.toBeInTheDocument()
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
     expect(onDelete).not.toHaveBeenCalled()
   })
 
@@ -172,7 +172,7 @@ describe('the sidebar row actions', () => {
     const { user, row } = await renderSidebar(onDelete)
 
     await user.click(within(row).getByRole('button', { name: 'Chat actions' }))
-    await user.click(within(row).getByRole('menuitem', { name: 'Delete chat' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Delete chat' }))
     await user.click(within(row).getByRole('button', { name: 'Delete' }))
 
     const alert = await within(row).findByRole('alert')
@@ -199,5 +199,172 @@ describe('the sidebar row actions', () => {
     )
 
     expect(screen.queryByRole('button', { name: 'Chat actions' })).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * The list itself (epic #201, U10): date headings, a marked open chat, the account menu at the
+ * foot and the put-away column.
+ *
+ * Rendered on the component with a hand-built list, because these are all rules about the
+ * list's own props — `groupSessionsByDate` has its calendar pinned in its own test
+ * (`src/lib/session-groups.test.ts`), and here the question is only whether the sidebar draws
+ * what it returns.
+ */
+describe('the sidebar list', () => {
+  /** A session with nothing but the fields the list reads. */
+  function session(id: string, createdAt: string, model = 'openai/gpt-5.1-mini'): Session {
+    return {
+      id,
+      type: 'session',
+      owner_id: 'user_1',
+      status: 'idle',
+      title: id,
+      metadata: {},
+      model: { id: model },
+      system: null,
+      agent: null,
+      created_at: createdAt,
+      updated_at: createdAt,
+    }
+  }
+
+  /** A timestamp `daysAgo` days ago, at midday. */
+  function daysAgo(days: number): string {
+    const date = new Date()
+    date.setDate(date.getDate() - days)
+    date.setHours(12, 0, 0, 0)
+    return date.toISOString()
+  }
+
+  it('draws a heading per date bucket, and only the buckets that hold something', () => {
+    render(
+      <Sidebar
+        sessions={[
+          session('today', daysAgo(0)),
+          session('yesterday', daysAgo(1)),
+          session('older', daysAgo(40)),
+        ]}
+        loading={false}
+        error={null}
+        truncated={false}
+        activeSessionId={undefined}
+        user={null}
+        onSignOut={undefined}
+      />,
+    )
+
+    expect(screen.getByRole('heading', { name: 'Today' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Yesterday' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Older' })).toBeInTheDocument()
+    // Nothing landed in it, so it is not drawn: a heading over an empty run of the list reads
+    // as a bug.
+    expect(screen.queryByRole('heading', { name: 'Previous 7 days' })).not.toBeInTheDocument()
+    // The headings are not rows: the list is still three chats.
+    expect(sessionRows()).toHaveLength(3)
+  })
+
+  it('marks the open chat beyond its colour', () => {
+    const { container } = render(
+      <Sidebar
+        sessions={[session('open', daysAgo(0)), session('other', daysAgo(0))]}
+        loading={false}
+        error={null}
+        truncated={false}
+        activeSessionId="open"
+        user={null}
+        onSignOut={undefined}
+      />,
+    )
+
+    // `aria-current` is the accessible half — what says "you are here" to a reader who cannot
+    // see the tint — and the bar is the visible one.
+    const linkFor = (id: string): HTMLElement | null =>
+      sessionRows()
+        .find((row) => row.querySelector('a')?.getAttribute('href') === `#/s/${id}`)
+        ?.querySelector('a') ?? null
+    expect(linkFor('open')).toHaveAttribute('aria-current', 'page')
+    expect(linkFor('other')).not.toHaveAttribute('aria-current')
+    expect(container.querySelectorAll('[data-slot="active-marker"]')).toHaveLength(1)
+  })
+
+  it('puts Settings, the theme and Sign out behind the account at the foot', async () => {
+    const user = userEvent.setup({ delay: null })
+    const user_ = { id: 'user_1', email: 'ada@example.com', name: 'Ada', image: undefined }
+    const onSignOut = vi.fn()
+    render(
+      <Sidebar
+        sessions={[]}
+        loading={false}
+        error={null}
+        truncated={false}
+        activeSessionId={undefined}
+        user={user_ as unknown as User}
+        onSignOut={onSignOut}
+      />,
+    )
+
+    expect(screen.queryByRole('menuitem', { name: 'Sign out' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Account menu' }))
+
+    expect(screen.getByRole('menuitem', { name: 'Settings' })).toHaveAttribute('href', '#/settings')
+    expect(screen.getByRole('menuitem', { name: 'Theme' })).toBeInTheDocument()
+    await user.click(screen.getByRole('menuitem', { name: 'Sign out' }))
+    expect(onSignOut).toHaveBeenCalled()
+  })
+
+  it('shows skeleton rows while the list is still on its way', () => {
+    render(
+      <Sidebar
+        sessions={[]}
+        loading
+        error={null}
+        truncated={false}
+        activeSessionId={undefined}
+        user={null}
+        onSignOut={undefined}
+      />,
+    )
+
+    expect(screen.getByText('Loading your chats')).toBeInTheDocument()
+    // Not the empty state: "no chats yet" and "we do not know yet" are different screens.
+    expect(screen.queryByText('No chats yet.')).not.toBeInTheDocument()
+  })
+
+  it('offers the collapse control only when the shell gave it one', async () => {
+    const user = userEvent.setup({ delay: null })
+    const onToggleCollapsed = vi.fn()
+    const fake = makeFake()
+    const sessions = (await fake.sessions.list()).data
+
+    const { rerender } = render(
+      <Sidebar
+        sessions={sessions}
+        loading={false}
+        error={null}
+        truncated={false}
+        activeSessionId={undefined}
+        user={null}
+        onSignOut={undefined}
+        onToggleCollapsed={onToggleCollapsed}
+      />,
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Hide sidebar' }))
+    expect(onToggleCollapsed).toHaveBeenCalled()
+
+    // Rendered without one — the sidebar tests, and the drawer — it is not there at all.
+    rerender(
+      <Sidebar
+        sessions={sessions}
+        loading={false}
+        error={null}
+        truncated={false}
+        activeSessionId={undefined}
+        user={null}
+        onSignOut={undefined}
+      />,
+    )
+    expect(screen.queryByRole('button', { name: 'Hide sidebar' })).not.toBeInTheDocument()
   })
 })

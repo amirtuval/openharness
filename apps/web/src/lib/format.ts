@@ -67,6 +67,27 @@ export function relativeTime(timestamp: string, now: number = Date.now()): strin
   return new Date(then).toLocaleDateString()
 }
 
+/**
+ * How long something has been going, short: `0s`, `12s`, `1m 05s`, `1h 02m`.
+ *
+ * The working row's clock (epic #201, U10). It counts up rather than down because nothing in
+ * the protocol says how long a turn will take, and it keeps the smaller unit once a bigger one
+ * starts — "1m 05s" ticked every second reads as a clock, where "1m" would look frozen. A
+ * negative or unparseable duration is `0s`: a clock that says `-3s` is worse than one that
+ * says nothing happened yet.
+ */
+export function formatElapsed(milliseconds: number): string {
+  const total = Math.max(0, Math.floor(milliseconds / 1000))
+  const seconds = total % 60
+  const minutes = Math.floor(total / 60) % 60
+  const hours = Math.floor(total / 3600)
+  const two = (value: number): string => value.toString().padStart(2, '0')
+  if (hours > 0) {
+    return `${hours}h ${two(minutes)}m`
+  }
+  return minutes > 0 ? `${minutes}m ${two(seconds)}s` : `${seconds}s`
+}
+
 /** The last path segment of a resource id, for a compact label. */
 export function shortId(id: string): string {
   const [prefix = '', suffix = ''] = id.split('_')

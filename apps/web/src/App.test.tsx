@@ -5,7 +5,9 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 
 import { App } from './App'
+import { settingsHash } from './lib/router'
 import { saveSettings } from './lib/settings'
+import { NEW_CHAT_GREETING } from './screens/new-chat-screen'
 import { authClientCalls } from './test-support/better-auth-client-mock'
 import { TWO_PROVIDERS, WITH_DEFAULT } from './test-support/catalog'
 import {
@@ -13,7 +15,9 @@ import {
   deriveSessionTitles,
   isStreaming,
   makeFake,
+  workingRow,
   messageElement,
+  openAccountMenu,
   recordListRequests,
   renderApp,
   sessionRows,
@@ -120,6 +124,39 @@ describe('App', () => {
     expect(partial.length).toBeGreaterThan(0)
     expect(long).toContain(partial)
     expect(partial).not.toBe(long)
+
+    // And the foot of the transcript says what the reader did (U10). Nothing in the log
+    // distinguishes "the reader stopped this" from "the turn ended", so this is the screen's
+    // own memory of the one action that could only have come from here.
+    expect(workingRow()).toHaveTextContent('Interrupted')
+
+    // It belongs to the turn it stopped: the next message is a new one, and the row goes with
+    // the old.
+    await user.type(screen.getByLabelText('Message'), 'again')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
+    expect(workingRow()).toBeNull()
+  })
+
+  it('says the turn is working, at the foot of the transcript, until text arrives', async () => {
+    const user = userEvent.setup({ delay: null })
+    const fake = makeFake()
+    fake.respondWith('A reply that takes a moment to start.', { chunks: 8, delayMs: 20 })
+    const stream = gateStream(fake)
+    renderApp(fake)
+
+    await user.type(await screen.findByLabelText('Message'), 'go')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
+
+    // Running, and not a word of the reply on screen yet: the row is the only thing that says
+    // anything is happening, and it is where the reply is about to appear.
+    await stream.until(() => workingRow() !== null, 'the working row')
+    expect(workingRow()).toHaveTextContent('Working…')
+    // A clock, not a spinner: the wait is the one thing the header indicator cannot say.
+    expect(workingRow()?.textContent).toMatch(/\ds/)
+
+    // The delta is the progress report from there on.
+    await stream.until(() => agentText().length > 0, 'the first delta')
+    expect(workingRow()).toBeNull()
   })
 
   it('restores the full history after a reload and resumes the stream', async () => {
@@ -462,18 +499,26 @@ describe('model-first labels, hidden agents', () => {
   })
 
   it('keeps the agents screen out of navigation, and its old route lands on the root', async () => {
+    const user = userEvent.setup({ delay: null })
     const fake = makeFake(WITH_DEFAULT)
     renderApp(fake, { hash: '#/' })
 
     const sidebar = await screen.findByRole('complementary', { name: 'Navigation' })
     expect(within(sidebar).queryByRole('link', { name: /Agents/ })).not.toBeInTheDocument()
-    expect(within(sidebar).getByRole('link', { name: /Settings/ })).toBeInTheDocument()
+
+    // Settings is in the sidebar still, one menu down (U10): the account menu at its foot.
+    await openAccountMenu(user)
+    expect(screen.getByRole('menuitem', { name: 'Settings' })).toHaveAttribute(
+      'href',
+      settingsHash(),
+    )
+    await user.keyboard('{Escape}')
 
     // An old bookmark to the screen: the route is gone, so it opens the root route — which is
     // New chat since #209 (the Home screen is gone), not a dead end.
     window.location.hash = '#/agents'
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: 'New chat' })).toBeInTheDocument()
+      expect(screen.getByRole('heading', { name: NEW_CHAT_GREETING })).toBeInTheDocument()
     })
     expect(screen.queryByRole('heading', { name: 'Agents' })).not.toBeInTheDocument()
   })
@@ -536,7 +581,7 @@ describe('deleting chats', () => {
     // A row carries a kebab menu with the delete action (U5).
     const otherRow = rowFor(other.id)
     await user.click(within(otherRow).getByRole('button', { name: 'Chat actions' }))
-    await user.click(within(otherRow).getByRole('menuitem', { name: 'Delete chat' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Delete chat' }))
     expect(within(otherRow).getByText('Delete this chat?')).toBeInTheDocument()
     await user.click(within(otherRow).getByRole('button', { name: 'Delete' }))
 
@@ -552,7 +597,7 @@ describe('deleting chats', () => {
     // And the same action on the *open* chat leaves it for New chat.
     const openRow = rowFor(fake.session.id)
     await user.click(within(openRow).getByRole('button', { name: 'Chat actions' }))
-    await user.click(within(openRow).getByRole('menuitem', { name: 'Delete chat' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Delete chat' }))
     await user.click(within(openRow).getByRole('button', { name: 'Delete' }))
 
     await waitFor(() => {
@@ -572,7 +617,7 @@ describe('deleting chats', () => {
 
     const row = rowFor(fake.session.id)
     await user.click(within(row).getByRole('button', { name: 'Chat actions' }))
-    await user.click(within(row).getByRole('menuitem', { name: 'Delete chat' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Delete chat' }))
     await user.click(within(row).getByRole('button', { name: 'Delete' }))
 
     const alert = await within(row).findByRole('alert')
@@ -688,7 +733,7 @@ describe('the sidebar below md', () => {
     renderApp(fake, { hash: '#/' })
 
     const screens: ReadonlyArray<readonly [hash: string, heading: string]> = [
-      ['#/new', 'New chat'],
+      ['#/new', NEW_CHAT_GREETING],
       ['#/settings', 'Settings'],
     ]
 

@@ -1,4 +1,5 @@
 import {
+  NEW_CHAT_GREETING,
   composer,
   defaultModel,
   ensureDefaultModel,
@@ -109,7 +110,7 @@ test.describe('W1 first run', () => {
       await test.step('an account with a key never sees the first-run screen', async () => {
         await page.goto('/')
 
-        await expect(page.getByRole('heading', { name: 'New chat' })).toBeVisible()
+        await expect(page.getByRole('heading', { name: NEW_CHAT_GREETING })).toBeVisible()
         await expect(page.getByRole('heading', { name: 'Connect a model provider' })).toHaveCount(0)
         await shot(page, 'w1-01-new-chat')
       })
@@ -117,7 +118,7 @@ test.describe('W1 first run', () => {
 
     await test.step('New chat is a chat, or a pointer to Settings when nothing can run', async () => {
       await page.goto('/#/new')
-      await expect(page.getByRole('heading', { name: 'New chat' })).toBeVisible()
+      await expect(page.getByRole('heading', { name: NEW_CHAT_GREETING })).toBeVisible()
 
       if (previousDefault === null) {
         const catalog = (await (await request.get('/v1/models')).json()) as { data: unknown[] }
