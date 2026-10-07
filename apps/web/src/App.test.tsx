@@ -2,7 +2,7 @@ import { ApiError, AuthenticationError } from '@openharness/client'
 import type { ModelEntry } from '@openharness/protocol'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi, type Mock } from 'vitest'
 
 import { App } from './App'
 import { settingsHash } from './lib/router'
@@ -17,6 +17,7 @@ import {
   makeFake,
   workingRow,
   messageElement,
+  messageElements,
   openAccountMenu,
   recordListRequests,
   renderApp,
@@ -746,6 +747,272 @@ describe('the sidebar below md', () => {
       })
       expect(screen.getByRole('button', { name: 'Navigation' })).toBeInTheDocument()
     }
+  })
+
+  describe('the foot of a message, and the keyboard (#212)', () => {
+    /** The first line to a reply that streams, so a test can stop it at a chosen moment. */
+    const SLOW = 'One two three four five six seven eight nine ten eleven twelve'
+
+    /** Install a clipboard the test can read. jsdom has no `navigator.clipboard` of its own. */
+    function stubClipboard(): Mock<(text: string) => Promise<void>> {
+      const writeText = vi.fn<(text: string) => Promise<void>>()
+      writeText.mockResolvedValue(undefined)
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+      return writeText
+    }
+
+    /**
+     * A window at least `md` wide, or not — jsdom has no `matchMedia` to ask.
+     *
+     * The sidebar shortcut moves the column on a wide window and the drawer on a narrow one
+     * (#211), so which of them the test is about has to be said rather than measured.
+     */
+    function stubWindowWidth(wide: boolean): void {
+      vi.stubGlobal('matchMedia', (query: string) => ({
+        matches: wide && query === '(min-width: 768px)',
+        media: query,
+        addEventListener: () => undefined,
+        removeEventListener: () => undefined,
+      }))
+    }
+
+    afterEach(() => {
+      vi.unstubAllGlobals()
+    })
+
+    /**
+     * Send `text`, and wait until its reply has arrived and the turn is over.
+     *
+     * The wait is on the *reply*, not on the idle status: the screen is idle before the fake
+     * has begun the turn, so a wait on idleness alone can be satisfied by the state it was
+     * already in — and the next message would then be a steering message. One more reply,
+     * stored (not streaming), on an idle session is the turn having happened.
+     */
+    async function send(user: ReturnType<typeof userEvent.setup>, text: string): Promise<void> {
+      const replies = messageElements('agent').length + 1
+      await user.type(await screen.findByLabelText('Message'), text)
+      await user.click(screen.getByRole('button', { name: 'Send message' }))
+      await waitFor(() => {
+        expect(messageElements('agent')).toHaveLength(replies)
+        expect(isStreaming()).toBe(false)
+        expect(screen.getByLabelText('Status: Idle')).toBeInTheDocument()
+      })
+    }
+
+    it('shows only the working row until the reply has a word in it', async () => {
+      const user = userEvent.setup({ delay: null })
+      const fake = makeFake()
+      fake.respondWith(SLOW, { chunks: 12, delayMs: 20 })
+      const stream = gateStream(fake)
+      renderApp(fake)
+
+      await user.type(await screen.findByLabelText('Message'), 'go')
+      await user.click(screen.getByRole('button', { name: 'Send message' }))
+
+      // `event_start` is what opens the streaming preview, and it carries no text at all: the
+      // transcript has a reply on it from here, and the screen must not draw one. It used to
+      // draw an empty agent bubble with a caret in it, next to a row saying the same thing.
+      await stream.until(
+        () => stream.released.includes('event_start'),
+        'the reply’s opening chunk event',
+      )
+      expect(document.querySelector('[data-role="agent"]')).toBeNull()
+      expect(workingRow()).toHaveTextContent('Working…')
+
+      // The first delta is the message: text, caret and all.
+      await stream.until(() => agentText().length > 0, 'the first delta')
+      expect(document.querySelector('[data-role="agent"]')).not.toBeNull()
+      expect(isStreaming()).toBe(true)
+    })
+
+    it('reports what a reply cost, under it, once the log says', async () => {
+      const user = userEvent.setup({ delay: null })
+      const fake = makeFake()
+      fake.respondWith('One.')
+      renderApp(fake)
+
+      await send(user, 'first')
+
+      // The fake's span events are the server's: this model served it, and it reported 512
+      // input and 32 output tokens (#201, U1) — 544, with the thousands separator a count
+      // gets. The duration is the wait, which under the fake is a few milliseconds.
+      const meta = document.querySelector('[data-slot="message-meta"]')
+      expect(meta?.textContent).toMatch(/^Claude Sonnet 5 · \d+(\.\d+)?s · 544 tokens$/)
+      // And it is not part of the reply: the message is still what the model wrote.
+      expect(agentText()).toBe('One.')
+
+      // A second reply on the same model does not name it again: the model is news once.
+      fake.respondWith('Two.')
+      await send(user, 'second')
+      const lines = [...document.querySelectorAll('[data-slot="message-meta"]')]
+      expect(lines).toHaveLength(2)
+      expect(lines[1]?.textContent).not.toContain('Claude Sonnet 5')
+      expect(lines[1]?.textContent).toMatch(/tokens$/)
+    })
+
+    it('puts a message’s source on the clipboard from its action row', async () => {
+      const user = userEvent.setup({ delay: null })
+      const writeText = stubClipboard()
+      const fake = makeFake()
+      fake.respondWith('**bold** answer')
+      renderApp(fake)
+
+      await send(user, 'the question')
+      const reply = messageElement('agent') as HTMLElement
+      await user.hover(reply)
+      await user.click(within(reply).getByRole('button', { name: 'Copy message' }))
+
+      // The markdown source, not the rendered text: what the reader gets back is what was
+      // written, which is the point of copying an agent message at all.
+      expect(writeText).toHaveBeenCalledWith('**bold** answer')
+      expect(await within(reply).findByRole('button', { name: 'Copied' })).toBeInTheDocument()
+    })
+
+    it('offers Edit and resend on the reader’s last message, and only there', async () => {
+      const user = userEvent.setup({ delay: null })
+      const fake = makeFake()
+      fake.respondWith('One.')
+      renderApp(fake)
+
+      await send(user, 'the first thing')
+      fake.respondWith('Two.')
+      await send(user, 'the second thing')
+
+      // One action, on the message the reader said last: anywhere else it would be a way to
+      // say the same thing twice into the middle of a conversation.
+      const lastUserMessage = messageElements('user').at(-1) as HTMLElement
+      const edit = screen.getAllByRole('button', { name: 'Edit and resend' })
+      expect(edit).toHaveLength(1)
+      expect(within(lastUserMessage).getByRole('button', { name: 'Edit and resend' })).toBe(edit[0])
+      expect(
+        within(messageElements('user')[0] as HTMLElement).queryByRole('button', {
+          name: 'Edit and resend',
+        }),
+      ).toBeNull()
+
+      const box = screen.getByLabelText('Message')
+      await user.hover(lastUserMessage)
+      await user.click(edit[0] as HTMLElement)
+
+      // The box has the words and the cursor, and nothing else has happened: nothing was
+      // sent, and the message it came from is still in the transcript.
+      expect(box).toHaveValue('the second thing')
+      expect(box).toHaveFocus()
+      expect(fake.history().filter((event) => event.type === 'user.message')).toHaveLength(2)
+      expect(visibleText(messageElements('agent').at(-1) ?? null)).toBe('Two.')
+    })
+
+    it('is Ctrl/⌘+Shift+O for a new chat, from anywhere', async () => {
+      const user = userEvent.setup({ delay: null })
+      // An account with a key, so New chat is New chat rather than the first-run flow (#209).
+      const fake = makeFake(WITH_DEFAULT)
+      renderApp(fake)
+      await screen.findByLabelText('Message')
+
+      await user.keyboard('{Control>}{Shift>}o{/Shift}{/Control}')
+
+      await waitFor(() => {
+        expect(window.location.hash).toBe('#/new')
+      })
+      expect(await screen.findByRole('heading', { name: NEW_CHAT_GREETING })).toBeInTheDocument()
+    })
+
+    it('puts the cursor in the message box with `/`, but only outside a field', async () => {
+      const user = userEvent.setup({ delay: null })
+      const fake = makeFake()
+      renderApp(fake)
+
+      const box = await screen.findByLabelText('Message')
+      box.blur()
+      expect(box).not.toHaveFocus()
+
+      await user.keyboard('/')
+      expect(box).toHaveFocus()
+      // A shortcut, not a character: nothing was typed into the box.
+      expect(box).toHaveValue('')
+
+      // And the other half of the rule — inside the box a bare key is a key. `?` opens the
+      // sheet from anywhere on the page, and from the box it is a question mark.
+      await user.keyboard('?')
+      expect(box).toHaveValue('?')
+      expect(screen.queryByText('Keyboard shortcuts')).toBeNull()
+    })
+
+    it('is `?` for the shortcut list, and Ctrl/⌘+/ for the same list', async () => {
+      const user = userEvent.setup({ delay: null })
+      const fake = makeFake()
+      renderApp(fake)
+
+      // A chat opens with the cursor in the box, and a shortcut that fired from there would
+      // be a shortcut fired by someone typing: the reader clicks off it first.
+      const box = await screen.findByLabelText('Message')
+      box.blur()
+
+      await user.keyboard('?')
+      expect(await screen.findByText('Keyboard shortcuts')).toBeInTheDocument()
+      await user.keyboard('{Escape}')
+      await waitFor(() => {
+        expect(screen.queryByText('Keyboard shortcuts')).toBeNull()
+      })
+
+      // The second door, for hands that are already on a modifier.
+      await user.keyboard('{Control>}/{/Control}')
+      expect(await screen.findByText('Keyboard shortcuts')).toBeInTheDocument()
+    })
+
+    it('is Ctrl/⌘+B for the sidebar — the column on a wide window, the drawer on a phone', async () => {
+      const user = userEvent.setup({ delay: null })
+
+      stubWindowWidth(true)
+      const wide = makeFake()
+      const { unmount } = renderApp(wide)
+      const column = await screen.findByRole('complementary', { name: 'Navigation' })
+      expect(column).not.toHaveClass('md:hidden')
+
+      await user.keyboard('{Control>}b{/Control}')
+      expect(column).toHaveClass('md:hidden')
+      // The same key brings it back, and the shell's own bar is what says so.
+      await user.keyboard('{Control>}b{/Control}')
+      expect(column).not.toHaveClass('md:hidden')
+      unmount()
+
+      // Below `md` the column is not the layout — the panel is the drawer, opened from the
+      // top bar's button, which is state the shortcut moves too.
+      stubWindowWidth(false)
+      const narrow = makeFake()
+      renderApp(narrow)
+      const menu = await screen.findByRole('button', { name: 'Navigation' })
+      expect(menu).toHaveAttribute('aria-expanded', 'false')
+      await user.keyboard('{Control>}b{/Control}')
+      expect(menu).toHaveAttribute('aria-expanded', 'true')
+    })
+
+    it('is Escape to stop a running turn, from the box, and nothing when nothing is running', async () => {
+      const user = userEvent.setup({ delay: null })
+      const fake = makeFake()
+      fake.respondWith(SLOW, { chunks: 12, delayMs: 100 })
+      const stream = gateStream(fake)
+      renderApp(fake)
+
+      const box = await screen.findByLabelText('Message')
+      await user.type(box, 'go')
+      await user.click(screen.getByRole('button', { name: 'Send message' }))
+      await stream.until(() => agentText().length > 0, 'the first delta')
+
+      // Stop is the box's key, and the click on Send left the focus on Send: the reader is
+      // back in the box, which is half of the rule.
+      await user.click(box)
+      expect(box).toHaveFocus()
+      await user.keyboard('{Escape}')
+
+      await fake.waitForIdle()
+      await stream.until(() => screen.queryByLabelText('Status: Idle') !== null, 'idle')
+      expect(fake.history().filter((event) => event.type === 'user.interrupt')).toHaveLength(1)
+
+      // Idle, the same key does nothing — Escape is the overlays' again.
+      await user.keyboard('{Escape}')
+      expect(fake.history().filter((event) => event.type === 'user.interrupt')).toHaveLength(1)
+    })
   })
 
   it('leaves the desktop column as it was', async () => {

@@ -5,7 +5,9 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 
 import { AuthProvider, useBrowserAuth } from './components/auth-provider'
 import { ChatView } from './components/chat/chat-view'
+import { focusComposer } from './components/chat/composer'
 import { ClientProvider, useClient } from './components/client-provider'
+import { ShortcutsSheet } from './components/shortcuts-sheet'
 import { SIDEBAR_ID, Sidebar } from './components/sidebar'
 import { ThemePreference } from './components/theme-preference'
 import { Button } from './components/ui/button'
@@ -15,6 +17,7 @@ import { useNotice } from './hooks/use-notice'
 import { useRoute } from './hooks/use-route'
 import { useSessions, type DeleteSessionResult } from './hooks/use-sessions'
 import { useSettings } from './hooks/use-settings'
+import { useShortcuts } from './hooks/use-shortcuts'
 import { dismissNotice } from './lib/notice'
 import { createBrowserAuthClient } from './lib/auth-client'
 import { beginSessionCheck, signOutSession } from './lib/auth-store'
@@ -208,9 +211,38 @@ function AppFrame({
   // preference: it is a thing about this window's width more than about the reader, and the
   // mobile drawer — the same panel, another layout — has always been state too.
   const [collapsed, setCollapsed] = useState(false)
+  // The shortcuts sheet (#212), open from `?` or Ctrl/⌘+/.
+  const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const panelRef = useRef<HTMLElement>(null)
   const menuButtonRef = useRef<HTMLButtonElement>(null)
   const wasOpen = useRef(false)
+
+  // The shell's shortcuts (issue #212). They are the ones that are about the *app* rather
+  // than about a screen: where the reader is (New chat), what is around the content (the
+  // sidebar) and what the app can tell them about itself (the sheet). The two that belong to
+  // a message box — `/` puts the cursor in it and Escape stops the turn — are asked for here
+  // and answered there, because only the box knows whether it exists and what it is doing.
+  useShortcuts({
+    'new-chat': () => {
+      navigate('#/new')
+    },
+    'focus-composer': () => {
+      focusComposer()
+    },
+    'toggle-sidebar': () => {
+      // One key, two layouts: below `md` the sidebar is the drawer and above it the column
+      // that can be put away (#211), so which of the two moves is decided by the same
+      // breakpoint the `md:` variants are written against.
+      if (isWideWindow()) {
+        setCollapsed((current) => !current)
+      } else {
+        setDrawerOpen((current) => !current)
+      }
+    },
+    'shortcuts-sheet': () => {
+      setShortcutsOpen(true)
+    },
+  })
 
   const closeDrawer = useCallback((): void => {
     setDrawerOpen(false)
@@ -254,6 +286,11 @@ function AppFrame({
       {/* The theme's one server reader and writer (#203): mounted with the signed-in frame,
           because preferences need a session, and rendered nowhere. */}
       <ThemePreference />
+
+      {/* The shortcut list (#212). Mounted like the Add-provider dialog: Radix keeps the
+          content out of the tree while it is closed, and the root stays up so Escape has
+          somewhere to put the focus back to. */}
+      <ShortcutsSheet open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
 
       {drawerOpen ? (
         <div
@@ -375,6 +412,27 @@ function AppFrame({
 /** A screen with nothing else around it: the sign-in page, and the session check before it. */
 function CenteredScreen({ children }: { children: ReactNode }) {
   return <div className="flex h-full min-h-0 items-center justify-center px-6">{children}</div>
+}
+
+/**
+ * Whether the window is at least `md` wide — the shell's one JavaScript read of a CSS
+ * breakpoint (#212).
+ *
+ * The sidebar shortcut has to move whichever of the two sidebars this window has, and only the
+ * stylesheet knows which that is: below `md` the panel is the drawer, from `md` up it is the
+ * column that can be put away (#211). `matchMedia` is the honest way to ask, because it is the
+ * *same query* the `md:` variants are compiled from — Tailwind's default `md` is 48rem, 768px
+ * at this app's root size, and this is the one place that number is written in JavaScript. A
+ * window that is resized between keystrokes gets the new answer, since nothing is cached.
+ *
+ * Where there is no `matchMedia` at all — jsdom, and anything that is not a browser — the
+ * answer is "not wide", the same reading `theme.ts` gives the system preference, and the
+ * drawer branch is the one that still works with no layout to speak of.
+ */
+function isWideWindow(): boolean {
+  return typeof window.matchMedia === 'function'
+    ? window.matchMedia('(min-width: 768px)').matches
+    : false
 }
 
 /**
