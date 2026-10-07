@@ -506,19 +506,27 @@ if (target === null) {
       expect(files.length).toBeGreaterThan(0)
       // `0016_user_preferences.sql` and `0017_scheduler_instances.sql` are each one
       // `create table if not exists` (#111, #122), and `0018_credential_key_provider.sql`
-      // one `add column if not exists` (#150): a re-run has to leave the tables and the
-      // column working, which the store calls below prove.
+      // and `0019_user_preferences_theme.sql` one `add column if not exists` (#150, #203):
+      // a re-run has to leave the tables and the columns working, which the store calls
+      // below prove.
       expect(files).toContain('0016_user_preferences.sql')
       expect(files).toContain('0017_scheduler_instances.sql')
       expect(files).toContain('0018_credential_key_provider.sql')
+      expect(files).toContain('0019_user_preferences_theme.sql')
       expect(await migrate(db)).toEqual(files)
 
       const { store, session } = await seeded()
       expect(await store.getSession(session.id, { ownerId: OWNER_A })).toEqual(session)
-      expect(await store.putPreferences(OWNER_A, { default_model: 'openai/gpt-5-mini' })).toEqual({
+      expect(
+        await store.putPreferences(OWNER_A, { default_model: 'openai/gpt-5-mini', theme: 'dim' }),
+      ).toEqual({
         default_model: 'openai/gpt-5-mini',
+        theme: 'dim',
       })
-      expect(await store.getPreferences(OWNER_A)).toEqual({ default_model: 'openai/gpt-5-mini' })
+      expect(await store.getPreferences(OWNER_A)).toEqual({
+        default_model: 'openai/gpt-5-mini',
+        theme: 'dim',
+      })
       await store.heartbeatInstance('after-a-re-run')
       expect(await store.listLiveInstances(30_000)).toEqual(['after-a-re-run'])
       await store.removeInstance('after-a-re-run')

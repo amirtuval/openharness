@@ -141,13 +141,16 @@ export function makeUser(overrides: Partial<User> = {}): User {
 }
 
 /**
- * A user's preferences, as `GET /v1/me/preferences` returns them: a default model, unless
- * the overrides clear it.
+ * A user's preferences, as `GET /v1/me/preferences` returns them: a default model and the
+ * default theme, unless the overrides replace either.
  *
  * @param overrides fields to replace on the default preferences
  */
 export function makeUserPreferences(overrides: Partial<UserPreferences> = {}): UserPreferences {
-  const preferences: UserPreferences = { default_model: 'anthropic/claude-sonnet-5' }
+  const preferences: UserPreferences = {
+    default_model: 'anthropic/claude-sonnet-5',
+    theme: 'system',
+  }
   return { ...preferences, ...overrides }
 }
 

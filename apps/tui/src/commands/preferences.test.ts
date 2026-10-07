@@ -63,6 +63,21 @@ describe('runDefaultModel', () => {
     expect((await fake.preferences.get()).default_model).toBe('openai/gpt-4.1-mini')
   })
 
+  it('leaves the web theme alone — the CLI has no theme of its own (epic #201, X3)', async () => {
+    const fake = createFakeClient({
+      preferences: { default_model: null, theme: 'dim' },
+    })
+    const { io } = recorder()
+
+    expect(await runDefaultModel(fake, io, 'openai/gpt-4.1-mini')).toBe(0)
+    // The write carries only `default_model`, and the server merges: setting a default from
+    // the terminal never resets what the user chose in the browser.
+    expect(await fake.preferences.get()).toEqual({
+      default_model: 'openai/gpt-4.1-mini',
+      theme: 'dim',
+    })
+  })
+
   it('reports a not-signed-in read on stderr and exits 1', async () => {
     const fake = createFakeClient({ authenticated: false })
     const { io, out, err } = recorder()

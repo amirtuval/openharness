@@ -147,12 +147,16 @@ describe('the automatic default model (U4)', () => {
     // The user's own choice, written through the settings route.
     await expect(client.preferences.put({ default_model: EXPLICIT_DEFAULT })).resolves.toEqual({
       default_model: EXPLICIT_DEFAULT,
+      theme: 'system',
     })
 
     // Deleting a *different* provider's key does not touch it: the model can still run, so
     // there is nothing to re-pick or clear.
     await expect(client.providerCredentials.delete(SECOND_PROVIDER)).resolves.toBeUndefined()
-    await expect(client.preferences.get()).resolves.toEqual({ default_model: EXPLICIT_DEFAULT })
+    await expect(client.preferences.get()).resolves.toEqual({
+      default_model: EXPLICIT_DEFAULT,
+      theme: 'system',
+    })
     // And the deleted provider is gone from the catalogue at once — the cached list was
     // fetched with the key that just went away (C4).
     expect(await listedProviders(client)).toEqual([FIRST_PROVIDER])
@@ -161,7 +165,10 @@ describe('the automatic default model (U4)', () => {
     // substituted (that is the user's to make), and a default that cannot run is worse than
     // none — the client shows "add a key" instead of failing the first message.
     await expect(client.providerCredentials.delete(FIRST_PROVIDER)).resolves.toBeUndefined()
-    await expect(client.preferences.get()).resolves.toEqual({ default_model: null })
+    await expect(client.preferences.get()).resolves.toEqual({
+      default_model: null,
+      theme: 'system',
+    })
     expect(await listedProviders(client)).toEqual([])
   })
 
@@ -184,9 +191,13 @@ describe('the automatic default model (U4)', () => {
     // The delete is scoped to the caller: B's key and B's default survive A's delete of the
     // same provider, and the catalogue is per person too.
     await a.client.providerCredentials.delete(FIRST_PROVIDER)
-    await expect(a.client.preferences.get()).resolves.toEqual({ default_model: null })
+    await expect(a.client.preferences.get()).resolves.toEqual({
+      default_model: null,
+      theme: 'system',
+    })
     await expect(b.client.preferences.get()).resolves.toEqual({
       default_model: `${SECOND_PROVIDER}/b-model`,
+      theme: 'system',
     })
     expect(await listedProviders(b.client)).toEqual([FIRST_PROVIDER])
     expect(await listedProviders(a.client)).toEqual([])
@@ -208,7 +219,10 @@ describe('the automatic default model (U4)', () => {
     // provider whose key is still there, so the rule that clears a default that cannot run has
     // nothing to do.
     await expect(client.providerCredentials.delete(SECOND_PROVIDER)).resolves.toBeUndefined()
-    await expect(client.preferences.get()).resolves.toEqual({ default_model: EXPLICIT_DEFAULT })
+    await expect(client.preferences.get()).resolves.toEqual({
+      default_model: EXPLICIT_DEFAULT,
+      theme: 'system',
+    })
     expect(await listedProviders(client)).toEqual([FIRST_PROVIDER])
   })
 
@@ -230,6 +244,7 @@ describe('the automatic default model (U4)', () => {
     await expect(client.providerCredentials.delete(SECOND_PROVIDER)).resolves.toBeUndefined()
     await expect(client.preferences.get()).resolves.toEqual({
       default_model: `${SECOND_PROVIDER}/never-saved`,
+      theme: 'system',
     })
     expect(await listedProviders(client)).toEqual([])
   })
@@ -244,7 +259,10 @@ describe('the automatic default model (U4)', () => {
       const me = await person(server, 'first-key')
 
       // Nobody has a default before a key exists.
-      await expect(me.client.preferences.get()).resolves.toEqual({ default_model: null })
+      await expect(me.client.preferences.get()).resolves.toEqual({
+        default_model: null,
+        theme: 'system',
+      })
 
       // The save a person makes; the provider call behind it is the stub's.
       const credential = await me.client.providerCredentials.put('anthropic', {
@@ -258,6 +276,7 @@ describe('the automatic default model (U4)', () => {
       // catalog lists because the stub is the provider.
       await expect(me.client.preferences.get()).resolves.toEqual({
         default_model: `anthropic/${recommended}`,
+        theme: 'system',
       })
 
       // Which calls made that possible: the validating read (A5) and the list the pick was
@@ -298,6 +317,7 @@ describe('the automatic default model (U4)', () => {
       // newest chat model that is neither expensive nor reasoning-only.
       await expect(me.client.preferences.get()).resolves.toEqual({
         default_model: registryFallbackFor('together'),
+        theme: 'system',
       })
       // Exactly the two calls: the validation and the list that failed.
       expect(stub.requests.filter((request) => request.host === 'api.together.xyz')).toHaveLength(2)
@@ -330,7 +350,10 @@ describe('the automatic default model (U4)', () => {
 
       // And reading the preferences does **not** backfill a choice the user never made: the
       // fix is in the clients (#146), not a server that substitutes one.
-      await expect(me.client.preferences.get()).resolves.toEqual({ default_model: null })
+      await expect(me.client.preferences.get()).resolves.toEqual({
+        default_model: null,
+        theme: 'system',
+      })
     } finally {
       await killServers()
       await stub.stop()
@@ -351,13 +374,19 @@ describe('the automatic default model (U4)', () => {
         api_key: FAKE_KEY,
       })
       const picked = `anthropic/${recommendedModelFor('anthropic')}`
-      await expect(twoKeys.client.preferences.get()).resolves.toEqual({ default_model: picked })
+      await expect(twoKeys.client.preferences.get()).resolves.toEqual({
+        default_model: picked,
+        theme: 'system',
+      })
 
       await twoKeys.client.providerCredentials.put('openai', {
         type: 'api_key',
         api_key: FAKE_KEY,
       })
-      await expect(twoKeys.client.preferences.get()).resolves.toEqual({ default_model: picked })
+      await expect(twoKeys.client.preferences.get()).resolves.toEqual({
+        default_model: picked,
+        theme: 'system',
+      })
 
       // (b) A key saved after an explicit choice is a key, not a re-pick. The choice is free
       // text — not necessarily catalogued — because the router accepts ids the catalog has
@@ -370,7 +399,10 @@ describe('the automatic default model (U4)', () => {
         type: 'api_key',
         api_key: FAKE_KEY,
       })
-      await expect(explicit.client.preferences.get()).resolves.toEqual({ default_model: chosen })
+      await expect(explicit.client.preferences.get()).resolves.toEqual({
+        default_model: chosen,
+        theme: 'system',
+      })
     } finally {
       await killServers()
       await stub.stop()

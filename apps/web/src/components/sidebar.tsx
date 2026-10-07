@@ -8,6 +8,7 @@ import type { ModelNameLookup } from '../lib/models'
 import { MAX_PAGE_ITEMS } from '../lib/paging'
 import { chatHash } from '../lib/router'
 import { cn } from '../lib/utils'
+import { ThemeMenu } from './theme-menu'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 
@@ -34,6 +35,9 @@ export const SIDEBAR_ID = 'app-sidebar'
  * shows on hover or focus (it stays in the DOM and reachable by keyboard either way), and
  * the delete itself asks in the page — a `window.confirm` would block and cannot be themed.
  * Deleting the open chat is the shell's call, not this list's: it navigates to New chat.
+ *
+ * The foot row is who is signed in, the way out, and — since #203 — {@link ThemeMenu}, the
+ * quick switch for the theme (`Settings → Appearance` is the full picker).
  */
 export function Sidebar({
   sessions,
@@ -299,6 +303,7 @@ export function Sidebar({
           >
             {user.email}
           </span>
+          <ThemeMenu />
           {onSignOut === undefined ? null : (
             <Button
               type="button"

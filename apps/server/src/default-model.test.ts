@@ -94,19 +94,46 @@ describe('the automatic default picker (U4)', () => {
 
     await choose.onCredentialAdded('user_a', 'openai')
 
-    expect(await store.getPreferences('user_a')).toEqual({ default_model: 'openai/gpt-5-mini' })
+    expect(await store.getPreferences('user_a')).toEqual({
+      default_model: 'openai/gpt-5-mini',
+      theme: 'system',
+    })
     expect(choose.isAutomatic('user_a')).toBe(true)
+  })
+
+  it('writes the default model without touching the theme the user chose (epic #201, X3)', async () => {
+    const catalog = fakeCatalog(['openai/gpt-5-mini', 'anthropic/claude-haiku-4-5'])
+    const { picker: choose, store } = picker(catalog)
+    await store.putPreferences('user_a', { default_model: null, theme: 'dim' })
+
+    // The pick: the theme is carried through the store's whole-value write.
+    await choose.onCredentialAdded('user_a', 'openai')
+    expect(await store.getPreferences('user_a')).toEqual({
+      default_model: 'openai/gpt-5-mini',
+      theme: 'dim',
+    })
+
+    // The clear: same.
+    catalog.models = []
+    await choose.onCredentialRemoved('user_a', 'openai')
+    expect(await store.getPreferences('user_a')).toEqual({ default_model: null, theme: 'dim' })
   })
 
   it('never overrides a choice the user made, while its provider has a key', async () => {
     const catalog = fakeCatalog(['openai/gpt-5-mini', 'anthropic/claude-haiku-4-5'])
     const { picker: choose, store } = picker(catalog)
-    await store.putPreferences('user_a', { default_model: 'openai/my-own-choice' })
+    await store.putPreferences('user_a', {
+      default_model: 'openai/my-own-choice',
+      theme: 'system',
+    })
 
     await choose.onCredentialAdded('user_a', 'openai')
     await choose.onCredentialAdded('user_a', 'anthropic')
 
-    expect(await store.getPreferences('user_a')).toEqual({ default_model: 'openai/my-own-choice' })
+    expect(await store.getPreferences('user_a')).toEqual({
+      default_model: 'openai/my-own-choice',
+      theme: 'system',
+    })
     expect(choose.isAutomatic('user_a')).toBe(false)
   })
 
@@ -117,7 +144,10 @@ describe('the automatic default picker (U4)', () => {
     await choose.onCredentialAdded('user_a', 'openai')
     await choose.onCredentialAdded('user_a', 'anthropic')
 
-    expect(await store.getPreferences('user_a')).toEqual({ default_model: 'openai/gpt-5-mini' })
+    expect(await store.getPreferences('user_a')).toEqual({
+      default_model: 'openai/gpt-5-mini',
+      theme: 'system',
+    })
   })
 
   it('re-picks an automatic default from the remaining providers when its provider is deleted', async () => {
@@ -131,6 +161,7 @@ describe('the automatic default picker (U4)', () => {
 
     expect(await store.getPreferences('user_a')).toEqual({
       default_model: 'anthropic/claude-haiku-4-5',
+      theme: 'system',
     })
     expect(choose.isAutomatic('user_a')).toBe(true)
   })
@@ -143,19 +174,22 @@ describe('the automatic default picker (U4)', () => {
     catalog.models = []
     await choose.onCredentialRemoved('user_a', 'openai')
 
-    expect(await store.getPreferences('user_a')).toEqual({ default_model: null })
+    expect(await store.getPreferences('user_a')).toEqual({ default_model: null, theme: 'system' })
     expect(choose.isAutomatic('user_a')).toBe(false)
   })
 
   it('clears an explicit default whose provider is deleted, instead of re-picking', async () => {
     const catalog = fakeCatalog(['openai/gpt-5-mini', 'anthropic/claude-haiku-4-5'])
     const { picker: choose, store } = picker(catalog)
-    await store.putPreferences('user_a', { default_model: 'openai/my-own-choice' })
+    await store.putPreferences('user_a', {
+      default_model: 'openai/my-own-choice',
+      theme: 'system',
+    })
 
     catalog.models = ['anthropic/claude-haiku-4-5']
     await choose.onCredentialRemoved('user_a', 'openai')
 
-    expect(await store.getPreferences('user_a')).toEqual({ default_model: null })
+    expect(await store.getPreferences('user_a')).toEqual({ default_model: null, theme: 'system' })
   })
 
   it('leaves a default alone when the deleted key is a different provider’s', async () => {
@@ -166,7 +200,10 @@ describe('the automatic default picker (U4)', () => {
     catalog.models = ['openai/gpt-5-mini']
     await choose.onCredentialRemoved('user_a', 'anthropic')
 
-    expect(await store.getPreferences('user_a')).toEqual({ default_model: 'openai/gpt-5-mini' })
+    expect(await store.getPreferences('user_a')).toEqual({
+      default_model: 'openai/gpt-5-mini',
+      theme: 'system',
+    })
   })
 
   it('treats a default written through the preferences route as explicit', async () => {
@@ -178,7 +215,7 @@ describe('the automatic default picker (U4)', () => {
     catalog.models = ['anthropic/claude-haiku-4-5']
     await choose.onCredentialRemoved('user_a', 'openai')
 
-    expect(await store.getPreferences('user_a')).toEqual({ default_model: null })
+    expect(await store.getPreferences('user_a')).toEqual({ default_model: null, theme: 'system' })
   })
 
   it('falls back to the registry’s newest everyday model when no recommendation is listed', async () => {
@@ -191,7 +228,10 @@ describe('the automatic default picker (U4)', () => {
     await choose.onCredentialAdded('user_a', 'openai')
 
     // 4.1 beats 4o by version; the pro tier, the reasoning tier and the embedding are all out.
-    expect(await store.getPreferences('user_a')).toEqual({ default_model: 'openai/gpt-4.1-mini' })
+    expect(await store.getPreferences('user_a')).toEqual({
+      default_model: 'openai/gpt-4.1-mini',
+      theme: 'system',
+    })
   })
 
   it('has a recommendation table with everyday entries for the main providers', () => {

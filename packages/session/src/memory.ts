@@ -1,6 +1,7 @@
 import {
   DEFAULT_EVENT_ORDER,
   DEFAULT_PARTITION_COUNT,
+  DEFAULT_USER_THEME,
   EVENT_TYPES,
   StoredEventSchema,
   encodeKeyCursor,
@@ -30,6 +31,7 @@ import {
   type UserEvent,
   type UserId,
   type UserPreferences,
+  type UserTheme,
 } from '@openharness/protocol'
 
 import { type Clock, systemClock, timestampAt } from './clock'
@@ -358,8 +360,13 @@ export class InMemorySessionStore implements SessionStore {
 
   getPreferences(userId: UserId): Promise<UserPreferences> {
     const stored = this.#preferences.get(userId)
-    // A user who never saved one reads the protocol's default: no row, no error, one shape.
-    return resolved(deepFreeze({ default_model: stored?.defaultModel ?? null }))
+    // A user who never saved one reads the protocol's defaults: no row, no error, one shape.
+    return resolved(
+      deepFreeze({
+        default_model: stored?.defaultModel ?? null,
+        theme: stored?.theme ?? DEFAULT_USER_THEME,
+      }),
+    )
   }
 
   putPreferences(userId: UserId, preferences: UserPreferences): Promise<UserPreferences> {
@@ -367,9 +374,12 @@ export class InMemorySessionStore implements SessionStore {
     // as the `user_preferences` row's `on conflict` decides in Postgres.
     this.#preferences.set(userId, {
       defaultModel: preferences.default_model,
+      theme: preferences.theme,
       updatedAtMs: this.#clock(),
     })
-    return resolved(deepFreeze({ default_model: preferences.default_model }))
+    return resolved(
+      deepFreeze({ default_model: preferences.default_model, theme: preferences.theme }),
+    )
   }
 
   // ----------------------------------------------------------------- events
@@ -996,6 +1006,8 @@ interface LeaseRecord {
 interface PreferencesRecord {
   /** The `provider/model` a new session starts with, or `null` for none. */
   readonly defaultModel: string | null
+  /** The web theme name (#203); the column's default until a user chooses one. */
+  readonly theme: UserTheme
   /** When `putPreferences` last wrote it, as the injected clock read it. */
   readonly updatedAtMs: number
 }

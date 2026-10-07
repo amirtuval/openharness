@@ -19,11 +19,13 @@ import type { RouteDeps } from './deps'
  * caller creates is owned by. The identity itself is Better Auth's (A1/A3); this route is
  * only the mapping onto the protocol's shape.
  *
- * `GET`/`PUT /v1/me/preferences` are the caller's stored settings (epic #116, U1): the
- * `default_model` a new chat starts with, read and written whole. Both are owner-only — the
- * resource is the caller, there is no id in the path to get wrong — and the `PUT` body's
- * `default_model` is shape-checked by the protocol's `DEFAULT_MODEL_PATTERN`, so a malformed
- * router id is the 400 `invalid_request_error` any bad body is.
+ * `GET`/`PUT /v1/me/preferences` are the caller's stored settings (epic #116, U1; the theme:
+ * #203, epic #201 X3): the `default_model` a new chat starts with and the colour scheme the
+ * web app paints with. Both are owner-only — the resource is the caller, there is no id in the
+ * path to get wrong — and the `PUT` body's `default_model` is shape-checked by the protocol's
+ * `DEFAULT_MODEL_PATTERN`, so a malformed router id is the 400 `invalid_request_error` any bad
+ * body is. The `PUT` merges the fields it is given over what is stored, so the web app's theme
+ * and `oh`'s default model never clear each other.
  *
  * `GET /v1/auth-config` is the one unauthenticated `/v1` route, and the interface agreed with
  * the web app (#62): it reads it *before* sign-in to know which buttons to show. It is
@@ -39,7 +41,15 @@ export function registerMeRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
   app.put(`${API_VERSION_PREFIX}/me/preferences`, async (c) => {
     const body = await parseBody(c, PutPreferencesRequestSchema)
     const userId = c.get('user').id
-    const stored = await deps.store.putPreferences(userId, body)
+    // A write merges (epic #201, X3): the body carries the fields to change and everything
+    // else keeps its stored value, so changing the theme never clears the default model and
+    // `oh default-model` — which knows nothing about themes — never clears it either. The
+    // stored row is still written whole, which is the store's contract.
+    const current = await deps.store.getPreferences(userId)
+    const stored = await deps.store.putPreferences(userId, {
+      default_model: body.default_model === undefined ? current.default_model : body.default_model,
+      theme: body.theme ?? current.theme,
+    })
     // Whatever is stored now is the user's own choice (epic #116, U4), so the automatic
     // default must never re-pick it out from under them.
     deps.defaultModel.markExplicit(userId)

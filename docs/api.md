@@ -84,8 +84,8 @@ the only way an event is ever removed together with its session.
 | `GET`    | `/ready`                                  | readiness — `{ status: 'ok' }`, or `503` while draining or when the store does not answer; open |
 | `GET`    | `/v1/auth-config`                         | unauthenticated: which providers are on, and whether dev login is                               |
 | `GET`    | `/v1/me`                                  | the signed-in user                                                                              |
-| `GET`    | `/v1/me/preferences`                      | the caller's preferences — today, the default model                                             |
-| `PUT`    | `/v1/me/preferences`                      | set them whole; `default_model` is `provider/model` or `null`                                   |
+| `GET`    | `/v1/me/preferences`                      | the caller's preferences — the default model and the web theme                                  |
+| `PUT`    | `/v1/me/preferences`                      | merge fields in; `default_model` is `provider/model` or `null`, `theme` one of four names       |
 | `POST`   | `/v1/agents`                              | create an agent                                                                                 |
 | `GET`    | `/v1/agents`                              | list agents, oldest first                                                                       |
 | `GET`    | `/v1/agents/{agent_id}`                   | read one agent                                                                                  |
@@ -338,12 +338,23 @@ and it is the same user.
 #### Preferences
 
 `GET /v1/me/preferences` answers the caller's stored preferences, unwrapped —
-`{ "default_model": "anthropic/claude-sonnet-5" }` — and `{ "default_model": null }` for a
-caller who has never saved any (the absence of a choice, not a 404). `PUT` writes them whole:
-`default_model` is required and `null` clears it. The value is a router id of
-`provider/model` shape, checked for shape only — it does not have to be in the caller's
-catalog — and it is what a new chat starts with (epic #116, U1). Both routes are owner-only
-like the rest of `/v1/me`; there is no partial update and no other preference today.
+`{ "default_model": "anthropic/claude-sonnet-5", "theme": "system" }` — and
+`{ "default_model": null, "theme": "system" }` for a caller who has never saved any (the
+absence of a choice, not a 404).
+
+`default_model` is a router id of `provider/model` shape, checked for shape only — it does not
+have to be in the caller's catalog — and it is what a new chat starts with (epic #116, U1).
+`theme` is the web app's colour scheme: `system` (follow the operating system; the default),
+`light`, `dim` or `dark` (epic #201, X3). It is a _choice_, not a resolved value — a `system`
+user is not rewritten to `light` or `dark` when their OS changes, because the following
+happens in the browser.
+
+`PUT` **merges**: each field the body carries is stored, a field it leaves out keeps its
+stored value, and `default_model: null` clears the stored default. An empty body is a no-op
+that answers what is stored. So the two settings cannot clear each other — `{"theme": "dim"}`
+from Settings leaves the default model alone, and `{"default_model": "openai/gpt-5-mini"}`
+from `oh default-model` leaves the theme alone. Both routes are owner-only like the rest of
+`/v1/me`.
 
 **The automatic default** (epic #116, U4). Saving a provider key when `default_model` is
 `null` sets one, so the first key makes "New chat" usable with no dialog: the server picks the

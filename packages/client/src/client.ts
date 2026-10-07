@@ -136,12 +136,12 @@ export interface Client {
   readonly auth: AuthResource
 
   /**
-   * The caller's own preferences (#111, epic #116 U1): the default model a new chat starts
-   * with.
+   * The caller's own preferences (#111, epic #116 U1; the theme: #203, epic #201 X3): the
+   * default model a new chat starts with, and the web app's theme.
    *
    * `preferences.get()` is `GET /v1/me/preferences` and `put` is `PUT /v1/me/preferences`,
-   * which writes the complete value — `{ default_model: null }` clears it. Owner-only, like
-   * `GET /v1/me`.
+   * which merges the fields it is given over what is stored — `{ default_model: null }` clears
+   * the default, and leaving a field out leaves it alone. Owner-only, like `GET /v1/me`.
    */
   readonly preferences: PreferencesResource
 

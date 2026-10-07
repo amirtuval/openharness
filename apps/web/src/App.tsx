@@ -7,6 +7,7 @@ import { AuthProvider, useBrowserAuth } from './components/auth-provider'
 import { ChatView } from './components/chat/chat-view'
 import { ClientProvider, useClient } from './components/client-provider'
 import { SIDEBAR_ID, Sidebar } from './components/sidebar'
+import { ThemePreference } from './components/theme-preference'
 import { Button } from './components/ui/button'
 import { useAuthState } from './hooks/use-auth'
 import { useModels } from './hooks/use-models'
@@ -247,6 +248,10 @@ function AppFrame({
 
   return (
     <>
+      {/* The theme's one server reader and writer (#203): mounted with the signed-in frame,
+          because preferences need a session, and rendered nowhere. */}
+      <ThemePreference />
+
       {drawerOpen ? (
         <div
           data-slot="sidebar-backdrop"
