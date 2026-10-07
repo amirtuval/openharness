@@ -88,6 +88,44 @@ export async function createDevFakeClient(): Promise<Client | null> {
 }
 
 /**
+ * The markdown the seeded session's reply is made of.
+ *
+ * Everything the chat's renderer has to get right, in one message: a heading, a list, a table
+ * that is wider than the bubble, inline code, and two fenced blocks with different languages.
+ * Keeping it in the seeded reply means fake mode opens on a finished, fully rendered message
+ * — which is also what the screenshots in the QA pass are taken of (#204, epic #201 X9).
+ */
+const SEEDED_REPLY = [
+  'I answer from the fake client: a scripted stream, no server involved.',
+  '',
+  '## What this reply shows',
+  '',
+  '- a heading, a list and some `inline code`',
+  '- a table, which scrolls sideways rather than squashing the message',
+  '- two code blocks, highlighted per theme, each with a **Copy** button',
+  '',
+  '| package | what it holds | where it is |',
+  '| --- | --- | --- |',
+  '| `@openharness/client` | the transcript reducer every frontend reads | `packages/client` |',
+  '| `@openharness/protocol` | the event and session schemas | `packages/protocol` |',
+  '| `@openharness/session` | the append-only event log | `packages/session` |',
+  '',
+  '```typescript',
+  'export function greeting(name: string): string {',
+  '  return `hello ${name}`',
+  '}',
+  '```',
+  '',
+  '```bash',
+  'yarn install --immutable',
+  'yarn turbo run build test --filter=@openharness/web...',
+  '```',
+  '',
+  '- press **Stop** while a reply is running',
+  '- reload the page: the history is replayed from the log',
+].join('\n')
+
+/**
  * The scenario the fake starts with.
  *
  * The smallest one that exercises the UI: a second agent, a second session created from it —
@@ -111,18 +149,16 @@ export async function seedFakeScenario(fake: FakeClient): Promise<void> {
     agent: assistant.id,
     title: 'What can you do?',
   })
-  fake.respondWith(
-    'I answer from the fake client: a scripted stream, no server involved.\n\n' +
-      '- send a message and watch it stream (deltas are on)\n' +
-      '- press **Stop** while one is running\n' +
-      '- reload the page: the history is replayed from the log',
-    { sessionId: seeded.id, chunks: 16, delayMs: 5 },
-  )
+  fake.respondWith(SEEDED_REPLY, { sessionId: seeded.id, chunks: 16, delayMs: 5 })
   await fake.sendMessage(seeded.id, 'What can you do?')
   await fake.waitForIdle(seeded.id)
 
-  fake.respondWith('Fake client again: still no server, still streaming.', {
-    chunks: 10,
-    delayMs: 20,
-  })
+  // Slow enough to watch arrive, and cut so that a fence is open part-way through: the
+  // second message is what a screenshot of the mid-stream state is taken of.
+  fake.respondWith(
+    'Fake client again: still no server, still streaming.\n\n' +
+      '```bash\nkubectl apply -f deploy.yaml\nkubectl rollout status deploy/web\n```\n\n' +
+      'That is the whole of it — nothing here reached a server.',
+    { chunks: 18, delayMs: 120 },
+  )
 }

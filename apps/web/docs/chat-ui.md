@@ -90,7 +90,78 @@ as they arrive, Stop next to Send).
 
 `react-markdown` + `remark-gfm`, with the elements styled by hand in `markdown.tsx` instead
 of pulling in a typography plugin. No `rehype-raw`: a message cannot inject HTML, so no
-sanitizer is needed.
+sanitizer is needed. Links open in a new tab with `rel="noreferrer"`; a table is a grid inside
+its own `overflow-x-auto` box, so a wide one scrolls instead of squashing the message it is in.
+
+## Streaming markdown, and the code blocks (#204, epic #201)
+
+`streamdown` was evaluated for this and **not** taken, and the two reasons are worth writing
+down because they will come up again.
+
+The first is the rule above: `streamdown` is built on `rehype-raw` — its whole approach is to
+parse the document, find the incomplete node at the end and render it specially — and this app
+deliberately does not let a message's bytes become HTML. Taking it would mean either dropping
+that rule or sanitizing (`rehype-harden`) what it produces, i.e. adding a second parser and a
+sanitizer to keep a property we already have for free.
+
+The second is that it brings a second markdown stack: `marked` and its own rendering path
+beside `react-markdown`'s, plus `unified` and its plugins, for a job that turns out to be
+CommonMark's already.
+
+**A half-written document is not a special case.** An unterminated fence is closed by the end
+of its input, so a fence being streamed is a code block from its first line on — the reader
+watches the block form rather than watching a stray ``` and a paragraph of code that turns
+into a block later. A half-written `**bold` or `[link](dest` is the characters that have
+arrived, which is what the next delta is about to complete. Nothing is hidden, nothing is
+mangled, and no second pass over the text is needed to find "the incomplete part". The one
+place GFM has an opinion is a half-written link with a URL in it: `[the docs](https://exa`
+leaves the marker as text and autolinks the address, because that is what the text says.
+`src/components/chat/markdown.test.tsx` pins all of it, directly and through a real stream.
+
+**Code blocks** are `components/chat/code-block.tsx`: the language in a header, a **Copy**
+button (`navigator.clipboard`, and "Copied" for 1.5s), and Shiki's tokens. To `react-markdown`
+a fence and an indented block are the same two elements — a `code` inside a `pre` — and only
+the `language-…` class tells them apart, so both go through the same component. A fence with
+no language is a block with a header and a Copy button, labelled `text`, just uncoloured; an
+indented block is exactly the same, which is the first time it has looked like a code block
+rather than like a `<pre>` with an inline-code pill in it.
+
+**Highlighting is lazy, on demand, and per grammar.** `src/lib/highlight.ts` is imported with a
+dynamic `import()` by the component; inside it, Shiki's core, the three themes and the wasm
+engine are separate chunks, and each of the fourteen grammars is a chunk of its own, fetched
+the first time a fence asks for it. The main bundle grows by the code block component alone
+(1.3 kB gzip), and a chat with no code in it never fetches any of the rest. A language the
+chat does not ship — or a grammar that refuses the text — answers `null`, and the block is
+plain text: still labelled, still copyable, never an error state.
+
+`createOnigurumaEngine` is the engine, and the wasm behind it is the largest thing here
+(232 kB gzip, cached, only for the first code block). It is the engine TextMate grammars are
+written for; Shiki's JavaScript engine supports only a subset of them, which is a correctness
+trade this app does not need to make. The wasm is inlined by `shiki/wasm`; fetching it as a
+file instead would save the base64 overhead if it ever needs saving.
+
+**Themes without re-highlighting.** `defaultColor: false` makes Shiki write all three palettes
+as CSS variables (`--shiki-light`, `--shiki-dim`, `--shiki-dark` and the `-bg` pair) instead
+of painting the first theme into the element's `style`. Three rules in `index.css` then pick
+the one `[data-theme]` names — Light uses `github-light`, Dim `github-dark-dimmed` and Dark
+`github-dark` — so a theme switch repaints code with the rest of the page and no token is
+recomputed. Nothing is inline, so no rule needs `!important`; a block with no variables (not
+highlighted yet, or not highlighted at all) falls back to the design tokens through `var()`
+defaults, and looks like an ordinary muted panel.
+
+Using each theme's own background rather than the app's is deliberate: Dim's background is a
+soft gray, and `github-dark-dimmed`'s token colours are chosen for its own darker one — the
+body text of a Dim code block measures 7:1 there against 3.9:1 on Dim's own gray, below AA.
+Where the app's own surface is wanted instead, the fallback is what it gets.
+
+**Streaming does not re-highlight what is finished.** `react-markdown` re-renders the whole
+document on every delta, so the `components` object is a module-level constant (a new one per
+render would be a new element type, and React would remount the message's subtree instead of
+patching it) and `CodeBlock` is `memo`'d on `(code, language)`. A finished block gets the same
+two strings back on the next delta and is not re-rendered, so only the block the reply is
+still writing is ever re-tokenized. The highlight of the text on screen a moment ago is
+dropped the instant it stops being the text on screen: a block renders plain until its own
+tokens arrive, rather than under a delta's worth of stale colours.
 
 ## Model-first chat, and why agents are hidden (#91, #113)
 
@@ -326,11 +397,28 @@ Practical notes for whoever adds the next test:
 
 ## Bundle
 
-`yarn build` emits one JS chunk (~187 kB gzip at the time of writing) plus ~6 kB of CSS.
-Nothing unexpected is in it: React and React DOM (about a third), the markdown stack, `zod`
-(via the client's response parsing), the Better Auth browser client, `tailwind-merge`, and the
-app. The fake client and the AI SDK are not: the first is dev-only by construction, the second
-was never added.
+`yarn build` emits one JS chunk plus ~7 kB of CSS, and — since #204 — a set of chunks that are
+only ever fetched when a reply contains code. The numbers below are `vite build` output, to
+the kilobyte of gzip at the time of writing:
+
+| chunk                      | raw     | gzip     | when it is fetched                              |
+| -------------------------- | ------- | -------- | ----------------------------------------------- |
+| `index-*.js` (the app)     | 637 kB  | 195.2 kB | first paint                                     |
+| `index-*.css`              | 36.0 kB | 6.9 kB   | first paint                                     |
+| `highlight-*.js`           | 94.7 kB | 30.6 kB  | the first code block on screen                  |
+| `wasm-*.js` (oniguruma)    | 622 kB  | 232.1 kB | the first code block on screen                  |
+| `github-light/dimmed/dark` | 37.2 kB | 8.2 kB   | with the highlighter                            |
+| the 14 grammars            | 1077 kB | 128.1 kB | one per language the first time a fence uses it |
+
+This change moved the app's own chunk from 632.35 kB to 636.99 kB (193.47 → 195.23 kB gzip) and
+the CSS from 35.32 to 35.97 kB (6.83 → 6.92 kB gzip) — **1.8 kB gzip on the first paint**, which
+is the code block component and nothing else. Everything else is below the fold: `dist/` went
+from 670 kB to 2.51 MB of assets, and a reader who never sees a code block downloads none of it.
+
+Nothing unexpected is in the main chunk: React and React DOM (about a third), the markdown
+stack, `zod` (via the client's response parsing), the Better Auth browser client,
+`tailwind-merge`, and the app. The fake client, the AI SDK and now Shiki are not in it: the
+first two were never in it, the third is a dynamic import.
 
 There is no size budget to check against — the numbers above are a note, so a jump is noticed
 in review, not a gate. Better Auth is the one dependency that was added for something other
