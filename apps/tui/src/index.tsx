@@ -16,6 +16,7 @@ import { openCredentials, type CredentialStore } from './credentials'
 import { createDevClient, FAKE_BANNER, isFakeMode } from './dev/fake'
 import { describeError, type ErrorContext } from './errors'
 import { HELP_TEXT } from './help'
+import { openHistory, type PromptHistory } from './history'
 import { installSignals } from './signals'
 import { restoreTerminal } from './terminal'
 import {
@@ -166,7 +167,12 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
           command.model,
         )
       case 'chat':
-        return await runChat(connected, command.options, context, { stdin, stdout, stderr })
+        return await runChat(connected, config, command.options, context, {
+          stdin,
+          stdout,
+          stderr,
+          env,
+        })
       case 'login': {
         // Ctrl+C during the poll is a cancellation, not a crash: abort the poll with the exit
         // code the signal deserves, and let the handler leave the process alone otherwise.
@@ -275,11 +281,13 @@ function authIo(
   }
 }
 
-/** The streams the chat renders into. */
+/** What the chat renders into, and where the files it touches are read from. */
 interface ChatStreams {
   readonly stdin: NodeJS.ReadStream
   readonly stdout: NodeJS.WriteStream
   readonly stderr: NodeJS.WriteStream
+  /** The environment the prompt history's path comes from. */
+  readonly env: Record<string, string | undefined>
 }
 
 /**
@@ -292,6 +300,7 @@ interface ChatStreams {
  */
 async function runChat(
   connected: Connected,
+  config: ResolvedConfig,
   options: ChatOptions,
   context: ErrorContext,
   streams: ChatStreams,
@@ -305,6 +314,13 @@ async function runChat(
     )
     return 2
   }
+
+  // The prompt's history (#206). It is handed over as a function rather than awaited here:
+  // it needs a `client.me()`, and waiting for that before the screen is drawn would leave
+  // `oh` silent, instead of saying "connecting to <server>…", for as long as the server
+  // takes to answer.
+  const loadHistory = (): Promise<PromptHistory | undefined> =>
+    openChatHistory(connected.client, config.server, streams.env)
 
   const restore = (): void => {
     restoreTerminal({ stdin: streams.stdin, stdout: streams.stdout })
@@ -347,6 +363,7 @@ async function runChat(
         options={options}
         context={context}
         banner={connected.banner}
+        loadHistory={loadHistory}
       />,
       {
         stdin: streams.stdin,
@@ -371,6 +388,31 @@ async function runChat(
     stopSignals()
     process.off('exit', onProcessExit)
     restore()
+  }
+}
+
+/**
+ * The prompt history for this chat: one list per server **and user** (#206).
+ *
+ * The user half needs a name, and the only one the CLI has is what the server calls the
+ * caller — so this asks `client.me()`. Two accounts on one server sign in with different
+ * tokens but share this machine, and without the user id they would share a history.
+ *
+ * A server that will not name the caller gets no history rather than a failed chat: the
+ * request that failed is about to fail the chat anyway, in its own words, and the list of
+ * old prompts is not worth a message of its own. The same goes for a `me()` that answers
+ * something unexpected.
+ */
+async function openChatHistory(
+  client: Client,
+  server: string,
+  env: Record<string, string | undefined>,
+): Promise<PromptHistory | undefined> {
+  try {
+    const me = await client.me()
+    return openHistory({ env, server, user: me.id })
+  } catch {
+    return undefined
   }
 }
 

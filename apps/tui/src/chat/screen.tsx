@@ -1,13 +1,15 @@
 import type { TranscriptError } from '@openharness/client'
 import type { ModelEntry } from '@openharness/protocol'
-import { Box, Text, useInput } from 'ink'
-import { useCallback, useEffect, useState, useSyncExternalStore } from 'react'
+import { Box, Text, useApp, useInput, useStdout } from 'ink'
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 
 import { ModelPicker } from '../components/model-picker'
 import { NoticeView } from '../components/notice-view'
 import { PromptInput } from '../components/prompt-input'
 import { StatusLine } from '../components/status-line'
 import { TranscriptView } from '../components/transcript-view'
+import type { PromptHistory } from '../history'
+import { clearScreen } from '../terminal'
 import type { ChatSession, Notice } from './session'
 
 /** What the in-chat model picker is doing: `/model` fetches the catalog first. */
@@ -21,6 +23,8 @@ export interface ChatScreenProps {
   readonly session: ChatSession
   /** Shown in the status line, e.g. that this is the dev fake. */
   readonly banner?: string | undefined
+  /** What ↑ and ↓ in the prompt walk back through (#206). */
+  readonly history?: PromptHistory | undefined
   /** Called when the user has asked to leave — the second idle Ctrl+C, or a deleted chat. */
   readonly onExit: () => void
 }
@@ -28,13 +32,18 @@ export interface ChatScreenProps {
 /**
  * The chat screen: transcript, status line, prompt.
  *
- * All the state lives in {@link ChatSession}; this is the rendering of it, plus the two
- * pieces of interaction that belong to the screen rather than the prompt — Ctrl+C, and the
+ * All the state lives in {@link ChatSession}; this is the rendering of it, plus the pieces of
+ * interaction that belong to the screen rather than the prompt — Ctrl+C, Ctrl+L, and the
  * `/model` command, which opens the picker over the prompt (#114, epic #116 U3).
  */
-export function ChatScreen({ session, banner, onExit }: ChatScreenProps) {
+export function ChatScreen({ session, banner, history, onExit }: ChatScreenProps) {
   const view = useSyncExternalStore(session.subscribe, session.getState, session.getState)
   const [chooser, setChooser] = useState<ModelChooser>({ kind: 'closed' })
+  const { stdout } = useStdout()
+  const { suspendTerminal } = useApp()
+  // A clear is in flight. A second Ctrl+L while the first is being handed over has nowhere
+  // to go — Ink refuses to suspend a suspended terminal — so it is dropped instead.
+  const clearing = useRef(false)
 
   // A model-first session has no agent to name (issues #93, #95): the status line shows the
   // model that session runs. A pick that has not been sent yet is the model it *will* run,
@@ -59,7 +68,29 @@ export function ChatScreen({ session, banner, onExit }: ChatScreenProps) {
   // then, and cancelling it must not also arm (or trigger) the chat's exit.
   useInput((input, key) => {
     if (chooser.kind !== 'closed') return
-    if (!key.ctrl || input !== 'c') return
+    if (!key.ctrl) return
+
+    // Ctrl+L clears the screen and keeps the session (#206) — the prompt's own keys do not
+    // see it, because a control character that is not a binding is not text.
+    //
+    // The wipe goes *through* Ink rather than around it: `suspendTerminal` erases the frame
+    // Ink owns, hands the terminal over for the callback, and forces a full redraw on the way
+    // back. Writing the escape sequence by hand would clear the screen and then leave it
+    // blank, because the frame that followed is one Ink has already drawn and so never writes
+    // again. Settled messages are `Static` output and are not replayed, which is the point:
+    // the session keeps them, the view of it does not.
+    if (input === 'l') {
+      if (clearing.current) return
+      clearing.current = true
+      void suspendTerminal(() => {
+        clearScreen({ stdout })
+      }).finally(() => {
+        clearing.current = false
+      })
+      return
+    }
+
+    if (input !== 'c') return
     if (session.pressCtrlC() === 'exit') onExit()
   })
 
@@ -97,6 +128,7 @@ export function ChatScreen({ session, banner, onExit }: ChatScreenProps) {
         />
       ) : (
         <PromptInput
+          history={history}
           onSubmit={(text) => {
             if (text.trim() === '/model') {
               openChooser()

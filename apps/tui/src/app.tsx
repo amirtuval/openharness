@@ -9,6 +9,7 @@ import { createChatSession, type ChatSession } from './chat/session'
 import { resolveTarget } from './chat/target'
 import { ModelPicker } from './components/model-picker'
 import { describeError, type ErrorContext, type ErrorReport } from './errors'
+import type { PromptHistory } from './history'
 
 /** What the CLI should do once the app is done, and which session to point at on the way out. */
 export interface ExitPayload {
@@ -50,6 +51,16 @@ export interface AppProps {
   readonly context: ErrorContext
   /** Extra words in the status line, e.g. that this is the dev fake. */
   readonly banner?: string | undefined
+  /**
+   * Build the prompt history ↑ and ↓ walk (#206); omitted, there is none and the arrows only
+   * move between the buffer's lines.
+   *
+   * A function rather than a value because one is keyed by the *user*, which means a
+   * `client.me()` — and taking that round trip before the screen was drawn would leave `oh`
+   * silent, instead of saying "connecting to <server>…", for as long as the server takes to
+   * answer. This way it starts beside the session lookup and arrives when it arrives.
+   */
+  readonly loadHistory?: (() => Promise<PromptHistory | undefined>) | undefined
   /** How to leave; Ink's `exit` by default. Tests pass a spy to observe the payload. */
   readonly onExit?: ((payload: ExitPayload) => void) | undefined
 }
@@ -62,9 +73,10 @@ export interface AppProps {
  * second session — so the guard is a ref rather than a dependency list that object
  * identities would keep re-triggering.
  */
-export function App({ client, options, context, banner, onExit }: AppProps) {
+export function App({ client, options, context, banner, loadHistory, onExit }: AppProps) {
   const { exit } = useApp()
   const [screen, setScreen] = useState<Screen>({ kind: 'resolving' })
+  const [history, setHistory] = useState<PromptHistory | undefined>(undefined)
   const resolved = useRef(false)
   const left = useRef(false)
 
@@ -133,6 +145,21 @@ export function App({ client, options, context, banner, onExit }: AppProps) {
     },
     [client, context, openModel, screen],
   )
+
+  // The prompt's history (#206), started beside the session lookup rather than before the
+  // screen exists — nobody waits for it, and ↑ has it by the time a message could have been
+  // sent. A history that could not be built is no history; see `loadHistory`.
+  useEffect(() => {
+    if (loadHistory === undefined) return
+    let live = true
+    void (async () => {
+      const loaded = await loadHistory()
+      if (live) setHistory(loaded)
+    })()
+    return () => {
+      live = false
+    }
+  }, [loadHistory])
 
   useEffect(() => {
     if (resolved.current) return
@@ -207,6 +234,7 @@ export function App({ client, options, context, banner, onExit }: AppProps) {
         <ChatScreen
           session={screen.session}
           banner={banner}
+          history={history}
           onExit={() => {
             const { session } = screen
             session.dispose()
