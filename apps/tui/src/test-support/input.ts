@@ -31,16 +31,53 @@ const KEYS = {
   enter: '\r',
   /** Line feed: what Ctrl+J sends, and the prompt's newline. */
   newline: '\n',
+  ctrlA: '\u0001',
   ctrlC: '\u0003',
+  ctrlE: '\u0005',
+  ctrlK: '\u000B',
+  ctrlL: '\u000C',
+  ctrlU: '\u0015',
+  ctrlW: '\u0017',
+  /** Alt+letter is `ESC` + the letter, which Ink reports with the meta flag. */
+  altB: '\u001Bb',
+  altF: '\u001Bf',
+  /** Alt+Enter: `ESC` + `\r`, the second binding for a newline. */
+  altEnter: '\u001B\r',
+  /** Alt+Backspace is `ESC` + `0x7F`; a terminal sends it for "delete the word behind". */
+  altBackspace: '\u001B\u007F',
+  /** Ctrl+← and Ctrl+→ are the modifiable-cursor sequences, modifier 5 (Ctrl). */
+  ctrlLeft: '\u001B[1;5D',
+  ctrlRight: '\u001B[1;5C',
   up: '\u001B[A',
   down: '\u001B[B',
+  left: '\u001B[D',
+  right: '\u001B[C',
+  home: '\u001B[H',
+  end: '\u001B[F',
+  delete: '\u001B[3~',
   backspace: '\u007F',
+  tab: '\t',
   escape: '\u001B',
 } as const
 
 /** Press a named key. */
 export function pressKey(instance: TestInstance, key: keyof typeof KEYS): void {
   instance.stdin.write(KEYS[key])
+}
+
+/** What a terminal wraps a paste in, once bracketed paste mode is on. */
+const PASTE_START = '\u001B[200~'
+const PASTE_END = '\u001B[201~'
+
+/**
+ * Paste `text`, the way a terminal with bracketed paste mode does.
+ *
+ * The whole thing arrives as one write — one `data` event, one bracketed-paste sequence —
+ * which is exactly the difference between a paste and a very fast typist: writing the same
+ * characters one at a time is {@link typeText}, and the prompt handles it as keystrokes.
+ */
+export function paste(instance: TestInstance, text: string): void {
+  instance.stdin.write(`${PASTE_START}${text}${PASTE_END}`)
 }
 
 /** Type `text` and press Enter. */

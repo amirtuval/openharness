@@ -302,18 +302,34 @@ install, because there is nothing here for npm to replace.
 
 ## In the chat
 
-| key               | what it does                                                 |
-| ----------------- | ------------------------------------------------------------ |
-| `/model` + Enter  | pick a model; it applies from the next message and sticks    |
-| Enter             | send — also while a reply streams, which is what steering is |
-| Ctrl+J, Alt+Enter | insert a newline                                             |
-| ←/→, Home/End     | move the cursor; Backspace deletes behind it, Delete at it   |
-| Ctrl+C            | interrupt the running turn; pressed again when idle, leave   |
+| key                     | what it does                                                     |
+| ----------------------- | ---------------------------------------------------------------- |
+| `/model` + Enter        | pick a model; it applies from the next message and sticks        |
+| Enter                   | send — also while a reply streams, which is what steering is     |
+| Ctrl+J, Alt+Enter       | insert a newline                                                 |
+| ←/→, Home/End, Ctrl+A/E | move the cursor; Home/End and Ctrl+A/Ctrl+E take the line's ends |
+| Backspace / Delete      | delete behind the cursor, and at it                              |
+| Ctrl+U / Ctrl+K         | delete to the start of the line, and to its end                  |
+| Ctrl+W, Alt+Backspace   | delete the word before the cursor                                |
+| Alt+B / Alt+F, Ctrl+←/→ | jump a word back and forward                                     |
+| ↑/↓                     | the buffer's own lines first, then the history (#206)            |
+| Ctrl+L                  | clear the screen; the session stays (#206)                       |
+| Ctrl+C                  | interrupt the running turn; pressed again when idle, leave       |
 
 "Shift+Enter" is not a key a terminal can send — most send the same `\r` for both — so the
 newline is bound to **Ctrl+J** (line feed, `0x0A`, against Enter's `0x0D`), which every
 terminal can send and none confuses with Enter, and to **Alt+Enter** (`ESC` + `\r`) for muscle
-memory. A paste arrives as one chunk and is inserted verbatim, newlines included.
+memory.
+
+The editing keys are readline's (#206), and the cursor is drawn as an inverse-video cell,
+including on a multi-line buffer. A paste is one **bracketed-paste** event — Ink's `usePaste`,
+which turns bracketed paste mode on while the prompt is mounted — so it arrives as a single
+string that is inserted verbatim, newlines included, and nothing inside it can be read as a
+keypress: a pasted line ending does not send. A paste over 2,000 characters is shown collapsed
+as `[pasted N lines]` and sent in full. ↑/↓ walk what this user has sent to this server, kept
+in `~/.config/openharness/history.json` under the server and the user, capped at 500 entries;
+the full list of bindings, the file's shape and the "don't record" seam the hidden-input issue
+(#207, X7) will use are in [`docs/prompt.md`](./docs/prompt.md).
 
 On the way out the CLI prints `Resume this session with: oh -s <id>` — unless the session
 was deleted while the chat was open, when it prints `This chat was deleted; it is gone.`
@@ -338,11 +354,13 @@ src/
   args.ts                parseArgs: commands, flags, usage errors
   config.ts              flags > env > config file > default, and its errors
   credentials.ts         credentials.json: one token per server, atomic, 0600
+  atomic-write.ts        the atomic 0600 write credentials.json and history.json share
+  history.ts             history.json: the prompts ↑ walks, per server and user (#206)
   browser.ts             open the sign-in page (xdg-open / open / start), and when not to
   errors.ts              ApiError / fetch failures → a message and hints
   help.ts                the --help text
   signals.ts             SIGINT/SIGTERM/SIGHUP → handlers, and a disposer
-  terminal.ts            restoreTerminal: raw mode off, cursor shown
+  terminal.ts            restoreTerminal (raw mode off, cursor shown), and clearScreen
   version.ts             the version injected at build time
   paging.ts              listAll: walk next_page to the end of an agents/sessions list
   chat/
@@ -457,32 +475,34 @@ command), and `src/commands/auth.ts` against the fake's scripted device flow (ap
 denial, cancellation, revoke failures); `src/index.test.ts` drives `run()` all the way through
 `login` / `whoami` / `logout` with `XDG_CONFIG_HOME` pointed at a temp directory.
 
-| file                                              | covers                                                                                                      |
-| ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `src/index.test.ts`                               | `run()` end to end: the exit codes, login / whoami / logout, signals, `default-model` and `sessions delete` |
-| `src/args.test.ts`                                | `parseArgs` and `readVersion`: every command, unknown and conflicting flags                                 |
-| `src/config.test.ts`                              | the precedence chain, and the errors a bad config file produces                                             |
-| `src/credentials.test.ts`                         | the credentials file: atomic write, `0600`/`0700`, per-server tokens, a write that failed                   |
-| `src/browser.test.ts`                             | the skip rules and the per-platform command, with an injected spawn                                         |
-| `src/commands/auth.test.ts`                       | `oh login` / `logout` / `whoami` against the fake's scripted device flow, mid-poll cancellation included    |
-| `src/commands/preferences.test.ts`                | `oh default-model`: print, set, replace, the failures                                                       |
-| `src/commands/list.test.ts`, `src/paging.test.ts` | the listings, their formatting, `sessions delete`, and the `next_page` walk                                 |
-| `src/chat/session.test.ts`                        | the runtime: transcript, stream, send, `/model`, deleted sessions, dispose                                  |
-| `src/chat/target.test.ts`                         | session/model/agent selection, the default model, and the paging it needs                                   |
-| `src/chat/ctrl-c.test.ts`                         | the Ctrl+C rules: interrupt, arm, exit                                                                      |
-| `src/components/model-picker.test.tsx`            | the picker: windowing, number keys, the free-text row                                                       |
-| `src/app.test.tsx`                                | the Ink screens through `ink-testing-library` and `createFakeClient()`                                      |
-| `src/errors.test.ts`                              | `describeError`: the 401 line, the connection hints, 403/429, `--debug`                                     |
-| `src/signals.test.ts`, `src/terminal.test.ts`     | the signal handlers and `restoreTerminal`                                                                   |
-| `src/update/semver.test.ts`                       | the comparator: the three numbers, prereleases, and what is not a version                                   |
-| `src/update/decide.test.ts`                       | the off switches, the hourly throttle, and the claim (the pid liveness included)                            |
-| `src/update/state.test.ts`                        | `update-state.json`: the write, the tolerant read, and the once-only consume                                |
-| `src/update/detect.test.ts`                       | the global-install check, `bin` symlink and case-insensitivity included                                     |
-| `src/update/notice.test.ts`                       | the one line: its two shapes, the stream it goes to, and that it never repeats                              |
-| `src/update/npm.test.ts`                          | npm over a fake `npm` on `PATH`: the lookup, the timeout, and the detached check's whole program            |
-| `src/update/check.test.ts`                        | the foreground decision: the gate, the throttle, the claim, and the spawn, against a fake runner            |
-| `src/commands/update.test.ts`                     | `oh update`: up to date, installed, failed, and refused                                                     |
-| `src/dev/fake.test.ts`                            | the fake-mode gate and the seeded dev client                                                                |
+| file                                              | covers                                                                                                                        |
+| ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `src/index.test.ts`                               | `run()` end to end: the exit codes, login / whoami / logout, signals, `default-model` and `sessions delete`                   |
+| `src/args.test.ts`                                | `parseArgs` and `readVersion`: every command, unknown and conflicting flags                                                   |
+| `src/config.test.ts`                              | the precedence chain, and the errors a bad config file produces                                                               |
+| `src/credentials.test.ts`                         | the credentials file: atomic write, `0600`/`0700`, per-server tokens, a write that failed                                     |
+| `src/history.test.ts`                             | `history.json`: the list, the cap, consecutive duplicates, per server _and_ user, `record: false`, and the reads it tolerates |
+| `src/components/prompt-input.test.tsx`            | every prompt binding, the cursor's line, history browsing with a draft, multi-line navigation, and paste (#206)               |
+| `src/browser.test.ts`                             | the skip rules and the per-platform command, with an injected spawn                                                           |
+| `src/commands/auth.test.ts`                       | `oh login` / `logout` / `whoami` against the fake's scripted device flow, mid-poll cancellation included                      |
+| `src/commands/preferences.test.ts`                | `oh default-model`: print, set, replace, the failures                                                                         |
+| `src/commands/list.test.ts`, `src/paging.test.ts` | the listings, their formatting, `sessions delete`, and the `next_page` walk                                                   |
+| `src/chat/session.test.ts`                        | the runtime: transcript, stream, send, `/model`, deleted sessions, dispose                                                    |
+| `src/chat/target.test.ts`                         | session/model/agent selection, the default model, and the paging it needs                                                     |
+| `src/chat/ctrl-c.test.ts`                         | the Ctrl+C rules: interrupt, arm, exit                                                                                        |
+| `src/components/model-picker.test.tsx`            | the picker: windowing, number keys, the free-text row                                                                         |
+| `src/app.test.tsx`                                | the Ink screens through `ink-testing-library` and `createFakeClient()`                                                        |
+| `src/errors.test.ts`                              | `describeError`: the 401 line, the connection hints, 403/429, `--debug`                                                       |
+| `src/signals.test.ts`, `src/terminal.test.ts`     | the signal handlers and `restoreTerminal`                                                                                     |
+| `src/update/semver.test.ts`                       | the comparator: the three numbers, prereleases, and what is not a version                                                     |
+| `src/update/decide.test.ts`                       | the off switches, the hourly throttle, and the claim (the pid liveness included)                                              |
+| `src/update/state.test.ts`                        | `update-state.json`: the write, the tolerant read, and the once-only consume                                                  |
+| `src/update/detect.test.ts`                       | the global-install check, `bin` symlink and case-insensitivity included                                                       |
+| `src/update/notice.test.ts`                       | the one line: its two shapes, the stream it goes to, and that it never repeats                                                |
+| `src/update/npm.test.ts`                          | npm over a fake `npm` on `PATH`: the lookup, the timeout, and the detached check's whole program                              |
+| `src/update/check.test.ts`                        | the foreground decision: the gate, the throttle, the claim, and the spawn, against a fake runner                              |
+| `src/commands/update.test.ts`                     | `oh update`: up to date, installed, failed, and refused                                                                       |
+| `src/dev/fake.test.ts`                            | the fake-mode gate and the seeded dev client                                                                                  |
 
 Every `run()` test gets its own `XDG_CONFIG_HOME` (`index.test.ts` creates one per test):
 without it the suite reads the developer's real `~/.config/openharness`, where a hand-written

@@ -58,5 +58,12 @@ In the chat:
   /model                       pick a model; it applies from the next message
   Enter                        send (works while the agent is replying — steering)
   Ctrl+J / Alt+Enter           insert a newline
+  ←/→, Home/End                move the cursor; Ctrl+A, Ctrl+E for the ends of the line
+  ↑/↓                          walk what you have sent before, and a draft's own lines
+  Backspace, Delete            delete behind the cursor, and at it
+  Ctrl+U, Ctrl+K               delete to the start of the line, and to its end
+  Ctrl+W, Alt+Backspace        delete the word before the cursor
+  Alt+B, Alt+F, Ctrl+←/→       jump a word back and forward
+  Ctrl+L                       clear the screen; the session stays
   Ctrl+C                       interrupt the reply; press twice when idle to exit
 `

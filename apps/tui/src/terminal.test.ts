@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { restoreTerminal } from './terminal'
+import { clearScreen, restoreTerminal } from './terminal'
 
 describe('restoreTerminal', () => {
   it('turns raw mode off on the way out', () => {
@@ -51,5 +51,25 @@ describe('restoreTerminal', () => {
     for (const call of write.mock.calls) {
       expect(call[0]).toContain('[?25h')
     }
+  })
+})
+
+describe('clearScreen', () => {
+  it('wipes the display, the scrollback behind it, and puts the cursor home', () => {
+    const write = vi.fn()
+
+    clearScreen({ stdout: { isTTY: true, write } })
+
+    // `2J` is the screen, `3J` the scrollback settled messages live in, `H` the top-left
+    // corner — all three, or Ctrl+L would only move the prompt up the screen (#206).
+    expect(write).toHaveBeenCalledWith('\u001B[2J\u001B[3J\u001B[H')
+  })
+
+  it('writes nothing to a stream that is not a terminal', () => {
+    const write = vi.fn()
+
+    clearScreen({ stdout: { isTTY: false, write } })
+
+    expect(write).not.toHaveBeenCalled()
   })
 })

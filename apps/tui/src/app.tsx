@@ -9,6 +9,7 @@ import { createChatSession, type ChatSession } from './chat/session'
 import { resolveTarget } from './chat/target'
 import { ModelPicker } from './components/model-picker'
 import { describeError, type ErrorContext, type ErrorReport } from './errors'
+import type { PromptHistory } from './history'
 
 /** What the CLI should do once the app is done, and which session to point at on the way out. */
 export interface ExitPayload {
@@ -50,6 +51,11 @@ export interface AppProps {
   readonly context: ErrorContext
   /** Extra words in the status line, e.g. that this is the dev fake. */
   readonly banner?: string | undefined
+  /**
+   * The prompts this user has sent to this server, for ↑ and ↓ (#206). Omitted there is
+   * none — the prompt still works, and the arrows only move between lines.
+   */
+  readonly history?: PromptHistory | undefined
   /** How to leave; Ink's `exit` by default. Tests pass a spy to observe the payload. */
   readonly onExit?: ((payload: ExitPayload) => void) | undefined
 }
@@ -62,7 +68,7 @@ export interface AppProps {
  * second session — so the guard is a ref rather than a dependency list that object
  * identities would keep re-triggering.
  */
-export function App({ client, options, context, banner, onExit }: AppProps) {
+export function App({ client, options, context, banner, history, onExit }: AppProps) {
   const { exit } = useApp()
   const [screen, setScreen] = useState<Screen>({ kind: 'resolving' })
   const resolved = useRef(false)
@@ -207,6 +213,7 @@ export function App({ client, options, context, banner, onExit }: AppProps) {
         <ChatScreen
           session={screen.session}
           banner={banner}
+          history={history}
           onExit={() => {
             const { session } = screen
             session.dispose()

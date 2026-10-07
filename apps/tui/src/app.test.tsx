@@ -1,12 +1,15 @@
 import { ApiError, type Client } from '@openharness/client'
 import { createFakeClient, type FakeClient } from '@openharness/client/testing'
 import { cleanup, render } from 'ink-testing-library'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { makeModelEntry } from '@openharness/protocol/fixtures'
 
 import { App, type ExitPayload } from './app'
 import type { ChatOptions } from './args'
+import type { PromptHistory } from './history'
 import { listingAgents } from './test-support/fake'
 import {
   frameOf,
@@ -27,13 +30,14 @@ function chatOptions(overrides: Partial<ChatOptions> = {}): ChatOptions {
 }
 
 /** Render the app against a client and record how it leaves. */
-function renderApp(client: Client, options: ChatOptions = chatOptions()) {
+function renderApp(client: Client, options: ChatOptions = chatOptions(), history?: PromptHistory) {
   const exits: ExitPayload[] = []
   const instance = render(
     <App
       client={client}
       options={options}
       context={CONTEXT}
+      history={history}
       onExit={(payload) => {
         exits.push(payload)
       }}
@@ -41,6 +45,23 @@ function renderApp(client: Client, options: ChatOptions = chatOptions()) {
   )
 
   return { ...instance, exits }
+}
+
+/**
+ * A prompt history that is only a list, for the tests that go through the whole app.
+ *
+ * The store's own file is covered in `history.test.ts`; what these tests are about is that
+ * the screen hands the history down to the prompt, and that a send reaches it.
+ */
+function fakeHistory(entries: readonly string[] = []): PromptHistory {
+  const list = [...entries]
+  return {
+    path: join(tmpdir(), 'oh-app-test', 'history.json'),
+    entries: () => list,
+    add(text) {
+      list.push(text)
+    },
+  }
 }
 
 type TestApp = TestInstance & { exits: ExitPayload[] }
@@ -480,6 +501,42 @@ describe('App', () => {
     await waitForFrame(app, /you › first line\n\s+second line/u)
     await waitForFrame(app, 'agent › Noted.')
     expect(userTexts(fake, sessionId)).toEqual(['first line\nsecond line'])
+  })
+
+  it('walks the history the screen handed the prompt, and adds to it (#206)', async () => {
+    const fake = createFakeClient()
+    fake.respondWith('Noted.')
+    const history = fakeHistory(['an older prompt'])
+    const app = renderApp(fake, chatOptions({ session: fake.session.id }), history)
+    await waitForChat(app, fake.session.id)
+
+    // ↑ recalls what an earlier `oh` was told, on this server and by this user.
+    pressKey(app, 'up')
+    await waitForFrame(app, '❯ an older prompt')
+
+    pressKey(app, 'down')
+    submit(app, 'something new')
+    await waitForFrame(app, 'you › something new')
+
+    // …and what this chat sent is there for the next ↑, which is the point of a history.
+    pressKey(app, 'up')
+    await waitForFrame(app, '❯ something new')
+  })
+
+  it('clears the screen on Ctrl+L and keeps the chat (#206)', async () => {
+    const fake = createFakeClient()
+    const app = renderApp(fake, chatOptions({ session: fake.session.id }))
+    await waitForChat(app, fake.session.id)
+    submit(app, 'Hi.')
+    await waitForFrame(app, 'you › Hi.')
+
+    pressKey(app, 'ctrlL')
+
+    // The session is untouched: the transcript is still there and the chat still takes keys.
+    expect(app.exits).toEqual([])
+    expect(frameOf(app)).toContain('you › Hi.')
+    submit(app, 'Still here.')
+    await waitForFrame(app, 'you › Still here.')
   })
 
   it('steers while a reply is streaming', async () => {
