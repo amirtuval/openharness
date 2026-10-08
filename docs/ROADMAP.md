@@ -7,7 +7,7 @@ plan between phases.
 For a survey of what other harnesses offer (Claude Code, Managed Agents, OpenCode, Codex, pi),
 see the [harness feature inventory](./research/harness-features.md).
 
-_Last updated: 2026-10-07._
+_Last updated: 2026-10-08._
 
 ## Where we are
 
@@ -129,7 +129,9 @@ is in [`DEPLOYMENT.md`](./DEPLOYMENT.md) and [`RELEASING.md`](./RELEASING.md).
 - the **model catalog** and **model-first chat** shipped early in
   [epic #92](https://github.com/amirtuval/openharness/issues/92) (closed 2026-10-04):
   - New chat picks a model from the models the user's own keys can use, read live from each
-    provider's API and joined with Mastra's registry for filtering and context windows;
+    provider's API and joined with Mastra's registry for filtering and context windows
+    (Mastra is being replaced by the official AI SDK providers and a vendored models.dev
+    snapshot: [#234](https://github.com/amirtuval/openharness/issues/234));
   - sessions carry their own model, and agents are optional;
   - customizable agents are hidden from the UI until they return as an advanced feature
     ([#96](https://github.com/amirtuval/openharness/issues/96)).
@@ -195,8 +197,8 @@ own.
 
 - **Programmatic access:** personal API keys, SDK and script access (no static server key
   any more).
-- **Organizations, teams and sharing:** shared agents and sessions, roles, invitations, and an
-  `author` on each user event once a session can have several people.
+- **Organizations, teams and sharing:** shared agents, roles and invitations. Shared
+  _sessions_ are spelled out under [Multi-user chat](#multi-user-chat) below.
 - **CLI and web polish:** a lot of smaller UX work in both clients, collected while testing v1.
 - **Context compaction:** summarizing old history for the model. This is separate from #46's
   event-store compaction.
@@ -218,7 +220,67 @@ own.
 - **Multiple agents:** subagents, background and parallel agents.
 - **Smaller follow-ups:**
   - merge streamed deltas (e.g. every ~50 ms) to cut writes, when performance matters;
-  - a tab watching a session started in another tab may not show the new title until reload.
+  - a tab watching a session started in another tab may not show the new title until reload;
+  - the session list has no live stream, so a chat created in one tab or in `oh` appears in
+    another tab's sidebar only after it refetches the list.
+
+## Multi-user chat
+
+Several people in one session, talking to the model together. Not ordered yet.
+
+**What already works.** Several clients of the **same** user on one session (a web tab and
+`oh`, or two tabs, on any server instance) are supported today, and this is what the event
+log was built for:
+
+- every SSE connection subscribes to the store on its own, and on Postgres a `LISTEN/NOTIFY`
+  connection fans each append out to every instance;
+- a connection subscribes, replays from `after_seq` / `Last-Event-ID`, then de-duplicates by
+  `seq`, so a client that joins mid-reply resumes mid-reply (streamed chunks are stored
+  events since #46);
+- two clients sending at once is safe: a message is an append, one brain claims it (fenced
+  claims and partition leases), and a message that arrives during a turn becomes a steer;
+- every client rebuilds the same order from the log (`packages/client/src/transcript.ts`).
+
+So the event log and its fan-out need no changes for multi-user chat. What's missing is
+everything around them:
+
+1. **Membership instead of one owner.** Every session has a single `owner_id` (migration
+   `0012_ownership.sql`), and every read and write is scoped to it, with 404 for anyone else.
+   This needs a membership table (owner and members, maybe a read-only viewer role), invites
+   (by email or link), and the `/v1` session routes, SSE stream and AI SDK adapter checking
+   membership instead of ownership. The session list shows shared sessions too.
+2. **An author on user events.** `user.message` and `user.interrupt` don't record who sent
+   them. Add `author` (a user id, stamped by the server and never taken from the client) to
+   the protocol, so clients can show who said what. Old events have none and are read as the
+   owner's.
+3. **The model must know who's speaking.** The context builder prefixes, or otherwise marks,
+   each user message with its author's display name, and the system prompt says the chat has
+   several participants. The log stores the raw message and the request records what was
+   sent, as it does now.
+4. **Whose key pays.** Today each request is made with the session owner's provider key. In a
+   shared session, decide between: the owner always pays, which is simple but means members
+   spend the owner's tokens (that needs a per-session or per-member budget, which ties into
+   phase 4's usage and budgets); or each request uses the key of whoever sent the message
+   being answered, which breaks down when one request answers messages from several people.
+   The leaning is that the owner pays, with a budget.
+5. **Turn-taking.** Steering suits one person. With several, A's message mid-turn redirects
+   the reply to B. Options: group sessions queue follow-ups instead of steering them (this
+   needs the follow-up messages and `queue_update` items listed under "Later"), or one message
+   per participant per turn, or steering only by whoever started the turn. Interrupts need a
+   rule too (anyone, or the owner only).
+6. **Per-message model switches.** `user.message.model` changes the session's model for
+   everyone. In a shared session, restrict it to the owner or make it visible as an event in
+   every client.
+7. **Revocation and removal.** Removing a member must close their open streams the way a
+   sign-out does today (`session-watch.ts` keys streams by auth session). Their stream should
+   end with a clear "removed from this chat" frame, not a generic error.
+8. **Presence (optional).** Who's watching and who's typing, as stream-only events that are
+   never stored.
+
+**Open:** whether sharing is per session only, or through the organizations/teams work
+above; whether a member can fork a shared session into a private one (ties into "fork or
+branch" under Session features); and read-only share links, which are a cheaper first step
+that needs only items 1 and 7.
 
 ## Ideas from other harnesses (low priority)
 
