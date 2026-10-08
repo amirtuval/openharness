@@ -1,4 +1,9 @@
-import type { ModelUsage } from '@openharness/protocol'
+import {
+  PROVIDERS as SHARED_PROVIDERS,
+  PROVIDER_IDS,
+  type ModelUsage,
+  type ProviderId,
+} from '@openharness/protocol'
 import { createAnthropic } from '@ai-sdk/anthropic'
 import { createCerebras } from '@ai-sdk/cerebras'
 import { createDeepSeek } from '@ai-sdk/deepseek'
@@ -86,13 +91,14 @@ interface ProviderClient {
 }
 
 /**
- * The providers a `provider/model` id may name, and the client each one is built with.
+ * The providers a `provider/model` id may name, and the client each one is built with, keyed
+ * by the shared provider id (`@openharness/protocol`, epic #245).
  *
- * **This table is the brain's copy of `VALIDATABLE_PROVIDERS`** (`apps/server`'s). They have to
- * agree — a provider a key can be saved for must be one a request can be made to — and the
- * server's `model-catalog.test.ts` pins that they do.
+ * The table used to be the brain's own copy of the server's list, held in step by a test in
+ * `apps/server`; now it is typed against `ProviderId`, so a provider a key can be saved for
+ * and a request cannot be made to is a compile error here rather than a test failure there.
  */
-const PROVIDERS: Readonly<Record<string, ProviderClient>> = {
+const PROVIDER_CLIENTS: Readonly<Record<ProviderId, ProviderClient>> = {
   anthropic: {
     baseURL: 'https://api.anthropic.com/v1',
     model: (options) => createAnthropic(options),
@@ -147,18 +153,28 @@ const PROVIDERS: Readonly<Record<string, ProviderClient>> = {
 /**
  * Every provider id {@link providerModelFactory} can build a model for, in table order.
  *
- * The same 11 ids as `VALIDATABLE_PROVIDERS`, and the same set the client's model picker
- * offers. Exported so a host can check its own list against it rather than restate it.
+ * The shared list's ids (`@openharness/protocol`), which are the same ones the server stores a
+ * key for and the frontends offer. Exported so a host can check its own list against it rather
+ * than restate it.
  */
-export const SUPPORTED_PROVIDERS: readonly string[] = Object.keys(PROVIDERS)
+export const SUPPORTED_PROVIDERS: readonly ProviderId[] = PROVIDER_IDS
+
+/** The model client for a provider id, or `undefined` for one this build has none for. */
+function providerClientFor(provider: string): ProviderClient | undefined {
+  // `Object.hasOwn`, not a bare index: a `provider/model` whose first half names an inherited
+  // property (`toString`, `constructor`) is an unsupported provider, not a client.
+  return Object.hasOwn(PROVIDER_CLIENTS, provider)
+    ? PROVIDER_CLIENTS[provider as ProviderId]
+    : undefined
+}
 
 /**
  * A `provider/model` id naming a provider this build has no client for.
  *
- * A provider outside {@link PROVIDERS} cannot have a credential stored (the server refuses one
- * it cannot validate), so the only way here is a session whose `model.id` names a provider
- * nobody configured — and the turn ends on it at the request boundary, the way a missing
- * credential does, rather than reaching a provider it could not authenticate to.
+ * A provider outside {@link PROVIDER_CLIENTS} cannot have a credential stored (the server
+ * refuses one it cannot validate), so the only way here is a session whose `model.id` names a
+ * provider nobody configured — and the turn ends on it at the request boundary, the way a
+ * missing credential does, rather than reaching a provider it could not authenticate to.
  */
 export class UnsupportedProviderError extends Error {
   /** The provider id, as {@link providerOf} read it. */
@@ -197,8 +213,8 @@ export function isUnsupportedProviderError(value: unknown): value is Unsupported
  *
  * `provider/model` is what the protocol documents for a session's `model.id`, and the part
  * before the first slash chooses the client — `@ai-sdk/anthropic`, `@ai-sdk/openai`,
- * `@ai-sdk/google` and the rest of {@link PROVIDERS} — built with the request's key and the
- * pinned base URL. The key is a **constructor argument** and nothing else: the provider
+ * `@ai-sdk/google` and the rest of {@link PROVIDER_CLIENTS} — built with the request's key and
+ * the pinned base URL. The key is a **constructor argument** and nothing else: the provider
  * packages read their `*_API_KEY` variable only when they were given no key, so a request with
  * an explicit one can never fall back to the environment (epic #65, A5). The key still has to
  * be non-blank for that reason — `isUsableCredential` checks it before `runTurn` gets this far,
@@ -218,7 +234,7 @@ export function isUnsupportedProviderError(value: unknown): value is Unsupported
  */
 export const providerModelFactory: ModelFactory = (modelId, credential) => {
   const provider = providerOf(modelId)
-  const client = PROVIDERS[provider]
+  const client = providerClientFor(provider)
   if (client === undefined) {
     throw new UnsupportedProviderError(provider)
   }
@@ -260,25 +276,18 @@ export function isUsableCredential(
   return credential !== null && credential.apiKey.trim().length > 0
 }
 
-/** How a provider id is spelled for a person: the ones we know, by their own capitalisation. */
-const PROVIDER_DISPLAY_NAMES: Readonly<Record<string, string>> = {
-  anthropic: 'Anthropic',
-  deepseek: 'DeepSeek',
-  fireworks: 'Fireworks',
-  google: 'Google',
-  groq: 'Groq',
-  openai: 'OpenAI',
-  openrouter: 'OpenRouter',
-}
-
 /**
  * What the log says when a request had no credential to make: a sentence for the user, naming
  * the provider so a client can point at the right Settings entry (epic #65, A5).
  *
+ * The name is the shared list's (`@openharness/protocol`), so it is the same words a frontend
+ * puts on a provider's tile; a provider the list does not carry — a session whose `model.id`
+ * names something nobody configured — falls back to its capitalised id.
+ *
  * @param provider the provider id, as {@link providerOf} read it
  */
 export function missingCredentialMessage(provider: string): string {
-  const name = PROVIDER_DISPLAY_NAMES[provider] ?? capitalize(provider)
+  const name = SHARED_PROVIDERS.find((entry) => entry.id === provider)?.name ?? capitalize(provider)
   return `No ${name} key is set. Add one in Settings → Model providers.`
 }
 

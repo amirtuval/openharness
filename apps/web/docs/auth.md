@@ -148,8 +148,9 @@ anywhere: not in a list, not in a status line, not in an error. The tests assert
 against the DOM after a save.
 
 Which providers are offered comes from `@openharness/client`'s `PROVIDERS` (name, key URL,
-free-tier hint, credential type) and is **the same set as the server's `VALIDATABLE_PROVIDERS`**
-— `e2e/src/provider-metadata.test.ts` is what holds the two together. That is also why the old
+free-tier hint, credential type), which is built from the shared provider list in
+`@openharness/protocol` — the same list the server's `VALIDATABLE_PROVIDERS` and its model-list
+table are keyed by (#245). That is also why the old
 "Custom…" free-text provider id is gone: with the list complete, a typed id could only name a
 provider whose key the server refuses on save.
 

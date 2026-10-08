@@ -5,44 +5,32 @@
  * The model catalogue reads its metadata from a snapshot committed to this repository
  * (`src/catalog/models-dev.json`, bundled into `dist/`), never from the network (C2's rule,
  * unchanged). This script is the one place that reaches out: it fetches models.dev once,
- * keeps the 11 providers this server can validate a key for
- * (`VALIDATABLE_PROVIDERS`), reduces each model to the fields the catalogue's join and the
- * usage routes read — name, limits and list prices — and writes the file back.
+ * keeps the providers of the shared list (`@openharness/protocol`'s `PROVIDERS`, epic #245),
+ * reduces each model to the fields the catalogue's join and the usage routes read — name,
+ * limits and list prices — and writes the file back.
  *
  * Run it by hand when the data should move — `yarn workspace @openharness/server
  * catalog:refresh` — and commit the diff. Nothing runs it at build, test or boot time, so a
  * sandbox with no network still builds: the snapshot is a source file, like any other.
  *
+ * **The list is the protocol package's, not this script's.** It is read from protocol's build
+ * output — the same `dist/` every other consumer reads — so the ids, their order and the
+ * models.dev keys cannot drift from what the server validates and lists. That is also why the
+ * script is run after a build: `yarn build` at the root, or `yarn build:deps` in
+ * `apps/server`, before `catalog:refresh`.
+ *
  * The provider keys models.dev uses are not always ours. models.dev spells two of the eleven
- * by product name; the table below is the whole of the mapping, and the snapshot is keyed by
- * **our** ids so nothing downstream has to know models.dev's spelling.
+ * by product name, and the shared list carries the mapping (`modelsDevKey`); the snapshot is
+ * keyed by **our** ids so nothing downstream has to know models.dev's spelling.
  */
 
 import { writeFile } from 'node:fs/promises'
 
+import { PROVIDERS } from '@openharness/protocol'
+
 /** Where the snapshot lives, and where it comes from. */
 const SNAPSHOT_URL = new URL('../src/catalog/models-dev.json', import.meta.url)
 const SOURCE = 'https://models.dev/api.json'
-
-/**
- * Our provider id → models.dev's key. The identity for nine of the eleven; `fireworks` and
- * `together` are models.dev's `fireworks-ai` and `togetherai` (the spelling the router id and
- * `VALIDATABLE_PROVIDERS` do not use). Keyed by models.dev's name so the fetch can be read as
- * written, and inverted below.
- */
-const MODELS_DEV_KEYS = {
-  anthropic: 'anthropic',
-  openai: 'openai',
-  google: 'google',
-  openrouter: 'openrouter',
-  groq: 'groq',
-  deepseek: 'deepseek',
-  fireworks: 'fireworks-ai',
-  mistral: 'mistral',
-  together: 'togetherai',
-  xai: 'xai',
-  cerebras: 'cerebras',
-}
 
 /** Today, as `YYYY-MM-DD` — the date the snapshot was taken, recorded in the file. */
 function today() {
@@ -105,23 +93,23 @@ function reduceModel(model) {
   return reduced
 }
 
-/** The whole snapshot: the date, the source, and one entry per provider. */
+/** The whole snapshot: the date, the source, and one entry per provider, in the list's order. */
 function buildSnapshot(data) {
   const providers = {}
-  for (const [provider, key] of Object.entries(MODELS_DEV_KEYS)) {
-    const entry = data[key]
+  for (const { id, modelsDevKey } of PROVIDERS) {
+    const entry = data[modelsDevKey]
     if (entry === undefined || entry.models === undefined) {
       throw new Error(
-        `models.dev knows no ${key} (our ${provider}); refusing to write a partial snapshot`,
+        `models.dev knows no ${modelsDevKey} (our ${id}); refusing to write a partial snapshot`,
       )
     }
     const models = {}
-    for (const [id, model] of Object.entries(entry.models)) {
-      models[id] = reduceModel(model)
+    for (const [modelId, model] of Object.entries(entry.models)) {
+      models[modelId] = reduceModel(model)
     }
-    providers[provider] = {
-      key,
-      name: entry.name ?? provider,
+    providers[id] = {
+      key: modelsDevKey,
+      name: entry.name ?? id,
       models,
     }
   }

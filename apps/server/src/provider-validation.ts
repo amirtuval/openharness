@@ -15,6 +15,8 @@
  * a deployment sets, so saving a key works behind a proxy exactly as listing models does.
  */
 
+import { PROVIDER_IDS, type ProviderId } from '@openharness/protocol'
+
 import {
   createProviderFetch,
   type ProviderFetch,
@@ -26,30 +28,19 @@ const providerFetch: ProviderFetch = createProviderFetch()
 
 /**
  * The providers this server can validate — the `provider/model` provider ids whose one-key
- * providers have a cheap authenticated read. The protocol stores any provider string; a key for one outside
- * this set is refused on save because it cannot be validated, rather than stored unchecked.
+ * providers have a cheap authenticated read. The protocol stores any provider string; a key for
+ * one outside this set is refused on save because it cannot be validated, rather than stored
+ * unchecked.
  *
- * Every one of these has a model-list adapter in `catalog/adapters.ts` — the catalogue could
- * not list a provider whose key cannot be stored, and saving a key for a provider the
- * catalogue cannot list would be a dead end. `model-catalog.test.ts` pins the invariant: the
- * two tables grow together.
+ * The set is the shared provider list's (`@openharness/protocol`): every provider openharness
+ * knows has a cheap read here, a model-list adapter in `catalog/adapters.ts` and a model client
+ * in the brain. That used to be three tables and a test; since #245 each table is typed against
+ * `ProviderId`, so a provider missing from one is a compile error rather than a failure here.
  */
-export const VALIDATABLE_PROVIDERS = [
-  'anthropic',
-  'openai',
-  'google',
-  'openrouter',
-  'groq',
-  'deepseek',
-  'fireworks',
-  'mistral',
-  'together',
-  'xai',
-  'cerebras',
-] as const
+export const VALIDATABLE_PROVIDERS: readonly ProviderId[] = PROVIDER_IDS
 
 /** A provider id {@link VALIDATABLE_PROVIDERS} knows. */
-export type ValidatableProvider = (typeof VALIDATABLE_PROVIDERS)[number]
+export type ValidatableProvider = ProviderId
 
 /** Checks that a key authenticates against a provider; throws when it does not. */
 export type ProviderCredentialValidator = (provider: string, apiKey: string) => Promise<void>
@@ -96,68 +87,75 @@ export const validateProviderApiKey: ProviderCredentialValidator = async (provid
 }
 
 /** The one cheap, authenticated read that proves a key: `GET <url>` with these headers. */
-function requestFor(
-  provider: string,
-  apiKey: string,
-): { readonly url: string; readonly headers: Record<string, string> } | null {
-  switch (provider) {
-    case 'anthropic':
-      return {
-        url: 'https://api.anthropic.com/v1/models?limit=1',
-        headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
-      }
-    case 'openai':
-      return {
-        url: 'https://api.openai.com/v1/models',
-        headers: { authorization: `Bearer ${apiKey}` },
-      }
-    case 'google':
-      return {
-        url: 'https://generativelanguage.googleapis.com/v1beta/models?pageSize=1',
-        headers: { 'x-goog-api-key': apiKey },
-      }
-    case 'openrouter':
-      // The key's own metadata: the cheapest authenticated call OpenRouter answers.
-      return {
-        url: 'https://openrouter.ai/api/v1/key',
-        headers: { authorization: `Bearer ${apiKey}` },
-      }
-    case 'groq':
-      return {
-        url: 'https://api.groq.com/openai/v1/models',
-        headers: { authorization: `Bearer ${apiKey}` },
-      }
-    case 'deepseek':
-      return {
-        url: 'https://api.deepseek.com/models',
-        headers: { authorization: `Bearer ${apiKey}` },
-      }
-    case 'fireworks':
-      return {
-        url: 'https://api.fireworks.ai/inference/v1/models',
-        headers: { authorization: `Bearer ${apiKey}` },
-      }
-    case 'mistral':
-      return {
-        url: 'https://api.mistral.ai/v1/models',
-        headers: { authorization: `Bearer ${apiKey}` },
-      }
-    case 'together':
-      return {
-        url: 'https://api.together.xyz/v1/models',
-        headers: { authorization: `Bearer ${apiKey}` },
-      }
-    case 'xai':
-      return {
-        url: 'https://api.x.ai/v1/models',
-        headers: { authorization: `Bearer ${apiKey}` },
-      }
-    case 'cerebras':
-      return {
-        url: 'https://api.cerebras.ai/v1/models',
-        headers: { authorization: `Bearer ${apiKey}` },
-      }
-    default:
-      return null
+interface ValidationRequest {
+  readonly url: string
+  readonly headers: Record<string, string>
+}
+
+/**
+ * The validating request per provider, as a table typed against the shared list (#245): a
+ * provider with no request is a compile error, not a key that silently cannot be saved.
+ *
+ * Every entry is a constant: the URL never comes from a request, so a key can only be sent to
+ * the provider it was stored for.
+ */
+const VALIDATION_REQUESTS: Readonly<Record<ProviderId, (apiKey: string) => ValidationRequest>> = {
+  anthropic: (apiKey) => ({
+    url: 'https://api.anthropic.com/v1/models?limit=1',
+    headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+  }),
+  openai: (apiKey) => ({
+    url: 'https://api.openai.com/v1/models',
+    headers: { authorization: `Bearer ${apiKey}` },
+  }),
+  google: (apiKey) => ({
+    url: 'https://generativelanguage.googleapis.com/v1beta/models?pageSize=1',
+    headers: { 'x-goog-api-key': apiKey },
+  }),
+  // The key's own metadata: the cheapest authenticated call OpenRouter answers.
+  openrouter: (apiKey) => ({
+    url: 'https://openrouter.ai/api/v1/key',
+    headers: { authorization: `Bearer ${apiKey}` },
+  }),
+  groq: (apiKey) => ({
+    url: 'https://api.groq.com/openai/v1/models',
+    headers: { authorization: `Bearer ${apiKey}` },
+  }),
+  deepseek: (apiKey) => ({
+    url: 'https://api.deepseek.com/models',
+    headers: { authorization: `Bearer ${apiKey}` },
+  }),
+  fireworks: (apiKey) => ({
+    url: 'https://api.fireworks.ai/inference/v1/models',
+    headers: { authorization: `Bearer ${apiKey}` },
+  }),
+  mistral: (apiKey) => ({
+    url: 'https://api.mistral.ai/v1/models',
+    headers: { authorization: `Bearer ${apiKey}` },
+  }),
+  together: (apiKey) => ({
+    url: 'https://api.together.xyz/v1/models',
+    headers: { authorization: `Bearer ${apiKey}` },
+  }),
+  xai: (apiKey) => ({
+    url: 'https://api.x.ai/v1/models',
+    headers: { authorization: `Bearer ${apiKey}` },
+  }),
+  cerebras: (apiKey) => ({
+    url: 'https://api.cerebras.ai/v1/models',
+    headers: { authorization: `Bearer ${apiKey}` },
+  }),
+}
+
+/**
+ * The request that validates a key for `provider`, or `null` for a provider the table has no
+ * entry for — a provider the server refuses on save rather than storing unchecked. The lookup
+ * is `Object.hasOwn` rather than a bare index so a provider string that names an inherited
+ * property (`toString`, `constructor`) is a miss, not a function call.
+ */
+function requestFor(provider: string, apiKey: string): ValidationRequest | null {
+  if (!Object.hasOwn(VALIDATION_REQUESTS, provider)) {
+    return null
   }
+  return VALIDATION_REQUESTS[provider as ProviderId](apiKey)
 }

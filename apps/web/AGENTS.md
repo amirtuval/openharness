@@ -488,8 +488,9 @@ the way `NEW_CHAT_GREETING` is, and the ✨ sits outside the gradient span.
 - **Tiles** come from `@openharness/client`'s `PROVIDERS`, one per provider, each with its mark
   and its free-tier hint (X8) drawn as a coral chip (`components/providers/free-tier-chip.tsx`,
   the one place that hint is styled — the tiles and the key form both render it). The list is
-  complete by construction: it is the same set as the server's `VALIDATABLE_PROVIDERS`, held
-  together by `e2e/src/provider-metadata.test.ts`.
+  complete by construction: since #245 it is built from the shared provider list in
+  `@openharness/protocol`, the same list the server's validation and model-list tables are keyed
+  by, so the two cannot drift.
 - **The form** is `components/providers/provider-key-form.tsx`, and it is the only place a key is
   typed in this app — the first-run screen, the Add-provider dialog and Settings all render it,
   so "paste and validate" means the same thing everywhere. **Its fields come from the credential

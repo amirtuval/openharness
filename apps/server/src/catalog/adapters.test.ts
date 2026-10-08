@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { SUPPORTED_PROVIDERS } from '@openharness/brain'
+import { PROVIDER_IDS } from '@openharness/protocol'
 
-import { VALIDATABLE_PROVIDERS } from '../provider-validation'
 import { adaptedProviders, adapterFor } from './adapters'
 
 /**
@@ -21,21 +20,15 @@ function adapter(provider: string) {
 }
 
 describe('the table', () => {
-  it('covers every provider whose key can be stored', () => {
-    // The invariant that keeps the two lists in step: saving a key for a provider the
-    // catalogue cannot list would be a dead end, so VALIDATABLE_PROVIDERS ⊆ the adapters.
-    for (const provider of VALIDATABLE_PROVIDERS) {
-      expect(adapterFor(provider), `${provider} has no model-list adapter`).not.toBeNull()
+  it('has an adapter for every provider of the shared list, under that provider id', () => {
+    // The table is a `Record<ProviderId, …>` (#245), so a missing provider is a compile error
+    // and the ids come from the one list rather than a copy. What is left for a test is the
+    // pairing itself: the key an adapter sits under is the id it serves, which the error
+    // messages in `catalog.ts` repeat back to a reader.
+    expect(adaptedProviders()).toEqual(PROVIDER_IDS)
+    for (const provider of PROVIDER_IDS) {
+      expect(adapterFor(provider)?.provider, `${provider} has no model-list adapter`).toBe(provider)
     }
-  })
-
-  it('names exactly the providers the brain can build a model for', () => {
-    // The other half of the invariant: a key that can be stored and listed must also be one a
-    // request can be made with, or the model picker would offer a dead end (#234). The brain
-    // cannot import this list — the dependency runs the other way — so the two are pinned
-    // against each other here, where both are reachable.
-    expect([...VALIDATABLE_PROVIDERS].sort()).toEqual([...SUPPORTED_PROVIDERS].sort())
-    expect([...adaptedProviders()].sort()).toEqual([...SUPPORTED_PROVIDERS].sort())
   })
 
   it('knows no adapter for a provider outside it — a registry-only provider', () => {

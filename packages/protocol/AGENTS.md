@@ -59,6 +59,7 @@ src/
   errors.ts             the Anthropic error envelope, error types and status codes
   content.ts            message content blocks (text only in v1)
   readonly.ts           DeepReadonly, the helper the immutable event types are built with
+  providers.ts          the model providers openharness knows: the one list every side uses
   resources/
     agent.ts            the agent resource + its endpoints
     model.ts            the model catalog (GET /v1/models) and its entries
@@ -161,6 +162,7 @@ save. It is the one API error type that does not end in `_error`.
 | `API_VERSION_PREFIX`, `ANTHROPIC_VERSION_HEADER`, `ANTHROPIC_BETA_HEADER`, `API_VERSION_DATE`, `LAST_EVENT_ID_HEADER`, `REQUEST_ID_HEADER`, `JSON_CONTENT_TYPE`, `SSE_CONTENT_TYPE` | the wire constants                                              |
 
 | `DEFAULT_PARTITION_COUNT`, `partitionOf()` | session → partition ownership hash |
+| `PROVIDERS` / `ProviderDefinition`, `PROVIDER_IDS`, `ProviderId` | the model providers openharness knows: the provider ids and the facts every side shares (#245) |
 | `TimestampSchema`, `MetadataSchema`, `PageLimitSchema`, `ListOrderSchema`, `DEFAULT_PAGE_LIMIT`, `MAX_PAGE_LIMIT`, `METADATA_MAX_PAIRS`, `METADATA_MAX_KEY_LENGTH`, `METADATA_MAX_VALUE_LENGTH` | shared scalars and limits |
 | `PACKAGE_NAME` | the package name; lets a dependent prove the import resolved |
 
@@ -245,6 +247,31 @@ fallback, the refresh rate limit) are documented in
 - **`ListModelsQuery.refresh`** bypasses the server's per-user, per-provider one-hour cache
   (C4) and is rate-limited to once a minute per user. The schema reads the wire spelling
   `'true'` / `'false'` as well as a real boolean, because a query string arrives as text.
+
+## The provider list (epic #245, A0)
+
+`src/providers.ts` is the **one** list of model providers in the repo. A provider id is the
+`provider` half of a `provider/model` model id, and `PROVIDERS` carries the facts every side of
+that id shares: the display name, the credential type, the models.dev key its models are filed
+under, and the URL a reader gets a key from.
+
+The list used to be restated five times — the server's `VALIDATABLE_PROVIDERS` and its
+model-list adapters, the brain's client table, `@openharness/client`'s metadata, the
+models.dev refresh script — with a test in `e2e` holding them together, because the server may
+not depend on `client`. Now each of those tables is keyed by `ProviderId`
+(`Readonly<Record<ProviderId, …>>` or `satisfies Record<ProviderId, …>`), so a provider missing
+from one is a **compile error**, not a test failure, and the agreement tests are gone.
+
+- **What stays in the packages.** Only the shared facts live here. A side's own table adds
+  what only it needs: the server's validating request and its model-list adapter, the brain's
+  AI SDK client, the frontends' free-tier and key-format hints.
+- **A provider id and a credential type are different things.** The id is the fixed name of one
+  of the eleven providers; the type says how a credential authenticates (`api_key` today,
+  `azure_openai`/`aws`/`gcp_service_account` later). A _named_ credential — `azure` and
+  `azure-eu`, both of type `azure_openai` — takes the name as the provider half of a model id
+  without being a new id here, which is why the two are kept apart.
+- **The order is the contract.** A frontend draws its tiles in `PROVIDERS` order and the
+  vendored models.dev snapshot is keyed in it, so reordering the list reorders the snapshot.
 
 ## Model-first sessions (epic #92, issue #93)
 
@@ -374,6 +401,7 @@ column points at the definition in code; the same list appears in the TSDoc ther
 | `session.usage` (#247)                                                 | `events/session.ts`                                     | The session's running token totals, per model, written after every model request that reported usage. Anthropic has the event — a snapshot of cumulative usage and its tracked list cost — but writes it once per idle, stamps the cost onto it and keeps it flat; here it is per request, carries no cost (cost is computed on read, epic #245) and is broken down by model — each entry with the request count that lets a reader count unpriced requests — because an openharness session may switch models mid-conversation.      |
 | `cost` on a model entry, and the usage endpoints (#247)                | `resources/model.ts`, `resources/usage.ts`              | The price of a model, and what a session or a user spent. Anthropic has no per-user usage endpoint and no price on its catalog: its cost figures are platform-computed and stored. openharness computes cost from the tokens the log holds and the vendored rates, on the read that asked for it.                                                                                                                                                                                                                                     |
 | `GET`/`PUT /v1/me/preferences` (#111)                                  | `resources/user.ts`                                     | A per-user default model (epic #116, U1), stored server-side and shared by the web app and `oh`. `default_model` is `provider/model`-shaped or `null`; the id does not have to be in the catalog. Anthropic has no per-user settings: its API is account-scoped by the caller's key.                                                                                                                                                                                                                                                  |
+| the provider list (#245)                                               | `providers.ts`                                          | Anthropic holds the model-provider keys and has no registry of them; openharness users bring their own (A5), so the providers it knows are openharness's own list. Every side — the server's validation and model-list tables, the brain's clients, the frontends' metadata, the models.dev refresh script — is keyed by its `ProviderId`.                                                                                                                                                                                            |
 | `DELETE /v1/sessions/{session_id}` → 204 (#111)                        | `resources/session.ts`                                  | Hard delete of a chat (epic #116, U5): owner-scoped (another user's session is a 404) and irreversible — it removes the session and its whole log. The explicit exception to the immutable log besides compaction; open streams receive `session.deleted` and close. Anthropic has no session-delete route.                                                                                                                                                                                                                           |
 
 ### Deviations — subsets and changed shapes

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { PROVIDER_IDS } from '@openharness/protocol'
 
 import {
   ZERO_MODEL_USAGE,
@@ -294,18 +295,20 @@ describe('isUsableCredential', () => {
 })
 
 describe('missingCredentialMessage', () => {
-  it('names the provider the way a person writes it', () => {
+  it('names the provider the way a person writes it, as the shared list spells it', () => {
     expect(missingCredentialMessage('openai')).toBe(
       'No OpenAI key is set. Add one in Settings → Model providers.',
     )
-    expect(missingCredentialMessage('anthropic')).toBe(
-      'No Anthropic key is set. Add one in Settings → Model providers.',
+    // The name is `@openharness/protocol`'s, not a capitalised id: "Fireworks AI", which is
+    // also what the frontends put on the provider's tile.
+    expect(missingCredentialMessage('fireworks')).toBe(
+      'No Fireworks AI key is set. Add one in Settings → Model providers.',
     )
   })
 
   it('falls back to capitalising a provider it does not know', () => {
-    expect(missingCredentialMessage('mistral')).toBe(
-      'No Mistral key is set. Add one in Settings → Model providers.',
+    expect(missingCredentialMessage('acme')).toBe(
+      'No Acme key is set. Add one in Settings → Model providers.',
     )
   })
 })
@@ -500,23 +503,11 @@ describe('providerModelFactory', () => {
     }
   }
 
-  it('covers exactly the providers a key can be stored for', () => {
-    // The same 11 ids `VALIDATABLE_PROVIDERS` carries in `apps/server/src/provider-validation.ts`
-    // — the server's `model-catalog.test.ts` pins that the two agree, and this is the brain's
-    // half of it: a provider with a key that a request cannot be made to would be a dead end.
-    expect(CASES.map((entry) => entry.provider)).toEqual([
-      'anthropic',
-      'openai',
-      'google',
-      'openrouter',
-      'groq',
-      'deepseek',
-      'fireworks',
-      'mistral',
-      'together',
-      'xai',
-      'cerebras',
-    ])
+  it('covers every provider of the shared list, one case each', () => {
+    // The table in `model.ts` is typed against `ProviderId` (#245), so a provider with no
+    // client is a compile error; this is the other half, and about this test alone: every
+    // provider the shared list carries is exercised below, in the list's order.
+    expect(CASES.map((entry) => entry.provider)).toEqual(PROVIDER_IDS)
   })
 
   for (const entry of CASES) {

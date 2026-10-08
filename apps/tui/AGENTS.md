@@ -224,7 +224,8 @@ that are one component (`src/components/provider-setup.tsx`):
 - **`oh providers add [provider]`**, on its own.
 
 The flow is two steps. It picks a provider from the list built from `PROVIDERS` (the metadata
-both frontends share, #209), each row with its **free-tier hint** (X8), and then asks for the
+both frontends share, #209 — itself built from the protocol's provider list, #245), each row
+with its **free-tier hint** (X8), and then asks for the
 key. The "get a key" URL is printed and `o` opens it in the browser (the same `openBrowser`
 rules as `oh login`; a terminal that cannot open one says so and leaves the URL on screen).
 The key goes into **`components/secret-input.tsx`** — a hidden input: `•` per character, never

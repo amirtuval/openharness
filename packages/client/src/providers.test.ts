@@ -6,10 +6,10 @@ import { PROVIDERS, providerInfo, providerName } from './providers'
 /**
  * The provider metadata both frontends offer (#209).
  *
- * The one rule this module has to keep is that it describes providers the server will actually
- * accept a key for — a tile that leads to a key the server refuses is worse than no tile. That
- * rule lives with both lists, in `e2e`'s `provider-metadata.test.ts` (the server may not depend
- * on this package). What is here is everything the list must be on its own.
+ * The list is the shared one (`@openharness/protocol`, epic #245, A0) plus the two hints only a
+ * form or a tile needs, so "it describes providers the server will accept a key for" is a
+ * compile-time property of the built list, not an assertion here. What is left for a test is
+ * everything the merged list must be on its own.
  */
 describe('PROVIDERS', () => {
   it('has one entry per provider id, with the fields a tile needs', () => {

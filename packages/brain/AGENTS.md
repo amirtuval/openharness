@@ -366,8 +366,11 @@ so on — which is the whole of "no environment fallback". Every AI SDK provider
 `*_API_KEY` variable only when it was constructed without a key, so an explicit one cannot be
 overridden; and a falsy one would silently become "no key given" and hand the request to
 whatever the process has set, which is exactly why the loop never builds a model without one.
-The base URL is pinned the same way, in that one table (`PROVIDERS`), because the `*_BASE_URL`
-variables would otherwise move a request — and its key — to a host nobody chose.
+The base URL is pinned the same way, in that one table (`PROVIDER_CLIENTS`), because the
+`*_BASE_URL` variables would otherwise move a request — and its key — to a host nobody chose.
+The table is keyed by the shared provider id (`Readonly<Record<ProviderId, …>>`, epic #245), so
+a provider a key can be stored for and a request cannot be made to is a compile error rather
+than a test failure.
 
 `model.test.ts` pins both halves of that contract, for **each of the 11 providers**: with every
 `*_API_KEY` and `*_BASE_URL` decoy set, one request goes to the provider's own host with the
@@ -389,7 +392,7 @@ capture the console anyway, because the libraries on this path could.
 ### Usage
 
 `ai@7` reads a model's `specificationVersion` and reshapes what it reports to match. Every
-provider in `PROVIDERS` declares the spec it implements (`v4`), which is the one `ai@7` reads,
+provider in `PROVIDER_CLIENTS` declares the spec it implements (`v4`), which is the one `ai@7` reads,
 so a report arrives as the numbers the protocol wants — `{ inputTokens: { total, noCache,
 cacheRead, cacheWrite }, … }` — and `result.usage` is reliable.
 

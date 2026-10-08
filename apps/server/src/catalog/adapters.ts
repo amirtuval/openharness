@@ -18,6 +18,8 @@
  * OpenAI-style `{ data: [...] }` or the bare array some of them return.
  */
 
+import { PROVIDER_IDS, type ProviderId } from '@openharness/protocol'
+
 /** One model a provider's own list offered, as the provider spelled it. */
 export interface ProviderModel {
   /** The raw model id, without the `provider/` prefix — how the provider names it. */
@@ -72,35 +74,44 @@ const ANTHROPIC_VERSION = '2023-06-01'
 const PAGE_SIZE = 1000
 
 /**
- * The fixed table of providers this server lists from. Every entry is a constant: base URL,
- * page shape and parser. Adding a provider means adding a row here (and, for its key to be
- * storable at all, to `VALIDATABLE_PROVIDERS` in `../provider-validation.ts`).
+ * The fixed table of providers this server lists from: one adapter per provider of the shared
+ * list (`@openharness/protocol`), keyed by its provider id. Every entry is a constant: base
+ * URL, page shape and parser. A provider the table leaves out is a compile error, so the
+ * catalogue cannot be missing an endpoint for a key the server stores (#245).
  */
-const ADAPTERS: readonly ProviderAdapter[] = [
-  openAiCompatible({
+const ADAPTERS: Readonly<Record<ProviderId, ProviderAdapter>> = {
+  anthropic: anthropic(),
+  openai: openAiCompatible({
     provider: 'openai',
     baseUrl: 'https://api.openai.com/v1',
   }),
-  anthropic(),
-  google(),
-  openRouter(),
-  openAiCompatible({ provider: 'groq', baseUrl: 'https://api.groq.com/openai/v1' }),
-  openAiCompatible({ provider: 'deepseek', baseUrl: 'https://api.deepseek.com/v1' }),
-  openAiCompatible({ provider: 'fireworks', baseUrl: 'https://api.fireworks.ai/inference/v1' }),
-  openAiCompatible({ provider: 'mistral', baseUrl: 'https://api.mistral.ai/v1' }),
-  openAiCompatible({ provider: 'together', baseUrl: 'https://api.together.xyz/v1' }),
-  openAiCompatible({ provider: 'xai', baseUrl: 'https://api.x.ai/v1' }),
-  openAiCompatible({ provider: 'cerebras', baseUrl: 'https://api.cerebras.ai/v1' }),
-]
-
-/** The adapter for a provider, or `null` when the table has none — a registry-only provider. */
-export function adapterFor(provider: string): ProviderAdapter | null {
-  return ADAPTERS.find((adapter) => adapter.provider === provider) ?? null
+  google: google(),
+  openrouter: openRouter(),
+  groq: openAiCompatible({ provider: 'groq', baseUrl: 'https://api.groq.com/openai/v1' }),
+  deepseek: openAiCompatible({ provider: 'deepseek', baseUrl: 'https://api.deepseek.com/v1' }),
+  fireworks: openAiCompatible({
+    provider: 'fireworks',
+    baseUrl: 'https://api.fireworks.ai/inference/v1',
+  }),
+  mistral: openAiCompatible({ provider: 'mistral', baseUrl: 'https://api.mistral.ai/v1' }),
+  together: openAiCompatible({ provider: 'together', baseUrl: 'https://api.together.xyz/v1' }),
+  xai: openAiCompatible({ provider: 'xai', baseUrl: 'https://api.x.ai/v1' }),
+  cerebras: openAiCompatible({ provider: 'cerebras', baseUrl: 'https://api.cerebras.ai/v1' }),
 }
 
-/** Every provider the table has an adapter for, in table order. */
-export function adaptedProviders(): readonly string[] {
-  return ADAPTERS.map((adapter) => adapter.provider)
+/**
+ * The adapter for a provider, or `null` when the table has none — a registry-only provider.
+ *
+ * The lookup is `Object.hasOwn` rather than a bare index so a provider string that names an
+ * inherited property (`toString`, `constructor`) is a miss, not a function call.
+ */
+export function adapterFor(provider: string): ProviderAdapter | null {
+  return Object.hasOwn(ADAPTERS, provider) ? ADAPTERS[provider as ProviderId] : null
+}
+
+/** Every provider the table has an adapter for, in the shared list's order. */
+export function adaptedProviders(): readonly ProviderId[] {
+  return PROVIDER_IDS
 }
 
 // ------------------------------------------------------------------ the adapters
