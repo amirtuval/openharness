@@ -146,9 +146,13 @@ export async function createDevFakeClient(): Promise<Client | null> {
  * The markdown the seeded session's reply is made of.
  *
  * Everything the chat's renderer has to get right, in one message: a heading, a list, a table
- * that is wider than the bubble, inline code, and two fenced blocks with different languages.
+ * that is wider than the bubble, inline code, and three fenced blocks with different languages.
  * Keeping it in the seeded reply means fake mode opens on a finished, fully rendered message
  * — which is also what the screenshots in the QA pass are taken of (#204, epic #201 X9).
+ *
+ * The Rust block is there because of #227: `rust` used to render plain, so it is the language
+ * a reader who saw the old build will look for first, and the screenshot of "the chat now
+ * highlights more" is a screenshot of it.
  */
 const SEEDED_REPLY = [
   'I answer from the fake client: a scripted stream, no server involved.',
@@ -174,6 +178,15 @@ const SEEDED_REPLY = [
   '```bash',
   'yarn install --immutable',
   'yarn turbo run build test --filter=@openharness/web...',
+  '```',
+  '',
+  '```rust',
+  'fn main() {',
+  '    let greetings = vec!["hello", "hola"];',
+  '    for greeting in &greetings {',
+  '        println!("{greeting}");',
+  '    }',
+  '}',
   '```',
   '',
   '- press **Stop** while a reply is running',
