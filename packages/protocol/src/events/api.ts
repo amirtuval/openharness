@@ -2,7 +2,7 @@ import { z } from 'zod'
 
 import { ListOrderSchema, PageLimitSchema } from '../common'
 import { NextPageSchema, PageCursorStringSchema, type NextPage } from '../pagination'
-import { AfterSeqSchema, STORED_EVENT_TYPES } from './common'
+import { AfterSeqSchema, EVENT_TYPES, STORED_EVENT_TYPES } from './common'
 import { DeltaTypeSchema } from './stream'
 import { UserEventSchema, type UserEvent } from './user'
 import { EventInputSchema, StoredEventSchema, type StoredEvent } from './union'
@@ -32,10 +32,43 @@ export const StoredEventTypeSchema = z.enum(STORED_EVENT_TYPES)
  * `session.rewind` (#238). The server owns everything else in the log. A rewind travels with
  * the edited message it belongs to, in one array and one append, so the session is never
  * rewound but missing the message the reader sent — see {@link EventInputSchema}.
+ *
+ * A batch may carry **at most one rewind, and it comes first**. The batch is appended in
+ * order and a rewind supersedes everything from the message it names to the end of the log as
+ * it stands, so a message ahead of it — or anything behind a second rewind — would be stored
+ * and then swallowed by the range the rewind records: accepted by the response and answered by
+ * no turn. A batch that breaks the rule is a 400 `invalid_request_error` and stores nothing.
+ * The store enforces the same rule on its append path (`assertRewinds` in
+ * `@openharness/session`); this is the wire's half of it.
  */
-export const SendEventsRequestSchema = z.object({
-  events: z.array(EventInputSchema).min(1),
-})
+export const SendEventsRequestSchema = z
+  .object({
+    events: z.array(EventInputSchema).min(1),
+  })
+  .superRefine((body, ctx) => {
+    // Where the batch's rewinds are, in order: the rule is about their number and their place.
+    const rewinds = body.events.flatMap((event, index) =>
+      event.type === EVENT_TYPES.sessionRewind ? [index] : [],
+    )
+    const [first, second] = rewinds
+    if (second !== undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['events', second],
+        message:
+          'a batch may carry at most one session.rewind: each one restarts the log, so a second would supersede the first',
+      })
+      return
+    }
+    if (first !== undefined && first > 0) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['events', first],
+        message:
+          'a session.rewind must be the first event in the batch: its range supersedes everything after the message it names, so a message before it would be stored and then swallowed',
+      })
+    }
+  })
 
 export type SendEventsRequest = z.infer<typeof SendEventsRequestSchema>
 

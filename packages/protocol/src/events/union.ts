@@ -113,6 +113,8 @@ export function isStoredEvent(event: StreamEvent): event is StoredEvent {
  * the client is the one that knows which message the reader edited, so it travels on the same
  * `events` array and the same request as the message that follows it, which is what makes the
  * two atomic: either the session is rewound and the edited message is stored, or neither is.
+ * A batch carries **at most one rewind, and it comes first**: see `SendEventsRequestSchema`
+ * for why anything else would be swallowed by the range the rewind records.
  *
  * This is the member type of `SendEventsRequest.events`; read a log with
  * {@link StoredEventSchema} and a stream with {@link StreamEventSchema}.

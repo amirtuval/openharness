@@ -42,6 +42,43 @@ describe('SendEventsRequestSchema', () => {
     ).toBe(true)
   })
 
+  it('accepts a rewind with no message behind it', () => {
+    // The reader took the edit back: the rewind alone restarts the session and nothing follows.
+    expect(
+      SendEventsRequestSchema.safeParse({ events: [{ type: 'session.rewind', from_seq: 3 }] })
+        .success,
+    ).toBe(true)
+  })
+
+  it('rejects a rewind that is not the first event of its batch (#238)', () => {
+    // A message ahead of the rewind would be stored and then swallowed by the range the rewind
+    // records: the answer would carry it as accepted and no turn would ever answer it.
+    const parsed = SendEventsRequestSchema.safeParse({
+      events: [
+        { type: 'user.message', content: text('write a haiku about snow') },
+        { type: 'session.rewind', from_seq: 3 },
+      ],
+    })
+    expect(parsed.success).toBe(false)
+    expect(parsed.error?.issues[0]?.message).toContain('first event')
+    expect(parsed.error?.issues[0]?.path).toEqual(['events', 1])
+  })
+
+  it('rejects a batch that carries two rewinds (#238)', () => {
+    // Two restarts in one append: the second's range begins inside the first's, and the
+    // message between them would be swallowed the same way.
+    const parsed = SendEventsRequestSchema.safeParse({
+      events: [
+        { type: 'session.rewind', from_seq: 3 },
+        { type: 'user.message', content: text('write a haiku about snow') },
+        { type: 'session.rewind', from_seq: 5 },
+      ],
+    })
+    expect(parsed.success).toBe(false)
+    expect(parsed.error?.issues[0]?.message).toContain('at most one')
+    expect(parsed.error?.issues[0]?.path).toEqual(['events', 2])
+  })
+
   it('rejects an empty batch, a missing batch and non-user events', () => {
     expect(SendEventsRequestSchema.safeParse({ events: [] }).success).toBe(false)
     expect(SendEventsRequestSchema.safeParse({}).success).toBe(false)

@@ -48,7 +48,9 @@ stream carries what it does. `user.interrupt` is the same call with
 `{"type":"user.interrupt"}`, and it aborts the turn in flight. The same array may carry one
 instruction that is not the user's own event — `{"type":"session.rewind","from_seq":1}`
 (#238), "edit and resend" — which restarts the session from that message and is refused with
-`409 conflict_error` while a turn is running.
+`409 conflict_error` while a turn is running. Such a batch takes **at most one rewind, and
+only as its first event**; anything else is a 400 `invalid_request_error` (see
+[Claims, chunks and superseding](#claims-chunks-and-superseding-d9)).
 
 **Creating a session.** `POST /v1/sessions` takes a `model`, an `agent`, or both, and at least
 one of the two: a request that names neither is refused with a 400 `invalid_request_error`. An
@@ -178,6 +180,11 @@ append-only. The rules that carry it:
   **any** type, where a reply's range covers the chunks it was streamed as and nothing else —
   the recorded range says which kind it is. It is accepted only while the session is idle
   (409 `conflict_error` otherwise), because the turn in flight owns the branch being replaced.
+  A batch carries **at most one rewind, and only as its first event**: the batch is appended in
+  order and the rewind supersedes everything after the message it names, so a message ahead of
+  it — or anything behind a second rewind — would be stored and then swallowed by the range,
+  accepted by the response and answered by no turn. Either mistake is a 400
+  `invalid_request_error`, and nothing in the batch is stored.
 
 ```json
 {"type":"span.model_request_start","id":"sevt_…","seq":3,"processed_at":"…",
@@ -205,6 +212,11 @@ takes back — and they are stored in one append:
 // → {"data":[{"type":"user.message","id":"sevt_…","seq":9,"processed_at":null,…}]}
 //   the answer carries the stored *user* event; the rewind is the server's
 ```
+
+The rewind must be the batch's **first** event, and there may be only one: `[user.message,
+session.rewind]` and `[session.rewind, session.rewind]` are both a 400 `invalid_request_error`
+that stores nothing, because the message the range would swallow would otherwise come back in
+the response as if a turn were going to answer it.
 
 An interrupt that arrives with nothing running is claimed by the `session.status_idle` that
 ends the turn — no span is opened for it, because no model request runs:
