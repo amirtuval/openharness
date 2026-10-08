@@ -79,27 +79,27 @@ src/
 
 ### `@openharness/client`
 
-| export                                                                                          | what it is                                                              |
-| ----------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| `createClient(options)`                                                                         | build a client                                                          |
-| `Client`, `ClientOptions`, `RequestOptions`                                                     | the interface both the real and the fake client implement               |
-| `AgentsResource`, `SessionsResource`, `SessionEventsResource`                                   | the resource interfaces                                                 |
-| `ProviderCredentialsResource`                                                                   | `providerCredentials.list/put/delete`                                   |
-| `ModelsResource`                                                                                | `models.list`: the chat models the caller's keys can use (epic #92)     |
-| `PreferencesResource`                                                                           | `preferences.get/put`: the caller's stored default model (#111)         |
-| `AuthResource`                                                                                  | `auth.startDeviceLogin/pollDeviceLogin/signOut`                         |
-| `OPENHARNESS_CLI_CLIENT_ID`                                                                     | the `client_id` the device flow presents: `'openharness-cli'`           |
-| `DeviceLoginError`, `DeviceLoginStart`, `PollDeviceLoginOptions`                                | the device flow's error, its start result and its poll options          |
-| `StreamOptions`                                                                                 | `{ deltas?, afterSeq?, signal? }` for `events.stream`                   |
-| `SendMessageOptions`                                                                            | `sendMessage`'s options: cancellation, plus the `model` to switch to    |
-| `FetchLike`, `DebugHook`, `RawResponse`                                                         | the `fetch` seam, the hook for what the client skips, the raw answer    |
-| `ApiError`, `AuthenticationError`, `ResponseValidationError`, `errorTypeForStatus()`            | the three errors and the status → `error.type` map                      |
-| `createTranscript()`, `reduceTranscript()`, `reduceTranscriptAll()`, `initialTranscriptState()` | the transcript store and the pure reducer                               |
-| `selectMessages()`, `selectIsRunning()`, `selectLastMessage()`, `selectStreamingMessage()`      | selectors                                                               |
-| `Transcript`, `TranscriptState`, `TranscriptMessage`, `TranscriptError`                         | the transcript's types                                                  |
-| `MessagePart`, `TextPart`, `TranscriptMessageMeta`, `TranscriptUsage`, `PendingModelRequest`    | a message's typed parts, a reply's metadata, and its bookkeeping (#201) |
-| `PROVIDERS`, `providerInfo()`, `providerName()`, `ProviderInfo`                                 | the model providers a form or a tile needs (#209)                       |
-| `PACKAGE_NAME`                                                                                  | the package name; a dependent's cheap proof that the import resolved    |
+| export                                                                                          | what it is                                                                             |
+| ----------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `createClient(options)`                                                                         | build a client                                                                         |
+| `Client`, `ClientOptions`, `RequestOptions`                                                     | the interface both the real and the fake client implement                              |
+| `AgentsResource`, `SessionsResource`, `SessionEventsResource`                                   | the resource interfaces                                                                |
+| `ProviderCredentialsResource`                                                                   | `providerCredentials.list/put/delete`                                                  |
+| `ModelsResource`                                                                                | `models.list`: the chat models the caller's keys can use (epic #92)                    |
+| `PreferencesResource`                                                                           | `preferences.get/put`: the caller's stored default model (#111)                        |
+| `AuthResource`                                                                                  | `auth.startDeviceLogin/pollDeviceLogin/signOut`                                        |
+| `OPENHARNESS_CLI_CLIENT_ID`                                                                     | the `client_id` the device flow presents: `'openharness-cli'`                          |
+| `DeviceLoginError`, `DeviceLoginStart`, `PollDeviceLoginOptions`                                | the device flow's error, its start result and its poll options                         |
+| `StreamOptions`                                                                                 | `{ deltas?, afterSeq?, signal? }` for `events.stream`                                  |
+| `SendMessageOptions`                                                                            | `sendMessage`'s options: cancellation, the `model` to switch to, and `rewindTo` (#238) |
+| `FetchLike`, `DebugHook`, `RawResponse`                                                         | the `fetch` seam, the hook for what the client skips, the raw answer                   |
+| `ApiError`, `AuthenticationError`, `ResponseValidationError`, `errorTypeForStatus()`            | the three errors and the status → `error.type` map                                     |
+| `createTranscript()`, `reduceTranscript()`, `reduceTranscriptAll()`, `initialTranscriptState()` | the transcript store and the pure reducer                                              |
+| `selectMessages()`, `selectIsRunning()`, `selectLastMessage()`, `selectStreamingMessage()`      | selectors                                                                              |
+| `Transcript`, `TranscriptState`, `TranscriptMessage`, `TranscriptError`                         | the transcript's types                                                                 |
+| `MessagePart`, `TextPart`, `TranscriptMessageMeta`, `TranscriptUsage`, `PendingModelRequest`    | a message's typed parts, a reply's metadata, and its bookkeeping (#201)                |
+| `PROVIDERS`, `providerInfo()`, `providerName()`, `ProviderInfo`                                 | the model providers a form or a tile needs (#209)                                      |
+| `PACKAGE_NAME`                                                                                  | the package name; a dependent's cheap proof that the import resolved                   |
 
 ### `@openharness/client/testing`
 
@@ -138,32 +138,32 @@ for await (const event of client.sessions.events.stream(session.id, { deltas: tr
 }
 ```
 
-| method                                           | wire                                         | returns                                                      |
-| ------------------------------------------------ | -------------------------------------------- | ------------------------------------------------------------ |
-| `me(options?)`                                   | `GET /v1/me`                                 | `User`                                                       |
-| `agents.create(body, options?)`                  | `POST /v1/agents`                            | `Agent`                                                      |
-| `agents.get(id, options?)`                       | `GET /v1/agents/{id}`                        | `Agent`                                                      |
-| `agents.list(params?, options?)`                 | `GET /v1/agents`                             | `{ data, next_page }`                                        |
-| `agents.update(id, body, options?)`              | `POST /v1/agents/{id}`                       | `Agent`                                                      |
-| `sessions.create(body, options?)`                | `POST /v1/sessions`                          | `Session`                                                    |
-| `sessions.get(id, options?)`                     | `GET /v1/sessions/{id}`                      | `Session`                                                    |
-| `sessions.list(params?, options?)`               | `GET /v1/sessions`                           | `{ data, next_page }`                                        |
-| `sessions.delete(id, options?)`                  | `DELETE /v1/sessions/{id}`                   | `void` (the wire answers `204`)                              |
-| `sessions.events.send(id, events, options?)`     | `POST /v1/sessions/{id}/events`              | `{ data: user event[] }`                                     |
-| `sessions.events.list(id, params?, options?)`    | `GET /v1/sessions/{id}/events`               | `{ data: stored event[], next_page }`                        |
-| `sessions.events.iterate(id, params?, options?)` | the same, page after page                    | `AsyncIterable<StoredEvent>`                                 |
-| `sessions.events.stream(id, options?)`           | `GET /v1/sessions/{id}/events/stream`        | `AsyncIterable<StreamEvent>`                                 |
-| `providerCredentials.list(options?)`             | `GET /v1/provider-credentials`               | `{ data: credential metadata[] }`                            |
-| `providerCredentials.put(provider, body, …)`     | `PUT /v1/provider-credentials/{provider}`    | `ProviderCredential` (metadata only)                         |
-| `providerCredentials.delete(provider, options?)` | `DELETE /v1/provider-credentials/{provider}` | `void` (the wire answers `204`)                              |
-| `models.list(params?, options?)`                 | `GET /v1/models`                             | `{ data: ModelEntry[], providers: ProviderCatalogStatus[] }` |
-| `preferences.get(options?)`                      | `GET /v1/me/preferences`                     | `{ default_model }` (`null` when none is set)                |
-| `preferences.put(preferences, options?)`         | `PUT /v1/me/preferences`                     | `{ default_model }` (the stored value)                       |
-| `auth.startDeviceLogin(options?)`                | `POST /api/auth/device/code`                 | `DeviceLoginStart`                                           |
-| `auth.pollDeviceLogin(code, options?)`           | `POST /api/auth/device/token`, polled        | the session token (`string`)                                 |
-| `auth.signOut(options?)`                         | `POST /api/auth/sign-out`                    | `void`                                                       |
-| `sendMessage(id, text, options?)`                | `POST …/events` with one `user.message`      | the stored `UserMessageEvent`                                |
-| `interrupt(id, options?)`                        | `POST …/events` with one `user.interrupt`    | the stored `UserInterruptEvent`                              |
+| method                                           | wire                                                                                                | returns                                                      |
+| ------------------------------------------------ | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| `me(options?)`                                   | `GET /v1/me`                                                                                        | `User`                                                       |
+| `agents.create(body, options?)`                  | `POST /v1/agents`                                                                                   | `Agent`                                                      |
+| `agents.get(id, options?)`                       | `GET /v1/agents/{id}`                                                                               | `Agent`                                                      |
+| `agents.list(params?, options?)`                 | `GET /v1/agents`                                                                                    | `{ data, next_page }`                                        |
+| `agents.update(id, body, options?)`              | `POST /v1/agents/{id}`                                                                              | `Agent`                                                      |
+| `sessions.create(body, options?)`                | `POST /v1/sessions`                                                                                 | `Session`                                                    |
+| `sessions.get(id, options?)`                     | `GET /v1/sessions/{id}`                                                                             | `Session`                                                    |
+| `sessions.list(params?, options?)`               | `GET /v1/sessions`                                                                                  | `{ data, next_page }`                                        |
+| `sessions.delete(id, options?)`                  | `DELETE /v1/sessions/{id}`                                                                          | `void` (the wire answers `204`)                              |
+| `sessions.events.send(id, events, options?)`     | `POST /v1/sessions/{id}/events`                                                                     | `{ data: user event[] }` (a rewind's event is the server's)  |
+| `sessions.events.list(id, params?, options?)`    | `GET /v1/sessions/{id}/events`                                                                      | `{ data: stored event[], next_page }`                        |
+| `sessions.events.iterate(id, params?, options?)` | the same, page after page                                                                           | `AsyncIterable<StoredEvent>`                                 |
+| `sessions.events.stream(id, options?)`           | `GET /v1/sessions/{id}/events/stream`                                                               | `AsyncIterable<StreamEvent>`                                 |
+| `providerCredentials.list(options?)`             | `GET /v1/provider-credentials`                                                                      | `{ data: credential metadata[] }`                            |
+| `providerCredentials.put(provider, body, …)`     | `PUT /v1/provider-credentials/{provider}`                                                           | `ProviderCredential` (metadata only)                         |
+| `providerCredentials.delete(provider, options?)` | `DELETE /v1/provider-credentials/{provider}`                                                        | `void` (the wire answers `204`)                              |
+| `models.list(params?, options?)`                 | `GET /v1/models`                                                                                    | `{ data: ModelEntry[], providers: ProviderCatalogStatus[] }` |
+| `preferences.get(options?)`                      | `GET /v1/me/preferences`                                                                            | `{ default_model }` (`null` when none is set)                |
+| `preferences.put(preferences, options?)`         | `PUT /v1/me/preferences`                                                                            | `{ default_model }` (the stored value)                       |
+| `auth.startDeviceLogin(options?)`                | `POST /api/auth/device/code`                                                                        | `DeviceLoginStart`                                           |
+| `auth.pollDeviceLogin(code, options?)`           | `POST /api/auth/device/token`, polled                                                               | the session token (`string`)                                 |
+| `auth.signOut(options?)`                         | `POST /api/auth/sign-out`                                                                           | `void`                                                       |
+| `sendMessage(id, text, options?)`                | `POST …/events` with one `user.message` — and a `session.rewind` first when `rewindTo` asks for one | the stored `UserMessageEvent`                                |
+| `interrupt(id, options?)`                        | `POST …/events` with one `user.interrupt`                                                           | the stored `UserInterruptEvent`                              |
 
 Notes worth knowing before reading the code:
 
@@ -184,6 +184,12 @@ Notes worth knowing before reading the code:
 - **`sendMessage(id, text, { model })`** rides the `model` on its `user.message` (epic #116,
   U1): the log records the choice, and the turn the message starts runs it. A caller that
   builds the event itself passes the same `model` to `sessions.events.send`.
+- **`sendMessage(id, text, { rewindTo })`** is "edit and resend" (#238): the rewind travels
+  with the message in one request and one append — `[session.rewind, user.message]` — so the
+  session is never rewound without the edit, and the rewrite is atomic in the log too. The
+  `seq` is the edited message's own position, which {@link TranscriptMessage.position}
+  carries. The server refuses one while a turn is running (409 `conflict_error`): the reply in
+  flight belongs to the branch being taken back.
 - A failed `fetch` (no network, DNS, TLS, an abort) rejects with the original error — only an
   answer from the server becomes an `ApiError`.
 
@@ -440,6 +446,18 @@ true`, keyed by the id of the event it previews; `event_delta`s extend it (per c
   so it is folded in _before_ the dedupe above, and the only thing it does is set
   `deleted: true`; seeing it again changes nothing. The stream ends after it, so a UI reacts
   to the state rather than to the end of an iteration.
+- **A `session.rewind` drops the branch it replaced** (#238). Editing a message restarts the
+  session from it, and the rewind carries the range it replaced — from the edited message
+  through the last event before the rewind. Everything the transcript is showing from there on
+  belongs to a branch the session is no longer on (a client that loads the session later never
+  receives any of it, because replay skips the range), so the rewind drops those messages,
+  the `lastError` it replaced, and the requests of the turn it replaced. The test is each
+  message's `position`: everything the range covers — at or after its `from_seq`, and not past
+  its `to_seq` — is inside it, and everything else stays exactly where it was. The `to_seq`
+  bound is what keeps the edit itself: a client that sent it has already applied the stored
+  message (whose `seq` is past the range), and the rewind the stream echoes behind it carries
+  the lower `seq` of the range — the one event the `seq <= lastSeq` dedupe must not swallow.
+  A rewind is applied wherever it arrives, and applying it twice changes nothing.
 - **A `model` on a `user.message` may switch the session** (epic #116, U1). `state.model`
   becomes the new id, and the message carries `modelChangedTo` when that id differs from the
   one already in effect — the change a UI draws its marker for. The first model the log shows
@@ -526,6 +544,17 @@ answer the 404 `not_found_error` an unknown id gets, as does deleting it a secon
 `user.message` sent with a `model` stores the choice on the event and switches the fake
 session's live `model`, so the next turn's `span.model_request_start` carries it — while a
 session created with a model still runs the model it was created with.
+
+`sessions.events.send` (and `sendMessage`) takes a `session.rewind` too (#238), the way the
+route does: the fake stores the rewind's own event — with the range the server would record,
+`from_seq` through the end of its log — and the batch's other events beside it, in one
+append. A refused rewind refuses the whole request, as one append does, with the two answers
+the server gives: the 409 `conflict_error` while a turn is running (the reply in flight
+belongs to the branch being taken back) and the 400 `invalid_request_error` for a `from_seq`
+that names nothing a reader could edit — no event there, not a `user.message`, or a message an
+earlier range already replaced. What a range covers is skipped by the fake's reads too, which
+is what the server's replay does: a reloaded client sees the conversation as if the edited
+message had been the one sent.
 
 **The fake refuses what the server refuses, the way the server refuses it** (#121). Bodies go
 through the same protocol schemas the routes parse them with — `agents.create` and

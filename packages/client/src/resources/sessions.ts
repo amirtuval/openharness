@@ -7,6 +7,7 @@ import {
 } from '@openharness/protocol'
 import type {
   CreateSessionRequest,
+  EventInput,
   ListEventsQuery,
   ListEventsResponse,
   ListSessionsQuery,
@@ -15,7 +16,6 @@ import type {
   Session,
   StoredEvent,
   StreamEvent,
-  UserEventInput,
 } from '@openharness/protocol'
 
 import type { RequestOptions } from '../client'
@@ -103,10 +103,18 @@ export interface SessionsResource {
 /** A session's event log, on the wire. */
 export interface SessionEventsResource {
   /**
-   * Append user events to a session's log.
+   * Append events to a session's log.
    *
-   * Only user events can be appended — `user.message` and `user.interrupt` — and the server
-   * assigns their `id`, `seq` and `processed_at`; the response carries them as stored.
+   * The user's own events — `user.message` and `user.interrupt` — and one instruction more:
+   * a `session.rewind` naming the message the conversation should restart from (#238). The
+   * server assigns a user event's `id`, `seq` and `processed_at` and the response carries
+   * those as stored; a rewind's event is the server's, and comes back on the log or the
+   * stream like any other session event.
+   *
+   * Sending a rewind and the message that replaces the one it took back in **one** call is
+   * what makes the two atomic: they are one append, so there is no moment where the session
+   * is rewound but the message is missing. {@link Client.sendMessage}'s `rewindTo` is that
+   * call for the common case of "edit and resend".
    *
    * @param sessionId the `sesn_` id
    * @param events one event, or several to append in order
@@ -114,7 +122,7 @@ export interface SessionEventsResource {
    */
   send(
     sessionId: string,
-    events: UserEventInput | readonly UserEventInput[],
+    events: EventInput | readonly EventInput[],
     options?: RequestOptions,
   ): Promise<SendEventsResponse>
 

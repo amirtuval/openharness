@@ -6,6 +6,7 @@ import {
   makeModelRequestEnd,
   makeModelRequestStart,
   makeSessionDeleted,
+  makeSessionRewind,
   makeSessionError,
   makeStatusIdle,
   makeStatusRescheduled,
@@ -957,6 +958,111 @@ describe('one reply, five clients (D9 convergence)', () => {
     expect(selectStreamingMessage(state)).toBeNull()
     // Nothing in the fold wrote to an event: a reducer that did would throw on the freeze.
     expect(JSON.stringify(frozen)).toBe(before)
+  })
+})
+
+describe('session.rewind (#238)', () => {
+  /** A turn: the user speaks, the brain replies, the session goes idle. */
+  const turn = (
+    at: number,
+    text: string,
+    reply: string,
+  ): { message: ReturnType<typeof makeUserMessage>; events: StreamEvent[] } => {
+    const message = makeUserMessage(text, { seq: at, processed_at: fixtureTimestamp(at) })
+    const start = makeModelRequestStart({ seq: at + 1, consumes: [message.id] })
+    return {
+      message,
+      events: [
+        makeStatusRunning({ seq: at - 1 }),
+        message,
+        start,
+        makeAgentMessage(reply, { seq: at + 2 }),
+        makeModelRequestEnd(start, { seq: at + 3 }),
+        makeStatusIdle({ seq: at + 4 }),
+      ],
+    }
+  }
+
+  it('drops the conversation the rewind replaced, keeping what came before it', () => {
+    const first = turn(2, 'write a haiku about rain', 'rain, on the window')
+    const second = turn(7, 'and the moon?', 'the moon, also wet')
+    const rewind = makeSessionRewind({ seq: 12, supersedes: { from_seq: 7, to_seq: 11 } })
+    const edited = makeUserMessage('and the snow?', { seq: 13 })
+
+    const state = reduceEvents([...first.events, ...second.events, rewind, edited])
+
+    // The reader edited their second message: that message, its reply and the turn around
+    // them are gone, and the first exchange — before the range — stays exactly where it was.
+    expect(asPairs(state)).toEqual([
+      'user:write a haiku about rain',
+      'agent:rain, on the window',
+      'user:and the snow?',
+    ])
+    expect(state.messages.at(-1)?.position).toBe(13)
+    // Nothing a client never saw is invented: the rewound events simply are not there.
+    expect(state.lastError).toBeNull()
+    expect(state.status).toBe('idle')
+  })
+
+  it('is the same conversation a client that loads the session later gets', () => {
+    const first = turn(2, 'write a haiku about rain', 'rain, on the window')
+    const second = turn(7, 'and the moon?', 'the moon, also wet')
+    const rewind = makeSessionRewind({ seq: 12, supersedes: { from_seq: 7, to_seq: 11 } })
+    const edited = makeUserMessage('and the snow?', { seq: 13 })
+
+    const live = reduceEvents([...first.events, ...second.events, rewind, edited])
+    // A reload replays the log, which already skips the range: the rewind is the only trace
+    // of the branch that was taken back.
+    const reloaded = reduceEvents([...first.events, rewind, edited])
+
+    expect(withoutMeta(live.messages)).toEqual(withoutMeta(reloaded.messages))
+    expect(live.lastSeq).toBe(reloaded.lastSeq)
+  })
+
+  it('drops the error and the requests the replaced turn left behind', () => {
+    const start = makeModelRequestStart({ seq: 2, consumes: [] })
+    const script: StreamEvent[] = [
+      makeStatusRunning({ seq: 1 }),
+      start,
+      makeSessionError({ seq: 3 }),
+      makeStatusIdle({ seq: 4 }),
+      makeSessionRewind({ seq: 5, supersedes: { from_seq: 1, to_seq: 4 } }),
+    ]
+
+    const state = reduceEvents(script)
+
+    expect(asPairs(state)).toEqual([])
+    expect(state.lastError).toBeNull()
+    // The request of the turn that was taken back cannot cost the next reply anything.
+    expect(state.pendingRequests).toEqual([])
+  })
+
+  it('keeps the edited message a client already showed when the rewind reaches it later', () => {
+    const first = turn(2, 'write a haiku about rain', 'rain, on the window')
+    const rewind = makeSessionRewind({ seq: 12, supersedes: { from_seq: 2, to_seq: 11 } })
+    const edited = makeUserMessage('write a haiku about snow', { seq: 13 })
+
+    // The sender's own view: the stored message is applied optimistically, and the rewind
+    // arrives a moment later on the stream — with the lower `seq` of the range it replaced.
+    // The edit is outside the range (it is the event *after* the rewind), so it survives, the
+    // branch it replaced goes, and the resume position stays where the client got to.
+    const state = reduceEvents([...first.events, edited, rewind])
+
+    expect(asPairs(state)).toEqual(['user:write a haiku about snow'])
+    expect(state.lastSeq).toBe(13)
+  })
+
+  it('touches nothing when the range covers nothing it holds', () => {
+    const state = reduceEvents([makeUserMessage('first', { seq: 1 })])
+    const rewind = makeSessionRewind({ seq: 5, supersedes: { from_seq: 4, to_seq: 4 } })
+
+    const next = reduceTranscript(state, rewind)
+
+    // The rewound range is past everything the transcript holds, so the messages are the very
+    // same array — only the position moves, as it does for any event.
+    expect(next.messages).toBe(state.messages)
+    expect(asPairs(next)).toEqual(['user:first'])
+    expect(next.lastSeq).toBe(5)
   })
 })
 

@@ -19,6 +19,7 @@ import type {
   Session,
   SessionDeletedEvent,
   SessionError,
+  SessionRewindEvent,
   SessionErrorType,
   StoredEvent,
   StoredEventDelta,
@@ -152,6 +153,25 @@ export function isChunk(event: StreamEvent): event is StoredEventStart | StoredE
   return event.type === EVENT_TYPES.eventStart || event.type === EVENT_TYPES.eventDelta
 }
 
+/** What a fake rewind did (#238): the stored `session.rewind`, or why it was refused. */
+export type RewindOutcome =
+  { readonly event: SessionRewindEvent } | { readonly refusal: RewindRefusal }
+
+/** Why a fake rewind was refused — the two answers the real server gives one (#238). */
+export type RewindRefusal =
+  /** A turn is running, so the branch being taken back is still being written (409). */
+  | 'busy'
+  /**
+   * The `seq` names nothing a reader could edit: no event there, not a `user.message`, or a
+   * message an earlier range already replaced (400).
+   */
+  | 'not_a_message'
+
+/** A `supersedes` range as the fake records it: the two ends, without the protocol's names. */
+function seqRangeOf(range: Supersedes): { fromSeq: number; toSeq: number } {
+  return { fromSeq: range.from_seq, toSeq: range.to_seq }
+}
+
 /** The in-memory brain of one fake session. */
 export class FakeBrain {
   /**
@@ -166,6 +186,15 @@ export class FakeBrain {
   session: Session
 
   readonly #log: StoredEvent[] = []
+  /**
+   * Every range a stored event has recorded: the reply's chunks a finished message replaced,
+   * and the tail a `session.rewind` restarted (#238).
+   *
+   * The log itself is never rewritten (D9); a range is a fact recorded beside it, exactly as
+   * the real store's `event_supersessions` table holds it, and the reads a client makes skip
+   * what a range covers.
+   */
+  readonly #ranges: { kind: 'chunks' | 'rewind'; fromSeq: number; toSeq: number }[] = []
   readonly #scripts: FakeScript[] = []
   readonly #subscribers = new Set<Subscriber>()
   readonly #delayMs: number
@@ -210,10 +239,12 @@ export class FakeBrain {
   }
 
   /**
-   * The session's log, in the order a server would have written it.
+   * The session's raw log, in the order a server would have written it — superseded events
+   * included, which is what its "read the whole log" debugging view shows.
    *
    * A read derives the user events' `processed_at` from the brain's notes; the log's own
-   * copies are never rewritten.
+   * copies are never rewritten. The reads a *client* makes — {@link FakeBrain.pageEvents},
+   * {@link FakeBrain.backlog} — are the replay read, which skips what a recorded range covers.
    */
   history(): readonly StoredEvent[] {
     return this.#log.map((event) => this.#view(event))
@@ -261,6 +292,38 @@ export class FakeBrain {
       this.#interruptRequested = true
     }
     return stored
+  }
+
+  /**
+   * Restart the session from an earlier `user.message` (#238), the way the server does when a
+   * client sends a `session.rewind`: refuse it unless the session is idle and the `seq` names
+   * a message a reader can still see, then record the range it replaces and emit the event.
+   *
+   * The range is `from_seq`..the last `seq` written — the store's to work out on the real
+   * server, because only it knows where the log ends; here the log is right at hand.
+   */
+  rewind(fromSeq: number): RewindOutcome {
+    if (this.running) {
+      return { refusal: 'busy' }
+    }
+    const target = this.#log.find((event) => event.seq === fromSeq)
+    if (
+      target === undefined ||
+      target.type !== EVENT_TYPES.userMessage ||
+      this.#isSuperseded(target)
+    ) {
+      return { refusal: 'not_a_message' }
+    }
+    const last = this.#log.at(-1)
+    const event: SessionRewindEvent = {
+      id: newEventId(),
+      type: EVENT_TYPES.sessionRewind,
+      seq: this.#nextSeq(),
+      processed_at: this.#now().toISOString(),
+      supersedes: { from_seq: fromSeq, to_seq: last === undefined ? fromSeq : last.seq },
+    }
+    this.#emit(event)
+    return { event }
   }
 
   /**
@@ -335,13 +398,19 @@ export class FakeBrain {
   backlog(afterSeq: number | undefined): readonly StoredEvent[] {
     return afterSeq === undefined
       ? []
-      : this.#log.filter((event) => event.seq > afterSeq).map((event) => this.#view(event))
+      : this.#log
+          .filter((event) => event.seq > afterSeq && !this.#isSuperseded(event))
+          .map((event) => this.#view(event))
   }
 
   /** One page of the log, honoring `limit`, `order`, `page`, `types[]` and `after_seq`. */
   pageEvents(params: ListEventsQuery): ListEventsResponse {
     const afterSeq = params.after_seq ?? cursorSeq(params.page)
-    let events = this.#log.filter((event) => afterSeq === undefined || event.seq > afterSeq)
+    // The replay read, so what a range covers does not come back (#238) — the same filter the
+    // store applies, and the same one the server's stream applies to its half of a resume.
+    let events = this.#log.filter(
+      (event) => (afterSeq === undefined || event.seq > afterSeq) && !this.#isSuperseded(event),
+    )
     if (params.types !== undefined) {
       const types = new Set<string>(params.types)
       events = events.filter((event) => types.has(event.type))
@@ -520,6 +589,19 @@ export class FakeBrain {
     return event
   }
 
+  /**
+   * Whether a recorded range covers an event: a reply's covers its chunks and nothing else, a
+   * rewind's every event in the tail it restarted (#238).
+   */
+  #isSuperseded(event: StoredEvent): boolean {
+    return this.#ranges.some(
+      (range) =>
+        event.seq >= range.fromSeq &&
+        event.seq <= range.toSeq &&
+        (range.kind === 'rewind' || isChunk(event)),
+    )
+  }
+
   /** Write a stored event to the log, move the session header along, and deliver it live. */
   #emit<T extends StoredEvent>(event: T): T {
     // The log is append-only (D9): every event is frozen before anything can hold it.
@@ -537,6 +619,17 @@ export class FakeBrain {
       for (const claimed of consumesOf(event)) {
         this.#processedAt.set(claimed, event.processed_at)
       }
+    }
+    // The range a finished reply records, or the one a rewind does (#238): a fact beside the
+    // log, like the real store's `event_supersessions` row, and what makes the replay read
+    // skip what it covers.
+    if (event.type === EVENT_TYPES.sessionRewind) {
+      this.#ranges.push({ kind: 'rewind', ...seqRangeOf(event.supersedes) })
+    } else if (
+      (event.type === EVENT_TYPES.agentMessage || event.type === EVENT_TYPES.modelRequestEnd) &&
+      event.supersedes !== undefined
+    ) {
+      this.#ranges.push({ kind: 'chunks', ...seqRangeOf(event.supersedes) })
     }
     if (event.type === EVENT_TYPES.sessionStatusRunning) {
       this.session.status = 'running'

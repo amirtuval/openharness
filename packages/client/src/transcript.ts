@@ -9,6 +9,7 @@ import type {
   UserMessageEvent,
   RetryStatusType,
   SessionErrorType,
+  SessionRewindEvent,
   SessionStatus,
 } from '@openharness/protocol'
 
@@ -311,6 +312,15 @@ export function initialTranscriptState(): TranscriptState {
  *   position for it — and the only thing it does is set `deleted` to `true`. The stream ends
  *   after it, so a UI can react to the state rather than to the end of an iteration, and a
  *   second one changes nothing.
+ * - **A `session.rewind` drops the conversation it replaced** (#238). Editing a message
+ *   restarts the session from it: the rewind carries the range it replaces — from the edited
+ *   message through the last event before it — and everything a client is showing from there
+ *   on belongs to a branch the session is no longer on. A client that followed the log live
+ *   has all of it on screen (a reload would never have shown it, since replay skips the
+ *   range), so the rewind drops those messages, the error it replaced, and the requests of
+ *   the turn it replaced. The test is each message's {@link TranscriptMessage.position}: a
+ *   user message sits at its own `seq` and a reply at the `from_seq` of the chunks it
+ *   replaced, so everything at or after the range's `from_seq` is inside it.
  * - **A `user.message` carrying a `model` may switch the session's model.** When its id
  *   differs from `state.model`, the message carries `modelChangedTo` so a UI can draw the
  *   marker, and `state.model` becomes the new id. The first model the log shows is not a
@@ -335,6 +345,18 @@ export function reduceTranscript(state: TranscriptState, event: StreamEvent): Tr
     // dedupe — which cannot apply to it — and idempotent, so a client that sees it twice
     // keeps the same state.
     return state.deleted ? state : { ...state, deleted: true }
+  }
+  if (event.type === EVENT_TYPES.sessionRewind) {
+    // A rewind is applied wherever it arrives (#238). A client that sent the edit applies the
+    // stored message the moment the request answers, and the rewind the stream echoes behind
+    // it carries the *lower* `seq` of the range it replaced — the ordinary dedupe would throw
+    // away the one event that takes the replaced branch off the screen. Applying it twice
+    // changes nothing, and it never moves `lastSeq` back.
+    const reduced = reduceStoredEvent(state, event)
+    if (reduced === state && event.seq <= state.lastSeq) {
+      return state
+    }
+    return { ...reduced, lastSeq: Math.max(state.lastSeq, event.seq) }
   }
   if (event.seq <= state.lastSeq) {
     // Already folded in: a resumed stream replaying from before where we got to, or the
@@ -420,6 +442,9 @@ function reduceStoredEvent(state: TranscriptState, event: StoredEvent): Transcri
         event.consumes,
       )
 
+    case EVENT_TYPES.sessionRewind:
+      return dropRewound(state, event)
+
     case EVENT_TYPES.sessionError:
       return {
         ...state,
@@ -466,6 +491,40 @@ function reduceStoredEvent(state: TranscriptState, event: StoredEvent): Transcri
     default:
       return state
   }
+}
+
+/**
+ * Drop the conversation a `session.rewind` replaced (#238).
+ *
+ * The message at the range's `from_seq`, its reply, and everything after them are what the
+ * reader took back: they are no longer part of what the session is. A client that watched the
+ * log live is showing them, so this is where the two views agree — a client that loads the
+ * session later never receives them at all, because replay skips the range.
+ *
+ * The turn's requests go with them, for the reason `session.status_idle` drops them: a
+ * request no reply ever claimed would otherwise fold its tokens into the next turn's reply.
+ * The error goes too: whatever it was about was inside the range.
+ *
+ * `position` is the test — a message's own `seq` for a user message, the `from_seq` of the
+ * chunks it replaced for a reply — so a message the reader saw before the edit stays exactly
+ * where it was.
+ */
+function dropRewound(state: TranscriptState, event: SessionRewindEvent): TranscriptState {
+  // The range, not "everything from `from_seq` on": the message that *follows* the rewind in
+  // the log — the edit itself — sits past `to_seq`, and a client that already showed it (its
+  // own send applies the stored message before the stream echoes the rewind) must keep it.
+  const messages = state.messages.filter(
+    (message) =>
+      message.position < event.supersedes.from_seq || message.position > event.supersedes.to_seq,
+  )
+  if (
+    messages.length === state.messages.length &&
+    state.lastError === null &&
+    state.pendingRequests.length === 0
+  ) {
+    return state
+  }
+  return { ...state, messages, lastError: null, pendingRequests: [] }
 }
 
 /**

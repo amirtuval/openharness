@@ -29,6 +29,20 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
+/**
+ * What a replay of a log shows: the log without the chunks a finished reply superseded (D9).
+ *
+ * The fake's reads are the replay read — `sessions.events.list`, `.iterate` and the replaying
+ * half of `.stream` all skip what a recorded range covers, exactly as the server's
+ * `listEvents` does — so a test comparing one of them against the log compares it against
+ * this view, which is also what a reloaded client sees.
+ */
+function replayOf(history: readonly StoredEvent[]): StoredEvent[] {
+  return history.filter(
+    (event) => event.type !== EVENT_TYPES.eventStart && event.type !== EVENT_TYPES.eventDelta,
+  )
+}
+
 describe('the fake client', () => {
   it('implements the client interface', () => {
     const fake = createFakeClient()
@@ -408,9 +422,12 @@ describe('the fake stream', () => {
     const history = fake.history()
     const lastSeq = history.at(-1)?.seq ?? 0
 
-    // `afterSeq: 0` replays the whole log; a later position replays only what follows it.
-    expect(await collect(fake, { afterSeq: 0 })).toEqual(history)
-    expect(await collect(fake, { afterSeq: lastSeq - 2 })).toEqual(history.slice(-2))
+    // `afterSeq: 0` replays the whole log — without the reply's superseded chunks, which is
+    // what the server's stream carries too — and a later position replays only what follows
+    // it.
+    const replay = replayOf(history)
+    expect(await collect(fake, { afterSeq: 0 })).toEqual(replay)
+    expect(await collect(fake, { afterSeq: lastSeq - 2 })).toEqual(replay.slice(-2))
     // And nothing at all without one: a stream delivers what happens next, not the history.
     expect(await collect(fake, {})).toEqual([])
   })
@@ -773,7 +790,7 @@ describe('the fake resources', () => {
       walked.push(event)
     }
 
-    expect(walked).toEqual(fake.history())
+    expect(walked).toEqual(replayOf(fake.history()))
     expect(walked.length).toBeGreaterThan(3)
   })
 
@@ -878,6 +895,103 @@ describe('the fake answers the server’s validation envelope (#121)', () => {
   })
 })
 
+describe('the fake rewinds a session (#238)', () => {
+  it('restarts the conversation from an edited message, and reads skip what it replaced', async () => {
+    const fake = createFakeClient()
+    fake.respondWith('rain, on the window').respondWith('snow, on the window')
+    await sendAndSettle(fake, 'write a haiku about rain')
+    const original = fake.history()
+    const edited = original.find((event) => event.type === EVENT_TYPES.userMessage)
+    expect(edited).toBeDefined()
+
+    await sendAndSettle(fake, 'write a haiku about snow', {
+      rewindTo: edited?.seq ?? 0,
+    })
+
+    // The log is append-only: the turn that was replaced is still in it, in place, and the
+    // rewind behind it says what it covers — the edited message through the last event before
+    // the rewind.
+    const log = fake.history()
+    const rewind = log.find((event) => event.type === EVENT_TYPES.sessionRewind)
+    expect(rewind).toMatchObject({
+      supersedes: { from_seq: edited?.seq, to_seq: rewind === undefined ? 0 : rewind.seq - 1 },
+    })
+
+    // What a client reads is the conversation restarted from the edit: a reload would never
+    // have seen the replaced branch, and the fake's replay read skips the range the same way
+    // the server's does.
+    const replay = (await fake.sessions.events.list(fake.session.id)).data
+    expect(replay.map((event) => event.type)).toEqual([
+      EVENT_TYPES.sessionRewind,
+      EVENT_TYPES.userMessage,
+      EVENT_TYPES.sessionStatusRunning,
+      EVENT_TYPES.modelRequestStart,
+      EVENT_TYPES.agentMessage,
+      EVENT_TYPES.modelRequestEnd,
+      EVENT_TYPES.sessionStatusIdle,
+    ])
+
+    // And the transcript the reader is looking at agrees with what a reload would build.
+    const live = reduceTranscriptAll(initialTranscriptState(), log)
+    const reloaded = reduceTranscriptAll(initialTranscriptState(), replay)
+    expect(live.messages.map((message) => `${message.role}:${message.text}`)).toEqual([
+      'user:write a haiku about snow',
+      'agent:snow, on the window',
+    ])
+    expect(reloaded.messages).toEqual(live.messages)
+  })
+
+  it('answers the two refusals the server answers, with the server’s envelopes', async () => {
+    const fake = createFakeClient()
+    fake.respondWith('slowly', { chunks: 20 })
+    const sent = fake.sendMessage(fake.session.id, 'first')
+    await fake
+      .sendMessage(fake.session.id, 'second', { rewindTo: 1 })
+      .then(() => expect.unreachable('a rewind while the turn runs must be refused'))
+      .catch((error: unknown) => {
+        // The turn in flight owns the branch being taken back: the route's 409.
+        expect(error).toMatchObject({ status: 409, type: 'conflict_error' })
+      })
+    await sent
+    await fake.waitForIdle(fake.session.id)
+
+    // A `from_seq` that names nothing a reader could edit — no event there, or an event that
+    // is not the user's — is the 400 the store's `RangeError` becomes.
+    const log = fake.history()
+    const reply = log.find((event) => event.type === EVENT_TYPES.agentMessage)
+    for (const rewindTo of [0, reply?.seq ?? 0, 999]) {
+      await expect(fake.sendMessage(fake.session.id, 'edited', { rewindTo })).rejects.toMatchObject(
+        { status: 400, type: 'invalid_request_error' },
+      )
+    }
+    // Nothing of a refused batch was stored: the log is exactly what it was.
+    expect(fake.history()).toEqual(log)
+  })
+
+  it('asks for no turn when the batch is a rewind alone', async () => {
+    const fake = createFakeClient()
+    fake.respondWith('a reply')
+    await sendAndSettle(fake, 'first')
+    const before = fake.history()
+
+    await fake.sessions.events.send(fake.session.id, {
+      type: EVENT_TYPES.sessionRewind,
+      from_seq: 1,
+    })
+    await fake.waitForIdle(fake.session.id)
+
+    // One event, and no turn around it: the route signals the scheduler from the user events
+    // a request stored, and a rewind is not one.
+    const after = fake.history()
+    expect(after).toHaveLength(before.length + 1)
+    const rewind = after.at(-1)
+    expect(rewind?.type).toBe(EVENT_TYPES.sessionRewind)
+    // A read of the session is the rewind alone: the range it recorded covers the turn that
+    // was there, and nothing took its place.
+    expect((await fake.sessions.events.list(fake.session.id)).data).toEqual([rewind])
+  })
+})
+
 describe('the fake deletes a session (#111)', () => {
   it('delivers one final session.deleted event, ends the stream, and answers 404 after', async () => {
     const fake = createFakeClient()
@@ -889,8 +1003,8 @@ describe('the fake deletes a session (#111)', () => {
     const events: StreamEvent[] = []
     const iterating = (async () => {
       for await (const event of fake.sessions.events.stream(fake.session.id, {
-        // The whole log, chunks included — the deletion is what ends the stream, and the
-        // events before it are exactly what the log held.
+        // The whole log replayed — the deletion is what ends the stream, and the events
+        // before it are the log's, less the chunks the reply's message superseded.
         deltas: true,
         afterSeq: 0,
         signal: controller.signal,
@@ -904,7 +1018,9 @@ describe('the fake deletes a session (#111)', () => {
     // its last event.
     await iterating
 
-    expect(events.filter(isStoredEvent)).toEqual(logged)
+    // The replay half of the stream, with the reply's superseded chunks skipped — the same
+    // events the log holds, minus what its own message replaced (D9).
+    expect(events.filter(isStoredEvent)).toEqual(replayOf(logged))
     expect(events.at(-1)).toEqual({
       type: EVENT_TYPES.sessionDeleted,
       session_id: fake.session.id,
