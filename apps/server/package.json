@@ -22,6 +22,7 @@
   "scripts": {
     "build": "tsdown",
     "build:deps": "turbo run build --filter=@openharness/server^...",
+    "catalog:refresh": "node scripts/refresh-models-dev.mjs",
     "dev": "tsdown --watch --on-success \"node dist/index.js\"",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
