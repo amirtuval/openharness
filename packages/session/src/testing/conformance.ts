@@ -109,8 +109,9 @@ import { type TestClock, createTestClock } from './clock'
  *   tail from the edited `user.message`, replay showing the conversation restarted from it,
  *   the replaced events gone from the pending list and from `findSessionsNeedingWork`, a
  *   claim into the range refused, the `RangeError` a `from_seq` that is not a still-visible
- *   message raises, an earlier rewind surviving a later one, and overlapping ranges treated
- *   as one union by replay and compaction.
+ *   message raises, the `RangeError` a batch whose rewind is not its first event — or that
+ *   carries two — raises, an earlier rewind surviving a later one, and overlapping ranges
+ *   treated as one union by replay and compaction.
  * - **compaction** — the retention window, only what a recorded range covers deleted
  *   (a reply's chunks, a rewind's whole tail), idempotence, and readers seeing the same log
  *   before and after.
@@ -1601,6 +1602,40 @@ export function runSessionStoreConformance(
         // a second restart from it would begin in a tail that is already gone.
         const again = await thrownBy(() => store.appendEvents(session.id, [rewindTo(1)]))
         expect(again).toBeInstanceOf(RangeError)
+      })
+
+      it('refuses a batch whose rewind is not first, or one that carries two', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        await completeTurn(store, session.id, 'first')
+        const before = (await store.listEventsUnscoped(session.id, { includeSuperseded: true }))
+          .data
+
+        // A message ahead of the rewind would be stored and then swallowed by the range the
+        // rewind records — the append would answer with it as if a turn were going to answer
+        // it — and a second rewind would supersede the first's restart. Neither is a batch the
+        // store records, whatever the caller is: both are refused whole, like a bad `from_seq`.
+        const batches: AppendableEvent[][] = [
+          [userMessage('edited'), rewindTo(1)],
+          [rewindTo(1), userMessage('edited'), rewindTo(1)],
+        ]
+        for (const batch of batches) {
+          const error = await thrownBy(() => store.appendEvents(session.id, batch))
+          expect(error).toBeInstanceOf(RangeError)
+        }
+        // Every refusal left the log exactly as it was — the message behind the refused rewind
+        // included, since a batch is one append.
+        expect(
+          (await store.listEventsUnscoped(session.id, { includeSuperseded: true })).data,
+        ).toEqual(before)
+
+        // The shape the rule allows is untouched: the rewind first, the edit behind it.
+        const [rewind, edited] = await append(store, session.id, [
+          rewindTo(1),
+          userMessage('edited'),
+        ])
+        expect(rewind).toMatchObject({ type: EVENT_TYPES.sessionRewind })
+        expect(edited).toMatchObject({ type: EVENT_TYPES.userMessage })
       })
 
       it('leaves a session with nothing to do when the rewind replaced everything', async () => {

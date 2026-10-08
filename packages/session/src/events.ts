@@ -197,7 +197,16 @@ export interface RewindTarget {
 }
 
 /**
- * Check the rewind ranges a batch carries against the log, before any of it is recorded.
+ * Check the rewinds a batch carries against the batch and the log, before any of it is
+ * recorded.
+ *
+ * A batch may carry **at most one** `session.rewind`, and it must be the **first** event.
+ * The batch is appended in order and a rewind supersedes everything from the message it names
+ * through the end of the log as it stands, so a message ahead of it — or anything behind a
+ * second rewind — would be stored and then swallowed by the range the rewind records: the
+ * append would answer with it as if accepted and no turn would ever answer it. The protocol's
+ * `SendEventsRequestSchema` refuses the same batches on the wire (#238); this is the store's
+ * half of the rule, and it holds whatever calls the store.
  *
  * A rewind's `from_seq` has to name a `user.message` of this session that no recorded range
  * already covers: a session restarts from a message a reader can still see, and a message an
@@ -218,9 +227,21 @@ export function assertRewinds(
   events: readonly SupersedingEvent[],
   target: (seq: number) => RewindTarget | undefined,
 ): void {
-  for (const event of events) {
+  let rewinds = 0
+  for (const [index, event] of events.entries()) {
     if (event.type !== EVENT_TYPES.sessionRewind) {
       continue
+    }
+    rewinds += 1
+    if (rewinds > 1) {
+      throw new RangeError(
+        `a batch may carry at most one session.rewind, and this one carries more: each restarts the log, so a second would supersede the first`,
+      )
+    }
+    if (index > 0) {
+      throw new RangeError(
+        `the rewind of ${String(event.id)} is not the first event in its batch: its range supersedes everything after the message it names, so a message ahead of it would be stored and then swallowed`,
+      )
     }
     const fromSeq = event.from_seq
     if (!isEventSeq(fromSeq)) {

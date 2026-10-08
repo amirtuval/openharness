@@ -256,9 +256,11 @@ whole tail of the log from that message through the event before it, of any type
 `appendEvents` fills in how far it reaches (`to_seq` is the rewind event's own `seq` minus
 one), inside the append's transaction, so only the store ever decides it. `appendEvents`
 records the range insert-only, after checking it lies within the session and ends before the
-superseding event's own `seq` — and, for a rewind, that `from_seq` names a `user.message` the
-log still has and no recorded range already covers (`assertRewinds`, shared by both stores);
-anything else is a `RangeError` and the whole append is refused. Replay then skips it:
+superseding event's own `seq` — and, for a rewind, that the batch carries **at most one and as
+its first event** (anything else would be stored and then swallowed by the range the rewind
+records) and that `from_seq` names a `user.message` the log still has and no recorded range
+already covers (`assertRewinds`, shared by both stores); anything else is a `RangeError` and
+the whole append is refused. Replay then skips it:
 `listEvents` leaves out the chunks a reply's range covers and every event a rewind's covers,
 so a reader loading a session after an edit sees the conversation as if the edited message had
 been the one sent, while the chunks of a message still in flight — nothing supersedes them —
@@ -424,8 +426,9 @@ and answers what was stored. Both answers are deep-frozen, like a credential's.
 `DuplicateEventIdError` (`appendEvents` carrying an id the log already
 holds, or the same id twice) and `ClaimConflictError` (`appendEvents` whose `consumes` names
 an event that is not a pending, uncovered user event of the session — a message a rewind
-replaced is neither, #238). A `supersedes` range that does not fit before its own event, or a
-rewind whose `from_seq` names no `user.message` this session still shows, is a `RangeError`,
+replaced is neither, #238). A `supersedes` range that does not fit before its own event, a
+rewind whose `from_seq` names no `user.message` this session still shows, and a batch whose
+rewind is not its first event or that carries two of them (#238), are a `RangeError`,
 like the other argument checks — `page` cursors, supplied event ids, lease ttls, and
 `compact()`'s cutoff. `getSession`, `getSessionUnscoped`,
 `updateSession`, `getAgent` and `updateAgent` answer `null` instead.
