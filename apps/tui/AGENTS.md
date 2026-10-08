@@ -171,10 +171,18 @@ chat picks a model, not an agent, and usually picks it with no dialog at all. In
 4. Only with no default either is there a **model picker**, fed by `client.models.list()`:
    the chat models the user's own provider keys can use, grouped by provider, each row
    showing the display name and the context window, and a last row, "Other model id…", that
-   takes a free-text `provider/model` id. Up/down move, Enter picks, the number keys pick
-   directly, Ctrl+C leaves; the list is windowed to ten rows and scrolls with the cursor,
-   and the numbers are positions in the whole list (and are off past nine rows, where "12"
-   would choose 1). After a pick, `oh` asks once — `Save <id> as your default model for new
+   takes a free-text `provider/model` id. A **search line** at the top filters the list as it
+   is typed — a case-insensitive substring of the model's display name, its `provider/model`
+   id or its provider name, with a provider's heading gone when none of its models match and
+   "No models match" when none do; Backspace removes from the query and Esc clears it, or
+   leaves when there is nothing to clear. Up/down move and Enter picks in the filtered list,
+   whose cursor is back on the first match whenever the query changes, and Ctrl+C leaves; the
+   list is windowed to ten rows and scrolls with the cursor, with the "N more above/below"
+   counts about the filtered list. The numbers name rows only while the query is empty and the
+   list is at most nine long (past nine, "12" would choose 1) — once a query is up a digit is a
+   character in it, because model names are full of them (`gpt-4o`, `claude-sonnet-5`). Choosing
+   "Other model id…" with a query carries the query into the free-text entry. After a pick,
+   `oh` asks once — `Save <id> as your default model for new
 chats? [y/N]` — and a `y` writes it with `preferences.put`; the chat opens either way,
    and a save that failed says so and steps aside on the next Enter.
 5. With no provider keys at all — `client.models.list()` answers with no entries and there
@@ -199,7 +207,8 @@ then on the session runs that model — later messages send no model — and the
 the model the log last said the session runs (`transcript.model`, falling back to the
 session's own), by its catalog name when the catalog is known and its id otherwise (#208).
 Switching provider mid-chat is supported; the history is rebuilt per request. Ctrl+C in the
-picker closes it and changes nothing.
+picker closes it and changes nothing — as does Esc, once the search line is empty (with a
+query in it, Esc clears that first).
 
 ### Model providers in the terminal (#210, epic #201 X7/X8)
 
@@ -316,8 +325,10 @@ newest session, which is on the first page by construction.
 
 The model picker needs no paging: `GET /v1/models` answers with the whole catalog in one
 response. It draws ten rows at a time, with the window following the cursor and the rows it
-leaves out counted above and below (`↑ 35 more`); a number key picks only while the list is
-at most nine long, with the same "12" rule as before.
+leaves out counted above and below (`↑ 35 more`) — the counts are about what the search line
+has left, so typing narrows the whole view. A number key picks only while the query is empty
+and the list is at most nine long, with the same "12" rule as before; once a query is up the
+digits are its characters.
 
 ### Updating itself
 
@@ -755,7 +766,7 @@ denial, cancellation, revoke failures); `src/index.test.ts` drives `run()` all t
 | `src/chat/session.test.ts`                        | the runtime: transcript, stream, send, `/model`, deleted sessions, dispose, and the turn clock the status line reads (#208)                                                                                                                                                                                                               |
 | `src/chat/target.test.ts`                         | session/model/agent selection, the default model, and the paging it needs                                                                                                                                                                                                                                                                 |
 | `src/chat/ctrl-c.test.ts`                         | the Ctrl+C rules: interrupt, arm, exit                                                                                                                                                                                                                                                                                                    |
-| `src/components/model-picker.test.tsx`            | the picker: windowing, number keys, the free-text row                                                                                                                                                                                                                                                                                     |
+| `src/components/model-picker.test.tsx`            | the picker: windowing, number keys, the free-text row, and the search line: `pickerRows` as a rule, the filtering list, heading hiding, the cursor reset, digits, Esc, the counts, the empty state and prefill                                                                                                                            |
 | `src/app.test.tsx`                                | the Ink screens through `ink-testing-library` and `createFakeClient()`, and the bottom of the screen whole: reply → blank → metadata → blank → rule → status → prompt, and one blank line and no more while a turn works (#233)                                                                                                           |
 | `src/errors.test.ts`                              | `describeError`: the 401 line, the connection hints, 403/429, `--debug`                                                                                                                                                                                                                                                                   |
 | `src/signals.test.ts`, `src/terminal.test.ts`     | the signal handlers and `restoreTerminal`                                                                                                                                                                                                                                                                                                 |

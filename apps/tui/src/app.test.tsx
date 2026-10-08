@@ -307,8 +307,9 @@ describe('App', () => {
     submit(app, '/model')
     await waitForScreen(app, 'Which model?')
 
-    // The prompt is not mounted while a flow is up, so what is typed reaches nothing: the
-    // picker's own keys (its Ctrl+C cancel included) are the only ones that do anything.
+    // The prompt is not mounted while a flow is up, so what is typed reaches nothing but the
+    // picker's own search line: the picker's keys (its Ctrl+C cancel included) are the only
+    // ones that do anything, and the prompt comes back empty.
     typeText(app, 'zz')
     pressKey(app, 'ctrlC')
     await waitFor(() => !frameOf(app).includes('Which model?'), { describe: () => frameOf(app) })
