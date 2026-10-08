@@ -31,6 +31,17 @@ describe('SendEventsRequestSchema', () => {
     ).toBe(true)
   })
 
+  it('accepts a rewind alongside the message it belongs to (#238)', () => {
+    expect(
+      SendEventsRequestSchema.safeParse({
+        events: [
+          { type: 'session.rewind', from_seq: 3 },
+          { type: 'user.message', content: text('write a haiku about snow') },
+        ],
+      }).success,
+    ).toBe(true)
+  })
+
   it('rejects an empty batch, a missing batch and non-user events', () => {
     expect(SendEventsRequestSchema.safeParse({ events: [] }).success).toBe(false)
     expect(SendEventsRequestSchema.safeParse({}).success).toBe(false)
@@ -45,6 +56,16 @@ describe('SendEventsRequestSchema', () => {
       }).success,
     ).toBe(false)
   })
+
+  it('rejects a rewind that names no message to restart from', () => {
+    expect(
+      SendEventsRequestSchema.safeParse({ events: [{ type: 'session.rewind' }] }).success,
+    ).toBe(false)
+    expect(
+      SendEventsRequestSchema.safeParse({ events: [{ type: 'session.rewind', from_seq: 0 }] })
+        .success,
+    ).toBe(false)
+  })
 })
 
 describe('SendEventsResponseSchema', () => {
@@ -57,6 +78,21 @@ describe('SendEventsResponseSchema', () => {
     expect(
       SendEventsResponseSchema.safeParse({
         data: [{ ...storedMessage, type: 'agent.message', content: text('hi') }],
+      }).success,
+    ).toBe(false)
+    // A rewind the request carried is not the answer either: the server wrote it, and a
+    // client reads it back from the log or the stream (#238).
+    expect(
+      SendEventsResponseSchema.safeParse({
+        data: [
+          {
+            id: newEventId(),
+            type: 'session.rewind',
+            seq: 2,
+            processed_at: '2026-03-15T10:00:00Z',
+            supersedes: { from_seq: 1, to_seq: 1 },
+          },
+        ],
       }).success,
     ).toBe(false)
   })

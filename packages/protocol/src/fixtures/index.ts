@@ -16,6 +16,7 @@ import type {
   SessionDeletedEvent,
   SessionError,
   SessionErrorEvent,
+  SessionRewindEvent,
   SessionStatusIdleEvent,
   SessionStatusRescheduledEvent,
   SessionStatusRunningEvent,
@@ -321,6 +322,25 @@ export function makeStatusRescheduled(
     type: 'session.status_rescheduled',
     seq: takeSeq(),
     processed_at: fixtureTimestamp(),
+  }
+  return { ...event, ...overrides }
+}
+
+/**
+ * A `session.rewind` event (#238): the session restarts from an earlier `user.message`.
+ *
+ * The default range covers `1..2`, the shape a session that has said one thing and been
+ * answered once produces — override `supersedes` (and usually `seq`) for anything else.
+ *
+ * @param overrides fields to replace on the event
+ */
+export function makeSessionRewind(overrides: Partial<SessionRewindEvent> = {}): SessionRewindEvent {
+  const event: SessionRewindEvent = {
+    id: newEventId(),
+    type: 'session.rewind',
+    seq: takeSeq(),
+    processed_at: fixtureTimestamp(),
+    supersedes: { from_seq: 1, to_seq: 2 },
   }
   return { ...event, ...overrides }
 }

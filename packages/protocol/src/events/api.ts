@@ -4,8 +4,8 @@ import { ListOrderSchema, PageLimitSchema } from '../common'
 import { NextPageSchema, PageCursorStringSchema, type NextPage } from '../pagination'
 import { AfterSeqSchema, STORED_EVENT_TYPES } from './common'
 import { DeltaTypeSchema } from './stream'
-import { UserEventInputSchema, UserEventSchema, type UserEvent } from './user'
-import { StoredEventSchema, type StoredEvent } from './union'
+import { UserEventSchema, type UserEvent } from './user'
+import { EventInputSchema, StoredEventSchema, type StoredEvent } from './union'
 
 /**
  * The three event endpoints:
@@ -28,17 +28,23 @@ export const StoredEventTypeSchema = z.enum(STORED_EVENT_TYPES)
 /**
  * Body of `POST /v1/sessions/{session_id}/events`.
  *
- * Only user events are accepted — the server owns everything else in the log.
+ * The user's own events, and one instruction the server turns into a session event: a
+ * `session.rewind` (#238). The server owns everything else in the log. A rewind travels with
+ * the edited message it belongs to, in one array and one append, so the session is never
+ * rewound but missing the message the reader sent — see {@link EventInputSchema}.
  */
 export const SendEventsRequestSchema = z.object({
-  events: z.array(UserEventInputSchema).min(1),
+  events: z.array(EventInputSchema).min(1),
 })
 
 export type SendEventsRequest = z.infer<typeof SendEventsRequestSchema>
 
 /**
- * Response of `POST /v1/sessions/{session_id}/events`: the events as they were stored, with
- * their `id` and `seq` assigned. Their `processed_at` is `null` until the brain reaches them.
+ * Response of `POST /v1/sessions/{session_id}/events`: the stored **user** events, with their
+ * `id` and `seq` assigned. Their `processed_at` is `null` until the brain reaches them.
+ *
+ * A `session.rewind` in the request is not one of them: the server writes it, and a client
+ * reads it back from the log or the stream like every other session event.
  */
 export const SendEventsResponseSchema = z.object({
   data: z.array(UserEventSchema),
