@@ -45,10 +45,12 @@ import { workingState } from './working-row'
  *   *which* message they came from, and that is what the send that follows rewinds the session
  *   to: the conversation restarts from the edited message, the transcript drops what it
  *   replaced, and the model never sees it. The memory is dropped when the box is **cleared**
- *   (how an edit is cancelled — a cancelled edit must not rewind) and after a send, so the
- *   composer is never left in an editing mode the reader cannot see. The action is disabled
- *   while the agent is working: the turn in flight owns the branch being taken back, and the
- *   server refuses the rewind (409) until it is done.
+ *   (how an edit is cancelled — a cancelled edit must not rewind, and Cancel and Escape are
+ *   spelled as clearing it) and after a send, so the composer is never left in an editing mode
+ *   the reader cannot see: the indicator the composer draws from it says what a send will do.
+ *   The action is disabled — and a send withheld — whenever the session is **not idle**: the
+ *   server takes a rewind only from an idle session (409 otherwise), because the turn in
+ *   flight owns the branch being taken back.
  */
 export function ChatView({
   sessionId,
@@ -130,8 +132,24 @@ export function ChatView({
     onDeleted(sessionId)
   }, [deleted, onDeleted, sessionId])
 
+  // Whether the session is idle, which is the state the server takes a rewind in (#238). The
+  // web's status is exactly that state — `running` is the whole of "not idle" — so the
+  // transcript's Edit action and a send of a pending edit read it here rather than each
+  // spelling out a status of their own.
+  const idle = status === 'idle'
+  // A pending edit whose rewind the server would refuse: the send is withheld, and the
+  // composer's indicator says what to wait for.
+  const editBlocked = editing !== null && !idle
+
   const sendFromComposer = useCallback(
     async (text: string): Promise<boolean> => {
+      // A pending edit is a rewind, and the server takes one only while the session is idle
+      // (#238): the turn in flight owns the branch being replaced. Keep the draft and the edit
+      // — the composer's indicator says why — and send nothing, rather than fire a request
+      // that comes back a 409.
+      if (editBlocked) {
+        return false
+      }
       // Sending is the start of a new turn: whatever the last one was stopped short of is no
       // longer what the foot of the transcript is about.
       setInterrupted(false)
@@ -152,7 +170,7 @@ export function ChatView({
       }
       return stored
     },
-    [chosen, editing, sessionModel, send],
+    [chosen, editBlocked, editing, sessionModel, send],
   )
 
   // Stop, and the word for it (U10): the interrupt request goes out, and the row at the foot
@@ -180,6 +198,13 @@ export function ChatView({
       setEditing(null)
     }
   }, [])
+
+  // Cancel, and Escape beside it in the composer: leave edit mode the way clearing the box
+  // does, so there is still exactly one rule about what ends an edit — the draft goes with it,
+  // because a cancelled edit is not a message waiting to be sent.
+  const cancelEdit = useCallback((): void => {
+    changeDraft('')
+  }, [changeDraft])
 
   // The transcript's own foot (U10). "No text has arrived" means the turn has not drawn
   // anything yet: an agent message is the newest one and it is still empty, so an ordinary
@@ -265,7 +290,8 @@ export function ChatView({
         nameOf={nameOf}
         working={statusRow}
         onEdit={editFromTranscript}
-        editDisabled={status === 'running'}
+        editDisabled={!idle}
+        replacingFrom={editing?.seq}
       />
 
       <div className="border-t px-4 py-3">
@@ -315,6 +341,7 @@ export function ChatView({
             inputRef={inputRef}
             value={draft}
             onValueChange={changeDraft}
+            edit={editing === null ? undefined : { blocked: editBlocked, onCancel: cancelEdit }}
             modelSelector={
               <ModelPicker
                 variant="compact"

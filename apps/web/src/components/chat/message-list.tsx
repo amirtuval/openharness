@@ -37,6 +37,7 @@ export function MessageList({
   working = null,
   onEdit,
   editDisabled = false,
+  replacingFrom,
 }: {
   messages: readonly TranscriptMessage[]
   loading: boolean
@@ -47,8 +48,15 @@ export function MessageList({
   /** Rewrite a message the reader wrote (#238): its text goes back in the composer, and
    *  sending it rewinds the session to that message. */
   onEdit?: ((message: TranscriptMessage) => void) | undefined
-  /** Whether rewriting is unavailable right now — the agent is working (#238). */
+  /** Whether rewriting is unavailable right now — the session is not idle (#238). */
   editDisabled?: boolean
+  /**
+   * The `position` of the message being rewritten (#238), when one is: every message **after**
+   * it is about to be replaced — sending the edit rewinds the session to that message — and is
+   * drawn as on its way out. The edited message itself stays as it is; its words are in the
+   * composer, not gone.
+   */
+  replacingFrom?: number | undefined
 }) {
   const last = messages.at(-1)
   const { ref, onScroll, isStuck, scrollToLatest } = useStickToBottom(
@@ -84,6 +92,7 @@ export function MessageList({
                 nameOf={nameOf}
                 previousModel={previousModels[index]}
                 editDisabled={editDisabled}
+                replacing={replacingFrom !== undefined && message.position > replacingFrom}
                 onEdit={
                   message.role === 'user' && onEdit !== undefined
                     ? () => {

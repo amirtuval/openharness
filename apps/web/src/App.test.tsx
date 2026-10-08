@@ -1001,6 +1001,112 @@ describe('the sidebar below md', () => {
       expect(edit).toBeEnabled()
     })
 
+    /** Open the edit on `index` of the reader's own messages, the way the transcript offers it. */
+    async function startEditing(
+      user: ReturnType<typeof userEvent.setup>,
+      index: number,
+    ): Promise<void> {
+      const users = messageElements('user')
+      await user.hover(users[index] as HTMLElement)
+      await user.click(
+        within(users[index] as HTMLElement).getByRole('button', { name: 'Edit and resend' }),
+      )
+    }
+
+    it('shows what a send would replace while editing, and Cancel takes the edit back (#238)', async () => {
+      const user = userEvent.setup({ delay: null })
+      const fake = makeFake()
+      fake.respondWith('One.')
+      renderApp(fake)
+      await send(user, 'the first thing')
+
+      await startEditing(user, 0)
+
+      // The mode is visible, not remembered silently: the composer says what a send would do.
+      expect(
+        screen.getByText('Editing message · sending replaces what follows it'),
+      ).toBeInTheDocument()
+
+      // Cancel takes the edit back — the draft goes with it, which is what clearing the box does,
+      // and the action is gone.
+      await user.click(screen.getByRole('button', { name: 'Cancel' }))
+      expect(screen.queryByText(/Editing message/)).toBeNull()
+      expect(screen.getByLabelText('Message')).toHaveValue('')
+
+      // Nothing was rewound, and the conversation is exactly what it was.
+      expect(messageElements('user').map(visibleText)).toEqual(['the first thing'])
+      expect(visibleText(messageElements('agent')[0] ?? null)).toBe('One.')
+      expect(fake.history().some((event) => event.type === EVENT_TYPES.sessionRewind)).toBe(false)
+    })
+
+    it('leaves edit mode on Escape (#238)', async () => {
+      const user = userEvent.setup({ delay: null })
+      const fake = makeFake()
+      fake.respondWith('One.')
+      renderApp(fake)
+      await send(user, 'the first thing')
+
+      await startEditing(user, 0)
+      expect(screen.getByText(/Editing message/)).toBeInTheDocument()
+
+      const box = screen.getByLabelText('Message')
+      await user.click(box)
+      await user.keyboard('{Escape}')
+
+      expect(screen.queryByText(/Editing message/)).toBeNull()
+      expect(box).toHaveValue('')
+    })
+
+    it('marks the messages an edit would replace (#238)', async () => {
+      const user = userEvent.setup({ delay: null })
+      const fake = makeFake()
+      fake.respondWith('One.')
+      renderApp(fake)
+      await send(user, 'the first thing')
+      fake.respondWith('Two.')
+      await send(user, 'the second thing')
+
+      // Editing the first message puts everything after it on its way out — the reader can see
+      // what the send would take back, not only read it in the composer.
+      await startEditing(user, 0)
+      expect(messageElements('user')[0]).toHaveAttribute('data-replacing', 'false')
+      expect(messageElements('agent')[0]).toHaveAttribute('data-replacing', 'true')
+      expect(messageElements('user')[1]).toHaveAttribute('data-replacing', 'true')
+      expect(messageElements('agent')[1]).toHaveAttribute('data-replacing', 'true')
+
+      // And taking the edit back puts them back: nothing is dimmed until an edit is pending.
+      await user.click(screen.getByRole('button', { name: 'Cancel' }))
+      expect(document.querySelectorAll('[data-replacing="true"]')).toHaveLength(0)
+    })
+
+    it('withholds an edit a running turn would refuse, and keeps the draft (#238)', async () => {
+      const user = userEvent.setup({ delay: null })
+      const fake = makeFake()
+      fake.respondWith('One.')
+      renderApp(fake)
+      await send(user, 'the first thing')
+
+      await startEditing(user, 0)
+      const box = screen.getByLabelText('Message')
+      await user.click(box)
+      await user.keyboard('!')
+
+      // Another tab sends: the turn starts while the edit is still pending, and the server
+      // would refuse the rewind now (409). Its own turn streams in like any other.
+      fake.respondWith(SLOW, { chunks: 8, delayMs: 20 })
+      await fake.sendMessage(fake.session.id, 'from another tab')
+      await waitFor(() => {
+        expect(screen.getByLabelText('Status: Running')).toBeInTheDocument()
+      })
+
+      // The box keeps the draft, says what to wait for, and nothing is posted — Enter included.
+      expect(screen.getByText('Editing message · wait for the reply to finish')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Send message' })).toBeDisabled()
+      await user.keyboard('{Enter}')
+      expect(box).toHaveValue('the first thing!')
+      expect(fake.history().some((event) => event.type === EVENT_TYPES.sessionRewind)).toBe(false)
+    })
+
     it('is Ctrl/⌘+Shift+O for a new chat, from anywhere', async () => {
       const user = userEvent.setup({ delay: null })
       // An account with a key, so New chat is New chat rather than the first-run flow (#209).

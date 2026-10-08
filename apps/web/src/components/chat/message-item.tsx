@@ -58,6 +58,7 @@ export function MessageItem({
   previousModel,
   onEdit,
   editDisabled = false,
+  replacing = false,
 }: {
   message: TranscriptMessage
   /** The catalog lookup for the marker's display name; the id when the catalog does not know it. */
@@ -66,8 +67,15 @@ export function MessageItem({
   previousModel?: string | undefined
   /** Rewrite this message — given for the reader's own messages (#238, "edit and resend"). */
   onEdit?: (() => void) | undefined
-  /** Whether rewriting is unavailable right now, because the agent is working (#238). */
+  /** Whether rewriting is unavailable right now, because the session is not idle (#238). */
   editDisabled?: boolean
+  /**
+   * Whether this message is about to be replaced (#238): an edit of an earlier message is
+   * pending in the composer, and sending it rewinds the session to that point. Drawn dimmed —
+   * one opacity step, no movement — so "what a send would take back" is visible in the
+   * transcript and not only in the composer's indicator.
+   */
+  replacing?: boolean
 }) {
   const isUser = message.role === 'user'
 
@@ -85,9 +93,13 @@ export function MessageItem({
       data-role={message.role}
       data-streaming={message.streaming}
       data-pending={message.pending}
+      data-replacing={replacing}
       className={cn(
-        'group/message flex w-full flex-col gap-0.5',
+        'group/message flex w-full flex-col gap-0.5 transition-opacity',
         isUser ? 'items-end' : 'items-start',
+        // About to be replaced (#238): an edit pending in the composer will rewind past this
+        // message, so it is on its way out. The fade is the whole statement — nothing moves.
+        replacing && 'opacity-40',
       )}
     >
       {message.modelChangedTo === undefined ? null : (

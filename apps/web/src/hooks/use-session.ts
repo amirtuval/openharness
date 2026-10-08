@@ -62,7 +62,7 @@ export interface SessionView {
    * left without the edit. The answer says whether the message was stored, so a composer can
    * keep the text on a failure — including the 409 a rewind gets while a turn is running.
    */
-  readonly send: (text: string, options?: { model?: string }) => Promise<boolean>
+  readonly send: (text: string, options?: { model?: string; rewindTo?: number }) => Promise<boolean>
   /** Ask the running session to stop. */
   readonly interrupt: () => Promise<void>
   /** Clear {@link requestError}. */

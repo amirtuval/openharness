@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { ANTHROPIC, OPENAI, providerStatus } from '../../test-support/catalog'
 import { ModelPicker } from '../models/model-picker'
-import { Composer } from './composer'
+import { Composer, type ComposerEdit } from './composer'
 
 /**
  * The composer's keyboard path (issue #105, P1): Enter sends, Shift+Enter starts a new line,
@@ -14,8 +14,14 @@ import { Composer } from './composer'
  *
  * Written against the composer as it is now, model selector included (epic #116): the
  * selector is part of the input area, so it is part of what the keyboard tests render.
+ *
+ * Edit mode (#238) is the second thing the box owns: the indicator above it, Escape and
+ * Cancel, and a send withheld while the screen says the rewind would be refused.
  */
-function setup(onSend: (text: string) => boolean | void | Promise<boolean | void> = () => true) {
+function setup(
+  onSend: (text: string) => boolean | void | Promise<boolean | void> = () => true,
+  edit?: ComposerEdit,
+) {
   const user = userEvent.setup({ delay: null })
   const send = vi.fn(onSend)
   render(
@@ -23,6 +29,7 @@ function setup(onSend: (text: string) => boolean | void | Promise<boolean | void
       running={false}
       onSend={send}
       onStop={vi.fn()}
+      edit={edit}
       modelSelector={
         <ModelPicker
           variant="compact"
@@ -100,6 +107,47 @@ describe('Composer', () => {
     expect(send).toHaveBeenCalledWith('keep me')
     // The one moment losing what you wrote hurts most is the one where it did not go.
     expect(input).toHaveValue('keep me')
+  })
+
+  it('says what a send would do while editing, and leaves on Cancel (#238)', async () => {
+    const onCancel = vi.fn()
+    const { user } = setup(() => true, { blocked: false, onCancel })
+
+    // The reader is told what pressing Send does before they press it: the messages after the
+    // one being rewritten are about to be replaced.
+    expect(
+      screen.getByText('Editing message · sending replaces what follows it'),
+    ).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(onCancel).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves edit mode on Escape (#238)', async () => {
+    const onCancel = vi.fn()
+    const { user, input } = setup(() => true, { blocked: false, onCancel })
+
+    await user.click(input)
+    await user.keyboard('{Escape}')
+
+    expect(onCancel).toHaveBeenCalledTimes(1)
+  })
+
+  it('withholds a send the screen says would be refused, and says why (#238)', async () => {
+    const { user, send, input, sendButton } = setup(() => true, {
+      blocked: true,
+      onCancel: vi.fn(),
+    })
+
+    await user.type(input, 'the rewrite')
+    // The turn in flight owns the branch the rewind would replace, so the server would refuse
+    // it (409): the box says what to wait for and offers no send — the button or Enter.
+    expect(screen.getByText('Editing message · wait for the reply to finish')).toBeInTheDocument()
+    expect(sendButton).toBeDisabled()
+    await user.keyboard('{Enter}')
+    expect(send).not.toHaveBeenCalled()
+    // And nothing was lost: the edit is still in the box, waiting for the turn to end.
+    expect(input).toHaveValue('the rewrite')
   })
 
   it('shows the model selector in the input area', async () => {
