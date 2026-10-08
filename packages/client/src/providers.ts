@@ -11,7 +11,7 @@ import type { ProviderCredentialType } from '@openharness/protocol'
  * `provider-metadata.test.ts` is what holds them together, because the server may not depend on
  * this package.
  *
- * The ids are **Mastra router names** — the first half of a `provider/model` string, which is
+ * The ids are **provider ids** — the first half of a `provider/model` string, which is
  * what `GET /v1/models` reports and what a session's `model.id` takes. The *credentials* form
  * has always been a convenience rather than a limit (an unknown provider can still be typed in
  * Settings), and this list stays that: a provider missing from it is reachable, it just has no
@@ -22,9 +22,9 @@ import type { ProviderCredentialType } from '@openharness/protocol'
  * (#210, epic #201 X7).
  */
 export interface ProviderInfo {
-  /** The Mastra router id: the `provider` half of a `provider/model` string. */
+  /** The provider id: the `provider` half of a `provider/model` string. */
   readonly id: string
-  /** What a reader calls it. Never the raw id, which is a router detail. */
+  /** What a reader calls it. Never the raw id, which is a wire detail. */
   readonly name: string
   /**
    * Which credential form collects the key (epic #201, X6).

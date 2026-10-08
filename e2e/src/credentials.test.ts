@@ -191,7 +191,7 @@ describe('provider credentials (A5)', () => {
     // credential — so the turn must end before any request is made (the provider is never
     // contacted, which is why this runs without a network).
     const server = await harness.server({ mockModel: false })
-    expect(server.output()).toMatch(/model: mastra router/)
+    expect(server.output()).toMatch(/model: provider factory/)
     const me = await person(server, 'keyless')
 
     const log = await runTurn(me, 'this must not reach a provider')

@@ -45,7 +45,7 @@ import type { Logger } from './types'
  *
  * The aim is the capable-but-affordable everyday tier — the "mini" / "flash" / "fast" class —
  * never the flagship and never the nano tier, because this is the model a brand-new chat runs
- * before anyone has chosen one. Ids are the provider's own; the full router id is the provider
+ * before anyone has chosen one. Ids are the provider's own; the full model id is the provider
  * plus this id (`anthropic/claude-haiku-4-5`). The fallback below covers providers with no
  * entry here (and a provider whose entries are all missing from the live catalog).
  */

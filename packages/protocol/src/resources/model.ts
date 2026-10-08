@@ -11,8 +11,9 @@ import { TimestampSchema } from '../common'
  * ```
  *
  * Only providers the caller has a credential for appear (C5). For each of them the server
- * calls the provider's own list-models endpoint with that credential, joined with the Mastra
- * registry for display names, context windows and output limits (C1, C2), and `providers`
+ * calls the provider's own list-models endpoint with that credential, joined with the
+ * bundled models.dev registry for display names, context windows and output limits (C1, C2),
+ * and `providers`
  * reports how each list was obtained: `ok` for the provider's own answer, `fallback` when the
  * call failed or timed out (5 s) — or the provider has no list endpoint — and the registry's
  * chat models stood in (C3). The server caches the answer in memory per user and provider for
@@ -27,7 +28,7 @@ import { TimestampSchema } from '../common'
 /**
  * One chat model the caller can use.
  *
- * `id` is the Mastra router string an agent's `model.id` takes, `provider/model`, and
+ * `id` is the model id an agent's `model.id` takes, `provider/model`, and
  * `provider` is its prefix. Non-chat models (embeddings, image, TTS, …) are never listed.
  */
 export const ModelEntrySchema = z.object({
@@ -60,7 +61,7 @@ export type ModelEntry = z.infer<typeof ModelEntrySchema>
  * (C3).
  */
 export const ProviderCatalogStatusSchema = z.object({
-  /** The Mastra router provider name, e.g. `anthropic`, `openai`. */
+  /** The provider id, e.g. `anthropic`, `openai`. */
   provider: z.string().min(1),
   /** `ok` or `fallback`; see the schema's description. */
   status: z.enum(['ok', 'fallback']),

@@ -115,7 +115,7 @@ export interface StartServerOptions {
   readonly catalog?: Pick<ModelCatalog, 'list' | 'invalidate'>
   /**
    * The registry the catalogue joins against, and the automatic default's fallback reads
-   * (epic #116, U4). Defaults to the bundled `@mastra/core` registry. A host that supplies
+   * (epic #116, U4). Defaults to the bundled models.dev snapshot. A host that supplies
    * its own catalogue supplies this too when the fallback should use its stub.
    */
   readonly registry?: ModelRegistry
@@ -216,7 +216,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   })
 
   // The model catalogue (epic #92): the caller's own keys, the providers' own lists, joined
-  // with the bundled `@mastra/core` registry and cached in memory per (user, provider). It is
+  // with the bundled models.dev snapshot and cached in memory per (user, provider). It is
   // built from the same credential store and vault the brain's resolver uses, and its one
   // outbound path is `createProviderFetch()`, which honors the egress-proxy variables. One
   // registry instance serves both the catalogue and the automatic default's fallback (U4).

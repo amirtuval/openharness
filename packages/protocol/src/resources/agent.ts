@@ -26,7 +26,7 @@ export const AGENT_DESCRIPTION_MAX_LENGTH = 2048
 /**
  * The model an agent runs, e.g. `{ "id": "anthropic/claude-sonnet-5" }`.
  *
- * `id` is a **Mastra model-router string**, `provider/model` — not a bare Anthropic model id.
+ * `id` is a **model id**, `provider/model` — not a bare Anthropic model id.
  * Anthropic's object also carries `effort`, `inference_geo` and `speed`; this is the subset
  * v1 stores, and unknown fields are dropped rather than rejected so that a real Anthropic
  * response still parses.

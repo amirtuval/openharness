@@ -6,10 +6,10 @@ import { VALIDATABLE_PROVIDERS } from '../provider-validation'
 /**
  * The registry seam over this package's committed models.dev snapshot (C2; #234): the data is
  * a file in the package, bundled with the code, and nothing here reaches a network. These
- * tests pin what the snapshot carries — display names, context windows, output limits and a
- * chat verdict, which the `@mastra/core` registry it replaced did not have — because the rest
- * of the catalogue is written around exactly that: the join fills the limits the provider's own
- * list leaves `null`, and the filter has a real verdict to consult before its name heuristic.
+ * tests pin what the snapshot carries — a display name, a context window and an output limit
+ * per model, which the ids-only registry it replaced did not — and what it does not, because
+ * the rest of the catalogue is written around exactly that: the join fills the limits the
+ * provider's own list leaves `null`, and the name filter still classifies.
  */
 
 const registry = createBundledRegistry()
@@ -41,9 +41,9 @@ describe('createBundledRegistry', () => {
     // for an embedding model too, and `family` is a name family. So the catalogue's name filter
     // is what classifies, and this is pinned here so a future refresh cannot quietly start
     // answering `chat: true` for `text-embedding-3-small` (C2 step 2 would then keep it).
-    const embedding = registry.models('openai').find(
-      (model) => model.id === 'text-embedding-3-small',
-    )
+    const embedding = registry
+      .models('openai')
+      .find((model) => model.id === 'text-embedding-3-small')
 
     expect(embedding?.chat).toBeUndefined()
     expect(registry.models('openai').some((model) => model.chat !== undefined)).toBe(false)

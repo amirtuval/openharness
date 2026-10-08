@@ -76,7 +76,9 @@ function buildSnapshot(data) {
   for (const [provider, key] of Object.entries(MODELS_DEV_KEYS)) {
     const entry = data[key]
     if (entry === undefined || entry.models === undefined) {
-      throw new Error(`models.dev knows no ${key} (our ${provider}); refusing to write a partial snapshot`)
+      throw new Error(
+        `models.dev knows no ${key} (our ${provider}); refusing to write a partial snapshot`,
+      )
     }
     const models = {}
     for (const [id, model] of Object.entries(entry.models)) {

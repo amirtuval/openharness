@@ -41,7 +41,7 @@ export interface ProviderCredentialsResource {
   /**
    * Add or replace the caller's credential for a provider.
    *
-   * @param provider the Mastra router provider name, e.g. `anthropic`, `openai`
+   * @param provider the provider id, e.g. `anthropic`, `openai`
    * @param body the credential; today always `{ type: 'api_key', api_key }`
    * @param options request options (cancellation)
    * @throws ApiError with `invalid_provider_credential` when the provider rejects the key
@@ -58,7 +58,7 @@ export interface ProviderCredentialsResource {
    * The wire answers `204` with no body, so there is nothing to return. Deleting a provider
    * that has no credential is not an error.
    *
-   * @param provider the Mastra router provider name, e.g. `anthropic`, `openai`
+   * @param provider the provider id, e.g. `anthropic`, `openai`
    * @param options request options (cancellation)
    */
   delete(provider: string, options?: RequestOptions): Promise<void>

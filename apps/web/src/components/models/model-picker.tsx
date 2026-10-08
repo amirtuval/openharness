@@ -19,7 +19,7 @@ import { Label } from '../ui/label'
  * drives `aria-activedescendant`, arrows move, Enter picks, Escape closes and hands focus
  * back to the trigger. Every model row shows the catalog's display name, the `provider/model`
  * id and — when the catalog knows it — the context window. "Other model ID…" swaps the list
- * for a free-text id field: the router accepts models this catalog does not list.
+ * for a free-text id field: the model factory takes ids this catalog does not list.
  *
  * The picker only ever offers what the server sent (providers the caller has a key for, C5);
  * it does not know provider names of its own.
@@ -394,7 +394,7 @@ export function ModelPicker({
                 >
                   <span className="truncate text-sm">Other model ID…</span>
                   <span className="truncate text-xs text-muted-foreground">
-                    type any provider/model the router knows
+                    type any provider/model id
                   </span>
                 </div>
               </div>
@@ -458,8 +458,8 @@ export function ModelPicker({
                 }}
               />
               <p className="text-xs text-muted-foreground">
-                A <code className="font-mono">provider/model</code> router string; the catalog may
-                not know it yet.
+                A <code className="font-mono">provider/model</code> model id; the catalog may not
+                know it yet.
               </p>
               <div className="flex items-center gap-2">
                 <Button

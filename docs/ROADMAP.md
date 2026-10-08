@@ -152,9 +152,8 @@ fullscreen TUI, and session rename, archive and fork.
 - the **model catalog** and **model-first chat** shipped early in
   [epic #92](https://github.com/amirtuval/openharness/issues/92) (closed 2026-10-04):
   - New chat picks a model from the models the user's own keys can use, read live from each
-    provider's API and joined with Mastra's registry for filtering and context windows
-    (Mastra is being replaced by the official AI SDK providers and a vendored models.dev
-    snapshot: [#234](https://github.com/amirtuval/openharness/issues/234));
+    provider's API and joined with a vendored models.dev snapshot for filtering and context
+    windows;
   - sessions carry their own model, and agents are optional;
   - customizable agents are hidden from the UI until they return as an advanced feature
     ([#96](https://github.com/amirtuval/openharness/issues/96)).

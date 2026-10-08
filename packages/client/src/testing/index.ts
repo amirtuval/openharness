@@ -607,8 +607,8 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
         return Promise.reject(badRequestFor(request.error.issues))
       }
       // The inline model id gets the same shape check the server applies on top of the
-      // schema (issue #94): the router's `provider/model`, at least two non-empty parts. A
-      // shape check, not a catalogue lookup — the router takes models no catalogue knows.
+      // schema (issue #94): the `provider/model` shape, at least two non-empty parts. A
+      // shape check, not a catalogue lookup — the factory takes models no catalogue knows.
       if (request.data.model !== undefined && !isModelId(request.data.model.id)) {
         return Promise.reject(
           new ApiError(
@@ -1098,7 +1098,7 @@ function requirePageCursor(page: string | undefined, kind: 'key' | 'seq'): ApiEr
 }
 
 /**
- * Whether an inline model id has the router's `provider/model` shape (issue #94).
+ * Whether an inline model id has the `provider/model` shape (issue #94).
  *
  * The server checks the inline id of `sessions.create` on top of the protocol's schema, where
  * it is only a non-empty string; the fake mirrors it so a UI tested here cannot ship ids the

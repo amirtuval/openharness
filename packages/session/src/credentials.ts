@@ -119,7 +119,7 @@ export interface SealedSecret {
 export interface CredentialKey {
   /** The owner: the `user.id` Better Auth minted. */
   readonly userId: UserId
-  /** The Mastra router provider the key authenticates, e.g. `anthropic`, `openai`. */
+  /** The provider id the key authenticates, e.g. `anthropic`, `openai`. */
   readonly provider: string
 }
 

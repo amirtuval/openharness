@@ -665,8 +665,7 @@ describe('GET /v1/models over the bundled snapshot', () => {
       responders: {
         'api.openai.com': () =>
           json({ object: 'list', data: [{ id: 'gpt-5-mini', object: 'model' }] }),
-        'api.anthropic.com': () =>
-          json({ data: [{ id: 'claude-haiku-4-5', type: 'model' }] }),
+        'api.anthropic.com': () => json({ data: [{ id: 'claude-haiku-4-5', type: 'model' }] }),
       },
     })
 

@@ -394,7 +394,7 @@ curl -X DELETE localhost:3000/v1/provider-credentials/anthropic \
   `invalid_provider_credential` with status `422`, and nothing is stored.
 - One credential per provider per user; `PUT` replaces it. Deletion is immediate.
 - `type` is a discriminated union that has only `api_key` today (Bedrock, Vertex and Azure
-  credentials come later); the provider is the Mastra router name (`anthropic`, `openai`, …).
+  credentials come later); the provider is the provider id (`anthropic`, `openai`, …).
 - A turn whose model's provider has no stored credential fails with a `session.error` whose
   type is `missing_provider_credential` — non-retryable, the message names the provider. The
   server never falls back to provider keys from the environment.
@@ -457,11 +457,11 @@ parameter bypasses the server's cache (below). The response is `ListModelsRespon
   deadline; Gemini's key travels in the `x-goog-api-key` header, never in the URL.
 - **The registry join, and how models are filtered.** What the provider's own payload carries
   is used first: Gemini's `displayName`/`inputTokenLimit`/`outputTokenLimit`, OpenRouter's
-  `name`/`context_length`, Anthropic's `display_name`. The bundled provider registry of the
-  pinned `@mastra/core` (never fetched from the network) is joined for the rest; note that
-  **the installed version's registry carries provider configuration and model ids, not
-  per-model names, context windows or a chat flag** — so on it, an entry keeps `null` limits
-  unless the provider itself reported them, and `name` falls back to the model id. A model is
+  `name`/`context_length`, Anthropic's `display_name`. The bundled models.dev snapshot —
+  a file committed to the server, never fetched from the network — is joined for the rest:
+  per model, its display name, context window and output limit. It carries **no chat flag**
+  (models.dev has none), so a model the provider's own payload does not classify is
+  classified by name, and a model neither side knows keeps `null` limits. A model is
   listed when it is a chat model, by this rule: an explicit non-chat verdict drops it (the
   provider's own capability data, e.g. Gemini's `supportedGenerationMethods` without
   `generateContent`); an explicit chat verdict keeps it (OpenRouter lists chat models only);

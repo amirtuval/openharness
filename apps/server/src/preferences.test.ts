@@ -6,7 +6,7 @@ import { asUser, createTestApp, type TestContext } from './test-support'
 /**
  * `GET`/`PUT /v1/me/preferences` (epic #116, U1; the theme: #203, epic #201 X3): the caller's
  * stored `default_model` — the model a new chat starts with — and the web app's `theme`.
- * Owner-only, shared by the web app and `oh`, and shape-checked only: a free-text router id
+ * Owner-only, shared by the web app and `oh`, and shape-checked only: a free-text model id
  * the catalogue has not caught up with is allowed.
  *
  * A `PUT` merges: the fields the body carries are stored and the rest keep their stored
@@ -56,7 +56,7 @@ describe('the preferences API', () => {
       theme: 'system',
     })
 
-    // A router id the catalogue does not know is fine (U1): the shape is the whole check, and
+    // A model id the catalogue does not know is fine (U1): the shape is the whole check, and
     // a field the body does not carry keeps its stored value.
     const freeText = await putPreferences(test, { default_model: 'acme/experimental-9' })
     expect(freeText.status).toBe(200)

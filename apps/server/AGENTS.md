@@ -285,10 +285,10 @@ maps the one error it can raise.
   size of 1000 and follows Anthropic's `has_more`/`last_id` and Gemini's `nextPageToken`;
   OpenRouter and the OpenAI-compatible family answer in one page. A provider that pages
   forever stops at `MAX_PAGES`.
-- **C2 — the registry join and the filter.** `catalog/registry.ts` reads the provider registry
-  bundled in `@mastra/core` through the API that version exports (`getProviderConfig` /
-  `PROVIDER_REGISTRY` from `@mastra/core/llm`) — never from the network. **The exact rule**,
-  per provider-listed model:
+- **C2 — the registry join and the filter.** `catalog/registry.ts` reads
+  `apps/server/src/catalog/models-dev.json`, a snapshot of models.dev committed to this
+  package and bundled into `dist/index.js` — never read from the network, and never from a
+  path that could be missing at runtime. **The exact rule**, per provider-listed model:
   1. **An explicit non-chat verdict drops it** — the registry's classification, or the
      provider's own capability data (Gemini's `supportedGenerationMethods` without
      `generateContent`).
@@ -304,17 +304,25 @@ maps the one error it can raise.
 
   The name, context window and max output of an entry come from the provider's own payload
   where it has them (Gemini's `displayName`/`inputTokenLimit`/`outputTokenLimit`, OpenRouter's
-  `name`/`context_length`/`top_provider.max_completion_tokens`), from the registry where it
+  `name`/`context_length`/`top_provider.max_completion_tokens`), from the snapshot where it
   has them, and from the model id otherwise; `null` is a legitimate value for the two limits.
-  **What the installed registry actually carries** — verified against `@mastra/core@1.71.0`,
-  not assumed: provider configuration (display name, base URL, API-key variable) and **model
-  ids**, plus the `attachment`/`temperature`/`structuredOutput` capability lists. It has no
-  per-model names, context windows or chat flag (the models.dev payload it is generated from
-  does; the package reduces it). So on this version the join contributes the id knowledge and
-  the fallback lists, the provider's own payload supplies the limits where there are any, and
-  step 3 is what classifies. `RegistryModel` carries `name`/`contextWindow`/`maxOutput`/`chat`
-  so that a registry version which attaches them is a one-place change; the tests inject a
-  registry stub with them to pin the join itself.
+  **What the snapshot actually carries** — the model's own `name`, `limit.context` and
+  `limit.output`, for the 11 providers whose keys this server can validate; it is keyed by our
+  provider ids, so `fireworks`/`together` are models.dev's `fireworks-ai`/`togetherai` mapped
+  at generation time. It carries **no chat flag, and could not**: models.dev has none, and the
+  fields it does have are not one — `modalities.output` is `["text"]` for
+  `text-embedding-3-small` too, and `family` is a name family. So step 3 is what classifies,
+  and its principle is unchanged. `RegistryModel` still carries `name`/`contextWindow`/
+  `maxOutput`/`chat`, so a registry that finds a real chat signal is a one-place change; the
+  tests inject a stub with all four to pin the join itself. The limits the snapshot supplies
+  are what fill the `null`s the provider's own list leaves for OpenAI, Anthropic and the rest
+  (`model-catalog.test.ts` pins the OpenAI and Anthropic entries end to end).
+
+  Regenerate it with `yarn workspace @openharness/server catalog:refresh`
+  (`scripts/refresh-models-dev.mjs`), which fetches https://models.dev/api.json, maps the
+  provider keys and writes the file; the snapshot's date is in the file (`SNAPSHOT_DATE`). It
+  is a source file like any other — nothing fetches at build, test or boot time, and a sandbox
+  with no network still builds. The data is only as fresh as a commit.
 
 - **C3 — fallback is visible, never silent.** A provider that times out (5 s), fails (non-2xx,
   an unreadable body, a transport error), cannot have its credential opened, or has no adapter
@@ -670,7 +678,7 @@ a crash loop or a retry.
 
 ## The test model hook
 
-`OPENHARNESS_TEST_MODEL=mock` swaps the brain's Mastra router for a deterministic model, so the
+`OPENHARNESS_TEST_MODEL=mock` swaps the brain's provider factory for a deterministic model, so the
 whole server — scheduler, brain, store, SSE, the AI SDK adapter — runs with no provider keys
 and no network. It is an AI SDK `MockLanguageModelV4`, streamed through the same `streamText`
 path a real provider goes through, and it lives in `mock-model.ts`; `resolveModelFactory` is
@@ -886,7 +894,7 @@ before the instance stops serving it (#151).
 | `SESSION_INVALID_MESSAGE`, `SSE_SESSION_INVALID`                                                                                 | what a stream says when its session is revoked or expires (#76)                           |
 | `validateProviderApiKey`, `VALIDATABLE_PROVIDERS`                                                                                | the one cheap provider call a saved key is checked with                                   |
 | `ModelCatalog`, `ModelCatalogOptions`, `CatalogRefreshLimitedError`                                                              | the model catalogue: provider lists, registry join, cache, fallback (#90)                 |
-| `createMastraRegistry()`, `emptyRegistry`, `ModelRegistry`, `RegistryModel`                                                      | the registry join's seam, over the bundled `@mastra/core` data                            |
+| `createBundledRegistry()`, `emptyRegistry`, `SNAPSHOT_DATE`, `ModelRegistry`, `RegistryModel`                                    | the registry join's seam, over the bundled models.dev snapshot                            |
 | `createProviderFetch()`, `ProviderFetch`, `DEFAULT_PROVIDER_TIMEOUT_MS`                                                          | the provider HTTP client: egress-proxy aware, 5 s deadline                                |
 | `CatalogCache`, `RefreshLimiter`, `DEFAULT_CATALOG_TTL_MS`, `DEFAULT_REFRESH_INTERVAL_MS`                                        | the in-memory per-(user, provider) cache and the refresh rate limit (C4)                  |
 | `adapterFor()`, `adaptedProviders()`, `isChatModel()`, `isNonChatFamily()`                                                       | the fixed endpoint table and the chat filter (C1/C2)                                      |
@@ -933,7 +941,7 @@ src/
   catalog/
     catalog.ts          ModelCatalog: per-provider fetch, join, filter, cache, fallback (#90)
     adapters.ts         the fixed provider endpoint table and each provider's payload shape
-    registry.ts         ModelRegistry over @mastra/core's bundled provider registry (C2)
+    registry.ts         ModelRegistry over the bundled models.dev snapshot (C2)
     filter.ts           isChatModel: the never-hide/never-show rule, and the name families
     cache.ts            CatalogCache (one hour per user+provider) and RefreshLimiter (C4)
     provider-fetch.ts   ProviderFetch: fetch over the egress-proxy env, and the 5 s deadline
@@ -1134,7 +1142,7 @@ parallel with each other.
   `catalog/cache.test.ts` — the pieces on their own: the name families and the verdict
   precedence, the endpoint table (constant URLs, each provider's header and payload shape,
   the `VALIDATABLE_PROVIDERS` ⊆ adapters invariant), the bundled registry read through
-  `@mastra/core` (including that this installed version carries ids only), and the TTL /
+  the bundled models.dev snapshot (including that it carries no chat flag), and the TTL /
   invalidation / rate-limit rules on an injected clock.
 
 ## Rules

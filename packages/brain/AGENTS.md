@@ -66,33 +66,33 @@ emits what that reaches.
 
 ### `@openharness/brain`
 
-| export                                                                        | what it is                                                                                    |
-| ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `runTurn(sessionId, options)`                                                 | run one turn; resolves to a `TurnOutcome`                                                     |
-| `RunTurnOptions`                                                              | `{ store, model, resolveCredential, signal?, fence?, contextStrategy?, retry? }`              |
-| `TurnOutcome`, `TurnOutcomeKind`                                              | `{ outcome: 'idle' \| 'noop' \| 'interrupted' \| 'error' }`                                   |
-| `ContextStrategy`, `ContextStrategyOptions`                                   | `(events, { model, system }) => ModelMessage[]`                                               |
-| `createContextStrategy(config?)`, `ContextStrategyConfig`                     | the default strategy: the conversation, trimmed to a token budget                             |
-| `DEFAULT_CONTEXT_STRATEGY`, `DEFAULT_CONTEXT_TOKEN_BUDGET`, `CHARS_PER_TOKEN` | its defaults                                                                                  |
-| `estimateTokens(text)`                                                        | the chars/4 estimate the budget is measured in                                                |
-| `ModelCredential`                                                             | `{ apiKey }` — the credential one model request is made with                                  |
-| `ResolveCredential`                                                           | `(provider) => Promise<ModelCredential \| null>` — where it comes from                        |
-| `ModelFactory`                                                                | `(modelId, credential) => LanguageModel` — how a `provider/model` becomes a model             |
-| `routerModelFactory`                                                          | the `ModelFactory` hosts normally pass: Mastra's model router, with the key passed explicitly |
-| `providerOf(modelId)`                                                         | the provider of a `provider/model` id: the part before the first slash                        |
-| `isUsableCredential(credential)`                                              | whether a resolved credential is a key at all (a blank one is not)                            |
-| `missingCredentialMessage(provider)`                                          | the `session.error` sentence for a provider with no key                                       |
-| `redactSecret(text, secret)`, `REDACTED_PLACEHOLDER`                          | the credential scrubbed out of provider error text                                            |
-| `streamModelRequest(params)`, `ModelRequestParams`, `ModelRequestResult`      | one model request, as text, usage, error and abort                                            |
-| `toModelUsage(usage)`, `ZERO_MODEL_USAGE`                                     | what a request reported → the protocol's four counters, always integers                       |
-| `classifyModelError(error)`, `ModelErrorClassification`                       | retryable or not, and the `session.error` type that says so                                   |
-| `isRetryableModelError(error)`                                                | the same answer, when only the boolean is wanted                                              |
-| `isClaimConflictError(error)`                                                 | whether the store refused a claim another owner had taken                                     |
-| `isOwnershipError(error)`                                                     | a fenced write or a claim conflict: the log is somebody else's (D9)                           |
-| `RetryPolicy`, `ResolvedRetryPolicy`, `resolveRetryPolicy(policy?)`           | how failures are retried                                                                      |
-| `backoffDelay(attempt, policy)`, `abortableSleep`, `Sleep`                    | the delay, and the sleep that honors an abort                                                 |
-| `DEFAULT_MAX_RETRIES`, `DEFAULT_BASE_DELAY_MS`, `DEFAULT_MAX_DELAY_MS`        | `3`, `500`, `8000`                                                                            |
-| `PACKAGE_NAME`, `DEPENDENCIES`                                                | the package name, and the edges that must resolve through built output                        |
+| export                                                                        | what it is                                                                                       |
+| ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `runTurn(sessionId, options)`                                                 | run one turn; resolves to a `TurnOutcome`                                                        |
+| `RunTurnOptions`                                                              | `{ store, model, resolveCredential, signal?, fence?, contextStrategy?, retry? }`                 |
+| `TurnOutcome`, `TurnOutcomeKind`                                              | `{ outcome: 'idle' \| 'noop' \| 'interrupted' \| 'error' }`                                      |
+| `ContextStrategy`, `ContextStrategyOptions`                                   | `(events, { model, system }) => ModelMessage[]`                                                  |
+| `createContextStrategy(config?)`, `ContextStrategyConfig`                     | the default strategy: the conversation, trimmed to a token budget                                |
+| `DEFAULT_CONTEXT_STRATEGY`, `DEFAULT_CONTEXT_TOKEN_BUDGET`, `CHARS_PER_TOKEN` | its defaults                                                                                     |
+| `estimateTokens(text)`                                                        | the chars/4 estimate the budget is measured in                                                   |
+| `ModelCredential`                                                             | `{ apiKey }` — the credential one model request is made with                                     |
+| `ResolveCredential`                                                           | `(provider) => Promise<ModelCredential \| null>` — where it comes from                           |
+| `ModelFactory`                                                                | `(modelId, credential) => LanguageModel` — how a `provider/model` becomes a model                |
+| `providerModelFactory`                                                        | the `ModelFactory` hosts normally pass: the official AI SDK providers, the key passed explicitly |
+| `providerOf(modelId)`                                                         | the provider of a `provider/model` id: the part before the first slash                           |
+| `isUsableCredential(credential)`                                              | whether a resolved credential is a key at all (a blank one is not)                               |
+| `missingCredentialMessage(provider)`                                          | the `session.error` sentence for a provider with no key                                          |
+| `redactSecret(text, secret)`, `REDACTED_PLACEHOLDER`                          | the credential scrubbed out of provider error text                                               |
+| `streamModelRequest(params)`, `ModelRequestParams`, `ModelRequestResult`      | one model request, as text, usage, error and abort                                               |
+| `toModelUsage(usage)`, `ZERO_MODEL_USAGE`                                     | what a request reported → the protocol's four counters, always integers                          |
+| `classifyModelError(error)`, `ModelErrorClassification`                       | retryable or not, and the `session.error` type that says so                                      |
+| `isRetryableModelError(error)`                                                | the same answer, when only the boolean is wanted                                                 |
+| `isClaimConflictError(error)`                                                 | whether the store refused a claim another owner had taken                                        |
+| `isOwnershipError(error)`                                                     | a fenced write or a claim conflict: the log is somebody else's (D9)                              |
+| `RetryPolicy`, `ResolvedRetryPolicy`, `resolveRetryPolicy(policy?)`           | how failures are retried                                                                         |
+| `backoffDelay(attempt, policy)`, `abortableSleep`, `Sleep`                    | the delay, and the sleep that honors an abort                                                    |
+| `DEFAULT_MAX_RETRIES`, `DEFAULT_BASE_DELAY_MS`, `DEFAULT_MAX_DELAY_MS`        | `3`, `500`, `8000`                                                                               |
+| `PACKAGE_NAME`, `DEPENDENCIES`                                                | the package name, and the edges that must resolve through built output                           |
 
 `log.ts`, `events.ts` and `validate.ts` are internal: they are how the loop is written, not what
 a host talks to.
@@ -122,6 +122,7 @@ LOOP — once per model request
      credential's provider. A session deleted meanwhile throws SessionNotFoundError and the
      turn stops, writing nothing (U5)
   4. no credential for the model's provider ............... MISSING CREDENTIAL (below)
+  4b. the id names a provider with no client here .......... UNSUPPORTED PROVIDER (below)
   5. ... span.model_request_start { consumes: the queued user.message ids,
                                     model: the provider/model of the request }
      (the append IS the claim: atomic, fenced, refused whole with ClaimConflictError)
@@ -151,6 +152,20 @@ MISSING CREDENTIAL — the owner has no stored key for the model's provider (epi
   claimed by the idle event that ends the turn, the way an interrupt's are (P4): left queued,
   the session's own scheduler would find them and run the same failing turn again. Nothing is
   retried: adding the key and sending the message again is what works.
+
+UNSUPPORTED PROVIDER — the model id names a provider `providerModelFactory` has no client for
+  ........................................... session.error
+                                               { type: model_request_failed_error,
+                                                 retry_status: exhausted }
+  ........................................... session.status_idle
+                                               { consumes: the queued user.message ids }
+  ........................................... return error
+
+  The provider of a `provider/model` id is free text (C5), so an id naming a provider outside
+  the 11 the server can store a key for is reachable — and a key for one could never exist.
+  The factory is built before the span start, so this ends the turn like a missing credential:
+  no span, no request, the message claimed by the idle event. `UnsupportedProviderError` is the
+  only error the loop treats this way; anything else a factory throws is a bug and propagates.
 
 INTERRUPT — an aborted signal, or a queued user.interrupt, at any point above
   text was streamed ......................... agent.message { supersedes: the chunk range }
@@ -248,7 +263,7 @@ Notes on the corners:
 | what                                 | how                                                                                              |
 | ------------------------------------ | ------------------------------------------------------------------------------------------------ |
 | how the log becomes messages         | `contextStrategy` on `runTurn`; the default trims to a token budget, per model                   |
-| how `provider/model` becomes a model | `model` on `runTurn` (required): a `ModelFactory`; the server passes `routerModelFactory`        |
+| how `provider/model` becomes a model | `model` on `runTurn` (required): a `ModelFactory`; the server passes `providerModelFactory`      |
 | where the key comes from             | `resolveCredential` on `runTurn`: the owner's credential per provider, resolved per request (A5) |
 | how failures are retried             | `retry` on `runTurn`: attempts, base delay, ceiling, and the `sleep` itself                      |
 
@@ -263,15 +278,13 @@ is for.
 
 ## The model seam
 
-The loop streams with the **AI SDK's `streamText`**, and resolves `provider/model` with
-**Mastra's model router** (`ModelRouterLanguageModel`) — the fallback the issue allows, chosen
-after trying Mastra's `Agent` first. `Agent.stream()` swallows what this loop needs most:
-
-- a provider failure never reaches the caller: the stream ends, `textStream` yields nothing
-  further, the error is logged to the console, and the turn would look like an empty success;
-- an abort is not reported either, and `agent.stream` retries internally through `p-retry`, on
-  top of the retries the loop has to write `session.error` events for;
-- the model object it wants is not the AI SDK's, so the factory could not be a `LanguageModel`.
+The loop streams with the **AI SDK's `streamText`**, and resolves a `provider/model` id with
+**`providerModelFactory`**: one official AI SDK provider per provider id, each built with the
+request's key passed explicitly. The package used to resolve it with Mastra's model router,
+which was tried after Mastra's `Agent` and rejected — `Agent.stream()` swallowed everything
+the loop needs, retried underneath it, and did not hand back a `LanguageModel`. The router
+stood in for it until [#234](https://github.com/amirtuval/openharness/issues/234) removed the
+dependency; this paragraph is the historical note the repository keeps.
 
 `streamText` gives all three cleanly: an `error` part plus `onError` with the original error
 (including its status), an `abort` part, and a `usage` report. The SDK must not retry
@@ -307,17 +320,23 @@ a retry resolves again, so a key the owner just added is picked up. `isUsableCre
 dangerous (below), so both end the turn with `missing_provider_credential` before any span is
 opened.
 
-`routerModelFactory` passes the key into the router's config —
-`new ModelRouterLanguageModel({ id: modelId, apiKey })` — which is the whole of "no environment
-fallback". Mastra's `resolveAuth()` (`@mastra/core@1.71.0`, its `router.ts`) returns a
-config-supplied `apiKey` verbatim, tagged `source: 'explicit'`, **without** asking the gateway
-whose `getApiKey()` is what reads `OPENAI_API_KEY` and friends; it only consults that gateway
-when `config.apiKey` is falsy. So an explicit key cannot be overridden, and the environment is
-never read — and a falsy key would silently restore the fallback, which is exactly why the loop
-never constructs the router without one. `model.test.ts` pins the first half of that contract —
-the explicit key wins with `OPENAI_API_KEY` set to a decoy — and `turn.test.ts` the second: a
-turn with no credential reaches no provider (`fetch` is stubbed and must not be called) even
-with the variables set.
+`providerModelFactory` passes the key to the provider package as a **constructor argument** —
+`createAnthropic({ apiKey, baseURL })`, `createOpenAI({ apiKey, baseURL }).responses(id)`, and
+so on — which is the whole of "no environment fallback". Every AI SDK provider reads its
+`*_API_KEY` variable only when it was constructed without a key, so an explicit one cannot be
+overridden; and a falsy one would silently become "no key given" and hand the request to
+whatever the process has set, which is exactly why the loop never builds a model without one.
+The base URL is pinned the same way, in that one table (`PROVIDERS`), because the `*_BASE_URL`
+variables would otherwise move a request — and its key — to a host nobody chose.
+
+`model.test.ts` pins both halves of that contract, for **each of the 11 providers**: with every
+`*_API_KEY` and `*_BASE_URL` decoy set, one request goes to the provider's own host with the
+owner's key in the header that provider authenticates with, and with nothing from the
+environment in it. `turn.test.ts` pins the second half at the loop's boundary: a turn with no
+credential reaches no provider (`fetch` is stubbed and must not be called) even with the
+variables set, and a turn whose id names a provider outside the table ends the same way —
+`model_request_failed_error`, `retry_status: exhausted`, no span, no request — because a
+credential for such a provider could never have been stored.
 
 The credential is also scrubbed on the way into the log: a provider that rejects a key
 sometimes quotes it in the error text, and `redactSecret` replaces the key — the whole value,
@@ -327,26 +346,35 @@ than eight characters is left alone, as is a trimmed variant that falls below ei
 whole, so the log still says what the provider said. The brain itself never logs; the tests
 capture the console anyway, because the libraries on this path could.
 
-### Usage, and the provider spec Mastra gets wrong
+### Usage
 
-`ai@7` reads a model's `specificationVersion` and reshapes what it reports to match. Mastra's
-router declares the **v2** spec (`@mastra/core@1.71.0`, `dist/llm/model/router.d.ts`) while the
-model it resolves — its own bundled `OpenAIResponsesLanguageModel` — declares **v3** and reports
-v3-shaped usage, `{ inputTokens: { total, noCache, cacheRead, cacheWrite }, … }`. `ai` believes
-the declaration, so `convertV2UsageToV3` reads that object as if it were the v2 number and wraps
-it again; `streamText` then accumulates the steps with `0 + { … }` and the total becomes the
-_string_ `"0[object Object]"` (issue #39). No released or alpha version of either package agrees
-with itself, so the brain recovers the numbers itself:
+`ai@7` reads a model's `specificationVersion` and reshapes what it reports to match. Every
+provider in `PROVIDERS` declares the spec it implements (`v4`), which is the one `ai@7` reads,
+so a report arrives as the numbers the protocol wants — `{ inputTokens: { total, noCache,
+cacheRead, cacheWrite }, … }` — and `result.usage` is reliable.
 
-- `streamModelRequest` reads each step's own report (`finish-step`) as it streams — the totals
-  are still numbers there — and only falls back to the SDK's accumulated `result.usage` when no
+The router this replaced did not: it declared the **v2** spec while streaming v3-shaped usage,
+so `ai` ran its v2 compatibility layer over a report that was already the newer shape,
+`streamText` accumulated the steps with `0 + { … }`, and the total became the _string_
+`"0[object Object]"` (issue #39). That is gone with it, but the recovery stays, because it
+costs a `typeof` check and because a future pairing could disagree in the same way:
+
+- `streamModelRequest` reads each step's own report (`finish-step`) as it streams — the counts
+  are most truthful there — and only falls back to the SDK's accumulated `result.usage` when no
   step reported one.
-- `toModelUsage` accepts whatever shape arrives: the v3 usage object, that object wrapped once
-  more by the compatibility layer, a numeric field (a number or a numeric string), or nothing
-  readable at all. It
-  always answers with the protocol's four counters, as non-negative integers, and `0` for a
-  count that cannot be recovered rather than a value the log would reject. Cache counters come
-  from the breakdown when the shape has one and from inside the usage object when it does not.
+- `toModelUsage` accepts whatever shape arrives: the v4 usage object, that object wrapped once
+  more by a compatibility layer, a numeric field (a number or a numeric string), or nothing
+  readable at all. It always answers with the protocol's four counters, as non-negative
+  integers, and `0` for a count that cannot be recovered rather than a value the log would
+  reject. Cache counters come from the breakdown when the shape has one and from inside the
+  usage object when it does not.
+
+`model.test.ts` reads **real-shaped streams** for the two biggest providers — an OpenAI
+Responses body and an Anthropic Messages body, streamed through the real clients with `fetch`
+stubbed — and asserts the four counters the wire carried. That is the acceptance test for the
+whole seam: not that a mock's object maps correctly, but that the numbers a provider really
+sends reach the log. `testing/mock-model.ts`'s `wrongSpecModel` declares the wrong spec on
+purpose and stays as `toModelUsage`'s regression test; no shipped provider is that model.
 
 Sessions whose turns ran before the fix keep the unreadable rows they were stored with; v1 is
 unreleased, so nothing migrates them — the fix is what stops new ones being written.
@@ -409,10 +437,11 @@ retries run on an injected `sleep`, the clock is a `TestClock` from
   scripts what each model request answers with, records the prompts, and can act mid-stream
   (abort, append a steering message) between two chunks. Its `apiCallError` is the failure
   shape a retry test needs — an `APICallError` the SDK's own retry classifier would act on, so
-  a call-count assertion can actually fail (#117). Its `misdeclaredSpec` is the one model
+  a call-count assertion can actually fail (#117). Its `wrongSpecModel` is the one model
   no provider has to be asked for: a mock that declares the `v2` provider spec over v3-shaped
-  usage, which is how the real router fails — the tests that use it assert the counts still reach
-  the log, as integers.
+  usage, which is the shape the router this package used to carry produced — the tests that use
+  it assert the counts still reach the log, as integers. `src/testing/provider-streams.ts` holds
+  the real-shaped SSE bodies `model.test.ts` streams through the real provider clients.
 
 ## Allowed `@openharness/*` dependencies
 

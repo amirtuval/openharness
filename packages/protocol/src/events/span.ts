@@ -82,8 +82,8 @@ export const ModelRequestStartEventSchema = z.object({
    */
   consumes: z.array(EventIdSchema).optional(),
   /**
-   * // extension: the model that served this request, a Mastra router string
-   * (`provider/model`) — the same spelling as `model.id` on the agent.
+   * // extension: the model that served this request, a model id (`provider/model`) —
+   * the same spelling as `model.id` on the agent.
    *
    * It is recorded per request rather than read off the agent so that a session which changes
    * models mid-conversation keeps, for every request, the model that actually ran — per-model

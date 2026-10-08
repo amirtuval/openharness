@@ -21,7 +21,7 @@
  * has no chat flag, and the fields it has are not one — `modalities.output` is `["text"]` for
  * `text-embedding-3-small` too, and `family` is a name family. So the catalogue's C2 steps 1
  * and 2 stay silent for a snapshot model and step 3's name filter decides, exactly as the
- * `@mastra/core` registry's ids-only entries did. `RegistryModel.chat` is still read when a
+ * registry of ids alone did. `RegistryModel.chat` is still read when a
  * registry has one (a test's stub, a future snapshot that finds a real signal).
  *
  * The snapshot is keyed by **our** provider ids, not models.dev's: the generator maps

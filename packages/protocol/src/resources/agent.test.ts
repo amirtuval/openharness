@@ -28,7 +28,7 @@ describe('AgentSchema', () => {
     expect(AgentSchema.parse(agent)).toEqual(agent)
   })
 
-  it('carries a Mastra model-router string in model.id', () => {
+  it('carries a model id (`provider/model`) in model.id', () => {
     expect(ModelConfigSchema.parse({ id: 'anthropic/claude-sonnet-5' }).id).toBe(
       'anthropic/claude-sonnet-5',
     )

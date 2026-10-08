@@ -12,7 +12,13 @@ import {
   toModelUsage,
 } from './model'
 import type { ModelRequestResult } from './model'
-import { TEST_API_KEY, TEST_CREDENTIAL, apiCallError, wrongSpecModel, mockModel } from './testing/mock-model'
+import {
+  TEST_API_KEY,
+  TEST_CREDENTIAL,
+  apiCallError,
+  wrongSpecModel,
+  mockModel,
+} from './testing/mock-model'
 import { anthropicSse, openAiResponsesSse } from './testing/provider-streams'
 
 describe('toModelUsage', () => {
@@ -146,7 +152,7 @@ describe('streamModelRequest', () => {
   })
 
   it('reports the real counts for a model that declares the wrong provider spec', async () => {
-    // The router's report, end to end: `ai` reads the mock's usage through its v2 compatibility
+    // A mis-declared report, end to end: `ai` reads the mock's usage through its v2 compatibility
     // layer and accumulates `"0[object Object]"`, and the counts have to come back out of the
     // step report the model made — not out of that sum (issue #39).
     const { factory } = mockModel({
@@ -303,7 +309,6 @@ describe('missingCredentialMessage', () => {
     )
   })
 })
-
 
 /**
  * The provider factory, one case per provider a key can be stored for.
@@ -478,7 +483,11 @@ describe('providerModelFactory', () => {
           // Not JSON: keep the raw text, which is still what the request carried.
         }
       }
-      requests.push({ url, headers: { ...((init?.headers ?? {}) as Record<string, string>) }, body })
+      requests.push({
+        url,
+        headers: { ...((init?.headers ?? {}) as Record<string, string>) },
+        body,
+      })
       return Promise.resolve(respond())
     })
     try {

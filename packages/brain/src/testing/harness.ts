@@ -15,7 +15,7 @@ import type { TestClock } from '@openharness/session/testing'
 
 /**
  * The session every turn test runs against: an in-memory store on a clock a test can move,
- * and one agent whose model is the router string the fixtures use.
+ * and one agent whose model is the model id the fixtures use.
  *
  * The brain talks to the store through the merged `SessionStore` contract and nothing else, so
  * this is the whole fixture: no database, no HTTP, no server.
