@@ -31,13 +31,18 @@ _Last updated: 2026-10-08._
   production at <https://app.oharness.dev> deploys from the `production` tag, and the CLI is on
   npm as [`@openh/cli`](https://www.npmjs.com/package/@openh/cli).
 - **Flaky server tests** ([#43](https://github.com/amirtuval/openharness/issues/43)) are fixed.
+- **Chat and TUI UX, pass 1** ([epic #201](https://github.com/amirtuval/openharness/issues/201)) is
+  done (closed 2026-10-08, PR #225).
+- **Mastra is gone** ([#234](https://github.com/amirtuval/openharness/issues/234), PR #237): the
+  brain builds models with the official AI SDK providers, and the catalog reads a bundled
+  models.dev snapshot instead of Mastra's registry.
 
 ## Order
 
 1. Finish v1 — done: the epic is closed.
 2. Authentication — done
 3. Deployment and CI/CD — done
-4. Chat and TUI UX, pass 1 ([epic #201](https://github.com/amirtuval/openharness/issues/201)) — in progress
+4. Chat and TUI UX, pass 1 ([epic #201](https://github.com/amirtuval/openharness/issues/201)) — done
 5. Model selection and provider keys
 6. Tools
 
@@ -112,7 +117,7 @@ is in [`DEPLOYMENT.md`](./DEPLOYMENT.md) and [`RELEASING.md`](./RELEASING.md).
 - shared rate-limit storage: the counters are per instance today, so the effective limit grows
   with the replica count.
 
-## 4. Chat and TUI UX, pass 1 ([epic #201](https://github.com/amirtuval/openharness/issues/201))
+## 4. Chat and TUI UX, pass 1 (done: [epic #201](https://github.com/amirtuval/openharness/issues/201))
 
 **Why now:** the tools phase is mostly UI (tool calls, approvals, `ask_user`), and production
 has real users. Pass 1 builds the foundation those features render on; **pass 2**, a finishing
