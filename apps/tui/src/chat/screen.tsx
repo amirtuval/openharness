@@ -8,8 +8,8 @@ import { NoticeView } from '../components/notice-view'
 import { PromptInput } from '../components/prompt-input'
 import { usePromptSlot } from '../components/prompt-slot'
 import { ProviderSetup } from '../components/provider-setup'
-import { modelLabel, StatusLine } from '../components/status-line'
-import { TranscriptView } from '../components/transcript-view'
+import { InputRule, modelLabel, StatusLine } from '../components/status-line'
+import { lastDrawn, TranscriptView } from '../components/transcript-view'
 import type { PromptHistory } from '../history'
 import type { ErrorContext } from '../errors'
 import { clearScreen } from '../terminal'
@@ -118,6 +118,26 @@ export function ChatScreen({
     view.transcript.status === 'running' && view.transcript.lastError?.retryStatus === 'retrying'
       ? view.transcript.lastError.message
       : undefined
+
+  // The two notices that sit under the transcript: what a command printed or a hint, and the
+  // turn's own error when the status line is not already saying it (#208).
+  const error = view.transcript.lastError
+  const failure = error !== null && retrying === undefined ? turnErrorNotice(error) : null
+  const hasNotice = view.notice !== null || failure !== null
+
+  /**
+   * Whether the transcript owes the block under it a blank line (issue #233).
+   *
+   * A user's message is banded, and its band ends in a blank line of its own
+   * (`message-view.tsx`), so it owes nothing; an agent's reply ends in its last line or in its
+   * metadata, and owes the line. An empty transcript — a session that has not started, or one
+   * whose history is still loading — has nothing to be set off from at all, which is what keeps
+   * the first frame free of a leading blank line. The question is about the last message
+   * *drawn*: a reply that has been announced but has not produced a token yet is not there
+   * (`transcript-view.tsx`), so the band above it is what the section is set off from.
+   */
+  const above = lastDrawn(view.transcript.messages)
+  const owesBlank = above !== undefined && above.role !== 'user'
 
   /**
    * Wipe the screen, keeping the session (#206) — Ctrl+L, and `/clear` by another name.
@@ -265,10 +285,17 @@ export function ChatScreen({
         currentModel={currentModel}
         holdLive={view.awaitingMetaId ?? undefined}
       />
-      {view.notice !== null && <NoticeView notice={view.notice} />}
-      {view.transcript.lastError !== null && retrying === undefined && (
-        <NoticeView notice={turnErrorNotice(view.transcript.lastError)} />
+      {hasNotice && (
+        <>
+          {owesBlank && <Text> </Text>}
+          {view.notice !== null && <NoticeView notice={view.notice} />}
+          {failure !== null && <NoticeView notice={failure} />}
+        </>
       )}
+      {/* The input area is its own section (issue #233): a blank line, a dim full-width rule,
+          and everything the console is — the status line, the prompt, and whatever has taken
+          the prompt's place — under it. */}
+      <InputRule blankAbove={owesBlank || hasNotice} />
       <StatusLine
         agentName={agentName}
         model={model}

@@ -29,8 +29,11 @@ const FALLBACK_COLUMNS = 80
  * Reserving the column keeps the cursor on the line it belongs to; nothing else is drawn
  * there, so the cost is one column of width, on every message rather than only the streaming
  * one, because a message that re-wrapped the moment it settled would jump for the same reason.
+ *
+ * The rule that opens the input section leaves it empty as well (`status-line.tsx`), so what
+ * the transcript ends in and what the section under it draws line up at the right edge.
  */
-const CURSOR_COLUMNS = 1
+export const CURSOR_COLUMNS = 1
 
 /**
  * What one part of a message draws (epic #201, X1).
@@ -138,6 +141,22 @@ export function messageLayout(
   }
 }
 
+/**
+ * Whether a message draws anything at all.
+ *
+ * A reply the log has announced but that has not produced a token yet is in the transcript
+ * with no parts and no text (`transcript.ts`), and draws nothing: no line, not even the
+ * streaming cursor, which goes at the end of a line that has to exist first. So it is not a
+ * block, and nothing drawn *beside* it — the blank line between two messages, the one the
+ * input section owes the transcript (issue #233) — belongs to it.
+ *
+ * A part with nothing in it is nothing drawn for the same reason: the renderers turn it into
+ * no lines, and a blank line is not a message.
+ */
+export function draws(message: TranscriptMessage): boolean {
+  return message.parts.some((part) => part.text !== '')
+}
+
 /** The spaces that carry a banded line out to the terminal's edge. */
 function bandPadding(spans: readonly Span[], columns: number): Span[] {
   const missing = Math.max(0, columns - spanWidth(spans))
@@ -202,11 +221,16 @@ export function MessageView({
         </Text>
       ))}
       {metaLine !== undefined && (
-        // Under the reply and at column 0 with it, so the metadata reads as belonging to the
-        // message above rather than as a line of its own — and so a copy of the reply keeps
-        // the reply's own words and not a footnote about them. Dim: it is what the reply
-        // cost, not something the model said.
-        <Text dimColor>{metaLine}</Text>
+        // A blank line first, so the metadata reads as a footer to the reply rather than as
+        // the last line of it (issue #233) — and a reply with nothing to report has no line
+        // and so no blank either. The line is part of the message's own output, so it settles
+        // with the reply in the same `<Static>` write. Under the reply and at column 0 with
+        // it, so a copy of the reply keeps the reply's own words and not a footnote about
+        // them. Dim: it is what the reply cost, not something the model said.
+        <>
+          <Text> </Text>
+          <Text dimColor>{metaLine}</Text>
+        </>
       )}
       {user && <Text> </Text>}
     </>

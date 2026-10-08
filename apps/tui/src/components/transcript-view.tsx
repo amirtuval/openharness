@@ -2,7 +2,7 @@ import type { TranscriptMessage } from '@openharness/client'
 import { Static, Text } from 'ink'
 import { Fragment } from 'react'
 
-import { MessageView } from './message-view'
+import { draws, MessageView } from './message-view'
 import { replyMetaLines } from './reply-meta'
 
 /**
@@ -43,6 +43,12 @@ import { replyMetaLines } from './reply-meta'
  * message is asked for the line above it only when the message above is not a user's message
  * as well. Anywhere else the message already brought one, and drawing another would put two
  * blank lines where the transcript has always had one.
+ *
+ * **A message that draws nothing is not a block** (issue #233). A reply that has been announced
+ * but has not produced a token yet is in the transcript with nothing in it, and the blank lines
+ * here — and the one the input section owes the transcript — are about the blocks on screen:
+ * drawn around a message nobody can see, they are a blank line after nothing, and one more than
+ * the one the transcript is supposed to have.
  */
 export function TranscriptView({
   messages,
@@ -58,20 +64,26 @@ export function TranscriptView({
   /** The reply to keep live until its metadata arrives (issue #208); usually the last one. */
   readonly holdLive?: string | undefined
 }) {
-  const firstLive = messages.findIndex((message) => isLive(message, holdLive))
-  const settled = firstLive === -1 ? messages : messages.slice(0, firstLive)
-  const live = firstLive === -1 ? [] : messages.slice(firstLive)
+  // Only the messages that draw something are laid out as blocks. A reply that has been
+  // announced but has not produced a token yet draws nothing at all (`message-view.tsx`), so
+  // it is not one — and the blank lines the transcript draws *between* messages, and the one
+  // the input section owes the last of them (issue #233), are about the blocks, not about the
+  // lines the log happens to hold.
+  const blocks = messages.filter(draws)
+  const firstLive = blocks.findIndex((message) => isLive(message, holdLive))
+  const settled = firstLive === -1 ? blocks : blocks.slice(0, firstLive)
+  const live = firstLive === -1 ? [] : blocks.slice(firstLive)
   const metaLines = replyMetaLines(messages, currentModel)
 
   /** The message at `index`, framed by the blank line the transcript owes it, if any. */
   const draw = (message: TranscriptMessage, index: number) => (
     <Fragment key={message.id}>
-      {separates(messages[index - 1], message) && <Text> </Text>}
+      {separates(blocks[index - 1], message) && <Text> </Text>}
       <MessageView
         message={message}
         width={width}
         metaLine={metaLines.get(message.id)}
-        blankAbove={blankAbove(messages[index - 1])}
+        blankAbove={blankAbove(blocks[index - 1])}
       />
     </Fragment>
   )
@@ -82,6 +94,17 @@ export function TranscriptView({
       {live.map((message, index) => draw(message, firstLive + index))}
     </>
   )
+}
+
+/**
+ * The last message of the transcript that draws anything, or `undefined` for an empty one.
+ *
+ * The block under the transcript — a notice, and the input section's rule (issue #233) — has to
+ * ask what is above it before drawing a blank line of its own, and the answer is about the last
+ * thing *drawn* rather than the last thing in the log: a reply with no tokens yet is neither.
+ */
+export function lastDrawn(messages: readonly TranscriptMessage[]): TranscriptMessage | undefined {
+  return messages.filter(draws).at(-1)
 }
 
 /** Whether a message may still change on screen, and so belongs in the live area. */

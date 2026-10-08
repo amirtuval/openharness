@@ -159,7 +159,7 @@ describe('per-reply metadata (issue #208)', () => {
       { currentModel: MODEL },
     )
 
-    expect(frame).toBe('hi\n\nhello there\n4.2s · 1.3k tokens\n\nok')
+    expect(frame).toBe('hi\n\nhello there\n\n4.2s · 1.3k tokens\n\nok')
   })
 
   it('holds a reply live until its metadata arrives, so `<Static>` cannot lose the line', () => {
@@ -174,7 +174,7 @@ describe('per-reply metadata (issue #208)', () => {
     expect(app.lastFrame()).toBe('hello')
 
     redraw(app, [late], { currentModel: MODEL, holdLive: 'sevt_1' })
-    expect(app.lastFrame()).toBe('hello\n4.2s')
+    expect(app.lastFrame()).toBe('hello\n\n4.2s')
   })
 
   it('is what the hold is for: a settled reply never picks the line up', () => {
