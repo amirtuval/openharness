@@ -12,8 +12,9 @@ ideas carry the design:
   session unreadable, so a turn that cannot write a valid event ends with an error instead
   (see [`packages/brain/AGENTS.md`](../packages/brain/AGENTS.md)). The log is immutable: a
   stored event is never modified — the types are deep-readonly, so writing to one is a
-  compile error — and the only deletion is compacting the streamed chunks a finished reply
-  superseded (D9, [#46](https://github.com/amirtuval/openharness/issues/46)). Every agent and
+  compile error — and the only deletion is compacting what a later event superseded: the
+  streamed chunks a finished reply replaced (D9, [#46](https://github.com/amirtuval/openharness/issues/46)),
+  and the tail of the log an edit rewound ([#238](https://github.com/amirtuval/openharness/issues/238)). Every agent and
   session belongs to exactly one user (epic [#65](https://github.com/amirtuval/openharness/issues/65),
   A4): it carries the owner's id, the reads a user-facing route makes are scoped to it, and
   another user's resource is answered 404, never 403. `@openharness/session` also owns the SQL
@@ -27,7 +28,9 @@ ideas carry the design:
   derived from the claim that took it. A streamed reply is stored as it streams, chunk by
   chunk, so a reply in flight is as resumable as anything else; the event that finishes it
   carries a `supersedes` range over those chunks, replay skips the range, and a compaction job
-  deletes it after a retention window without changing what any reader sees.
+  deletes it after a retention window without changing what any reader sees. Edit and resend
+  is the same machinery over a wider range: a `session.rewind` supersedes everything from the
+  edited `user.message` on, and the edited text is appended after it as a new message.
 
 - **Hands** — the things that actually act on the world (sandboxes, tools) behind a single
   `execute(name, input)` shape, so they can be swapped without touching the brain.
