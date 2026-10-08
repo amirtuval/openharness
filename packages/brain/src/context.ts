@@ -57,8 +57,11 @@ export interface ContextStrategyConfig {
  *
  * `user.message` and `agent.message` become `user` and `assistant` messages in `seq` order —
  * which is the whole conversation the session has had, whatever happened to it in between:
- * `user.interrupt`, status transitions and spans are bookkeeping, not things the model said or
- * was told. The session's `system` prompt, when it has one, becomes the leading system message.
+ * `user.interrupt`, status transitions, spans and a `session.rewind` are bookkeeping, not
+ * things the model said or was told (a rewind's *range* is not bookkeeping either: the log the
+ * brain reads has already left out what it replaced, so the model is handed the conversation
+ * as the reader left it, #238). The session's `system` prompt, when it has one, becomes the
+ * leading system message.
  *
  * Messages with no text (an empty `content`, which is how a model that answered with nothing
  * is recorded) are left out rather than sent as empty turns.
