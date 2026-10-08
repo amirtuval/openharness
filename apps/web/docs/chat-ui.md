@@ -126,6 +126,16 @@ no language is a block with a header and a Copy button, labelled `text`, just un
 indented block is exactly the same, which is the first time it has looked like a code block
 rather than like a `<pre>` with an inline-code pill in it.
 
+**A block takes the whole message column (#231).** A bubble is as wide as its words — that is
+what makes a short message read as a short message — and a code block inside one is a
+percentage width inside a shrink-to-fit box, which CSS resolves back to the content: so the
+block was as wide as its longest line, and a snippet of three short lines drew a stub with a
+`Copy` button on it. The fix is one class on the bubble, `has-[pre]:w-full`: `markdown.tsx` is
+the only thing that produces a `pre`, a code block is what it produces, and a message that
+holds one takes the column (`max-w-[85%]`, unchanged) while a message that does not is exactly
+as small as it was. Long lines still scroll inside the block and `min-w-0` still lets a narrow
+screen shrink it (#212), so nothing is clipped at 400px either way.
+
 **Highlighting is lazy, on demand, and per grammar.** `src/lib/highlight.ts` is imported with a
 dynamic `import()` by the component; inside it, Shiki's core, the three themes and the wasm
 engine are separate chunks, and each grammar is a chunk of its own, fetched the first time a
