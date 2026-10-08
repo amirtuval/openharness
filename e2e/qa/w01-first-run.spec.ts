@@ -115,9 +115,9 @@ test.describe('W1 first run', () => {
         await page.goto('/')
 
         await expect(page.getByRole('heading', { name: NEW_CHAT_GREETING })).toBeVisible()
-        await expect(page.getByRole('heading', { name: new RegExp(FIRST_RUN_HEADING) })).toHaveCount(
-          0,
-        )
+        await expect(
+          page.getByRole('heading', { name: new RegExp(FIRST_RUN_HEADING) }),
+        ).toHaveCount(0)
         await shot(page, 'w1-01-new-chat')
       })
     }
