@@ -4,13 +4,31 @@ import { markdownLines, type RenderLayout } from './render'
 import { spanWidth, type Span } from './text'
 import type { TerminalTheme } from './theme'
 
-const DARK: TerminalTheme = { background: 'dark', color: true }
-const PLAIN: TerminalTheme = { background: 'dark', color: false }
+const DARK: TerminalTheme = { background: 'dark', color: true, level: 3 }
+const PLAIN: TerminalTheme = { background: 'dark', color: false, level: 0 }
+/** A terminal with sixteeen colours and no tints at all: the code block's fallback (#231). */
+const NAMED: TerminalTheme = { background: 'dark', color: true, level: 1 }
 
-/** The lines of a reply, as text: what the frame would show. */
+/**
+ * The lines of a reply, as text — with the trailing panel padding trimmed off.
+ *
+ * A code block's lines carry the panel out to the block's width in spaces (#231), which is a
+ * surface rather than content; the tests that care about it read the line's *width*, and every
+ * other test wants to read the words.
+ */
 function linesOf(text: string, width = 60, theme: TerminalTheme = DARK): string[] {
   const layout: RenderLayout = { width, theme }
-  return markdownLines(text, layout).map((line) => line.map((span) => span.text).join(''))
+  return markdownLines(text, layout).map((line) =>
+    line
+      .map((span) => span.text)
+      .join('')
+      .trimEnd(),
+  )
+}
+
+/** The lines of a reply, whole: padding, tint and all. */
+function rawLinesOf(text: string, width = 60, theme: TerminalTheme = DARK): Span[][] {
+  return markdownLines(text, { width, theme }).map((line) => [...line])
 }
 
 /** The spans of a reply, flattened, for the tests about colour. */
@@ -18,15 +36,17 @@ function spansOf(text: string, width = 60, theme: TerminalTheme = DARK): Span[] 
   return markdownLines(text, { width, theme }).flatMap((line) => [...line])
 }
 
-/** A code block's label line as the renderer draws it: `── rust ───…`, `width` columns wide. */
+/**
+ * A code block's label as the panel draws it: dim, against the **right** edge of the block's
+ * `width` columns, so nothing is in front of the code below it (#231).
+ */
 function label(name: string, width: number): string {
-  const head = `── ${name} `
-  return head + '─'.repeat(width - head.length)
+  return name.padStart(width)
 }
 
-/** The rule that closes a code block. */
-function rule(width: number): string {
-  return '─'.repeat(width)
+/** A code panel's padding line: blank, `width` columns wide, on the tint. */
+function padding(width: number): string {
+  return ' '.repeat(width)
 }
 
 /**
@@ -228,14 +248,14 @@ describe('tables', () => {
 })
 
 describe('code blocks', () => {
-  it('labels the block above the code and closes it below', () => {
+  it('sets the label at the right edge of the block, above the code (#231)', () => {
     const lines = linesOf('```ts\nconst x = 1\n```', 20)
 
-    expect(lines).toEqual([label('ts', 20), 'const x = 1', rule(20)])
+    expect(lines).toEqual([label('ts', 20), 'const x = 1', padding(20).trimEnd()])
   })
 
   it('calls a fence with no language code', () => {
-    expect(linesOf('```\nplain\n```', 16)).toEqual([label('code', 16), 'plain', rule(16)])
+    expect(linesOf('```\nplain\n```', 16)).toEqual([label('code', 16), 'plain', ''])
   })
 
   it('draws the code at column 0, with no gutter in front of it (#229)', () => {
@@ -246,11 +266,29 @@ describe('code blocks', () => {
     expect(lines.slice(1, -1)).toEqual(['fn main() {', '    println!("hi");', '}'])
   })
 
-  it('colours the code by the language, and the label by the terminal', () => {
+  it('colours the code by the language, and tints the panel with the terminal (#231)', () => {
     const source = '```ts\nconst x = 1\n```'
+    const lines = rawLinesOf(source, 20)
 
     expect(spanWith(source, 'const').color).toBe('#ff7b72')
-    expect(spanWith(source, '── ts ').color).toBe('gray')
+
+    // The surface, not the words: the label is the last run on the line above the code, dim
+    // and on the tint, and the padding line under the code is the tint and nothing else.
+    expect(lines[0]?.at(-1)).toMatchObject({ text: 'ts', dim: true, background: '#1f2026' })
+    expect(lines[2]?.every((span) => span.background === '#1f2026')).toBe(true)
+  })
+
+  it('pads every line of the panel out to the block, so the tint is a surface', () => {
+    // A panel only as wide as its longest line would be a ragged highlight; the padding is
+    // what makes it a surface, and the code keeps column 0 on the way (#231).
+    const lines = rawLinesOf('```ts\nconst x = 1\n```', 20)
+
+    expect(lines).toHaveLength(3)
+    for (const line of lines) expect(spanWidth(line)).toBe(20)
+    // The code keeps column 0, and only the padding is added after it.
+    expect(lines[1]?.map((span) => span.text).join('')).toBe('const x = 1'.padEnd(20))
+    expect(lines[1]?.[0]?.text).toBe('const')
+    expect(lines[1]?.at(-1)).toMatchObject({ background: '#1f2026' })
   })
 
   it('breaks a line too wide for the block rather than wrapping it as prose', () => {
@@ -271,11 +309,27 @@ describe('code blocks', () => {
     const closed = linesOf(`Here:\n\n${body}\n\`\`\``, 40)
 
     expect(open).toEqual(closed)
-    expect(open).toEqual(['Here:', '', label('python', 40), 'def f(x):', '    return x', rule(40)])
+    expect(open).toEqual(['Here:', '', label('python', 40), 'def f(x):', '    return x', ''])
   })
 
   it('shows a fence in a language it does not know, uncut', () => {
     expect(linesOf('```unknownlang\nanything at all\n```', 40)).toContain('anything at all')
+  })
+
+  describe('with no tint to draw the panel with (#231)', () => {
+    it('falls back to a dim label line above and a blank line after', () => {
+      const lines = linesOf('```ts\nconst x = 1\n```', 20, NAMED)
+      const raw = rawLinesOf('```ts\nconst x = 1\n```', 20, NAMED)
+
+      // The same three lines the panel has (a fence that closes must not jump into or out of
+      // this shape), the same code at column 0 — the surface is the only thing gone.
+      expect(lines).toEqual(['ts', 'const x = 1', ''])
+      expect(linesOf('```ts\nconst x = 1\n```', 20, PLAIN)).toEqual(lines)
+      // The label is the terminal's own "structure" colour here, as it was before the panel.
+      expect(raw[0]?.[0]).toMatchObject({ text: 'ts', dim: true, color: 'gray' })
+      expect(raw.every((line) => line.every((span) => span.background === undefined))).toBe(true)
+      expect(raw[2]).toEqual([])
+    })
   })
 })
 
@@ -294,13 +348,22 @@ describe('rules and raw html', () => {
 
 describe('NO_COLOR', () => {
   it('drops every colour and keeps every line', () => {
-    const source = '# Title\n\n- one\n\n> quote\n\n```ts\nconst x = 1\n```\n\n[a](https://b)'
-    const coloured = linesOf(source, 40, DARK)
-    const plain = linesOf(source, 40, PLAIN)
+    // Prose is untouched by it: the same words, the same wrapping, in no colour at all. A code
+    // block is the one place the *frame* is colour — the panel's tint and the label's edge of
+    // it disappear with the rest (see the fallback below) — and a heading, a list item and a
+    // quote are laid out identically.
+    const prose = '# Title\n\n- one\n\n> quote\n\n[a](https://b)'
 
-    expect(plain).toEqual(coloured)
-    expect(spansOf(source, 40, PLAIN).every((span) => span.color === undefined)).toBe(true)
-    expect(spansOf(source, 40, DARK).some((span) => span.color !== undefined)).toBe(true)
+    expect(linesOf(prose, 40, PLAIN)).toEqual(linesOf(prose, 40, DARK))
+    expect(spansOf(prose, 40, PLAIN).every((span) => span.color === undefined)).toBe(true)
+    expect(spansOf(prose, 40, DARK).some((span) => span.color !== undefined)).toBe(true)
+
+    // The code, too: the same lines, the same words, the label at column 0 instead of on the
+    // panel's right edge, and no tint anywhere.
+    const code = '```ts\nconst x = 1\n```'
+
+    expect(linesOf(code, 40, PLAIN)).toEqual(['ts', 'const x = 1', ''])
+    expect(linesOf(code, 40, PLAIN)).toEqual(linesOf(code, 40, NAMED))
   })
 })
 

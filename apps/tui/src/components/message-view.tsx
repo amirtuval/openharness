@@ -39,7 +39,7 @@ const CURSOR_COLUMNS = 1
  * — are an entry here and a compile error until they have one.
  *
  * A renderer returns *lines of spans*, not a string and not a `<Text>`: Markdown needs more
- * than a string (a heading is bold, a table is a box, a code block is a labelled rule) and
+ * than a string (a heading is bold, a table is a box, a code block is a tinted panel) and
  * less than a `<Text>` (the band around a user's message is not its business). The lines come
  * back already fitted to the width the renderer was given — the width of the message itself,
  * since issue #229 took the label away — and the view bands them.
@@ -225,8 +225,12 @@ function trailing(message: TranscriptMessage): Span[] {
  * A span, as Ink's `<Text>` props.
  *
  * The two theme decisions land here: a colour is dropped entirely when `NO_COLOR` asked for
- * none (`color` false), and the band is painted span by span, which is what carries it over
+ * none (`color` false), and a background is painted span by span, which is what carries it over
  * the padding Ink would otherwise trim away.
+ *
+ * A background is either the message's own band — a user's message, decided once for the whole
+ * message — or the span's, which is how a code block's panel travels with the lines it covers
+ * (#231). The two never meet: a user's message is not Markdown, so its parts carry no panel.
  */
 function textProps(
   span: Span,
@@ -244,7 +248,7 @@ function textProps(
 } {
   return {
     color: paint(theme, span.color),
-    backgroundColor: band,
+    backgroundColor: span.background ?? band,
     bold: span.bold,
     italic: span.italic,
     underline: span.underline,

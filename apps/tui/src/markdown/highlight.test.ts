@@ -4,8 +4,8 @@ import { HIGHLIGHTED_LANGUAGES, highlightCode } from './highlight'
 import type { Line, Span } from './text'
 import type { TerminalTheme } from './theme'
 
-const DARK: TerminalTheme = { background: 'dark', color: true }
-const PLAIN: TerminalTheme = { background: 'dark', color: false }
+const DARK: TerminalTheme = { background: 'dark', color: true, level: 3 }
+const PLAIN: TerminalTheme = { background: 'dark', color: false, level: 0 }
 
 /** A line's text, with the spans joined. */
 function textOf(line: Line): string {

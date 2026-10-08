@@ -20,8 +20,8 @@ import {
 } from './status-line'
 import { ThemeProvider } from './theme'
 
-const DARK: TerminalTheme = { background: 'dark', color: true }
-const PLAIN: TerminalTheme = { background: 'dark', color: false }
+const DARK: TerminalTheme = { background: 'dark', color: true, level: 3 }
+const PLAIN: TerminalTheme = { background: 'dark', color: false, level: 0 }
 
 /** The session the line names; its ULID ends in the six characters the line shows. */
 const SESSION = 'sesn_01M4BHNRMAG3T659PV1FQ092B1'

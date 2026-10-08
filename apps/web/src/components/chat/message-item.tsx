@@ -94,7 +94,14 @@ export function MessageItem({
       )}
       <div
         className={cn(
-          'max-w-[85%] min-w-0 rounded-lg px-3.5 py-2.5',
+          // A bubble is as wide as its words — until it holds a code block, when it takes the
+          // whole column instead (#231). `has-[pre]` is the message's own signal that it does:
+          // a block whose lines are all short would otherwise shrink the message to the width
+          // of its longest line, which reads as a stray fragment rather than as a block, and
+          // there is no way to ask for a percentage width from inside a shrink-to-fit box. A
+          // message with no block is untouched, and `min-w-0` stays either way so a long line
+          // scrolls inside the block rather than being clipped (#212).
+          'max-w-[85%] min-w-0 rounded-lg px-3.5 py-2.5 has-[pre]:w-full',
           isUser ? 'bg-secondary text-secondary-foreground' : 'text-foreground',
         )}
       >

@@ -1,7 +1,7 @@
 # Markdown, code and colour in the transcript
 
 `src/markdown/` is how an agent's reply becomes lines on a terminal, and this is what it
-does — issue #205, epic #201, decisions X1, X2 and X4.
+does — issue #205, epic #201, decisions X1, X2 and X4, and issues #229 and #231.
 
 ## What is rendered, and what is not
 
@@ -12,19 +12,19 @@ indentation, because `#` in a prompt is a hash and a prompt pasted out of an edi
 indentation it had there. Both get the same layout — column 0, wrapping, and for the user's
 message a band; see [Layout](#layout).
 
-| Markdown       | on the terminal                                                                            |
-| -------------- | ------------------------------------------------------------------------------------------ |
-| headings       | bold, in blue; `#` and `##` also underlined                                                |
-| emphasis       | italic; strong: bold; strikethrough: struck through                                        |
-| inline code    | magenta                                                                                    |
-| lists          | `• ` bullets and `1. ` numbers; nested lists indented under their parent; task boxes `[x]` |
-| block quotes   | a `▏ ` bar down the left, the whole quote dimmed                                           |
-| links          | the text (blue, underlined) and the URL after it, dimmed — and once, when the text _is_ it |
-| images         | the alt text, italic, and the URL                                                          |
-| tables         | box-drawn (GFM), with the header row bold and the delimiter row's alignment                |
-| thematic break | a `─` rule across the width                                                                |
-| fenced code    | a labelled rule above the code, the code verbatim, a rule below it — all syntax-coloured   |
-| raw HTML       | the tags, as text, dimmed — there is no `rehype-raw` on either client                      |
+| Markdown       | on the terminal                                                                                                                              |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| headings       | bold, in blue; `#` and `##` also underlined                                                                                                  |
+| emphasis       | italic; strong: bold; strikethrough: struck through                                                                                          |
+| inline code    | magenta                                                                                                                                      |
+| lists          | `• ` bullets and `1. ` numbers; nested lists indented under their parent; task boxes `[x]`                                                   |
+| block quotes   | a `▏ ` bar down the left, the whole quote dimmed                                                                                             |
+| links          | the text (blue, underlined) and the URL after it, dimmed — and once, when the text _is_ it                                                   |
+| images         | the alt text, italic, and the URL                                                                                                            |
+| tables         | box-drawn (GFM), with the header row bold and the delimiter row's alignment                                                                  |
+| thematic break | a `─` rule across the width                                                                                                                  |
+| fenced code    | a tinted full-width panel: a padding line with the language at its right edge, the code verbatim at column 0, a padding line under it (#231) |
+| raw HTML       | the tags, as text, dimmed — there is no `rehype-raw` on either client                                                                        |
 
 A **soft break** — a newline in the source that is not a hard one — is a space, which is what
 CommonMark says and what a model that wraps its prose means. Two spaces or a `\` at the end of
@@ -77,20 +77,38 @@ would straddle the edge of a line moves to the next one whole.
 
 ## Colour
 
-Every colour the transcript draws is an **ANSI named colour** — one of the sixteen the
-terminal's own theme defines — so `oh` wears the terminal's colours and not its own (X4). The
-names are in `PALETTE` in `src/markdown/theme.ts`: `blue` for headings and links, `magenta` for
-inline code, and `gray` (bright black) for everything structural — rules, table borders, quote
-bars, a code block's label, a link's URL.
+Every **foreground** colour the transcript draws is an **ANSI named colour** — one of the
+sixteen the terminal's own theme defines — so `oh` wears the terminal's colours and not its own
+(X4). The names are in `PALETTE` in `src/markdown/theme.ts`: `blue` for headings and links,
+`magenta` for inline code, and `gray` (bright black) for everything structural — rules, table
+borders, quote bars, a code block's label where there is no panel to draw, a link's URL.
 
-The **band** a user's message sits on is not in `PALETTE`: it comes from the terminal's own
-background, so it is a shade _of_ the terminal rather than a colour beside it. `messageBand()`
-answers `blackBright` on a dark terminal and `white` on a light one, and the text on it is left
-at the terminal's default foreground — the one colour guaranteed readable on both.
+**Backgrounds are the exception** (#231). The sixteen named colours have no subtle gray in
+them — the nearest, _bright black_, is a heavy band — so the two surfaces the transcript draws
+are **derived** from the terminal's background instead, and how they are drawn depends on how
+much colour the terminal can show:
 
-The **code theme** is the exception, and has to be: sixteen terminal colours are not a syntax
-theme. `SYNTAX` carries a light and a dark palette (the familiar GitHub pairing), and the one
-used is chosen by the terminal's background.
+| level | detected from                    | the band / the panel                        |
+| ----- | -------------------------------- | ------------------------------------------- |
+| 3     | `COLORTERM=truecolor` or `24bit` | 24-bit hex                                  |
+| 2     | `TERM` ending in `-256color`     | the nearest gray of the 232-255 ramp        |
+| 1     | anything else                    | the named colours (`blackBright` / `white`) |
+| 0     | `NO_COLOR`                       | nothing at all                              |
+
+The **band** a user's message sits on is a shade _of_ the terminal rather than a colour beside
+it: `#2a2b33` on a dark one and `#ececf2` on a light one, or `ansi256(236)` / `ansi256(254)`,
+or `blackBright` / `white` where neither is available. The text on it is left at the terminal's
+default foreground — the one colour guaranteed readable on both. `messageBand()` answers it.
+
+The **panel** a code block sits on is a step _toward_ the background on a dark terminal
+(`#1f2026`, `ansi256(235)`) and the lighter of the two surfaces on a light one (`#f5f5f8`,
+`ansi256(255)`), so a block reads as inset in the page rather than laid on it. `codePanel()`
+answers it, and answers `undefined` where there is no tint to draw with — which is the signal
+`render.ts` reads to fall back to a plain label line.
+
+The **code theme** is the other exception, and has to be: sixteen terminal colours are not a
+syntax theme. `SYNTAX` carries a light and a dark palette (the familiar GitHub pairing), and
+the one used is chosen by the terminal's background.
 
 ### Which background
 
@@ -119,38 +137,54 @@ palette included, and changes almost nothing else: the same lines, the same layo
 Markdown. Colour is not content. Bold, italic, underline and dim are _not_ colour and are kept,
 so a heading still reads as a heading and a quote still reads as a quote.
 
-The one thing it changes is the **band**: a band is colour, so without colour there is nothing
-to tell a user's message from an agent's. A user's message then carries a dim `›` on a line of
-its own **above** it, which is not a colour and so survives. A mark on its own line and not a
-prefix, because that is the difference this whole pass is about: a selection can leave a line
-above out, and can never leave out a character in front of every line. A user's message is
-otherwise unchanged — the same words, the same column 0, and (in colour) the same banded rows,
-whose padding Ink keeps because it is styled.
+What it changes is the two **surfaces**, because a surface is colour. A user's message, with no
+band to tell it from an agent's, carries a dim `›` on a line of its own **above** it instead —
+a mark on its own line and not a prefix, because that is the difference this whole pass is
+about: a selection can leave a line above out, and can never leave out a character in front of
+every line. A user's message is otherwise unchanged — the same words, the same column 0, and
+(in colour) the same banded rows, whose padding Ink keeps because it is styled.
+
+And a code block loses its panel (see [Code blocks](#code-blocks)): the label moves to column 0
+and the tint goes, leaving the same lines and the same code. A block that had a panel and one
+that did not are otherwise the same three lines, so a reply that starts streaming in one mode
+does not change shape.
 
 ## Code blocks
 
-A labelled rule above the code, the code itself, a rule below it. The rules and the label are
-drawn in the terminal's own "structure" colour rather than the syntax theme's — the label
-belongs to the terminal and the code inside it to the language:
+A full-width **tinted panel** (#231): a padding line with the language at its right edge, the
+code at column 0, and a padding line under it. Nothing is drawn _in front of_ a line, so the
+code is still the code — the label is decoration at the far end of the padding.
 
 ```text
-── ts ─────────────────────────────────────────────────────────────────
+                                                              ts
 export function markdownLines(text: string, layout: RenderLayout) {
   return renderBlocks(parseMarkdown(text).children, layout)
 }
-───────────────────────────────────────────────────────────────────────
 ```
+
+Every line is padded out to the block's width with spaces that carry the tint, which is what
+makes it a panel rather than a ragged highlight around its longest line. The width is the
+message's own less the streaming cursor's reserved column (`CURSOR_COLUMNS`), so the `▌` still
+has somewhere to land: it goes on the bottom padding line, just outside the tint, which is
+where the block ends.
+
+With **no tint to draw with** — `NO_COLOR`, or a terminal that can mix neither 24-bit nor the
+256-colour ramp — the panel would have to be made of a named colour, which is the heavy band
+#231 is about. The block falls back to a dim label line above (in the terminal's "structure"
+colour, as it was before) and a blank line after: the same three lines, the same code at column
+0, and only the surface gone.
 
 **There is no gutter and no box** (issue #229). The frame used to open every line with a `│ `
 bar, which meant the code only existed _inside_ the drawing: select it and you copied the bar
-and the space with every line, and pasted a block that no longer compiles. The code lines are
-now the code — at column 0, exactly as they were written, so selecting them gives them back
-byte for byte. What is left is the label, on a line of its own, and the closing rule; both are
-decoration a selection can leave out.
+and the space with every line, and pasted a block that no longer compiles. Then it was the
+`── rust ──` pair of rules above and below (#229), which copied cleanly but left the block as
+unadorned text. The code lines are now the code — at column 0, exactly as they were written, so
+selecting them gives them back byte for byte, plus the panel's trailing spaces at worst.
 
-The label and the rule are drawn from the same tree on every render, so a block whose fence has
-not closed yet — which `remark` reads as a code block to the end of the text — is laid out
-exactly like the block it becomes. Nothing appears and nothing moves when the fence closes.
+The label, the padding and the body are drawn from the same tree on every render, so a block
+whose fence has not closed yet — which `remark` reads as a code block to the end of the text —
+is laid out exactly like the block it becomes. Nothing appears and nothing moves when the fence
+closes, and a streaming block is the panel growing a line at a time.
 
 Lines longer than the block are **broken at its edge**, not word-wrapped: the line breaks a
 language has are not the breaks a reader wants.

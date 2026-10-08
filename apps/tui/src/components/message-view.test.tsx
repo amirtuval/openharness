@@ -8,9 +8,11 @@ import type { TerminalTheme } from '../markdown/theme'
 import { messageLayout, MessageView, PART_RENDERERS } from './message-view'
 import { ThemeProvider } from './theme'
 
-const DARK: TerminalTheme = { background: 'dark', color: true }
-const LIGHT: TerminalTheme = { background: 'light', color: true }
-const PLAIN: TerminalTheme = { background: 'dark', color: false }
+const DARK: TerminalTheme = { background: 'dark', color: true, level: 3 }
+const LIGHT: TerminalTheme = { background: 'light', color: true, level: 3 }
+const PLAIN: TerminalTheme = { background: 'dark', color: false, level: 0 }
+/** A terminal with sixteen colours and no tints at all: the code block's fallback (#231). */
+const NAMED: TerminalTheme = { background: 'dark', color: true, level: 1 }
 
 /** A message as the transcript hands one over: one text part, settled, not streaming. */
 function message(
@@ -62,15 +64,12 @@ function layoutText(subject: TranscriptMessage, columns: number, theme: Terminal
   )
 }
 
-/** A code block's label line as the renderer draws it: `── rust ───…`, `width` columns wide. */
+/**
+ * A code block's label as the panel draws it: the name against the **right** edge of the
+ * block's `width` columns, which is what keeps the code's own column clean (#231).
+ */
 function label(name: string, width: number): string {
-  const head = `── ${name} `
-  return head + '─'.repeat(width - head.length)
-}
-
-/** The rule that closes a code block. */
-function rule(width: number): string {
-  return '─'.repeat(width)
+  return name.padStart(width)
 }
 
 afterEach(() => {
@@ -127,7 +126,8 @@ describe('MessageView', () => {
     )
 
     // Lists keep their bullets and quotes keep their bar: those are content, not gutters. The
-    // heading, the prose, the label line and the code are all at column 0.
+    // heading, the prose and the code are all at column 0; the label is on the panel's top
+    // line, right-aligned and dim, and the panel's bottom line is tinted padding (#231).
     expect(lines(frame)).toEqual([
       'Heading',
       '',
@@ -140,7 +140,7 @@ describe('MessageView', () => {
       '',
       label('ts', 39),
       'const x = 1',
-      rule(39),
+      '',
     ])
   })
 
@@ -153,7 +153,7 @@ describe('MessageView', () => {
   it('is a code block in progress when the fence has not been closed yet', () => {
     const frame = frameOf(message('Here:\n\n```python\ndef f(x):', 'agent'), 30)
 
-    expect(lines(frame)).toEqual(['Here:', '', label('python', 29), 'def f(x):', rule(29)])
+    expect(lines(frame)).toEqual(['Here:', '', label('python', 29), 'def f(x):', ''])
   })
 
   it('does not jump when the fence closes (#229)', () => {
@@ -168,9 +168,9 @@ describe('MessageView', () => {
     expect(open).toEqual(closed)
   })
 
-  it('keeps the block closed while it streams: the label and the rule never move', () => {
+  it('keeps the block closed while it streams: the label and the padding never move', () => {
     // What a streaming block looks like frame by frame: only the body grows. The label line
-    // is at the top and the closing rule at the bottom from the first frame to the last, so
+    // is at the top and the panel's padding at the bottom from the first frame to the last, so
     // there is nothing to appear and nothing to misalign.
     const chunks = ['```rust\nfn main() {', '\n    println!("hi");', '\n}']
     const frames = chunks.map((_, index) =>
@@ -179,14 +179,19 @@ describe('MessageView', () => {
 
     for (const frame of frames) {
       expect(frame[0]).toBe(label('rust', 29))
-      expect(frame.at(-1)).toBe(rule(29))
+      // The bottom line of the panel: tinted padding, which is what a frame with no colour in
+      // it draws as an empty line.
+      expect(frame.at(-1)).toBe('')
     }
+    // And that line really is the panel's padding — the full width of the block, which the
+    // frame's trim hides and the layout does not (#231).
+    expect(layoutText(message(chunks.join(''), 'agent'), 30).at(-1)).toHaveLength(29)
     expect(frames.at(-1)).toEqual([
       label('rust', 29),
       'fn main() {',
       '    println!("hi");',
       '}',
-      rule(29),
+      '',
     ])
   })
 
@@ -215,7 +220,7 @@ describe('MessageView', () => {
   })
 
   it('draws the same words under NO_COLOR, in no colour at all', () => {
-    const reply = '# Heading\n\nsome `code` and a [link](https://x)\n\n```ts\nconst x = 1\n```'
+    const reply = '# Heading\n\nsome `code` and a [link](https://x)'
     const colourless = frameOf(message(reply), 40, PLAIN)
 
     // The frame says the same thing: NO_COLOR is about colour, not about content.
@@ -229,6 +234,20 @@ describe('MessageView', () => {
 
     expect(spans(PLAIN).every((span) => span.color === undefined)).toBe(true)
     expect(spans(DARK).some((span) => span.color !== undefined)).toBe(true)
+  })
+
+  it('draws a code block without a tint under NO_COLOR, and keeps every line of it (#231)', () => {
+    const reply = '```ts\nconst x = 1\n```'
+
+    // The panel is colour, so without colour there is no panel: the label moves to column 0
+    // and the tint is gone. What is not gone is the shape — three lines, the code at column 0,
+    // the same words a coloured terminal shows.
+    expect(lines(frameOf(message(reply), 40, PLAIN))).toEqual(['ts', 'const x = 1', ''])
+    expect(lines(frameOf(message(reply), 40, NAMED))).toEqual(['ts', 'const x = 1', ''])
+
+    // With a tint to draw it with, the label is at the block's right edge instead, and the
+    // code line is the only one a reader reads (#231).
+    expect(lines(frameOf(message(reply), 40, DARK))).toEqual([label('ts', 39), 'const x = 1', ''])
   })
 
   it('draws a colourless message with the same text as a coloured one', () => {
@@ -261,7 +280,7 @@ describe('the band a user message is drawn on (#229)', () => {
   it('is a full-width background on a user message, and none on an agent reply', () => {
     const user = messageLayout(message('hi there', 'user'), 20, DARK)
 
-    expect(user.band).toBe('blackBright')
+    expect(user.band).toBe('#2a2b33')
     expect(user.mark).toBeUndefined()
     // Every line, the last of them included, reaches the terminal's edge.
     for (const line of user.lines) expect(spanWidth(line)).toBe(20)
@@ -272,9 +291,15 @@ describe('the band a user message is drawn on (#229)', () => {
     expect(layoutText(message('hi there', 'agent'), 20)).toEqual(['hi there'])
   })
 
-  it('takes its shade from the terminal it is in, like every other colour (X4)', () => {
-    expect(messageLayout(message('hi', 'user'), 20, LIGHT).band).toBe('white')
-    expect(messageLayout(message('hi', 'user'), 20, DARK).band).toBe('blackBright')
+  it('takes its shade from the terminal it is in, in as much colour as it has (#231)', () => {
+    // A 24-bit terminal gets the derived tint, a 256-colour one the nearest gray of the ramp,
+    // and a sixteen-colour one the named colour it always had — the argument is in `theme.ts`.
+    expect(messageLayout(message('hi', 'user'), 20, LIGHT).band).toBe('#ececf2')
+    expect(messageLayout(message('hi', 'user'), 20, DARK).band).toBe('#2a2b33')
+    expect(messageLayout(message('hi', 'user'), 20, { ...DARK, level: 2 }).band).toBe(
+      'ansi256(236)',
+    )
+    expect(messageLayout(message('hi', 'user'), 20, NAMED).band).toBe('blackBright')
   })
 
   it('is the whole band, not just the words on it', () => {
@@ -307,7 +332,7 @@ describe('the band a user message is drawn on (#229)', () => {
 })
 
 describe('copy-safety (#229)', () => {
-  it('opens no line with a label, an indent or a space of its own', () => {
+  it('opens no line of a reply with a label, an indent or a space of its own', () => {
     const reply = [
       '# Heading',
       '',
@@ -318,11 +343,19 @@ describe('copy-safety (#229)', () => {
       '```',
     ].join('\n')
     const frame = frameOf(message(reply), 24)
+    const drawn = lines(frame).filter((text) => text !== '')
 
-    for (const line of lines(frame).filter((text) => text !== '')) {
+    // The code panel's label is the one line that is not content: it is the language's name,
+    // dim, against the block's right edge, and it is the one thing here that can be left out
+    // of a selection whole rather than character by character (#231). Everything else — the
+    // heading, the prose, the code — opens at column 0.
+    const content = drawn.filter((text) => text !== label('ts', 23))
+
+    for (const line of content) {
       expect(line.startsWith(' '), `indented: ${JSON.stringify(line)}`).toBe(false)
       expect(line).not.toContain('agent ›')
     }
+    expect(drawn).toContain(label('ts', 23))
   })
 
   it('copies an agent reply exactly, in colour and without it', () => {

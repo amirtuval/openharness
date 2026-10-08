@@ -128,4 +128,32 @@ describe('MessageItem', () => {
     expect(foot?.className).toContain('min-w-0')
     expect(foot?.className).toContain('max-w-full')
   })
+
+  it('gives a message that holds a code block the whole column (#231)', () => {
+    // A block whose lines are all short would otherwise leave the bubble as narrow as its
+    // longest line — a stray fragment rather than a block — and a percentage width asked for
+    // from *inside* a shrink-to-fit box resolves back to the content, so the width has to be
+    // the bubble's own. `has-[pre]` is the message's own signal that it holds one: the block
+    // is what `markdown.tsx` turns a fence into, and nothing else in a message produces one.
+    const source = '```ts\nlet x = 1\n```'
+    render(
+      <MessageItem message={message({ text: source, parts: [{ type: 'text', text: source }] })} />,
+    )
+    const bubble = document.querySelector('[data-role="agent"] > div')
+    expect(bubble?.querySelector('[data-slot="code-block"]')).not.toBeNull()
+    expect(bubble?.className).toContain('has-[pre]:w-full')
+    // Still capped, and still able to shrink: the column is 85%, and a long line inside the
+    // block scrolls rather than being clipped at 400px (#212).
+    expect(bubble?.className).toContain('max-w-[85%]')
+    expect(bubble?.className).toContain('min-w-0')
+  })
+
+  it('leaves a message with no code block as wide as its words', () => {
+    render(<MessageItem message={message()} />)
+    const bubble = document.querySelector('[data-role="agent"] > div')
+    expect(bubble?.querySelector('pre')).toBeNull()
+    // The conditional class is on every bubble; it is the `:has(pre)` that decides. Nothing
+    // here asks for a width *unconditionally*, so a short message still draws a short bubble.
+    expect(bubble?.className.split(' ')).not.toContain('w-full')
+  })
 })

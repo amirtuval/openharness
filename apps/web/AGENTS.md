@@ -108,13 +108,15 @@ src/
                                composer with the model selector, the model-change marker
       message-list.tsx         the scrolling conversation + stick-to-bottom
       message-item.tsx         one message (user right / agent left, markdown), the
-                               "Switched to …" marker when it changed the model, and
-                               PART_RENDERERS: a renderer per message part (#201)
+                               "Switched to …" marker when it changed the model,
+                               PART_RENDERERS: a renderer per message part (#201), and the
+                               bubble that takes the whole column when it holds a block (#231)
       markdown.tsx             react-markdown + remark-gfm, styled element by element, and
                                streaming-safe by rendering (a half-written fence is a code
                                block; #204)
-      code-block.tsx           a fenced block: the language, the Copy button, and the
-                               highlighted lines — lazily, per theme (#204)
+      code-block.tsx           a fenced block: the language, the Copy button, the highlighted
+                               lines — lazily, per theme — and the full column of the message
+                               it is in (#204, #231)
       composer.tsx             the input: Enter sends, it grows to a cap and then scrolls,
                                Stop (worded) and Send sit in its foot, and the model control
                                is part of the same surface (#211)
@@ -627,6 +629,14 @@ Highlighting is **theme-aware without re-highlighting**: `defaultColor: false` m
 write all three palettes as CSS variables on the block, and three `[data-theme]` rules in
 `index.css` pick the one the page is in — Light to `github-light`, Dim to `github-dark-dimmed`
 and Dark to `github-dark`. See `docs/chat-ui.md` for the numbers and the decisions.
+
+A block **fills the message column** (#231). A bubble is as wide as its words, so a short block
+used to draw a stub as wide as its longest line; `has-[pre]:w-full` on the bubble — a code
+block is the only thing `markdown.tsx` produces a `pre` for — gives the whole 85% column to a
+message that holds one and leaves every other message exactly as small as it was. A percentage
+width asked for from inside a shrink-to-fit box would resolve back to the content, which is why
+it is the bubble that carries it. `message-item.test.tsx` pins the class; what it looks like at
+400px is a browser question.
 
 ### Themes (#203, epic #201 X3)
 
