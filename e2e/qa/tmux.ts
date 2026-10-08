@@ -454,32 +454,44 @@ function cliIsSignedIn(): boolean {
   }
 }
 
-/** The label every line of an agent message starts with (`components/message-view.tsx`). */
-export const AGENT_LINE = 'agent › '
-
 /** How many times `needle` occurs in a pane capture. */
 export function occurrences(haystack: string, needle: string): number {
   return haystack.split(needle).length - 1
 }
 
 /**
- * Whether any agent message on the screen has text in it yet.
+ * The block a reply that is still arriving ends its last line with (`components/message-view`).
  *
- * The cursor a streaming message ends with is drawn as soon as the reply is announced, before
- * the first token arrives, so an `agent ›` line on its own only says a reply has *started*.
- * Interrupting at that point is interrupting nothing.
+ * The one mark on screen that is a reply's and nobody else's: since #229 a message has no
+ * `agent › ` label to recognise it by.
+ */
+export const STREAM_CURSOR = '▌'
+
+/**
+ * Whether the reply being streamed has said anything yet.
+ *
+ * The cursor is drawn the moment a reply is announced, before the first token arrives, so a
+ * line that is only the cursor says a reply has *started* and interrupting there interrupts
+ * nothing. Text on the line before the cursor is the proof that it has said something.
  */
 export function replyHasText(screen: string): boolean {
   return screen.split('\n').some((line) => {
-    const at = line.indexOf(AGENT_LINE)
-    if (at === -1) return false
-    return (
-      line
-        .slice(at + AGENT_LINE.length)
-        .replaceAll('▌', '')
-        .trim().length > 0
-    )
+    const at = line.indexOf(STREAM_CURSOR)
+    return at > 0 && line.slice(0, at).trim().length > 0
   })
+}
+
+/**
+ * How many times `text` has been written on a line of its own since the pane's first row.
+ *
+ * This is how many messages on screen *say* it — the message the user sent, and the mock's
+ * echo of it — and it deliberately does not count the prompt, whose copy of it sits behind
+ * the `❯ ` and so never begins a line. A line's own beginning is what a leading `\n` matches,
+ * which is why the capture is prefixed with one: the first row has no newline in front of it.
+ */
+export function replyOccurrences(screen: string, text: string): number {
+  const firstLine = (text.split('\n')[0] ?? '').trim()
+  return occurrences(`\n${screen}`, `\n${firstLine}`)
 }
 
 /**
@@ -506,36 +518,34 @@ export function expectNoErrorNotice(screen: string): void {
   expect(errorNoticeLines(screen), 'the CLI is showing an error notice').toEqual([])
 }
 
-/** `text` with everything a regexp would read as syntax escaped. */
-function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-}
-
 /**
  * Send a line to the chat and wait for the agent's answer to it to start arriving.
  *
- * The mock echoes its prompt, so the specs written for passes 1 and 2 wait for
- * `agent › <the prompt>` — which is both "the reply started" and, at least for a short
- * prompt, roughly "the reply is here". A real provider answers in its own words, so there is
- * nothing in the reply to match: the wait is for one more agent line on the screen than there
- * was before, which is the same event without the wording.
+ * The mock echoes its prompt, so the reply *says* what the message that asked for it said —
+ * which is both "the reply started" and, at least for a short prompt, roughly "the reply is
+ * here" (#229: there is no `agent › ` label left to recognise it by). The prompt's own copy
+ * of the text does not count: it sits behind the `❯ `, and the count is of lines that begin
+ * with the text. A real provider answers in its own words, so there is nothing in the reply
+ * to match — the wait there is for the streaming cursor to have text in front of it.
  *
  * `slow` marks a prompt the mock answers at length rather than echoing. Its reply is the
- * counted-off `part 1/40 part 2/40 …`, so the prompt is not in it to be matched.
+ * counted-off `part 1/40 part 2/40 …`, so the prompt is not in it to be counted.
  */
 export async function sendAndAwaitAnswer(
   terminal: Terminal,
   text: string,
   options: { readonly slow?: boolean } = {},
 ): Promise<void> {
-  const before = occurrences(terminal.capture(), AGENT_LINE)
   terminal.type(text)
   terminal.send('Enter')
   if (isRealModel) {
-    await terminal.waitUntil((screen) => occurrences(screen, AGENT_LINE) > before, 60_000)
+    await terminal.waitUntil(replyHasText, 60_000)
     return
   }
-  const firstLine = (text.split('\n')[0] ?? '').trim()
-  const expected = options.slow === true ? 'part 1/40' : escapeRegExp(firstLine)
-  await terminal.waitFor(new RegExp(`agent › ${expected}`), 60_000)
+  if (options.slow === true) {
+    await terminal.waitFor(/part 1\/40/, 60_000)
+    return
+  }
+  // The user's message is the first writing of it; the mock's echo is the second.
+  await terminal.waitUntil((screen) => replyOccurrences(screen, text) >= 2, 60_000)
 }

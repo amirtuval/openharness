@@ -18,6 +18,17 @@ function spansOf(text: string, width = 60, theme: TerminalTheme = DARK): Span[] 
   return markdownLines(text, { width, theme }).flatMap((line) => [...line])
 }
 
+/** A code block's label line as the renderer draws it: `── rust ───…`, `width` columns wide. */
+function label(name: string, width: number): string {
+  const head = `── ${name} `
+  return head + '─'.repeat(width - head.length)
+}
+
+/** The rule that closes a code block. */
+function rule(width: number): string {
+  return '─'.repeat(width)
+}
+
 /**
  * The span carrying `text`, wherever it is.
  *
@@ -217,48 +228,54 @@ describe('tables', () => {
 })
 
 describe('code blocks', () => {
-  it('labels the frame with the language and draws the code inside it', () => {
+  it('labels the block above the code and closes it below', () => {
     const lines = linesOf('```ts\nconst x = 1\n```', 20)
 
-    expect(lines).toEqual(['┌ ts ───────────────', '│ const x = 1', '└───────────────────'])
+    expect(lines).toEqual([label('ts', 20), 'const x = 1', rule(20)])
   })
 
   it('calls a fence with no language code', () => {
-    expect(linesOf('```\nplain\n```', 16)).toEqual([
-      '┌ code ─────────',
-      '│ plain',
-      '└───────────────',
-    ])
+    expect(linesOf('```\nplain\n```', 16)).toEqual([label('code', 16), 'plain', rule(16)])
   })
 
-  it('colours the code by the language, and the frame by the terminal', () => {
+  it('draws the code at column 0, with no gutter in front of it (#229)', () => {
+    // The point of the pass: select these lines and paste them and the code is what comes
+    // back — the `│ ` bar that used to open every line came with it.
+    const lines = linesOf('```rust\nfn main() {\n    println!("hi");\n}\n```', 40)
+
+    expect(lines.slice(1, -1)).toEqual(['fn main() {', '    println!("hi");', '}'])
+  })
+
+  it('colours the code by the language, and the label by the terminal', () => {
     const source = '```ts\nconst x = 1\n```'
 
     expect(spanWith(source, 'const').color).toBe('#ff7b72')
-    expect(spanWith(source, '┌ ts ').color).toBe('gray')
+    expect(spanWith(source, '── ts ').color).toBe('gray')
   })
 
-  it('breaks a line too long for the frame rather than wrapping it as prose', () => {
+  it('breaks a line too wide for the block rather than wrapping it as prose', () => {
     const lines = linesOf('```ts\nconst longName = 1234567890\n```', 20)
 
-    // Eighteen columns inside the frame: the line is cut at the column, not at the space.
+    // Twenty columns to the block: the line is cut at the column, not at the space.
     expect(lines).toHaveLength(4)
-    expect(lines[1]).toBe('│ const longName = 1')
-    expect(lines[2]).toBe('│ 234567890')
+    expect(lines[1]).toBe('const longName = 123')
+    expect(lines[2]).toBe('4567890')
   })
 
-  it('draws a fence that has not been closed yet as a code block in progress', () => {
-    // What a streaming reply looks like mid-block: there is no closing fence, and it is
-    // still a code block.
-    const lines = linesOf('Here:\n\n```python\ndef f(x):\n    return x', 40)
+  it('draws a fence that has not been closed yet as the block it is going to be', () => {
+    // What a streaming reply looks like mid-block: the fence is open, so `remark` reads
+    // everything to the end of the text as code — and the block is laid out exactly as the
+    // closed one will be, so nothing jumps when the fence lands (#229).
+    const body = '```python\ndef f(x):\n    return x'
+    const open = linesOf(`Here:\n\n${body}`, 40)
+    const closed = linesOf(`Here:\n\n${body}\n\`\`\``, 40)
 
-    expect(lines.at(-1)).toBe('└───────────────────────────────────────')
-    expect(lines).toContain('│ def f(x):')
-    expect(lines).toContain('│     return x')
+    expect(open).toEqual(closed)
+    expect(open).toEqual(['Here:', '', label('python', 40), 'def f(x):', '    return x', rule(40)])
   })
 
   it('shows a fence in a language it does not know, uncut', () => {
-    expect(linesOf('```unknownlang\nanything at all\n```', 40)).toContain('│ anything at all')
+    expect(linesOf('```unknownlang\nanything at all\n```', 40)).toContain('anything at all')
   })
 })
 

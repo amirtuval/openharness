@@ -13,12 +13,11 @@ import {
   waitForIdle,
 } from './support'
 import {
-  AGENT_LINE,
+  replyOccurrences,
   CLI_LOGIN_HINT,
   Terminal,
   ensureCliSignedIn,
   expectNoErrorNotice,
-  occurrences,
   ohCommand,
   ohCommandIn,
   openDevicePage,
@@ -77,9 +76,11 @@ test.describe('W27 §11 cross-client and robustness', () => {
       })
 
       await test.step('from the browser: the terminal sees it, then the reply', async () => {
-        const before = occurrences(terminal.capture(), AGENT_LINE)
         await sendFromComposer(page, 'sent from the browser')
-        await terminal.waitUntil((screen) => occurrences(screen, AGENT_LINE) > before, 120_000)
+        await terminal.waitUntil(
+          (screen) => replyOccurrences(screen, 'sent from the browser') >= 2,
+          120_000,
+        )
         await terminal.waitForIdle(120_000)
         await waitForIdle(request, session.id)
         await expect(page.getByRole('log', { name: 'Conversation' })).toContainText(

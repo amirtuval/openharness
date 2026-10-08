@@ -108,8 +108,14 @@ export const DEV_REPLIES: readonly string[] = [
     '}',
     '```',
     '',
-    'And a paragraph long enough that it has to wrap, so that the hanging indent under the',
-    '`agent › ` label is visible on every one of its lines rather than only the first.',
+    '```rust',
+    'fn main() {',
+    '    println!("every line of this starts at column 0");',
+    '}',
+    '```',
+    '',
+    'And a paragraph long enough that it has to wrap, so that a wrapped line is visible —',
+    'and so is the fact that it starts at column 0 like the line before it.',
   ].join('\n'),
 ]
 
