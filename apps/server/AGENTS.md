@@ -38,30 +38,30 @@ Everything under `API_VERSION_PREFIX` (`/v1`). Bodies and queries are validated 
 protocol's schemas, so the shapes are not repeated here — see
 [`packages/protocol/AGENTS.md`](../../packages/protocol/AGENTS.md).
 
-| method   | path                                      | body / query                             | answers                                                                                                              |
-| -------- | ----------------------------------------- | ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `GET`    | `/health`                                 | —                                        | liveness: `{ status: 'ok' }`; never needs a session                                                                  |
-| `GET`    | `/ready`                                  | —                                        | readiness (#151): `{ status: 'ok' }`, or 503 while draining or when the store does not answer; never needs a session |
-| `GET`    | `/v1/auth-config`                         | —                                        | `{ providers, dev_login }`; never needs a session                                                                    |
-| `GET`    | `/v1/me`                                  | —                                        | the signed-in `User`                                                                                                 |
-| `GET`    | `/v1/me/preferences`                      | —                                        | the caller's `UserPreferences`, unwrapped                                                                            |
-| `PUT`    | `/v1/me/preferences`                      | `PutPreferencesRequestSchema`            | the stored preferences; 400 for a malformed `default_model`                                                          |
-| `POST`   | `/v1/agents`                              | `CreateAgentRequestSchema`               | 201, the `Agent`                                                                                                     |
-| `GET`    | `/v1/agents`                              | `ListAgentsQuerySchema`                  | `{ data, next_page }`                                                                                                |
-| `GET`    | `/v1/agents/{agent_id}`                   | —                                        | the `Agent`, or 404                                                                                                  |
-| `POST`   | `/v1/agents/{agent_id}`                   | `UpdateAgentRequestSchema`               | the updated `Agent`, or 404                                                                                          |
-| `POST`   | `/v1/sessions`                            | `CreateSessionRequestSchema`             | 201, the `Session`; 404 for an unknown agent; 400 for neither an agent nor a model                                   |
-| `GET`    | `/v1/sessions`                            | `ListSessionsQuerySchema`                | `{ data, next_page }`                                                                                                |
-| `GET`    | `/v1/sessions/{session_id}`               | —                                        | the `Session`, or 404                                                                                                |
-| `DELETE` | `/v1/sessions/{session_id}`               | —                                        | 204; hard delete (U5); 404 for another owner's or an unknown session                                                 |
-| `POST`   | `/v1/sessions/{session_id}/events`        | `SendEventsRequestSchema`                | `{ data: user event[] }`; then signals, and a title; 409 for a rewind while running (#238)                           |
-| `GET`    | `/v1/sessions/{session_id}/events`        | `ListEventsQuerySchema`                  | `{ data, next_page }`                                                                                                |
-| `GET`    | `/v1/sessions/{session_id}/events/stream` | `StreamEventsQuerySchema`                | the SSE stream; 404 for an unknown session                                                                           |
-| `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`   | the AI SDK `useChat` request (see below) | an AI SDK UI message stream — an **extension**                                                                       |
-| `GET`    | `/v1/models`                              | `ListModelsQuerySchema` (`refresh`)      | `{ data, providers }`; 429 for a refresh inside the minute                                                           |
-| `PUT`    | `/v1/provider-credentials/{provider}`     | `PutProviderCredentialRequestSchema`     | the credential's metadata; 422 if the key is refused                                                                 |
-| `GET`    | `/v1/provider-credentials`                | —                                        | `{ data: ProviderCredential[] }`, metadata only                                                                      |
-| `DELETE` | `/v1/provider-credentials/{provider}`     | —                                        | 204; never an error for one that is not there                                                                        |
+| method   | path                                      | body / query                             | answers                                                                                                                                              |
+| -------- | ----------------------------------------- | ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET`    | `/health`                                 | —                                        | liveness: `{ status: 'ok' }`; never needs a session                                                                                                  |
+| `GET`    | `/ready`                                  | —                                        | readiness (#151): `{ status: 'ok' }`, or 503 while draining or when the store does not answer; never needs a session                                 |
+| `GET`    | `/v1/auth-config`                         | —                                        | `{ providers, dev_login }`; never needs a session                                                                                                    |
+| `GET`    | `/v1/me`                                  | —                                        | the signed-in `User`                                                                                                                                 |
+| `GET`    | `/v1/me/preferences`                      | —                                        | the caller's `UserPreferences`, unwrapped                                                                                                            |
+| `PUT`    | `/v1/me/preferences`                      | `PutPreferencesRequestSchema`            | the stored preferences; 400 for a malformed `default_model`                                                                                          |
+| `POST`   | `/v1/agents`                              | `CreateAgentRequestSchema`               | 201, the `Agent`                                                                                                                                     |
+| `GET`    | `/v1/agents`                              | `ListAgentsQuerySchema`                  | `{ data, next_page }`                                                                                                                                |
+| `GET`    | `/v1/agents/{agent_id}`                   | —                                        | the `Agent`, or 404                                                                                                                                  |
+| `POST`   | `/v1/agents/{agent_id}`                   | `UpdateAgentRequestSchema`               | the updated `Agent`, or 404                                                                                                                          |
+| `POST`   | `/v1/sessions`                            | `CreateSessionRequestSchema`             | 201, the `Session`; 404 for an unknown agent; 400 for neither an agent nor a model                                                                   |
+| `GET`    | `/v1/sessions`                            | `ListSessionsQuerySchema`                | `{ data, next_page }`                                                                                                                                |
+| `GET`    | `/v1/sessions/{session_id}`               | —                                        | the `Session`, or 404                                                                                                                                |
+| `DELETE` | `/v1/sessions/{session_id}`               | —                                        | 204; hard delete (U5); 404 for another owner's or an unknown session                                                                                 |
+| `POST`   | `/v1/sessions/{session_id}/events`        | `SendEventsRequestSchema`                | `{ data: user event[] }`; then signals, and a title; 409 for a rewind while running, 400 for a batch whose rewind is not its only first event (#238) |
+| `GET`    | `/v1/sessions/{session_id}/events`        | `ListEventsQuerySchema`                  | `{ data, next_page }`                                                                                                                                |
+| `GET`    | `/v1/sessions/{session_id}/events/stream` | `StreamEventsQuerySchema`                | the SSE stream; 404 for an unknown session                                                                                                           |
+| `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`   | the AI SDK `useChat` request (see below) | an AI SDK UI message stream — an **extension**                                                                                                       |
+| `GET`    | `/v1/models`                              | `ListModelsQuerySchema` (`refresh`)      | `{ data, providers }`; 429 for a refresh inside the minute                                                                                           |
+| `PUT`    | `/v1/provider-credentials/{provider}`     | `PutProviderCredentialRequestSchema`     | the credential's metadata; 422 if the key is refused                                                                                                 |
+| `GET`    | `/v1/provider-credentials`                | —                                        | `{ data: ProviderCredential[] }`, metadata only                                                                                                      |
+| `DELETE` | `/v1/provider-credentials/{provider}`     | —                                        | 204; never an error for one that is not there                                                                                                        |
 
 Every `/v1` route except `auth-config` requires a session (see "Authentication"), and every
 resource is scoped to its owner. `/api/auth/*` is Better Auth's own surface: sign-in, sign-out,
@@ -86,7 +86,11 @@ turn — is the **409 `conflict_error`** `requireIdleSession` raises. The store 
 that wins the race anyway, because a claim naming a superseded message is not a claim the log
 accepts, so that turn ends at its next write instead of appending into the range. A `from_seq`
 that names no `user.message` this session still shows is the store's `RangeError`, which the
-app maps to the 400 `invalid_request_error` every bad-argument refusal gets.
+app maps to the 400 `invalid_request_error` every bad-argument refusal gets. The batch carries
+**at most one rewind, and only as its first event**: `SendEventsRequestSchema` refuses
+`[user.message, session.rewind]` and `[session.rewind, session.rewind]` in `parseBody`, before
+the route reads anything, with the same 400 and nothing stored — a message the rewind's range
+would swallow is a message no turn would answer.
 
 Creating a session with `initial_events` goes through the same rules: the protocol says those
 events are stored "before it starts running", so a `user.message` among them signals `work` and

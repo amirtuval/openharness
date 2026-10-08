@@ -578,6 +578,37 @@ describe('edit and resend: the rewind (#238)', () => {
     expect(response.status).toBe(400)
     expect(ApiErrorBodySchema.parse(await response.json()).error.type).toBe('invalid_request_error')
   })
+
+  it('answers 400, and stores nothing, for a message ahead of its rewind, or two rewinds', async () => {
+    const test = setup()
+    const { sessionId, message } = await sessionWithAMessage(test)
+    const before = await readHistory(test.store, sessionId, { includeSuperseded: true })
+
+    // A message ahead of the rewind would be stored and then swallowed by the range the rewind
+    // records — returned in the answer as if a turn were going to answer it — and a second
+    // rewind would supersede the first's restart. The protocol's request schema refuses both
+    // before the route reads anything, so it is the 400 and nothing is stored.
+    for (const events of [
+      [
+        { type: 'user.message', content: [{ type: 'text', text: 'write a haiku about snow' }] },
+        { type: 'session.rewind', from_seq: message.seq },
+      ],
+      [
+        { type: 'session.rewind', from_seq: message.seq },
+        { type: 'user.message', content: [{ type: 'text', text: 'write a haiku about snow' }] },
+        { type: 'session.rewind', from_seq: message.seq },
+      ],
+    ]) {
+      const response = await postEvents(test, sessionId, events)
+
+      expect(response.status).toBe(400)
+      expect(ApiErrorBodySchema.parse(await response.json()).error.type).toBe(
+        'invalid_request_error',
+      )
+    }
+    // Nothing of either batch was stored, the message behind the refused rewind included.
+    expect(await readHistory(test.store, sessionId, { includeSuperseded: true })).toEqual(before)
+  })
 })
 
 describe('session titles', () => {
