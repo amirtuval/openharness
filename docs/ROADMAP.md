@@ -198,7 +198,7 @@ own.
 - **Programmatic access:** personal API keys, SDK and script access (no static server key
   any more).
 - **Organizations, teams and sharing:** shared agents, roles and invitations. Shared
-  *sessions* are spelled out under [Multi-user chat](#multi-user-chat) below.
+  _sessions_ are spelled out under [Multi-user chat](#multi-user-chat) below.
 - **CLI and web polish:** a lot of smaller UX work in both clients, collected while testing v1.
 - **Context compaction:** summarizing old history for the model. This is separate from #46's
   event-store compaction.
