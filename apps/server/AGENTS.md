@@ -54,7 +54,7 @@ protocol's schemas, so the shapes are not repeated here — see
 | `GET`    | `/v1/sessions`                            | `ListSessionsQuerySchema`                | `{ data, next_page }`                                                                                                |
 | `GET`    | `/v1/sessions/{session_id}`               | —                                        | the `Session`, or 404                                                                                                |
 | `DELETE` | `/v1/sessions/{session_id}`               | —                                        | 204; hard delete (U5); 404 for another owner's or an unknown session                                                 |
-| `POST`   | `/v1/sessions/{session_id}/events`        | `SendEventsRequestSchema`                | `{ data: user event[] }`; then signals, and a title                                                                  |
+| `POST`   | `/v1/sessions/{session_id}/events`        | `SendEventsRequestSchema`                | `{ data: user event[] }`; then signals, and a title; 409 for a rewind while running (#238)                           |
 | `GET`    | `/v1/sessions/{session_id}/events`        | `ListEventsQuerySchema`                  | `{ data, next_page }`                                                                                                |
 | `GET`    | `/v1/sessions/{session_id}/events/stream` | `StreamEventsQuerySchema`                | the SSE stream; 404 for an unknown session                                                                           |
 | `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`   | the AI SDK `useChat` request (see below) | an AI SDK UI message stream — an **extension**                                                                       |
@@ -72,6 +72,21 @@ fixed order: it **stores** the events (`processed_at: null`, which is what makes
 and only then tells the scheduler. The store call is what makes the request durable; the
 signal is a latency optimization the scheduler can afford to lose (see "Signals are hints" in
 `packages/session`).
+
+The body carries the user's own events, and one instruction that is not one: a
+**`session.rewind`** (#238), "edit and resend". It names the `user.message` the reader edited,
+travels with the replaced message in the **same batch** — so the two are one append, and a
+rewind the log cannot honour stores neither — and the server writes the event (`session.*` is
+the session's domain: it is not queued and never claimed, unlike `user.*`). The append records
+the range it replaces, from that message through the end of the log as it stood; the response
+carries the stored **user events** alone, and a client reads the rewind back from the log or
+the stream. A rewind is accepted **only while the session is idle**: anything else — `running`,
+and `unfinished` too, since the next brain to take the partition over will run the inherited
+turn — is the **409 `conflict_error`** `requireIdleSession` raises. The store refuses a brain
+that wins the race anyway, because a claim naming a superseded message is not a claim the log
+accepts, so that turn ends at its next write instead of appending into the range. A `from_seq`
+that names no `user.message` this session still shows is the store's `RangeError`, which the
+app maps to the 400 `invalid_request_error` every bad-argument refusal gets.
 
 Creating a session with `initial_events` goes through the same rules: the protocol says those
 events are stored "before it starts running", so a `user.message` among them signals `work` and

@@ -62,6 +62,17 @@ export function invalidProviderCredential(message: string): HttpError {
 }
 
 /**
+ * The request conflicts with the resource's current state — a rewind aimed at a session with
+ * a turn in flight (#238): 409 `conflict_error`.
+ *
+ * The status the protocol gives the type; the message says what the caller can do about it
+ * (wait for the turn, or interrupt it).
+ */
+export function conflictError(message: string): HttpError {
+  return new HttpError('conflict_error', message)
+}
+
+/**
  * The caller is over a rate limit — a `GET /v1/models?refresh=true` inside the once-a-minute
  * window (C4): 429 `rate_limit_error`.
  */

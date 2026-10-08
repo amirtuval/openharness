@@ -17,6 +17,7 @@ import {
   SessionSchema,
   type Session,
   type SessionId,
+  type StoredEvent,
 } from '@openharness/protocol'
 
 import { createApp } from './app'
@@ -428,6 +429,151 @@ describe('the events API', () => {
     const response = await test.request(
       `${API_VERSION_PREFIX}/sessions/${session.id}/events?page=page_${keyCursor}`,
     )
+
+    expect(response.status).toBe(400)
+    expect(ApiErrorBodySchema.parse(await response.json()).error.type).toBe('invalid_request_error')
+  })
+})
+
+describe('edit and resend: the rewind (#238)', () => {
+  /**
+   * A session that has said one thing and been answered: the message the reader will edit, and
+   * the `seq` the log ends at (the turn's `session.status_idle`), which a rewind covers too.
+   */
+  async function sessionWithAMessage(test: TestContext): Promise<{
+    sessionId: SessionId
+    message: { id: string; seq: number }
+    tail: number
+    raw: readonly StoredEvent[]
+  }> {
+    const agent = await httpCreateAgent(test)
+    const session = await httpCreateSession(test, agent.id)
+    const response = await postEvents(test, session.id, [
+      { type: 'user.message', content: [{ type: 'text', text: 'write a haiku about rain' }] },
+    ])
+    const body = SendEventsResponseSchema.parse(await response.json())
+    const stored = body.data[0]
+    if (stored?.type !== EVENT_TYPES.userMessage) {
+      throw new Error('the session was not stored with a message')
+    }
+    // The scripted model answers, so the session has a whole turn in it by the time this
+    // returns — and the rewind the tests send replaces all of it.
+    await waitForIdle(test.store, session.id)
+    const raw = await readHistory(test.store, session.id, { includeSuperseded: true })
+    const tail = raw[raw.length - 1]?.seq ?? 0
+    return { sessionId: session.id, message: { id: stored.id, seq: stored.seq }, tail, raw }
+  }
+
+  it('restarts the session from an edited message, and the title stays', async () => {
+    const test = setup()
+    const { sessionId, message, tail, raw: before } = await sessionWithAMessage(test)
+    const titled = await readSession(test, sessionId)
+    expect(titled.title).toBe('write a haiku about rain')
+
+    const response = await postEvents(test, sessionId, [
+      { type: 'session.rewind', from_seq: message.seq },
+      { type: 'user.message', content: [{ type: 'text', text: 'write a haiku about snow' }] },
+    ])
+
+    expect(response.status).toBe(200)
+    const body = SendEventsResponseSchema.parse(await response.json())
+    // The answer carries the stored message alone: the rewind's own event is the server's, and
+    // a client reads it back from the log like any other session event.
+    expect(body.data).toHaveLength(1)
+    expect(body.data[0]).toMatchObject({
+      type: EVENT_TYPES.userMessage,
+      seq: tail + 2,
+      processed_at: null,
+    })
+
+    // What a read of the log shows is the conversation restarted from the edit: the rewind,
+    // and the message that replaced the one it took back — and then the turn that message
+    // started, so the assertions below are about the head of the log and about what is *not*
+    // anywhere in it.
+    await waitForIdle(test.store, sessionId)
+    const history = await readHistory(test.store, sessionId)
+    expect(history.slice(0, 2).map((event) => event.type)).toEqual([
+      EVENT_TYPES.sessionRewind,
+      EVENT_TYPES.userMessage,
+    ])
+    expect(history[0]).toMatchObject({
+      type: EVENT_TYPES.sessionRewind,
+      supersedes: { from_seq: message.seq, to_seq: tail },
+    })
+    // Nothing of the branch the edit took back survives in what a reader sees.
+    expect(JSON.stringify(history)).not.toContain('about rain')
+
+    // Nothing already stored was modified: the raw log opens with the whole turn it did
+    // before, field for field, and a session titled from its first message keeps the title it
+    // has — the edit is a new message, not a new session.
+    const raw = await readHistory(test.store, sessionId, { includeSuperseded: true })
+    expect(raw.slice(0, before.length)).toEqual(before)
+    expect((await readSession(test, sessionId)).title).toBe(titled.title)
+  })
+
+  it('answers 409 while a turn is running, and stores nothing', async () => {
+    const test = setup()
+    const { sessionId, message } = await sessionWithAMessage(test)
+    // A turn in flight: the status event opens it and the span start is what makes it
+    // `running` rather than merely open. Appended after the turn above went idle, so the
+    // state is deterministic.
+    await test.store.appendEvents(sessionId, [
+      { type: EVENT_TYPES.sessionStatusRunning },
+      { type: EVENT_TYPES.modelRequestStart, model: 'anthropic/claude-sonnet-5' },
+    ])
+    const before = await readHistory(test.store, sessionId, { includeSuperseded: true })
+
+    const response = await postEvents(test, sessionId, [
+      { type: 'session.rewind', from_seq: message.seq },
+      { type: 'user.message', content: [{ type: 'text', text: 'write a haiku about snow' }] },
+    ])
+
+    expect(response.status).toBe(409)
+    const error = ApiErrorBodySchema.parse(await response.json()).error
+    expect(error.type).toBe('conflict_error')
+    expect(error.message).toContain('running')
+    // Nothing of the batch was stored — the message behind the refused rewind included.
+    expect(await readHistory(test.store, sessionId, { includeSuperseded: true })).toEqual(before)
+  })
+
+  it('answers 400, and stores nothing, for a rewind that names no message', async () => {
+    const test = setup()
+    const { sessionId, message, tail } = await sessionWithAMessage(test)
+    const before = await readHistory(test.store, sessionId, { includeSuperseded: true })
+
+    // The turn's last event is a status event, and 99 is past the end of the log: neither is
+    // something a reader could have edited.
+    for (const fromSeq of [tail, 99]) {
+      const response = await postEvents(test, sessionId, [
+        { type: 'session.rewind', from_seq: fromSeq },
+        { type: 'user.message', content: [{ type: 'text', text: 'write a haiku about snow' }] },
+      ])
+
+      expect(response.status, String(fromSeq)).toBe(400)
+      expect(ApiErrorBodySchema.parse(await response.json()).error.type).toBe(
+        'invalid_request_error',
+      )
+    }
+    // Neither refusal stored anything: the batch is one append, so a rewind the log cannot
+    // honour takes the message behind it with it.
+    expect(await readHistory(test.store, sessionId, { includeSuperseded: true })).toEqual(before)
+
+    // And a rewind to the message itself does work, so the refusals were about the `seq`.
+    expect(
+      (
+        await postEvents(test, sessionId, [
+          { type: 'session.rewind', from_seq: message.seq },
+          { type: 'user.message', content: [{ type: 'text', text: 'write a haiku about snow' }] },
+        ])
+      ).status,
+    ).toBe(200)
+  })
+
+  it('answers 400 for a rewind without a message to restart from', async () => {
+    const test = setup()
+    const { sessionId } = await sessionWithAMessage(test)
+
+    const response = await postEvents(test, sessionId, [{ type: 'session.rewind' }])
 
     expect(response.status).toBe(400)
     expect(ApiErrorBodySchema.parse(await response.json()).error.type).toBe('invalid_request_error')

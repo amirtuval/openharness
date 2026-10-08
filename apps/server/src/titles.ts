@@ -3,7 +3,7 @@ import {
   SESSION_TITLE_MAX_LENGTH,
   type Session,
   type SessionId,
-  type UserEventInput,
+  type EventInput,
 } from '@openharness/protocol'
 import type { SessionStore } from '@openharness/session'
 
@@ -67,7 +67,7 @@ export function deriveSessionTitle(text: string): string | null {
 export async function nameSessionFromFirstMessage(
   store: SessionStore,
   sessionId: SessionId,
-  events: readonly UserEventInput[],
+  events: readonly EventInput[],
   ownerId: string,
 ): Promise<Session | null> {
   const message = events.find((event) => event.type === EVENT_TYPES.userMessage)
