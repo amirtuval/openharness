@@ -72,7 +72,7 @@ emits what that reaches.
 | `RunTurnOptions`                                                              | `{ store, model, resolveCredential, signal?, fence?, contextStrategy?, retry? }`                 |
 | `TurnOutcome`, `TurnOutcomeKind`                                              | `{ outcome: 'idle' \| 'noop' \| 'interrupted' \| 'error' }`                                      |
 | `ContextStrategy`, `ContextStrategyOptions`                                   | `(events, { model, system }) => ModelMessage[]`                                                  |
-| `createContextStrategy(config?)`, `ContextStrategyConfig`                     | the default strategy: the conversation, trimmed to a token budget                                |
+| `createContextStrategy(config?)`, `ContextStrategyConfig`                     | the default strategy: the conversation, trimmed to a token budget resolved per model             |
 | `DEFAULT_CONTEXT_STRATEGY`, `DEFAULT_CONTEXT_TOKEN_BUDGET`, `CHARS_PER_TOKEN` | its defaults                                                                                     |
 | `estimateTokens(text)`                                                        | the chars/4 estimate the budget is measured in                                                   |
 | `ModelCredential`                                                             | `{ apiKey }` — the credential one model request is made with                                     |
@@ -278,6 +278,23 @@ Notes on the corners:
 session's `{ model, system }`; it must be pure — the loop owns the store, and a strategy that
 wrote to it would put the transcript out of step with the request that produced it.
 
+### The context budget (#246)
+
+The default strategy trims the history to a token budget, and how big that budget is per
+model is the host's to say. `ContextStrategyConfig` takes `tokenBudget` — one number for every
+model, defaulting to `DEFAULT_CONTEXT_TOKEN_BUDGET` — and `tokenBudgetFor(modelId)`, a
+**resolver the strategy asks once per call** with the id the request runs. It is a function
+rather than a record because the model space is not a handful of ids: the server's registry
+holds hundreds (the bundled models.dev snapshot), and a record would have to be built from all
+of them to answer for the one model a request names. `undefined` means "budget it like every
+other model", so the default stays in one place.
+
+The budget is resolved **per request, not per session**: the loop re-reads the session at
+every request boundary, so a mid-chat model switch trims to the new model from the next
+request on. The server's resolver (`apps/server/src/catalog/context-budget.ts`) turns the
+registry's limits into `contextWindow − min(maxOutput, 25% of contextWindow)`, and the
+trimming itself is unchanged — oldest complete turns first, never the newest turn.
+
 `ModelFactory` is what keeps the package testable without a key: tests return one of the AI SDK's
 mock models, and nothing else in the loop knows the difference — a mock ignores the credential
 it is handed, but the loop still asks for one, which is what the tests' `resolveTestCredential`
@@ -435,7 +452,10 @@ retries run on an injected `sleep`, the clock is a `TestClock` from
   whole scenario — a normal turn, a 401, a retryable failure — whose provider errors quote a
   distinctive fake key, asserting neither the key nor a four-character-trimmed piece of it
   appears in the stored events or in captured console output.
-- `context.test.ts`, `errors.test.ts`, `retry.test.ts`, `log.test.ts`, `model.test.ts`,
+- `context.test.ts` pins the per-model budget resolver of #246 too: the strategy trims to what
+  `tokenBudgetFor` answers for the request's own model, falls back to the default when it
+  answers nothing, and asks it once per call with the id the request runs.
+- `errors.test.ts`, `retry.test.ts`, `log.test.ts`, `model.test.ts`,
   `redact.test.ts`, `validate.test.ts` and `index.test.ts` cover the pieces on their own,
   including the branches the loop cannot reach. `errors.test.ts` also covers the wrappers the
   classification follows (`AI_RetryError` and duck-typed ones), and `model.test.ts` pins the
