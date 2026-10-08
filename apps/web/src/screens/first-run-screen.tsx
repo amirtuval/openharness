@@ -1,4 +1,5 @@
 import { providerInfo } from '@openharness/client'
+import { ArrowRight } from 'lucide-react'
 import { useState } from 'react'
 
 import { ErrorBanner } from '../components/chat/error-banner'
@@ -11,6 +12,16 @@ import { usePreferences } from '../hooks/use-preferences'
 import type { ModelsView } from '../hooks/use-models'
 import { useProviderCredentials } from '../hooks/use-provider-credentials'
 import { modelNameLookup } from '../lib/models'
+
+/**
+ * The sentence the first-run screen is headed with (U12, #227).
+ *
+ * Exported for the same reason `NEW_CHAT_GREETING` is: it is how a test, a QA spec and a
+ * screenshot say *which screen is this*. The ✨ after it is drawn outside the gradient span —
+ * an emoji is decoration, and `background-clip: text` would swallow it — so anything matching
+ * the heading by name matches this sentence, not the whole heading.
+ */
+export const FIRST_RUN_HEADING = "Let's get you chatting"
 
 /**
  * Connect a model provider (epic #201, X5).
@@ -67,15 +78,20 @@ export function FirstRunScreen({
   }
 
   return (
-    <div className="h-full overflow-y-auto">
-      <div className="mx-auto w-full max-w-lg space-y-5 px-6 py-8">
+    // `m-auto` rather than `items-center` on the scroller (U12, #227): centred when it fits,
+    // and still scrolled from the top when it does not — `items-center` clips the first line of
+    // an overflowing child, which on a 400px-wide phone is exactly the heading.
+    <div className="flex h-full min-h-0 flex-col overflow-y-auto">
+      <div className="m-auto w-full max-w-lg space-y-5 px-6 py-8">
         {connected === null ? (
           <>
             <div className="space-y-1">
-              <h1 className="text-base font-medium">Connect a model provider</h1>
+              <h1 className="text-lg font-semibold">
+                <span data-slot="hero-title">{FIRST_RUN_HEADING}</span> ✨
+              </h1>
               <p className="text-sm text-muted-foreground">
-                Your chats run on your own provider keys, stored on this server — openharness keeps
-                none of its own.
+                Pick a model provider and paste a key. Your key stays encrypted on the server, and
+                we never ship one of our own.
               </p>
             </div>
 
@@ -113,15 +129,22 @@ export function FirstRunScreen({
         ) : (
           <div className="space-y-4">
             <div className="space-y-1">
-              <h1 className="text-base font-medium">
-                You&apos;re set: your default model is{' '}
-                <span className="font-semibold">
-                  {defaultModel === null ? 'not set yet' : (nameOf(defaultModel) ?? defaultModel)}
-                </span>
+              <h1 className="text-lg font-semibold">
+                <span data-slot="hero-title">You&apos;re all set!</span> 🎉
               </h1>
               <p className="text-sm text-muted-foreground">
-                Saved the {providerInfo(connected)?.name ?? connected} key. New chats start on this
-                model — the composer&apos;s selector still lets you switch mid-chat.
+                Saved the {providerInfo(connected)?.name ?? connected} key.{' '}
+                {defaultModel === null ? (
+                  'Pick a default model below and you are ready to go.'
+                ) : (
+                  <>
+                    Your chats will use{' '}
+                    <span className="font-medium text-foreground">
+                      {nameOf(defaultModel) ?? defaultModel}
+                    </span>{' '}
+                    — the composer&apos;s selector still switches mid-chat.
+                  </>
+                )}
               </p>
             </div>
 
@@ -155,7 +178,8 @@ export function FirstRunScreen({
             )}
 
             <Button type="button" onClick={onLeave}>
-              Start chatting
+              Let&apos;s go
+              <ArrowRight aria-hidden="true" />
             </Button>
           </div>
         )}

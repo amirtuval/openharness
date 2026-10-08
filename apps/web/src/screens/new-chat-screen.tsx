@@ -27,7 +27,7 @@ import { SUGGESTED_PROMPTS } from '../lib/suggestions'
  * the drawer tests, the first-run flow's landing and the QA pass all ask which screen they are
  * on by reading it, so one constant is better than the same sentence typed in five files.
  */
-export const NEW_CHAT_GREETING = 'What can I help with?'
+export const NEW_CHAT_GREETING = 'Hey! What are we building today?'
 
 /**
  * New chat, immediately (epic #116, U2): an empty chat whose composer runs on the account's
@@ -160,7 +160,9 @@ export function NewChatScreen({
       return (
         <div className="flex h-full items-center justify-center px-6">
           <div className="max-w-md space-y-2 text-center">
-            <h1 className="text-lg font-medium">{NEW_CHAT_GREETING}</h1>
+            <h1 className="text-lg font-semibold">
+              <span data-slot="hero-title">{NEW_CHAT_GREETING}</span>
+            </h1>
             <p className="text-sm font-medium">Add a provider key to start</p>
             <p className="text-sm text-muted-foreground">
               A chat runs on a model from a provider you have a key for. Saving the first key also
@@ -182,7 +184,9 @@ export function NewChatScreen({
           sent until the reader says so, because a first visit is not a commitment. */}
       <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-6 py-6">
         <div className="w-full max-w-xl space-y-block text-center">
-          <h1 className="text-lg font-medium">{NEW_CHAT_GREETING}</h1>
+          <h1 className="text-lg font-semibold">
+            <span data-slot="hero-title">{NEW_CHAT_GREETING}</span>
+          </h1>
           <p className="text-sm text-muted-foreground">
             {model === null
               ? 'Pick a model below, and this chat starts with your first message.'

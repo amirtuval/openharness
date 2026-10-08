@@ -128,11 +128,22 @@ rather than like a `<pre>` with an inline-code pill in it.
 
 **Highlighting is lazy, on demand, and per grammar.** `src/lib/highlight.ts` is imported with a
 dynamic `import()` by the component; inside it, Shiki's core, the three themes and the wasm
-engine are separate chunks, and each of the fourteen grammars is a chunk of its own, fetched
-the first time a fence asks for it. The main bundle grows by the code block component alone
-(1.3 kB gzip), and a chat with no code in it never fetches any of the rest. A language the
-chat does not ship — or a grammar that refuses the text — answers `null`, and the block is
-plain text: still labelled, still copyable, never an error state.
+engine are separate chunks, and each grammar is a chunk of its own, fetched the first time a
+fence asks for it. The main bundle grows by the code block component alone (1.3 kB gzip), and a
+chat with no code in it never fetches any of the rest. A language nothing claims — or a grammar
+that refuses the text — answers `null`, and the block is plain text: still labelled, still
+copyable, never an error state.
+
+**The table is Shiki's, not ours (#227).** The list was fourteen hand-picked grammars, so a
+`rust` fence — or `cpp`, `swift`, `dockerfile`, `protobuf` — rendered plain. It is now
+`bundledLanguages` from `shiki/langs`: every grammar Shiki ships, _keyed by its aliases too_
+(`rs`, `c++`, `cs`, `kt`, `rb`, `py`, `sh`, `zsh`, `yml`, `tf`, `dockerfile`, …), plus the two
+the app adds because Shiki has no answer for them (`golang`, `patch`). What makes that
+affordable is what the module actually is: a map of `() => import('…')` thunks, about 30 kB
+gzip of _metadata_, whose every value is still a separate chunk. Reading the table costs a
+look-up; loading from it is what it always was. So the property the fourteen existed for is
+intact — a chat fetches exactly the grammars it draws — while the main bundle does not move
+at all, because `highlight.ts` was already behind a dynamic import.
 
 `createOnigurumaEngine` is the engine, and the wasm behind it is the largest thing here
 (232 kB gzip, cached, only for the first code block). It is the engine TextMate grammars are
@@ -201,7 +212,7 @@ panel for a `provider/model` text field instead of closing over a selection.
   `{ ok: false, kind: 'rate_limit' }`, the picker shows the server's sentence inline
   (`role="status"`) and the list that is already on screen stays exactly as it was;
 - no credentials at all → the root route is the **first-run screen** (epic #201, X5): tiles,
-  a key form, the default model the server picked, Start chatting. Once a key exists but the
+  a key form, the default model the server picked, "Let's go". Once a key exists but the
   catalog is still empty, New chat shows the "Add a provider key to start" state that links to
   Settings → Providers, and there is nothing to type into;
 - keys but no default (#146) → the composer is there with the picker, nothing selected, and
@@ -364,8 +375,9 @@ waits on (preferences, then the catalog). A skeleton may carry a `label`, which 
 "Loading your chats" once rather than once per bar. That label is also what the tests read,
 which is how "still loading" stopped being prose in four different places.
 
-**The empty state on New chat** is a greeting (`NEW_CHAT_GREETING`), the model the chat would
-run on, and four openers from `lib/suggestions.ts`. Two decisions in it:
+**The empty state on New chat** is a greeting (`NEW_CHAT_GREETING`, "Hey! What are we building
+today?" since #227), the model the chat would run on, and four openers from
+`lib/suggestions.ts`. Two decisions in it:
 
 - **An opener fills the composer and stops.** Nothing is created, nothing is sent, the text is
   editable. A first visit is not a commitment, and a suggestion that auto-sent would be the
@@ -486,11 +498,59 @@ been saved yet is the reader's last word, and only the component that made the r
 whether it has been overtaken. If the `PUT` is refused, the previous choice is put back and
 the shell's notice says so.
 
-**Dim** is the new palette: a dark gray background (`oklch(0.3 …)`, against Dark's
-`oklch(0.145 …)`) and lower-contrast text that is still above the WCAG AA floor — the numbers
-are in the stylesheet's comment, and every pair is measured against the block it lives in.
-Light and Dark are the palettes that were already there. In Dark, `--destructive-foreground`
-on `--destructive` measures 2.8:1, below AA: it is pre-existing, and #203 does not change it.
+**Dim** is the soft palette: a violet-leaning dark background (`#1E1B2E`) against Dark's deep
+one (`#12101B`), with lower-contrast text that is still above the WCAG AA floor — the numbers
+are in the stylesheet's comment, and every pair is measured against the block it lives in. In
+Dark, `--destructive-foreground` on `--destructive` measures 2.8:1, below AA: it is
+pre-existing, and #203 does not change it.
+
+All three palettes were retuned to violet + coral in #227 — see below.
+
+## The palette: violet + coral (#227)
+
+The maintainer's hands-on test said the onboarding and the themes worked and the app had no
+personality. #227 is the pass that gave it one. Three things about how it is built are
+decisions rather than colours:
+
+**Everything is a token in the three theme blocks.** No component carries a hex. There are two
+brand colours and each needs more than one value, which is the whole subtlety:
+
+| token                       | Light       | Dim / Dark   | what it is for                                       |
+| --------------------------- | ----------- | ------------ | ---------------------------------------------------- |
+| `--primary`                 | `#7C3AED`   | `#7C3AED`    | the violet _fill_: Send, the active row, a selection |
+| `--primary-foreground`      | white       | white        | text on that fill — 5.7:1 in all three themes        |
+| `--link`, `--ring`          | `#7C3AED`   | `#A78BFA`    | the violet as _type_ and as a focus ring             |
+| `--coral`                   | `#FB7185`   | `#FB7185`    | the hello-colour _mark_: caret, spinner, dot, tint   |
+| `--coral-ink`               | `#BE123C`   | `#FB7185`    | the coral as _type_                                  |
+| `--hero-from` / `--hero-to` | violet/rose | violet/coral | the two ends of the heading gradient                 |
+
+A fill and a piece of type are not the same problem, and that is why `--link` exists: white on
+`#7C3AED` is 5.7:1 and violet _text_ on Light's page is 5.3:1 — but on a violet-black page the
+same violet is 2.9:1, under AA for anything but large type. So the primary stays the vivid
+violet where it is a surface and lifts to `#A78BFA` where it is a word. Light happens to need
+no separation, so `--link` is the primary there; the dark themes are where the token earns its
+keep. The coral has the same split for the same reason, the other way round: `#FB7185` is
+legible on both dark pages and not on a light one, so Light's `--coral-ink` is the deep rose.
+
+**The gradient is a rule, not a utility.** `[data-slot='hero-title']` in `index.css` carries
+`background-image: linear-gradient(… var(--hero-from), var(--hero-to))` with
+`background-clip: text`. Two reasons it is not `bg-gradient-to-r` on the element: each end has
+to be a _per-theme_ token to stay legible as type, and Tailwind's `bg-clip-text` on a heading
+whose text fails to resolve would be an invisible heading rather than an unstyled one. The ✨ on
+the first-run heading is deliberately outside the clipped span — `background-clip: text` paints
+the gradient where a colour-emoji glyph's own colours would have been.
+
+**The gray is gone everywhere, not just on the two components the issue named.** The page, the
+sidebar, the borders, the muted text, the user's own bubble (`--secondary`) and the code
+block's _fallback_ panel all carry the tint now. The one surface deliberately left alone is the
+highlighted code block: Shiki's three palettes (`github-light`, `github-dark-dimmed`,
+`github-dark`) are measured against their own backgrounds, and a violet-tinted one under
+GitHub's token colours would only move the contrast the wrong way. Nothing in the app's own
+palette is read inside a highlighted block.
+
+Every pair is at WCAG AA and the ratios are in the stylesheet comments — body text 15.6:1
+(Light) / 14.0:1 (Dim) / 16.8:1 (Dark), muted text 6.5 / 7.8 / 7.7, white on the primary
+5.7 / 5.7 / 5.7, the coral as type 5.8 / 6.2 / 7.0.
 
 ## Settings and the server URL
 

@@ -13,6 +13,7 @@ import { ErrorBanner } from '../chat/error-banner'
 import { Button } from '../ui/button'
 import { Input } from '../ui/input'
 import { Label } from '../ui/label'
+import { FreeTierChip } from './free-tier-chip'
 
 /**
  * The key form for one provider (epic #201, X5/X6).
@@ -176,7 +177,14 @@ export function ProviderKeyForm({
         />
       ) : failure !== null ? (
         <ErrorBanner
-          title={failure.kind === 'invalid' ? 'The key was rejected' : 'The request failed'}
+          // Warm, but still the truth: the provider refused the key, and the server's own
+          // sentence — `The OpenAI credential was rejected by the provider.` — is the body
+          // verbatim (U12, #227). A failure is never softened into vagueness.
+          title={
+            failure.kind === 'invalid'
+              ? `Hmm, ${info?.name ?? provider} didn't accept that key`
+              : 'The request failed'
+          }
           message={failure.message}
           onDismiss={() => setFailure(null)}
         />
@@ -198,9 +206,7 @@ export function ProviderKeyForm({
           </a>
         )}
       </div>
-      {info?.freeTier === undefined ? null : (
-        <p className="text-xs text-muted-foreground">{info.freeTier}</p>
-      )}
+      {info?.freeTier === undefined ? null : <FreeTierChip hint={info.freeTier} />}
 
       {form.fields.map((field, index) => (
         <div key={field.name} className="flex flex-col gap-1.5">

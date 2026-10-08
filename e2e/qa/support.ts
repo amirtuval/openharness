@@ -72,14 +72,24 @@ export function uniqueName(prefix: string): string {
 export const QA_MODEL = process.env.QA_MODEL ?? 'anthropic/claude-sonnet-5'
 
 /**
- * The heading of the web app's New chat screen (epic #201, U10, #211).
+ * The heading of the web app's New chat screen (epic #201, U10, #211; U12, #227).
  *
  * `apps/web` exports it as `NEW_CHAT_GREETING` (`src/screens/new-chat-screen.tsx`), and it
  * replaced the literal "New chat" the screen used to be headed with. That package's `exports`
  * is its built `index.html`, though, so there is nothing for a spec to import: the string is
  * repeated here, and changing it in the app is changing this line.
  */
-export const NEW_CHAT_GREETING = 'What can I help with?'
+export const NEW_CHAT_GREETING = 'Hey! What are we building today?'
+
+/**
+ * The heading of the web app's first-run screen (U12, #227).
+ *
+ * The same mirror as {@link NEW_CHAT_GREETING}, for `FIRST_RUN_HEADING`
+ * (`src/screens/first-run-screen.tsx`). The heading also carries a ✨ that sits outside the
+ * gradient span, so a spec matches the heading with `new RegExp(FIRST_RUN_HEADING)` rather
+ * than by the whole name — the sentence is the contract, the emoji is decoration.
+ */
+export const FIRST_RUN_HEADING = "Let's get you chatting"
 
 /**
  * Whether this run is against a real provider rather than the mock model.

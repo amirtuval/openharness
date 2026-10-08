@@ -3,6 +3,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 
+import { FIRST_RUN_HEADING } from './first-run-screen'
 import { NEW_CHAT_GREETING } from './new-chat-screen'
 import { TWO_PROVIDERS, credential } from '../test-support/catalog'
 import { makeFake, renderApp } from '../test-support/render-app'
@@ -19,11 +20,13 @@ describe('the first-run screen', () => {
   it('is what the root route shows with no credentials', async () => {
     renderApp(makeFake({ models: [], providers: [] }), { hash: '#/' })
 
+    // The ✨ is drawn outside the gradient span, so the heading's name is the sentence plus it;
+    // matching on the sentence is what keeps this assertion about the copy, not the decoration.
     expect(
-      await screen.findByRole('heading', { name: 'Connect a model provider' }),
+      await screen.findByRole('heading', { name: new RegExp(FIRST_RUN_HEADING) }),
     ).toBeInTheDocument()
     // The sentence that says why: the reader's own keys, not the server's.
-    expect(screen.getByText(/run on your own provider keys/)).toBeInTheDocument()
+    expect(screen.getByText(/we never ship one of our own/)).toBeInTheDocument()
     // No composer yet — there is no model a message could run on.
     expect(screen.queryByLabelText('Message')).not.toBeInTheDocument()
   })
@@ -35,7 +38,7 @@ describe('the first-run screen', () => {
     // everyone it does not apply to.
     expect(await screen.findByRole('heading', { name: NEW_CHAT_GREETING })).toBeInTheDocument()
     expect(
-      screen.queryByRole('heading', { name: 'Connect a model provider' }),
+      screen.queryByRole('heading', { name: new RegExp(FIRST_RUN_HEADING) }),
     ).not.toBeInTheDocument()
     expect(screen.getByLabelText('Message')).toBeInTheDocument()
   })
@@ -74,10 +77,10 @@ describe('the first-run screen', () => {
     await user.click(screen.getByRole('button', { name: 'Save key' }))
 
     // The key never comes back: what the server stored is metadata. The confirmation names
-    // the model the server picked when the first key landed (U4).
-    expect(
-      await screen.findByRole('heading', { name: /set: your default model is/ }),
-    ).toHaveTextContent('Claude Sonnet 5')
+    // the model the server picked when the first key landed (U4) — in the sentence under the
+    // heading, which is where U12 moved it.
+    expect(await screen.findByRole('heading', { name: /all set/ })).toBeInTheDocument()
+    expect(await screen.findByText(/Your chats will use/)).toHaveTextContent('Claude Sonnet 5')
     expect(document.body.textContent ?? '').not.toContain('sk-ant-first-run-1234')
     await waitFor(async () => {
       expect((await fake.providerCredentials.list()).data.map((entry) => entry.last4)).toEqual([
@@ -85,8 +88,8 @@ describe('the first-run screen', () => {
       ])
     })
 
-    // Start chatting: New chat, on the model just chosen, with the cursor in the composer.
-    await user.click(screen.getByRole('button', { name: 'Start chatting' }))
+    // Let's go: New chat, on the model just chosen, with the cursor in the composer.
+    await user.click(screen.getByRole('button', { name: "Let's go" }))
     expect(await screen.findByRole('heading', { name: NEW_CHAT_GREETING })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Model: Claude Sonnet 5' })).toBeInTheDocument()
     expect(screen.getByLabelText('Message')).toHaveFocus()
@@ -100,7 +103,7 @@ describe('the first-run screen', () => {
     await user.click(await screen.findByRole('button', { name: /Anthropic/ }))
     await user.type(screen.getByLabelText('API key'), 'sk-ant-pick-5678')
     await user.click(screen.getByRole('button', { name: 'Save key' }))
-    await screen.findByRole('heading', { name: /set: your default model is/ })
+    await screen.findByRole('heading', { name: /all set/ })
 
     // The Change option is the app's own picker, over the same catalog the composer uses.
     await user.click(screen.getByRole('button', { name: /Model/ }))
@@ -109,9 +112,7 @@ describe('the first-run screen', () => {
     await waitFor(async () => {
       expect((await fake.preferences.get()).default_model).toBe('openai/gpt-4.1-mini')
     })
-    expect(
-      await screen.findByRole('heading', { name: /set: your default model is/ }),
-    ).toHaveTextContent('GPT-4.1 mini')
+    expect(await screen.findByText(/Your chats will use/)).toHaveTextContent('GPT-4.1 mini')
   })
 
   it('shows a rejected key inline, with the form still there to try another', async () => {
@@ -132,7 +133,9 @@ describe('the first-run screen', () => {
     await user.click(screen.getByRole('button', { name: 'Save key' }))
 
     const alert = await screen.findByRole('alert')
-    expect(alert).toHaveTextContent('The key was rejected')
+    // Warm, and still the server's own sentence underneath: the provider is named in the
+    // title, and the 422's message is the body (U12, #227).
+    expect(alert).toHaveTextContent("Hmm, OpenAI didn't accept that key")
     expect(alert).toHaveTextContent('rejected by the provider')
     // Still on the form, and nothing was stored.
     expect(screen.getByLabelText('API key')).toBeInTheDocument()
@@ -169,7 +172,7 @@ describe('the first-run screen', () => {
     // New chat's existing empty state (#146), not a second first-run screen.
     expect(await screen.findByText('Add a provider key to start')).toBeInTheDocument()
     expect(
-      screen.queryByRole('heading', { name: 'Connect a model provider' }),
+      screen.queryByRole('heading', { name: new RegExp(FIRST_RUN_HEADING) }),
     ).not.toBeInTheDocument()
     expect((await fake.providerCredentials.list()).data).toEqual([])
   })
@@ -202,7 +205,7 @@ describe('the first-run screen', () => {
 
     // One tile per provider `@openharness/client` carries, and no others: the list is the
     // contract with the server (its `VALIDATABLE_PROVIDERS`), held together by the e2e test.
-    await screen.findByRole('heading', { name: 'Connect a model provider' })
+    await screen.findByRole('heading', { name: new RegExp(FIRST_RUN_HEADING) })
     for (const provider of PROVIDERS) {
       expect(
         screen.getByRole('button', { name: new RegExp(`^${provider.name}`) }),
