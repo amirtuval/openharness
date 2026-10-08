@@ -4,6 +4,16 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
+    <!--
+      The icons (#240). Vite's `base` is unset, so the paths are absolute from the site root
+      and `public/` is served there: `favicon.svg` is the mark — it swaps its ring for the
+      dark violet in a browser that prefers dark — `favicon.ico` is the fallback for a browser
+      without SVG favicons, and the apple-touch icon is the opaque square iOS asks for.
+      `yarn icons` in this folder regenerates the two raster files from the SVG.
+    -->
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/favicon.ico" sizes="32x32" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <title>openharness</title>
     <script>
       /*

@@ -355,3 +355,40 @@ describe('the sidebar list', () => {
     expect(screen.queryByRole('button', { name: 'Hide sidebar' })).not.toBeInTheDocument()
   })
 })
+
+/**
+ * The header (issue #240): the mark beside the wordmark, inside the one link out of the list.
+ *
+ * The mark is decorative, so the link is still named for the wordmark, and it takes its ring
+ * from the `text-link` token rather than a colour of its own — which is what makes it follow
+ * `data-theme` instead of the operating system. The two numbers the design asks for (a 20px
+ * mark, an 8px gap) are the classes asserted here; what that looks like collapsed, and in the
+ * 390px drawer, is a browser question.
+ */
+describe('the sidebar header', () => {
+  it('shows the mark beside the wordmark, and the link is still named for the wordmark', () => {
+    render(
+      <Sidebar
+        sessions={[]}
+        loading={false}
+        error={null}
+        truncated={false}
+        activeSessionId={undefined}
+        user={null}
+        onSignOut={undefined}
+      />,
+    )
+
+    const link = screen.getByRole('link', { name: 'openharness' })
+    expect(link).toHaveAttribute('href', '#/')
+    expect(link).toHaveClass('items-center', 'gap-control')
+
+    const mark = link.querySelector('svg')
+    expect(mark).toHaveAttribute('aria-hidden', 'true')
+    expect(mark).toHaveClass('size-5', 'text-link')
+    // The ring follows the ink; the dot is the coral token, the one part of the mark that is
+    // not the link colour.
+    expect(mark?.querySelector('circle')).toHaveAttribute('stroke', 'currentColor')
+    expect(mark?.querySelectorAll('circle')[1]).toHaveClass('fill-coral')
+  })
+})

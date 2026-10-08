@@ -17,6 +17,7 @@ Run from this folder (`apps/web`):
 | `yarn build`        | builds the static site into `dist/` with Vite                           |
 | `yarn build:deps`   | builds only this package's workspace dependencies (turbo filter `^...`) |
 | `yarn dev`          | Vite dev server on http://localhost:5173, with `/v1` proxied            |
+| `yarn icons`        | regenerates `public/favicon.ico` and `apple-touch-icon.png` (#240)      |
 | `yarn typecheck`    | `tsc --noEmit`                                                          |
 | `yarn lint`         | ESLint over this folder                                                 |
 | `yarn format`       | Prettier `--write`                                                      |
@@ -84,6 +85,9 @@ src/
     provider-icon.tsx          the sign-in marks (Google / GitHub / Microsoft) and the
                                model providers' marks, inline; a monogram where a brand's
                                mark could not be confirmed
+    logo-mark.tsx              the openharness mark, inline (#240): the ring in the link
+                               token, the dot in coral; the same drawing is
+                               `public/favicon.svg`
     sidebar.tsx                the chat list, grouped by date (Today / Yesterday / Previous
                                7 days / Older), New chat, the row's menu (Delete chat,
                                in-page confirm, Radix DropdownMenu), and the account menu at
@@ -191,6 +195,12 @@ src/
   test-support/stream.ts       gate the fake's stream, one event at a time
   test-support/catalog.ts      the two-provider catalog fixtures the picker tests share
 ```
+
+Two folders outside `src/` matter here. `public/` is served at the site root by Vite and holds
+the icons (see "The mark") — files there are copied, not imported, so nothing can be
+tree-shaken or hashed and the paths in `index.html` are literal. `scripts/` holds
+`build-icons.mjs`, the one-off rasterizer behind `yarn icons`: a `.mjs` run by hand, never by
+the build, which is why its rasterizer is a devDependency rather than a dependency.
 
 ### Routes
 
@@ -706,6 +716,38 @@ table is a map of `() => import('…')` thunks, so reading it is free and only t
 actually names is fetched — the main bundle does not move, and `highlight.test.ts` asserts the
 resolution and the tokenizing for thirty of them.
 
+### The mark (#240)
+
+The openharness mark is a ring left open at the upper right, with a coral dot in the opening:
+the agent loop, open to the outside. It is the favicon, and it sits beside the sidebar's
+wordmark. (The TUI's own branding, and the README's logo, are not this change.)
+
+- **One 32×32 drawing, written down twice.** A page cannot put a React component in a
+  `<link rel="icon">`, so `components/logo-mark.tsx` draws it inline — `LOGO_MARK_RING` and
+  `LOGO_MARK_DOT` are the exported numbers, and `LogoMark` is sized by `className` (the sidebar
+  uses `size-5`) — and `public/favicon.svg` is the file. `src/icons.test.ts` parses the SVG and
+  compares it against those constants, so the two cannot drift.
+- **No colour is a literal in the component.** The ring is `currentColor`, and the component's
+  default ink is `text-link`: the primary violet in Light, the lighter violet in Dim and Dark,
+  and a caller that names its own text colour wins. The dot is `fill-coral`. That is what makes
+  the mark follow `data-theme`, which a favicon cannot read — the SVG therefore spells the
+  values out and swaps the ring for the dark violet inside
+  `@media (prefers-color-scheme: dark)`.
+- **The files.** `public/favicon.svg` is the mark with that dark rule, `public/favicon.ico` is
+  16 + 32 px of the light variant for a browser without SVG favicons, and
+  `public/apple-touch-icon.png` is 180 px and opaque — the mark at 70% of the square on the
+  Light page colour, because iOS composites an alpha channel onto white. `index.html` links all
+  three. There is no web manifest, so there are no 192/512 icons to add with it.
+- **Regenerating them** is `yarn icons` from this folder: `scripts/build-icons.mjs` reads
+  `favicon.svg`, strips the dark-scheme `<style>` to leave the light variant, and rasterizes
+  with `sharp` — a devDependency, pinned exactly, used nowhere else. The generated files are
+  committed, so neither the build nor CI ever runs the script.
+- **In the sidebar** the mark is 20px, inside the same link as the wordmark and 8px to its
+  left. It is decorative (`aria-hidden`), so the link's accessible name is still
+  "openharness". The collapsed column is `md:hidden` — the whole panel is put away and there is
+  no icon rail — so there is no mark-only variant to show; the drawer below `md` renders the
+  same header at its full width.
+
 ## Testing
 
 `src/**/*.test.tsx` with Vitest (jsdom) and Testing Library, driving
@@ -737,12 +779,14 @@ outside `@openharness/client` — is stubbed at `fetch` where a test needs it.
 | `src/components/models/model-picker.test.tsx`           | the picker itself: grouping, search, the keyboard rule, free text, the fallback note, refresh (429 and failure), the compact trigger                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `src/hooks/use-session.test.tsx`                        | the hook's own contract: a failed load, and no duplicated message                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `src/hooks/use-stick-to-bottom.test.tsx`                | the auto-scroll rule, with a scroll geometry jsdom does not have                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `src/components/logo-mark.test.tsx`                     | the mark (#240): one `aria-hidden` svg, the ring in `currentColor` and the dot in coral, no hex anywhere in the markup, the canonical geometry on both circles, and a caller's own size and ink winning over the defaults                                                                                                                                                                                                                                                                                                                                                                                        |
 | `src/components/sidebar.test.tsx`                       | the session list: first page then the rest, the cap note, and the row's delete action (in-page confirm, cancel, Escape, failure); then, for #211, the date headings (and only the buckets that hold something), the marked open chat, the account menu, the loading skeleton and the collapse control                                                                                                                                                                                                                                                                                                            |
 | `src/lib/session-groups.test.ts`                        | the date buckets (#211), with the clock pinned: each bucket, calendar days rather than 24-hour windows, the seventh day back against the eighth, empty buckets left out, an unreadable timestamp kept, a future one as today, and the order inside a bucket                                                                                                                                                                                                                                                                                                                                                      |
 | `src/components/chat/working-row.test.tsx`              | the working row (#211): `workingState` as a rule (running/no-text, gone once text arrives, idle, retrying with the server's reason and without one, the reader's own stop first), and the component's clock under fake timers — counting up, the minute rollover, and no clock at all for "Interrupted"                                                                                                                                                                                                                                                                                                          |
 | `src/components/theme-menu.test.tsx`                    | the theme quick switch (#203), now the account menu's submenu (#211): a pick paints and saves, it reads back with `aria-checked`, Escape closes without choosing                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `src/components/settings/appearance.test.tsx`           | the Appearance picker (#203): a pick is saved to the account and painted at once, the cached theme paints first and the account's stored one takes over once it answers                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `src/lib/*.test.ts`                                     | routes (including `#/` and its fallbacks, #209), the settings store, the theme store (`system` following `matchMedia`, the cache, the attribute; #203), the fake-mode scenario, the paging walk, the session re-read, the label rules, the context-window formatting, the auth store's rules, the auth-config schema's unknown-provider filter, and the highlighter's language table — thirty languages plus seventeen aliases, tokenized for real (#227)                                                                                                                                                        |
+| `src/icons.test.ts`                                     | the shipped icons (#240): `public/favicon.svg` parses, draws the ring and dot the component's constants describe, carries the tokens' exact sRGB (with the dark violet behind its media query) — and every icon `index.html` links really exists in `public/`                                                                                                                                                                                                                                                                                                                                                    |
 
 Timing: streaming tests do not race the clock. `src/test-support/stream.ts` gates the fake's
 stream so the test releases **one event at a time** and asserts between events — the fake

@@ -17,6 +17,7 @@ import { MAX_PAGE_ITEMS } from '../lib/paging'
 import { chatHash, settingsHash } from '../lib/router'
 import { groupSessionsByDate } from '../lib/session-groups'
 import { cn } from '../lib/utils'
+import { LogoMark } from './logo-mark'
 import { ThemeMenuItems } from './theme-menu'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
@@ -63,6 +64,10 @@ export const SIDEBAR_ID = 'app-sidebar'
  * - **The foot is one account menu** — Settings, the theme quick switch (as a submenu) and Sign
  *   out, behind the signed-in email. It used to be a link, an icon button and a text button
  *   sharing the corner, three of the four of which were the same person's.
+ *
+ * Since #240 the header's link carries the mark itself ({@link LogoMark}) — the ring in
+ * `--link`, the dot in `--coral` — 20px to the left of the wordmark. It is decorative, so the
+ * link's accessible name is still "openharness"; the favicon is the same drawing.
  */
 export function Sidebar({
   sessions,
@@ -159,7 +164,13 @@ export function Sidebar({
       )}
     >
       <div className="flex items-center justify-between gap-2 px-3 py-3">
-        <a href="#/" className="rounded-sm text-sm font-semibold outline-none" onClick={onNavigate}>
+        <a
+          href="#/"
+          className="flex items-center gap-control rounded-sm text-sm font-semibold outline-none"
+          onClick={onNavigate}
+        >
+          {/* Decorative, so the link's name stays the wordmark alone (#240). */}
+          <LogoMark className="size-5" />
           openharness
         </a>
         <div className="flex shrink-0 items-center gap-1">
