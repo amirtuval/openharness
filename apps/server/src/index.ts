@@ -151,6 +151,11 @@ export {
 } from './catalog/adapters'
 export { isChatModel, isNonChatFamily, type ChatVerdicts } from './catalog/filter'
 export {
+  OUTPUT_RESERVE_RATIO,
+  contextTokenBudget,
+  createTokenBudgetResolver,
+} from './catalog/context-budget'
+export {
   DEFAULT_PROVIDER_TIMEOUT_MS,
   createProviderFetch,
   type ProviderFetch,

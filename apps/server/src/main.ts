@@ -3,7 +3,8 @@ import { Kysely, PostgresDialect } from 'kysely'
 import { Pool } from 'pg'
 import type { Hono } from 'hono'
 import type { MemoryDB } from 'better-auth/adapters/memory'
-import type { ModelFactory } from '@openharness/brain'
+import type { ContextStrategy, ModelFactory } from '@openharness/brain'
+import { createContextStrategy } from '@openharness/brain'
 import type { SessionId } from '@openharness/protocol'
 import {
   InMemoryCredentialStore,
@@ -26,6 +27,7 @@ import { SessionTraces, withSessionTraces } from './observability/session-traces
 import { initTracing, type Tracer } from './observability/tracing'
 import { createAuth, createDevLoginUser, type Auth, type AuthDatabase } from './auth'
 import { ModelCatalog } from './catalog/catalog'
+import { createTokenBudgetResolver } from './catalog/context-budget'
 import { createProviderFetch } from './catalog/provider-fetch'
 import { createBundledRegistry, type ModelRegistry } from './catalog/registry'
 import { DeltaCompactor } from './compaction'
@@ -205,7 +207,26 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
           logger,
         }))
 
-  const scheduler = createScheduler(config, store, model, resolveCredential, logger)
+  // The context budget (epic #245's A1; #246): every request is trimmed to the window of the
+  // model it runs — `contextWindow − min(maxOutput, 25%)` — read from the bundled registry,
+  // so a long chat fits a 200k-token model instead of forgetting early and a small model is
+  // not handed more than it can take. The lookup is per request (the brain re-reads the
+  // session at each request boundary), so a mid-session switch trims to the new model from the
+  // next request on. One registry instance serves the resolver, the catalogue and the
+  // automatic default's fallback (U4).
+  const registry = options.registry ?? createBundledRegistry()
+  const contextStrategy = createContextStrategy({
+    tokenBudgetFor: createTokenBudgetResolver(registry),
+  })
+
+  const scheduler = createScheduler(
+    config,
+    store,
+    model,
+    resolveCredential,
+    contextStrategy,
+    logger,
+  )
   // Compaction is the store's, not a scheduler's: it deletes superseded chunks whoever ran the
   // turn that superseded them, so every instance runs it in either scheduler mode.
   const compactor = new DeltaCompactor({
@@ -218,9 +239,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   // The model catalogue (epic #92): the caller's own keys, the providers' own lists, joined
   // with the bundled models.dev snapshot and cached in memory per (user, provider). It is
   // built from the same credential store and vault the brain's resolver uses, and its one
-  // outbound path is `createProviderFetch()`, which honors the egress-proxy variables. One
-  // registry instance serves both the catalogue and the automatic default's fallback (U4).
-  const registry = options.registry ?? createBundledRegistry()
+  // outbound path is `createProviderFetch()`, which honors the egress-proxy variables.
   const catalog =
     options.catalog ??
     new ModelCatalog({
@@ -370,14 +389,15 @@ function installSignalHandlers(logger: Logger): void {
  * `local` runs every turn in this process; `postgres` shares the sessions with the other
  * instances through partition leases, which is why it needs the store and why the config
  * refuses to boot without a `DATABASE_URL`. Both are handed the same model, credential
- * resolver and concurrency and drain limits — what changes is who owns a session, not how it
- * is run.
+ * resolver, context strategy and concurrency and drain limits — what changes is who owns a
+ * session, not how it is run.
  */
 function createScheduler(
   config: ServerConfig,
   store: SessionStore,
   model: ModelFactory,
   resolveCredential: ResolveSessionCredential,
+  contextStrategy: ContextStrategy,
   logger: Logger,
 ): SessionScheduler {
   const onError = (error: unknown, sessionId: SessionId | undefined): void => {
@@ -391,6 +411,7 @@ function createScheduler(
       store,
       model,
       resolveCredential,
+      contextStrategy,
       instanceId: config.instanceId,
       partitions: config.partitions,
       ttlMs: config.leaseTtlMs,
@@ -408,6 +429,7 @@ function createScheduler(
     store,
     model,
     resolveCredential,
+    contextStrategy,
     maxConcurrentSessions: config.maxConcurrentSessions,
     drainTimeoutMs: config.drainTimeoutMs,
     partitionCount: config.partitions,

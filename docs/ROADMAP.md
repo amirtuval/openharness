@@ -177,10 +177,12 @@ fullscreen TUI, and session rename, archive and fork.
 
 **Decided:**
 
-- **The context budget comes from the model and is chosen per model request,** not per
-  session, so a mid-session model switch trims correctly on the next request. Each request
-  records its model on `span.model_request_start` (#46). The fixed 32,768-token default becomes
-  the fallback for unknown models.
+- **The context budget comes from the model and is chosen per model request** — done
+  ([#246](https://github.com/amirtuval/openharness/issues/246)): `contextWindow − min(maxOutput,
+25% of contextWindow)`, read from the bundled models.dev registry and resolved per request, so
+  a mid-session model switch trims correctly on the next request. The fixed 32,768-token default
+  is the fallback for unknown models. Each request records its model on
+  `span.model_request_start` (#46).
 - **Modes are part of this phase.** Each request records the mode it ran under alongside the
   resolved model, so the log stays accurate when a mode's mapping changes later.
 

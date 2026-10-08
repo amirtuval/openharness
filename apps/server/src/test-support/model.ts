@@ -27,6 +27,12 @@ export interface ScriptedReply {
   readonly onChunk?: (chunk: string, index: number) => Promise<void> | void
 }
 
+/** One message of a prompt the scripted model received, as the test reads it back. */
+export interface ScriptedPromptMessage {
+  readonly role: string
+  readonly text: string
+}
+
 /** The model a test drives, and what it has seen. */
 export interface ScriptedModel {
   /** Hand this to a scheduler or a `runTurn`. */
@@ -37,6 +43,12 @@ export interface ScriptedModel {
   readonly maxConcurrent: number
   /** The last user message of every request, in order. */
   readonly prompts: string[]
+  /**
+   * Every message of every request's prompt, in order — what the context strategy sent, not
+   * just its last user turn. `prompts` answers "which prompt was this"; this answers "how much
+   * history did it carry", which is what a context-budget assertion (#246) needs.
+   */
+  readonly histories: readonly (readonly ScriptedPromptMessage[])[]
   /** Append a reply for the next request; without one, replies repeat. */
   push(...replies: ScriptedReply[]): void
   /** Resolve when `requests` reaches `count`. */
@@ -71,6 +83,7 @@ export const resolveTestSessionCredential: ResolveSessionCredential = (_sessionI
 export function createScriptedModel(...replies: ScriptedReply[]): ScriptedModel {
   const queue = [...replies]
   const prompts: string[] = []
+  const histories: ScriptedPromptMessage[][] = []
   let inFlight = 0
   let maxConcurrent = 0
   let requests = 0
@@ -83,6 +96,9 @@ export function createScriptedModel(...replies: ScriptedReply[]): ScriptedModel 
     doStream: (options) => {
       const reply = queue.length === 0 ? {} : queue.length === 1 ? queue[0] : queue.shift()
       prompts.push(lastUserText(options.prompt))
+      histories.push(
+        options.prompt.map((message) => ({ role: message.role, text: textOf(message) })),
+      )
       requests += 1
       inFlight += 1
       maxConcurrent = Math.max(maxConcurrent, inFlight)
@@ -109,6 +125,9 @@ export function createScriptedModel(...replies: ScriptedReply[]): ScriptedModel 
     },
     get prompts() {
       return prompts
+    },
+    get histories() {
+      return histories
     },
     push(...more) {
       queue.push(...more)
@@ -189,21 +208,28 @@ function streamOf(
   })
 }
 
+/** One message of a provider-level prompt: what `streamText` hands the model. */
+interface PromptMessage {
+  readonly role: string
+  readonly content: string | readonly { readonly type: string; readonly text?: string }[]
+}
+
+/** The text of one prompt message, whatever shape its content has — what {@link histories} reads. */
+function textOf(message: PromptMessage): string {
+  if (typeof message.content === 'string') {
+    return message.content
+  }
+  return message.content.flatMap((part) => (part.type === 'text' ? [part.text ?? ''] : [])).join('')
+}
+
 /** The last user message of a provider-level prompt. */
-function lastUserText(
-  prompt: readonly { role: string; content: string | readonly { type: string; text?: string }[] }[],
-): string {
+function lastUserText(prompt: readonly PromptMessage[]): string {
   for (let index = prompt.length - 1; index >= 0; index -= 1) {
     const message = prompt[index]
     if (message === undefined || message.role !== 'user') {
       continue
     }
-    if (typeof message.content === 'string') {
-      return message.content
-    }
-    return message.content
-      .flatMap((part) => (part.type === 'text' ? [part.text ?? ''] : []))
-      .join('')
+    return textOf(message)
   }
   return ''
 }

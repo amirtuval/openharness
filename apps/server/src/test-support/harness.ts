@@ -1,4 +1,5 @@
 import type { Hono } from 'hono'
+import { createContextStrategy } from '@openharness/brain'
 import type { ModelFactory } from '@openharness/brain'
 import {
   API_VERSION_PREFIX,
@@ -35,6 +36,7 @@ import {
   type BetterAuthInstance,
 } from '../auth'
 import { ModelCatalog } from '../catalog/catalog'
+import { createTokenBudgetResolver } from '../catalog/context-budget'
 import { emptyRegistry, type ModelRegistry } from '../catalog/registry'
 import { DEFAULT_DELTA_RETENTION_MS } from '../compaction'
 import {
@@ -204,8 +206,10 @@ export interface TestOptions {
    */
   readonly catalog?: Pick<ModelCatalog, 'list' | 'invalidate'>
   /**
-   * The registry the automatic default's fallback reads (epic #116, U4). Defaults to the
-   * empty one: a test of the fallback passes a stub, exactly as a catalogue test would.
+   * The registry the automatic default's fallback reads (epic #116, U4) and the context budget
+   * resolves each request's model against (#246). Defaults to the empty one: a test of either
+   * passes a stub, exactly as a catalogue test would, and an empty one leaves the context
+   * budget at the brain's 32,768-token fallback.
    */
   readonly registry?: ModelRegistry
   /**
@@ -281,6 +285,13 @@ export function createTestApp(options: TestOptions = {}): TestContext {
     store,
     model: options.model ?? model.factory,
     resolveCredential: options.resolveCredential ?? resolveTestSessionCredential,
+    // The production wiring (#246): the history budget comes from the registry's limits for
+    // the model the request runs. The default registry is the empty one, so a test that does
+    // not build a catalogue gets the brain's own 32,768-token fallback, exactly as it did
+    // before the budget was per model.
+    contextStrategy: createContextStrategy({
+      tokenBudgetFor: createTokenBudgetResolver(options.registry ?? emptyRegistry),
+    }),
     ...(options.maxConcurrentSessions === undefined
       ? {}
       : { maxConcurrentSessions: options.maxConcurrentSessions }),
