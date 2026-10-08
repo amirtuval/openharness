@@ -145,7 +145,7 @@ function AppScreen({
   // with no default opens on. It rides down to the chat so the status line can name the model
   // the way the picker did (#208); a chat that started from `--model` or a stored default
   // never read a catalog and has none, which is why nothing is fetched for this.
-  const [catalog, setCatalog] = useState<readonly ModelEntry[]>([])
+  const [catalog, setCatalog] = useState<readonly ModelEntry[] | null>(null)
   const resolved = useRef(false)
   const left = useRef(false)
 
@@ -357,7 +357,7 @@ function AppScreen({
           onSignIn={leaveToSignIn}
           banner={banner}
           history={history}
-          catalog={catalog}
+          catalog={catalog ?? undefined}
           // `/new` opens a session the way a first chat does — `openModel` — and the screen
           // for the old one unmounts with it, which disposes its stream (the effect below).
           onNewChat={openModel}
@@ -396,7 +396,9 @@ function AppScreen({
       return (
         <ProviderSaved
           modelId={screen.modelId}
-          catalog={catalog}
+          // The save that produced this screen is what read the catalog, so it is never null
+          // here; the empty list is the honest fallback and names the model by its id.
+          catalog={catalog ?? []}
           onStart={() => {
             openModel(screen.modelId)
           }}
@@ -589,6 +591,7 @@ function ProviderSaved({
   onCancel,
 }: {
   readonly modelId: string
+  /** The catalog the save read: the names the confirmation prints. */
   readonly catalog: readonly ModelEntry[]
   readonly onStart: () => void
   readonly onCancel: () => void

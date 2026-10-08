@@ -105,9 +105,7 @@ describe('the session’s current model is resolved per request (U3)', () => {
     )
     expect(totals).toHaveLength(2)
     expect(totals[1]?.models.map((entry) => entry.model)).toEqual([TEST_MODEL_ID, SWITCH.id])
-    expect(totals[1]?.input_tokens).toBe(
-      (totals[0]?.input_tokens ?? 0) * 2,
-    )
+    expect(totals[1]?.input_tokens).toBe((totals[0]?.input_tokens ?? 0) * 2)
     // The log is the source of truth and the projection follows it: the session keeps running
     // the switched model.
     expect((await store.getSessionUnscoped(sessionId))?.model).toEqual(SWITCH)

@@ -43,6 +43,7 @@ export const DEV_MODELS: readonly ModelEntry[] = [
     name: 'Claude Sonnet 5',
     context_window: 200_000,
     max_output_tokens: 64_000,
+    cost: { input: 2, output: 10, cache_read: 0.2, cache_write: 2.5 },
     source: 'provider',
   },
   {
@@ -51,6 +52,7 @@ export const DEV_MODELS: readonly ModelEntry[] = [
     name: 'Claude Opus 5.5',
     context_window: 200_000,
     max_output_tokens: 64_000,
+    cost: { input: 5, output: 25, cache_read: 0.5, cache_write: 6.25 },
     source: 'provider',
   },
   {
@@ -59,6 +61,7 @@ export const DEV_MODELS: readonly ModelEntry[] = [
     name: 'GPT-4.1 Mini',
     context_window: 1_000_000,
     max_output_tokens: 32_768,
+    cost: { input: 0.4, output: 1.6, cache_read: 0.1, cache_write: null },
     source: 'provider',
   },
   {
@@ -67,6 +70,7 @@ export const DEV_MODELS: readonly ModelEntry[] = [
     name: 'o3',
     context_window: 200_000,
     max_output_tokens: 100_000,
+    cost: { input: 2, output: 8, cache_read: 0.5, cache_write: null },
     source: 'registry',
   },
   {
@@ -75,6 +79,7 @@ export const DEV_MODELS: readonly ModelEntry[] = [
     name: 'Gemini 2.5 Pro',
     context_window: 1_048_576,
     max_output_tokens: 65_536,
+    cost: { input: 1.25, output: 10, cache_read: 0.31, cache_write: null },
     source: 'provider',
   },
 ]

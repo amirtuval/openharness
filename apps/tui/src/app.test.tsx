@@ -986,18 +986,24 @@ describe('the bottom of the screen (issue #233)', () => {
     expect(frameOf(app).split('\n')[0]).toBe(RULE)
 
     submit(app, 'Hello there.')
-    await waitForFrame(app, '· 544 tokens')
     await waitForFrame(app, / · idle$/mu)
+    // The catalog is read in the background and a settled reply is written once (#247, #208
+    // X2), so the reply is held live until the prices are in: wait for the cost rather than
+    // racing the read, and assert on the frame that has it.
+    await waitForFrame(app, /544 tokens · \$0\.\d+/)
 
     expect(frameOf(app).split('\n')).toEqual([
       'Hello there.', // the user's message, on its band
       '', // …whose band brings its own blank line below it (#229)
       'Fake reply: Hello there.', // the reply
       '', // the footer's blank line (#233)
-      expect.stringMatching(/^\d+(?:\.\d+)?(?:ms|s) · 544 tokens$/), // what it cost (#208)
+      // what it cost (#208, #247): the time, the tokens, and the money the catalog prices
+      // them at
+      expect.stringMatching(/^\d+(?:\.\d+)?(?:ms|s) · 544 tokens · \$0\.\d+$/),
       '', // the input section's blank line (#233)
       RULE, // …and the rule that opens it, one column short of the terminal
-      expect.stringMatching(/· sesn_…[0-9A-Z]{6} · idle$/), // the status line
+      // the status line: the session, what it has spent, and what it is doing (#247)
+      expect.stringMatching(/· sesn_…[0-9A-Z]{6} · \$0\.\d+ · idle$/),
       '❯', // the prompt
     ])
   })

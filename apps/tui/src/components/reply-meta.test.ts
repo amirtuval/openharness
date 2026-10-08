@@ -1,7 +1,17 @@
-import type { TranscriptMessage, TranscriptMessageMeta } from '@openharness/client'
+import type {
+  ModelPriceLookup,
+  TranscriptMessage,
+  TranscriptMessageMeta,
+} from '@openharness/client'
 import { describe, expect, it } from 'vitest'
 
-import { formatDuration, formatTokens, replyMetaLine, replyMetaLines } from './reply-meta'
+import {
+  formatCost,
+  formatDuration,
+  formatTokens,
+  replyMetaLine,
+  replyMetaLines,
+} from './reply-meta'
 
 /** A reply, settled, with the metadata the test is about. */
 function message(
@@ -86,7 +96,7 @@ describe('replyMetaLine', () => {
         {
           model: 'anthropic/claude-sonnet-5',
           durationMs: 4200,
-          usage: { input: 1000, output: 300, total: 1300 },
+          usage: { input: 1000, output: 300, cacheCreation: 0, cacheRead: 0, total: 1300 },
         },
         context,
       ),
@@ -111,11 +121,21 @@ describe('replyMetaLine', () => {
   it('prints whatever part of the metadata did arrive, and no more', () => {
     expect(replyMetaLine({ model: 'openai/gpt-4.1-mini' }, context)).toBe('openai/gpt-4.1-mini')
     expect(replyMetaLine({ durationMs: 800 }, context)).toBe('800ms')
-    expect(replyMetaLine({ usage: { input: 10, output: 5, total: 15 } }, context)).toBe('15 tokens')
+    expect(
+      replyMetaLine(
+        { usage: { input: 10, output: 5, cacheCreation: 0, cacheRead: 0, total: 15 } },
+        context,
+      ),
+    ).toBe('15 tokens')
   })
 
   it('counts zero as a number the model reported, not as nothing', () => {
-    expect(replyMetaLine({ usage: { input: 0, output: 0, total: 0 } }, context)).toBe('0 tokens')
+    expect(
+      replyMetaLine(
+        { usage: { input: 0, output: 0, cacheCreation: 0, cacheRead: 0, total: 0 } },
+        context,
+      ),
+    ).toBe('0 tokens')
   })
 })
 
@@ -155,5 +175,72 @@ describe('replyMetaLines', () => {
   it('has nothing to say about a message with no metadata at all', () => {
     const lines = replyMetaLines([message('sevt_1', undefined), message('sevt_2', {})], 'x')
     expect(lines.size).toBe(0)
+  })
+})
+
+describe('the cost in the line (#247)', () => {
+  // The session's own model, so the line names none: what is left is tokens and money.
+  const context = { currentModel: 'anthropic/claude-sonnet-5', previousModel: undefined }
+  const prices: ModelPriceLookup = (modelId) =>
+    modelId === 'anthropic/claude-sonnet-5'
+      ? { input: 2, output: 10, cache_read: 0.2, cache_write: 2.5 }
+      : null
+
+  it('prices the reply with its model’s rates, after the tokens', () => {
+    expect(
+      replyMetaLine(
+        {
+          model: 'anthropic/claude-sonnet-5',
+          durationMs: 4200,
+          usage: { input: 1000, output: 300, cacheCreation: 0, cacheRead: 0, total: 1300 },
+        },
+        context,
+        prices,
+      ),
+    ).toBe('4.2s · 1.3k tokens · $0.005')
+  })
+
+  it('shows a dash for a model nobody publishes a price for', () => {
+    expect(
+      replyMetaLine(
+        {
+          model: 'anthropic/claude-sonnet-5',
+          usage: { input: 10, output: 5, cacheCreation: 0, cacheRead: 0, total: 15 },
+        },
+        context,
+        () => null,
+      ),
+    ).toBe('15 tokens · —')
+  })
+
+  it('leaves the cost off entirely when the caller has no catalog', () => {
+    expect(
+      replyMetaLine(
+        {
+          model: 'anthropic/claude-sonnet-5',
+          usage: { input: 10, output: 5, cacheCreation: 0, cacheRead: 0, total: 15 },
+        },
+        context,
+      ),
+    ).toBe('15 tokens')
+  })
+})
+
+describe('formatCost (#247)', () => {
+  it('reads an unknown cost as a dash, never as a number', () => {
+    expect(formatCost(null)).toBe('—')
+  })
+
+  it('keeps the precision a small cost needs, and no more', () => {
+    expect(formatCost(0)).toBe('$0.00')
+    expect(formatCost(0.0004)).toBe('$0.0004')
+    expect(formatCost(0.001344)).toBe('$0.0013')
+    expect(formatCost(0.024)).toBe('$0.024')
+    expect(formatCost(1)).toBe('$1.00')
+    expect(formatCost(3.4567)).toBe('$3.46')
+  })
+
+  it('says so rather than rounding a cost too small to print to zero', () => {
+    expect(formatCost(0.00001)).toBe('<$0.0001')
   })
 })

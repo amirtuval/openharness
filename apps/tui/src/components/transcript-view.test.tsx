@@ -151,7 +151,7 @@ describe('per-reply metadata (issue #208)', () => {
           meta: {
             model: MODEL,
             durationMs: 4200,
-            usage: { input: 1000, output: 300, total: 1300 },
+            usage: { input: 1000, output: 300, cacheCreation: 0, cacheRead: 0, total: 1300 },
           },
         }),
         message('sevt_3', 'ok', 'user'),

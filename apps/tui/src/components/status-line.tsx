@@ -1,3 +1,4 @@
+import type { ModelPriceLookup } from '@openharness/client'
 import type { ModelEntry, SessionStatus } from '@openharness/protocol'
 import { Text, useStdout } from 'ink'
 import { useEffect, useState } from 'react'
@@ -66,6 +67,12 @@ export interface StatusLineProps {
   readonly status: SessionStatus
   /** Whether the history and the stream are in place yet. */
   readonly phase: ChatViewState['phase']
+  /**
+   * What the session has spent (epic #245, A2; issue #247), already formatted — `$0.0042`, or
+   * `—` when a model it ran on has no published price. Omitted when there is nothing to say:
+   * a session that has not answered yet, or a caller with no catalog to price with.
+   */
+  readonly cost?: string | undefined
   /** Extra context, e.g. that this is the dev fake. */
   readonly banner?: string | undefined
   /** When the turn in progress started, in epoch milliseconds; `null` when none is running. */
@@ -287,6 +294,20 @@ export function modelLabel(modelId: string, catalog: readonly ModelEntry[]): str
   return catalog.find((entry) => entry.id === modelId)?.name ?? modelId
 }
 
+/**
+ * The catalog's prices, by model id (epic #245, A2; issue #247).
+ *
+ * The catalog is where prices reach the CLI — each entry carries the model's list rates — so
+ * this is the lookup the status line's session total and every reply's footer are computed
+ * with. A model it does not carry has no price, and its cost reads `—`: the CLI never invents
+ * a rate, and a chat that never read the catalog (one opened on `--model`, before the
+ * background read lands) simply shows no cost at all.
+ */
+export function modelPriceLookup(catalog: readonly ModelEntry[]): ModelPriceLookup {
+  const byId = new Map(catalog.map((entry) => [entry.id, entry.cost]))
+  return (modelId) => byId.get(modelId) ?? null
+}
+
 /** One part of the line, with what it takes to drop it. */
 interface Segment {
   /** The span as it will be drawn, spinner included. */
@@ -298,11 +319,12 @@ interface Segment {
 /**
  * How much each part of the line is worth when there is not room for all of it.
  *
- * The status is the line's reason to exist; the model is what the chat *is*; the session is a
- * handle nobody needs at a glance (and which the CLI prints in full on the way out); and the
- * banner is for whoever is developing the CLI.
+ * The status is the line's reason to exist; the model is what the chat *is*; what it has cost
+ * so far is the next thing a reader looks for (#247) and goes when the line is tight; the
+ * session is a handle nobody needs at a glance (and which the CLI prints in full on the way
+ * out); and the banner is for whoever is developing the CLI.
  */
-const PRIORITY = { banner: 1, session: 2, who: 3, status: 4 } as const
+const PRIORITY = { banner: 1, session: 2, who: 3, cost: 3, status: 4 } as const
 
 /** The line's parts, in the order they are drawn and with the weight they carry. */
 function lineSegments(props: StatusLineProps, field: StatusField, frame: string): Segment[] {
@@ -312,6 +334,7 @@ function lineSegments(props: StatusLineProps, field: StatusField, frame: string)
   const segments: Segment[] = [
     { span: chrome(who), priority: PRIORITY.who },
     { span: chrome(shortSessionId(props.sessionId)), priority: PRIORITY.session },
+    ...(props.cost === undefined ? [] : [{ span: chrome(props.cost), priority: PRIORITY.cost }]),
     {
       span: { text: status, color: toneColor(field.tone), dim: field.tone === 'plain' },
       priority: PRIORITY.status,

@@ -1,4 +1,4 @@
-import type { TranscriptMessage } from '@openharness/client'
+import type { ModelPriceLookup, TranscriptMessage } from '@openharness/client'
 import { Static, Text } from 'ink'
 import { Fragment } from 'react'
 
@@ -54,6 +54,7 @@ export function TranscriptView({
   messages,
   width,
   currentModel,
+  costOf,
   holdLive,
 }: {
   readonly messages: readonly TranscriptMessage[]
@@ -61,6 +62,8 @@ export function TranscriptView({
   readonly width?: number | undefined
   /** The model the session runs, for the per-reply metadata lines (issue #208). */
   readonly currentModel?: string | undefined
+  /** The catalog's prices, for what each reply cost (#247); omitted, no cost is drawn. */
+  readonly costOf?: ModelPriceLookup | undefined
   /** The reply to keep live until its metadata arrives (issue #208); usually the last one. */
   readonly holdLive?: string | undefined
 }) {
@@ -73,7 +76,7 @@ export function TranscriptView({
   const firstLive = blocks.findIndex((message) => isLive(message, holdLive))
   const settled = firstLive === -1 ? blocks : blocks.slice(0, firstLive)
   const live = firstLive === -1 ? [] : blocks.slice(firstLive)
-  const metaLines = replyMetaLines(messages, currentModel)
+  const metaLines = replyMetaLines(messages, currentModel, costOf)
 
   /** The message at `index`, framed by the blank line the transcript owes it, if any. */
   const draw = (message: TranscriptMessage, index: number) => (
