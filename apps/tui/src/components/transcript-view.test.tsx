@@ -34,7 +34,7 @@ function viewOf(
   } = {},
 ) {
   return render(
-    <ThemeProvider theme={{ background: 'dark', color: true }}>
+    <ThemeProvider theme={{ background: 'dark', color: true, level: 3 }}>
       <TranscriptView
         messages={messages}
         width={options.width ?? 40}
@@ -69,7 +69,7 @@ function redraw(
   } = {},
 ): void {
   app.rerender(
-    <ThemeProvider theme={{ background: 'dark', color: true }}>
+    <ThemeProvider theme={{ background: 'dark', color: true, level: 3 }}>
       <TranscriptView
         messages={messages}
         width={options.width ?? 40}

@@ -20,6 +20,14 @@ export interface Span {
   readonly underline?: boolean | undefined
   readonly strikethrough?: boolean | undefined
   readonly dim?: boolean | undefined
+  /**
+   * The surface this run sits on — a code block's panel (#231). A span's own background, not
+   * the message's: the band around a user's message is decided once for the whole message
+   * (`message-view.tsx`), where a panel covers exactly the lines the renderer gives it, so it
+   * has to travel with them. Absent everywhere else, which is why nothing but the code block
+   * renderer sets it.
+   */
+  readonly background?: string | undefined
 }
 
 /** One rendered line: the spans it is made of, already fitted to the width it was given. */
@@ -59,7 +67,8 @@ function sameStyle(a: Span, b: Span): boolean {
     a.italic === b.italic &&
     a.underline === b.underline &&
     a.strikethrough === b.strikethrough &&
-    a.dim === b.dim
+    a.dim === b.dim &&
+    a.background === b.background
   )
 }
 

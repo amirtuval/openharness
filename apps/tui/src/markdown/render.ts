@@ -16,7 +16,7 @@ import stringWidth from 'string-width'
 
 import { highlightCode } from './highlight'
 import { parseMarkdown } from './parse'
-import { PALETTE, paint, type TerminalTheme } from './theme'
+import { codePanel, PALETTE, paint, type TerminalTheme } from './theme'
 import {
   padSpans,
   spanWidth,
@@ -52,9 +52,6 @@ interface InlineStyle {
   readonly strikethrough?: boolean | undefined
   readonly color?: string | undefined
 }
-
-/** The rule a code block's label sits in: `── rust ───…` (issue #229). */
-const LABEL_EDGE = '── '
 
 /**
  * A reply, as the lines the terminal draws.
@@ -168,29 +165,42 @@ function rule(layout: RenderLayout): Line[] {
 }
 
 /**
- * A fenced (or indented) code block: a labelled rule above the code, the code itself, a rule
- * below it.
+ * A fenced (or indented) code block, as a **tinted panel** (issues #229, #231).
  *
  * ```text
- * ── ts ───────────────────────────────
+ *                              rust
  * const x = 1
- * ────────────────────────────────────
  * ```
  *
- * **No gutter, and no box (issue #229).** The old frame prefixed every line with a `│ ` bar
- * and closed it with a corner, which meant the code only existed *inside* the drawing: select
- * it and you copied the bar and the space with every line, and pasted a block that no longer
- * compiles. The code lines are now the code, at column 0, exactly as they were written —
- * selecting them and pasting them gives the code back byte for byte. What is left is the
- * label, which is on its own line and is decoration a reader can leave out of a selection,
- * and a closing rule that ends the block the way a blank line would but without the ambiguity
- * of one.
+ * Three lines above and below, drawn on a surface a shade off the terminal's own background:
+ * a line of padding with the language label dim at its **right** edge, the code, and a line of
+ * padding under it. The label is right-aligned so the block's own column stays clean — nothing
+ * is in front of a line — and the padding is *tinted* rather than blank so the block reads as
+ * one surface rather than as code that happens to be near some whitespace.
  *
- * The rule and the label are the terminal's own "structure" colour, not the syntax theme's:
- * the label belongs to the terminal and the code inside it to the language. The rule is drawn
- * at the full width the block was given in both places, and — because the label, the body and
- * the closing rule are drawn from the same tree on every render — a block whose fence has not
- * closed yet is laid out exactly like the block it becomes, so nothing jumps when it does.
+ * **No gutter, no box, no rules (issue #229).** The old frame prefixed every line with a `│ `
+ * bar and closed it with a corner, which meant the code only existed *inside* the drawing:
+ * select it and you copied the bar and the space with every line, and pasted a block that no
+ * longer compiles. Then it was a `── rust ──` rule above and one below (#229), which copied
+ * cleanly but left the block as unadorned text. The code lines are still the code, at column 0,
+ * exactly as they were written — selecting them and pasting them gives the code back byte for
+ * byte, plus the panel's trailing spaces at worst.
+ *
+ * **Every line is padded to the block's width** with spaces that carry the panel's tint, which
+ * is what makes it a panel and not a ragged highlight around the longest line. The width is
+ * `layout.width`, which is the message's own minus the streaming cursor's reserved column
+ * (`message-view.tsx`), so the `▌` still has somewhere to land: it goes on the bottom padding
+ * line, outside the tint, exactly where the block ends.
+ *
+ * **Where there is no tint to draw with** — `NO_COLOR`, or a terminal that can mix neither
+ * 24-bit nor the 256-colour ramp — the panel would have to be made of a *named* colour, which
+ * is the heavy band #231 is about. The block falls back to a dim label line above and a blank
+ * line after: the same number of lines, the same code at column 0, and only the surface gone.
+ *
+ * The label, the padding and the body are drawn from the same tree on every render, so a block
+ * whose fence has not closed yet — which `remark` reads as a code block to the end of the text
+ * — is laid out exactly like the block it becomes. Nothing appears and nothing moves when the
+ * fence closes.
  *
  * Lines wider than the block are broken at its edge (`splitToWidth`): a code block is the one
  * thing that may not be word-wrapped, because the line breaks a language has are not the
@@ -198,29 +208,55 @@ function rule(layout: RenderLayout): Line[] {
  */
 function codeBlock(node: Code, layout: RenderLayout): Line[] {
   const language = (node.lang ?? '').trim()
-  const chrome = paint(layout.theme, PALETTE.chrome)
+  const label = language === '' ? 'code' : language
+  const panel = codePanel(layout.theme)
 
   const body = highlightCode(node.value, language, layout.theme).flatMap((line) =>
     splitToWidth(line, layout.width),
   )
 
+  if (panel === undefined) {
+    // The label is the terminal's own "structure" colour here, as it was before the panel: the
+    // label belongs to the terminal and the code inside it to the language.
+    return [
+      textSpans(label, { color: paint(layout.theme, PALETTE.chrome), dim: true }),
+      ...body,
+      [],
+    ]
+  }
+
   return [
-    codeLabel(layout.width, language === '' ? 'code' : language, chrome),
-    ...body,
-    codeRule(layout.width, chrome),
+    panelLabel(layout.width, label, panel),
+    ...body.map((line) => panelLine(line, layout.width, panel)),
+    panelPadding(layout.width, panel),
   ]
 }
 
-/** A code block's label line: `── rust ────…`, exactly `width` columns wide. */
-function codeLabel(width: number, label: string, color: string | undefined): Line {
-  const head = `${LABEL_EDGE}${label} `
-  const rule = Math.max(0, width - stringWidth(head))
-  return [{ text: head, color, dim: true }, ...textSpans('─'.repeat(rule), { color, dim: true })]
+/**
+ * The panel's top line: the language label, dim, against the right edge of the tint.
+ *
+ * Right-aligned and not left, so the label sits where nothing else does: a reader scanning the
+ * left edge of a reply sees code and only code, and the label is decoration at the far end of
+ * the padding, which is what a selection can leave out.
+ */
+function panelLabel(width: number, label: string, panel: string): Line {
+  const padding = Math.max(0, width - stringWidth(label))
+  return [
+    ...(padding === 0 ? [] : [{ text: ' '.repeat(padding), background: panel }]),
+    { text: label, background: panel, dim: true },
+  ]
 }
 
-/** The rule a code block ends on: the width, drawn. */
-function codeRule(width: number, color: string | undefined): Line {
-  return textSpans('─'.repeat(Math.max(1, width)), { color, dim: true })
+/** One line of a code panel: the code on the tint, carried out to the full width. */
+function panelLine(line: Line, width: number, panel: string): Line {
+  const spans: Span[] = line.map((span) => ({ ...span, background: panel }))
+  const missing = Math.max(0, width - spanWidth(spans))
+  return missing === 0 ? spans : [...spans, { text: ' '.repeat(missing), background: panel }]
+}
+
+/** The panel's bottom line: tinted, and nothing on it but the tint. */
+function panelPadding(width: number, panel: string): Line {
+  return [{ text: ' '.repeat(Math.max(1, width)), background: panel }]
 }
 
 /** A quote: a bar down the left, and the whole thing a shade quieter. */

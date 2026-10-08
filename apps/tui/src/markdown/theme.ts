@@ -1,18 +1,23 @@
 /**
- * What the message view draws with (epic #201, X4).
+ * What the message view draws with (epic #201, X4; issue #231).
  *
- * Two decisions live here, and they are different ones:
+ * Three decisions live here, and they are different ones:
  *
- * - **Colour is ANSI named colours only** — the 16 the terminal's own theme defines, so `oh`
- *   looks like the terminal it is in rather than like this package. There is no hex in a
- *   message; the one place that is allowed its own values is a code block's syntax theme,
- *   which has to look the same *on* a light background as on a dark one.
- * - **Colour is off** when `NO_COLOR` says so. That is not a theme — it is the absence of
- *   one — so it is a flag carried beside the background rather than a third palette.
+ * - **Foreground colour is ANSI named colours only** — the 16 the terminal's own theme defines,
+ *   so `oh` looks like the terminal it is in rather than like this package. The one place that
+ *   is allowed its own values is a code block's syntax theme, which has to look the same *on* a
+ *   light background as on a dark one.
+ * - **A background may be 24-bit** (#231). The sixteen named colours have no subtle gray — the
+ *   nearest one, *bright black*, is a heavy band — so a user's band and a code block's panel are
+ *   *derived* from the detected background instead: a tint a shade off the terminal's own, in
+ *   24-bit where the terminal can mix one, in the 256-colour gray ramp where it can mix that,
+ *   and the named colours `oh` has always used where it can mix neither.
+ * - **Colour is off** when `NO_COLOR` says so. That is not a theme — it is the absence of one —
+ *   so it is a flag carried beside the background rather than a third palette.
  *
- * The background matters for the syntax theme and nothing else: the terminal's own colours
- * are already readable on the terminal's own background, which is the whole point of asking
- * for them by name. A dark code theme on a light terminal is a wall of pale text, so the
+ * The background matters for the syntax theme, the tints and nothing else: the terminal's own
+ * colours are already readable on the terminal's own background, which is the whole point of
+ * asking for them by name. A dark code theme on a light terminal is a wall of pale text, so the
  * theme is picked from the background the terminal reports.
  */
 
@@ -22,22 +27,38 @@ export type ThemeSetting = 'auto' | 'light' | 'dark'
 /** Which way round the terminal is: what a syntax theme has to be readable against. */
 export type TerminalBackground = 'light' | 'dark'
 
-/** The resolved theme: the background, and whether anything is drawn in colour at all. */
+/**
+ * How much colour the terminal can show, as chalk counts it: 3 for 24-bit, 2 for the 256-colour
+ * palette, 1 for the sixteen named ones, 0 for none.
+ *
+ * The transcript tells only the top two apart — below them the named colours it has always
+ * drawn with are what there is, and a derived tint is not available — but the two are not the
+ * same question to the eye: `#2a2b33` is the tint a 24-bit terminal gets and `ansi256(236)` the
+ * nearest gray a 256-colour one can mix (issue #231).
+ */
+export type ColorLevel = 0 | 1 | 2 | 3
+
+/** The resolved theme: the background, the colour budget, and whether colour is drawn at all. */
 export interface TerminalTheme {
   /** The background the syntax theme was chosen for. */
   readonly background: TerminalBackground
   /** False under `NO_COLOR`: every colour is dropped, the layout is not. */
   readonly color: boolean
+  /** How much colour the terminal can show: what the band and the panel are drawn with (#231). */
+  readonly level: ColorLevel
 }
 
-/** The theme every caller gets when nobody said anything: a dark terminal, in colour. */
-export const DEFAULT_THEME: TerminalTheme = { background: 'dark', color: true }
+/** The theme every caller gets when nobody said anything: a dark terminal, in full colour. */
+export const DEFAULT_THEME: TerminalTheme = { background: 'dark', color: true, level: 3 }
 
 /** The environment variable that turns colour off, by being there at all. */
 export const NO_COLOR_ENV = 'NO_COLOR'
 
 /** The environment variable a terminal sets to say what it is: `fg;bg`, as palette indexes. */
 export const COLORFGBG_ENV = 'COLORFGBG'
+
+/** The environment variable a terminal sets to say it has more than sixteen colours. */
+export const COLORTERM_ENV = 'COLORTERM'
 
 /**
  * Resolve `theme` against the environment.
@@ -62,7 +83,33 @@ export function resolveTerminalTheme(
   return {
     background: setting === 'auto' ? detectBackground(env) : setting,
     color: colorEnabled(env),
+    level: detectColorLevel(env),
   }
+}
+
+/**
+ * How much colour `env` says the terminal can show.
+ *
+ * `COLORTERM` is the variable every modern terminal sets to say it is 24-bit — `truecolor` and
+ * `24bit` are two spellings of one thing, and some terminals write them in caps — and `TERM`'s
+ * `-256color` suffix is the older way of saying the palette is the 256 one. Everything else is
+ * the sixteen named colours, which `oh` has always drawn with and never had to ask about (X4):
+ * a terminal that says nothing gets the named colours and loses only the tints by it.
+ *
+ * `NO_COLOR` wins over all of it, and is the one answer that is not a budget but an absence:
+ * level 0 is "no colour at all", which is what {@link colorEnabled} says too.
+ */
+export function detectColorLevel(
+  env: Record<string, string | undefined> = process.env,
+): ColorLevel {
+  if (!colorEnabled(env)) return 0
+
+  const colorTerm = env[COLORTERM_ENV]?.trim().toLowerCase()
+  if (colorTerm === 'truecolor' || colorTerm === '24bit') return 3
+
+  if (env.TERM?.toLowerCase().includes('256color') === true) return 2
+
+  return 1
 }
 
 /**
@@ -104,22 +151,94 @@ export function paint(theme: TerminalTheme, color: string | undefined): string |
 }
 
 /**
- * The band a user's message is drawn on (issue #229).
+ * One derived tint, in the two spellings a terminal might be able to mix it in.
+ *
+ * `ansi256` is an index into the 232-255 gray ramp — `8 + 10 * (index - 232)` of each channel,
+ * the twenty-four grays every 256-colour terminal has — so `236` is `#303030` and `254` is
+ * `#e4e4e4`. Nothing in the 6×6×6 cube above it is a gray, which is why the ramp is the one
+ * that is named here (issue #231).
+ */
+interface Tint {
+  /** The 24-bit value, for a terminal that can mix it (`level` 3). */
+  readonly hex: string
+  /** The nearest gray of the 232-255 ramp, for one that can mix that (`level` 2). */
+  readonly ansi256: number
+}
+
+/**
+ * The tints the transcript derives from the terminal's background (issue #231).
+ *
+ * **A band and a panel are not the same shade, and the difference is the point.** On a dark
+ * terminal the band is a couple of steps *off* the background — `#2a2b33`, violet-leaning so it
+ * sits with the rest of the app — and the panel is a step *toward* black (`#1f2026`), so a code
+ * block reads as inset in the page rather than laid on it. On a light terminal both are darker
+ * than the page and the panel is the lighter of the two (`#f5f5f8` against `#ececf2`), which is
+ * the same "the panel is the quieter surface" the other way up.
+ *
+ * The 256-colour indexes are the nearest gray of that ramp to each hex, and they keep that
+ * relationship: 236 over 235 on dark, 254 under 255 on light.
+ */
+const TINTS: Readonly<Record<TerminalBackground, Readonly<Record<'band' | 'panel', Tint>>>> = {
+  dark: {
+    band: { hex: '#2a2b33', ansi256: 236 },
+    panel: { hex: '#1f2026', ansi256: 235 },
+  },
+  light: {
+    band: { hex: '#ececf2', ansi256: 254 },
+    panel: { hex: '#f5f5f8', ansi256: 255 },
+  },
+}
+
+/**
+ * `tint` in the best spelling this terminal can mix, or nothing at all.
+ *
+ * The 24-bit value goes to a `level` 3 terminal as a hex string, which Ink hands to chalk and
+ * chalk writes as `38;2;…`; the gray index goes to a `level` 2 one as `ansi256(n)`, **not** as
+ * the hex a step above, because chalk would downgrade a hex through its own 6×6×6 mapping and
+ * land on a colour with a hue in it. Level 1 and 0 cannot mix a gray that is not one of the
+ * sixteen, so they get nothing here and the callers fall back to the named colours.
+ */
+function tintColor(theme: TerminalTheme, tint: Tint): string | undefined {
+  if (!theme.color) return undefined
+  if (theme.level >= 3) return tint.hex
+  if (theme.level === 2) return `ansi256(${tint.ansi256})`
+  return undefined
+}
+
+/**
+ * The band a user's message is drawn on (issues #229, #231).
  *
  * A band rather than a label, because a label is a character and a background is not: nothing
  * in front of the user's words, so selecting them and pasting them gives the words and only
- * the words. The colour is the terminal's own, like every other one in the transcript (X4):
- * *bright black* is a shade of a dark terminal's background and *white* of a light one's, so
- * the band is a band on either without `oh` naming a colour of its own. The text on it is left
- * at the terminal's default foreground, which is the one colour guaranteed readable on both.
+ * the words. The text on it is left at the terminal's default foreground, the one colour
+ * guaranteed readable on the background the terminal already chose.
  *
- * The name is the **foreground** spelling of the colour, because that is what Ink's
- * `backgroundColor` prop takes: it prefixes a `bg` of its own (`blackBright` → `bgBlackBright`,
- * the `\e[100m` a terminal paints a subtle band with). Under `NO_COLOR` there is no band at
- * all — `message-view.tsx` puts a dim `›` above the message instead, which is not colour.
+ * **The shade is derived, not named** (#231): bright black is the nearest named colour, and a
+ * reader looking at it said the band was "too bright" — the sixteen-colour palette simply has
+ * no subtle gray in it. So where the terminal can mix one the band is {@link TINTS}'s, and only
+ * a terminal that can mix neither (`level` 0 or 1) keeps the named colour it always had, in the
+ * **foreground** spelling Ink's `backgroundColor` prop takes (`blackBright` → `bgBlackBright`).
+ * Under `NO_COLOR` there is no band at all — `message-view.tsx` puts a dim `›` above the
+ * message instead, which is not colour.
  */
 export function messageBand(theme: TerminalTheme): string | undefined {
   if (!theme.color) return undefined
+  return tintColor(theme, TINTS[theme.background].band) ?? bandFallback(theme)
+}
+
+/**
+ * The code block's tinted panel (#231), or nothing where there is no tint to draw it with.
+ *
+ * `undefined` is the signal `render.ts` reads: a `NO_COLOR` terminal, or one that can mix
+ * neither 24-bit nor the 256-colour ramp, gets the label-line fallback instead of a panel,
+ * because a panel made of a *named* colour would be the heavy band #231 is about.
+ */
+export function codePanel(theme: TerminalTheme): string | undefined {
+  return tintColor(theme, TINTS[theme.background].panel)
+}
+
+/** The band for a terminal with no tints: the named colour `oh` has always drawn it in. */
+function bandFallback(theme: TerminalTheme): string {
   return theme.background === 'light' ? 'white' : 'blackBright'
 }
 
