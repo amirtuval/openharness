@@ -22,12 +22,12 @@ const PRICED_MODEL = 'anthropic/claude-sonnet-5'
 const UNPRICED_MODEL = 'acme/experimental-9'
 
 /** A clock the test moves by hand, so days and ranges are asserted rather than waited out. */
-function movableClock(start: string): { now: () => Date; set: (instant: string) => void } {
-  let current = new Date(start)
+function movableClock(start: string): { now: () => number; set: (instant: string) => void } {
+  let current = new Date(start).getTime()
   return {
-    now: () => new Date(current),
+    now: () => current,
     set: (instant) => {
-      current = new Date(instant)
+      current = new Date(instant).getTime()
     },
   }
 }

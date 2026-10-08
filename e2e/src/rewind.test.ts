@@ -148,6 +148,7 @@ describe('edit and resend (#238)', () => {
       EVENT_TYPES.modelRequestStart,
       EVENT_TYPES.agentMessage,
       EVENT_TYPES.modelRequestEnd,
+      EVENT_TYPES.sessionUsage,
       EVENT_TYPES.sessionStatusIdle,
     ])
     const rewind = log[0]
