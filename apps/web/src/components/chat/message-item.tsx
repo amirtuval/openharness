@@ -57,14 +57,17 @@ export function MessageItem({
   nameOf,
   previousModel,
   onEdit,
+  editDisabled = false,
 }: {
   message: TranscriptMessage
   /** The catalog lookup for the marker's display name; the id when the catalog does not know it. */
   nameOf?: ModelNameLookup | undefined
   /** The previous reply's model, so the meta line names one only when it changed (#212). */
   previousModel?: string | undefined
-  /** Pre-fill the composer with this message — given for the last user message, and no other. */
+  /** Rewrite this message — given for the reader's own messages (#238, "edit and resend"). */
   onEdit?: (() => void) | undefined
+  /** Whether rewriting is unavailable right now, because the agent is working (#238). */
+  editDisabled?: boolean
 }) {
   const isUser = message.role === 'user'
 
@@ -127,7 +130,7 @@ export function MessageItem({
         {isUser ? null : (
           <MessageMeta message={message} previousModel={previousModel} nameOf={nameOf} />
         )}
-        <MessageActions text={message.text} onEdit={onEdit} />
+        <MessageActions text={message.text} onEdit={onEdit} editDisabled={editDisabled} />
       </div>
     </article>
   )

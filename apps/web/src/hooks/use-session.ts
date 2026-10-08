@@ -56,8 +56,11 @@ export interface SessionView {
   /**
    * Send a message. While the agent is running this is a steering message.
    *
-   * `options.model` (`{ id }`) switches the session's model from this message on (U3). The
-   * answer says whether the message was stored, so a composer can keep the text on a failure.
+   * `options.model` (`{ id }`) switches the session's model from this message on (U3), and
+   * `options.rewindTo` restarts the session from a message the reader edited (#238,
+   * "edit and resend"): the rewind and the message are one request, so the transcript is never
+   * left without the edit. The answer says whether the message was stored, so a composer can
+   * keep the text on a failure — including the 409 a rewind gets while a turn is running.
    */
   readonly send: (text: string, options?: { model?: string }) => Promise<boolean>
   /** Ask the running session to stop. */
@@ -163,18 +166,17 @@ export function useSession(client: Client, sessionId: string): SessionView {
   }, [saidSomething, titled, refresh, sessionId])
 
   const send = useCallback(
-    async (text: string, options?: { model?: string }): Promise<boolean> => {
+    async (text: string, options?: { model?: string; rewindTo?: number }): Promise<boolean> => {
       const body = text.trim()
       if (body === '') {
         return false
       }
       setRequestError(null)
       try {
-        const stored = await client.sendMessage(
-          sessionId,
-          body,
-          options?.model === undefined ? undefined : { model: { id: options.model } },
-        )
+        const stored = await client.sendMessage(sessionId, body, {
+          ...(options?.model === undefined ? {} : { model: { id: options.model } }),
+          ...(options?.rewindTo === undefined ? {} : { rewindTo: options.rewindTo }),
+        })
         // Show the message at once instead of waiting for the stream to echo it: the client
         // returns the stored event, and the reducer drops the stream's copy of it (same `seq`).
         transcript.apply(stored)
