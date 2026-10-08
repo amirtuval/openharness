@@ -189,6 +189,31 @@ describe('resolveConfig', () => {
     expect(errorOf({ env: {}, readFile: () => '{"autoUpdate": 1}' })).toContain("'autoUpdate'")
   })
 
+  it('leaves the theme at auto unless the file says otherwise (epic #201, X4)', () => {
+    expect(configOf({ env: {}, readFile: () => undefined }).theme).toBe('auto')
+    expect(withFile('{"theme": "light"}')).toMatchObject({ ok: true, config: { theme: 'light' } })
+    expect(withFile('{"theme": "dark"}')).toMatchObject({ ok: true, config: { theme: 'dark' } })
+    expect(withFile('{"theme": "auto"}')).toMatchObject({ ok: true, config: { theme: 'auto' } })
+  })
+
+  it('reads the theme beside a server and an autoUpdate', () => {
+    expect(
+      configOf({
+        env: {},
+        readFile: () => '{"server": "http://x.test", "autoUpdate": false, "theme": "light"}',
+      }),
+    ).toMatchObject({ server: 'http://x.test', autoUpdate: false, theme: 'light' })
+  })
+
+  it('rejects a theme that is not one of the three, naming them', () => {
+    const error = errorOf({ env: {}, readFile: () => '{"theme": "dim"}' })
+
+    expect(error).toContain("'theme'")
+    expect(error).toContain("'auto'")
+    expect(error).toContain("'light'")
+    expect(error).toContain("'dark'")
+  })
+
   it('reports a config file it cannot read', () => {
     const error = errorOf({
       env: {},

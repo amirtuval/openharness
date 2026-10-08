@@ -525,9 +525,12 @@ describe('preferences (#111)', () => {
   })
 
   it('reads the absence of a default model as null, not a 404', async () => {
-    const { client } = clientWith(() => jsonResponse({ default_model: null }))
+    const { client } = clientWith(() => jsonResponse({ default_model: null, theme: 'system' }))
 
-    await expect(client.preferences.get()).resolves.toEqual({ default_model: null })
+    await expect(client.preferences.get()).resolves.toEqual({
+      default_model: null,
+      theme: 'system',
+    })
   })
 
   it('puts the whole value to PUT /v1/me/preferences and reads back the stored one', async () => {
@@ -545,7 +548,9 @@ describe('preferences (#111)', () => {
   })
 
   it('clears the default with null, which is a value the request schema accepts', async () => {
-    const { client, mock } = clientWith(() => jsonResponse({ default_model: null }))
+    const { client, mock } = clientWith(() =>
+      jsonResponse({ default_model: null, theme: 'system' }),
+    )
 
     await client.preferences.put({ default_model: null })
 

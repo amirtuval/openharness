@@ -2,8 +2,10 @@ import {
   AgentSchema,
   CreateAgentRequestSchema,
   CreateSessionRequestSchema,
+  DEFAULT_USER_THEME,
   ListModelsResponseSchema,
   ProviderCredentialSchema,
+  PutPreferencesRequestSchema,
   SendEventsRequestSchema,
   SessionSchema,
   UpdateAgentRequestSchema,
@@ -133,10 +135,24 @@ export interface FakeClientOptions {
    */
   providers?: readonly ProviderCatalogStatus[]
   /**
-   * The preferences {@link Client.preferences} starts with, in place of the default
-   * `{ default_model: null }` — the absence of a choice, like an account that never saved one.
+   * The preferences {@link Client.preferences} starts with, over the default
+   * `{ default_model: null, theme: 'system' }` — the absence of a choice, like an account that
+   * never saved one.
+   *
+   * Fields are merged over that default, so a test that only cares about the default model
+   * says only that: `{ default_model: 'openai/gpt-5-mini' }` leaves the theme at `system`.
    */
-  preferences?: UserPreferences
+  preferences?: Partial<UserPreferences>
+  /**
+   * The provider credentials {@link Client.providerCredentials} starts with, over the default
+   * of none.
+   *
+   * Metadata only, the way the store holds them: the key itself never exists here. A test of a
+   * screen that behaves differently for an account with a key — the first-run check is the one
+   * that made this an option (#209) — seeds one instead of putting it before rendering, which
+   * `put` cannot do synchronously.
+   */
+  credentials?: readonly ProviderCredential[]
 }
 
 /** A device flow, as {@link FakeClient.scriptDeviceLogin} takes it. */
@@ -330,7 +346,9 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
 
   const agents = new Map<string, Agent>()
   const brains = new Map<string, FakeBrain>()
-  const credentials = new Map<string, ProviderCredential>()
+  const credentials = new Map<string, ProviderCredential>(
+    (options.credentials ?? []).map((credential) => [credential.provider, credential]),
+  )
   const user = options.user ?? makeUser()
   const models: readonly ModelEntry[] = options.models ?? [makeModelEntry()]
   const providers: readonly ProviderCatalogStatus[] =
@@ -344,9 +362,11 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
   const modelListCalls: ModelListCall[] = []
   // The caller's settings (#111): one in-memory value, replaced whole by `put`, exactly like
   // the server's row behind `GET`/`PUT /v1/me/preferences`.
-  let preferences: GetPreferencesResponse = UserPreferencesSchema.parse(
-    options.preferences ?? { default_model: null },
-  )
+  let preferences: GetPreferencesResponse = UserPreferencesSchema.parse({
+    default_model: null,
+    theme: DEFAULT_USER_THEME,
+    ...options.preferences,
+  })
   let authenticated = options.authenticated ?? true
   let deviceFlow: FakeDeviceFlow | undefined
 
@@ -722,6 +742,16 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
         validated_at: timestamp,
       })
       credentials.set(provider, stored)
+      // The server picks a default model for an account that has none when its first key is
+      // saved (epic #116, U4), which is the model the onboarding screens name back to the
+      // reader (#209). The fake restates the rule without the recommendation table the server
+      // keeps: the saved provider's first catalog model, else the catalog's first. A default
+      // that is already stored — the reader's own, or an earlier pick — is never replaced.
+      if (preferences.default_model === null) {
+        const picked =
+          models.find((entry) => entry.provider === provider)?.id ?? models[0]?.id ?? null
+        preferences = UserPreferencesSchema.parse({ ...preferences, default_model: picked })
+      }
       return stored
     },
 
@@ -765,9 +795,15 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       if (!authenticated) {
         return unauthenticated()
       }
-      // Written whole, like the server's PUT — no partial update — and `null` clears the
-      // stored default. Parsed with the protocol's schema, the way the route validates it.
-      preferences = UserPreferencesSchema.parse(next)
+      // Merged over what is stored, like the server's PUT: a field left out keeps its stored
+      // value, and `default_model: null` clears the default. Validated with the protocol's
+      // request schema, the way the route validates it.
+      const patch = PutPreferencesRequestSchema.parse(next)
+      preferences = UserPreferencesSchema.parse({
+        default_model:
+          patch.default_model === undefined ? preferences.default_model : patch.default_model,
+        theme: patch.theme ?? preferences.theme,
+      })
       return Promise.resolve(preferences)
     },
   }

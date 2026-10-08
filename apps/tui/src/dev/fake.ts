@@ -4,13 +4,32 @@ import type { ModelEntry } from '@openharness/protocol'
 /** Set this (to `1`, `true` or `yes`) and `oh` runs against the in-memory fake client. */
 export const FAKE_MODE_ENV = 'OPENHARNESS_FAKE'
 
+/**
+ * Set this beside {@link FAKE_MODE_ENV} and the dev fake starts **signed out** (#210).
+ *
+ * The fake is signed in by default, which is the state to develop in — but the sign-in a chat
+ * offers when it finds no session, and the 401 a stale one gets, are paths a dev otherwise
+ * cannot see without a server and a second terminal. With this, `oh` asks `Sign in now? [Y/n]`
+ * against the fake's scripted device flow, which approves it.
+ */
+export const FAKE_SIGNED_OUT_ENV = 'OPENHARNESS_FAKE_SIGNED_OUT'
+
 /** What the status line says while the fake is answering: nobody should mistake it for real. */
 export const FAKE_BANNER = 'fake client (dev)'
 
 /** Is the CLI in fake mode? Empty, `0` and `false` all mean "no". */
 export function isFakeMode(env: Record<string, string | undefined> = process.env): boolean {
-  const value = env[FAKE_MODE_ENV]?.trim().toLowerCase()
-  return value === '1' || value === 'true' || value === 'yes'
+  return isTruthy(env[FAKE_MODE_ENV])
+}
+
+/** Does the dev fake start signed out? The same spelling as {@link isFakeMode}. */
+export function isFakeSignedOut(env: Record<string, string | undefined> = process.env): boolean {
+  return isTruthy(env[FAKE_SIGNED_OUT_ENV])
+}
+
+function isTruthy(value: string | undefined): boolean {
+  const normalized = value?.trim().toLowerCase()
+  return normalized === '1' || normalized === 'true' || normalized === 'yes'
 }
 
 /**
@@ -65,6 +84,39 @@ export const DEV_REPLIES: readonly string[] = [
   'Hello from the openharness dev fake. Nothing here leaves your machine: no server, no model, just a scripted reply stream.',
   'While this streams you can steer it: type another message and press Enter before the reply finishes, and it is queued for the next request. Ctrl+J (or Alt+Enter) inserts a newline instead.',
   'Ctrl+C interrupts a reply in flight and keeps what it has produced. Press it twice when idle to leave — the CLI then prints the exact `oh -s <id>` that resumes this session.',
+  [
+    '## Markdown, rendered',
+    '',
+    'A scripted reply that exercises the renderer — **strong**, *emphasis*, `inline code`, a',
+    '[link](https://github.com/amirtuval/openharness), a list, a quote, a table and a fenced',
+    'code block. Replies are Markdown; what you type is not.',
+    '',
+    '- a list item',
+    '  - nested one level deeper',
+    '- and a second one',
+    '',
+    '> Quoted, dimmed, behind its own bar.',
+    '',
+    '| what | where |',
+    '| --- | --- |',
+    '| the renderer | `src/markdown/render.ts` |',
+    '| the theme | `src/markdown/theme.ts` |',
+    '',
+    '```ts',
+    'export function markdownLines(text: string, layout: RenderLayout) {',
+    '  return renderBlocks(parseMarkdown(text).children, layout)',
+    '}',
+    '```',
+    '',
+    '```rust',
+    'fn main() {',
+    '    println!("every line of this starts at column 0");',
+    '}',
+    '```',
+    '',
+    'And a paragraph long enough that it has to wrap, so that a wrapped line is visible —',
+    'and so is the fact that it starts at column 0 like the line before it.',
+  ].join('\n'),
 ]
 
 /** The default model the dev fake stores, so a new chat starts without the picker (#114). */
@@ -83,18 +135,28 @@ export const DEV_DEFAULT_MODEL = 'anthropic/claude-sonnet-5'
  *   saved one looks: `oh` starts chatting on it, no picker;
  * - three agents, for `oh agents` and the `--agent` preset path — a new chat without
  *   `--agent` runs a model, not an agent;
- * - a scripted conversation, so replies stream in visibly;
- * - a second session with history in it, so `oh --continue` and `oh -s <id>` have something
- *   to resume.
+ * - a scripted conversation ({@link DEV_REPLIES}), so replies stream in visibly — scripted
+ *   on the session with history, which is the one `oh --continue` opens, because that is the
+ *   only session a dev can name: a chat the CLI opens is a session of its own, created at
+ *   run time, with an id nobody could have scripted for;
+ * - a session with history in it, so `oh --continue` and `oh -s <id>` have something to
+ *   resume.
  *
  * @see {@link FAKE_MODE_ENV}
  */
-export async function createDevClient(): Promise<FakeClient> {
+export async function createDevClient(
+  env: Record<string, string | undefined> = process.env,
+): Promise<FakeClient> {
   const { createFakeClient } = await import('@openharness/client/testing')
   const fake = createFakeClient({
     delayMs: 12,
     models: DEV_MODELS,
     preferences: { default_model: DEV_DEFAULT_MODEL },
+    // The seeded order is the order they were created in, and the fake orders a list by
+    // `(created_at, id)`. A clock that only moves when it is asked — `new Date()` returns the
+    // same millisecond twice under a fast seeding run — leaves the two agents below tied, and
+    // the tie broken by the random half of their ids: a coin flip a test would flake on.
+    now: tickingClock(),
   })
 
   await fake.agents.create({
@@ -110,11 +172,9 @@ export async function createDevClient(): Promise<FakeClient> {
     system: null,
   })
 
-  for (const reply of DEV_REPLIES) {
-    fake.respondWith(reply, { chunks: 8, delayMs: 20 })
-  }
-
-  // Created last, so `oh --continue` finds it: the list is newest first.
+  // Created after the fake's own session, so `oh --continue` finds it (the list is newest
+  // first) — and the replies are scripted on it once its history is settled, so that a dev
+  // running `oh -c` gets the conversation below rather than an echo.
   const resumed = await fake.sessions.create({
     agent: fake.agent.id,
     title: 'A session with history',
@@ -124,5 +184,29 @@ export async function createDevClient(): Promise<FakeClient> {
   })
   await fake.waitForIdle(resumed.id)
 
+  for (const reply of DEV_REPLIES) {
+    fake.respondWith(reply, { sessionId: resumed.id, chunks: 8, delayMs: 20 })
+  }
+
+  // Signing out happens last, on purpose: a signed-out fake refuses every `/v1` call, so the
+  // seeding above could not have run. What is left is an account with the dev catalog and the
+  // dev default model that still has to be signed into — the state `oh`'s sign-in offer is for
+  // (#210), and the one the fake's scripted device flow can approve.
+  if (isFakeSignedOut(env)) {
+    await fake.auth.signOut()
+  }
+
   return fake
+}
+
+/**
+ * A clock that advances a millisecond per call, for seeding order that does not depend on how
+ * fast the machine is. See {@link createDevClient}.
+ */
+function tickingClock(): () => Date {
+  let at = Date.now()
+  return () => {
+    at += 1
+    return new Date(at)
+  }
 }

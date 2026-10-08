@@ -45,6 +45,18 @@ export type CliCommand =
       readonly options: GlobalOptions
     }
   | { readonly kind: 'agents'; readonly options: GlobalOptions }
+  | { readonly kind: 'providers'; readonly options: GlobalOptions }
+  | {
+      readonly kind: 'providers-add'
+      readonly provider?: string | undefined
+      readonly options: GlobalOptions
+    }
+  | {
+      readonly kind: 'providers-remove'
+      readonly provider: string
+      readonly yes: boolean
+      readonly options: GlobalOptions
+    }
   | {
       readonly kind: 'default-model'
       readonly model?: string | undefined
@@ -71,6 +83,7 @@ export type ParseOutcome =
 const SUBCOMMANDS = [
   'sessions',
   'agents',
+  'providers',
   'default-model',
   'login',
   'logout',
@@ -84,6 +97,7 @@ type Subcommand = (typeof SUBCOMMANDS)[number]
 const SUBCOMMAND_BLURBS: Record<Subcommand, string> = {
   sessions: 'it lists what the server has, or deletes one with `delete <id>`',
   agents: 'it lists what the server has',
+  providers: 'it lists the model-provider keys, or manages them with `add` and `remove <provider>`',
   'default-model': 'it gets or sets the default model',
   login: 'it signs you in through the browser',
   logout: 'it ends the session and forgets the token',
@@ -151,6 +165,10 @@ export function parseArgs(argv: readonly string[]): ParseOutcome {
       return parseSessions(extra, values, global)
     }
 
+    if (subcommand === 'providers') {
+      return parseProviders(extra, values, global)
+    }
+
     if (subcommand === 'default-model') {
       return parseDefaultModel(extra, values, global)
     }
@@ -188,7 +206,11 @@ export function parseArgs(argv: readonly string[]): ParseOutcome {
   }
 
   if (values.yes === true) {
-    return { ok: false, error: '--yes only makes sense with `oh sessions delete <id>`.' }
+    return {
+      ok: false,
+      error:
+        '--yes only makes sense with `oh sessions delete <id>` or `oh providers remove <provider>`.',
+    }
   }
 
   if (values.model !== undefined && values.model.trim() === '') {
@@ -286,6 +308,105 @@ function parseSessions(
 }
 
 /**
+ * `oh providers` in all three shapes (#210): a bare listing (or `list`), `add [provider]`, and
+ * `remove <provider> [--yes]`.
+ *
+ * A bare `oh providers` is the listing, the way a bare `oh sessions` is — the common case is
+ * reading what is there. `add` takes at most one argument, the provider to start on; `remove`
+ * takes exactly one, the provider to forget, and `--yes` is the only flag the command accepts
+ * besides the global ones.
+ */
+function parseProviders(
+  extra: readonly string[],
+  values: ReturnType<typeof parseOptions>['values'],
+  global: GlobalOptions,
+): ParseOutcome {
+  const [action, ...rest] = extra
+
+  if (action === undefined || action === 'list') {
+    if (action === 'list' && rest.length > 0) {
+      return {
+        ok: false,
+        error: `\`oh providers list\` takes no arguments, got '${rest.join(' ')}'.`,
+      }
+    }
+    if (values.yes === true) {
+      return {
+        ok: false,
+        error: '--yes only makes sense with `oh providers remove <provider>`.',
+      }
+    }
+    const conflicting = wrongFlagFor('providers', values)
+    if (conflicting !== undefined) {
+      return {
+        ok: false,
+        error: `\`oh providers\` does not take ${conflicting}; ${SUBCOMMAND_BLURBS.providers}.`,
+      }
+    }
+    return { ok: true, command: { kind: 'providers', options: global } }
+  }
+
+  if (action === 'add') {
+    const [provider, ...overflow] = rest
+    if (overflow.length > 0) {
+      return {
+        ok: false,
+        error: `\`oh providers add\` takes at most one provider, got '${rest.join(' ')}'.`,
+      }
+    }
+    if (provider !== undefined && provider.trim() === '') {
+      return {
+        ok: false,
+        error: '`oh providers add` needs a provider name, like `oh providers add anthropic`.',
+      }
+    }
+    if (values.yes === true) {
+      return { ok: false, error: '--yes only makes sense with `oh providers remove <provider>`.' }
+    }
+    const conflicting = wrongFlagFor('providers', values)
+    if (conflicting !== undefined) {
+      return {
+        ok: false,
+        error: `\`oh providers add\` does not take ${conflicting}; it connects a provider.`,
+      }
+    }
+    return { ok: true, command: { kind: 'providers-add', provider, options: global } }
+  }
+
+  if (action === 'remove') {
+    const [provider, ...overflow] = rest
+    if (provider === undefined) {
+      return {
+        ok: false,
+        error: '`oh providers remove` needs the provider: oh providers remove <provider>.',
+      }
+    }
+    if (overflow.length > 0) {
+      return {
+        ok: false,
+        error: `\`oh providers remove\` takes one provider, got '${[provider, ...overflow].join(' ')}'.`,
+      }
+    }
+    const conflicting = wrongFlagFor('providers', values)
+    if (conflicting !== undefined) {
+      return {
+        ok: false,
+        error: `\`oh providers remove\` does not take ${conflicting}; it forgets one key.`,
+      }
+    }
+    return {
+      ok: true,
+      command: { kind: 'providers-remove', provider, yes: values.yes === true, options: global },
+    }
+  }
+
+  return {
+    ok: false,
+    error: `unknown \`oh providers\` argument '${action}'. \`oh providers\` lists the keys; \`oh providers add [provider]\` connects one; \`oh providers remove <provider>\` forgets one.`,
+  }
+}
+
+/**
  * `oh default-model [provider/model]`: no argument prints the stored default, one sets it.
  *
  * The id is not validated here beyond being non-empty — the server owns the shape rule (a
@@ -344,7 +465,15 @@ function wrongFlagFor(
   if (values.continue === true) return '--continue'
   if (values.agent !== undefined) return `--agent <id|name>`
   if (values.model !== undefined) return `--model <provider/model>`
-  if (values.yes === true && subcommand !== 'sessions') return '--yes'
+  if (
+    values.yes === true &&
+    subcommand !== 'sessions' &&
+    // `oh providers remove` is the other command that asks a question to skip; the bare
+    // listing and `oh providers add` reject it themselves, in `parseProviders`.
+    subcommand !== 'providers'
+  ) {
+    return '--yes'
+  }
   if (values['no-browser'] === true && subcommand !== 'login') return '--no-browser'
   return undefined
 }

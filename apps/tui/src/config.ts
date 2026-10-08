@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 
+import type { ThemeSetting } from './markdown/theme'
+
 /**
  * Where the server lives when nothing says otherwise: production (#192).
  *
@@ -27,6 +29,11 @@ export interface ResolvedConfig {
    * `OH_NO_AUTO_UPDATE`, and `CI`, are the other two).
    */
   readonly autoUpdate: boolean
+  /**
+   * Which background the code theme is drawn for (epic #201, X4): `auto` reads the terminal,
+   * the other two are the override for a terminal that will not say. Default `auto`.
+   */
+  readonly theme: ThemeSetting
   /** Which source the server URL came from, for `--debug`. */
   readonly sources: {
     readonly server: ConfigSource
@@ -98,6 +105,7 @@ export function resolveConfig(inputs: ConfigInputs = {}): ConfigOutcome {
     config: {
       server: normalized.value,
       autoUpdate: file.value.autoUpdate ?? true,
+      theme: file.value.theme ?? 'auto',
       sources: { server: server.source },
     },
   }
@@ -107,9 +115,13 @@ export function resolveConfig(inputs: ConfigInputs = {}): ConfigOutcome {
 interface FileConfig {
   readonly server?: string | undefined
   readonly autoUpdate?: boolean | undefined
+  readonly theme?: ThemeSetting | undefined
 }
 
-const FILE_KEYS = ['server', 'autoUpdate'] as const
+const FILE_KEYS = ['server', 'autoUpdate', 'theme'] as const
+
+/** Every value the `theme` key takes. */
+const THEME_VALUES = ['auto', 'light', 'dark'] as const
 
 type ReadResult =
   { readonly ok: true; readonly value: FileConfig } | { readonly ok: false; readonly error: string }
@@ -164,7 +176,7 @@ function readConfigFile(path: string, read: (path: string) => string | undefined
     }
   }
 
-  const value: { server?: string; autoUpdate?: boolean } = {}
+  const value: { server?: string; autoUpdate?: boolean; theme?: ThemeSetting } = {}
 
   const server = record['server']
   if (server !== undefined) {
@@ -183,6 +195,17 @@ function readConfigFile(path: string, read: (path: string) => string | undefined
       return { ok: false, error: `${path}: 'autoUpdate' must be true or false.` }
     }
     value.autoUpdate = autoUpdate
+  }
+
+  const theme = record['theme']
+  if (theme !== undefined) {
+    if (typeof theme !== 'string' || !(THEME_VALUES as readonly string[]).includes(theme)) {
+      return {
+        ok: false,
+        error: `${path}: 'theme' must be ${THEME_VALUES.map((name) => `'${name}'`).join(', ')}.`,
+      }
+    }
+    value.theme = theme as ThemeSetting
   }
 
   return { ok: true, value }

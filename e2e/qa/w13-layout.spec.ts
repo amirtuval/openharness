@@ -90,9 +90,11 @@ test.describe('W13 layout and keyboard', () => {
         order.push(await focusedNow())
       }
       console.log('tab order from the top:', order.join(' → '))
-      // The sidebar comes first, which is where it is on the page.
+      // The sidebar comes first, which is where it is on the page: its own logo, the control
+      // that puts the column away (#211, U10), and then New chat.
       expect(order[0]).toContain('openharness')
-      expect(order[1]).toContain('New chat')
+      expect(order[1]).toContain('Hide sidebar')
+      expect(order[2]).toContain('New chat')
 
       // And the composer hands the keyboard to the controls next to it: the model selector
       // first — it sits between the box and Send since #113 (U3) — and then Send.

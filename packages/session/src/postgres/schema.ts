@@ -209,12 +209,14 @@ export interface ProviderCredentialsTable {
 }
 
 /**
- * `user_preferences`: the settings a user keeps across sessions (#111, epic #116 U1).
+ * `user_preferences`: the settings a user keeps across sessions (#111, epic #116 U1; theme:
+ * #203, epic #201 X3).
  *
  * One row per user — `user_id` is the primary key — holding the `provider/model` a new chat
- * starts with, or `null` when the user has no default. `putPreferences` replaces the row
- * whole (the store upserts it), so this is a value rather than a log, and `updated_at` is
- * when that value last changed, from the injected clock. `on delete cascade` from `"user"`
+ * starts with, or `null` when the user has no default, and the web app's `theme` (`system`,
+ * `light`, `dim` or `dark`; `system` follows the operating system). `putPreferences` replaces
+ * the row whole (the store upserts it), so this is a value rather than a log, and `updated_at`
+ * is when that value last changed, from the injected clock. `on delete cascade` from `"user"`
  * takes a user's preferences with the user.
  */
 export interface UserPreferencesTable {
@@ -222,6 +224,8 @@ export interface UserPreferencesTable {
   user_id: string
   /** The `provider/model` a new session starts with, or `null` for no default. */
   default_model: string | null
+  /** The web theme name; `system` unless the user chose one (`0019_user_preferences_theme.sql`). */
+  theme: string
   updated_at: Date
 }
 

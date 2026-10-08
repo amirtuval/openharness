@@ -36,6 +36,9 @@ export type { ProviderCredentialsResource } from './resources/provider-credentia
 export type { ModelsResource } from './resources/models'
 export type { PreferencesResource } from './resources/preferences'
 
+export { PROVIDERS, providerInfo, providerName } from './providers'
+export type { ProviderInfo } from './providers'
+
 export { DeviceLoginError, OPENHARNESS_CLI_CLIENT_ID } from './resources/auth'
 export type { AuthResource, DeviceLoginStart, PollDeviceLoginOptions } from './resources/auth'
 
@@ -58,6 +61,16 @@ export {
   selectMessages,
   selectStreamingMessage,
 } from './transcript'
-export type { Transcript, TranscriptError, TranscriptMessage, TranscriptState } from './transcript'
+export type {
+  MessagePart,
+  PendingModelRequest,
+  TextPart,
+  Transcript,
+  TranscriptError,
+  TranscriptMessage,
+  TranscriptMessageMeta,
+  TranscriptState,
+  TranscriptUsage,
+} from './transcript'
 
 export type { StreamOptions } from './events/stream'

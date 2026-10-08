@@ -13,12 +13,11 @@ import {
   waitForIdle,
 } from './support'
 import {
-  AGENT_LINE,
+  replyOccurrences,
   CLI_LOGIN_HINT,
   Terminal,
   ensureCliSignedIn,
   expectNoErrorNotice,
-  occurrences,
   ohCommand,
   ohCommandIn,
   openDevicePage,
@@ -77,9 +76,11 @@ test.describe('W27 §11 cross-client and robustness', () => {
       })
 
       await test.step('from the browser: the terminal sees it, then the reply', async () => {
-        const before = occurrences(terminal.capture(), AGENT_LINE)
         await sendFromComposer(page, 'sent from the browser')
-        await terminal.waitUntil((screen) => occurrences(screen, AGENT_LINE) > before, 120_000)
+        await terminal.waitUntil(
+          (screen) => replyOccurrences(screen, 'sent from the browser') >= 2,
+          120_000,
+        )
         await terminal.waitForIdle(120_000)
         await waitForIdle(request, session.id)
         await expect(page.getByRole('log', { name: 'Conversation' })).toContainText(
@@ -117,7 +118,9 @@ test.describe('W27 §11 cross-client and robustness', () => {
   test('W27b Settings and the device page at 390x844', async ({ context, page }) => {
     await page.setViewportSize({ width: 390, height: 844 })
     await page.goto('/#/settings')
-    await expect(page.getByText('Model providers')).toBeVisible()
+    await expect(page.getByText('Providers', { exact: true })).toBeVisible()
+    // #209: the URL is Settings → Advanced, collapsed until it is asked for.
+    await page.getByRole('button', { name: /Advanced/ }).click()
     await expect(page.getByLabel('Server URL')).toBeVisible()
     const settingsOverflow = await page.evaluate(
       () => document.documentElement.scrollWidth - document.documentElement.clientWidth,

@@ -1,3 +1,4 @@
+import { providerName } from '@openharness/client'
 import { Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
@@ -6,15 +7,16 @@ import type { DeleteSessionResult } from '../../hooks/use-sessions'
 import { useSession } from '../../hooks/use-session'
 import type { ModelsView } from '../../hooks/use-models'
 import { shortId, sessionLabel } from '../../lib/format'
-import type { ModelNameLookup } from '../../lib/models'
+import { providerOf, type ModelNameLookup } from '../../lib/models'
 import { showNotice } from '../../lib/notice'
-import { settingsHash } from '../../lib/router'
 import { ModelPicker } from '../models/model-picker'
+import { AddProviderDialog } from '../providers/add-provider-dialog'
 import { Button } from '../ui/button'
-import { Composer } from './composer'
+import { Composer, focusComposer } from './composer'
 import { ErrorBanner } from './error-banner'
 import { MessageList } from './message-list'
 import { StatusIndicator } from './status-indicator'
+import { workingState } from './working-row'
 
 /**
  * An open session: header, conversation, errors, composer.
@@ -34,6 +36,11 @@ import { StatusIndicator } from './status-indicator'
  *   leaves the chat after it (the open chat goes to New chat). A chat deleted somewhere else
  *   announces itself through the stream's `session.deleted`: the app shows the notice and
  *   leaves, so the reader is never left typing into a log that no longer exists.
+ * - **The draft is the screen's (#212).** The composer has been able to take its text from
+ *   the caller since U10; what needed it here is Edit and resend, which puts a message that is
+ *   already in the transcript back in the box. A send clears it the same way the composer's
+ *   own text used to be cleared — through `onValueChange('')` — so there is still exactly one
+ *   rule about what is in the box.
  */
 export function ChatView({
   sessionId,
@@ -71,6 +78,10 @@ export function ChatView({
     dismissError,
   } = useSession(client, sessionId)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  // The draft, owned here rather than by the composer (#212): "Edit and resend" puts the
+  // reader's own words back in the box, and a screen that wants to put words in the box owns
+  // its text (U10) — the composer is the box, not the thing that decides what is in it.
+  const [draft, setDraft] = useState('')
 
   // The model the session runs as the log last said it; a session created with a model shows
   // it through the header resource until a message carries one (the transcript's `model`).
@@ -80,6 +91,15 @@ export function ChatView({
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
+  // The Add-provider dialog (X5). Three states in one value: `undefined` is closed, `null` is
+  // open with the provider left to the reader (the picker's "+ Add provider"), and a provider
+  // id is open on that provider's form (the missing-key banner, which knows which one failed).
+  const [addingProvider, setAddingProvider] = useState<string | null | undefined>(undefined)
+  // The reader has pressed Stop on this turn (U10). Nothing in the log says a request was
+  // interrupted *by the reader* — the log says the turn ended — so the screen remembers the one
+  // action that can only have come from here, and drops it the moment a new message is sent:
+  // "Interrupted" belongs to the turn it stopped, not to the chat.
+  const [interrupted, setInterrupted] = useState(false)
 
   // A chat opens with the cursor in the box: whether it was picked from the sidebar or just
   // created from New chat, the next thing the user does is type.
@@ -99,6 +119,9 @@ export function ChatView({
 
   const sendFromComposer = useCallback(
     async (text: string): Promise<boolean> => {
+      // Sending is the start of a new turn: whatever the last one was stopped short of is no
+      // longer what the foot of the transcript is about.
+      setInterrupted(false)
       const switching = chosen !== null && chosen !== sessionModel
       const stored = await send(text, switching ? { model: chosen } : undefined)
       if (stored && switching) {
@@ -110,6 +133,33 @@ export function ChatView({
     },
     [chosen, sessionModel, send],
   )
+
+  // Stop, and the word for it (U10): the interrupt request goes out, and the row at the foot
+  // of the transcript says what was done — until the next message.
+  const stop = useCallback(async (): Promise<void> => {
+    setInterrupted(true)
+    await interrupt()
+  }, [interrupt])
+
+  // "Edit and resend" (#212): the message goes back in the box, with the cursor in it, and
+  // that is the whole of it — nothing here removes the message it came from, because the log
+  // is append-only (#201) and the reader is writing a new message, not repairing an old one.
+  const editFromTranscript = useCallback((text: string): void => {
+    setDraft(text)
+    focusComposer()
+  }, [])
+
+  // The transcript's own foot (U10). "No text has arrived" means the turn has not drawn
+  // anything yet: an agent message is the newest one and it is still empty, so an ordinary
+  // reply in flight (which is text on screen) gets no row.
+  const newest = messages.at(-1)
+  const statusRow = workingState({
+    status,
+    retrying: lastError?.retryStatus === 'retrying',
+    retryReason: lastError?.message,
+    interrupted,
+    hasReplyText: newest?.role === 'agent' && newest.text.trim() !== '',
+  })
 
   const confirmDelete = async (): Promise<void> => {
     setDeleting(true)
@@ -177,7 +227,13 @@ export function ChatView({
         </div>
       ) : null}
 
-      <MessageList messages={messages} loading={loadingHistory} nameOf={nameOf} />
+      <MessageList
+        messages={messages}
+        loading={loadingHistory}
+        nameOf={nameOf}
+        working={statusRow}
+        onEdit={editFromTranscript}
+      />
 
       <div className="border-t px-4 py-3">
         <div className="mx-auto w-full max-w-3xl space-y-2">
@@ -198,12 +254,20 @@ export function ChatView({
               message={lastError.message}
               // The one error in the log the reader can fix themselves: the session's owner
               // has no key for the model's provider (epic #65, A5), so the turn ended and no
-              // retry will help until one is saved.
+              // retry will help until one is saved. The fix opens **here** (X5): leaving the
+              // chat for Settings, saving, and finding the way back was the whole detour this
+              // issue removes. The provider is the one the failed model names.
               action={
                 lastError.type === 'missing_provider_credential' ? (
-                  <a className="underline underline-offset-2" href={settingsHash()}>
-                    Add a key in Settings → Model providers
-                  </a>
+                  <Button
+                    type="button"
+                    variant="link"
+                    size="xs"
+                    className="h-auto p-0 text-destructive"
+                    onClick={() => setAddingProvider(providerOf(sessionModel))}
+                  >
+                    Add a provider key
+                  </Button>
                 ) : undefined
               }
             />
@@ -214,8 +278,10 @@ export function ChatView({
           <Composer
             running={status === 'running'}
             onSend={sendFromComposer}
-            onStop={interrupt}
+            onStop={stop}
             inputRef={inputRef}
+            value={draft}
+            onValueChange={setDraft}
             modelSelector={
               <ModelPicker
                 variant="compact"
@@ -226,11 +292,27 @@ export function ChatView({
                 onChange={setChosen}
                 refreshing={catalog.refreshing}
                 onRefresh={catalog.refresh}
+                // From the picker the provider is the reader's to choose, so the dialog opens
+                // on the tiles rather than on a form.
+                onAddProvider={() => setAddingProvider(null)}
               />
             }
           />
         </div>
       </div>
+
+      <AddProviderDialog
+        open={addingProvider !== undefined}
+        initialProvider={addingProvider ?? undefined}
+        onSaved={(provider) => {
+          setAddingProvider(undefined)
+          showNotice(`Saved the ${providerName(provider)} key.`)
+          // A key that was not there a moment ago is a provider's models that were not there
+          // either: the picker offers them from here, without leaving the chat (X5).
+          void catalog.reload()
+        }}
+        onClose={() => setAddingProvider(undefined)}
+      />
     </div>
   )
 }

@@ -1,4 +1,4 @@
-import { expect, signInWithDevForm, test } from './support'
+import { expect, openAccountMenu, signInWithDevForm, test } from './support'
 
 /**
  * W15 — the sign-in page (epic #65, A1/A3/A7).
@@ -140,8 +140,11 @@ test.describe('W15 sign-in', () => {
         // The shell replaces the sign-in page, and the sidebar knows who it is (A2: a session
         // cookie; the URL never moved).
         await expect(page.getByRole('heading', { name: 'Sign in to openharness' })).toHaveCount(0)
-        // The sidebar's own control, which only exists for a signed-in person.
-        await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible()
+        // The sidebar's own control, which only exists for a signed-in person — one menu
+        // down, in the account menu at its foot (#211).
+        await openAccountMenu(page)
+        await expect(page.getByRole('menuitem', { name: 'Sign out' })).toBeVisible()
+        await page.keyboard.press('Escape')
       })
 
       await test.step('already signed in, #/signin goes home', async () => {

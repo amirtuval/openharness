@@ -27,8 +27,10 @@ export function StatusIndicator({
       <span
         aria-hidden="true"
         className={cn(
+          // Coral, the palette's "something is happening" colour (U12, #227) — it was a green
+          // dot, which was the only colour in the app the violet/coral palette had no home for.
           'size-2 rounded-full',
-          running ? 'animate-pulse bg-emerald-500' : 'bg-muted-foreground/40',
+          running ? 'animate-pulse bg-coral' : 'bg-muted-foreground/40',
         )}
       />
       {label}

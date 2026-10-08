@@ -10,12 +10,23 @@ import type { FakeClient } from '@openharness/client/testing'
  * developed, clicked through and QA'd before the server exists.
  *
  * Two things keep the fake out of a production build: `import.meta.env.DEV` is replaced by
- * `false`, which leaves the branch below statically dead so it (and the dynamic import inside
- * it) is dropped, and the fake itself is a dynamic import, so it can only ever be a separate
- * chunk.
+ * `false`, which leaves the branch below statically dead so (and the dynamic import inside it)
+ * is dropped, and the fake itself is a dynamic import, so it can only ever be a separate chunk.
  */
 export function isFakeMode(): boolean {
   return import.meta.env.DEV && import.meta.env.VITE_OPENHARNESS_FAKE === '1'
+}
+
+/**
+ * Which fake account to run: the seeded one, or a first run with nothing configured.
+ *
+ * `VITE_OPENHARNESS_FAKE_STATE=empty` is the state the first-run screen exists for (epic #201,
+ * X5): an account with no provider key, so no catalog, no default and no chat that could run.
+ * Without it fake mode is the seeded account (`seedFakeScenario`), which is the state to
+ * *develop* in — the empty one is the state to look at.
+ */
+function fakeState(): 'seeded' | 'empty' {
+  return import.meta.env.VITE_OPENHARNESS_FAKE_STATE === 'empty' ? 'empty' : 'seeded'
 }
 
 /**
@@ -30,6 +41,50 @@ export async function createDevFakeClient(): Promise<Client | null> {
   }
 
   const { createFakeClient } = await import('@openharness/client/testing')
+
+  if (fakeState() === 'empty') {
+    const fresh = createFakeClient({
+      // No credentials and no default: the first-run screen is decided by the credentials list
+      // alone (#209), so this is the state it exists for.
+      //
+      // The catalog is seeded anyway, which a real server would not do (C5 lists models for
+      // the providers the caller has a key for) — the fake's catalog is a fixed list that a
+      // saved key cannot change, and without it the screen *after* the flow would have
+      // nothing to name and nothing to run: `createFakeClient` picks the first catalog model
+      // of the provider just saved, the way the server does (U4). Clicking the flow through
+      // therefore ends where it would against a real server, which is the point of the state.
+      models: [
+        {
+          id: 'anthropic/claude-sonnet-5',
+          provider: 'anthropic',
+          name: 'Claude Sonnet 5',
+          context_window: 200_000,
+          max_output_tokens: 64_000,
+          source: 'provider',
+        },
+        {
+          id: 'openai/gpt-5.1-mini',
+          provider: 'openai',
+          name: 'GPT-5.1 mini',
+          context_window: 400_000,
+          max_output_tokens: 128_000,
+          source: 'provider',
+        },
+        {
+          id: 'google/gemini-2.5-pro',
+          provider: 'google',
+          name: 'Gemini 2.5 Pro',
+          context_window: 1_000_000,
+          max_output_tokens: 65_536,
+          source: 'provider',
+        },
+      ],
+      preferences: { default_model: null },
+    })
+    Object.assign(globalThis, { __openharnessFake: fresh })
+    return fresh
+  }
+
   // A small catalog across two providers — one of them fallen back to the registry — so the
   // New chat picker's grouping, context windows and fallback note are all visible in fake
   // mode (#91), not just a single row.
@@ -88,6 +143,57 @@ export async function createDevFakeClient(): Promise<Client | null> {
 }
 
 /**
+ * The markdown the seeded session's reply is made of.
+ *
+ * Everything the chat's renderer has to get right, in one message: a heading, a list, a table
+ * that is wider than the bubble, inline code, and three fenced blocks with different languages.
+ * Keeping it in the seeded reply means fake mode opens on a finished, fully rendered message
+ * — which is also what the screenshots in the QA pass are taken of (#204, epic #201 X9).
+ *
+ * The Rust block is there because of #227: `rust` used to render plain, so it is the language
+ * a reader who saw the old build will look for first, and the screenshot of "the chat now
+ * highlights more" is a screenshot of it.
+ */
+const SEEDED_REPLY = [
+  'I answer from the fake client: a scripted stream, no server involved.',
+  '',
+  '## What this reply shows',
+  '',
+  '- a heading, a list and some `inline code`',
+  '- a table, which scrolls sideways rather than squashing the message',
+  '- two code blocks, highlighted per theme, each with a **Copy** button',
+  '',
+  '| package | what it holds | where it is |',
+  '| --- | --- | --- |',
+  '| `@openharness/client` | the transcript reducer every frontend reads | `packages/client` |',
+  '| `@openharness/protocol` | the event and session schemas | `packages/protocol` |',
+  '| `@openharness/session` | the append-only event log | `packages/session` |',
+  '',
+  '```typescript',
+  'export function greeting(name: string): string {',
+  '  return `hello ${name}`',
+  '}',
+  '```',
+  '',
+  '```bash',
+  'yarn install --immutable',
+  'yarn turbo run build test --filter=@openharness/web...',
+  '```',
+  '',
+  '```rust',
+  'fn main() {',
+  '    let greetings = vec!["hello", "hola"];',
+  '    for greeting in &greetings {',
+  '        println!("{greeting}");',
+  '    }',
+  '}',
+  '```',
+  '',
+  '- press **Stop** while a reply is running',
+  '- reload the page: the history is replayed from the log',
+].join('\n')
+
+/**
  * The scenario the fake starts with.
  *
  * The smallest one that exercises the UI: a second agent, a second session created from it —
@@ -111,18 +217,16 @@ export async function seedFakeScenario(fake: FakeClient): Promise<void> {
     agent: assistant.id,
     title: 'What can you do?',
   })
-  fake.respondWith(
-    'I answer from the fake client: a scripted stream, no server involved.\n\n' +
-      '- send a message and watch it stream (deltas are on)\n' +
-      '- press **Stop** while one is running\n' +
-      '- reload the page: the history is replayed from the log',
-    { sessionId: seeded.id, chunks: 16, delayMs: 5 },
-  )
+  fake.respondWith(SEEDED_REPLY, { sessionId: seeded.id, chunks: 16, delayMs: 5 })
   await fake.sendMessage(seeded.id, 'What can you do?')
   await fake.waitForIdle(seeded.id)
 
-  fake.respondWith('Fake client again: still no server, still streaming.', {
-    chunks: 10,
-    delayMs: 20,
-  })
+  // Slow enough to watch arrive, and cut so that a fence is open part-way through: the
+  // second message is what a screenshot of the mid-stream state is taken of.
+  fake.respondWith(
+    'Fake client again: still no server, still streaming.\n\n' +
+      '```bash\nkubectl apply -f deploy.yaml\nkubectl rollout status deploy/web\n```\n\n' +
+      'That is the whole of it — nothing here reached a server.',
+    { chunks: 18, delayMs: 120 },
+  )
 }

@@ -1,5 +1,6 @@
-import { ApiError, AuthenticationError } from '@openharness/client'
-import { createFakeClient } from '@openharness/client/testing'
+import { ApiError, AuthenticationError, type Client } from '@openharness/client'
+import { createFakeClient, type FakeClient } from '@openharness/client/testing'
+import { EVENT_TYPES } from '@openharness/protocol'
 import { describe, expect, it } from 'vitest'
 
 import { failing } from '../test-support/fake'
@@ -158,6 +159,29 @@ describe('createChatSession', () => {
     session.dispose()
   })
 
+  it('shows a line a command wrote, and keeps it until the next message', async () => {
+    const fake = createFakeClient()
+    fake.respondWith('Answered.')
+    const session = createChatSession({ client: fake, session: fake.session })
+    await session.start()
+
+    session.showNotice({ kind: 'info', text: 'Commands and keys', hints: ['/model'] })
+    expect(session.getState().notice).toEqual({
+      kind: 'info',
+      text: 'Commands and keys',
+      hints: ['/model'],
+    })
+
+    // A hint goes away when the user types; what a command printed is not a hint.
+    session.dismissHint()
+    expect(session.getState().notice?.text).toBe('Commands and keys')
+
+    await session.send('Hello.')
+    await fake.waitForIdle()
+    expect(session.getState().notice).toBeNull()
+    session.dispose()
+  })
+
   it('sends a model picked with /model on the next message, and clears it', async () => {
     const fake = createFakeClient()
     fake.respondWith('Switched.', { sessionId: fake.session.id })
@@ -311,4 +335,129 @@ describe('createChatSession', () => {
     expect(seen.length).toBe(before)
     session.dispose()
   })
+
+  it('keeps the clock the working indicator reads, and clears it between turns (#208)', async () => {
+    const fake = createFakeClient({ delayMs: 5 })
+    fake.respondWith('A slow reply.', { chunks: 4, delayMs: 20 })
+    const session = createChatSession({ client: fake, session: fake.session })
+    await session.start()
+
+    expect(session.getState().runningSince).toBeNull()
+    expect(session.getState().lastTextAt).toBeNull()
+
+    await session.send('Go.')
+    await waitFor(() => session.getState().runningSince !== null)
+    await waitFor(() => session.getState().lastTextAt !== null)
+
+    await fake.waitForIdle()
+    await waitFor(() => session.getState().transcript.status === 'idle')
+
+    // A turn that has ended has no clock: the elapsed time was about *that* turn, and the
+    // next one starts its own.
+    expect(session.getState().runningSince).toBeNull()
+    expect(session.getState().lastTextAt).toBeNull()
+    session.dispose()
+  })
+
+  it('names the reply whose metadata is still on its way (#208)', async () => {
+    const fake = createFakeClient({ delayMs: 5 })
+    fake.respondWith('A reply.', { chunks: 3, delayMs: 5 })
+    const { client, release } = holdingFirstSpanEnd(fake)
+    const session = createChatSession({ client, session: fake.session })
+    await session.start()
+
+    await session.send('Go.')
+    // The *stored* reply, not the preview the deltas stream into: the preview is not a
+    // message anything will hold for, and the window this test is about opens the moment the
+    // reply lands.
+    await waitFor(() => {
+      const messages = session.getState().transcript.messages
+      return messages.some((message) => message.role === 'agent' && !message.streaming)
+    })
+
+    // The reply is complete on screen and its span end is still in flight, so the transcript
+    // is still waiting on it. Holding that reply live is what lets its metadata line arrive
+    // before Ink's `<Static>` writes the message for good.
+    const reply = session
+      .getState()
+      .transcript.messages.find((message) => message.role === 'agent' && !message.streaming)
+    expect(reply).toBeDefined()
+    expect(session.getState().awaitingMetaId).toBe(reply?.id)
+
+    release()
+    await fake.waitForIdle()
+    await waitFor(() => session.getState().awaitingMetaId === null)
+
+    const settled = session.getState().transcript.messages.find((m) => m.role === 'agent')
+    expect(settled?.meta?.usage?.total).toBeGreaterThan(0)
+    session.dispose()
+  })
+
+  it('says a turn was interrupted, until there is a newer one (#208)', async () => {
+    const fake = createFakeClient({ delayMs: 5 })
+    fake.respondWith('One two three four', { chunks: 4, delayMs: 30 })
+    const session = createChatSession({ client: fake, session: fake.session })
+    await session.start()
+
+    await session.send('Go.')
+    await waitFor(() => session.getState().transcript.status === 'running')
+    expect(session.getState().interrupted).toBe(false)
+
+    expect(session.pressCtrlC()).toBe('interrupt')
+    await waitFor(() => session.getState().interrupted)
+
+    // It stays said after the turn ends: the reader is owed the answer to "what happened to
+    // that?", which the partial reply on screen does not give.
+    await fake.waitForIdle()
+    await waitFor(() => session.getState().transcript.status === 'idle')
+    expect(session.getState().interrupted).toBe(true)
+
+    fake.respondWith('A second reply.', { chunks: 4, delayMs: 30 })
+    await session.send('Again.')
+    // Sending is enough to turn the line over, before the server has said anything: the next
+    // turn is not the interrupted one, and `Interrupted` is about to be wrong either way.
+    expect(session.getState().interrupted).toBe(false)
+    session.dispose()
+  })
 })
+
+/**
+ * A client whose stream holds the first `span.model_request_end` back until the test lets it
+ * through.
+ *
+ * The server writes a reply and *then* its span end — the reply is what the model produced,
+ * the span end is the accounting for it — and the two can reach a client in different
+ * batches, which is what puts a settled reply in the scrollback before its metadata. The fake
+ * emits them back to back, so this is the seam that opens the gap wide enough for a test.
+ */
+function holdingFirstSpanEnd(fake: FakeClient): {
+  readonly client: Client
+  readonly release: () => void
+} {
+  let release: () => void = () => {}
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let held = false
+
+  const client: Client = {
+    ...fake,
+    sessions: {
+      ...fake.sessions,
+      events: {
+        ...fake.sessions.events,
+        async *stream(sessionId, options) {
+          for await (const event of fake.sessions.events.stream(sessionId, options)) {
+            if (!held && event.type === EVENT_TYPES.modelRequestEnd) {
+              held = true
+              await gate
+            }
+            yield event
+          }
+        },
+      },
+    },
+  }
+
+  return { client, release }
+}

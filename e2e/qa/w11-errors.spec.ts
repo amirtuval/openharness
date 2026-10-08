@@ -160,10 +160,9 @@ test.describe('W11 errors', () => {
     // about. An absolute URL here is the same origin the page is already on.
     await test.step('point the app at the server by URL', async () => {
       await page.goto('/#/settings')
+      // #209: the server URL is Settings → Advanced, and Advanced is collapsed by default.
+      await page.getByRole('button', { name: /Advanced/ }).click()
       await page.getByLabel('Server URL').fill(BASE_URL)
-      // `exact` because the Model providers card below the URL has its own "Save key" button,
-      // and the role-name match is a substring match: without it this locator is ambiguous
-      // (found while running §11.3 of the #74 pass).
       await page.getByRole('button', { name: 'Save', exact: true }).click()
       // The inline "Saved" confirmation is not the thing to wait for: saving a *new* URL
       // rebuilds the client, the auth gate re-checks the session, and the screen remounts
@@ -335,17 +334,25 @@ test.describe('W11 errors', () => {
     await openChat(page, session.id)
     await sendFromComposer(page, 'anything at all')
 
-    await test.step('the app names the credential that is missing, and where to add it', async () => {
+    await test.step('the app names the credential that is missing, and offers the fix', async () => {
       const banner = page.getByRole('alert')
       await expect(banner).toBeVisible({ timeout: 60_000 })
       await expect(banner).toContainText('missing_provider_credential')
       await expect(banner).toContainText(/No .* key is set/i)
-      await expect(banner.getByRole('link', { name: /Settings/ })).toHaveAttribute(
-        'href',
-        '#/settings',
-      )
+      // #209: the action opens the Add-provider dialog on the provider that failed, in place —
+      // it used to be a link to Settings → Model providers and a walk back.
+      await banner.getByRole('button', { name: 'Add a provider key' }).click()
+      const dialog = page.getByRole('dialog', { name: 'Add a model provider' })
+      await expect(dialog).toBeVisible()
+      await expect(dialog.getByText(/^Connect /)).toBeVisible()
+      await expect(dialog.getByLabel('API key')).toBeVisible()
       await expect(status(page)).toHaveAttribute('aria-label', 'Status: Idle')
       await shot(page, 'w11-06-missing-credential')
+
+      // Escape leaves it without navigating: the chat is still the screen underneath.
+      await page.keyboard.press('Escape')
+      await expect(dialog).toHaveCount(0)
+      await expect(page).toHaveURL(new RegExp(`#/s/${session.id}`))
     })
 
     await test.step('the log says it failed once, and never retried', async () => {

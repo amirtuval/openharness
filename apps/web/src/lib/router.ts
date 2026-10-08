@@ -14,11 +14,17 @@
  * it is the React binding.
  *
  * There is no `#/agents` route since #91: agents are hidden from the UI (they stay in the
- * API), so the screen and its route are gone and an old bookmark lands on the home screen.
+ * API), so the screen and its route are gone and an old bookmark lands on the root route.
+ *
+ * `home` is the root route and nothing more (#209, X5): since the Home screen was removed it
+ * renders the same thing `new` does — a new chat, or the first-run flow for an account with no
+ * provider key. It stays a distinct route here so `#/` keeps meaning "wherever a reader starts"
+ * and `#/new` keeps meaning "a new chat, deliberately".
  */
 
 /** Where the app is. */
 export type Route =
+  /** `#/`: the root — a new chat, or the first-run flow (#209). */
   | { readonly name: 'home' }
   | { readonly name: 'new' }
   | { readonly name: 'chat'; readonly sessionId: string }

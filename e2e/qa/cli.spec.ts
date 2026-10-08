@@ -20,7 +20,6 @@ import {
   uniqueName,
 } from './support'
 import {
-  AGENT_LINE,
   CLI_CONFIG_HOME,
   CLI_CWD,
   CLI_LOGIN_HINT,
@@ -31,10 +30,10 @@ import {
   expectNoErrorNotice,
   forgetCliCredentials,
   loggedInAs,
-  occurrences,
   ohCommand,
   openDevicePage,
   replyHasText,
+  replyOccurrences,
   sendAndAwaitAnswer,
 } from './tmux'
 
@@ -201,11 +200,11 @@ test.describe('cli scenarios', () => {
       await terminal.screenshot(shot, 'c1-02-streaming')
       await terminal.waitForIdle()
       const screen = terminal.capture()
-      expect(screen).toContain('you › hello from the terminal')
+      // Both sides of the exchange: the message that was sent, and the reply to it. Neither
+      // has a label any more (#229), so the count is what says the mock echoed it.
+      expect(screen).toContain('hello from the terminal')
       if (!isRealModel) {
-        // The mock answers by echoing its prompt; where the reply's own words are not known,
-        // the line above is the only half of this that can be asserted.
-        expect(screen).toContain('agent › hello from the terminal')
+        expect(replyOccurrences(screen, 'hello from the terminal')).toBe(2)
       }
       expect(screen, 'the status line is back').toMatch(/idle/)
       expectNoErrorNotice(screen)
@@ -235,8 +234,8 @@ test.describe('cli scenarios', () => {
       expect(narrow).toMatch(/idle/)
       expect(narrow).toContain('❯')
       if (isRealModel) {
-        // The whole reply went through an 80x24 pane: the last number it was asked for is in
-        // the scrollback, so nothing was dropped on the way.
+        // The whole reply went through an 80x24 pane: the count reaches its end in the
+        // scrollback, so nothing was dropped on the way.
         expect(terminal.capture(400), 'the reply arrived in full').toMatch(LONG_REPLY_END)
       } else {
         expect(narrow).toContain('part 40/40')
@@ -249,7 +248,7 @@ test.describe('cli scenarios', () => {
       // written the moment Enter is pressed, at the new width, into a pane a long reply has
       // already scrolled. Whether it is *still* in the capture below depends on how far the
       // reply that follows pushed it up, which is not what this scenario is about.
-      await terminal.waitFor(/you › now at the wider size/, 60_000)
+      await terminal.waitFor(/now at the wider size/, 60_000)
       await terminal.waitForIdle()
       await terminal.screenshot(shot, 'c2-02-wide-200x50')
       const wide = terminal.capture()
@@ -299,10 +298,7 @@ test.describe('cli scenarios', () => {
       terminal.run(ohCommand('-c'))
       // The history that comes back holds both sides; which line is asserted depends on
       // whether the reply's words are known.
-      await terminal.waitFor(
-        isRealModel ? /a message worth resuming/ : /agent › a message worth resuming/,
-        30_000,
-      )
+      await terminal.waitFor(/a message worth resuming/, 30_000)
       await terminal.waitForIdle()
       expect(terminal.capture()).toContain('a message worth resuming')
       expectNoErrorNotice(terminal.capture())
@@ -338,8 +334,8 @@ test.describe('cli scenarios', () => {
       await terminal.screenshot(shot, 'c4-01-steering-queued')
 
       // The steering message is claimed when the brain answers it, and the `(queued)` marker
-      // goes with it. Counting `agent ›` lines would not do here: a long reply scrolls the
-      // first one off a 30-row pane, so the count never reaches two.
+      // goes with it. Counting replies would not do here: a long reply scrolls the first one
+      // off a 30-row pane, so the count never reaches two.
       await terminal.waitUntil((screen) => !screen.includes('(queued)'), 120_000)
       await terminal.waitForIdle()
       expect(terminal.capture(), 'the queued marker is gone').not.toContain('(queued)')
@@ -369,8 +365,8 @@ test.describe('cli scenarios', () => {
         await sendAndAwaitAnswer(terminal, prompt, { slow: !isRealModel })
         await terminal.waitFor(/\brunning\b/, 15_000)
         if (isRealModel) {
-          // Interrupt a reply that has actually said something. The `agent ›` line shows up
-          // with only the streaming cursor on it, before the first token.
+          // Interrupt a reply that has actually said something: the streaming cursor is on
+          // screen from the moment the reply is announced, before the first token.
           await terminal.waitUntil(replyHasText, 60_000)
         } else {
           await terminal.waitFor(/part 5\/40/, 20_000)
@@ -380,13 +376,15 @@ test.describe('cli scenarios', () => {
 
         const screen = terminal.capture()
         const promptLine = prompt.split('\n')[0] ?? ''
-        const interrupted = screen.slice(screen.lastIndexOf(`you › ${promptLine}`))
+        const interrupted = screen.slice(screen.lastIndexOf(promptLine))
+        // The reply is what is left after the message that asked for it — the count for the
+        // mock, and for a real model any two numbers it has got to.
         expect(interrupted, 'the partial reply stays on screen').toMatch(
-          isRealModel ? /agent › / : /part 1\/40/,
+          isRealModel ? /\b\d+\s+\d+\b/ : /part 1\/40/,
         )
         if (isRealModel) {
-          // The reply was asked to count, one number per line, so the last number on a line of
-          // its own means it finished — which an interrupt mid-stream must prevent.
+          // The reply was asked to count to the end of the range, so the last two numbers
+          // arriving together means it finished — which an interrupt mid-stream must prevent.
           expect(interrupted, 'the reply stopped short of the end').not.toMatch(LONG_REPLY_END)
         } else {
           expect(interrupted, 'the reply stopped short').not.toContain('part 40/40')
@@ -434,12 +432,11 @@ test.describe('cli scenarios', () => {
       await terminal.waitFor(/first line\s*\n\s+second line/)
       await terminal.screenshot(shot, 'c6-01-ctrl-j')
 
-      const beforeSend = occurrences(terminal.capture(), AGENT_LINE)
       terminal.send('Enter')
       if (isRealModel) {
-        await terminal.waitUntil((screen) => occurrences(screen, AGENT_LINE) > beforeSend, 60_000)
+        await terminal.waitUntil(replyHasText, 60_000)
       } else {
-        await terminal.waitFor(/agent › first line/, 30_000)
+        await terminal.waitUntil((screen) => replyOccurrences(screen, 'first line') >= 2, 30_000)
       }
       const sent = terminal.capture()
       expect(sent).toContain('second line')

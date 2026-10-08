@@ -947,20 +947,36 @@ describe('the fake deletes a session (#111)', () => {
 })
 
 describe('the fake preferences (#111)', () => {
-  it('starts at { default_model: null } and replaces the whole value', async () => {
+  it('starts at the protocol defaults and merges what a put carries', async () => {
     const fake = createFakeClient()
 
-    await expect(fake.preferences.get()).resolves.toEqual({ default_model: null })
+    await expect(fake.preferences.get()).resolves.toEqual({ default_model: null, theme: 'system' })
 
     const stored = await fake.preferences.put({ default_model: 'openai/gpt-4.1-mini' })
-    expect(stored).toEqual({ default_model: 'openai/gpt-4.1-mini' })
-    await expect(fake.preferences.get()).resolves.toEqual({ default_model: 'openai/gpt-4.1-mini' })
+    // The default model alone: the theme it did not carry keeps its stored value.
+    expect(stored).toEqual({ default_model: 'openai/gpt-4.1-mini', theme: 'system' })
+    await expect(fake.preferences.get()).resolves.toEqual({
+      default_model: 'openai/gpt-4.1-mini',
+      theme: 'system',
+    })
 
-    // null clears the choice: the whole value is written, like the server's PUT.
+    // A theme alone likewise leaves the default model alone (#203) — the two never clear
+    // each other.
+    await expect(fake.preferences.put({ theme: 'dim' })).resolves.toEqual({
+      default_model: 'openai/gpt-4.1-mini',
+      theme: 'dim',
+    })
+    await expect(fake.preferences.get()).resolves.toEqual({
+      default_model: 'openai/gpt-4.1-mini',
+      theme: 'dim',
+    })
+
+    // null clears the choice, like the server's PUT.
     await expect(fake.preferences.put({ default_model: null })).resolves.toEqual({
       default_model: null,
+      theme: 'dim',
     })
-    await expect(fake.preferences.get()).resolves.toEqual({ default_model: null })
+    await expect(fake.preferences.get()).resolves.toEqual({ default_model: null, theme: 'dim' })
   })
 
   it('seeds the value from createFakeClient', async () => {
@@ -970,6 +986,7 @@ describe('the fake preferences (#111)', () => {
 
     await expect(fake.preferences.get()).resolves.toEqual({
       default_model: 'anthropic/claude-sonnet-5',
+      theme: 'system',
     })
   })
 })
@@ -1178,6 +1195,47 @@ describe("the fake's authentication", () => {
       fake.providerCredentials.put('anthropic', { type: 'api_key', api_key: '  ' }),
     ).rejects.toMatchObject({ status: 422, type: 'invalid_provider_credential' })
   })
+
+  it('picks a default model for the first key, and never replaces one (#116, U4)', async () => {
+    const fake = createFakeClient({
+      models: [
+        {
+          id: 'anthropic/claude-sonnet-5',
+          provider: 'anthropic',
+          name: 'Claude Sonnet 5',
+          context_window: 200_000,
+          max_output_tokens: 64_000,
+          source: 'provider',
+        },
+        {
+          id: 'openai/gpt-4.1-mini',
+          provider: 'openai',
+          name: 'GPT-4.1 mini',
+          context_window: 128_000,
+          max_output_tokens: 16_000,
+          source: 'provider',
+        },
+      ],
+    })
+    expect((await fake.preferences.get()).default_model).toBeNull()
+
+    await fake.providerCredentials.put('openai', { type: 'api_key', api_key: 'sk-openai-1234' })
+    // The saved provider's model, not the catalog's first.
+    expect((await fake.preferences.get()).default_model).toBe('openai/gpt-4.1-mini')
+
+    // The reader's own choice stands: a second key does not move the default.
+    await fake.preferences.put({ default_model: 'anthropic/claude-sonnet-5' })
+    await fake.providerCredentials.put('openai', { type: 'api_key', api_key: 'sk-openai-5678' })
+    expect((await fake.preferences.get()).default_model).toBe('anthropic/claude-sonnet-5')
+  })
+
+  it('leaves the default null when no catalog model can be picked', async () => {
+    const fake = createFakeClient({ models: [] })
+
+    await fake.providerCredentials.put('anthropic', { type: 'api_key', api_key: 'sk-ant-1234' })
+
+    expect((await fake.preferences.get()).default_model).toBeNull()
+  })
 })
 
 describe('the fake and the real client agree', () => {
@@ -1195,6 +1253,23 @@ describe('the fake and the real client agree', () => {
       'agent:One more time.',
     ])
     expect(transcript.lastSeq).toBe(fake.history().at(-1)?.seq)
+  })
+
+  it('give a retried reply the same metadata live and replayed (#201, U1)', async () => {
+    const fake = createFakeClient()
+    fake.failWith({ retryStatus: 'retrying' })
+    fake.respondWith('Second time lucky.', { chunks: 3 })
+
+    const { events, transcript } = await runTurn(fake)
+    const live = transcript.messages.at(-1)?.meta
+
+    // Both requests report FAKE_MODEL_USAGE — the one that failed and the retry that answered
+    // — and a reply that took two of them ran on the model of the second.
+    expect(live).toMatchObject({
+      model: fake.session.model.id,
+      usage: { input: 1024, output: 64, total: 1088 },
+    })
+    expect((await replayThroughClient(events, fake.session.id)).messages.at(-1)?.meta).toEqual(live)
   })
 
   it('agree after an interrupt as well', async () => {

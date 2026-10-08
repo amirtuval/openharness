@@ -80,7 +80,8 @@ migrations/             the SQL the Postgres stores need, applied by `migrate()`
                         0015 the effective session model/system (#93),
                         0016 the per-user preferences (#111),
                         0017 the scheduler-instance membership (#122),
-                        0018 the credential key provider (#150)
+                        0018 the credential key provider (#150),
+                        0019 the theme on the per-user preferences (#203)
 docs/postgres.md        the Postgres stores: schema, migrations, delivery, local setup
 ```
 
@@ -91,7 +92,7 @@ docs/postgres.md        the Postgres stores: schema, migrations, delivery, local
 | export                                                                                                                                              | what it is                                                                                                                                                                                                                                                                                                                                |
 | --------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `SessionStore`                                                                                                                                      | the storage and signaling contract; every method is async, and documented below. Since #111 it also carries `getPreferences`/`putPreferences` (the per-user settings beside the log) and `deleteSession` (the owner-scoped hard delete); since #122 the scheduler membership (`heartbeatInstance`, `listLiveInstances`, `removeInstance`) |
-| `UserPreferences`                                                                                                                                   | a user's stored preferences, `{ default_model: string \| null }` (#111, epic #116 U1) — the vocabulary of `getPreferences`/`putPreferences`                                                                                                                                                                                               |
+| `UserPreferences`                                                                                                                                   | a user's stored preferences, `{ default_model: string \| null, theme: 'system' \| 'light' \| 'dim' \| 'dark' }` (#111, epic #116 U1; theme: #203, epic #201 X3) — the vocabulary of `getPreferences`/`putPreferences`                                                                                                                     |
 | `AppendableEvent`                                                                                                                                   | an event a caller appends: a `StoredEvent` minus `seq` and `processed_at`, plus an optional `id` the caller supplies                                                                                                                                                                                                                      |
 | `CreateSessionOptions`, `ListAgentsOptions`, `ListSessionsOptions`, `ListEventsOptions`                                                             | the options objects of the list and create methods (`CreateSessionOptions` carries the effective `model`/`system`, #93)                                                                                                                                                                                                                   |
 | `OwnerScope`                                                                                                                                        | `{ ownerId }`: how a read is scoped to one owner (A4) — required, so forgetting it is a compile error; see [the contract](#the-contract)                                                                                                                                                                                                  |
@@ -394,10 +395,12 @@ close the open streams of a session revoked elsewhere. Like a signal, a missed n
 recoverable rather than fatal: the server re-validates the session periodically.
 
 **Preferences.** `getPreferences(userId)` and `putPreferences(userId, preferences)` are the
-per-user settings beside the log (#111, epic #116 U1), keyed by `userId` like the
-`CredentialStore` is. `UserPreferences` is one value, `{ default_model: string | null }` — the
-`provider/model` a new chat starts with, or `null` for no choice — and a user who has never
-saved one reads `{ default_model: null }`: there is no null answer and no throw, so a settings
+per-user settings beside the log (#111, epic #116 U1; the theme: #203, epic #201 X3), keyed by
+`userId` like the `CredentialStore` is. `UserPreferences` is one value,
+`{ default_model: string | null, theme: UserTheme }` — the `provider/model` a new chat starts
+with, or `null` for no choice, and the web app's colour scheme — and a user who has never
+saved one reads `{ default_model: null, theme: 'system' }`: there is no null answer and no
+throw, so a settings
 screen always has a value. `putPreferences` writes the value whole (one row per user, replaced
 in place; `{ default_model: null }` clears it), stamps `updated_at` from the injected clock,
 and answers what was stored. Both answers are deep-frozen, like a credential's.
@@ -484,8 +487,8 @@ recorded `{ from_seq, to_seq }` range: `by_event_id` primary key, `by_seq`, and 
 `last_seen` of its last heartbeat; see `0017`), `provider_credentials` (a sealed credential per
 `(user_id, provider)`, with the key provider that wrapped its data key — NULL meaning `local`;
 see `0013` and `0018`) and
-`user_preferences` (one row per user: the stored `default_model`, or NULL; `on delete cascade`
-from `"user"`; see `0016`). Five are
+`user_preferences` (one row per user: the stored `default_model`, or NULL, and the `theme`,
+`system` by default; `on delete cascade` from `"user"`; see `0016` and `0019`). Five are
 **Better Auth's**, created by the same migrations and read and written by Better Auth itself
 (decision A1): `user`, `session`, `account`, `verification` and `deviceCode`.
 
@@ -581,8 +584,8 @@ Wave 1 of the chat-UX epic (#111) added one more:
   `user_preferences` table, one row per user — `user_id` primary key, `on delete cascade` from
   `"user"` — holding `default_model text` (NULL for no default) and `updated_at`. One
   `create table if not exists`, and nothing to backfill: a user with no row reads the
-  protocol's default, `{ default_model: null }`. `putPreferences` upserts the row
-  (`on conflict (user_id) do update`), so the table is a value rather than a log.
+  protocol's defaults, `{ default_model: null, theme: 'system' }`. `putPreferences` upserts
+  the row (`on conflict (user_id) do update`), so the table is a value rather than a log.
 
 The partition scheduler's membership (issue #122) added another:
 
@@ -595,7 +598,19 @@ The partition scheduler's membership (issue #122) added another:
   is nothing to backfill — an absent row means nobody has announced that id — and a lost row
   costs one heartbeat's announcement rather than anything durable.
 
-The vault's key provider (issue #150, deployment epic #148 decision D6) added the latest one:
+The web theme (issue #203, chat-UX epic #201 decision X3) added one more:
+
+- **`0019_user_preferences_theme.sql` — the theme on the per-user preferences** (#203): one
+  `add column if not exists theme text not null default 'system'` on `user_preferences`,
+  holding `system`, `light`, `dim` or `dark` — the shape the protocol's `UserThemeSchema`
+  validates, stored here as the name. **Every existing row takes `system`**, which is not a
+  guess: it is what those users were already seeing, because the app followed
+  `prefers-color-scheme` and had no switcher. A real column default rather than the
+  "NULL means the default" rule of `0018`, because a write always supplies it — an absent theme
+  would be a bug, not a legitimate older shape. The reader is total anyway: a name outside the
+  four reads as `system`, so a hand-edited row cannot break a preferences read.
+
+The vault's key provider (issue #150, deployment epic #148 decision D6) added one before it:
 
 - **`0018_credential_key_provider.sql` — which provider wrapped a credential** (#150): one
   `add column if not exists key_provider text` on `provider_credentials`, holding `local` or

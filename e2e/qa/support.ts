@@ -72,6 +72,26 @@ export function uniqueName(prefix: string): string {
 export const QA_MODEL = process.env.QA_MODEL ?? 'anthropic/claude-sonnet-5'
 
 /**
+ * The heading of the web app's New chat screen (epic #201, U10, #211; U12, #227).
+ *
+ * `apps/web` exports it as `NEW_CHAT_GREETING` (`src/screens/new-chat-screen.tsx`), and it
+ * replaced the literal "New chat" the screen used to be headed with. That package's `exports`
+ * is its built `index.html`, though, so there is nothing for a spec to import: the string is
+ * repeated here, and changing it in the app is changing this line.
+ */
+export const NEW_CHAT_GREETING = 'Hey! What are we building today?'
+
+/**
+ * The heading of the web app's first-run screen (U12, #227).
+ *
+ * The same mirror as {@link NEW_CHAT_GREETING}, for `FIRST_RUN_HEADING`
+ * (`src/screens/first-run-screen.tsx`). The heading also carries a ✨ that sits outside the
+ * gradient span, so a spec matches the heading with `new RegExp(FIRST_RUN_HEADING)` rather
+ * than by the whole name — the sentence is the contract, the emoji is decoration.
+ */
+export const FIRST_RUN_HEADING = "Let's get you chatting"
+
+/**
  * Whether this run is against a real provider rather than the mock model.
  *
  * Setting `QA_MODEL` at all is the signal: the default above is the model every spec has
@@ -95,8 +115,19 @@ export const LONG_REPLY_COUNT = 60
 /** A prompt a real provider answers at length. */
 export const LONG_REPLY_PROMPT = `Count from 1 to ${String(LONG_REPLY_COUNT)}, one number per line. Nothing else.`
 
-/** The line the long reply ends with, which is how "it finished" reads on screen. */
-export const LONG_REPLY_END = new RegExp(`^\\s*${String(LONG_REPLY_COUNT)}\\s*$`, 'm')
+/**
+ * What "the long reply finished" reads as on screen.
+ *
+ * The reply is a count, one number per line — and a reply is Markdown, so those newlines are
+ * the soft breaks CommonMark says they are and the numbers end up flowing together, wrapped
+ * by the client to the width it has. The end is therefore the last two numbers next to each
+ * other, whatever line the wrapping put them on (`\s+` covers a line break and the hanging
+ * indent after it). The prompt's own `1 to 60` cannot satisfy it: nothing precedes that
+ * number but a space.
+ */
+export const LONG_REPLY_END = new RegExp(
+  `\\b${String(LONG_REPLY_COUNT - 1)}\\s+${String(LONG_REPLY_COUNT)}\\b`,
+)
 
 /**
  * A longer reply still, for the scenario that kills the server in the middle of one.
@@ -522,6 +553,45 @@ export async function setDefaultModel(
   expect(response.status(), await response.text()).toBe(200)
 }
 
+/** The four theme names, as the protocol's `UserThemeSchema` spells them (epic #201, X3). */
+const THEMES = ['system', 'light', 'dim', 'dark'] as const
+
+/** One of them. */
+export type StoredTheme = (typeof THEMES)[number]
+
+/** The account's stored theme — the web app's colour scheme (epic #201, X3). */
+export async function storedTheme(request: APIRequestContext): Promise<StoredTheme> {
+  const response = await request.get('/v1/me/preferences')
+  expect(response.status(), await response.text()).toBe(200)
+  const body = (await response.json()) as { theme: string }
+  // The route's own vocabulary: a name outside the four is a server bug, not a QA surprise.
+  expect(THEMES, `stored theme ${body.theme}`).toContain(body.theme)
+  return body.theme as StoredTheme
+}
+
+/**
+ * Store a theme through the API, the way Settings → Appearance does.
+ *
+ * A write merges (X3), so this leaves the account's default model exactly where it was.
+ */
+export async function setStoredTheme(
+  request: APIRequestContext,
+  theme: StoredTheme,
+): Promise<void> {
+  const response = await request.put('/v1/me/preferences', { data: { theme } })
+  expect(response.status(), await response.text()).toBe(200)
+}
+
+/**
+ * Which theme the page is painted with: what `data-theme` says on `<html>`.
+ *
+ * The one observable a theme has in a browser — every token block in `src/index.css` hangs off
+ * it — so specs assert this rather than the colours it stands for.
+ */
+export async function paintedTheme(page: Page): Promise<string | null> {
+  return page.evaluate(() => document.documentElement.getAttribute('data-theme'))
+}
+
 /**
  * Give the account a default model, and answer which one it now is.
  *
@@ -710,6 +780,91 @@ export async function sendFromComposer(page: Page, text: string): Promise<void> 
   await input.click()
   await input.fill(text)
   await input.press('Enter')
+}
+
+// --- the account menu (#211, U10) -----------------------------------------------------------------
+
+/**
+ * The sidebar's account menu, at the foot of the list.
+ *
+ * Since #211 Settings, the theme quick switch and Sign out live behind this one button, which
+ * is labelled for the account rather than with the email — the email in it changes, and a spec
+ * should not have to know it to open "things I can do as me".
+ */
+export async function openAccountMenu(page: Page): Promise<void> {
+  await page.getByRole('button', { name: 'Account menu' }).click()
+}
+
+/** Sign out the way a reader does: the account menu, then Sign out. */
+export async function signOutFromSidebar(page: Page): Promise<void> {
+  await openAccountMenu(page)
+  await page.getByRole('menuitem', { name: 'Sign out' }).click()
+}
+
+/**
+ * Open the account menu's Theme submenu and return it.
+ *
+ * A submenu opens on hover and on ArrowRight; Playwright's `hover` produces the real
+ * pointermove Radix listens for.
+ */
+export async function openThemeSubmenu(page: Page): Promise<void> {
+  await openAccountMenu(page)
+  await page.getByRole('menuitem', { name: 'Theme' }).hover()
+}
+
+// --- provider keys (#209) --------------------------------------------------------------------------
+
+/** The Add-provider dialog, addressed by the label it carries (`aria-label`). */
+export function providerDialog(page: Page) {
+  return page.getByRole('dialog', { name: 'Add a model provider' })
+}
+
+/** The keys already stored, as Settings → Providers lists them. */
+export function savedKeys(page: Page) {
+  return page.getByRole('region', { name: 'Saved provider keys' })
+}
+
+/**
+ * Open Settings → Providers and wait for the card to have loaded.
+ *
+ * The card is a list since #209: adding and replacing go through the dialog
+ * ({@link addProviderKey}), and the list itself is what a scenario about stored keys reads.
+ */
+export async function openProviders(page: Page): Promise<void> {
+  await page.goto('/#/settings')
+  await expect(page.getByText('Providers', { exact: true })).toBeVisible()
+  await expect(savedKeys(page).getByText('Loading your keys…')).toHaveCount(0)
+}
+
+/**
+ * Store a provider key through Settings → Providers → Add provider.
+ *
+ * @param displayName the provider's display name, which is what the tile is labelled with
+ *   (`OpenAI`, not `openai`).
+ */
+export async function addProviderKey(page: Page, displayName: string, key: string): Promise<void> {
+  await page.getByRole('button', { name: 'Add provider' }).click()
+  await providerDialog(page)
+    .getByRole('button', { name: new RegExp(displayName) })
+    .click()
+  await providerDialog(page).getByLabel('API key').fill(key)
+  await providerDialog(page)
+    .getByRole('button', { name: /^(Save|Replace) key$/ })
+    .click()
+  await expect(providerDialog(page)).toHaveCount(0)
+}
+
+/**
+ * Delete a provider's key through Settings → Providers, with the in-page confirmation.
+ *
+ * @param provider the router id, which is what the row's action is labelled with
+ *   (`Delete the openai key`).
+ */
+export async function deleteProviderKey(page: Page, provider: string): Promise<void> {
+  await page.getByRole('button', { name: `Delete the ${provider} key` }).click()
+  await page.getByRole('button', { name: 'Delete', exact: true }).click()
+  // The row's own actions are the row: there is no "delete this provider" left to click.
+  await expect(page.getByRole('button', { name: `Delete the ${provider} key` })).toHaveCount(0)
 }
 
 /**

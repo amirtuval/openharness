@@ -56,6 +56,8 @@ src/
   http.ts               request building, response parsing, error mapping, FetchLike
   errors.ts             ApiError, AuthenticationError, ResponseValidationError, status → type
   transcript.ts         TranscriptState, reduceTranscript, selectors, createTranscript
+  providers.ts          PROVIDERS: the model providers the frontends offer — name, key URL,
+                        free-tier hint, credential type (#209)
   resources/agents.ts   agents.create/get/list/update
   resources/auth.ts     auth.startDeviceLogin/pollDeviceLogin/signOut, DeviceLoginError
   resources/models.ts   models.list: the model catalog (epic #92)
@@ -77,25 +79,27 @@ src/
 
 ### `@openharness/client`
 
-| export                                                                                          | what it is                                                           |
-| ----------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| `createClient(options)`                                                                         | build a client                                                       |
-| `Client`, `ClientOptions`, `RequestOptions`                                                     | the interface both the real and the fake client implement            |
-| `AgentsResource`, `SessionsResource`, `SessionEventsResource`                                   | the resource interfaces                                              |
-| `ProviderCredentialsResource`                                                                   | `providerCredentials.list/put/delete`                                |
-| `ModelsResource`                                                                                | `models.list`: the chat models the caller's keys can use (epic #92)  |
-| `PreferencesResource`                                                                           | `preferences.get/put`: the caller's stored default model (#111)      |
-| `AuthResource`                                                                                  | `auth.startDeviceLogin/pollDeviceLogin/signOut`                      |
-| `OPENHARNESS_CLI_CLIENT_ID`                                                                     | the `client_id` the device flow presents: `'openharness-cli'`        |
-| `DeviceLoginError`, `DeviceLoginStart`, `PollDeviceLoginOptions`                                | the device flow's error, its start result and its poll options       |
-| `StreamOptions`                                                                                 | `{ deltas?, afterSeq?, signal? }` for `events.stream`                |
-| `SendMessageOptions`                                                                            | `sendMessage`'s options: cancellation, plus the `model` to switch to |
-| `FetchLike`, `DebugHook`, `RawResponse`                                                         | the `fetch` seam, the hook for what the client skips, the raw answer |
-| `ApiError`, `AuthenticationError`, `ResponseValidationError`, `errorTypeForStatus()`            | the three errors and the status → `error.type` map                   |
-| `createTranscript()`, `reduceTranscript()`, `reduceTranscriptAll()`, `initialTranscriptState()` | the transcript store and the pure reducer                            |
-| `selectMessages()`, `selectIsRunning()`, `selectLastMessage()`, `selectStreamingMessage()`      | selectors                                                            |
-| `Transcript`, `TranscriptState`, `TranscriptMessage`, `TranscriptError`                         | the transcript's types                                               |
-| `PACKAGE_NAME`                                                                                  | the package name; a dependent's cheap proof that the import resolved |
+| export                                                                                          | what it is                                                              |
+| ----------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `createClient(options)`                                                                         | build a client                                                          |
+| `Client`, `ClientOptions`, `RequestOptions`                                                     | the interface both the real and the fake client implement               |
+| `AgentsResource`, `SessionsResource`, `SessionEventsResource`                                   | the resource interfaces                                                 |
+| `ProviderCredentialsResource`                                                                   | `providerCredentials.list/put/delete`                                   |
+| `ModelsResource`                                                                                | `models.list`: the chat models the caller's keys can use (epic #92)     |
+| `PreferencesResource`                                                                           | `preferences.get/put`: the caller's stored default model (#111)         |
+| `AuthResource`                                                                                  | `auth.startDeviceLogin/pollDeviceLogin/signOut`                         |
+| `OPENHARNESS_CLI_CLIENT_ID`                                                                     | the `client_id` the device flow presents: `'openharness-cli'`           |
+| `DeviceLoginError`, `DeviceLoginStart`, `PollDeviceLoginOptions`                                | the device flow's error, its start result and its poll options          |
+| `StreamOptions`                                                                                 | `{ deltas?, afterSeq?, signal? }` for `events.stream`                   |
+| `SendMessageOptions`                                                                            | `sendMessage`'s options: cancellation, plus the `model` to switch to    |
+| `FetchLike`, `DebugHook`, `RawResponse`                                                         | the `fetch` seam, the hook for what the client skips, the raw answer    |
+| `ApiError`, `AuthenticationError`, `ResponseValidationError`, `errorTypeForStatus()`            | the three errors and the status → `error.type` map                      |
+| `createTranscript()`, `reduceTranscript()`, `reduceTranscriptAll()`, `initialTranscriptState()` | the transcript store and the pure reducer                               |
+| `selectMessages()`, `selectIsRunning()`, `selectLastMessage()`, `selectStreamingMessage()`      | selectors                                                               |
+| `Transcript`, `TranscriptState`, `TranscriptMessage`, `TranscriptError`                         | the transcript's types                                                  |
+| `MessagePart`, `TextPart`, `TranscriptMessageMeta`, `TranscriptUsage`, `PendingModelRequest`    | a message's typed parts, a reply's metadata, and its bookkeeping (#201) |
+| `PROVIDERS`, `providerInfo()`, `providerName()`, `ProviderInfo`                                 | the model providers a form or a tile needs (#209)                       |
+| `PACKAGE_NAME`                                                                                  | the package name; a dependent's cheap proof that the import resolved    |
 
 ### `@openharness/client/testing`
 
@@ -358,20 +362,40 @@ for await (const event of client.sessions.events.stream(sessionId, {
 
 ```ts
 interface TranscriptState {
-  messages: TranscriptMessage[] // { id, role, text, blocks, pending, streaming, position, modelChangedTo? }
+  // { id, role, text, parts, meta?, pending, streaming, position, modelChangedTo? }
+  messages: TranscriptMessage[]
   status: 'idle' | 'running' // from the session status events
   lastError: TranscriptError | null // { type, message, retryStatus }
   lastSeq: number // the `seq` to resume from
   deleted: boolean // a `session.deleted` arrived: the session is gone (#111)
   model: string | null // the model the log last said the session runs (#111)
+  pendingRequests: PendingModelRequest[] // bookkeeping for `meta`; empty between turns (#201)
 }
 ```
+
+**A message is typed parts, not text** (epic #201, X1). `parts: readonly MessagePart[]` is a
+discriminated union on `type`; only `{ type: 'text', text }` exists today, and `thinking`,
+`tool_use`, `tool_result`, `question` and `approval` are the members the next phases add —
+named in the type's TSDoc, deliberately not implemented, with no protocol event behind them
+yet. `text` stays `parts.join('')` of the text parts, so a caller that only wants the words
+does not change. Both frontends render `message.parts` through a `Record<MessagePart['type'],
+Renderer>`, so the new members are a compile error until each frontend has drawn them.
 
 The rules it implements, in one place:
 
 - **Messages come from stored events, keyed by id.** `user.message` adds a `user` message;
   `agent.message` **replaces** whatever the transcript holds for the same id — the chunks
   accumulated so far, or nothing at all — and never merges.
+- **A reply carries what it cost** (epic #201, U1). The turn's `span.model_request_start`
+  names the model and opens a tracked request ({@link PendingModelRequest}), its
+  `span.model_request_end` reports the tokens and closes it, and the reply takes them all as
+  `meta: { model?, durationMs?, usage? }`. The span end arrives _after_ the reply, so the
+  metadata is written twice: the model when the reply lands, the tokens and the time when the
+  end arrives. A reply the brain retried takes the request that failed too, so its tokens sum
+  and its duration runs from the first start to the last end — the time a reader waited. A
+  turn that ends (`session.status_idle`) drops the requests no reply ever claimed. Anything
+  the log does not say is absent, never `0`: a view that joined after a reply's span start
+  cannot name its model, and one that never saw a span reports no `meta` at all.
 - **Every message has a position, and `messages` stays sorted by it.** A reply in flight sits
   where its chunks started (its `event_start`'s `seq`, or its first delta's `seq` when the
   start was skipped); a finished reply sits where it started (`supersedes.from_seq`, the
@@ -421,6 +445,28 @@ true`, keyed by the id of the event it previews; `event_delta`s extend it (per c
   one already in effect — the change a UI draws its marker for. The first model the log shows
   is not a change (`state.model` starts at `null`), so it sets the state silently, and a
   message naming the model already in effect changes nothing.
+
+## Provider metadata (#209)
+
+`src/providers.ts` is the list both frontends offer: one `ProviderInfo` per provider — the
+**Mastra router id** (the `provider` half of a `provider/model` string), the display name, the
+**credential type** that selects the form (epic #201, X6), the "get a key" URL, an optional
+free-tier hint (X8) and an optional key-format hint for an input's placeholder.
+
+It is presentation metadata, not a capability list: authorization is still the server's
+(`PUT /v1/provider-credentials/{provider}`). The one rule it has to keep is that it describes
+providers the server will accept a key for — `apps/server`'s `VALIDATABLE_PROVIDERS` — and the
+two have to be **exactly** the same set, because a tile that leads to a key the server refuses
+is worse than no tile. That invariant lives in `e2e/src/provider-metadata.test.ts`: the server
+may not depend on this package, so neither side can hold the assertion, and `e2e` is the one
+place that already depends on both.
+
+`providerName(id)` answers the display name and falls back to the id — the credentials API takes
+any router provider, so a reader who typed an id this list does not carry sees what they typed,
+never a blank.
+
+The web app builds its first-run tiles, its Add-provider dialog and its Settings list from this
+(#209); `oh` will offer the same providers in the terminal (#210, X7).
 
 ## The fake client
 
@@ -531,6 +577,15 @@ The preferences routes are an in-memory value too: `{ default_model: null }` unl
 `createFakeClient({ preferences })` seeds it, `put` replaces it whole, and both answer 401
 while signed out like every `/v1` route.
 
+The credentials are configurable too: `createFakeClient({ credentials })` seeds the store with
+metadata-only rows, which is what a screen that behaves differently for an account **with** a key
+needs — the first-run check is the one that made this an option (#209) — because `put` cannot run
+before a synchronous render. The store itself follows the server: `put` replaces one provider's
+row, `delete` is idempotent, an empty key is answered 422 `invalid_provider_credential`, and the
+**first** save with no default stored picks one the way U4 does — the saved provider's first
+catalog model, else the catalog's first, and never over a default that is already there. The
+recommendation table the server keeps is the one thing the fake does not restate.
+
 The model catalog is configurable too: `createFakeClient({ models, providers })` seeds what
 `models.list` answers — one `anthropic/claude-sonnet-5` entry with an `ok` status by default —
 served sorted by provider then name, the way the server sorts it. Every call is recorded, so a
@@ -594,7 +649,8 @@ Deliberate differences, so a test does not read more into the fake than is there
 ## Testing
 
 `src/**/*.test.ts` with Vitest: `node` everywhere except `src/browser.test.ts`, which declares
-`@vitest-environment jsdom`. The suite drives a mock `fetch` (`src/test-support/mock-fetch.ts`)
+`@vitest-environment jsdom`. `src/providers.test.ts` holds what the metadata list must be on its
+own — unique ids, https key URLs, and a credential type the protocol's request schema parses. The suite drives a mock `fetch` (`src/test-support/mock-fetch.ts`)
 rather than a server: request building and response parsing (cookie and bearer, `me`, the
 credential routes, the preferences routes — `null` and a refused value included — deleting a
 session's 204, the model catalog, sending a message with a model, and creating a session from
@@ -606,14 +662,19 @@ SSE parser's edge cases, reconnect/resume (including a resume mid-reply, from a 
 and the stream ending on `session.deleted` without a reconnect), the server's `event: error`
 goodbye being skipped with the loop ending on the 401 its reconnect meets, every transcript
 rule (the model-switch marker and the deleted flag
-included), one scripted D9 session folded from five different client views that must all
-converge on the same conversation, frozen events through the reducer, the fake's own auth
+included), typed parts (one text part per content block, a streamed reply's parts equal to the
+stored one's) and per-reply metadata (the model, the duration and the tokens off the spans; a
+retried reply's summed tokens; `undefined` where the log says nothing), one scripted D9
+session folded from five different client views that must all converge on the same
+conversation — metadata included, except that the view which joined after the reply's span
+start cannot know its model — frozen events through the reducer, the fake's own auth
 (signed-out 401s, credentials, preferences, the scripted device flow — `slow_down` included),
 the fake's naming of a session from its first message, its 400s and cursor kinds (each case
-asserted against the protocol schema that refuses it), a deleted fake session's final event
+asserted against the protocol schema that refuses it), the default model a first credential save
+picks and the default it leaves alone, a deleted fake session's final event
 and the 404s that follow it, and the fake against the real client on the same scripted
 scenario (the fake's events are replayed to the real client as an SSE body, and the two
-transcripts must be equal).
+transcripts must be equal — a retried reply's metadata included).
 
 ## Allowed `@openharness/*` dependencies
 

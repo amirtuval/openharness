@@ -24,8 +24,8 @@ import type {
 } from '@openharness/protocol'
 
 /**
- * A user's stored preferences (#111, epic #116 U1): the `provider/model` a new chat starts
- * with, or `null` for no default.
+ * A user's stored preferences (#111, epic #116 U1; theme: #203, epic #201 X3): the
+ * `provider/model` a new chat starts with, or `null` for no default, and the web app's theme.
  *
  * The protocol defines it; it is re-exported here because it is the vocabulary of
  * {@link SessionStore.getPreferences} and {@link SessionStore.putPreferences}, so an
@@ -102,11 +102,11 @@ export type { UserPreferences } from '@openharness/protocol'
  *   the scheduler act *for* a session, not for a user, and use the explicitly named unscoped
  *   methods ({@link SessionStore.getSessionUnscoped}, {@link SessionStore.listEventsUnscoped})
  *   that no user-facing route may call.
- * - **Preferences** (#111, epic #116 U1). {@link SessionStore.getPreferences} and
- *   {@link SessionStore.putPreferences} are the per-user settings beside the log: one value
- *   per user — `{ default_model }` — and a user who has never saved one reads the protocol's
- *   default rather than a `null` or a throw. The answer is deep-frozen, like a credential,
- *   because it is a value a caller owns.
+ * - **Preferences** (#111, epic #116 U1; theme: #203, epic #201 X3).
+ *   {@link SessionStore.getPreferences} and {@link SessionStore.putPreferences} are the
+ *   per-user settings beside the log: one value per user — `{ default_model, theme }` — and a
+ *   user who has never saved one reads the protocol's defaults rather than a `null` or a
+ *   throw. The answer is deep-frozen, like a credential, because it is a value a caller owns.
  * - **Deletion** (#111, epic #116 U5). {@link SessionStore.deleteSession} removes a session
  *   and its whole log — owner-scoped, and irreversible — and a subscription to it ends with a
  *   final `session.deleted` stream event instead of starving.
@@ -289,14 +289,15 @@ export interface SessionStore {
   // ------------------------------------------------------------- preferences
 
   /**
-   * Read a user's stored preferences (#111, epic #116 U1), or the protocol's default when
-   * there are none.
+   * Read a user's stored preferences (#111, epic #116 U1; theme: #203, epic #201 X3), or the
+   * protocol's defaults when there are none.
    *
    * Preferences are per user, not per session: the settings a user applies to new sessions —
-   * today the `provider/model` a new chat starts with. A user who has never saved any has no
-   * stored value, and that reads as `{ default_model: null }`: the absence of a choice, never
-   * `null` and never a throw, so a settings screen always has a value to render. The answer
-   * is deep-frozen, like a credential — a caller owns it, and writing to it throws.
+   * the `provider/model` a new chat starts with, and the web theme. A user who has never
+   * saved any has no stored value, and that reads as `{ default_model: null, theme: 'system'
+   * }`: the absence of a choice, never `null` and never a throw, so a settings screen always
+   * has a value to render. The answer is deep-frozen, like a credential — a caller owns it,
+   * and writing to it throws.
    */
   getPreferences(userId: UserId): Promise<UserPreferences>
 
@@ -305,9 +306,12 @@ export interface SessionStore {
    * (#111, epic #116 U1).
    *
    * One value per user, so a second put replaces the first in place rather than accumulating.
-   * There is no partial update: a caller always writes the complete value it wants, and
-   * `{ default_model: null }` is how it clears the stored default. `updated_at` moves to the
-   * injected clock's instant; the answer is the preferences as written, deep-frozen.
+   * There is no partial update: a caller always writes the complete value it wants, and a
+   * `default_model` of `null` is how it clears the stored default. That is what keeps the two
+   * settings from clearing each other — a caller changing one reads the stored value first and
+   * writes both back, rather than writing a half-value this store would have to guess at.
+   * `updated_at` moves to the injected clock's instant; the answer is the preferences as
+   * written, deep-frozen.
    */
   putPreferences(userId: UserId, preferences: UserPreferences): Promise<UserPreferences>
 

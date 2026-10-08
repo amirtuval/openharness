@@ -1,13 +1,22 @@
 import { createTranscript } from '@openharness/client'
 import type { Client, Transcript, TranscriptState } from '@openharness/client'
-import type { ModelEntry, Session } from '@openharness/protocol'
+import { EVENT_TYPES } from '@openharness/protocol'
+import type { ModelEntry, Session, StreamEvent } from '@openharness/protocol'
 
 import { describeError, type ErrorContext } from '../errors'
 import { CTRL_C_WINDOW_MS, decideCtrlC, type CtrlCAction } from './ctrl-c'
 
-/** A line the chat shows above the status bar: a hint, or something that went wrong. */
+/**
+ * A line the chat shows above the status bar.
+ *
+ * - `hint` is transient: typing drops it, which is what makes "press Ctrl+C again to exit"
+ *   a thing that goes away rather than a thing to dismiss.
+ * - `error` is something that went wrong, kept until the next message.
+ * - `info` is a command's own output (`/help`) — also kept until the next message, and
+ *   deliberately not dropped by a keystroke: what a command printed is not a hint.
+ */
 export interface Notice {
-  readonly kind: 'hint' | 'error'
+  readonly kind: 'hint' | 'error' | 'info'
   readonly text: string
   readonly hints: readonly string[]
 }
@@ -25,6 +34,32 @@ export interface ChatViewState {
    * rides the next message, so the status line says so until then.
    */
   readonly pendingModel: string | null
+  /**
+   * When the turn in progress began, in epoch milliseconds — `null` between turns (#208).
+   *
+   * Read off the `session.status_running` event's `processed_at` rather than off the local
+   * clock, so a session resumed mid-turn still counts from when the turn really started. It
+   * is the baseline the working indicator's elapsed time is measured from.
+   */
+  readonly runningSince: number | null
+  /**
+   * When the last text of the turn arrived, in epoch milliseconds — `null` before any has
+   * (#208). A delta or a stored reply counts; the indicator watches it to tell a reply that
+   * is producing text from one that has gone quiet.
+   */
+  readonly lastTextAt: number | null
+  /**
+   * The reply whose `span.model_request_end` is still outstanding, or `null` (#208).
+   *
+   * The transcript keeps a model request until its span end folds that request's tokens and
+   * duration into the reply, so a request that names a message is a reply whose metadata is
+   * on its way. `TranscriptView` holds that reply live until it is not: a settled message is
+   * written once by Ink's `<Static>` and never redrawn, so the metadata line has to land
+   * before the message settles or it never lands at all (epic #201, X2).
+   */
+  readonly awaitingMetaId: string | null
+  /** The user cut the turn short with Ctrl+C, until the next turn or the next send (#208). */
+  readonly interrupted: boolean
 }
 
 /** What {@link createChatSession} needs. */
@@ -80,6 +115,11 @@ export interface ChatSession {
   readonly listModels: () => Promise<readonly ModelEntry[]>
   /** Show an error the screen hit itself, e.g. a catalog that would not load. */
   readonly reportError: (error: unknown) => void
+  /**
+   * Show a line of the caller's own — a command's output (`/help`), or an unknown command's
+   * suggestion (#207). It replaces whatever was there, and the next message clears it.
+   */
+  readonly showNotice: (notice: Notice) => void
   /** Ask a running turn to stop, keeping what it has produced so far. */
   readonly interrupt: () => Promise<void>
   /** Apply the Ctrl+C rules; the caller exits when this returns `exit`. */
@@ -107,6 +147,10 @@ export function createChatSession(options: ChatSessionOptions): ChatSession {
     phase: 'loading',
     notice: null,
     pendingModel: null,
+    runningSince: null,
+    lastTextAt: null,
+    awaitingMetaId: null,
+    interrupted: false,
   }
   let armedAt: number | null = null
   const listeners = new Set<(state: ChatViewState) => void>()
@@ -123,7 +167,13 @@ export function createChatSession(options: ChatSessionOptions): ChatSession {
       })
       return
     }
-    setState({ transcript: next })
+    setState({
+      transcript: next,
+      runningSince,
+      lastTextAt,
+      awaitingMetaId: awaitingMeta(next),
+      interrupted,
+    })
   })
 
   function setState(patch: Partial<ChatViewState>): void {
@@ -134,6 +184,52 @@ export function createChatSession(options: ChatSessionOptions): ChatSession {
   function noticeFor(error: unknown): Notice {
     const report = describeError(error, options.context)
     return { kind: 'error', text: report.message, hints: report.hints }
+  }
+
+  // The working indicator's clock (issue #208): when the turn started, when text last
+  // arrived, and whether the user cut it short. Beside the transcript rather than in it —
+  // these are facts about the session's *time*, which the reducers have no business in.
+  let runningSince: number | null = null
+  let lastTextAt: number | null = null
+  let interrupted = false
+
+  /** Fold an event into the transcript, noting what it says about the clock first. */
+  function apply(event: StreamEvent): void {
+    noteTiming(event)
+    transcript.apply(event)
+  }
+
+  /**
+   * Note what an event says about the working indicator's clock (issue #208).
+   *
+   * A turn starts at `session.status_running` — and at `session.status_rescheduled`, which is
+   * what a retry emits before it runs again — and ends at `session.status_idle`, where the
+   * elapsed time and the quiet window are both reset. Text is a delta or a stored reply: the
+   * two ways a reply says it is getting somewhere.
+   *
+   * The timestamps come from the events' own `processed_at` rather than from the local clock,
+   * so history lands on the turn's real start. The local clock would have `oh -s` into a
+   * session that has been running for a minute open on `Working… 0s`, which is the one number
+   * a reader would act on.
+   */
+  function noteTiming(event: StreamEvent): void {
+    switch (event.type) {
+      case EVENT_TYPES.sessionStatusRunning:
+      case EVENT_TYPES.sessionStatusRescheduled:
+        runningSince = epochMs(event.processed_at) ?? now()
+        interrupted = false
+        break
+      case EVENT_TYPES.sessionStatusIdle:
+        runningSince = null
+        lastTextAt = null
+        break
+      case EVENT_TYPES.eventDelta:
+      case EVENT_TYPES.agentMessage:
+        lastTextAt = epochMs(event.processed_at) ?? now()
+        break
+      default:
+        break
+    }
   }
 
   const chat: ChatSession = {
@@ -153,7 +249,7 @@ export function createChatSession(options: ChatSessionOptions): ChatSession {
         for await (const event of client.sessions.events.iterate(sessionId, undefined, {
           signal: lifetime.signal,
         })) {
-          transcript.apply(event)
+          apply(event)
         }
       } catch (error) {
         if (!lifetime.signal.aborted) setState({ notice: noticeFor(error) })
@@ -167,6 +263,9 @@ export function createChatSession(options: ChatSessionOptions): ChatSession {
     async send(text) {
       if (text.trim() === '') return
       armedAt = null
+      // Sending is the end of whatever the last turn was, interrupted or not (issue #208):
+      // the status line stops saying so the moment there is something newer to say.
+      interrupted = false
       // A model `/model` picked rides this message (epic #116 U3); the session runs it from
       // the turn the message starts, and it is cleared whether or not the send worked —
       // a failed send stored nothing, so there is nothing for the choice to have applied to.
@@ -178,8 +277,8 @@ export function createChatSession(options: ChatSessionOptions): ChatSession {
         })
         // Fold the stored event in now rather than waiting for the stream: the message shows
         // immediately, and the stream's copy of it is dropped as already seen.
-        transcript.apply(stored)
-        setState({ notice: null, pendingModel: null })
+        apply(stored)
+        setState({ notice: null, pendingModel: null, interrupted: false })
       } catch (error) {
         if (!lifetime.signal.aborted) setState({ notice: noticeFor(error), pendingModel: null })
       }
@@ -199,8 +298,20 @@ export function createChatSession(options: ChatSessionOptions): ChatSession {
       setState({ notice: noticeFor(error) })
     },
 
+    showNotice(notice) {
+      // A command is activity, the way picking a model is: it disarms an armed exit.
+      armedAt = null
+      setState({ notice })
+    },
+
     async interrupt() {
       if (transcript.getState().status !== 'running') return
+      // Said at once rather than when the server answers: the interrupt is the user's own
+      // action, and a status line that took a round trip to say so would look like nothing
+      // had happened (#208). The turn is over either way — a failed interrupt says so in a
+      // notice beside this.
+      interrupted = true
+      setState({ interrupted: true })
       try {
         await client.interrupt(sessionId, { signal: lifetime.signal })
       } catch (error) {
@@ -263,7 +374,7 @@ export function createChatSession(options: ChatSessionOptions): ChatSession {
       })
 
       for await (const event of events) {
-        transcript.apply(event)
+        apply(event)
       }
     } catch (error) {
       // An abort is the normal way out. Anything else — a key the server will not take, a
@@ -275,4 +386,25 @@ export function createChatSession(options: ChatSessionOptions): ChatSession {
   }
 
   return chat
+}
+
+/**
+ * The reply whose metadata has not landed yet, or `null` (issue #208).
+ *
+ * The transcript tracks a model request until its `span.model_request_end` folds that
+ * request's tokens and duration into the reply it belongs to, so the last request that names
+ * a message is a reply still waiting for its span end. Requests that name no message — a
+ * failed attempt a retry has yet to fold in — say nothing about what is on screen.
+ */
+function awaitingMeta(transcript: TranscriptState): string | null {
+  return transcript.pendingRequests.reduce<string | null>(
+    (last, request) => request.messageId ?? last,
+    null,
+  )
+}
+
+/** A timestamp as epoch milliseconds, or `undefined` when it is not a date at all. */
+function epochMs(timestamp: string): number | undefined {
+  const ms = Date.parse(timestamp)
+  return Number.isNaN(ms) ? undefined : ms
 }

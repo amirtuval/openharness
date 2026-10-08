@@ -5,6 +5,36 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
     <title>openharness</title>
+    <script>
+      /*
+       * The theme, before the first paint (epic #201, X3).
+       *
+       * The account's theme lives on the server and arrives with a request, which is far too
+       * late to paint a frame with: this reads the cached choice `src/lib/theme.ts` keeps in
+       * `localStorage` and sets `data-theme` on `<html>` here, in the head, so the very first
+       * frame is already in the right colours. The server's value wins afterwards — the app
+       * adopts it and rewrites the cache — and this script's answer is only ever a guess that
+       * is right about everything except the first visit on a new browser.
+       *
+       * It is deliberately tiny, dependency-free and total: a browser with storage turned off,
+       * or a cache holding something an older version wrote, gets `system`. It mirrors
+       * `resolveTheme()` in `src/lib/theme.ts`; keep the two in step.
+       */
+      ;(function () {
+        try {
+          var choice = localStorage.getItem('openharness:theme')
+          if (choice !== 'light' && choice !== 'dim' && choice !== 'dark') {
+            var dark =
+              typeof window.matchMedia === 'function' &&
+              window.matchMedia('(prefers-color-scheme: dark)').matches
+            choice = dark ? 'dark' : 'light'
+          }
+          document.documentElement.setAttribute('data-theme', choice)
+        } catch (error) {
+          document.documentElement.setAttribute('data-theme', 'light')
+        }
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -1,5 +1,5 @@
 import { ApiError, AuthenticationError, type Client } from '@openharness/client'
-import type { ProviderCredential } from '@openharness/protocol'
+import type { ProviderCredential, PutProviderCredentialRequest } from '@openharness/protocol'
 import { useCallback, useEffect, useState } from 'react'
 
 import { describeError } from '../lib/errors'
@@ -22,7 +22,17 @@ export type CredentialResult =
   | { readonly ok: true }
   | { readonly ok: false; readonly kind: CredentialFailureKind; readonly message: string }
 
-/** Everything the Model providers card needs. */
+/**
+ * The outcome of a write, carrying what was stored.
+ *
+ * A save that succeeded has a credential to show, which is what lets the list this hook holds
+ * be updated in place rather than read again — `PUT` is both "add" and "replace".
+ */
+export type CredentialWriteResult =
+  | { readonly ok: true; readonly credential: ProviderCredential }
+  | { readonly ok: false; readonly kind: CredentialFailureKind; readonly message: string }
+
+/** Everything the credential surfaces need: the list, and adding, replacing and deleting. */
 export interface ProviderCredentialsView {
   /** The saved credentials, metadata only — the keys themselves never come back. */
   readonly credentials: readonly ProviderCredential[]
@@ -30,35 +40,59 @@ export interface ProviderCredentialsView {
   readonly loading: boolean
   /** A failed list, as shown inline. */
   readonly error: string | null
-  /** Add or replace one provider's key. */
+  /**
+   * Add or replace one provider's credential, from a whole request body.
+   *
+   * A body rather than an api key because the fields a form collects are decided by the
+   * provider's **credential type** (epic #201, X6): {@link ProviderKeyForm} builds it, and it
+   * is the only thing here that knows how many fields that type has.
+   */
+  readonly put: (
+    provider: string,
+    body: PutProviderCredentialRequest,
+  ) => Promise<CredentialWriteResult>
+  /** Add or replace one provider's api key. The `api_key` shorthand over {@link put}. */
   readonly save: (provider: string, apiKey: string) => Promise<CredentialResult>
-  /** Delete one provider's key. */
+  /** Delete one provider's key; deleting what is not there is not a failure. */
   readonly remove: (provider: string) => Promise<CredentialResult>
+  /**
+   * Read the list again.
+   *
+   * For a surface that shares the screen with the Add-provider dialog (#209): the dialog holds
+   * its own list, so a save made in it is invisible to the card behind it until the card reads
+   * again. A write through this hook's own {@link put} or {@link remove} updates the list in
+   * place and needs nothing.
+   */
+  readonly reload: () => Promise<void>
   /** Clear the list error. */
   readonly dismissError: () => void
 }
 
-/** The caller's provider credentials: the list, and adding, replacing and deleting. */
+/**
+ * The caller's provider credentials: the list, and adding, replacing and deleting.
+ *
+ * One in-memory list per call site. There is no shared store across the app because the three
+ * surfaces that hold one — Settings → Providers, the first-run screen, the Add-provider dialog
+ * — are never on screen together, and the credentials API is write-only, so a screen that
+ * mounts can just read the list again.
+ */
 export function useProviderCredentials(client: Client): ProviderCredentialsView {
   const [credentials, setCredentials] = useState<readonly ProviderCredential[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const { serverUrl } = useSettings()
 
-  useEffect(() => {
-    const controller = new AbortController()
-    setLoading(true)
-    void client.providerCredentials.list({ signal: controller.signal }).then(
-      (response) => {
-        if (controller.signal.aborted) {
-          return
-        }
+  /** One read: the mount's, and every {@link reload}. */
+  const load = useCallback(
+    async (signal?: AbortSignal): Promise<void> => {
+      try {
+        const response = await client.providerCredentials.list(
+          signal === undefined ? undefined : { signal },
+        )
         setCredentials(response.data)
         setError(null)
-        setLoading(false)
-      },
-      (caught: unknown) => {
-        if (controller.signal.aborted) {
+      } catch (caught) {
+        if (signal?.aborted === true) {
           return
         }
         // A 401 while listing means there is no session to list for: the shell takes it from
@@ -66,14 +100,28 @@ export function useProviderCredentials(client: Client): ProviderCredentialsView 
         if (!noteAuthenticationError(client, caught)) {
           setError(describeError(caught, { serverUrl }))
         }
+      }
+    },
+    [client, serverUrl],
+  )
+
+  useEffect(() => {
+    const controller = new AbortController()
+    setLoading(true)
+    void load(controller.signal).finally(() => {
+      if (!controller.signal.aborted) {
         setLoading(false)
-      },
-    )
+      }
+    })
     return () => controller.abort()
-  }, [client, serverUrl])
+  }, [load])
+
+  const reload = useCallback(async (): Promise<void> => {
+    await load()
+  }, [load])
 
   const failureOf = useCallback(
-    (caught: unknown): CredentialResult => {
+    (caught: unknown): { ok: false; kind: CredentialFailureKind; message: string } => {
       if (caught instanceof AuthenticationError) {
         return {
           ok: false,
@@ -90,25 +138,33 @@ export function useProviderCredentials(client: Client): ProviderCredentialsView 
     [serverUrl],
   )
 
-  const save = useCallback(
-    async (provider: string, apiKey: string): Promise<CredentialResult> => {
+  const put = useCallback(
+    async (
+      provider: string,
+      body: PutProviderCredentialRequest,
+    ): Promise<CredentialWriteResult> => {
       try {
-        const saved = await client.providerCredentials.put(provider, {
-          type: 'api_key',
-          api_key: apiKey,
-        })
+        const credential = await client.providerCredentials.put(provider, body)
         // Replace in place: the list is one entry per provider, so `put` is both "add" and
         // "replace" and the row keeps its position.
         setCredentials((current) => [
-          ...current.filter((credential) => credential.provider !== saved.provider),
-          saved,
+          ...current.filter((stored) => stored.provider !== credential.provider),
+          credential,
         ])
-        return { ok: true }
+        return { ok: true, credential }
       } catch (caught) {
         return failureOf(caught)
       }
     },
     [client, failureOf],
+  )
+
+  const save = useCallback(
+    async (provider: string, apiKey: string): Promise<CredentialResult> => {
+      const result = await put(provider, { type: 'api_key', api_key: apiKey })
+      return result.ok ? { ok: true } : result
+    },
+    [put],
   )
 
   const remove = useCallback(
@@ -130,5 +186,5 @@ export function useProviderCredentials(client: Client): ProviderCredentialsView 
     setError(null)
   }, [])
 
-  return { credentials, loading, error, save, remove, dismissError }
+  return { credentials, loading, error, put, save, remove, reload, dismissError }
 }

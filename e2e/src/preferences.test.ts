@@ -23,26 +23,49 @@ describe('the caller’s default model (U1)', () => {
     const server = await harness.server()
     const client = await harness.client(server)
 
-    // Never saved anything: the field is present and null, not missing and not a 404.
-    await expect(client.preferences.get()).resolves.toEqual({ default_model: null })
+    // Never saved anything: both fields are present at their defaults, not missing, not a 404.
+    await expect(client.preferences.get()).resolves.toEqual({
+      default_model: null,
+      theme: 'system',
+    })
 
     const stored = await client.preferences.put({ default_model: 'anthropic/claude-haiku-4-5' })
-    // The write answers the stored value, which is what the settings screen renders.
-    expect(stored).toEqual({ default_model: 'anthropic/claude-haiku-4-5' })
+    // The write answers the stored value, which is what the settings screen renders — with
+    // the theme the body did not mention left where it was.
+    expect(stored).toEqual({ default_model: 'anthropic/claude-haiku-4-5', theme: 'system' })
     await expect(client.preferences.get()).resolves.toEqual({
       default_model: 'anthropic/claude-haiku-4-5',
+      theme: 'system',
     })
 
     await expect(client.preferences.put({ default_model: null })).resolves.toEqual({
       default_model: null,
+      theme: 'system',
     })
-    await expect(client.preferences.get()).resolves.toEqual({ default_model: null })
+    await expect(client.preferences.get()).resolves.toEqual({
+      default_model: null,
+      theme: 'system',
+    })
 
-    // A replacement is a whole write: there is no partial update to get out of step.
+    // A second write replaces the field it carries, over what is stored (epic #201, X3).
     await client.preferences.put({ default_model: 'openai/gpt-4.1-mini' })
     await expect(client.preferences.get()).resolves.toEqual({
       default_model: 'openai/gpt-4.1-mini',
+      theme: 'system',
     })
+
+    // The theme is its own setting, and writing it does not touch the model (epic #201, X3).
+    await expect(client.preferences.put({ theme: 'dim' })).resolves.toEqual({
+      default_model: 'openai/gpt-4.1-mini',
+      theme: 'dim',
+    })
+    await expect(client.preferences.get()).resolves.toEqual({
+      default_model: 'openai/gpt-4.1-mini',
+      theme: 'dim',
+    })
+
+    // The harness shares this user with the tests below, which start from the default theme.
+    await client.preferences.put({ theme: 'system' })
   })
 
   it('keeps one person’s default out of another’s way, on the same server', async () => {
@@ -60,19 +83,25 @@ describe('the caller’s default model (U1)', () => {
 
     // B is not offered A's value — not as a default and not as a fallback — and B's own write
     // does not disturb A's.
-    await expect(b.client.preferences.get()).resolves.toEqual({ default_model: null })
+    await expect(b.client.preferences.get()).resolves.toEqual({
+      default_model: null,
+      theme: 'system',
+    })
     await b.client.preferences.put({ default_model: 'groq/llama-3.3-70b-versatile' })
     await expect(b.client.preferences.get()).resolves.toEqual({
       default_model: 'groq/llama-3.3-70b-versatile',
+      theme: 'system',
     })
     await expect(a.client.preferences.get()).resolves.toEqual({
       default_model: 'anthropic/claude-sonnet-5',
+      theme: 'system',
     })
 
     // B clearing their own leaves A's alone too.
     await b.client.preferences.put({ default_model: null })
     await expect(a.client.preferences.get()).resolves.toEqual({
       default_model: 'anthropic/claude-sonnet-5',
+      theme: 'system',
     })
   })
 
@@ -84,9 +113,10 @@ describe('the caller’s default model (U1)', () => {
     // default that is ahead of the catalogue is exactly how a new provider arrives.
     await expect(
       client.preferences.put({ default_model: 'acme/not-in-any-catalogue' }),
-    ).resolves.toEqual({ default_model: 'acme/not-in-any-catalogue' })
+    ).resolves.toEqual({ default_model: 'acme/not-in-any-catalogue', theme: 'system' })
     await expect(client.preferences.get()).resolves.toEqual({
       default_model: 'acme/not-in-any-catalogue',
+      theme: 'system',
     })
 
     for (const bad of ['model-without-a-provider', 'openai/', '/gpt-5.1', 'openai//gpt-5.1']) {
@@ -95,15 +125,23 @@ describe('the caller’s default model (U1)', () => {
       expect([bad, refused.type]).toEqual([bad, 'invalid_request_error'])
     }
 
-    // A rejected write stores nothing: the valid value above is still what a read answers.
+    // A refused theme is the same 400 — a name outside the four is a bad body, not a
+    // preference to store.
+    const badTheme = await errorOf(() => client.preferences.put({ theme: 'midnight' } as never))
+    expect(badTheme.status).toBe(400)
+    expect(badTheme.type).toBe('invalid_request_error')
+
+    // Every refusal stores nothing: the valid value above is still what a read answers.
     await expect(client.preferences.get()).resolves.toEqual({
       default_model: 'acme/not-in-any-catalogue',
+      theme: 'system',
     })
 
-    // The field itself is required — the resource is written whole, so a body without it is a
-    // 400 rather than a silent clear.
-    const missing = await errorOf(() => client.preferences.put({} as never))
-    expect(missing.status).toBe(400)
-    expect(missing.type).toBe('invalid_request_error')
+    // An empty body is a merge over what is stored — a no-op, not a reset: `null` is the only
+    // way to clear a default.
+    await expect(client.preferences.put({})).resolves.toEqual({
+      default_model: 'acme/not-in-any-catalogue',
+      theme: 'system',
+    })
   })
 })

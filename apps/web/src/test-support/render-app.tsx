@@ -3,7 +3,8 @@ import {
   type FakeClient,
   type FakeClientOptions,
 } from '@openharness/client/testing'
-import { render, type RenderResult } from '@testing-library/react'
+import { render, screen, type RenderResult } from '@testing-library/react'
+import type userEvent from '@testing-library/user-event'
 
 import { App } from '../App'
 
@@ -120,23 +121,52 @@ export function sessionRows(): HTMLElement[] {
   return [...document.querySelectorAll<HTMLElement>('nav[aria-label="Chats"] li')]
 }
 
+/**
+ * Open the account menu at the foot of the sidebar (U10).
+ *
+ * Settings, the theme and Sign out live inside it, and a Radix menu keeps its content out of
+ * the DOM until it opens — so a test that wants one of them has to open it the way a reader
+ * does, and this is that one step in one place. The menu itself is portalled to `document.body`,
+ * which is why its items are queried with `screen`, not `within` the sidebar.
+ */
+export async function openAccountMenu(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+  // `findBy`, not `getBy`: the shell is behind the session check, so the sidebar — and the menu
+  // in its foot — does not exist for the first frames of a render.
+  await user.click(await screen.findByRole('button', { name: 'Account menu' }))
+}
+
 /** The message element for a role — the first one, for the single-message cases. */
 export function messageElement(role: 'user' | 'agent'): Element | null {
   return document.querySelector(`[data-role="${role}"]`)
 }
 
 /**
+ * Every message for a role, in transcript order.
+ *
+ * `messageElement` answers "the message" for a conversation with one of them; a test about
+ * something that is true of *one* of several — the last user message, the second reply's
+ * metadata (#212) — needs the list, and the last is `.at(-1)`.
+ */
+export function messageElements(role: 'user' | 'agent'): HTMLElement[] {
+  return [...document.querySelectorAll<HTMLElement>(`[data-role="${role}"]`)]
+}
+
+/**
  * A message's text as a reader sees it.
  *
- * `textContent` would also pick up the screen-reader note next to a streaming reply ("The
- * assistant is replying…"), which is not part of what the model wrote.
+ * Two things inside a message are not what it says, and both are stripped: the screen-reader
+ * note next to a streaming reply ("The assistant is replying…"), and the **foot** every
+ * message carries since #212 — the metadata line and the action row, which are about the
+ * message rather than in it. What is left is the message.
  */
 export function visibleText(element: Element | null): string {
   if (element === null) {
     return ''
   }
   const clone = element.cloneNode(true) as Element
-  for (const hidden of clone.querySelectorAll('.sr-only')) {
+  for (const hidden of clone.querySelectorAll(
+    '.sr-only, [data-slot="message-meta"], [data-slot="message-actions"]',
+  )) {
     hidden.remove()
   }
   return clone.textContent ?? ''
@@ -150,4 +180,15 @@ export function agentText(): string {
 /** Whether a reply is on screen and still arriving. */
 export function isStreaming(): boolean {
   return document.querySelector('[data-role="agent"][data-streaming="true"]') !== null
+}
+
+/**
+ * The row at the foot of the transcript — "Working…", "Retrying…" or "Interrupted" — or `null`
+ * when there is none (U10).
+ *
+ * Read off `data-slot` rather than by role: it is a `role="status"` live region, and so is the
+ * header's indicator, so a role query would find whichever came first in the document.
+ */
+export function workingRow(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('[data-slot="working-row"]')
 }

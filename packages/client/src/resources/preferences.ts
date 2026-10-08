@@ -13,16 +13,18 @@ import type { Transport } from '../http'
  * ```
  *
  * `default_model` is the `provider/model` a new chat starts with, or `null` when the user has
- * not set one — the absence of a choice, not a 404. The routes are owner-only, like
- * `GET /v1/me`: they answer for the authenticated caller and nobody else. `put` writes the
- * complete value (there is no partial update), so `null` is how the stored default is cleared.
- * The id is validated for shape only; whether the model exists is the catalog's answer.
+ * not set one — the absence of a choice, not a 404 — and `theme` is the web app's colour
+ * scheme (`system`, `light`, `dim` or `dark`). The routes are owner-only, like `GET /v1/me`:
+ * they answer for the authenticated caller and nobody else. `put` merges: the fields it is
+ * given are stored, the ones it leaves out keep their stored value, and `default_model: null`
+ * clears the stored default. The id is validated for shape only; whether the model exists is
+ * the catalog's answer.
  */
 export interface PreferencesResource {
   /**
    * Read the caller's preferences.
    *
-   * A caller who has never saved any gets `{ default_model: null }`.
+   * A caller who has never saved any gets `{ default_model: null, theme: 'system' }`.
    *
    * @param options request options (cancellation)
    * @throws AuthenticationError when the caller has no valid session
@@ -30,9 +32,10 @@ export interface PreferencesResource {
   get(options?: RequestOptions): Promise<GetPreferencesResponse>
 
   /**
-   * Write the caller's preferences, whole.
+   * Write the caller's preferences: the fields given, over what is stored.
    *
-   * @param preferences the complete value to store; `default_model: null` clears the default
+   * @param preferences the fields to change; `default_model: null` clears the default, and a
+   * field left out keeps its stored value
    * @param options request options (cancellation)
    */
   put(preferences: PutPreferencesRequest, options?: RequestOptions): Promise<GetPreferencesResponse>
