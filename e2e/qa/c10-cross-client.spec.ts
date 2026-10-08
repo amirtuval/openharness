@@ -13,11 +13,11 @@ import {
   waitForAnswer,
 } from './support'
 import {
-  AGENT_LINE,
+  replyHasText,
+  replyOccurrences,
   Terminal,
   ensureCliSignedIn,
   expectNoErrorNotice,
-  occurrences,
   ohCommand,
   sendAndAwaitAnswer,
 } from './tmux'
@@ -88,17 +88,19 @@ test.describe('C10 cross-client', () => {
       })
 
       await test.step('what the browser sends shows up in oh', async () => {
-        const before = occurrences(terminal.capture(), AGENT_LINE)
         await sendFromComposer(page, 'sent from the browser')
-        // The agent's line, not the user's: the user's own message is echoed immediately and
-        // the turn is still running behind it.
+        // Both the message and the reply to it: the mock echoes the prompt, and the prompt's
+        // own copy of the text does not count — it sits behind the `❯ ` (#229).
         if (isRealModel) {
-          await terminal.waitUntil((screen) => occurrences(screen, AGENT_LINE) > before, 60_000)
+          await terminal.waitUntil(replyHasText, 60_000)
         } else {
-          await terminal.waitFor(/agent › sent from the browser/, 30_000)
+          await terminal.waitUntil(
+            (screen) => replyOccurrences(screen, 'sent from the browser') >= 2,
+            30_000,
+          )
         }
         await terminal.waitForIdle()
-        expect(terminal.capture()).toContain('you › sent from the browser')
+        expect(terminal.capture()).toContain('sent from the browser')
         expectNoErrorNotice(terminal.capture())
       })
 

@@ -188,10 +188,9 @@ function tokenize(spans: readonly Span[], mode: WrapMode): Token[] {
 /**
  * Wrap spans to `width` columns, preserving every span's style.
  *
- * This is the hanging indent the message view needs: the caller wraps the *content* to the
- * columns left over after the label, and draws the label (or the same number of spaces) in
- * front of every line it gets back — so a wrapped line stays under the text it belongs to
- * instead of running back under the `agent › ` prefix.
+ * This is the wrapping the message view needs: the caller hands in the width of the message —
+ * all of it, since issue #229 took the label away — and draws the lines it gets back from
+ * column 0, which is what makes a settled reply copy-paste clean.
  *
  * An empty run is one empty line, so a message part with nothing in it still draws.
  */

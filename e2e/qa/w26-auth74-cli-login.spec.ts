@@ -146,7 +146,7 @@ test.describe('W26 §10 oh login and friends', () => {
         await terminal.waitForIdle()
         await sendAndAwaitAnswer(terminal, 'a first message from the oh CLI')
         await terminal.waitForIdle()
-        expect(terminal.capture()).toContain('you › a first message from the oh CLI')
+        expect(terminal.capture()).toContain('a first message from the oh CLI')
         await terminal.screenshot(shotPage, 'w26-04-oh-chat')
 
         // The session shows up in the web app as the signed-in dev user's — the newest row,
@@ -164,16 +164,19 @@ test.describe('W26 §10 oh login and friends', () => {
         const prompt = isRealModel ? LONG_REPLY_PROMPT : '__slow__ a long reply from the CLI'
         await sendAndAwaitAnswer(terminal, prompt, { slow: !isRealModel })
         // Interrupt once the reply has text (a cursor alone is not a reply).
-        await terminal.waitUntil((screen) => replyHasText(screen), 60_000)
+        await terminal.waitUntil(replyHasText, 60_000)
         terminal.send('C-c')
         await terminal.waitForIdle(60_000)
-        const partial = terminal.capture()
-        expect(replyHasText(partial), 'the partial reply stays').toBe(true)
+        // The reply that has arrived is still there: the mock's counted-off parts, or a real
+        // model's two numbers next to each other (#229 — there is no label to look for).
+        expect(terminal.capture(), 'the partial reply stays').toMatch(
+          isRealModel ? /\b\d+\s+\d+\b/ : /part 1\/40/,
+        )
         await terminal.screenshot(shotPage, 'w26-06-interrupted')
 
         await sendAndAwaitAnswer(terminal, 'a short follow-up after the interrupt')
         await terminal.waitForIdle(60_000)
-        expect(terminal.capture()).toContain('you › a short follow-up after the interrupt')
+        expect(terminal.capture()).toContain('a short follow-up after the interrupt')
         expect(terminal.capture(), 'no error notice').not.toMatch(/\n\s*error:/)
         await terminal.screenshot(shotPage, 'w26-07-steered')
       })

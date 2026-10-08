@@ -448,34 +448,47 @@ instead (epic #116 U5).
 
 ### How a message is drawn
 
-`MessageView` lays a message out — the `you ›` / `agent ›` label, the indent under it, the
+**Everything starts at column 0** (#229). `MessageView` lays a message out — the wrapping, the
 block cursor while a reply streams, the `(queued)` note — and draws its content part by part
 through `PART_RENDERERS` (epic #201, X1), a `Record<MessagePart['type'], …>` that holds the
 text renderer today and is where the next phases' parts — a tool call, a question, an approval
 — get theirs. A renderer returns **lines of styled spans**, not characters and not a `<Text>`:
 Markdown needs more than a string (a heading is bold, a table is a box, a code block is a
-frame) and less than a `<Text>` (the label and the indent are not its business), and the
-renderer is handed the columns it has after the label so that its own wrapping is the layout.
+labelled rule) and less than a `<Text>` (the band around a user's message is not its business),
+and the renderer is handed the width of the message itself, since the pass took the label away.
 Each line is one `<Text>` whose children are the spans — nested text nodes are one line of
-output, where sibling ones in a column would be two — so the label and the text beside it
-arrive as one line, which is what a test's `toContain('you › hello')` rests on.
+output, where sibling ones in a column would be two.
+
+The label and the hanging indent under it are gone, because both were characters in front of a
+line: selecting a reply and pasting it pasted them too. What tells the two apart instead is a
+**band** — every line of a user's message carries a background, padded to the terminal's edge,
+its shade chosen from the terminal's own background like the syntax theme (#201, X4) — and a
+dim `›` on a line of its own above the message under `NO_COLOR`, where there is no colour to
+band with. `messageLayout()` in `message-view.tsx` decides all of that as plain data so a test
+can hold it still, and `MessageView` draws it.
 
 Messages are separated by one blank line, drawn as part of the next message's output rather
 than as a thing of its own — a reply arrives as one `<Static>` write, and a separator of its
-own would be written twice: once while that message was live, and again when it settled.
+own would be written twice: once while that message was live, and again when it settled. A
+user's message brings the blanks around its band itself, so the transcript draws no separator
+around one and asks a user's message for the line above it only when the message above is not
+another user's message: one blank line between any two messages, and none at the top.
 
 An **agent** message is rendered as Markdown and a **user** message as typed, and both are
-wrapped to the terminal width with a hanging indent — the label on the first line, that many
-spaces under it on the rest. The width is read when the message is drawn, which is what makes
-a resize leave the scrollback alone (#201, X2): settled messages are Ink's `<Static>` and are
-never re-rendered, so they keep the width they had. Colours are ANSI named colours only, the
-code theme is chosen from the terminal's background, and `NO_COLOR` drops the lot (#201, X4).
-The renderer, the tables, the code frame and the theme are
+wrapped to the terminal width, hard-wrapped, with Ink re-wrapping anything wider than the
+terminal, `<Static>` included — so the newlines a copied paragraph has are the terminal's and
+the text in front of them is nothing. The width is read when the message is drawn, which is
+what makes a resize leave the scrollback alone (#201, X2): settled messages are Ink's
+`<Static>` and are never re-rendered, so they keep the width they had. The last column is left
+empty: the `▌` a streaming reply ends with is a column of its own, and a full-width closing
+rule would push it onto a line of its own — which was the streaming bug #229 reports. Colours
+are ANSI named colours only, the code theme is chosen from the terminal's background, and
+`NO_COLOR` drops the lot (#201, X4). The renderer, the tables, the code block and the theme are
 [`docs/markdown.md`](./docs/markdown.md); the wrapping itself is `src/markdown/text.ts`.
 
 A **settled agent reply** carries one dim line under it — what it ran on, how long it took,
 what it cost (`4.2s · 1.3k tokens`) — written by `components/reply-meta.ts` and drawn by
-`message-view.tsx` on the reply's own hanging indent. The model appears only when it is news
+`message-view.tsx` at column 0 with the reply. The model appears only when it is news
 (the session's own, or the previous reply's, is not), and a field the log does not have is
 left out; a reply with nothing to say has no line at all. Because the tokens and the duration
 arrive with the reply's `span.model_request_end` — _after_ the reply itself — a reply is held
@@ -677,48 +690,48 @@ command), and `src/commands/auth.ts` against the fake's scripted device flow (ap
 denial, cancellation, revoke failures); `src/index.test.ts` drives `run()` all the way through
 `login` / `whoami` / `logout` with `XDG_CONFIG_HOME` pointed at a temp directory.
 
-| file                                              | covers                                                                                                                                                                                    |
-| ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/index.test.ts`                               | `run()` end to end: the exit codes, login / whoami / logout, signals, `default-model` and `sessions delete`                                                                               |
-| `src/args.test.ts`                                | `parseArgs` and `readVersion`: every command, unknown and conflicting flags                                                                                                               |
-| `src/config.test.ts`                              | the precedence chain, and the errors a bad config file produces                                                                                                                           |
-| `src/credentials.test.ts`                         | the credentials file: atomic write, `0600`/`0700`, per-server tokens, a write that failed                                                                                                 |
-| `src/history.test.ts`                             | `history.json`: the list, the cap, consecutive duplicates, per server _and_ user, `record: false`, and the reads it tolerates                                                             |
-| `src/components/prompt-input.test.tsx`            | every prompt binding, the cursor's line, history browsing with a draft, multi-line navigation, paste (#206), and the command menu's keys and filtering (#207)                             |
-| `src/chat/commands.test.ts`                       | the registry, the parse (`//`, unknown, aliases), the filter, the closest match, `currentModelOf`, and every command's `run` (#207)                                                       |
-| `src/components/command-menu.test.tsx`            | the menu's rows, the highlight, and the usage column padded to the whole registry (#207)                                                                                                  |
-| `src/components/prompt-slot.test.tsx`             | a flow in the prompt's place, its result, its steps, and a flow that replaces one that is up (#207)                                                                                       |
-| `src/providers/credential-form.test.ts`           | the form table: a form per credential type, the body it builds, and the fallback for an unknown provider (#210, X6)                                                                       |
-| `src/components/secret-input.test.tsx`            | the hidden input: no echo, the mask's length, paste (newline and all), Enter/Esc, and the character the flow claims before it is inserted (#210)                                          |
-| `src/components/provider-setup.test.tsx`          | the connect flow: the provider list and its free-tier hints, the key page and `o`, a save, a rejected key asking again, a stale session, Esc back and Esc out (#210)                      |
-| `src/commands/providers.test.tsx`                 | `oh providers`: the list's columns, the remove question, `--yes`, and the connect screen end to end (#210)                                                                                |
-| `src/markdown/text.test.ts`                       | the wrapper: prose and pasted indentation, wide characters, long words, truncation and alignment (#205)                                                                                   |
-| `src/markdown/theme.test.ts`                      | `COLORFGBG`, `NO_COLOR`, the config's `theme`, and the two syntax palettes (#205)                                                                                                         |
-| `src/markdown/highlight.test.ts`                  | highlight.js → spans: tokens, nested scopes, entities, a language it does not know, half a snippet (#205)                                                                                 |
-| `src/markdown/render.test.ts`                     | mdast → lines: every element, the table in the room it has, the frame, NO_COLOR, no line wider than its box (#205)                                                                        |
-| `src/components/message-view.test.tsx`            | the frame: the label, the hanging indent, a reply rendered as Markdown, wide characters, the cursor, `(queued)` and the metadata line (#205, #208)                                        |
-| `src/components/reply-meta.test.ts`               | durations and token counts, and the line they compose: the model only when it is news, nothing invented, no line when there is nothing to say (#208)                                      |
-| `src/components/status-line.test.tsx`             | the line's parts and colours, the shortened id, the model's display name, the spinner on fake timers, the quiet window, retrying and interrupted, and what a narrow terminal drops (#208) |
-| `src/browser.test.ts`                             | the skip rules and the per-platform command, with an injected spawn                                                                                                                       |
-| `src/commands/auth.test.ts`                       | `oh login` / `logout` / `whoami` against the fake's scripted device flow, mid-poll cancellation included, and `offerSignIn` — the chat's offer, and the answers it takes as yes (#210)    |
-| `src/commands/preferences.test.ts`                | `oh default-model`: print, set, replace, the failures                                                                                                                                     |
-| `src/commands/list.test.ts`, `src/paging.test.ts` | the listings, their formatting, `sessions delete`, and the `next_page` walk                                                                                                               |
-| `src/chat/session.test.ts`                        | the runtime: transcript, stream, send, `/model`, deleted sessions, dispose, and the turn clock the status line reads (#208)                                                               |
-| `src/chat/target.test.ts`                         | session/model/agent selection, the default model, and the paging it needs                                                                                                                 |
-| `src/chat/ctrl-c.test.ts`                         | the Ctrl+C rules: interrupt, arm, exit                                                                                                                                                    |
-| `src/components/model-picker.test.tsx`            | the picker: windowing, number keys, the free-text row                                                                                                                                     |
-| `src/app.test.tsx`                                | the Ink screens through `ink-testing-library` and `createFakeClient()`                                                                                                                    |
-| `src/errors.test.ts`                              | `describeError`: the 401 line, the connection hints, 403/429, `--debug`                                                                                                                   |
-| `src/signals.test.ts`, `src/terminal.test.ts`     | the signal handlers and `restoreTerminal`                                                                                                                                                 |
-| `src/update/semver.test.ts`                       | the comparator: the three numbers, prereleases, and what is not a version                                                                                                                 |
-| `src/update/decide.test.ts`                       | the off switches, the hourly throttle, and the claim (the pid liveness included)                                                                                                          |
-| `src/update/state.test.ts`                        | `update-state.json`: the write, the tolerant read, and the once-only consume                                                                                                              |
-| `src/update/detect.test.ts`                       | the global-install check, `bin` symlink and case-insensitivity included                                                                                                                   |
-| `src/update/notice.test.ts`                       | the one line: its two shapes, the stream it goes to, and that it never repeats                                                                                                            |
-| `src/update/npm.test.ts`                          | npm over a fake `npm` on `PATH`: the lookup, the timeout, and the detached check's whole program                                                                                          |
-| `src/update/check.test.ts`                        | the foreground decision: the gate, the throttle, the claim, and the spawn, against a fake runner                                                                                          |
-| `src/commands/update.test.ts`                     | `oh update`: up to date, installed, failed, and refused                                                                                                                                   |
-| `src/dev/fake.test.ts`                            | the fake-mode gate and the seeded dev client                                                                                                                                              |
+| file                                              | covers                                                                                                                                                                                                                                    |
+| ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/index.test.ts`                               | `run()` end to end: the exit codes, login / whoami / logout, signals, `default-model` and `sessions delete`                                                                                                                               |
+| `src/args.test.ts`                                | `parseArgs` and `readVersion`: every command, unknown and conflicting flags                                                                                                                                                               |
+| `src/config.test.ts`                              | the precedence chain, and the errors a bad config file produces                                                                                                                                                                           |
+| `src/credentials.test.ts`                         | the credentials file: atomic write, `0600`/`0700`, per-server tokens, a write that failed                                                                                                                                                 |
+| `src/history.test.ts`                             | `history.json`: the list, the cap, consecutive duplicates, per server _and_ user, `record: false`, and the reads it tolerates                                                                                                             |
+| `src/components/prompt-input.test.tsx`            | every prompt binding, the cursor's line, history browsing with a draft, multi-line navigation, paste (#206), and the command menu's keys and filtering (#207)                                                                             |
+| `src/chat/commands.test.ts`                       | the registry, the parse (`//`, unknown, aliases), the filter, the closest match, `currentModelOf`, and every command's `run` (#207)                                                                                                       |
+| `src/components/command-menu.test.tsx`            | the menu's rows, the highlight, and the usage column padded to the whole registry (#207)                                                                                                                                                  |
+| `src/components/prompt-slot.test.tsx`             | a flow in the prompt's place, its result, its steps, and a flow that replaces one that is up (#207)                                                                                                                                       |
+| `src/providers/credential-form.test.ts`           | the form table: a form per credential type, the body it builds, and the fallback for an unknown provider (#210, X6)                                                                                                                       |
+| `src/components/secret-input.test.tsx`            | the hidden input: no echo, the mask's length, paste (newline and all), Enter/Esc, and the character the flow claims before it is inserted (#210)                                                                                          |
+| `src/components/provider-setup.test.tsx`          | the connect flow: the provider list and its free-tier hints, the key page and `o`, a save, a rejected key asking again, a stale session, Esc back and Esc out (#210)                                                                      |
+| `src/commands/providers.test.tsx`                 | `oh providers`: the list's columns, the remove question, `--yes`, and the connect screen end to end (#210)                                                                                                                                |
+| `src/markdown/text.test.ts`                       | the wrapper: prose and pasted indentation, wide characters, long words, truncation and alignment (#205)                                                                                                                                   |
+| `src/markdown/theme.test.ts`                      | `COLORFGBG`, `NO_COLOR`, the config's `theme`, and the two syntax palettes (#205)                                                                                                                                                         |
+| `src/markdown/highlight.test.ts`                  | highlight.js → spans: tokens, nested scopes, entities, a language it does not know, half a snippet (#205)                                                                                                                                 |
+| `src/markdown/render.test.ts`                     | mdast → lines: every element, the table in the room it has, the code block's label and rule, NO_COLOR, no line wider than its box, and a fence that has not closed laid out like the block it becomes (#205, #229)                        |
+| `src/components/message-view.test.tsx`            | the frame: column 0, a reply rendered as Markdown, wide characters, the cursor, `(queued)`, the metadata line, the band a user's message sits on and its `NO_COLOR` mark, and a half-streamed fence that does not jump (#205, #208, #229) |
+| `src/components/reply-meta.test.ts`               | durations and token counts, and the line they compose: the model only when it is news, nothing invented, no line when there is nothing to say (#208)                                                                                      |
+| `src/components/status-line.test.tsx`             | the line's parts and colours, the shortened id, the model's display name, the spinner on fake timers, the quiet window, retrying and interrupted, and what a narrow terminal drops (#208)                                                 |
+| `src/browser.test.ts`                             | the skip rules and the per-platform command, with an injected spawn                                                                                                                                                                       |
+| `src/commands/auth.test.ts`                       | `oh login` / `logout` / `whoami` against the fake's scripted device flow, mid-poll cancellation included, and `offerSignIn` — the chat's offer, and the answers it takes as yes (#210)                                                    |
+| `src/commands/preferences.test.ts`                | `oh default-model`: print, set, replace, the failures                                                                                                                                                                                     |
+| `src/commands/list.test.ts`, `src/paging.test.ts` | the listings, their formatting, `sessions delete`, and the `next_page` walk                                                                                                                                                               |
+| `src/chat/session.test.ts`                        | the runtime: transcript, stream, send, `/model`, deleted sessions, dispose, and the turn clock the status line reads (#208)                                                                                                               |
+| `src/chat/target.test.ts`                         | session/model/agent selection, the default model, and the paging it needs                                                                                                                                                                 |
+| `src/chat/ctrl-c.test.ts`                         | the Ctrl+C rules: interrupt, arm, exit                                                                                                                                                                                                    |
+| `src/components/model-picker.test.tsx`            | the picker: windowing, number keys, the free-text row                                                                                                                                                                                     |
+| `src/app.test.tsx`                                | the Ink screens through `ink-testing-library` and `createFakeClient()`                                                                                                                                                                    |
+| `src/errors.test.ts`                              | `describeError`: the 401 line, the connection hints, 403/429, `--debug`                                                                                                                                                                   |
+| `src/signals.test.ts`, `src/terminal.test.ts`     | the signal handlers and `restoreTerminal`                                                                                                                                                                                                 |
+| `src/update/semver.test.ts`                       | the comparator: the three numbers, prereleases, and what is not a version                                                                                                                                                                 |
+| `src/update/decide.test.ts`                       | the off switches, the hourly throttle, and the claim (the pid liveness included)                                                                                                                                                          |
+| `src/update/state.test.ts`                        | `update-state.json`: the write, the tolerant read, and the once-only consume                                                                                                                                                              |
+| `src/update/detect.test.ts`                       | the global-install check, `bin` symlink and case-insensitivity included                                                                                                                                                                   |
+| `src/update/notice.test.ts`                       | the one line: its two shapes, the stream it goes to, and that it never repeats                                                                                                                                                            |
+| `src/update/npm.test.ts`                          | npm over a fake `npm` on `PATH`: the lookup, the timeout, and the detached check's whole program                                                                                                                                          |
+| `src/update/check.test.ts`                        | the foreground decision: the gate, the throttle, the claim, and the spawn, against a fake runner                                                                                                                                          |
+| `src/commands/update.test.ts`                     | `oh update`: up to date, installed, failed, and refused                                                                                                                                                                                   |
+| `src/dev/fake.test.ts`                            | the fake-mode gate and the seeded dev client                                                                                                                                                                                              |
 
 Every `run()` test gets its own `XDG_CONFIG_HOME` (`index.test.ts` creates one per test):
 without it the suite reads the developer's real `~/.config/openharness`, where a hand-written

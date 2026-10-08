@@ -94,11 +94,11 @@ token. So the status field is not the bare word `running` while a turn works:
 
 ## Per-reply metadata
 
-Every settled agent reply gets one dim line under it, on the same hanging indent as its text:
+Every settled agent reply gets one dim line under it, at column 0 with its text (#229):
 
 ```
-agent › The file has three callers.
-        openai/gpt-4.1-mini · 4.2s · 1.3k tokens
+The file has three callers.
+openai/gpt-4.1-mini · 4.2s · 1.3k tokens
 ```
 
 …which for a reply on the model the session already runs is just `4.2s · 1.3k tokens` — the
