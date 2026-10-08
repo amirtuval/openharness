@@ -4,6 +4,7 @@ import type { ReactNode } from 'react'
 
 import { useUsage } from '../../hooks/use-usage'
 import { formatCost, formatCount } from '../../lib/format'
+import { formatDay } from '../../lib/usage'
 import { useClient } from '../client-provider'
 import { ErrorBanner } from '../chat/error-banner'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card'
@@ -80,16 +81,21 @@ function ModelTable({ entries }: { entries: readonly ModelUsageBreakdown[] }): R
       <caption className="sr-only">Usage this month, by model</caption>
       <thead>
         <tr className="text-muted-foreground">
-          <th scope="col" className="pb-1 text-left font-normal">
+          {/* The model is the column that gives up room first: its id is the long value, and
+              everything else is a number a reader compares down the column. */}
+          <th scope="col" className="w-full pb-1 text-left font-normal">
             Model
           </th>
-          <th scope="col" className="pb-1 text-right font-normal">
-            Requests
+          <th scope="col" className="pb-1 pl-2 text-right font-normal">
+            Req
           </th>
-          <th scope="col" className="pb-1 text-right font-normal">
-            Tokens
+          <th scope="col" className="pb-1 pl-2 text-right font-normal">
+            In
           </th>
-          <th scope="col" className="pb-1 text-right font-normal">
+          <th scope="col" className="pb-1 pl-2 text-right font-normal">
+            Out
+          </th>
+          <th scope="col" className="pb-1 pl-2 text-right font-normal">
             Cost
           </th>
         </tr>
@@ -97,14 +103,19 @@ function ModelTable({ entries }: { entries: readonly ModelUsageBreakdown[] }): R
       <tbody>
         {entries.map((entry) => (
           <tr key={entry.model} className="border-t">
-            <td className="py-1 pr-2">
-              <span className="block max-w-[16rem] truncate" title={entry.model}>
+            <td className="max-w-0 w-full py-1 pr-2">
+              <span className="block truncate" title={entry.model}>
                 {modelLabelOf(entry.model)}
               </span>
             </td>
-            <td className="py-1 text-right tabular-nums">{formatCount(entry.requests)}</td>
-            <td className="py-1 text-right tabular-nums">{formatTokensFor(entry.usage)}</td>
-            <td className="py-1 text-right tabular-nums" data-slot="usage-model-cost">
+            <td className="py-1 pl-2 text-right tabular-nums">{formatCount(entry.requests)}</td>
+            <td className="py-1 pl-2 text-right tabular-nums">
+              {formatCount(entry.usage.input_tokens)}
+            </td>
+            <td className="py-1 pl-2 text-right tabular-nums">
+              {formatCount(entry.usage.output_tokens)}
+            </td>
+            <td className="py-1 pl-2 text-right tabular-nums" data-slot="usage-model-cost">
               {formatCost(entry.cost)}
             </td>
           </tr>
@@ -139,7 +150,7 @@ function DayList({
       <p className="text-xs text-muted-foreground">By day</p>
       {days.map((day) => (
         <div key={day.day} className="flex items-center gap-2 text-xs">
-          <span className="w-16 shrink-0 tabular-nums">{day.day.slice(5)}</span>
+          <span className="w-16 shrink-0 tabular-nums">{formatDay(day.day)}</span>
           <span
             aria-hidden="true"
             className="h-2 rounded-xs bg-primary/40"
