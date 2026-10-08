@@ -19,6 +19,7 @@ import type {
   SessionId,
   StoredEvent,
   Supersedes,
+  UserEventInput,
 } from '@openharness/protocol'
 import { InMemorySessionStore, isFencedError } from '@openharness/session'
 import type { AppendableEvent, AppendEventsOptions, SessionStore } from '@openharness/session'
@@ -28,12 +29,12 @@ import { describe, expect, it, vi } from 'vitest'
 import { eventDelta, eventStart, spanStart } from './events'
 import { isClaimConflictError } from './errors'
 import type { ModelFactory } from './model'
-import { routerModelFactory } from './model'
+import { providerModelFactory } from './model'
 import { REDACTED_PLACEHOLDER } from './redact'
 import type { Sleep } from './retry'
 import {
   apiCallError,
-  misdeclaredSpec,
+  wrongSpecModel,
   mockModel,
   readPrompt,
   resolveTestCredential,
@@ -396,7 +397,7 @@ describe('runTurn', () => {
       usage: { input_tokens: 9, output_tokens: 3, cache_read_input_tokens: 2 },
     })
     const model: ModelFactory = (modelId, credential) =>
-      misdeclaredSpec(factory(modelId, credential))
+      wrongSpecModel(factory(modelId, credential))
 
     const outcome = await runTurn(sessionId, {
       store,
@@ -1101,10 +1102,55 @@ describe('runTurn', () => {
     await expectClean(store, sessionId)
   })
 
+  it('ends a turn whose model names a provider it has no client for, before any request', async () => {
+    // The provider a session's model id names is free text (C5), so an id no provider can serve
+    // is reachable — and a key for it could never be stored, so no request could authenticate.
+    // The turn ends on it the way a missing credential does: a `session.error` and an idle, no
+    // span (every span start is a real model request), and the message claimed by the idle.
+    const fetchSpy = vi.fn(() =>
+      Promise.reject(new Error('no request may be made for an unsupported provider')),
+    )
+    vi.stubGlobal('fetch', fetchSpy)
+    try {
+      const unsupported: UserEventInput = {
+        type: EVENT_TYPES.userMessage,
+        content: [{ type: 'text', text: 'Hello' }],
+        model: { id: 'acme/gpt-9' },
+      }
+      const { store, sessionId } = await newSession([unsupported])
+
+      const outcome = await runTurn(sessionId, {
+        store,
+        model: providerModelFactory,
+        resolveCredential: resolveTestCredential,
+      })
+
+      expect(outcome).toEqual({ outcome: 'error' })
+      const raw = await rawLogOf(store, sessionId)
+      const failure = raw.find((event) => event.type === EVENT_TYPES.sessionError)
+      expect(failure).toMatchObject({
+        error: {
+          type: 'model_request_failed_error',
+          retry_status: { type: 'exhausted' },
+        },
+      })
+      // The message names the provider nobody could have configured; `model.test.ts` pins the
+      // whole sentence the factory builds.
+      expect(JSON.stringify(failure)).toContain('no model client for provider')
+      expect(raw.some(isSpanStart)).toBe(false)
+      expect(await store.getPendingUserEvents(sessionId)).toEqual([])
+      expect(fetchSpy).not.toHaveBeenCalled()
+      await expectClean(store, sessionId)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('never falls back to a provider key in the environment', async () => {
     // A5: even with the variables set, the router must not find them — and it cannot, because
     // it is never constructed without a key `resolveCredential` answered. A blank key counts
-    // as no key: Mastra reads a falsy `apiKey` as "none given" and would fall back.
+    // as no key: the provider packages read a falsy `apiKey` as "none given" and would fall
+    // back to their own environment variable.
     const decoy = 'sk-env-decoy-2b7f41c9ae05'
     vi.stubEnv('OPENAI_API_KEY', decoy)
     vi.stubEnv('ANTHROPIC_API_KEY', decoy)
@@ -1118,7 +1164,7 @@ describe('runTurn', () => {
 
         const outcome = await runTurn(sessionId, {
           store,
-          model: routerModelFactory,
+          model: providerModelFactory,
           resolveCredential: () => Promise.resolve(credential),
         })
 

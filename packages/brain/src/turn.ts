@@ -9,6 +9,8 @@ import type {
 import type { AppendableEvent, PartitionFence, SessionStore } from '@openharness/session'
 import { SessionNotFoundError } from '@openharness/session'
 
+import type { LanguageModel } from 'ai'
+
 import type { ContextStrategy } from './context'
 import { DEFAULT_CONTEXT_STRATEGY } from './context'
 import {
@@ -35,6 +37,7 @@ import {
 } from './log'
 import type { ModelFactory, ResolveCredential } from './model'
 import {
+  isUnsupportedProviderError,
   isUsableCredential,
   missingCredentialMessage,
   providerOf,
@@ -177,7 +180,7 @@ export interface RunTurnOptions {
    * The brain holds no provider key of its own and never reads one from the environment: a
    * request is made only with a credential this resolver answered, and an owner who has none
    * for the model's provider ends the turn with `missing_provider_credential` rather than
-   * letting Mastra's router fall back to `OPENAI_API_KEY` and friends.
+   * letting the provider package fall back to `OPENAI_API_KEY` and friends.
    */
   readonly resolveCredential: ResolveCredential
   /** Aborting this ends the turn at the next safe point; see the lifecycle above. */
@@ -421,6 +424,29 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       ])
       return { outcome: 'error' }
     }
+    // The model for this one request, built with the id and the credential just resolved. Both
+    // are read at this request's boundary and neither is held between requests, so a switch or
+    // a key added mid-turn is picked up by the next one. A build that cannot happen at all —
+    // the id names a provider this build has no client for — ends the turn here, before the
+    // span: every span start is a real model request, and this one would have none (see
+    // `UnsupportedProviderError`).
+    let agentModel: LanguageModel
+    try {
+      agentModel = model(requestModel.id, credential)
+    } catch (error) {
+      if (!isUnsupportedProviderError(error)) {
+        throw error
+      }
+      await append([
+        sessionError({
+          type: 'model_request_failed_error',
+          message: error.message,
+          retry_status: { type: 'exhausted' },
+        }),
+        statusIdle(claims),
+      ])
+      return { outcome: 'error' }
+    }
     const [start] = await append([spanStart(claims, requestModel.id)])
     if (start === undefined) {
       throw new Error('the store did not return the span it was asked to append')
@@ -439,11 +465,9 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       throw new Error('the store did not return the event_start it was asked to append')
     }
     let lastChunkSeq = chunkOpen.seq
-    // One model per request, built with this request's model id and credential: both are read
-    // at this request's boundary, so a switch or a key added mid-turn is picked up by the next
-    // request, and neither is held on to between them.
+    // One model per request, built above with this request's model id and credential.
     const result = await streamModelRequest({
-      model: model(requestModel.id, credential),
+      model: agentModel,
       messages,
       signal,
       onTextDelta: async (text) => {

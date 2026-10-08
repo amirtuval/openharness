@@ -33,7 +33,6 @@
   "dependencies": {
     "@google-cloud/opentelemetry-cloud-trace-exporter": "3.1.0",
     "@hono/node-server": "2.1.1",
-    "@mastra/core": "1.71.0",
     "@openharness/brain": "workspace:*",
     "@openharness/hands": "workspace:*",
     "@openharness/protocol": "workspace:*",
