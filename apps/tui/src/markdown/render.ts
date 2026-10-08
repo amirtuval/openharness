@@ -53,8 +53,8 @@ interface InlineStyle {
   readonly color?: string | undefined
 }
 
-/** Columns a code block's frame spends on `│ ` — the bar and the space after it. */
-const FRAME = 2
+/** The rule a code block's label sits in: `── rust ───…` (issue #229). */
+const LABEL_EDGE = '── '
 
 /**
  * A reply, as the lines the terminal draws.
@@ -168,48 +168,59 @@ function rule(layout: RenderLayout): Line[] {
 }
 
 /**
- * A fenced (or indented) code block, framed and coloured.
+ * A fenced (or indented) code block: a labelled rule above the code, the code itself, a rule
+ * below it.
  *
  * ```text
- * ┌ ts ────────────────
- * │ const x = 1
- * └────────────────────
+ * ── ts ───────────────────────────────
+ * const x = 1
+ * ────────────────────────────────────
  * ```
  *
- * A frame rather than a bare indent because the code has to be *distinguishable* from the
- * prose around it, and the language label is the one thing a reader wants to know first. The
- * rule is drawn at the full width the block was given, so it lines up with the text it sits
- * between, and the frame is the terminal's own "structure" colour rather than the syntax
- * theme's — the frame belongs to the terminal, the code inside it to the language.
+ * **No gutter, and no box (issue #229).** The old frame prefixed every line with a `│ ` bar
+ * and closed it with a corner, which meant the code only existed *inside* the drawing: select
+ * it and you copied the bar and the space with every line, and pasted a block that no longer
+ * compiles. The code lines are now the code, at column 0, exactly as they were written —
+ * selecting them and pasting them gives the code back byte for byte. What is left is the
+ * label, which is on its own line and is decoration a reader can leave out of a selection,
+ * and a closing rule that ends the block the way a blank line would but without the ambiguity
+ * of one.
  *
- * Lines wider than the frame are broken at the frame's edge (`splitToWidth`): a code block is
- * the one thing that may not be word-wrapped, because the line breaks a language has are not
- * the breaks a reader wants.
+ * The rule and the label are the terminal's own "structure" colour, not the syntax theme's:
+ * the label belongs to the terminal and the code inside it to the language. The rule is drawn
+ * at the full width the block was given in both places, and — because the label, the body and
+ * the closing rule are drawn from the same tree on every render — a block whose fence has not
+ * closed yet is laid out exactly like the block it becomes, so nothing jumps when it does.
+ *
+ * Lines wider than the block are broken at its edge (`splitToWidth`): a code block is the one
+ * thing that may not be word-wrapped, because the line breaks a language has are not the
+ * breaks a reader wants.
  */
 function codeBlock(node: Code, layout: RenderLayout): Line[] {
   const language = (node.lang ?? '').trim()
   const chrome = paint(layout.theme, PALETTE.chrome)
-  const inner = Math.max(1, layout.width - FRAME)
 
   const body = highlightCode(node.value, language, layout.theme).flatMap((line) =>
-    splitToWidth(line, inner),
+    splitToWidth(line, layout.width),
   )
 
   return [
-    [...frame(layout.width, '┌', language === '' ? 'code' : language, chrome)],
-    ...body.map((line) => [...textSpans('│ ', { color: chrome }), ...line]),
-    [...frame(layout.width, '└', '', chrome)],
+    codeLabel(layout.width, language === '' ? 'code' : language, chrome),
+    ...body,
+    codeRule(layout.width, chrome),
   ]
 }
 
-/** The top or bottom of a code block's frame: `┌ ts ────…`, exactly `width` columns wide. */
-function frame(width: number, corner: string, label: string, color: string | undefined): Span[] {
-  const head = label === '' ? '' : ` ${label} `
-  const rule = Math.max(0, width - 1 - stringWidth(head))
-  return [
-    { text: `${corner}${head}`, color, bold: label !== '' },
-    ...textSpans('─'.repeat(rule), { color, dim: true }),
-  ]
+/** A code block's label line: `── rust ────…`, exactly `width` columns wide. */
+function codeLabel(width: number, label: string, color: string | undefined): Line {
+  const head = `${LABEL_EDGE}${label} `
+  const rule = Math.max(0, width - stringWidth(head))
+  return [{ text: head, color, dim: true }, ...textSpans('─'.repeat(rule), { color, dim: true })]
+}
+
+/** The rule a code block ends on: the width, drawn. */
+function codeRule(width: number, color: string | undefined): Line {
+  return textSpans('─'.repeat(Math.max(1, width)), { color, dim: true })
 }
 
 /** A quote: a bar down the left, and the whole thing a shade quieter. */

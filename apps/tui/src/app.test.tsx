@@ -128,8 +128,8 @@ describe('App', () => {
 
     // The fake echoes the message when nothing is scripted — which also proves the chat
     // opened a session of its own and the brain got the text.
-    await waitForFrame(app, 'you › Hi there.')
-    await waitForFrame(app, 'agent › Fake reply: Hi there.')
+    await waitForFrame(app, 'Hi there.')
+    await waitForFrame(app, 'Fake reply: Hi there.')
     expect(app.exits).toEqual([])
   })
 
@@ -142,8 +142,8 @@ describe('App', () => {
     const app = renderApp(fake, chatOptions({ session: fake.session.id }))
     await waitForChat(app, fake.session.id)
 
-    await waitForFrame(app, 'you › An earlier question.')
-    await waitForFrame(app, 'agent › An earlier reply.')
+    await waitForFrame(app, 'An earlier question.')
+    await waitForFrame(app, 'An earlier reply.')
   })
 
   it('resumes the newest session with --continue', async () => {
@@ -161,7 +161,7 @@ describe('App', () => {
     const app = renderApp(fake, chatOptions({ continue: true }))
     await waitForChat(app, resumed.id)
 
-    await waitForFrame(app, 'you › From the recent session.')
+    await waitForFrame(app, 'From the recent session.')
   })
 
   it('shows the model and the status in the status line of a model-first chat', async () => {
@@ -278,7 +278,7 @@ describe('App', () => {
 
     submit(app, 'On the other model.')
 
-    await waitForFrame(app, 'you › On the other model.')
+    await waitForFrame(app, 'On the other model.')
     const sent = fake.history(sessionId).find((event) => event.type === 'user.message')
     expect(sent?.type === 'user.message' && sent.model?.id).toBe('openai/gpt-4.1-mini')
     await waitForFrame(app, /GPT-4\.1 Mini · sesn_/)
@@ -316,7 +316,7 @@ describe('App', () => {
     expect(frameOf(app)).not.toContain('zz')
     // And the prompt it gave back is the one that was there: empty, and ready.
     submit(app, 'Back on the prompt.')
-    await waitForFrame(app, 'you › Back on the prompt.')
+    await waitForFrame(app, 'Back on the prompt.')
     expect(app.exits).toEqual([])
   })
 
@@ -375,7 +375,7 @@ describe('App', () => {
     expect(frameOf(app)).toContain(shortSessionId(newest?.id ?? ''))
     // The chat carries on in the new session, which is the point of `/new`.
     submit(app, 'A message in the new chat.')
-    await waitForFrame(app, 'you › A message in the new chat.')
+    await waitForFrame(app, 'A message in the new chat.')
     expect(userTexts(fake, newest?.id ?? '')).toEqual(['A message in the new chat.'])
   })
 
@@ -384,16 +384,16 @@ describe('App', () => {
     const app = renderApp(fake, chatOptions({ session: fake.session.id }))
     await waitForChat(app, fake.session.id)
     submit(app, 'Hi.')
-    await waitForFrame(app, 'you › Hi.')
+    await waitForFrame(app, 'Hi.')
 
     submit(app, '/clear')
 
     // A test's stdout is not a terminal, so the wipe itself does nothing here — what it
     // must not do is end the chat or lose the session behind it.
     expect(app.exits).toEqual([])
-    expect(frameOf(app)).toContain('you › Hi.')
+    expect(frameOf(app)).toContain('Hi.')
     submit(app, 'Still here.')
-    await waitForFrame(app, 'you › Still here.')
+    await waitForFrame(app, 'Still here.')
   })
 
   it('lists the commands and the keys with /help, and sends nothing', async () => {
@@ -474,7 +474,7 @@ describe('App', () => {
 
     submit(app, '//model')
 
-    await waitForFrame(app, 'you › /model')
+    await waitForFrame(app, '/model')
     expect(userTexts(fake, fake.session.id)).toEqual(['/model'])
     expect(frameOf(app)).not.toContain('Which model?')
   })
@@ -758,8 +758,8 @@ describe('App', () => {
     submit(app, 'Go.')
     // The heading is a heading, the list is bulleted and the table is drawn: what the
     // transcript renders is what `message-view` renders (see `message-view.test.tsx`).
-    await waitForFrame(app, 'agent › Report')
-    await waitForFrame(app, /• one\n\s+• two/u)
+    await waitForFrame(app, 'Report')
+    await waitForFrame(app, /• one\n• two/u)
     await waitForFrame(app, /│ a │ b │/u)
     expect(app.exits).toEqual([])
   })
@@ -777,19 +777,19 @@ describe('App', () => {
     // Nothing has arrived yet, so the status field shows the spinner rather than `running`
     // (#208); the word comes back once the reply's first chunk lands.
     await waitForFrame(app, 'Working… ')
-    await waitForFrame(app, /agent › One two/u)
+    await waitForFrame(app, /One two/u)
 
     pressKey(app, 'ctrlC')
 
     // The turn stops, the reply so far stays, and the app keeps running — and the status
     // line says what happened to it.
     await waitForFrame(app, 'Interrupted')
-    await waitForFrame(app, /agent › One two three/u)
+    await waitForFrame(app, /One two three/u)
     expect(app.exits).toEqual([])
 
     // …until there is something newer to say: the next send turns the line over.
     submit(app, 'Again.')
-    await waitForFrame(app, 'you › Again.')
+    await waitForFrame(app, 'Again.')
     await waitFor(() => !frameOf(app).includes('Interrupted'))
   })
 
@@ -845,8 +845,8 @@ describe('App', () => {
 
     pressKey(app, 'enter')
 
-    await waitForFrame(app, /you › first line\n\s+second line/u)
-    await waitForFrame(app, 'agent › Noted.')
+    await waitForFrame(app, /first line\nsecond line/u)
+    await waitForFrame(app, 'Noted.')
     expect(userTexts(fake, sessionId)).toEqual(['first line\nsecond line'])
   })
 
@@ -863,7 +863,7 @@ describe('App', () => {
 
     pressKey(app, 'down')
     submit(app, 'something new')
-    await waitForFrame(app, 'you › something new')
+    await waitForFrame(app, 'something new')
 
     // …and what this chat sent is there for the next ↑, which is the point of a history.
     pressKey(app, 'up')
@@ -875,15 +875,15 @@ describe('App', () => {
     const app = renderApp(fake, chatOptions({ session: fake.session.id }))
     await waitForChat(app, fake.session.id)
     submit(app, 'Hi.')
-    await waitForFrame(app, 'you › Hi.')
+    await waitForFrame(app, 'Hi.')
 
     pressKey(app, 'ctrlL')
 
     // The session is untouched: the transcript is still there and the chat still takes keys.
     expect(app.exits).toEqual([])
-    expect(frameOf(app)).toContain('you › Hi.')
+    expect(frameOf(app)).toContain('Hi.')
     submit(app, 'Still here.')
-    await waitForFrame(app, 'you › Still here.')
+    await waitForFrame(app, 'Still here.')
   })
 
   it('steers while a reply is streaming', async () => {
@@ -897,15 +897,15 @@ describe('App', () => {
 
     submit(app, 'One.')
     await waitForFrame(app, 'Working… ')
-    await waitForFrame(app, /agent › First/u)
+    await waitForFrame(app, /First/u)
 
     submit(app, 'Two.')
 
     // Queued: the brain has not reached it yet, and the line says so (#208).
-    await waitForFrame(app, 'you › Two. (queued)')
+    await waitForFrame(app, 'Two. (queued)')
 
-    await waitForFrame(app, 'agent › Second reply.')
-    await waitForFrame(app, 'you › Two.')
+    await waitForFrame(app, 'Second reply.')
+    await waitForFrame(app, 'Two.')
     // Delivered: the request that folded it in claimed it, so the tag is gone.
     await waitFor(() => !frameOf(app).includes('(queued)'))
     expect(userTexts(fake, sessionId)).toEqual(['One.', 'Two.'])
@@ -941,7 +941,7 @@ describe('App', () => {
     // its own: `error:` would be a second line about the same thing.
     await waitForFrame(app, 'Retrying… the model is overloaded')
     expect(frameOf(app)).not.toContain('error: the model is overloaded')
-    await waitForFrame(app, 'agent › Second time lucky.')
+    await waitForFrame(app, 'Second time lucky.')
     await waitFor(() => !frameOf(app).includes('the model is overloaded'))
   })
 

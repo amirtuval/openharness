@@ -36,6 +36,13 @@ import { replyMetaLines } from './reply-meta'
  * next message was still live and again when it settled. The line is a single space and not
  * an empty `<Text>`: Ink gives a text node with nothing in it no height at all, so an empty
  * one is not a blank line, it is no line.
+ *
+ * **A user message brings its own blank lines** (issue #229): the band it is drawn on has one
+ * below it, and one above it unless the message above ended in one — the same reason. So the
+ * separator here is drawn only between two messages that are not user messages, and a user's
+ * message is asked for the line above it only when the message above is not a user's message
+ * as well. Anywhere else the message already brought one, and drawing another would put two
+ * blank lines where the transcript has always had one.
  */
 export function TranscriptView({
   messages,
@@ -56,22 +63,23 @@ export function TranscriptView({
   const live = firstLive === -1 ? [] : messages.slice(firstLive)
   const metaLines = replyMetaLines(messages, currentModel)
 
+  /** The message at `index`, framed by the blank line the transcript owes it, if any. */
+  const draw = (message: TranscriptMessage, index: number) => (
+    <Fragment key={message.id}>
+      {separates(messages[index - 1], message) && <Text> </Text>}
+      <MessageView
+        message={message}
+        width={width}
+        metaLine={metaLines.get(message.id)}
+        blankAbove={blankAbove(messages[index - 1])}
+      />
+    </Fragment>
+  )
+
   return (
     <>
-      <Static items={[...settled]}>
-        {(message, index) => (
-          <Fragment key={message.id}>
-            {index > 0 && <Text> </Text>}
-            <MessageView message={message} width={width} metaLine={metaLines.get(message.id)} />
-          </Fragment>
-        )}
-      </Static>
-      {live.map((message, index) => (
-        <Fragment key={message.id}>
-          {firstLive + index > 0 && <Text> </Text>}
-          <MessageView message={message} width={width} metaLine={metaLines.get(message.id)} />
-        </Fragment>
-      ))}
+      <Static items={[...settled]}>{draw}</Static>
+      {live.map((message, index) => draw(message, firstLive + index))}
     </>
   )
 }
@@ -79,4 +87,28 @@ export function TranscriptView({
 /** Whether a message may still change on screen, and so belongs in the live area. */
 function isLive(message: TranscriptMessage, holdLive: string | undefined): boolean {
   return message.pending || message.streaming || message.id === holdLive
+}
+
+/**
+ * Whether the transcript draws a separator between two messages.
+ *
+ * Only between two messages that are not user messages: a user's message brings the blank line
+ * around its band itself (see `message-view.tsx`), and a separator as well would be two blank
+ * lines where there has always been one. The first message of a conversation has none either —
+ * `previous` is `undefined` there.
+ */
+function separates(previous: TranscriptMessage | undefined, message: TranscriptMessage): boolean {
+  return previous !== undefined && previous.role !== 'user' && message.role !== 'user'
+}
+
+/**
+ * Whether the message after `previous` is the one that draws the blank line above itself.
+ *
+ * A message with nothing above it is not a message that needs setting off; a message whose
+ * predecessor was a user's message already has the blank line that band ended in. Everything
+ * else — an agent's reply above it, or the transcript's own separator — is a case the message
+ * has to cover itself, and only a user's message ever does.
+ */
+function blankAbove(previous: TranscriptMessage | undefined): boolean {
+  return previous !== undefined && previous.role !== 'user'
 }

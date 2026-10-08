@@ -91,11 +91,11 @@ describe('TranscriptView', () => {
       message('sevt_2', 'hello there', 'agent'),
     ])
 
-    expect(frame).toBe('you › hi\n\nagent › hello there')
+    expect(frame).toBe('hi\n\nhello there')
   })
 
   it('does not open the transcript with a blank line', () => {
-    expect(frameOf([message('sevt_1', 'hi', 'user')])).toBe('you › hi')
+    expect(frameOf([message('sevt_1', 'hi', 'user')])).toBe('hi')
   })
 
   it('separates a message that is still streaming from the one before it', () => {
@@ -104,7 +104,7 @@ describe('TranscriptView', () => {
       message('sevt_2', 'arriving…', 'agent', { streaming: true }),
     ])
 
-    expect(frame).toBe('you › hi\n\nagent › arriving…▌')
+    expect(frame).toBe('hi\n\narriving…▌')
   })
 
   it('keeps a blank line between two messages, not between the blocks of one', () => {
@@ -113,7 +113,30 @@ describe('TranscriptView', () => {
       message('sevt_2', 'ok', 'user'),
     ])
 
-    expect(frame).toBe('agent › • one\n        • two\n\nyou › ok')
+    expect(frame).toBe('• one\n• two\n\nok')
+  })
+})
+
+describe('the blank lines around a user message (issue #229)', () => {
+  it('sets a banded message off from the reply above and the reply below', () => {
+    // The bands are what the blank lines are for. The message brings them itself, so the
+    // transcript does not draw its separator as well: one blank line either side, not two.
+    const frame = frameOf([
+      message('sevt_1', 'first', 'agent'),
+      message('sevt_2', 'hi', 'user'),
+      message('sevt_3', 'second', 'agent'),
+    ])
+
+    expect(frame).toBe('first\n\nhi\n\nsecond')
+  })
+
+  it('leaves one blank line between two user messages, not one each', () => {
+    // Steering queues a second message behind a first that has not been sent yet, so this is
+    // two bands in a row: the first ends in a blank line and the second does not start with
+    // another.
+    const frame = frameOf([message('sevt_1', 'one', 'user'), message('sevt_2', 'two', 'user')])
+
+    expect(frame).toBe('one\n\ntwo')
   })
 })
 
@@ -136,7 +159,7 @@ describe('per-reply metadata (issue #208)', () => {
       { currentModel: MODEL },
     )
 
-    expect(frame).toBe('you › hi\n\nagent › hello there\n        4.2s · 1.3k tokens\n\nyou › ok')
+    expect(frame).toBe('hi\n\nhello there\n4.2s · 1.3k tokens\n\nok')
   })
 
   it('holds a reply live until its metadata arrives, so `<Static>` cannot lose the line', () => {
@@ -148,10 +171,10 @@ describe('per-reply metadata (issue #208)', () => {
     })
 
     const app = viewOf([early], { currentModel: MODEL, holdLive: 'sevt_1' })
-    expect(app.lastFrame()).toBe('agent › hello')
+    expect(app.lastFrame()).toBe('hello')
 
     redraw(app, [late], { currentModel: MODEL, holdLive: 'sevt_1' })
-    expect(app.lastFrame()).toBe('agent › hello\n        4.2s')
+    expect(app.lastFrame()).toBe('hello\n4.2s')
   })
 
   it('is what the hold is for: a settled reply never picks the line up', () => {
@@ -164,10 +187,10 @@ describe('per-reply metadata (issue #208)', () => {
     })
 
     const app = viewOf([early], { currentModel: MODEL })
-    expect(app.lastFrame()).toBe('agent › hello\n')
+    expect(app.lastFrame()).toBe('hello\n')
 
     redraw(app, [late], { currentModel: MODEL })
-    expect(app.lastFrame()).toBe('agent › hello\n')
+    expect(app.lastFrame()).toBe('hello\n')
   })
 
   it('draws no line at all for a reply whose metadata says nothing', () => {
@@ -177,10 +200,10 @@ describe('per-reply metadata (issue #208)', () => {
       frameOf([message('sevt_1', 'hello', 'agent', { meta: { model: MODEL } })], {
         currentModel: MODEL,
       }),
-    ).toBe('agent › hello')
+    ).toBe('hello')
   })
 
   it('has no line for a reply the log said nothing about', () => {
-    expect(frameOf([message('sevt_1', 'hello')])).toBe('agent › hello')
+    expect(frameOf([message('sevt_1', 'hello')])).toBe('hello')
   })
 })

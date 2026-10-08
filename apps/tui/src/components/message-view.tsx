@@ -1,23 +1,36 @@
 import type { MessagePart, TranscriptMessage } from '@openharness/client'
 import { Text, useStdout } from 'ink'
-import stringWidth from 'string-width'
 
 import { markdownLines, type RenderLayout } from '../markdown/render'
-import { PALETTE, paint, type TerminalTheme } from '../markdown/theme'
-import { textSpans, wrapSpans, type Line, type Span } from '../markdown/text'
+import { messageBand, paint, type TerminalTheme } from '../markdown/theme'
+import { spanWidth, textSpans, wrapSpans, type Line, type Span } from '../markdown/text'
 import { useTerminalTheme } from './theme'
-
-/** The word in front of each message, and the colour the label takes. */
-const STYLE = {
-  user: { label: 'you', color: PALETTE.user },
-  agent: { label: 'agent', color: PALETTE.agent },
-} as const
 
 /** The block that marks where a reply currently ends, while it is still arriving. */
 const STREAM_CURSOR = '▌'
 
+/**
+ * What marks a user's message when there is no band to mark it with — `NO_COLOR`, where the
+ * background is gone too and something has to say that this line is a thing the user said.
+ * On its own line above the message, never in front of it: a prefix is a character, and a
+ * character is what a copy-paste would pick up (issue #229).
+ */
+const USER_MARK = '›'
+
 /** What the terminal falls back to when it will not say how wide it is. */
 const FALLBACK_COLUMNS = 80
+
+/**
+ * The column at the right edge the transcript leaves empty: the streaming cursor's.
+ *
+ * `<Text>` re-wraps anything wider than the terminal, so a `▌` appended to a line that already
+ * fills the width — a code block's closing rule, a paragraph that wrapped to the last column —
+ * is pushed onto a line of its own, and the reply's last line visibly jumps as it arrives.
+ * Reserving the column keeps the cursor on the line it belongs to; nothing else is drawn
+ * there, so the cost is one column of width, on every message rather than only the streaming
+ * one, because a message that re-wrapped the moment it settled would jump for the same reason.
+ */
+const CURSOR_COLUMNS = 1
 
 /**
  * What one part of a message draws (epic #201, X1).
@@ -26,11 +39,10 @@ const FALLBACK_COLUMNS = 80
  * — are an entry here and a compile error until they have one.
  *
  * A renderer returns *lines of spans*, not a string and not a `<Text>`: Markdown needs more
- * than a string (a heading is bold, a table is a box, a code block is a frame) and less than a
- * `<Text>` (the message's own label, indent and cursor are not its business). The lines come
- * back already fitted to the width the renderer was given, so the view can put the same prefix
- * — the label, or the indent under it — in front of every one of them, which is how a wrapped
- * line stays under the text it belongs to.
+ * than a string (a heading is bold, a table is a box, a code block is a labelled rule) and
+ * less than a `<Text>` (the band around a user's message is not its business). The lines come
+ * back already fitted to the width the renderer was given — the width of the message itself,
+ * since issue #229 took the label away — and the view bands them.
  */
 export type PartRenderer = (
   part: MessagePart,
@@ -51,12 +63,89 @@ export const PART_RENDERERS: Record<MessagePart['type'], PartRenderer> = {
 }
 
 /**
- * One message of the transcript.
+ * One message, laid out: what it is drawn on, and the lines inside it.
  *
- * The message is laid out here — the `agent › ` label, the indent under it, the block cursor
- * while a reply streams, the `(queued)` note — and its `parts` are drawn by
- * {@link PART_RENDERERS}, a lookup from the part's type to the renderer, so a message that
- * carries more than text renders without this component changing shape.
+ * Everything a reader could argue about — the width the text wraps to, the band a user's
+ * message sits on, the mark that stands in for it under `NO_COLOR`, the padding that carries
+ * the band to the terminal's edge, the cursor at the end of a streaming reply — is decided
+ * here as plain data, so a test can hold it still without a terminal. {@link MessageView} is
+ * the drawing of it.
+ */
+export interface MessageLayout {
+  /**
+   * What Ink paints behind every line — the name Ink's `backgroundColor` prop wants, or
+   * `undefined` for no band at all (an agent's message, and every message under `NO_COLOR`).
+   */
+  readonly band: string | undefined
+  /** The columns a banded line is padded to, so the band reaches the terminal's edge. */
+  readonly columns: number
+  /** The dim mark drawn on a line above the message where there is no band, or `undefined`. */
+  readonly mark: string | undefined
+  /** The lines, each already padded to {@link columns} when there is a band. */
+  readonly lines: readonly Line[]
+}
+
+/**
+ * What one message draws at `columns` wide (issue #229).
+ *
+ * The layout is the whole point of the pass: **everything starts at column 0.** There is no
+ * `you › ` / `agent › ` label and no hanging indent under one, so selecting the transcript and
+ * pasting it gives the words that were written and nothing else — the prefix and the indent
+ * were the two things a copy picked up that nobody had said. What tells the two apart is a
+ * *background* instead (X4): a user's message is a full-width band, and an agent's is the
+ * terminal's own background, which is what the transcript has always been drawn on.
+ *
+ * Under `NO_COLOR` there is no band — colour is off, and the band is colour — so a user's
+ * message gets a dim `›` on a line of its own above it instead. A mark and not a prefix:
+ * line-anchored decoration is something a reader can leave out of a selection, where a
+ * character in front of every line never is.
+ *
+ * A **blank line** is drawn below a user's message, and above it too when nothing above has
+ * already set it off — so the band never runs into the message on either side of it. The lines
+ * are the message's own rather than the transcript's, for the reason the separator has always
+ * been (`transcript-view.tsx`): a message settles into `<Static>` as one write, and a blank
+ * line rendered beside it would be written twice, once while it was live and again when it
+ * settled. The blanks are *outside* the band; a blank line *inside* the message (a prompt with
+ * a paragraph break in it) is padded to the full width and so is part of it.
+ */
+export function messageLayout(
+  message: TranscriptMessage,
+  columns: number,
+  theme: TerminalTheme,
+): MessageLayout {
+  const trail = trailing(message)
+  // The cursor (or a `(queued)` note) goes on the last line, so the *content* has to leave the
+  // room for it — otherwise the mark is what the terminal wraps.
+  const reserved = Math.max(CURSOR_COLUMNS, spanWidth(trail))
+  const layout: RenderLayout = { width: Math.max(1, columns - reserved), theme }
+  const body = message.parts.flatMap((part) => PART_RENDERERS[part.type](part, message, layout))
+  const band = message.role === 'user' ? messageBand(theme) : undefined
+
+  const lines = body.map((line, index) => {
+    const spans: Span[] = [...line, ...(index === body.length - 1 ? trail : [])]
+    // A line with nothing in it is not a line at all to Ink — a text node with no children
+    // has no height — so a blank line between two blocks is drawn as one space. Ink trims
+    // what trails off the end of a line, so a space renders as the blank line it is.
+    const drawn = spans.length === 0 ? [{ text: ' ' }] : spans
+    return band === undefined ? drawn : [...drawn, ...bandPadding(drawn, columns)]
+  })
+
+  return {
+    band,
+    columns,
+    mark: band === undefined && message.role === 'user' ? USER_MARK : undefined,
+    lines,
+  }
+}
+
+/** The spaces that carry a banded line out to the terminal's edge. */
+function bandPadding(spans: readonly Span[], columns: number): Span[] {
+  const missing = Math.max(0, columns - spanWidth(spans))
+  return missing === 0 ? [] : [{ text: ' '.repeat(missing) }]
+}
+
+/**
+ * One message of the transcript, at column 0.
  *
  * The width is the terminal's, read here rather than handed down, because that is what makes
  * `<Static>` behave the way X2 asks: a settled message is drawn once, at the width the
@@ -64,89 +153,70 @@ export const PART_RENDERERS: Record<MessagePart['type'], PartRenderer> = {
  * streamed and leaves the scrollback alone, which is exactly the old output not reflowing.
  *
  * Each line is one `<Text>` whose children are the spans: nested `<Text>` nodes are one line
- * of output, where sibling ones in a column would be two. That is what `expect(frame).toContain
- * ('you › hello')` in the tests is resting on — the label and the text beside it have to
- * arrive as one line, whatever colours the two of them are in.
+ * of output, where sibling ones in a column would be two. The band is on the spans rather
+ * than on the line around them, so it is painted across the padding as well — Ink trims the
+ * trailing whitespace off a line, and a background that ended at the last word would be a
+ * ragged band.
  *
  * @param props.width how wide the terminal is, when the caller knows better than Ink does —
  * the test seam the frame tests use to draw a message at a width a test can read.
  * @param props.metaLine what the reply cost, as the one dim line under a settled agent
  * message (issue #208). Formatted by `reply-meta.ts`, which is where the rules about
- * durations and tokens live; it is drawn here because the indent under the `agent › ` label
- * is this component's business, and because the line has to be written in the same `<Static>`
- * pass as the message it belongs to.
+ * durations and tokens live.
+ * @param props.blankAbove whether this message is the one that draws the blank line above it.
+ * The transcript draws that line itself between two messages that are not user messages, so it
+ * is only ever asked for by a user's message — and not by one whose predecessor was a user's
+ * message too, whose band already ends in a blank line of its own.
  */
 export function MessageView({
   message,
   width,
   metaLine,
+  blankAbove,
 }: {
   message: TranscriptMessage
   width?: number
   metaLine?: string | undefined
+  blankAbove?: boolean | undefined
 }) {
   const theme = useTerminalTheme()
   const { stdout } = useStdout()
-  const style = STYLE[message.role]
 
   const columns = width ?? stdout.columns ?? FALLBACK_COLUMNS
-  const prefix = `${style.label} › `
-  const prefixWidth = stringWidth(prefix)
-  const indent = ' '.repeat(prefixWidth)
-  // The user's own words are the one thing drawn in the label's colour: an agent's reply
-  // takes its colours from what it is made of, and its label is what says who is talking.
-  const body = message.role === 'user' ? style.color : undefined
-
-  const layout: RenderLayout = { width: Math.max(1, columns - prefixWidth), theme }
-  const lines = message.parts.flatMap((part) => PART_RENDERERS[part.type](part, message, layout))
-  const last = lines.length - 1
+  const { band, mark, lines } = messageLayout(message, columns, theme)
+  const user = message.role === 'user'
 
   return (
     <>
-      {lines.map((line, index) => {
-        // A blank line between two blocks still carries the prefix: Ink gives a text node
-        // with nothing in it no height, so a line with no spans of *any* kind is a line that
-        // is not there — the blank line between two paragraphs would close up. The indent is
-        // the smallest thing that keeps it, and is what an empty line was drawn as before
-        // this view had spans at all.
-        const spans: readonly Span[] = [
-          {
-            text: index === 0 ? prefix : indent,
-            color: paint(theme, style.color),
-            // The label is bold; the indent under it is spaces, and bolding those is an
-            // escape sequence that draws nothing at all.
-            bold: index === 0,
-          },
-          ...line,
-          ...(index === last ? trailing(message, theme, style.color) : []),
-        ]
-
-        return (
-          // A message's lines have no identity of their own; their order is the identity.
-          <Text key={index}>
-            {spans.map((span, position) => (
-              // Same here: a span has no identity, its position in the line is it.
-              <Text key={position} {...textProps(span, theme, message.pending, body)}>
-                {span.text}
-              </Text>
-            ))}
-          </Text>
-        )
-      })}
+      {user && blankAbove === true && <Text> </Text>}
+      {mark !== undefined && <Text dimColor>{mark}</Text>}
+      {lines.map((line, index) => (
+        // A message's lines have no identity of their own; their order is the identity.
+        <Text key={index}>
+          {line.map((span, position) => (
+            // Same here: a span has no identity, its position in the line is it.
+            <Text key={position} {...textProps(span, theme, band, message.pending)}>
+              {span.text}
+            </Text>
+          ))}
+        </Text>
+      ))}
       {metaLine !== undefined && (
-        // Under the reply, and under the same indent as its text, so the metadata reads as
-        // belonging to the message above it rather than as a line of its own. Dim: it is a
-        // footnote about the reply, not something the model said.
-        <Text dimColor>{`${indent}${metaLine}`}</Text>
+        // Under the reply and at column 0 with it, so the metadata reads as belonging to the
+        // message above rather than as a line of its own — and so a copy of the reply keeps
+        // the reply's own words and not a footnote about them. Dim: it is what the reply
+        // cost, not something the model said.
+        <Text dimColor>{metaLine}</Text>
       )}
+      {user && <Text> </Text>}
     </>
   )
 }
 
 /** The two marks a message still on the move carries at its end. */
-function trailing(message: TranscriptMessage, theme: TerminalTheme, color: string): Span[] {
+function trailing(message: TranscriptMessage): Span[] {
   const spans: Span[] = []
-  if (message.streaming) spans.push({ text: STREAM_CURSOR, color: paint(theme, color) })
+  if (message.streaming) spans.push({ text: STREAM_CURSOR })
   if (message.pending) spans.push({ text: ' (queued)', dim: true })
   return spans
 }
@@ -155,16 +225,17 @@ function trailing(message: TranscriptMessage, theme: TerminalTheme, color: strin
  * A span, as Ink's `<Text>` props.
  *
  * The two theme decisions land here: a colour is dropped entirely when `NO_COLOR` asked for
- * none (`color` false), and a body span with no colour of its own takes the message's — which
- * is how a user's line is all one colour while an agent's is not.
+ * none (`color` false), and the band is painted span by span, which is what carries it over
+ * the padding Ink would otherwise trim away.
  */
 function textProps(
   span: Span,
   theme: TerminalTheme,
+  band: string | undefined,
   pending: boolean,
-  body: string | undefined,
 ): {
   color?: string | undefined
+  backgroundColor?: string | undefined
   bold?: boolean | undefined
   italic?: boolean | undefined
   underline?: boolean | undefined
@@ -172,7 +243,8 @@ function textProps(
   dimColor?: boolean | undefined
 } {
   return {
-    color: theme.color ? (span.color ?? body) : undefined,
+    color: paint(theme, span.color),
+    backgroundColor: band,
     bold: span.bold,
     italic: span.italic,
     underline: span.underline,

@@ -104,25 +104,41 @@ export function paint(theme: TerminalTheme, color: string | undefined): string |
 }
 
 /**
+ * The band a user's message is drawn on (issue #229).
+ *
+ * A band rather than a label, because a label is a character and a background is not: nothing
+ * in front of the user's words, so selecting them and pasting them gives the words and only
+ * the words. The colour is the terminal's own, like every other one in the transcript (X4):
+ * *bright black* is a shade of a dark terminal's background and *white* of a light one's, so
+ * the band is a band on either without `oh` naming a colour of its own. The text on it is left
+ * at the terminal's default foreground, which is the one colour guaranteed readable on both.
+ *
+ * The name is the **foreground** spelling of the colour, because that is what Ink's
+ * `backgroundColor` prop takes: it prefixes a `bg` of its own (`blackBright` → `bgBlackBright`,
+ * the `\e[100m` a terminal paints a subtle band with). Under `NO_COLOR` there is no band at
+ * all — `message-view.tsx` puts a dim `›` above the message instead, which is not colour.
+ */
+export function messageBand(theme: TerminalTheme): string | undefined {
+  if (!theme.color) return undefined
+  return theme.background === 'light' ? 'white' : 'blackBright'
+}
+
+/**
  * The named colours the transcript and the status line draw with.
  *
  * Every one of them is one of the sixteen the terminal theme defines, so `oh` wears the
  * terminal's colours and not its own. `chrome` is bright black — the one a reader reads as
  * "structure, not content" — which is why the rules, the table borders, the quote bars and
- * the code frame all take it, and it is a *named* colour like the rest: it is the terminal
- * that decides what bright black looks like.
+ * the code block's label all take it, and it is a *named* colour like the rest: it is the
+ * terminal that decides what bright black looks like.
  */
 export const PALETTE = {
-  /** The `you › ` label, and the words of a message the user wrote. */
-  user: 'cyan',
-  /** The `agent › ` label. */
-  agent: 'green',
   /** Headings. */
   heading: 'blue',
   /** Link text and inline code, the two things a reader is meant to try out. */
   link: 'blue',
   code: 'magenta',
-  /** Rules, table borders, quote bars, code frames, a link's URL. */
+  /** Rules, table borders, quote bars, a code block's label, a link's URL. */
   chrome: 'gray',
   /**
    * The status line's "something is happening": a turn that is working or retrying (#208).
