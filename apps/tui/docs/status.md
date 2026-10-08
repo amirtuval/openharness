@@ -6,6 +6,11 @@ each reply that says what it cost. This is issue #208 (epic #201), and it builds
 metadata the transcript already carries (#202, X1) and the rendering rules the transcript
 already follows (#205, X2 and X4).
 
+The bottom of the screen is one section, and #233 gave it its edges: the metadata is a footer
+under the reply rather than its last line, and a dim rule separates the console — the status
+line, the prompt and whatever takes the prompt's place — from the conversation above it. See
+[The bottom of the screen](#the-bottom-of-the-screen) for the whole rhythm.
+
 ## The status line
 
 One line, in this order:
@@ -94,10 +99,13 @@ token. So the status field is not the bare word `running` while a turn works:
 
 ## Per-reply metadata
 
-Every settled agent reply gets one dim line under it, at column 0 with its text (#229):
+Every settled agent reply gets one dim line under it, at column 0 with its text (#229), set off
+by **a blank line** (#233), so it reads as a footer to the reply rather than as a last line of
+it:
 
 ```
 The file has three callers.
+
 openai/gpt-4.1-mini · 4.2s · 1.3k tokens
 ```
 
@@ -136,6 +144,50 @@ So a reply is not settled until its metadata has landed **or** its turn has gone
 - The hold ends when the span end lands, or when the turn ends — an idle empties the pending
   requests — so a log with no span events at all (a session written before epic #201) still
   settles, one turn later.
+
+## The bottom of the screen
+
+The console is one section, and the reader can see where it starts (issue #233):
+
+```
+Chaining iterator methods like filter, map, and sum is idiomatic Rust: …
+
+7.3s · 347 tokens
+
+────────────────────────────────────────────────────────
+openai/gpt-6-astra · sesn_…N89SKV · idle
+❯
+```
+
+- **The rule** is what says the conversation ends here: it is drawn from column 0, in the
+  `chrome` named colour and dim, like every other piece of structure the transcript draws (X4),
+  and it stops one column short of the terminal because the transcript reserves that column for
+  its streaming cursor (`CURSOR_COLUMNS`) — the two agree about the right edge, and the rule is
+  never a line exactly as wide as the terminal. Under `NO_COLOR` it is the plain `─` it always
+  was: a rule is a character, not a surface.
+- **Everything the console is renders under it**: the status line, the prompt, the command menu
+  (`/`), whatever flow has taken the input area over (`prompt-slot.tsx` — the model picker,
+  `/providers`), and the hidden key input. They are one section because they are one thing:
+  what the user is looking at while typing.
+- **Everything below the rule is still wiped by Ctrl+L**, and the status line's clock is
+  unaffected by any of this: the rule is drawn once and never ticks.
+
+### One blank line, everywhere
+
+The blank line above the rule belongs to the _section_, and like every other blank line in the
+transcript it is drawn by whoever needs it and only when it is not already there:
+
+| above the section                           | the blank line comes from                                                                           |
+| ------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| an agent's reply (with or without a footer) | the input section (`InputRule`'s `blankAbove`)                                                      |
+| a user's message                            | the band, whose own blank line ends it (#229)                                                       |
+| a notice (`error: …`, `/help`, a hint)      | the input section — a notice never ends in one                                                      |
+| a reply that has not said anything yet      | the band or reply above it: a message with nothing in it draws nothing, so it is not a block (#233) |
+
+The same rule holds between messages: one blank line, never two, and none at the top of a
+session. `app.test.tsx` holds the whole rhythm still — reply → blank → metadata → blank → rule
+→ status → prompt — because whether each piece's own blank line adds up to one or two is a fact
+about the screen rather than about any one component.
 
 ## Queued messages
 

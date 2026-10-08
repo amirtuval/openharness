@@ -6,8 +6,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { TerminalTheme } from '../markdown/theme'
 import {
   formatElapsed,
+  InputRule,
   isQuiet,
   modelLabel,
+  ruleSpan,
+  ruleWidth,
   shortSessionId,
   SPINNER_FRAMES,
   statusField,
@@ -116,6 +119,51 @@ describe('StatusLine', () => {
     expect(shortSessionId(SESSION)).toBe('sesn_…Q092B1')
     expect(shortSessionId('sesn_ABCDEF')).toBe('sesn_ABCDEF')
     expect(shortSessionId('not-a-session')).toBe('not-a-session')
+  })
+})
+
+describe('the rule above the input area (issue #233)', () => {
+  /** The rule as the terminal would show it, at 40 columns unless a test says otherwise. */
+  function frame(overrides: { readonly width?: number; readonly blankAbove?: boolean } = {}) {
+    const { lastFrame } = render(
+      <ThemeProvider theme={DARK}>
+        <InputRule width={overrides.width ?? 40} blankAbove={overrides.blankAbove ?? true} />
+      </ThemeProvider>,
+    )
+    return lastFrame() ?? ''
+  }
+
+  it('spans the width, less the column the transcript reserves for its cursor', () => {
+    // The last column is the streaming cursor's (`CURSOR_COLUMNS`), so the rule stops one
+    // short of it and lines up with the transcript above.
+    expect(ruleWidth(40)).toBe(39)
+    expect(frame({ width: 40 })).toBe(`\n${'─'.repeat(39)}`)
+  })
+
+  it('is structure: the chrome named colour, and dim', () => {
+    const span = ruleSpan(DARK, 40)
+    expect(span.text).toBe('─'.repeat(39))
+    expect(span.color).toBe('gray')
+    expect(span.dim).toBe(true)
+  })
+
+  it('is the plain rule under NO_COLOR — a rule is a character, not a surface', () => {
+    const span = ruleSpan(PLAIN, 40)
+    expect(span.color).toBeUndefined()
+    expect(span.text).toBe('─'.repeat(39))
+    expect(frame({ width: 40 })).toContain('─'.repeat(39))
+  })
+
+  it('draws the blank line above itself only when it is asked for one', () => {
+    // The screen asks for none when the band above already ended in one, or when there is
+    // nothing above the section at all — a session's first frame.
+    expect(frame({ blankAbove: true })).toBe(`\n${'─'.repeat(39)}`)
+    expect(frame({ blankAbove: false })).toBe('─'.repeat(39))
+  })
+
+  it('never draws a rule with no room at all, however narrow the terminal is', () => {
+    expect(ruleWidth(1)).toBe(1)
+    expect(ruleWidth(0)).toBe(1)
   })
 })
 

@@ -9,7 +9,7 @@ import { makeModelEntry, makeProviderCredential } from '@openharness/protocol/fi
 
 import { App, type AppProps, type ExitPayload } from './app'
 import type { ChatOptions } from './args'
-import { shortSessionId } from './components/status-line'
+import { ruleWidth, shortSessionId } from './components/status-line'
 import type { PromptHistory } from './history'
 import { firstRunFake, listingAgents } from './test-support/fake'
 import {
@@ -959,5 +959,78 @@ describe('App', () => {
 
     await waitForFrame(app, 'error: the connection dropped')
     expect(app.exits).toEqual([])
+  })
+})
+
+/**
+ * The bottom of the screen (issue #233): a reply, the blank line its metadata sits under, the
+ * blank line the input section is set off with, the rule, the status line and the prompt.
+ *
+ * These are the frame tests that hold the whole rhythm still, which is the one thing a
+ * per-component test cannot see: each piece draws its own blank line, and whether that adds up
+ * to one line between two blocks or two is a fact about the screen.
+ */
+describe('the bottom of the screen (issue #233)', () => {
+  /** The terminal `ink-testing-library` gives every test, and so the width the rule is drawn at. */
+  const COLUMNS = 100
+  const RULE = '─'.repeat(ruleWidth(COLUMNS))
+
+  it('draws reply → blank → metadata → blank → rule → status → prompt', async () => {
+    const fake = createFakeClient()
+    const app = renderApp(fake, chatOptions({ session: fake.session.id }))
+    await waitForChat(app, fake.session.id)
+
+    // A session with nothing in it yet opens on the section itself, with no blank line above
+    // the rule: there is nothing there to be set off from.
+    expect(frameOf(app).split('\n')[0]).toBe(RULE)
+
+    submit(app, 'Hello there.')
+    await waitForFrame(app, '· 544 tokens')
+    await waitForFrame(app, / · idle$/mu)
+
+    expect(frameOf(app).split('\n')).toEqual([
+      'Hello there.', // the user's message, on its band
+      '', // …whose band brings its own blank line below it (#229)
+      'Fake reply: Hello there.', // the reply
+      '', // the footer's blank line (#233)
+      expect.stringMatching(/^\d+(?:\.\d+)?(?:ms|s) · 544 tokens$/), // what it cost (#208)
+      '', // the input section's blank line (#233)
+      RULE, // …and the rule that opens it, one column short of the terminal
+      expect.stringMatching(/· sesn_…[0-9A-Z]{6} · idle$/), // the status line
+      '❯', // the prompt
+    ])
+  })
+
+  it('keeps exactly one blank line above the rule while a turn is working', async () => {
+    const fake = createFakeClient({ delayMs: 10 })
+    fake.respondWith('A slow reply.', { chunks: 8, delayMs: 60 })
+    const app = renderApp(fake, chatOptions({ session: fake.session.id }))
+    await waitForChat(app, fake.session.id)
+
+    submit(app, 'One.')
+    await waitForFrame(app, 'Working… ')
+
+    // The message just sent is the last thing in the transcript, and its band ends in a blank
+    // line of its own: the section asks for none when it is already there, so the band runs to
+    // the rule across one blank line and not two.
+    const frame = frameOf(app)
+    expect(frame).toMatch(/^One\.\n\n─+\n.*Working… /mu)
+    expect(frame).not.toContain('\n\n\n')
+
+    // …and one blank line still, once the reply is the last message instead of the band.
+    await waitForFrame(app, 'A slow reply.')
+    expect(frameOf(app)).not.toContain('\n\n\n')
+  })
+
+  it('sets a notice off from the conversation and from the console', async () => {
+    const fake = createFakeClient()
+    const app = renderApp(fake, chatOptions({ session: fake.session.id }))
+    await waitForChat(app, fake.session.id)
+
+    submit(app, '/help')
+
+    await waitForFrame(app, 'Commands and keys')
+    await waitForFrame(app, /Commands and keys[\s\S]*─+/u)
+    expect(frameOf(app)).not.toContain('\n\n\n')
   })
 })

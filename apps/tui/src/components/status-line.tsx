@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react'
 import type { ChatViewState } from '../chat/session'
 import { PALETTE, paint, type TerminalTheme } from '../markdown/theme'
 import { spanWidth, truncateSpans, type Span } from '../markdown/text'
+import { CURSOR_COLUMNS } from './message-view'
 import { useTerminalTheme } from './theme'
 
 /**
@@ -385,4 +386,76 @@ function lineSpans(segments: readonly Segment[], theme: TerminalTheme): Span[] {
 /** The width of the line the segments would draw, separators included. */
 function lineWidth(segments: readonly Segment[]): number {
   return spanWidth(joined(segments))
+}
+
+/**
+ * The rule that opens the input area (issue #233).
+ *
+ * The bottom of the screen is one section — the rule, the status line, the prompt, the command
+ * menu under it, a flow in the prompt slot, the hidden key input — and this is what says so:
+ * above it is the conversation, below it is the console. It goes *above* the status line
+ * because the status line is part of the console: it is the one line of chrome the user reads
+ * while typing, not a line of the reply.
+ *
+ * It is drawn from column 0 to the column the transcript leaves empty for its streaming cursor
+ * (`CURSOR_COLUMNS`), so the two agree about where the right edge is — and so the rule is never
+ * a line exactly as wide as the terminal, which is the same trouble that reserves the column in
+ * the first place.
+ *
+ * It is structure, so it is drawn the way the transcript draws structure (X4): the `chrome`
+ * named colour, and dim. Under `NO_COLOR` there is no colour to drop and no surface to lose —
+ * the rule is the plain `─` it always was, and the section it opens is unchanged.
+ */
+export function InputRule({
+  width,
+  blankAbove = true,
+}: {
+  /**
+   * How wide the terminal is, when the caller knows better than Ink does — the test seam the
+   * frame tests draw at a width they can read, as `MessageView` and `StatusLine` have.
+   */
+  readonly width?: number | undefined
+  /**
+   * Whether this section draws the blank line above it (issue #233): the line that sets the
+   * section off from the transcript. Never asked for when the message above already ends in
+   * one — a user's message is banded and its band ends in a blank line of its own — or when
+   * there is nothing above it at all, which is how a session starts.
+   */
+  readonly blankAbove?: boolean | undefined
+}) {
+  const theme = useTerminalTheme()
+  const { stdout } = useStdout()
+  const columns = width ?? stdout.columns ?? FALLBACK_COLUMNS
+
+  return (
+    <>
+      {blankAbove && <Text> </Text>}
+      <Text color={ruleSpan(theme, columns).color} dimColor>
+        {ruleSpan(theme, columns).text}
+      </Text>
+    </>
+  )
+}
+
+/** The character a rule is drawn with: the transcript's own, from `markdown/render.ts`. */
+export const RULE_CHARACTER = '─'
+
+/**
+ * How many columns a rule spans: the terminal's, less the column the transcript reserves for
+ * its streaming cursor (`message-view.tsx`). At least one, so the section always has an edge.
+ */
+export function ruleWidth(columns: number): number {
+  return Math.max(1, columns - CURSOR_COLUMNS)
+}
+
+/**
+ * The rule as the span it is drawn from — the whole decision, in one place and without a
+ * terminal, as {@link statusSpans} is for the line under it.
+ */
+export function ruleSpan(theme: TerminalTheme, columns: number): Span {
+  return {
+    text: RULE_CHARACTER.repeat(ruleWidth(columns)),
+    color: paint(theme, PALETTE.chrome),
+    dim: true,
+  }
 }

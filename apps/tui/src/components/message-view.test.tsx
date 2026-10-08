@@ -254,17 +254,18 @@ describe('MessageView', () => {
     expect(lines(frameOf(message('- one\n- two'), 40, PLAIN))).toEqual(['• one', '• two'])
   })
 
-  it('puts the metadata line under the reply, at column 0 with it (#208, #229)', () => {
+  it('puts the metadata line under the reply, at column 0 with it (#208, #229, #233)', () => {
     const { lastFrame } = render(
       <ThemeProvider theme={DARK}>
         <MessageView message={message('hello there')} width={40} metaLine="4.2s · 1.3k tokens" />
       </ThemeProvider>,
     )
 
-    expect(lines(lastFrame() ?? '')).toEqual(['hello there', '4.2s · 1.3k tokens'])
+    // A blank line first, so the metadata is a footer rather than the reply's last line.
+    expect(lines(lastFrame() ?? '')).toEqual(['hello there', '', '4.2s · 1.3k tokens'])
   })
 
-  it('has no metadata line to draw when the caller has none (#208)', () => {
+  it('has no metadata line to draw when the caller has none (#208) — and no blank either', () => {
     expect(lines(frameOf(message('hello there'), 40))).toEqual(['hello there'])
   })
 
