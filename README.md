@@ -180,7 +180,8 @@ not know yet — and offers to save the answer as the default. Add a key in the 
 from a saved agent preset (`oh agents` lists them).
 
 Inside a chat, `/model` opens the same picker: the choice rides the next message, and the
-status line shows the model the session runs. `oh sessions` lists sessions, `oh sessions
+status line shows the model the session runs. Type to filter the picker by model name, id or
+provider; Esc clears the search. `oh sessions` lists sessions, `oh sessions
 delete <id>` deletes one (it asks first; `--yes` skips the question), `oh -c` continues the
 most recent one, and `oh -s <id>` resumes a particular one — a chat deleted elsewhere says
 so and exits. `apps/tui/AGENTS.md` documents the keys and the exit codes.
