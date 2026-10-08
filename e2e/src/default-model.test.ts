@@ -1,6 +1,6 @@
 import type { Client } from '@openharness/client'
 import {
-  createMastraRegistry,
+  createBundledRegistry,
   isEverydayModel,
   newestModelId,
   RECOMMENDED_DEFAULT_MODELS,
@@ -100,7 +100,7 @@ function recommendedModelFor(provider: string): string {
 
 /** What the registry fallback should pick for a provider, per the exported rule. */
 function registryFallbackFor(provider: string): string {
-  const everyday = createMastraRegistry()
+  const everyday = createBundledRegistry()
     .models(provider)
     .filter((model) => isEverydayModel(model.id, model.chat))
     .map((model) => `${provider}/${model.id}`)

@@ -76,7 +76,7 @@ function emptyValues(form: CredentialForm): Record<string, string> {
 
 /** What the form takes. */
 export interface ProviderKeyFormProps {
-  /** The Mastra router id the key is for. */
+  /** The provider id the key is for. */
   readonly provider: string
   /** A key for this provider is already stored, so saving replaces it. */
   readonly replacing: boolean
@@ -112,7 +112,7 @@ export function ProviderKeyForm({
   autoFocus = false,
 }: ProviderKeyFormProps) {
   const info = providerInfo(provider)
-  // A provider this app has never heard of — the credentials API takes any router id — is an
+  // A provider this app has never heard of — the credentials API takes any provider id — is an
   // `api_key` form, because that is what every provider the server can validate takes.
   const form = CREDENTIAL_FORMS[info?.credential ?? 'api_key']
 

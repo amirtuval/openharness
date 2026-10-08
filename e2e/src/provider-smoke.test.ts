@@ -118,9 +118,9 @@ describe.skipIf(smoke === undefined && !smokeRequired)('a real model provider', 
     const target = smoke
 
     // `mockModel: false` is the point: no `OPENHARNESS_TEST_MODEL`, so the process runs the
-    // brain's default router and whatever provider the model id resolves to.
+    // brain's provider factory and whatever provider the model id resolves to.
     const server = await harness.server({ mockModel: false })
-    expect(server.output()).toMatch(/model: mastra router/)
+    expect(server.output()).toMatch(/model: provider factory/)
 
     const client = await harness.client(server)
 

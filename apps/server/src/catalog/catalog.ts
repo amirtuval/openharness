@@ -58,7 +58,7 @@ export interface ModelCatalogOptions {
   readonly credentials: Pick<CredentialStore, 'list' | 'get'>
   /** The vault that opens a sealed credential for one call. */
   readonly vault: Vault
-  /** Where metadata and the fallback lists come from — the bundled `@mastra/core` registry. */
+  /** Where metadata and the fallback lists come from — the bundled models.dev snapshot. */
   readonly registry: ModelRegistry
   /** How a provider is reached; the production one is `createProviderFetch()`. */
   readonly fetch: ProviderFetch
@@ -322,7 +322,7 @@ function entryOf(
   }
 }
 
-/** The first value that carries a name; the router id is the last resort. */
+/** The first value that carries a name; the model id is the last resort. */
 function firstNonEmpty(...values: readonly (string | undefined)[]): string {
   for (const value of values) {
     if (value !== undefined && value.trim().length > 0) {

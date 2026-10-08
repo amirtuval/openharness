@@ -22,6 +22,7 @@
   "scripts": {
     "build": "tsdown",
     "build:deps": "turbo run build --filter=@openharness/server^...",
+    "catalog:refresh": "node scripts/refresh-models-dev.mjs",
     "dev": "tsdown --watch --on-success \"node dist/index.js\"",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
@@ -32,7 +33,6 @@
   "dependencies": {
     "@google-cloud/opentelemetry-cloud-trace-exporter": "3.1.0",
     "@hono/node-server": "2.1.1",
-    "@mastra/core": "1.71.0",
     "@openharness/brain": "workspace:*",
     "@openharness/hands": "workspace:*",
     "@openharness/protocol": "workspace:*",

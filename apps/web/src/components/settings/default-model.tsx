@@ -14,7 +14,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui
  * web app and `oh` agree on it. The card shows what the server holds — including a default
  * the **server chose by itself** when the first provider key was saved (U4), because this is
  * a read of the same value the picker writes, not a local choice — and the same catalog
- * picker the composer uses, so a default can be any `provider/model` the router knows,
+ * picker the composer uses, so a default can be any `provider/model` id,
  * catalog entry or typed id.
  *
  * The catalog comes from the shell (`AppFrame`), which loaded it once for the whole app (#91);

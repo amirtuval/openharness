@@ -71,7 +71,7 @@ export function sessionError(error: SessionError): AppendableEvent {
  * its own, so there is no such thing as a span start without a request behind it.
  *
  * @param consumes the ids of the pending user events this request answers; `[]` claims nothing
- * @param model the `provider/model` the request is made with, a Mastra router string
+ * @param model the model id (`provider/model`) the request is made with
  */
 export function spanStart(consumes: readonly EventId[], model: string): AppendableEvent {
   return {

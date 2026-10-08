@@ -46,7 +46,7 @@ export interface ProviderPage {
 
 /** How to list one provider's models. */
 export interface ProviderAdapter {
-  /** The Mastra router provider name this adapter serves — the `provider` of a `provider/model` id. */
+  /** The provider id this adapter serves — the `provider` of a `provider/model` id. */
   readonly provider: string
   /**
    * The URL of one page of the list. `cursor` is the previous page's `next`, or `null` for the

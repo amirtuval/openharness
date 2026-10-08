@@ -441,7 +441,7 @@ export function describeConfig(config: ServerConfig): string[] {
   )
   lines.push(
     config.testModel === undefined
-      ? 'model: mastra router'
+      ? 'model: provider factory'
       : `model: TEST MODEL (${ENV_VARS.testModel}=${config.testModel})`,
   )
   lines.push(

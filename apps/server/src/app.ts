@@ -87,12 +87,12 @@ export interface AppOptions {
   /**
    * The model catalogue (epic #92): what `GET /v1/models` answers, and the per-provider cache
    * entry the credential PUT/DELETE routes drop (C4). `main.ts` builds it with the real
-   * provider fetch and the bundled `@mastra/core` registry; a test injects its own seams.
+   * provider fetch and the bundled models.dev snapshot registry; a test injects its own seams.
    */
   readonly catalog: RouteDeps['catalog']
   /**
    * Where the automatic default's registry fallback reads model ids (epic #116, U4). The
-   * bundled `@mastra/core` registry in production — `main.ts` passes the same one the
+   * bundled models.dev snapshot in production — `main.ts` passes the same one the
    * catalogue was built with — and `emptyRegistry` (no fallback) otherwise.
    */
   readonly registry?: ModelRegistry

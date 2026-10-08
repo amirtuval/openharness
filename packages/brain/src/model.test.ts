@@ -4,12 +4,22 @@ import {
   ZERO_MODEL_USAGE,
   isUsableCredential,
   missingCredentialMessage,
+  isUnsupportedProviderError,
   providerOf,
-  routerModelFactory,
+  providerModelFactory,
   streamModelRequest,
+  UnsupportedProviderError,
   toModelUsage,
 } from './model'
-import { TEST_CREDENTIAL, apiCallError, misdeclaredSpec, mockModel } from './testing/mock-model'
+import type { ModelRequestResult } from './model'
+import {
+  TEST_API_KEY,
+  TEST_CREDENTIAL,
+  apiCallError,
+  wrongSpecModel,
+  mockModel,
+} from './testing/mock-model'
+import { anthropicSse, openAiResponsesSse } from './testing/provider-streams'
 
 describe('toModelUsage', () => {
   it('maps the AI SDK report onto the protocol counters', () => {
@@ -49,9 +59,10 @@ describe('toModelUsage', () => {
     ).toEqual(ZERO_MODEL_USAGE)
   })
 
-  it('reads the counts out of the usage object a v2-declared model reports', () => {
-    // What `streamText` hands over for Mastra's router: the model's own usage object, where a
-    // number belongs, with the cache breakdown inside it rather than beside it.
+  it('reads the counts out of the usage object a mis-declared model reports', () => {
+    // The shape a report takes when the model's declared provider spec is older than the usage
+    // it streams: the model's own usage object, where a number belongs, with the cache
+    // breakdown inside it rather than beside it.
     expect(
       toModelUsage({
         inputTokens: { total: 11, noCache: 6, cacheRead: 2, cacheWrite: 3 },
@@ -72,7 +83,7 @@ describe('toModelUsage', () => {
     })
   })
 
-  it('reads through the second layer the compatibility layer wraps around it', () => {
+  it('reads through the second layer a spec-compatibility layer wraps around it', () => {
     expect(
       toModelUsage({
         inputTokens: { total: { total: 7, cacheRead: 1, cacheWrite: 2 }, noCache: undefined },
@@ -141,7 +152,7 @@ describe('streamModelRequest', () => {
   })
 
   it('reports the real counts for a model that declares the wrong provider spec', async () => {
-    // The router's report, end to end: `ai` reads the mock's usage through its v2 compatibility
+    // A mis-declared report, end to end: `ai` reads the mock's usage through its v2 compatibility
     // layer and accumulates `"0[object Object]"`, and the counts have to come back out of the
     // step report the model made — not out of that sum (issue #39).
     const { factory } = mockModel({
@@ -150,7 +161,7 @@ describe('streamModelRequest', () => {
     })
 
     const result = await streamModelRequest({
-      model: misdeclaredSpec(factory('anthropic/claude-sonnet-5', TEST_CREDENTIAL)),
+      model: wrongSpecModel(factory('anthropic/claude-sonnet-5', TEST_CREDENTIAL)),
       messages,
     })
 
@@ -269,8 +280,9 @@ describe('providerOf', () => {
 
 describe('isUsableCredential', () => {
   it('answers no for a missing credential and for a blank key', () => {
-    // A blank key is not merely useless: Mastra's router reads a falsy `apiKey` as "none
-    // given" and falls back to the environment, so it must never be treated as a credential.
+    // A blank key is not merely useless: every provider client reads a falsy `apiKey` as "none
+    // given" and falls back to its own environment variable, so it must never be treated as
+    // a credential.
     expect(isUsableCredential(null)).toBe(false)
     expect(isUsableCredential({ apiKey: '' })).toBe(false)
     expect(isUsableCredential({ apiKey: '   ' })).toBe(false)
@@ -298,29 +310,281 @@ describe('missingCredentialMessage', () => {
   })
 })
 
-describe('routerModelFactory', () => {
-  /** The router's auth resolution: private in its type, an ordinary method at runtime. */
-  interface RouterInternals {
-    resolveAuth(provider: string, model: string): Promise<{ apiKey?: string; source?: string }>
+/**
+ * The provider factory, one case per provider a key can be stored for.
+ *
+ * Every case streams one request through the *real* provider client with `fetch` stubbed, so
+ * what it asserts is what the client would really send: the URL, and the header the key
+ * travelled in. The environment is set to decoys first — the `*_API_KEY` and `*_BASE_URL`
+ * variables the provider packages read when a constructor leaves a setting out — and nothing
+ * from it may appear in the request (epic #65, A5).
+ */
+describe('providerModelFactory', () => {
+  /**
+   * One provider's expected shape: the request that proves the factory built the right client,
+   * pointed at the right endpoint, authenticated with the owner's key.
+   *
+   * The model ids are the providers' own spellings — a fireworks or OpenRouter id carries
+   * slashes of its own, and the OpenRouter one is the shape the catalogue's own
+   * recommendations use.
+   */
+  const CASES = [
+    {
+      provider: 'anthropic',
+      model: 'claude-haiku-4-5',
+      url: 'https://api.anthropic.com/v1/messages',
+      header: 'x-api-key',
+      value: TEST_API_KEY,
+    },
+    {
+      provider: 'openai',
+      model: 'gpt-4o-mini',
+      url: 'https://api.openai.com/v1/responses',
+      header: 'authorization',
+      value: `Bearer ${TEST_API_KEY}`,
+    },
+    {
+      provider: 'google',
+      model: 'gemini-2.5-flash',
+      url:
+        'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash' +
+        ':streamGenerateContent?alt=sse',
+      header: 'x-goog-api-key',
+      value: TEST_API_KEY,
+    },
+    {
+      provider: 'openrouter',
+      model: 'google/gemini-2.5-flash',
+      url: 'https://openrouter.ai/api/v1/chat/completions',
+      header: 'authorization',
+      value: `Bearer ${TEST_API_KEY}`,
+    },
+    {
+      provider: 'groq',
+      model: 'llama-3.3-70b-versatile',
+      url: 'https://api.groq.com/openai/v1/chat/completions',
+      header: 'authorization',
+      value: `Bearer ${TEST_API_KEY}`,
+    },
+    {
+      provider: 'deepseek',
+      model: 'deepseek-chat',
+      url: 'https://api.deepseek.com/chat/completions',
+      header: 'authorization',
+      value: `Bearer ${TEST_API_KEY}`,
+    },
+    {
+      provider: 'fireworks',
+      model: 'accounts/fireworks/models/llama-v3p1-70b-instruct',
+      url: 'https://api.fireworks.ai/inference/v1/chat/completions',
+      header: 'authorization',
+      value: `Bearer ${TEST_API_KEY}`,
+    },
+    {
+      provider: 'mistral',
+      model: 'mistral-small-latest',
+      url: 'https://api.mistral.ai/v1/chat/completions',
+      header: 'authorization',
+      value: `Bearer ${TEST_API_KEY}`,
+    },
+    {
+      provider: 'together',
+      model: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
+      url: 'https://api.together.xyz/v1/chat/completions',
+      header: 'authorization',
+      value: `Bearer ${TEST_API_KEY}`,
+    },
+    {
+      provider: 'xai',
+      model: 'grok-4',
+      url: 'https://api.x.ai/v1/responses',
+      header: 'authorization',
+      value: `Bearer ${TEST_API_KEY}`,
+    },
+    {
+      provider: 'cerebras',
+      model: 'llama-3.3-70b',
+      url: 'https://api.cerebras.ai/v1/chat/completions',
+      header: 'authorization',
+      value: `Bearer ${TEST_API_KEY}`,
+    },
+  ] as const
+
+  /**
+   * The decoy environment, one pair per provider: what a deployment might have set, and what a
+   * request built from the environment would pick up instead of the owner's key or the pinned
+   * URL. No value here may appear in a request this factory builds.
+   */
+  const DECOYS: Readonly<Record<string, string>> = {
+    ANTHROPIC_API_KEY: 'sk-ant-env-decoy',
+    ANTHROPIC_BASE_URL: 'https://env-decoy.invalid/anthropic',
+    OPENAI_API_KEY: 'sk-openai-env-decoy',
+    OPENAI_BASE_URL: 'https://env-decoy.invalid/openai',
+    GOOGLE_GENERATIVE_AI_API_KEY: 'google-env-decoy',
+    GOOGLE_GENERATIVE_AI_BASE_URL: 'https://env-decoy.invalid/google',
+    OPENROUTER_API_KEY: 'openrouter-env-decoy',
+    OPENROUTER_BASE_URL: 'https://env-decoy.invalid/openrouter',
+    GROQ_API_KEY: 'groq-env-decoy',
+    GROQ_BASE_URL: 'https://env-decoy.invalid/groq',
+    DEEPSEEK_API_KEY: 'deepseek-env-decoy',
+    DEEPSEEK_BASE_URL: 'https://env-decoy.invalid/deepseek',
+    FIREWORKS_API_KEY: 'fireworks-env-decoy',
+    FIREWORKS_BASE_URL: 'https://env-decoy.invalid/fireworks',
+    MISTRAL_API_KEY: 'mistral-env-decoy',
+    MISTRAL_BASE_URL: 'https://env-decoy.invalid/mistral',
+    TOGETHER_API_KEY: 'together-env-decoy',
+    TOGETHER_BASE_URL: 'https://env-decoy.invalid/together',
+    XAI_API_KEY: 'xai-env-decoy',
+    XAI_BASE_URL: 'https://env-decoy.invalid/xai',
+    CEREBRAS_API_KEY: 'cerebras-env-decoy',
+    CEREBRAS_BASE_URL: 'https://env-decoy.invalid/cerebras',
   }
 
-  it('authenticates each request with the explicit key, never the environment', async () => {
-    vi.stubEnv('OPENAI_API_KEY', 'sk-env-decoy-that-must-not-be-used')
-    try {
-      const model = routerModelFactory('openai/gpt-4o', {
-        apiKey: 'sk-explicit-from-the-owner',
-      }) as unknown as RouterInternals
+  /** One captured outbound request. */
+  interface Captured {
+    readonly url: string
+    readonly headers: Record<string, string>
+    readonly body: unknown
+  }
 
-      // Mastra's `resolveAuth` returns a config-supplied key verbatim — `source: 'explicit'`
-      // — without asking the gateway that would read `OPENAI_API_KEY`. That is the property
-      // epic #65 (A5) rests on, and the one pinned here so a Mastra upgrade cannot silently
-      // undo it.
-      await expect(model.resolveAuth('openai', 'gpt-4o')).resolves.toMatchObject({
-        apiKey: 'sk-explicit-from-the-owner',
-        source: 'explicit',
+  const PROMPT = [{ role: 'user' as const, content: 'Hello' }]
+
+  /** What a provider answers when a test only cares about the request it was sent: a refusal. */
+  function refusal(): Response {
+    return new Response(JSON.stringify({ error: { message: 'not under test' } }), {
+      status: 400,
+      headers: { 'content-type': 'application/json' },
+    })
+  }
+
+  /**
+   * Build a model for `modelId` with {@link TEST_CREDENTIAL}, set every decoy variable, stub
+   * `fetch` with `respond` so nothing leaves the process, and stream one request through it.
+   *
+   * The captured requests are what is under test: the URL the provider client built and the
+   * headers it authenticated with, read before anything is parsed. What the request's outcome
+   * is — a 400 the client rejects, or a stream it parses — is the caller's to assert.
+   */
+  async function capture(
+    modelId: string,
+    respond: () => Response,
+  ): Promise<{ readonly requests: Captured[]; readonly result: ModelRequestResult }> {
+    const requests: Captured[] = []
+    for (const [name, value] of Object.entries(DECOYS)) {
+      vi.stubEnv(name, value)
+    }
+    vi.stubGlobal('fetch', (input: unknown, init?: { headers?: unknown; body?: unknown }) => {
+      const url = typeof input === 'string' ? input : String((input as { url: string }).url)
+      let body: unknown = init?.body
+      if (typeof body === 'string') {
+        try {
+          body = JSON.parse(body)
+        } catch {
+          // Not JSON: keep the raw text, which is still what the request carried.
+        }
+      }
+      requests.push({
+        url,
+        headers: { ...((init?.headers ?? {}) as Record<string, string>) },
+        body,
       })
+      return Promise.resolve(respond())
+    })
+    try {
+      const model = providerModelFactory(modelId, TEST_CREDENTIAL)
+      const result = await streamModelRequest({ model, messages: PROMPT })
+      return { requests, result }
     } finally {
       vi.unstubAllEnvs()
+      vi.unstubAllGlobals()
     }
+  }
+
+  it('covers exactly the providers a key can be stored for', () => {
+    // The same 11 ids `VALIDATABLE_PROVIDERS` carries in `apps/server/src/provider-validation.ts`
+    // — the server's `model-catalog.test.ts` pins that the two agree, and this is the brain's
+    // half of it: a provider with a key that a request cannot be made to would be a dead end.
+    expect(CASES.map((entry) => entry.provider)).toEqual([
+      'anthropic',
+      'openai',
+      'google',
+      'openrouter',
+      'groq',
+      'deepseek',
+      'fireworks',
+      'mistral',
+      'together',
+      'xai',
+      'cerebras',
+    ])
+  })
+
+  for (const entry of CASES) {
+    it(`sends the ${entry.provider} request to its own host with the explicit key`, async () => {
+      const { requests } = await capture(`${entry.provider}/${entry.model}`, refusal)
+
+      expect(requests).toHaveLength(1)
+      const [request] = requests
+      expect(request?.url).toBe(entry.url)
+      // The exact header the provider authenticates with, carrying the owner's key — not the
+      // decoy the environment holds, and not the decoy's endpoint either.
+      expect(request?.headers[entry.header]).toBe(entry.value)
+      expect(JSON.stringify(requests)).not.toContain('env-decoy')
+    })
+  }
+
+  it('sends the model id the session named, not the whole provider/model string', async () => {
+    // A fireworks id carries slashes of its own, so the id is everything after the first one —
+    // not `split('/')[1]`, which would ask Fireworks for `accounts`.
+    const { requests } = await capture(
+      'fireworks/accounts/fireworks/models/llama-v3p1-70b-instruct',
+      refusal,
+    )
+
+    expect(requests[0]?.body).toMatchObject({
+      model: 'accounts/fireworks/models/llama-v3p1-70b-instruct',
+    })
+  })
+
+  it('refuses a provider it has no client for, before any request', () => {
+    // The provider a session names is free text (C5), so this is reachable — and a key for such
+    // a provider could never be stored. `runTurn` catches this and ends the turn on it.
+    expect(() => providerModelFactory('acme/gpt-9', TEST_CREDENTIAL)).toThrow(
+      UnsupportedProviderError,
+    )
+    expect(() => providerModelFactory('no-slash-at-all', TEST_CREDENTIAL)).toThrow(
+      'no model client for provider "no-slash-at-all"',
+    )
+    expect(isUnsupportedProviderError(new UnsupportedProviderError('acme'))).toBe(true)
+    expect(isUnsupportedProviderError(new Error('nope'))).toBe(false)
+  })
+
+  it('reports the numbers a real OpenAI Responses stream carries', async () => {
+    const { result } = await capture('openai/gpt-4o-mini', openAiResponsesSse)
+
+    expect(result.error).toBeUndefined()
+    expect(result.text).toBe('Hi there')
+    expect(result.usage).toEqual({
+      input_tokens: 11,
+      output_tokens: 5,
+      cache_read_input_tokens: 2,
+      cache_creation_input_tokens: 0,
+    })
+  })
+
+  it('reports the numbers a real Anthropic stream carries', async () => {
+    const { result } = await capture('anthropic/claude-haiku-4-5', anthropicSse)
+
+    expect(result.error).toBeUndefined()
+    expect(result.text).toBe('Hi there')
+    // Anthropic's `input_tokens` is the *uncached* input, so the provider's total is that plus
+    // both cache halves — 11 + 2 written + 3 read. The four protocol counters are the ones the
+    // wire carried, which is what the old router could not get right (issue #39).
+    expect(result.usage).toEqual({
+      input_tokens: 16,
+      output_tokens: 5,
+      cache_read_input_tokens: 3,
+      cache_creation_input_tokens: 2,
+    })
   })
 })

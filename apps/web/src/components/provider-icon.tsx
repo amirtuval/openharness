@@ -36,7 +36,7 @@ export function ModelProviderIcon({
   provider,
   name,
 }: {
-  /** The Mastra router id, e.g. `openai`. */
+  /** The provider id, e.g. `openai`. */
   provider: string
   /** The display name, for the monogram's letter. */
   name: string

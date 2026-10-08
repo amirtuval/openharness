@@ -21,7 +21,7 @@ import { ProviderCredentialIdSchema } from '../ids'
 /**
  * The credential forms a provider credential can take.
  *
- * Only `api_key` exists today: one secret, for the providers Mastra's model router
+ * Only `api_key` exists today: one secret, for the providers the model factory
  * authenticates that way (OpenAI, Anthropic, Google AI Studio, OpenRouter, Groq, …). The
  * record is designed so that `aws`, `gcp_service_account` and `azure` later become new types
  * in this union rather than a new design — each a `type` string plus its own payload fields.
@@ -40,7 +40,7 @@ export type ProviderCredentialType = z.infer<typeof ProviderCredentialTypeSchema
 export const ProviderCredentialSchema = z.object({
   id: ProviderCredentialIdSchema,
   type: ProviderCredentialTypeSchema,
-  /** The Mastra router provider name the key authenticates, e.g. `anthropic`, `openai`. */
+  /** The provider id the key authenticates, e.g. `anthropic`, `openai`. */
   provider: z.string().min(1),
   /** The last four characters of the stored secret, for recognition only. */
   last4: z.string(),
@@ -75,7 +75,7 @@ export type ApiKeyProviderCredential = z.infer<typeof ApiKeyProviderCredentialSc
  *
  * A discriminated union on `type` with exactly one member today — `api_key` — so that
  * `aws`, `gcp_service_account` and `azure` slot in later as new members with their own
- * payload fields. The path's `provider` names the router provider (`anthropic`, `openai`, …);
+ * payload fields. The path's `provider` names the provider id (`anthropic`, `openai`, …);
  * the body carries the secret.
  *
  * A fresh session is required to add, replace or delete a credential (epic #65, A2): the

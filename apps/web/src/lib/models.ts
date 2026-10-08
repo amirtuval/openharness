@@ -7,7 +7,7 @@ import type { ModelEntry, ProviderCatalogStatus } from '@openharness/protocol'
  * The web app no longer hardcodes model suggestions (the old `MODEL_SUGGESTIONS` list is
  * gone, #91): the catalog is whatever the caller's own keys can use, and the only model list
  * the UI offers is that one — plus the picker's free-text "Other model ID…" escape hatch,
- * because the router understands models the catalog may not know yet.
+ * because the model factory takes ids the catalog may not know yet.
  */
 
 /** A catalog lookup: the display name of a model id, or `null` when the catalog does not know it. */
@@ -15,7 +15,7 @@ export type ModelNameLookup = (modelId: string) => string | null
 
 /** One provider's models, with that provider's catalog status when it reported one. */
 export interface ProviderGroup {
-  /** The Mastra router provider name, e.g. `openai`. */
+  /** The provider id, e.g. `openai`. */
   readonly provider: string
   /** The provider's chat models, in catalog order (the server sorts by provider, then name). */
   readonly models: readonly ModelEntry[]

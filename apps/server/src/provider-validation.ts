@@ -25,8 +25,8 @@ import {
 const providerFetch: ProviderFetch = createProviderFetch()
 
 /**
- * The providers this server can validate — the Mastra router ids whose one-key providers have
- * a cheap authenticated read. The protocol stores any provider string; a key for one outside
+ * The providers this server can validate — the `provider/model` provider ids whose one-key
+ * providers have a cheap authenticated read. The protocol stores any provider string; a key for one outside
  * this set is refused on save because it cannot be validated, rather than stored unchecked.
  *
  * Every one of these has a model-list adapter in `catalog/adapters.ts` — the catalogue could

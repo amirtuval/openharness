@@ -55,7 +55,7 @@ export const GetMeResponseSchema = UserSchema
 export type GetMeResponse = User
 
 /**
- * // extension: the shape of a `default_model`: a Mastra router string, `provider/model`
+ * // extension: the shape of a `default_model`: a model id, `provider/model`
  * (epic #116, U1).
  *
  * The first path segment names the provider; the rest is the model, so a provider's own id
@@ -86,7 +86,7 @@ export const DEFAULT_USER_THEME: UserTheme = 'system'
 /**
  * // extension: a user's stored preferences (epic #116, U1; theme: epic #201, X3).
  *
- * `default_model` is the `provider/model` a new chat starts with — the free-text router id
+ * `default_model` is the `provider/model` a new chat starts with — the free-text model id
  * described above, validated for shape only — or `null` when the user has not set one (and
  * none was chosen automatically from their provider keys). `theme` is the web app's colour
  * scheme, stored beside it so the choice follows the user across browsers; it is written by
@@ -97,7 +97,7 @@ export const DEFAULT_USER_THEME: UserTheme = 'system'
 export const UserPreferencesSchema = z.object({
   default_model: z
     .string()
-    .regex(DEFAULT_MODEL_PATTERN, { error: 'default_model must be a provider/model router id' })
+    .regex(DEFAULT_MODEL_PATTERN, { error: 'default_model must be a provider/model id' })
     .nullable(),
   theme: UserThemeSchema,
 })

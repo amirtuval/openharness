@@ -27,7 +27,7 @@ export interface AgentsResource {
   /**
    * Create an agent.
    *
-   * @param body the agent's fields; `model.id` is a Mastra router string, `provider/model`
+   * @param body the agent's fields; `model.id` is a model id, `provider/model`
    * @param options request options (cancellation)
    */
   create(body: CreateAgentRequest, options?: RequestOptions): Promise<Agent>

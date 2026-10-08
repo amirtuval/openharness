@@ -11,7 +11,7 @@ import type { CreateSessionOptions, ListSessionsOptions } from '@openharness/ses
 import type { AppEnv } from '../types'
 import { invalidRequest, notFoundError } from '../http/errors'
 import { parseBody, parseQuery, sessionIdParam } from '../http/request'
-import { isRouterModelId } from '../model-id'
+import { isModelId } from '../model-id'
 import { nameSessionFromFirstMessage } from '../titles'
 import type { RouteDeps } from './deps'
 import { signalKinds } from './signals'
@@ -31,7 +31,7 @@ export function registerSessionRoutes(app: Hono<AppEnv>, deps: RouteDeps): void 
   app.post(sessions, async (c) => {
     const body = await parseBody(c, CreateSessionRequestSchema)
     // The protocol's refinement already refused a request naming neither an agent nor a model
-    // (a 400). The inline model id is checked here: the router's `provider/model` shape, with
+    // (a 400). The inline model id is checked here: the factory's `provider/model` shape, with
     // non-empty parts — a value no provider could ever resolve is a request, not a session
     // (issue #94). The format lives outside the protocol's `ModelConfigSchema` until the
     // catalog wave is done; this is the one route that acts on it today.
@@ -129,11 +129,11 @@ export function registerSessionRoutes(app: Hono<AppEnv>, deps: RouteDeps): void 
 }
 
 /**
- * Refuse an id that does not have the `provider/model` shape the router takes (issue #94;
- * epic #116 U1/U3), as the protocol's `invalid_request_error` 400.
+ * Refuse an id that does not have the `provider/model` shape the model factory takes (issue
+ * #94; epic #116 U1/U3), as the protocol's `invalid_request_error` 400.
  */
 export function requireModelId(id: string): void {
-  if (!isRouterModelId(id)) {
+  if (!isModelId(id)) {
     throw invalidRequest(
       `model.id must be a "provider/model" id with non-empty parts, got ${JSON.stringify(id)}`,
     )

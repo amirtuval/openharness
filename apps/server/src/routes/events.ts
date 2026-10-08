@@ -48,7 +48,7 @@ export function registerEventRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
     await requireOwnedSession(deps, c, sessionId)
     const body = await parseBody(c, SendEventsRequestSchema)
     // A `user.message` may carry a model to switch the session to (epic #116, U3); the id is
-    // checked for the router's shape here, so a value no provider could resolve is a 400
+    // checked for the model id's shape here, so a value no provider could resolve is a 400
     // before anything is appended.
     requireEventModelIds(body.events)
     // The store writes `processed_at: null` on every user event, which is what makes it

@@ -10,6 +10,7 @@ import { InMemoryCredentialStore, type CredentialStore } from '@openharness/sess
 import { createVault, envKeyProvider } from '@openharness/vault'
 
 import { ModelCatalog } from './catalog/catalog'
+import { createBundledRegistry } from './catalog/registry'
 import type { ModelRegistry, RegistryModel } from './catalog/registry'
 import type { ProviderFetch, ProviderResponse } from './catalog/provider-fetch'
 import { credentialUpsert } from './credentials'
@@ -47,7 +48,11 @@ function testClock(): { now: () => Date; advance: (ms: number) => void } {
   }
 }
 
-/** A registry whose models the test declares, instead of `@mastra/core`'s bundled data. */
+/**
+ * A registry whose models the test declares, instead of the bundled models.dev snapshot — so a
+ * test can give a model a verdict or a limit the real data does not have, and assert what the
+ * join does with it. `model-catalog-snapshot.test.ts` runs the same catalogue over the real one.
+ */
 function fakeRegistry(models: Record<string, readonly RegistryModel[]>): ModelRegistry {
   return { models: (provider) => models[provider] ?? [] }
 }
@@ -644,6 +649,68 @@ describe('GET /v1/models', () => {
     expect(response).toEqual({ data: [], providers: [] })
   })
 })
+
+/**
+ * The same catalogue over the **real** registry — the committed models.dev snapshot, not a
+ * stub (#234). This is the acceptance case for the registry change: the limits a provider's
+ * own list does not carry (`context_window`, `max_output_tokens`) are no longer `null` for
+ * OpenAI and Anthropic, because the snapshot has them.
+ */
+describe('GET /v1/models over the bundled snapshot', () => {
+  it('serves the context window and output limit the snapshot carries', async () => {
+    const fixture = catalogueApp({
+      registry: createBundledRegistry(),
+      // The providers' own lists, with no limits on them: exactly the shape OpenAI's and
+      // Anthropic's endpoints answer, which is why the join is the only source for these two.
+      responders: {
+        'api.openai.com': () =>
+          json({ object: 'list', data: [{ id: 'gpt-5-mini', object: 'model' }] }),
+        'api.anthropic.com': () => json({ data: [{ id: 'claude-haiku-4-5', type: 'model' }] }),
+      },
+    })
+
+    await fixture.putKey('openai', KEY_A)
+    await fixture.putKey('anthropic', KEY_A)
+    const response = await modelsOf(fixture)
+
+    expect(entryOf(response, 'openai/gpt-5-mini')).toMatchObject({
+      name: 'GPT-5 Mini',
+      context_window: 400000,
+      max_output_tokens: 128000,
+      source: 'provider',
+    })
+    expect(entryOf(response, 'anthropic/claude-haiku-4-5')).toMatchObject({
+      name: 'Claude Haiku 4.5 (latest)',
+      context_window: 200000,
+      max_output_tokens: 64000,
+      source: 'provider',
+    })
+  })
+
+  it('drops the non-chat models the snapshot lists on a fallback, naming them from it', async () => {
+    // The snapshot lists every model a provider serves; on a fallback (here: a provider the
+    // adapter cannot dial) the catalogue's filter is what turns that into a picker's list.
+    const fixture = catalogueApp({
+      registry: createBundledRegistry(),
+      responders: { 'api.groq.com': () => failure(500, 'down') },
+    })
+
+    await fixture.putKey('groq', KEY_A)
+    const response = await modelsOf(fixture)
+
+    expect(statusOf(response, 'groq').status).toBe('fallback')
+    expect(idsOf(response).every((id) => id.startsWith('groq/'))).toBe(true)
+    expect(idsOf(response).some((id) => /whisper|embed|tts/i.test(id))).toBe(false)
+    expect(entryOf(response, 'groq/llama-3.3-70b-versatile').source).toBe('registry')
+  })
+})
+
+/** One entry of a response, failing the test rather than returning `undefined`. */
+function entryOf(response: ListModelsResponse, id: string): ModelEntry {
+  const found = response.data.find((entry) => entry.id === id)
+  expect(found, `no entry for ${id} in ${idsOf(response).join(', ')}`).toBeDefined()
+  return found as ModelEntry
+}
 
 /** A 200 response with a JSON body. */
 function json(body: unknown): ProviderResponse {

@@ -42,7 +42,7 @@ describe('PROVIDERS', () => {
   it('answers the display name, and the id for a provider it does not carry', () => {
     expect(providerInfo('anthropic')?.name).toBe('Anthropic')
     expect(providerInfo('made-up-provider')).toBeUndefined()
-    // An unrecognized provider is not an error — the credentials API takes any router id, so
+    // An unrecognized provider is not an error — the credentials API takes any provider id, so
     // the id is what the reader typed and what they see.
     expect(providerName('made-up-provider')).toBe('made-up-provider')
   })

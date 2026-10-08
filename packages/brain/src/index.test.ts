@@ -17,7 +17,7 @@ import {
   estimateTokens,
   isRetryableModelError,
   resolveRetryPolicy,
-  routerModelFactory,
+  providerModelFactory,
   runTurn,
   streamModelRequest,
   toModelUsage,
@@ -40,7 +40,7 @@ describe('@openharness/brain', () => {
   it('exports the turn loop and its knobs', () => {
     expect(typeof runTurn).toBe('function')
     expect(typeof streamModelRequest).toBe('function')
-    expect(typeof routerModelFactory).toBe('function')
+    expect(typeof providerModelFactory).toBe('function')
     expect(typeof createContextStrategy).toBe('function')
     expect(typeof classifyModelError).toBe('function')
     expect(typeof isRetryableModelError).toBe('function')
@@ -66,11 +66,11 @@ describe('@openharness/brain', () => {
     })
   })
 
-  it('builds a model from a router string, authenticated by the credential it is given', () => {
-    // Constructing the router model touches no provider and no network: resolving the provider
-    // and authenticating happen on the first request, with the credential the caller supplied.
-    expect(routerModelFactory('anthropic/claude-sonnet-5', TEST_CREDENTIAL)).toMatchObject({
-      provider: 'anthropic',
+  it('builds a model from a model id, authenticated by the credential it is given', () => {
+    // Constructing a provider model touches no network: the client is built from the id, the
+    // key and the pinned base URL, and nothing is sent until the first request is streamed.
+    expect(providerModelFactory('anthropic/claude-sonnet-5', TEST_CREDENTIAL)).toMatchObject({
+      provider: 'anthropic.messages',
       modelId: 'claude-sonnet-5',
     })
   })

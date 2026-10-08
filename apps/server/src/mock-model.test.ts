@@ -172,7 +172,7 @@ describe('__fail_terminal__', () => {
 
 describe('the hook', () => {
   it('never activates the mock unless the environment asks for it', () => {
-    expect(resolveModelFactory(testConfig()).kind).toBe('router')
+    expect(resolveModelFactory(testConfig()).kind).toBe('provider')
     expect(resolveModelFactory({ ...testConfig(), testModel: MOCK_MODEL_ENV_VALUE }).kind).toBe(
       'mock',
     )

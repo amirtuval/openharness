@@ -449,7 +449,7 @@ true`, keyed by the id of the event it previews; `event_delta`s extend it (per c
 ## Provider metadata (#209)
 
 `src/providers.ts` is the list both frontends offer: one `ProviderInfo` per provider — the
-**Mastra router id** (the `provider` half of a `provider/model` string), the display name, the
+**provider id** (the `provider` half of a `provider/model` string), the display name, the
 **credential type** that selects the form (epic #201, X6), the "get a key" URL, an optional
 free-tier hint (X8) and an optional key-format hint for an input's placeholder.
 

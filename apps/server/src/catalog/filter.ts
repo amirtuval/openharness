@@ -22,11 +22,12 @@
  * every model a provider serves, chat and non-chat alike, and this module is what turns that
  * into the chat models a picker can offer.
  *
- * `@mastra/core@1.71.0`'s bundled registry carries model ids and provider configuration but
- * no chat flag, so in the installed version step 3 is what does the work; the two explicit
- * steps are what the rule degrades to when a verdict is there (Gemini, OpenRouter today; a
- * richer registry later). This ordering is the documented contract — keep it in step with
- * "The chat-model filter" in `apps/server/AGENTS.md`.
+ * The bundled models.dev snapshot carries a model's name and limits but no chat flag — models.dev
+ * has none, and the fields it does have are not one (see `registry.ts`) — so step 3 is what
+ * classifies most models; the two explicit steps are what the rule reads where a verdict is
+ * there (Gemini's and OpenRouter's own payloads today; a registry that finds a real signal
+ * later). This ordering is the documented contract — keep it in step with "The chat-model
+ * filter" in `apps/server/AGENTS.md`.
  */
 
 /**

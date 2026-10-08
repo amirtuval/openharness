@@ -38,7 +38,7 @@ describe('ModelEntrySchema', () => {
 
   it('accepts exactly the two sources', () => {
     expect(ModelEntrySchema.safeParse({ ...entry, source: 'registry' }).success).toBe(true)
-    for (const source of ['mastra', 'anthropic', '']) {
+    for (const source of ['catalogue', 'anthropic', '']) {
       expect(ModelEntrySchema.safeParse({ ...entry, source }).success, source).toBe(false)
     }
   })

@@ -178,23 +178,28 @@ function streamOf(script: MockModelScript): ReadableStream<LanguageModelV4Stream
 }
 
 /**
- * A model that declares the wrong provider spec, the way Mastra's router does.
+ * A model that declares the wrong provider spec, as a regression test for {@link toModelUsage}.
  *
  * `MockLanguageModelV4` declares `v4` and reports usage in the shape the AI SDK reads straight
- * off. A real provider behind the router is worse company than that: `ModelRouterLanguageModel`
- * declares `specificationVersion: 'v2'` while streaming v3-shaped usage, so `ai` runs its v2
+ * off. A provider whose declaration and payload disagree is worse company than that: it says
+ * `specificationVersion: 'v2'` while streaming v3-shaped usage, so `ai` runs its v2
  * compatibility layer over a report that is already the newer shape and the counts end up
  * nested inside an object where a number belongs — `0 + { … }`, the string issue #39 shipped.
  * Nothing else about the mock changes; only the declaration it makes is wrong.
  *
+ * No provider shipped today does this — the AI SDK providers a request is built from declare
+ * the spec they implement — so this model is not a reproduction of a live failure. It is what
+ * keeps `toModelUsage` honest about reading a count wherever it survived, which is the
+ * insurance against a future pairing that disagrees again.
+ *
  * ```ts
  * const { factory } = mockModel({ text: ['Hello'], usage: { input_tokens: 9 } })
- * const model = misdeclaredSpec(factory('anthropic/claude-sonnet-5'))
+ * const model = wrongSpecModel(factory('anthropic/claude-sonnet-5'))
  * ```
  *
  * @param model the model to mislabel
  */
-export function misdeclaredSpec(model: LanguageModel): LanguageModel {
+export function wrongSpecModel(model: LanguageModel): LanguageModel {
   // A proxy, not a copy: `LanguageModel` is a union that includes a bare provider-id string,
   // and the model this labels keeps its methods and its `supportedUrls` getter where they are.
   return new Proxy(model as object, {
