@@ -74,25 +74,29 @@ describe('the log is append-only', () => {
     expect(schema).toContain('events: EventsTable')
   })
 
-  it('confines the compaction delete to superseded chunks', async () => {
+  it('confines the compaction delete to what a recorded range covers', async () => {
     const store = await readFile(join(SRC_DIR, 'postgres', 'store.ts'), 'utf8')
     const start = store.indexOf('delete from events')
     const end = store.indexOf('returning e.id', start)
     expect(start).toBeGreaterThan(-1)
     expect(end).toBeGreaterThan(start)
-    const statement = store.slice(start, end).replaceAll(/\s+/gu, ' ')
+    const statement = store.slice(start, end).replaceAll(/\s+/gu, ' ').trim()
 
-    // Rows a recorded supersession covers: the join to `event_supersessions` and the range
-    // check are the difference between deleting a reply's chunks and deleting the log.
-    expect(statement).toContain('using event_supersessions s')
-    expect(statement).toContain('e.session_id = s.session_id')
-    expect(statement).toContain('e.seq between s.from_seq and s.to_seq')
-    // Of the two chunk types only, and old enough for the retention window. Nothing else
-    // narrows or widens the `WHERE`: exactly three conjuncts, so a fourth clause — or a
-    // relaxed one — fails here and has to be looked at rather than shipping quietly.
-    expect(statement).toContain('e.type in (${EVENT_TYPES.eventStart}, ${EVENT_TYPES.eventDelta})')
-    expect(statement).toContain('e.created_at < ${instant(cutoff)}')
-    expect(statement.match(/ and e\./gu)).toHaveLength(3)
+    // Rows a recorded supersession covers, and nothing else. The join to
+    // `event_supersessions` and the range check are the difference between deleting a
+    // reply's chunks and deleting the log; the kind is the difference between a reply's
+    // range, which covers its chunks and only chunks, and a rewind's, which covers every
+    // event in the tail it restarted (#238); and `created_at` is the retention window.
+    // The `WHERE` is spelled out in full here, so a relaxed clause — a fourth one, or one
+    // that drops the kind — fails this test and has to be looked at rather than shipping
+    // quietly.
+    expect(statement).toBe(
+      'delete from events e using event_supersessions s ' +
+        'where e.session_id = s.session_id ' +
+        'and e.seq between s.from_seq and s.to_seq ' +
+        'and (s.kind = ${REWIND_KIND} or e.type in (${EVENT_TYPES.eventStart}, ${EVENT_TYPES.eventDelta})) ' +
+        'and e.created_at < ${instant(cutoff)}',
+    )
   })
 })
 
