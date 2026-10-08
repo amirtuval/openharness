@@ -105,7 +105,9 @@ export function MessageItem({
         {message.streaming ? <StreamingCaret /> : null}
       </div>
       {message.pending ? (
-        <Badge variant="outline" className="text-2xs text-muted-foreground">
+        // Coral: a steering message waiting its turn is a thing worth noticing, and it is
+        // the only badge the transcript carries (U12, #227).
+        <Badge variant="coral" className="text-2xs">
           queued
         </Badge>
       ) : null}
@@ -124,13 +126,13 @@ export function MessageItem({
   )
 }
 
-/** The block cursor that shows a reply is still arriving. */
+/** The block cursor that shows a reply is still arriving — coral, so the live edge of a reply is the one warm thing on the page (U12, #227). */
 function StreamingCaret() {
   return (
     <>
       <span
         aria-hidden="true"
-        className="mt-1 inline-block h-3.5 w-1.5 animate-pulse rounded-xs bg-foreground/60 align-text-bottom"
+        className="mt-1 inline-block h-3.5 w-1.5 animate-pulse rounded-xs bg-coral align-text-bottom"
       />
       <span className="sr-only">The assistant is replying…</span>
     </>

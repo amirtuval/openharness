@@ -1,6 +1,7 @@
 import { PROVIDERS } from '@openharness/client'
 
 import { ModelProviderIcon } from '../provider-icon'
+import { FreeTierChip } from './free-tier-chip'
 
 /**
  * The providers, as tiles (epic #201, X5/X8).
@@ -34,16 +35,12 @@ export function ProviderTiles({
             onClick={() => onPick(provider.id)}
             className="flex w-full items-center gap-3 rounded-md border px-3 py-2.5 text-left transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50"
           >
-            <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+            <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
               <ModelProviderIcon provider={provider.id} name={provider.name} />
             </span>
             <span className="min-w-0">
               <span className="block truncate text-sm">{provider.name}</span>
-              {provider.freeTier === undefined ? null : (
-                <span className="block truncate text-xs text-muted-foreground">
-                  {provider.freeTier}
-                </span>
-              )}
+              {provider.freeTier === undefined ? null : <FreeTierChip hint={provider.freeTier} />}
             </span>
           </button>
         </li>

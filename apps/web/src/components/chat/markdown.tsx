@@ -38,7 +38,7 @@ const components: Components = {
       href={href}
       target="_blank"
       rel="noreferrer"
-      className="font-medium underline underline-offset-2"
+      className="font-medium text-link underline underline-offset-2"
     >
       {children}
     </a>

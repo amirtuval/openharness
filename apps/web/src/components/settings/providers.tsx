@@ -88,7 +88,10 @@ export function ProvidersCard() {
           />
         ) : failure !== null && !failure.ok ? (
           <ErrorBanner
-            title={failure.kind === 'invalid' ? 'The key was rejected' : 'The request failed'}
+            // The row's own failure has no provider to name here (the dialog owns the form), so
+            // this is the same warm sentence without one (U12, #227). The server's own message
+            // is still the body, verbatim.
+            title={failure.kind === 'invalid' ? "Hmm, that key didn't work" : 'The request failed'}
             message={failure.message}
             onDismiss={() => setFailure(null)}
           />
