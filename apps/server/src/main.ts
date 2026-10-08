@@ -27,7 +27,7 @@ import { initTracing, type Tracer } from './observability/tracing'
 import { createAuth, createDevLoginUser, type Auth, type AuthDatabase } from './auth'
 import { ModelCatalog } from './catalog/catalog'
 import { createProviderFetch } from './catalog/provider-fetch'
-import { createMastraRegistry, type ModelRegistry } from './catalog/registry'
+import { createBundledRegistry, type ModelRegistry } from './catalog/registry'
 import { DeltaCompactor } from './compaction'
 import { ENV_VARS, type ServerConfig, describeConfig, readServerConfig } from './config'
 import { createSessionCredentialResolver, type ResolveSessionCredential } from './credentials'
@@ -220,7 +220,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   // built from the same credential store and vault the brain's resolver uses, and its one
   // outbound path is `createProviderFetch()`, which honors the egress-proxy variables. One
   // registry instance serves both the catalogue and the automatic default's fallback (U4).
-  const registry = options.registry ?? createMastraRegistry()
+  const registry = options.registry ?? createBundledRegistry()
   const catalog =
     options.catalog ??
     new ModelCatalog({

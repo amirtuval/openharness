@@ -157,8 +157,9 @@ export {
   type ProviderResponse,
 } from './catalog/provider-fetch'
 export {
-  createMastraRegistry,
+  createBundledRegistry,
   emptyRegistry,
+  SNAPSHOT_DATE,
   type ModelRegistry,
   type RegistryModel,
 } from './catalog/registry'

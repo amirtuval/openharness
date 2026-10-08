@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { SUPPORTED_PROVIDERS } from '@openharness/brain'
 
 import { VALIDATABLE_PROVIDERS } from '../provider-validation'
 import { adaptedProviders, adapterFor } from './adapters'
@@ -26,6 +27,15 @@ describe('the table', () => {
     for (const provider of VALIDATABLE_PROVIDERS) {
       expect(adapterFor(provider), `${provider} has no model-list adapter`).not.toBeNull()
     }
+  })
+
+  it('names exactly the providers the brain can build a model for', () => {
+    // The other half of the invariant: a key that can be stored and listed must also be one a
+    // request can be made with, or the model picker would offer a dead end (#234). The brain
+    // cannot import this list — the dependency runs the other way — so the two are pinned
+    // against each other here, where both are reachable.
+    expect([...VALIDATABLE_PROVIDERS].sort()).toEqual([...SUPPORTED_PROVIDERS].sort())
+    expect([...adaptedProviders()].sort()).toEqual([...SUPPORTED_PROVIDERS].sort())
   })
 
   it('knows no adapter for a provider outside it — a registry-only provider', () => {

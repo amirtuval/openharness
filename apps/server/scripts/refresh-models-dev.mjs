@@ -50,26 +50,22 @@ function today() {
 }
 
 /**
- * One model, reduced to what the catalogue's registry join reads.
+ * One model, reduced to what the catalogue's registry join reads: its name, its context
+ * window and its output limit, straight from models.dev's `name` and `limit.{context,output}`.
  *
- * `name`, `contextWindow` and `maxOutput` come straight from models.dev's `name` and
- * `limit.{context,output}`. `chat` is derived — models.dev has no chat flag, but its
- * `modalities.output` says which shapes a model can produce, and a model that cannot emit
- * text cannot answer a turn. A model whose entry carries no `modalities` at all gets no
- * `chat` verdict, and the catalogue's name filter decides it instead (the rule in
- * `src/catalog/filter.ts`).
+ * **No chat verdict.** models.dev carries no chat flag, and the fields it does carry are not
+ * one: `modalities.output` is `["text"]` even for `text-embedding-3-small`, and `family` is a
+ * name family, which is what the catalogue's own filter already reads. So the catalogue's
+ * explicit-verdict steps stay silent for snapshot models and its name filter decides, exactly
+ * as before — see `src/catalog/filter.ts`, and the note in `src/catalog/registry.ts`.
  */
 function reduceModel(model) {
-  const output = model.modalities?.output
   const reduced = { name: model.name ?? model.id }
   if (typeof model.limit?.context === 'number') {
     reduced.contextWindow = model.limit.context
   }
   if (typeof model.limit?.output === 'number') {
     reduced.maxOutput = model.limit.output
-  }
-  if (Array.isArray(output)) {
-    reduced.chat = output.includes('text')
   }
   return reduced
 }
