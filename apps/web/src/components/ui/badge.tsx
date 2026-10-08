@@ -17,6 +17,12 @@ const badgeVariants = cva(
           'bg-destructive text-destructive-foreground focus-visible:ring-destructive/20 dark:focus-visible:ring-destructive/40 [a&]:hover:bg-destructive/90',
         outline:
           'border-border text-foreground [a&]:hover:bg-accent [a&]:hover:text-accent-foreground',
+        /**
+         * The coral highlight (U12, #227): a badge that means "look here" rather than "this is
+         * the primary thing" — the free-tier hint, the queued marker. The tint is the mark
+         * colour and the text is the ink one, so it reads at AA on all three themes.
+         */
+        coral: 'border-transparent bg-coral/15 text-coral-ink',
         ghost: '[a&]:hover:bg-accent [a&]:hover:text-accent-foreground',
         link: 'text-primary underline-offset-4 [a&]:hover:underline',
       },

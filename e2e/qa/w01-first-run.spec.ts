@@ -1,4 +1,5 @@
 import {
+  FIRST_RUN_HEADING,
   NEW_CHAT_GREETING,
   composer,
   defaultModel,
@@ -20,8 +21,8 @@ import type { APIRequestContext } from '@playwright/test'
  * chat the first message creates.
  *
  * The root route of a signed-in reader is New chat — or, when the account has **no provider
- * key**, the first-run screen (epic #201, X5): "Connect a model provider", a tile per provider,
- * a key form, the default model the server picked, and Start chatting. The Home screen this
+ * key**, the first-run screen (epic #201, X5): "Let's get you chatting", a tile per provider,
+ * a key form, the default model the server picked, and "Let's go". The Home screen this
  * scenario used to open on is gone, so what `goto('/')` shows is now a fact worth asserting
  * rather than a dead end worth walking past.
  *
@@ -64,9 +65,12 @@ test.describe('W1 first run', () => {
         await page.goto('/')
 
         // #209: an account with no key gets the onboarding flow, and the sentence that says
-        // why (the server runs on the reader's own keys).
-        await expect(page.getByRole('heading', { name: 'Connect a model provider' })).toBeVisible()
-        await expect(page.getByText(/run on your own provider keys/)).toBeVisible()
+        // why (the server runs on the reader's own keys). U12 (#227) warmed both sentences and
+        // put the ✨ outside the heading's gradient span, so the name is matched by sentence.
+        await expect(
+          page.getByRole('heading', { name: new RegExp(FIRST_RUN_HEADING) }),
+        ).toBeVisible()
+        await expect(page.getByText(/we never ship one of our own/)).toBeVisible()
         // Tiles, with the free-tier hint where the provider has one (X8).
         await expect(page.getByRole('button', { name: /Groq/ })).toContainText('Free tier')
         await expect(page.getByRole('button', { name: /Anthropic/ })).toBeVisible()
@@ -92,15 +96,15 @@ test.describe('W1 first run', () => {
           await page.getByRole('button', { name: /^(Save|Replace) key$/ }).click()
 
           // The server validated the key, stored it, and picked a default model for the
-          // account (U4) — which is exactly what the confirmation names.
-          await expect(
-            page.getByRole('heading', { name: /set: your default model is/ }),
-          ).toBeVisible()
+          // account (U4) — which is exactly what the confirmation names. U12 (#227) moved the
+          // model out of the heading and into the sentence under it.
+          await expect(page.getByRole('heading', { name: /all set/ })).toBeVisible()
+          await expect(page.getByText(/Your chats will use/)).toBeVisible()
           await expect(page.getByRole('button', { name: /^Model/ })).toBeVisible()
           await shot(page, 'w1-03-connected')
 
-          await test.step('Start chatting lands in a new chat with the cursor in the box', async () => {
-            await page.getByRole('button', { name: 'Start chatting' }).click()
+          await test.step('Let’s go lands in a new chat with the cursor in the box', async () => {
+            await page.getByRole('button', { name: "Let's go" }).click()
             await expect(composer(page)).toBeVisible()
             await expect(composer(page)).toBeFocused()
           })
@@ -111,7 +115,9 @@ test.describe('W1 first run', () => {
         await page.goto('/')
 
         await expect(page.getByRole('heading', { name: NEW_CHAT_GREETING })).toBeVisible()
-        await expect(page.getByRole('heading', { name: 'Connect a model provider' })).toHaveCount(0)
+        await expect(
+          page.getByRole('heading', { name: new RegExp(FIRST_RUN_HEADING) }),
+        ).toHaveCount(0)
         await shot(page, 'w1-01-new-chat')
       })
     }
@@ -146,7 +152,7 @@ test.describe('W1 first run', () => {
 
       // The composer, on the default model — no dialog in between.
       await expect(composer(page)).toBeVisible()
-      await expect(page.getByText(/the chat is created with your first message/)).toBeVisible()
+      await expect(page.getByText(/starts with your first message/)).toBeVisible()
       const modelControl = page.getByRole('button', { name: /^Model: / })
       await expect(modelControl).toBeVisible()
       await expect(modelControl).not.toHaveAccessibleName(/Choose a model/)

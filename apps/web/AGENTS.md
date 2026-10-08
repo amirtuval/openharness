@@ -133,8 +133,8 @@ src/
   screens/
     start-screen.tsx           what `#/` and `#/new` show: New chat, or the first-run flow
                                when the account has no provider key (#209)
-    first-run-screen.tsx       Connect a model provider: tiles -> key form -> the default the
-                               server picked -> Start chatting (X5)
+    first-run-screen.tsx       "Let's get you chatting ✨": tiles -> key form -> the default
+                               the server picked -> "Let's go" (X5, #227)
     new-chat-screen.tsx        an empty composer on the default model, under a greeting, the
                                model and four suggested prompts that fill the box (#113,
                                #211); the session is created with the first message; with no
@@ -172,9 +172,9 @@ src/
                                `localStorage` cache the first paint reads (#203)
     notice.ts                  the shell's notice, a one-line store
     session-refresh.ts         the one re-read of a session whose first message named it
-    highlight.ts               the code highlighter: lazy Shiki, three themes, one
-                               grammar at a time, and the tokens the code block draws
-                               (#204)
+    highlight.ts               the code highlighter: lazy Shiki, three themes, Shiki's
+                               whole bundled grammar set fetched one grammar at a time,
+                               and the tokens the code block draws (#204, #227)
     dev-fake-client.ts         dev-only fake client + the seeded scenario, which carries
                                the markdown the QA screenshots are taken of (#204); the
                                `empty` state is the first-run account (#209)
@@ -380,9 +380,10 @@ waits on. A skeleton may carry a `label`, which becomes `role="status"` plus scr
 text, and that is what the tests read instead of the prose the screens used to print. Errors
 did not need a new component — `ErrorBanner` already was one.
 
-**New chat has an empty state.** The greeting (exported as `NEW_CHAT_GREETING`; it replaced the
-literal "New chat" heading, so `App.test.tsx` and three QA specs read it from one constant or
-one line of `e2e/qa/support.ts`), the model the chat would run on, and four suggested prompts
+**New chat has an empty state.** The greeting (exported as `NEW_CHAT_GREETING` — "Hey! What are
+we building today?" since #227; it replaced the literal "New chat" heading, so `App.test.tsx`
+and three QA specs read it from one constant or one line of `e2e/qa/support.ts`), the model the
+chat would run on, and four suggested prompts
 from `lib/suggestions.ts`. A prompt **fills the composer** and stops: nothing is created,
 nothing is sent, and the text is editable. That is why the composer's draft is a prop
 (`value`/`onValueChange`) — a screen that wants to put words in the box owns the box's text,
@@ -444,21 +445,28 @@ every surface that offers the catalog can rebuild it where the list is. It has t
 `full` (Settings) and `compact` — the composer's quiet "gpt-4.1-mini ▾" control, whose panel
 opens upward.
 
-### Onboarding: one flow, from sign-in to a first chat (#209, epic #201 X5/X6/X8)
+### Onboarding: one flow, from sign-in to a first chat (#209, epic #201 X5/X6/X8; #227)
 
 An account with **no provider key** lands on the first-run screen instead of New chat, at both
 `#/` and `#/new`:
 
-    tiles -> the key form -> "You're set: your default model is X" -> Start chatting
+    tiles -> the key form -> "You're all set! 🎉 Your chats will use X" -> "Let's go"
 
 `StartScreen` (`src/screens/start-screen.tsx`) is the gate: it reads the credentials list once
 and decides once. Deciding once matters — saving a key makes the list non-empty, and a live
 condition would swap the screen out from under the confirmation the reader is reading — so the
-reader leaves when they say so, by Start chatting or Skip, and the next mount decides again.
+reader leaves when they say so, by "Let's go" or Skip, and the next mount decides again.
+
+The screen is **centred in the main area** (`m-auto` on a flex scroller, not `items-center`:
+centred when it fits and scrolled from the top when it does not), and its heading is one of the
+two the violet→coral gradient is on — see "The palette" below. `FIRST_RUN_HEADING` is exported
+the way `NEW_CHAT_GREETING` is, and the ✨ sits outside the gradient span.
 
 - **Tiles** come from `@openharness/client`'s `PROVIDERS`, one per provider, each with its mark
-  and its free-tier hint (X8). The list is complete by construction: it is the same set as the
-  server's `VALIDATABLE_PROVIDERS`, held together by `e2e/src/provider-metadata.test.ts`.
+  and its free-tier hint (X8) drawn as a coral chip (`components/providers/free-tier-chip.tsx`,
+  the one place that hint is styled — the tiles and the key form both render it). The list is
+  complete by construction: it is the same set as the server's `VALIDATABLE_PROVIDERS`, held
+  together by `e2e/src/provider-metadata.test.ts`.
 - **The form** is `components/providers/provider-key-form.tsx`, and it is the only place a key is
   typed in this app — the first-run screen, the Add-provider dialog and Settings all render it,
   so "paste and validate" means the same thing everywhere. **Its fields come from the credential
@@ -467,8 +475,9 @@ reader leaves when they say so, by Start chatting or Skip, and the next mount de
   protocol's credential union is a compile error there until it has a form — which is where
   Bedrock, Vertex and Azure land in phase 4.
 - **Errors are inline**, in the three classes the credentials API has: a refused key
-  (`invalid_provider_credential`, "The key was rejected"), a stale session (401, with a link to
-  sign in again and back to where the reader is), and everything else as one line.
+  (`invalid_provider_credential`, titled "Hmm, <provider> didn't accept that key" since #227
+  while the server's own 422 message stays the body — warm, never vague), a stale session (401,
+  with a link to sign in again and back to where the reader is), and everything else as one line.
 - **Skip** leaves for New chat, whose own empty state still says what is missing — the flow
   prompts, it does not block.
 
@@ -649,6 +658,44 @@ The theme is not the TUI's (there, the terminal's own colours are the theme, epi
 it is why `Settings` grew a card rather than the whole app growing a context: a theme is one
 attribute and one preference, and a provider for it would be a provider for a string.
 
+### The palette: violet + coral, and the languages (#227)
+
+The maintainer's feedback after the first hands-on test was that the app worked and had no
+personality. U12 is the pass that gave it one, in three parts, and the whole of it is **tokens
+in the three `src/index.css` blocks** — there is not one one-off colour in a component.
+
+- **Violet is the primary** (`#7C3AED` as a fill in all three themes, so the Send button, the
+  active sidebar row, a selected theme, a picked provider and every focus ring are the same
+  violet). Two tokens exist because a fill and _type_ are not the same problem: `--primary` is
+  the fill with white on it (5.7:1 everywhere), and `--link`/`--ring` are the same hue lifted to
+  `#A78BFA` on Dim and Dark, where the fill violet is only 2.9:1 as text. Light needs no
+  separation (5.3:1 either way), which is why `--link` equals `--primary` there.
+- **Coral is the highlight** (`--coral`, the mark: the streaming caret, the "Working…" spinner,
+  the status dot, a chip's tint) with `--coral-ink` as its text-safe twin — `#FB7185` on the
+  dark themes, `#BE123C` in Light. `Badge` grew a `coral` variant for it, and
+  `components/providers/free-tier-chip.tsx` is the free-tier hint.
+- **No gray survives.** The page is a faint violet in Light (`#F7F5FF`), Dim is violet-leaning
+  (`#1E1B2E`) and Dark is the same palette taken deep (`#12101B`); borders, muted surfaces and
+  muted text carry the tint, and the user's own bubble is `--secondary` — a violet tint in
+  Light, a deep violet on the dark themes.
+- **The gradient is on the two hero headings only**, through one rule (`[data-slot='hero-title']`
+  in `index.css`) rather than a utility on each, because each end has to be a _per-theme_ token
+  to stay legible as type. An emoji on one of those headings is drawn outside the clipped span:
+  `background-clip: text` would paint over a colour-emoji glyph's own colours.
+
+Every pair is at WCAG AA and the measured ratios are in the stylesheet's own comments (the
+tightest: muted text on the page at 6.5:1 in Light, coral ink on its chip at 5.1:1). The three
+Shiki themes were **not** changed: a code block is its own surface, its palettes are measured
+against their own backgrounds, and nothing in this palette is read inside one.
+
+**Highlighting covers the languages people actually paste.** `src/lib/highlight.ts` now resolves
+a fence against Shiki's whole bundled set (`bundledLanguages` from `shiki/langs` — 242 grammars
+and their aliases: `rs`, `c++`, `cs`, `kt`, `rb`, `py`, `sh`, `zsh`, `yml`, `tf`, `dockerfile`,
+…) plus two the app adds, `golang` and `patch`. The property that mattered is unchanged: that
+table is a map of `() => import('…')` thunks, so reading it is free and only the grammar a block
+actually names is fetched — the main bundle does not move, and `highlight.test.ts` asserts the
+resolution and the tokenizing for thirty of them.
+
 ## Testing
 
 `src/**/*.test.tsx` with Vitest (jsdom) and Testing Library, driving
@@ -685,7 +732,7 @@ outside `@openharness/client` — is stubbed at `fetch` where a test needs it.
 | `src/components/chat/working-row.test.tsx`              | the working row (#211): `workingState` as a rule (running/no-text, gone once text arrives, idle, retrying with the server's reason and without one, the reader's own stop first), and the component's clock under fake timers — counting up, the minute rollover, and no clock at all for "Interrupted"                                                                                                                                                                                                                                                                                                          |
 | `src/components/theme-menu.test.tsx`                    | the theme quick switch (#203), now the account menu's submenu (#211): a pick paints and saves, it reads back with `aria-checked`, Escape closes without choosing                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `src/components/settings/appearance.test.tsx`           | the Appearance picker (#203): a pick is saved to the account and painted at once, the cached theme paints first and the account's stored one takes over once it answers                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `src/lib/*.test.ts`                                     | routes (including `#/` and its fallbacks, #209), the settings store, the theme store (`system` following `matchMedia`, the cache, the attribute; #203), the fake-mode scenario, the paging walk, the session re-read, the label rules, the context-window formatting, the auth store's rules, and the auth-config schema's unknown-provider filter                                                                                                                                                                                                                                                               |
+| `src/lib/*.test.ts`                                     | routes (including `#/` and its fallbacks, #209), the settings store, the theme store (`system` following `matchMedia`, the cache, the attribute; #203), the fake-mode scenario, the paging walk, the session re-read, the label rules, the context-window formatting, the auth store's rules, the auth-config schema's unknown-provider filter, and the highlighter's language table — thirty languages plus seventeen aliases, tokenized for real (#227)                                                                                                                                                        |
 
 Timing: streaming tests do not race the clock. `src/test-support/stream.ts` gates the fake's
 stream so the test releases **one event at a time** and asserts between events — the fake

@@ -99,12 +99,9 @@ export function WorkingRow({ state }: { state: WorkingState }) {
       className="flex items-center gap-inline text-sm text-muted-foreground"
     >
       {state.kind === 'working' ? (
-        <Loader2 aria-hidden="true" className="size-3.5 shrink-0 animate-spin" />
+        <Loader2 aria-hidden="true" className="size-3.5 shrink-0 animate-spin text-coral" />
       ) : state.kind === 'retrying' ? (
-        <span
-          aria-hidden="true"
-          className="size-2 shrink-0 animate-pulse rounded-full bg-amber-500"
-        />
+        <span aria-hidden="true" className="size-2 shrink-0 animate-pulse rounded-full bg-coral" />
       ) : (
         <Square aria-hidden="true" className="size-3 shrink-0" />
       )}

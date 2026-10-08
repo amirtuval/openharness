@@ -272,7 +272,7 @@ A chat is started from a **model** (epic #92), and since epic #116 "New chat" is
 composer on the account's **default model** (`GET /v1/me/preferences`, U1/U2): the session is
 created with the first message. Since epic #201 (#209) an account with **no provider key at
 all** — the state a mock pass starts in — gets the **first-run screen** at the root instead
-("Connect a model provider": tiles, a key form, the default the server picks, Start chatting),
+("Let's get you chatting ✨": tiles, a key form, the default the server picks, "Let's go"),
 and once a key exists New chat is what it always was. An account with a key but no default is
 shown the catalog's own answer (#146). The default is normally chosen by the server when the
 first key is saved (U4), which a mock pass only does if the scenario saves one, so a scenario
@@ -331,7 +331,7 @@ reading and writing the account's default (U1).
 The web half of the same flow: W10 is the composer's model switch, W18 the delete (in-page
 confirm, header and sidebar, and a chat deleted elsewhere), W19 Settings → Default model, and
 W1 the first run — the root route's first-run screen (tiles, key form, the default the server
-picked, Start chatting), the skip into New chat's empty state, the default model, and the first
+picked, "Let's go"), the skip into New chat's empty state, the default model, and the first
 chat the send creates. W1b is the same key form opened from inside an open chat, where the save
 must not navigate. W17 covers Settings → Providers and the dialog's refusing, adding, replacing
 and deleting.

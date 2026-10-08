@@ -1,8 +1,9 @@
 import { createHighlighterCore, type HighlighterCore, type LanguageInput } from 'shiki/core'
 import { createOnigurumaEngine } from 'shiki/engine/oniguruma'
+import { bundledLanguages } from 'shiki/langs'
 
 /**
- * Syntax highlighting for the chat's code blocks (epic #201, #204).
+ * Syntax highlighting for the chat's code blocks (epic #201, #204; U12, #227).
  *
  * Four things make this module what it is:
  *
@@ -12,16 +13,23 @@ import { createOnigurumaEngine } from 'shiki/engine/oniguruma'
  *   it never fetches it at all.
  * - **One highlighter, made once.** {@link highlighter} memoizes `createHighlighterCore`, so
  *   every code block on the page shares one instance instead of one grammar registry each.
- * - **Grammars arrive on demand, one at a time.** {@link LANGUAGES} is the whole set the chat
- *   highlights; a fence asks for one of them and only that grammar is fetched, once, through
- *   `loadLanguage`. Anything else — an unshipped language, a label we do not know, a fence
- *   that is still being written — is `null`, and the block renders as plain text: still
- *   readable, still copyable, and no worse off than before this module existed.
+ * - **Grammars arrive on demand, one at a time.** {@link grammars} is Shiki's own bundled
+ *   set — every language it ships, plus its aliases — and a fence asks for exactly one of
+ *   them: the map is a table of `() => import('…')` thunks, so *reading* it costs nothing and
+ *   only the grammar a block actually names is ever fetched. Anything else — a label no
+ *   grammar claims, a fence still being written — is `null`, and the block renders as plain
+ *   text: still readable, still copyable, and no worse off than before this module existed.
  * - **Nothing is inline.** `defaultColor: false` makes Shiki write all three palettes as CSS
  *   variables (`--shiki-light`, `--shiki-dim`, `--shiki-dark` and the `-bg` pair) rather than
  *   painting the first theme into the element's `style`. `index.css` then picks the one the
  *   page is in with `[data-theme]` rules — no `!important`, and a theme switch repaints code
  *   without re-highlighting it.
+ *
+ * #227 replaced a hand-kept list of fourteen grammars with the bundled set. The promise that
+ * mattered — a chat fetches no grammar it does not draw — is kept exactly: `shiki/langs` is a
+ * module of thunks (about 30 kB gzip) that lands in *this* chunk, which was already lazy, and
+ * the 240-odd grammars behind it are still one chunk each, fetched on the fence that asks.
+ * The main bundle does not move at all, which the PR's build output shows.
  */
 
 /** The Shiki theme per app theme (#203). Dim borrows Shiki's own soft dark palette. */
@@ -32,66 +40,27 @@ const THEMES = {
 } as const
 
 /**
- * The languages a fence is highlighted in, keyed by the id Shiki knows them by, each its own
- * lazy chunk.
+ * Every grammar the chat can highlight, keyed by the id Shiki knows it by — and by the aliases
+ * it ships for them.
  *
- * Deliberately short: a chat highlights what people paste and what models write, and every
- * entry costs a grammar in the build. A language that is not here is not a failure — the block
- * falls back to plain text.
+ * `bundledLanguages` is base ids *and* aliases (`sh` → `shellscript`, `py` → `python`,
+ * `rs` → `rust`, `c++` → `cpp`, `tf` → `terraform`, `dockerfile` → `docker`, …), which is
+ * exactly the table a fence needs: models write the short form as often as the long one. Each
+ * value is a dynamic import, so this map costs a look-up and nothing else; the grammar itself
+ * is fetched the first time a block asks for it.
  */
-const LANGUAGES: Record<string, LanguageInput> = {
-  bash: () => import('shiki/langs/bash.mjs'),
-  css: () => import('shiki/langs/css.mjs'),
-  diff: () => import('shiki/langs/diff.mjs'),
-  go: () => import('shiki/langs/go.mjs'),
-  html: () => import('shiki/langs/html.mjs'),
-  javascript: () => import('shiki/langs/javascript.mjs'),
-  json: () => import('shiki/langs/json.mjs'),
-  jsx: () => import('shiki/langs/jsx.mjs'),
-  markdown: () => import('shiki/langs/markdown.mjs'),
-  python: () => import('shiki/langs/python.mjs'),
-  sql: () => import('shiki/langs/sql.mjs'),
-  tsx: () => import('shiki/langs/tsx.mjs'),
-  typescript: () => import('shiki/langs/typescript.mjs'),
-  yaml: () => import('shiki/langs/yaml.mjs'),
-}
+const grammars: Readonly<Record<string, LanguageInput>> = bundledLanguages
 
 /**
- * The fence labels that name one of {@link LANGUAGES}.
+ * The handful of fence labels Shiki does not ship an alias for.
  *
- * Models write `ts`, `js`, `py`, `sh` as often as the full names, and a fence nobody wrote a
- * language for is common enough that there is no entry for it — the block simply goes
- * unhighlighted.
+ * Short, and short on purpose — an entry here is a label Shiki has no answer for, not a
+ * preference. `golang` and `patch` are the two the old hand-kept table carried that the
+ * bundled one does not; a language nobody claims still falls back to plain text.
  */
-const LANGUAGE_ALIASES: Record<string, string> = {
-  bash: 'bash',
-  sh: 'bash',
-  shell: 'bash',
-  zsh: 'bash',
-  console: 'bash',
-  css: 'css',
-  diff: 'diff',
-  patch: 'diff',
-  go: 'go',
+const EXTRA_ALIASES: Readonly<Record<string, string>> = {
   golang: 'go',
-  html: 'html',
-  javascript: 'javascript',
-  js: 'javascript',
-  mjs: 'javascript',
-  cjs: 'javascript',
-  node: 'javascript',
-  json: 'json',
-  jsx: 'jsx',
-  markdown: 'markdown',
-  md: 'markdown',
-  python: 'python',
-  py: 'python',
-  sql: 'sql',
-  tsx: 'tsx',
-  typescript: 'typescript',
-  ts: 'typescript',
-  yaml: 'yaml',
-  yml: 'yaml',
+  patch: 'diff',
 }
 
 /** A token of a highlighted line: its text, and the variables the three themes read. */
@@ -138,13 +107,26 @@ function highlighter(): Promise<HighlighterCore> {
 }
 
 /**
+ * The grammar a fence label names, or `undefined` when nothing claims it.
+ *
+ * Two look-ups, and the order between them is the whole of it: the app's own few aliases first
+ * (they exist because Shiki has no answer), then Shiki's bundled table, which already folds
+ * every alias it ships onto its grammar.
+ */
+function grammarFor(label: string): string | undefined {
+  const normalised = label.trim().toLowerCase()
+  const id = EXTRA_ALIASES[normalised] ?? normalised
+  return grammars[id] === undefined ? undefined : id
+}
+
+/**
  * Load one grammar, once.
  *
  * The map is what makes a language safe to ask for twice: two code blocks that arrive together
  * with the same fence share the one `loadLanguage` call rather than racing each other into it.
  */
 function loadLanguage(shiki: HighlighterCore, id: string): Promise<void> {
-  const load = LANGUAGES[id]
+  const load = grammars[id]
   if (load === undefined) {
     return Promise.resolve()
   }
@@ -159,14 +141,14 @@ function loadLanguage(shiki: HighlighterCore, id: string): Promise<void> {
 /**
  * Highlight `code` as `language`, or answer `null` when it cannot be.
  *
- * `null` is the answer for a language the chat does not ship and for a grammar that refuses
- * the text, and it is never an error the caller has to handle: a block that cannot be
- * highlighted is drawn as plain text. Highlighting is a decoration, and a reply must render
- * whether or not it can be applied — including the reply that is still arriving, whose fence
- * may not have closed yet.
+ * `null` is the answer for a label no grammar claims and for a grammar that refuses the text,
+ * and it is never an error the caller has to handle: a block that cannot be highlighted is
+ * drawn as plain text. Highlighting is a decoration, and a reply must render whether or not it
+ * can be applied — including the reply that is still arriving, whose fence may not have closed
+ * yet.
  */
 export async function highlight(code: string, language: string): Promise<HighlightedCode | null> {
-  const id = LANGUAGE_ALIASES[language.trim().toLowerCase()]
+  const id = grammarFor(language)
   if (id === undefined) {
     return null
   }
