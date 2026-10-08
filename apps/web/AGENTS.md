@@ -98,6 +98,7 @@ src/
       providers.tsx            Settings -> Providers: the list, Replace, Delete, Add provider
       default-model.tsx        Settings -> Default model: the picker, saved to preferences
       appearance.tsx           Settings -> Appearance: the four-way theme picker (#203)
+      usage.tsx                Settings -> Usage: this month by model and by day (#247)
     providers/
       provider-tiles.tsx       the provider grid: one tile per PROVIDER, free-tier hint (X5/X8)
       provider-key-form.tsx    THE key form, built from the credential type (X6); the same
@@ -163,6 +164,7 @@ src/
     use-models.ts              the catalog (GET /v1/models), once for the whole shell; reload()
                                after a credential change, refresh() to bypass the cache
     use-preferences.ts         GET/PUT /v1/me/preferences: the default model
+    use-usage.ts               GET /v1/me/usage: this month, in the reader's own zone (#247)
     use-theme.ts               the theme store's React binding (#203)
     use-auth.ts                the auth store's React binding
     use-auth-config.ts         GET /v1/auth-config for the sign-in page
@@ -193,7 +195,9 @@ src/
                                days / Older), measured in local calendar days (#211)
     suggestions.ts             the four openers New chat offers; they fill the composer
                                and send nothing (#211)
-    models.ts                  helpers over the catalog: grouping, name lookup, providerOf
+    models.ts                  helpers over the catalog: grouping, name lookup, price lookup,
+                               providerOf (#247)
+    usage.ts                   the reader's local days: the zone, the month so far, a day's label
     errors.ts, format.ts, utils.ts    and `formatElapsed` for the working row's clock
   test-support/render-app.tsx  render the app against a fake client; DOM readers
   test-support/stream.ts       gate the fake's stream, one event at a time
@@ -560,6 +564,29 @@ Settings link. A failed create keeps the text in the box; a failed send keeps th
 already created and retries into that, not a second empty chat. The first message is what
 names the session (#35), so a successful send asks `lib/session-refresh` for its one re-read
 itself — the sidebar row was added by the create, before the name existed.
+
+### Usage and cost (#247)
+
+Three surfaces, and each is priced where it is read — the log holds tokens and never money:
+
+- **a reply's metadata row** (`components/chat/message-meta.tsx`) ends with what that reply cost,
+  next to the tokens #212 already showed. It is `replyCost(meta, costOf)` over the reply's own
+  counters and its model's rates, and it draws `—` for a model nobody prices. `costOf` is the
+  shell's `modelPriceLookup(catalog.models)` (`lib/models.ts`), pushed down the same path
+  `nameOf` travels; a caller with no catalog leaves the cost off the line rather than drawing an
+  unknown one.
+- **the chat header** shows what the session has spent, beside the model id (`chat-view.tsx`):
+  `selectSessionUsage(transcript)` — the log's running totals, or the ones derived from its
+  replies — priced with the same lookup. It is absent until a request has run: a chat with no
+  answer has no cost to report.
+- **Settings → Usage** (`components/settings/usage.tsx` over `hooks/use-usage.ts`) is the month
+  so far: the total, a table of models, and a bar per day. It reads `GET /v1/me/usage` with the
+  zone the browser reports (`lib/usage.ts`: `localTimeZone`, `currentMonthRange`, `formatDay`),
+  because the server groups by **the reader's** days. Nothing polls and nothing is cached: it is
+  a screen a reader opens.
+
+`formatCost` (`lib/format.ts`) is the one place a number becomes money on screen — `—` for
+unknown, four decimals while the number is a fraction of a cent, and cents at dollar scale.
 
 ### The composer's model control (#113, U3)
 

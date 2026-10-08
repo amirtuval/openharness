@@ -64,6 +64,7 @@ src/
   resources/preferences.ts  preferences.get/put: the caller's default model (#111)
   resources/provider-credentials.ts  providerCredentials.list/put/delete
   resources/sessions.ts sessions.create/get/list/delete + sessions.events.send/list/iterate/stream
+  resources/usage.ts    usage.session/usage.me: what a session and the caller spent (#247)
   events/sse.ts         the SSE parser over a ReadableStream
   events/stream.ts      the reconnect/resume loop around it
   internal/async.ts     sleep and a small async queue (the fake's plumbing)
@@ -79,27 +80,30 @@ src/
 
 ### `@openharness/client`
 
-| export                                                                                          | what it is                                                                             |
-| ----------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| `createClient(options)`                                                                         | build a client                                                                         |
-| `Client`, `ClientOptions`, `RequestOptions`                                                     | the interface both the real and the fake client implement                              |
-| `AgentsResource`, `SessionsResource`, `SessionEventsResource`                                   | the resource interfaces                                                                |
-| `ProviderCredentialsResource`                                                                   | `providerCredentials.list/put/delete`                                                  |
-| `ModelsResource`                                                                                | `models.list`: the chat models the caller's keys can use (epic #92)                    |
-| `PreferencesResource`                                                                           | `preferences.get/put`: the caller's stored default model (#111)                        |
-| `AuthResource`                                                                                  | `auth.startDeviceLogin/pollDeviceLogin/signOut`                                        |
-| `OPENHARNESS_CLI_CLIENT_ID`                                                                     | the `client_id` the device flow presents: `'openharness-cli'`                          |
-| `DeviceLoginError`, `DeviceLoginStart`, `PollDeviceLoginOptions`                                | the device flow's error, its start result and its poll options                         |
-| `StreamOptions`                                                                                 | `{ deltas?, afterSeq?, signal? }` for `events.stream`                                  |
-| `SendMessageOptions`                                                                            | `sendMessage`'s options: cancellation, the `model` to switch to, and `rewindTo` (#238) |
-| `FetchLike`, `DebugHook`, `RawResponse`                                                         | the `fetch` seam, the hook for what the client skips, the raw answer                   |
-| `ApiError`, `AuthenticationError`, `ResponseValidationError`, `errorTypeForStatus()`            | the three errors and the status → `error.type` map                                     |
-| `createTranscript()`, `reduceTranscript()`, `reduceTranscriptAll()`, `initialTranscriptState()` | the transcript store and the pure reducer                                              |
-| `selectMessages()`, `selectIsRunning()`, `selectLastMessage()`, `selectStreamingMessage()`      | selectors                                                                              |
-| `Transcript`, `TranscriptState`, `TranscriptMessage`, `TranscriptError`                         | the transcript's types                                                                 |
-| `MessagePart`, `TextPart`, `TranscriptMessageMeta`, `TranscriptUsage`, `PendingModelRequest`    | a message's typed parts, a reply's metadata, and its bookkeeping (#201)                |
-| `PROVIDERS`, `providerInfo()`, `providerName()`, `ProviderInfo`                                 | the model providers a form or a tile needs (#209)                                      |
-| `PACKAGE_NAME`                                                                                  | the package name; a dependent's cheap proof that the import resolved                   |
+| export                                                                                          | what it is                                                                               |
+| ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `createClient(options)`                                                                         | build a client                                                                           |
+| `Client`, `ClientOptions`, `RequestOptions`                                                     | the interface both the real and the fake client implement                                |
+| `AgentsResource`, `SessionsResource`, `SessionEventsResource`                                   | the resource interfaces                                                                  |
+| `ProviderCredentialsResource`                                                                   | `providerCredentials.list/put/delete`                                                    |
+| `ModelsResource`                                                                                | `models.list`: the chat models the caller's keys can use (epic #92)                      |
+| `PreferencesResource`                                                                           | `preferences.get/put`: the caller's stored default model (#111)                          |
+| `UsageResource`                                                                                 | `usage.session(id)` and `usage.me(range)`: what was spent, priced on the server (#247)   |
+| `AuthResource`                                                                                  | `auth.startDeviceLogin/pollDeviceLogin/signOut`                                          |
+| `OPENHARNESS_CLI_CLIENT_ID`                                                                     | the `client_id` the device flow presents: `'openharness-cli'`                            |
+| `DeviceLoginError`, `DeviceLoginStart`, `PollDeviceLoginOptions`                                | the device flow's error, its start result and its poll options                           |
+| `StreamOptions`                                                                                 | `{ deltas?, afterSeq?, signal? }` for `events.stream`                                    |
+| `SendMessageOptions`                                                                            | `sendMessage`'s options: cancellation, the `model` to switch to, and `rewindTo` (#238)   |
+| `FetchLike`, `DebugHook`, `RawResponse`                                                         | the `fetch` seam, the hook for what the client skips, the raw answer                     |
+| `ApiError`, `AuthenticationError`, `ResponseValidationError`, `errorTypeForStatus()`            | the three errors and the status → `error.type` map                                       |
+| `createTranscript()`, `reduceTranscript()`, `reduceTranscriptAll()`, `initialTranscriptState()` | the transcript store and the pure reducer                                                |
+| `selectMessages()`, `selectIsRunning()`, `selectLastMessage()`, `selectStreamingMessage()`      | selectors                                                                                |
+| `Transcript`, `TranscriptState`, `TranscriptMessage`, `TranscriptError`                         | the transcript's types                                                                   |
+| `MessagePart`, `TextPart`, `TranscriptMessageMeta`, `TranscriptUsage`, `PendingModelRequest`    | a message's typed parts, a reply's metadata, and its bookkeeping (#201)                  |
+| `SessionUsage`, `SessionModelUsage`, `SessionUsageTotals`, `ModelPriceLookup`                   | the session's totals as the transcript keeps them, and how a frontend prices them (#247) |
+| `selectSessionUsage()`, `sessionUsageOf()`, `sessionCost()`, `replyCost()`                      | what a session and a reply cost, from the log's tokens and the catalog's rates (#247)    |
+| `PROVIDERS`, `providerInfo()`, `providerName()`, `ProviderInfo`                                 | the model providers a form or a tile needs (#209)                                        |
+| `PACKAGE_NAME`                                                                                  | the package name; a dependent's cheap proof that the import resolved                     |
 
 ### `@openharness/client/testing`
 
@@ -158,6 +162,8 @@ for await (const event of client.sessions.events.stream(session.id, { deltas: tr
 | `providerCredentials.delete(provider, options?)` | `DELETE /v1/provider-credentials/{provider}`                                                        | `void` (the wire answers `204`)                              |
 | `models.list(params?, options?)`                 | `GET /v1/models`                                                                                    | `{ data: ModelEntry[], providers: ProviderCatalogStatus[] }` |
 | `preferences.get(options?)`                      | `GET /v1/me/preferences`                                                                            | `{ default_model }` (`null` when none is set)                |
+| `usage.session(id, options?)`                    | `GET /v1/sessions/{id}/usage`                                                                       | `{ session_id, totals, cost, by_model }`                     |
+| `usage.me(params?, options?)`                    | `GET /v1/me/usage` (`from`, `to`, `tz`)                                                             | `{ from, to, totals, cost, by_model, by_day }`               |
 | `preferences.put(preferences, options?)`         | `PUT /v1/me/preferences`                                                                            | `{ default_model }` (the stored value)                       |
 | `auth.startDeviceLogin(options?)`                | `POST /api/auth/device/code`                                                                        | `DeviceLoginStart`                                           |
 | `auth.pollDeviceLogin(code, options?)`           | `POST /api/auth/device/token`, polled                                                               | the session token (`string`)                                 |
@@ -243,6 +249,30 @@ The server caches the answer in memory per user and provider for an hour;
 off the wire otherwise). Refreshing is rate-limited to once a minute per user, so a
 too-frequent one is answered `429 rate_limit_error` — an `ApiError` with `retryable: true`,
 which a Refresh button should surface to the user rather than retry in a loop.
+
+### Usage and cost (#247)
+
+`client.usage` is the two reads that answer what was spent: `usage.session(id)` for one
+session's totals and `usage.me({ from, to, tz })` for the caller's own, by model and by day.
+Both are owner-scoped server-side (another user's session is a 404, and there is no id in the
+per-user path), and both answer **cost** — computed by the server from the log's tokens and its
+vendored prices, `null` for a model nobody prices.
+
+The transcript carries the same numbers for a screen that is already following a session, which
+is why a client rarely needs either route:
+
+- `TranscriptState.usage` is the newest `session.usage` event the reducer has folded in — the
+  session's **running** totals, per model (the event carries them cumulatively).
+- `selectSessionUsage(state)` answers that, or **derives** the same totals from the transcript's
+  replies for a session stored before the event existed. The two agree by construction: the
+  event is what a fold over the stored spans produces.
+- `sessionCost(usage, prices)` and `replyCost(meta, prices)` turn tokens into money with the
+  catalog's rates (`ModelEntry.cost`), which is what a frontend passes in as a `ModelPriceLookup`
+  — `modelPriceLookup(models)` in the web app. A reply or a session whose model has no price is
+  `null`: `—` on screen, never a zero.
+- A `session.rewind` drops `state.usage`: the totals the rewind replaced counted a branch that is
+  gone, and the derivation from the messages that survived is right until the next request writes
+  a fresh snapshot.
 
 ### Preferences and deleting a session
 
@@ -614,6 +644,16 @@ row, `delete` is idempotent, an empty key is answered 422 `invalid_provider_cred
 **first** save with no default stored picks one the way U4 does — the saved provider's first
 catalog model, else the catalog's first, and never over a default that is already there. The
 recommendation table the server keeps is the one thing the fake does not restate.
+
+The usage reads are answered from the fake's own logs (#247), the way the server answers them
+from a real one: `fakeRequestsOf` pairs a session's spans (through the replay read, so a rewound
+branch is not counted), `fakeUsage` prices them with the catalog the fake lists and assembles the
+totals and the per-model split, and `usage.me` groups the caller's requests by the local day they
+fell on in the zone it was given (`fakeUsageRange`/`fakeLocalDay`, `Intl` as the server uses it).
+The fake's own `session.usage` events are written by its brain after every request that reported
+usage, in the same spot the real brain writes them — so a component test that reads either the
+transcript's totals or the route sees the same numbers. A zone the runtime does not know is the
+400 `invalid_request_error` the server answers, and an unknown session is a 404.
 
 The model catalog is configurable too: `createFakeClient({ models, providers })` seeds what
 `models.list` answers — one `anthropic/claude-sonnet-5` entry with an `ok` status by default —

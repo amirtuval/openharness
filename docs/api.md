@@ -107,6 +107,8 @@ the only way an event is ever removed together with its session.
 | `GET`    | `/v1/provider-credentials`                | list the caller's credential metadata; never the secrets                                        |
 | `DELETE` | `/v1/provider-credentials/{provider}`     | delete one; answers `204` with no body                                                          |
 | `GET`    | `/v1/models`                              | the chat models the caller's own keys can use, with per-provider status                         |
+| `GET`    | `/v1/sessions/{session_id}/usage`         | what one session spent: totals, cost, and the per-model breakdown                               |
+| `GET`    | `/v1/me/usage`                            | what the caller spent between two local days (`from`, `to`, `tz`): by model and by day          |
 
 Every `/v1` resource belongs to the caller and is scoped to them.
 
@@ -134,6 +136,7 @@ session. It is also the SSE `id` and the resume position, so a client that recon
 | `span.model_request_end`     | the brain     | it finished — usage, any error, the interrupts it ends                               |
 | `event_start`                | the brain     | a reply started streaming — a stored chunk since D9                                  |
 | `event_delta`                | the brain     | a streamed fragment of it — a stored chunk since D9                                  |
+| `session.usage`              | the brain     | the session's running token totals, per model, after a request that reported usage   |
 | `session.rewind`             | the server    | // extension: the session restarts from an earlier `user.message` (#238)             |
 | `session.deleted`            | the server    | stream-only: the session was deleted; sent last, then the stream closes (#111)       |
 
@@ -142,6 +145,40 @@ model the session runs from that message on, and the session keeps running it un
 message changes it (epic #116, U3). The switch is stored on the message — the log stays the
 source of truth — and each `span.model_request_start` still records the model its request
 actually used.
+
+`session.usage` is the session's **running** totals, written by the brain in the same append as
+the `span.model_request_end` that closes a request which reported usage — so a client watching
+a turn reads the session's cost off the stream instead of adding the spans up itself:
+
+```json
+{
+  "type": "session.usage",
+  "id": "sevt_…",
+  "seq": 10,
+  "processed_at": "…",
+  "input_tokens": 1076,
+  "output_tokens": 64,
+  "cache_creation_input_tokens": 0,
+  "cache_read_input_tokens": 0,
+  "models": [
+    {
+      "model": "anthropic/claude-sonnet-5",
+      "usage": {
+        "input_tokens": 1076,
+        "output_tokens": 64,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0
+      }
+    }
+  ]
+}
+```
+
+The four counters beside `models` are that breakdown's sum, and the schema refuses an event
+where they disagree. **It carries no cost**: money is computed when it is read, from these
+tokens and the model catalog's prices, and is never stored (see [Usage and cost](#usage-and-cost)).
+A session stored before the event existed has none, and its totals are derived on read from the
+`span.model_request_end` events it does have — the same numbers, from the events underneath.
 
 ### Claims, chunks and superseding (D9)
 
@@ -449,8 +486,9 @@ curl -X DELETE localhost:3000/v1/provider-credentials/anthropic \
 ## The model catalog
 
 `GET /v1/models` answers **the chat models the caller's own provider keys can use** — the list
-the agent form picks from. Authentication is the usual one; the optional `refresh=true` query
-parameter bypasses the server's cache (below). The response is `ListModelsResponse`:
+the agent form picks from, and the prices a client computes a reply's cost with. Authentication
+is the usual one; the optional `refresh=true` query parameter bypasses the server's cache
+(below). The response is `ListModelsResponse`:
 
 ```json
 {
@@ -461,6 +499,7 @@ parameter bypasses the server's cache (below). The response is `ListModelsRespon
       "name": "Gemini 2.5 Flash",
       "context_window": 1048576,
       "max_output_tokens": 65536,
+      "cost": { "input": 0.3, "output": 2.5, "cache_read": 0.075, "cache_write": null },
       "source": "provider"
     },
     {
@@ -469,6 +508,7 @@ parameter bypasses the server's cache (below). The response is `ListModelsRespon
       "name": "openai/gpt-4.1-mini",
       "context_window": null,
       "max_output_tokens": null,
+      "cost": null,
       "source": "provider"
     },
     {
@@ -528,6 +568,69 @@ parameter bypasses the server's cache (below). The response is `ListModelsRespon
   Postgres. `refresh=true` bypasses the cache and re-fetches — rate-limited to **once a
   minute per user**: a second refresh inside the window is answered `429 rate_limit_error`
   rather than refreshed, so a Refresh button should show that instead of looping.
+
+## Usage and cost
+
+Two routes answer what was spent. Both are **reads of the log**: the tokens come from the
+`span.model_request_end` events the log holds, the money is computed from the model catalog's
+prices when the request is answered, and nothing about cost is ever written down.
+`session.usage` (above) is the same totals pushed onto the stream, so a client following a
+session does not have to ask.
+
+```
+GET /v1/sessions/{session_id}/usage    -> { session_id, totals, cost, by_model }
+GET /v1/me/usage?from=&to=&tz=         -> { from, to, tz, totals, cost, by_model, by_day }
+```
+
+```json
+{
+  "session_id": "sesn_01JQZ8R6X9M4V0W7Y2B3C5D6E7",
+  "totals": {
+    "input_tokens": 1076,
+    "output_tokens": 64,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+  },
+  "cost": 0.002792,
+  "by_model": [
+    {
+      "model": "anthropic/claude-sonnet-5",
+      "usage": {
+        "input_tokens": 1076,
+        "output_tokens": 64,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0
+      },
+      "requests": 2,
+      "cost": 0.002792
+    }
+  ]
+}
+```
+
+- **Cost is computed on read, and never estimated.** A model with no published price contributes
+  its tokens and no cost, and any total that includes one is `null` — which a client renders as
+  `—`. A model that publishes an input and output rate but no cache rates is priced for the
+  tokens whose rates exist and answers `null` for a request that spent cache tokens: charging
+  nothing for tokens that were really spent would understate the bill. Prices are USD per
+  million tokens, from the vendored models.dev snapshot (see `apps/server/AGENTS.md`).
+- **Cache tokens are priced separately.** `cache_read` and `cache_write` are their own rates at
+  every provider that publishes them, not a fraction of the input rate.
+- **Usage is broken down by model, never by mode.** A session may switch models mid-conversation
+  (U3), so `by_model` is what separates the cheap requests from the expensive ones. The per-user
+  route adds `by_day`; there is no third axis.
+- **Days are the reader's days.** `tz` is an IANA zone name — the web app reads
+  `Intl.DateTimeFormat().resolvedOptions().timeZone` and `oh` the same in Node — and the request
+  timestamps are grouped by the local day they fell on _there_. A zone the server does not know
+  is a `400 invalid_request_error`, never a silent UTC. `from` and `to` are inclusive local days
+  and default to the current month so far; a `from` after `to` is a `400` too. A day with no
+  requests is **absent** from `by_day`, not present as a zero.
+- **Ownership is the whole of the access control** (A4). The session route is owner-scoped:
+  another user's session is the `404` an unknown id gets. The per-user route has no id in its
+  path at all — it is always the caller — and there is no operator-wide view.
+- **Nothing is rolled up or stored.** Deleting a session removes its usage with it (the log is
+  gone), and a request inside a branch a `session.rewind` replaced is not billed: the reads go
+  through the replay read, which skips what a range supersedes.
 
 ## Errors
 
