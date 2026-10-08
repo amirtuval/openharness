@@ -560,9 +560,12 @@ the status is what the line exists for.
 The rates come from a catalog the screen reads **once, in the background**, purely for the
 prices and the display names (`chat/screen.tsx`): a chat opened on `--model` or on a stored
 default still starts immediately, and a chat that never reads one shows no cost at all rather
-than a dash that claims to know. Until it lands the last reply is **held live** — Ink writes a
-settled message once (#208, X2), so a footer that settled early would keep a cost it could not
-compute — and the status line, which is live, picks the cost up the moment it can.
+than a dash that claims to know. Until it lands the transcript settles **nothing** (`holdAll` on
+`TranscriptView`) — Ink writes a settled message once and never redraws it (#208, X2), so a
+footer that settled early would keep a cost it could not compute, and that applies to the
+replies loaded from history as much as to the live one. The messages are still drawn while they
+are held (live rather than static); they settle, with their costs, the moment the read answers,
+whatever the answer was.
 
 The status field doubles as the **working indicator** (#208): `Working… 12s` with a turning
 spinner while a running turn has produced no text yet, `running` once it has, the spinner back

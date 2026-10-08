@@ -122,7 +122,11 @@ export function ChatScreen({
       .then((models) => {
         if (!cancelled) setCatalog(models)
       })
-      .catch(() => {})
+      .catch(() => {
+        // A read that failed is still an answered question: the transcript settles (see
+        // `holdAll`), and a cost it cannot compute reads `—` rather than never arriving.
+        if (!cancelled) setCatalog([])
+      })
     return () => {
       cancelled = true
     }
@@ -338,12 +342,11 @@ export function ChatScreen({
         costOf={costOf}
         // A reply settles into Ink's static output once and never redraws (#208, X2), so it is
         // held live until *everything* its footer needs has arrived: its own metadata, and —
-        // when the catalog is still being read in the background (#247) — the rates that
-        // footer's cost is computed from.
-        holdLive={
-          view.awaitingMetaId ??
-          (catalog === null ? lastDrawn(view.transcript.messages)?.id : undefined)
-        }
+        // while the prices are still being read (#247) — the rates that footer's cost is
+        // computed from. That second half is `holdAll`: it covers the replies loaded from
+        // history too, which would otherwise settle uncosted the instant they are drawn.
+        holdLive={view.awaitingMetaId ?? undefined}
+        holdAll={catalog === null}
       />
       {hasNotice && (
         <>
