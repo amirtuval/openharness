@@ -21,7 +21,7 @@ import { useShortcuts } from './hooks/use-shortcuts'
 import { dismissNotice } from './lib/notice'
 import { createBrowserAuthClient } from './lib/auth-client'
 import { beginSessionCheck, signOutSession } from './lib/auth-store'
-import { modelNameLookup } from './lib/models'
+import { modelNameLookup, modelPriceLookup } from './lib/models'
 import { navigate, routeToHash, type Route } from './lib/router'
 import { DeviceScreen } from './screens/device-screen'
 import { SettingsScreen } from './screens/settings-screen'
@@ -176,6 +176,9 @@ function AppFrame({
   // untitled sessions with its display names (#91).
   const catalog = useModels(client)
   const nameOf = useMemo(() => modelNameLookup(catalog.models), [catalog.models])
+  // The catalog's prices, for the costs a chat and its replies show (#247). Built beside the
+  // names because they come from the same list and change together.
+  const costOf = useMemo(() => modelPriceLookup(catalog.models), [catalog.models])
   // The shell's notice (epic #116, U5): "This chat was deleted." lands here after the chat it
   // was about is gone, so it outlives the screen that raised it.
   const notice = useNotice()
@@ -385,6 +388,7 @@ function AppFrame({
               key={route.sessionId}
               sessionId={route.sessionId}
               nameOf={nameOf}
+              costOf={costOf}
               catalog={catalog}
               onDelete={deleteSession}
               onDeleted={forgetSession}

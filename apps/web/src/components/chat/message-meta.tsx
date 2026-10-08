@@ -1,14 +1,15 @@
-import type { TranscriptMessage, TranscriptUsage } from '@openharness/client'
+import { replyCost } from '@openharness/client'
+import type { ModelPriceLookup, TranscriptMessage, TranscriptUsage } from '@openharness/client'
 import { Fragment, type ReactNode } from 'react'
 
-import { formatCount, formatDuration, modelLabel } from '../../lib/format'
+import { formatCost, formatCount, formatDuration, modelLabel } from '../../lib/format'
 import type { ModelNameLookup } from '../../lib/models'
 import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip'
 
 /**
  * What a reply cost, in one low-contrast line under it (#212).
  *
- *     Claude Sonnet 5 · 4.2s · 1,312 tokens
+ *     Claude Sonnet 5 · 4.2s · 1,312 tokens · $0.0013
  *
  * The transcript used to end at the answer, and everything the log knew about how it was
  * produced — the model that served it (#201, U1) and what it spent — had no reader. The line
@@ -28,11 +29,16 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip'
  * - **The tokens are a total, and the split is a hover away.** `total` is what a reader thinks
  *   in; input and output are what a reader who is counting spends, so they are in the tooltip
  *   rather than in the line.
+ * - **The cost is computed here, from the catalog's prices** (epic #245, A2; #247). The log
+ *   stores tokens and never money, so the reply's own counters are priced with its model's
+ *   rates when the row is drawn; a model nobody prices shows `—`, which is the honest answer
+ *   and never a zero.
  */
 export function MessageMeta({
   message,
   previousModel,
   nameOf,
+  costOf,
 }: {
   /** The reply. Anything that is not an agent message has no metadata to draw. */
   message: TranscriptMessage
@@ -40,6 +46,11 @@ export function MessageMeta({
   previousModel: string | undefined
   /** The catalog lookup for the model's display name; the id when the catalog does not know it. */
   nameOf?: ModelNameLookup | undefined
+  /**
+   * The catalog's prices (epic #245, A2; #247), for the reply's cost. Omitted — a caller that
+   * has no catalog — the cost is left out of the line rather than guessed at.
+   */
+  costOf?: ModelPriceLookup | undefined
 }): ReactNode {
   const meta = message.role === 'agent' ? message.meta : undefined
   if (meta === undefined) {
@@ -63,6 +74,15 @@ export function MessageMeta({
   }
   if (meta.usage !== undefined) {
     items.push(<TokenTotal key="tokens" usage={meta.usage} />)
+    if (costOf !== undefined) {
+      // `null` — a model the catalog does not price — draws as `—`: the tokens are real, the
+      // money is not known, and the two must not look alike.
+      items.push(
+        <span key="cost" data-slot="message-cost">
+          {formatCost(replyCost(meta, costOf))}
+        </span>,
+      )
+    }
   }
   if (items.length === 0) {
     return null

@@ -14,6 +14,9 @@ export function modelEntry(
   return {
     context_window: null,
     max_output_tokens: null,
+    // Unpriced unless a test says otherwise: a fixture that invented rates would make a cost
+    // assertion pass for the wrong reason (#247).
+    cost: null,
     source: 'provider',
     ...overrides,
   }

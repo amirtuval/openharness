@@ -122,6 +122,41 @@ export function formatCount(value: number): string {
   return COUNT_FORMAT.format(value)
 }
 
+/**
+ * What something cost, in dollars — or `—` when the cost is not known (epic #245, #247).
+ *
+ * The em dash is not a fallback for a failure: it is the answer for a model nobody publishes a
+ * price for, and the one thing this function must never do is invent a number. A cost that is
+ * known is written with as much precision as it needs and no more: a reply that cost a tenth of
+ * a cent is `$0.0001`-shaped, not `$0.00`, and a dollar-scale total is cents.
+ */
+export function formatCost(cost: number | null): string {
+  if (cost === null) {
+    return '—'
+  }
+  if (cost === 0) {
+    return '$0.00'
+  }
+  if (cost < 0.0001) {
+    // Below the precision the line has room for: say so rather than rounding to zero, which
+    // would read as "free".
+    return '<$0.0001'
+  }
+  if (cost < 0.01) {
+    return `$${trimZeros(cost.toFixed(4))}`
+  }
+  if (cost < 1) {
+    return `$${trimZeros(cost.toFixed(3))}`
+  }
+  return `$${(Math.round(cost * 100) / 100).toFixed(2)}`
+}
+
+/** `0.0240` → `0.024`, `0.0100` → `0.01`: trailing zeros say nothing about what was spent. */
+function trimZeros(value: string): string {
+  const trimmed = value.replace(/0+$/, '')
+  return trimmed.endsWith('.') ? `${trimmed}0` : trimmed
+}
+
 /** The last path segment of a resource id, for a compact label. */
 export function shortId(id: string): string {
   const [prefix = '', suffix = ''] = id.split('_')

@@ -10,7 +10,7 @@ import { settingsHash } from './lib/router'
 import { saveSettings } from './lib/settings'
 import { NEW_CHAT_GREETING } from './screens/new-chat-screen'
 import { authClientCalls } from './test-support/better-auth-client-mock'
-import { TWO_PROVIDERS, WITH_DEFAULT } from './test-support/catalog'
+import { TWO_PROVIDERS, WITH_DEFAULT, modelEntry } from './test-support/catalog'
 import {
   agentText,
   deriveSessionTitles,
@@ -95,6 +95,36 @@ describe('App', () => {
     await stream.until(() => agentText() === REPLY, 'the complete reply')
     await stream.until(() => screen.queryByLabelText('Status: Idle') !== null, 'idle')
     expect(isStreaming()).toBe(false)
+
+    // The reply's cost, and the session's, are computed from the catalog's rates and the
+    // tokens the log reported (#247): the fake's default catalog prices the model, and the
+    // header's total is the same money the reply's row shows.
+    const cost = document.querySelector('[data-slot="message-cost"]')
+    expect(cost?.textContent).toMatch(/^\$/)
+    const total = document.querySelector('[data-slot="session-cost"]')
+    expect(total?.textContent).toBe(cost?.textContent)
+  })
+
+  it('shows a dash for a session whose model nobody prices (#247)', async () => {
+    const user = userEvent.setup({ delay: null })
+    // A catalog with one model nobody prices, which is not the model the session runs: the
+    // reply's own model has no published rate either way.
+    const fake = makeFake({
+      models: [modelEntry({ id: 'acme/mystery-1', provider: 'acme', name: 'Mystery' })],
+    })
+    fake.respondWith('Hello there.')
+    renderApp(fake)
+
+    await user.type(await screen.findByLabelText('Message'), 'Hi there')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
+    // The reply's cost arrives with its span end, which follows the message itself.
+    await waitFor(() => {
+      expect(document.querySelector('[data-slot="message-cost"]')).not.toBeNull()
+    })
+
+    // The tokens are real and the money is not known: "—", never `$0.00`.
+    expect(document.querySelector('[data-slot="message-cost"]')?.textContent).toBe('—')
+    expect(document.querySelector('[data-slot="session-cost"]')?.textContent).toBe('—')
   })
 
   it('stops a running reply with user.interrupt and keeps what was written', async () => {
@@ -489,6 +519,7 @@ describe('model-first labels, hidden agents', () => {
       name: 'GPT-4.1 mini',
       context_window: 128_000,
       max_output_tokens: null,
+      cost: null,
       source: 'provider',
     }
     // The seeded session runs anthropic/claude-sonnet-5; this catalog does not list it.
@@ -838,7 +869,8 @@ describe('the sidebar below md', () => {
       // input and 32 output tokens (#201, U1) — 544, with the thousands separator a count
       // gets. The duration is the wait, which under the fake is a few milliseconds.
       const meta = document.querySelector('[data-slot="message-meta"]')
-      expect(meta?.textContent).toMatch(/^Claude Sonnet 5 · \d+(\.\d+)?s · 544 tokens$/)
+      // The cost rides at the end of the same line (#247), computed from the catalog's rates.
+      expect(meta?.textContent).toMatch(/^Claude Sonnet 5 · \d+(\.\d+)?s · 544 tokens · \$0\.\d+$/)
       // And it is not part of the reply: the message is still what the model wrote.
       expect(agentText()).toBe('One.')
 
@@ -848,7 +880,7 @@ describe('the sidebar below md', () => {
       const lines = [...document.querySelectorAll('[data-slot="message-meta"]')]
       expect(lines).toHaveLength(2)
       expect(lines[1]?.textContent).not.toContain('Claude Sonnet 5')
-      expect(lines[1]?.textContent).toMatch(/tokens$/)
+      expect(lines[1]?.textContent).toMatch(/tokens · \$\d/)
     })
 
     it('puts a message’s source on the clipboard from its action row', async () => {

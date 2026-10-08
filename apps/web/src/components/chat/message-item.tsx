@@ -1,4 +1,4 @@
-import type { MessagePart, TranscriptMessage } from '@openharness/client'
+import type { MessagePart, ModelPriceLookup, TranscriptMessage } from '@openharness/client'
 import { Fragment, type ReactNode } from 'react'
 
 import { modelLabel } from '../../lib/format'
@@ -55,6 +55,7 @@ const PART_RENDERERS: Record<MessagePart['type'], PartRenderer> = {
 export function MessageItem({
   message,
   nameOf,
+  costOf,
   previousModel,
   onEdit,
   editDisabled = false,
@@ -63,6 +64,8 @@ export function MessageItem({
   message: TranscriptMessage
   /** The catalog lookup for the marker's display name; the id when the catalog does not know it. */
   nameOf?: ModelNameLookup | undefined
+  /** The catalog's prices, for the reply's cost (#247); omitted leaves the cost out. */
+  costOf?: ModelPriceLookup | undefined
   /** The previous reply's model, so the meta line names one only when it changed (#212). */
   previousModel?: string | undefined
   /** Rewrite this message — given for the reader's own messages (#238, "edit and resend"). */
@@ -140,7 +143,12 @@ export function MessageItem({
         className="flex h-6 max-w-full min-w-0 items-center gap-control"
       >
         {isUser ? null : (
-          <MessageMeta message={message} previousModel={previousModel} nameOf={nameOf} />
+          <MessageMeta
+            message={message}
+            previousModel={previousModel}
+            nameOf={nameOf}
+            costOf={costOf}
+          />
         )}
         <MessageActions text={message.text} onEdit={onEdit} editDisabled={editDisabled} />
       </div>

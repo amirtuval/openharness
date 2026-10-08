@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   formatContextWindow,
+  formatCost,
   formatCount,
   formatDuration,
   modelLabel,
@@ -32,6 +33,7 @@ const nameOf = modelNameLookup([
     name: 'Claude Sonnet 5',
     context_window: 200_000,
     max_output_tokens: 64_000,
+    cost: null,
     source: 'provider',
   },
 ])
@@ -106,5 +108,28 @@ describe('formatCount', () => {
     expect(formatCount(999)).toBe('999')
     expect(formatCount(1312)).toBe('1,312')
     expect(formatCount(1_234_567)).toBe('1,234,567')
+  })
+})
+
+describe('formatCost (#247)', () => {
+  it('reads an unknown cost as a dash, never as a number', () => {
+    expect(formatCost(null)).toBe('—')
+  })
+
+  it('keeps the precision a small cost needs, and no more', () => {
+    expect(formatCost(0)).toBe('$0.00')
+    // A reply that cost a twentieth of a cent: rounding it to `$0.00` would read as free.
+    expect(formatCost(0.0004)).toBe('$0.0004')
+    expect(formatCost(0.001344)).toBe('$0.0013')
+    expect(formatCost(0.024)).toBe('$0.024')
+    expect(formatCost(0.01)).toBe('$0.01')
+    expect(formatCost(0.5)).toBe('$0.5')
+    expect(formatCost(1)).toBe('$1.00')
+    expect(formatCost(3.4567)).toBe('$3.46')
+    expect(formatCost(12.004)).toBe('$12.00')
+  })
+
+  it('says so rather than rounding a cost too small to print to zero', () => {
+    expect(formatCost(0.00001)).toBe('<$0.0001')
   })
 })

@@ -60,6 +60,7 @@ export async function createDevFakeClient(): Promise<Client | null> {
           name: 'Claude Sonnet 5',
           context_window: 200_000,
           max_output_tokens: 64_000,
+          cost: { input: 2, output: 10, cache_read: 0.2, cache_write: 2.5 },
           source: 'provider',
         },
         {
@@ -68,6 +69,7 @@ export async function createDevFakeClient(): Promise<Client | null> {
           name: 'GPT-5.1 mini',
           context_window: 400_000,
           max_output_tokens: 128_000,
+          cost: { input: 0.4, output: 1.6, cache_read: 0.1, cache_write: null },
           source: 'provider',
         },
         {
@@ -76,6 +78,7 @@ export async function createDevFakeClient(): Promise<Client | null> {
           name: 'Gemini 2.5 Pro',
           context_window: 1_000_000,
           max_output_tokens: 65_536,
+          cost: null,
           source: 'provider',
         },
       ],
@@ -100,6 +103,7 @@ export async function createDevFakeClient(): Promise<Client | null> {
         name: 'Claude Sonnet 5',
         context_window: 200_000,
         max_output_tokens: 64_000,
+        cost: { input: 2, output: 10, cache_read: 0.2, cache_write: 2.5 },
         source: 'provider',
       },
       {
@@ -108,6 +112,7 @@ export async function createDevFakeClient(): Promise<Client | null> {
         name: 'GPT-5.1',
         context_window: 400_000,
         max_output_tokens: 128_000,
+        cost: { input: 2.5, output: 15, cache_read: 0.25, cache_write: null },
         source: 'registry',
       },
       {
@@ -116,6 +121,7 @@ export async function createDevFakeClient(): Promise<Client | null> {
         name: 'GPT-5.1 mini',
         context_window: 400_000,
         max_output_tokens: 128_000,
+        cost: { input: 0.4, output: 1.6, cache_read: 0.1, cache_write: null },
         source: 'registry',
       },
     ],

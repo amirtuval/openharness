@@ -1,3 +1,4 @@
+import type { ModelPriceLookup } from '@openharness/client'
 import type { ModelEntry, ProviderCatalogStatus } from '@openharness/protocol'
 
 /**
@@ -26,6 +27,19 @@ export interface ProviderGroup {
 /** A lookup over a catalog, built once per list so the label code does not scan per row. */
 export function modelNameLookup(models: readonly ModelEntry[]): ModelNameLookup {
   const byId = new Map(models.map((entry) => [entry.id, entry.name]))
+  return (modelId) => byId.get(modelId) ?? null
+}
+
+/**
+ * The catalog's prices, by model id (epic #245, A2; issue #247).
+ *
+ * The catalog is where prices reach the app — each entry carries the model's list rates — so
+ * this is the lookup every cost on screen is computed with: a reply's, and a session's. A model
+ * the catalog does not price answers `null` and its cost shows as `—`; a model the catalog does
+ * not list at all (an id a key was deleted for, a free-text id) answers `null` too.
+ */
+export function modelPriceLookup(models: readonly ModelEntry[]): ModelPriceLookup {
+  const byId = new Map(models.map((entry) => [entry.id, entry.cost]))
   return (modelId) => byId.get(modelId) ?? null
 }
 
