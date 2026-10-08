@@ -1,6 +1,7 @@
 import {
   AgentSchema,
   CreateAgentRequestSchema,
+  EVENT_TYPES,
   CreateSessionRequestSchema,
   DEFAULT_USER_THEME,
   ListModelsResponseSchema,
@@ -48,7 +49,7 @@ import { isEventList } from '../internal/events'
 import { sleep } from '../internal/async'
 import { DeviceLoginError, SLOW_DOWN_INCREMENT_SECONDS } from '../resources/auth'
 import type { DeviceLoginStart, PollDeviceLoginOptions } from '../resources/auth'
-import { FakeBrain, clampLimit, type FakeScript } from './fake-brain'
+import { FakeBrain, clampLimit, type FakeScript, type RewindRefusal } from './fake-brain'
 
 export { FAKE_MODEL_USAGE } from './fake-brain'
 export type { FakeFailure, FakeReply, FakeScript } from './fake-brain'
@@ -538,18 +539,38 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       // the 404 even when the events are malformed too.
       const brain = await requireBrain(sessionId)
       // `SendEventsRequestSchema` is the body the route validates — the events list, at least
-      // one, every member a user event. Validating here rather than storing the caller's value
-      // is what keeps a `raw ZodError`, an empty batch or an event the protocol does not know
-      // from reaching the fake's log; the parsed value is what is stored, unknown fields
-      // stripped, exactly as the server stores what its parser produced.
+      // one, every member a user event or the one rewind instruction (#238). Validating here
+      // rather than storing the caller's value is what keeps a `raw ZodError`, an empty batch
+      // or an event the protocol does not know from reaching the fake's log; the parsed value
+      // is what is stored, unknown fields stripped, exactly as the server stores what its
+      // parser produced.
       const request = SendEventsRequestSchema.safeParse({
         events: isEventList(events) ? events : [events],
       })
       if (!request.success) {
         throw badRequestFor(request.error.issues)
       }
-      const stored: UserEvent[] = request.data.events.map((input) => brain.appendUserEvent(input))
-      brain.startTurn()
+      // The batch's rewinds land first, and a refusal refuses the whole request the way one
+      // append does: nothing of the batch is stored (#238). A rewind's own event is the
+      // server's, not the caller's, so it is not part of the answer — `data` carries the
+      // stored user events, exactly as the route's filter leaves them.
+      for (const input of request.data.events) {
+        if (input.type !== EVENT_TYPES.sessionRewind) {
+          continue
+        }
+        const outcome = brain.rewind(input.from_seq)
+        if ('refusal' in outcome) {
+          throw rewindRefused(outcome.refusal)
+        }
+      }
+      const stored: UserEvent[] = request.data.events.flatMap((input) =>
+        input.type === EVENT_TYPES.sessionRewind ? [] : [brain.appendUserEvent(input)],
+      )
+      // A batch of just a rewind asks for no turn: the route signals the scheduler from the
+      // user events it stored, and a rewind is not one (#238).
+      if (stored.length > 0) {
+        brain.startTurn()
+      }
       return Promise.resolve({ data: stored })
     },
 
@@ -907,6 +928,15 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       if (!input.success) {
         throw badRequestFor(input.error.issues)
       }
+      // "Edit and resend" (#238): the rewind rides the same request as the message and lands
+      // first, the way the body the real client posts carries it — one batch, so an append
+      // that stores either stores both, and a refusal stores neither.
+      if (messageOptions?.rewindTo !== undefined) {
+        const outcome = brain.rewind(messageOptions.rewindTo)
+        if ('refusal' in outcome) {
+          throw rewindRefused(outcome.refusal)
+        }
+      }
       const stored = brain.appendUserEvent(input.data) as UserMessageEvent
       brain.startTurn()
       return stored
@@ -1058,6 +1088,25 @@ interface ValidationIssue {
  * would show against the server. One helper for every body the fake parses, because the
  * inconsistency this replaced (#105) was three routes each doing their own thing.
  */
+/**
+ * The error a refused rewind answers with (#238), the same one the server sends: a turn in
+ * flight owns the branch being taken back (409 `conflict_error`, which the route raises), and
+ * a `from_seq` that names nothing editable is the 400 the store's `RangeError` becomes.
+ */
+function rewindRefused(refusal: RewindRefusal): ApiError {
+  return refusal === 'busy'
+    ? new ApiError(
+        409,
+        'the session is running: the turn in flight owns the message being edited',
+        {
+          type: 'conflict_error',
+        },
+      )
+    : new ApiError(400, 'the rewind names no message of this session that can be edited', {
+        type: 'invalid_request_error',
+      })
+}
+
 function badRequestFor(issues: readonly ValidationIssue[]): ApiError {
   const first = issues[0]
   if (first === undefined) {

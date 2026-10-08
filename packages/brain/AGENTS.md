@@ -97,6 +97,13 @@ emits what that reaches.
 `log.ts`, `events.ts` and `validate.ts` are internal: they are how the loop is written, not what
 a host talks to.
 
+**An edited message is not history.** A `session.rewind` (#238) restarts the session from the
+`user.message` a reader edited, and everything it replaced is gone from the log the brain
+reads — `readLog` is the store's replay read, which skips what a recorded range covers — so
+the prompt a request is built from holds the conversation as the reader left it, and the model
+is never told what the edit took back. The brain does nothing about it: the turn reads the log
+and answers what is waiting in it, exactly as after any other append.
+
 ## The lifecycle
 
 The order of the events is the contract — the session log is what a client replays — so it is

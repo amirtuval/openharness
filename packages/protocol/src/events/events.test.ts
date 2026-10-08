@@ -7,11 +7,14 @@ import {
   AgentMessageEventSchema,
   ContentDeltaSchema,
   EVENT_TYPES,
+  EventInputSchema,
   ModelRequestEndEventSchema,
   ModelRequestStartEventSchema,
   STORED_EVENT_TYPES,
   SessionDeletedEventSchema,
   SessionEventSchema,
+  SessionRewindEventInputSchema,
+  SessionRewindEventSchema,
   SessionErrorEventSchema,
   SessionErrorSchema,
   SessionErrorTypeSchema,
@@ -131,6 +134,13 @@ const storedSamples = {
     event_id: eventId(),
     delta: { type: 'content_delta', index: 0, content: { type: 'text', text: 'Here' } },
   },
+  'session.rewind': {
+    id: eventId(),
+    type: 'session.rewind',
+    seq: 12,
+    processed_at: '2026-03-15T10:00:00Z',
+    supersedes: { from_seq: 1, to_seq: 11 },
+  },
 } as const
 
 describe('stored event schemas', () => {
@@ -247,6 +257,68 @@ describe('session.deleted (stream-only, #111)', () => {
       StreamEventSchema.safeParse({ type: 'session.terminated', session_id: deleted.session_id })
         .success,
     ).toBe(false)
+  })
+})
+
+describe('session.rewind (#238)', () => {
+  const rewind = storedSamples['session.rewind']
+
+  it('is a stored event: the log keeps the rewind and is otherwise unchanged', () => {
+    expect(EVENT_TYPES.sessionRewind).toBe('session.rewind')
+    expect(STORED_EVENT_TYPES).toContain('session.rewind')
+    expect(StoredEventSchema.safeParse(rewind).success).toBe(true)
+    expect(SessionEventSchema.safeParse(rewind).success).toBe(true)
+    expect(StreamEventSchema.safeParse(rewind).success).toBe(true)
+  })
+
+  it('requires a supersedes range, and one that is not inverted', () => {
+    const { supersedes: _supersedes, ...withoutRange } = rewind
+    expect(SessionRewindEventSchema.safeParse(withoutRange).success).toBe(false)
+    for (const range of [
+      { from_seq: 0, to_seq: 3 },
+      { from_seq: 4, to_seq: 3 },
+      { from_seq: 1.5, to_seq: 3 },
+      { from_seq: 1, to_seq: '3' },
+    ]) {
+      expect(
+        SessionRewindEventSchema.safeParse({ ...rewind, supersedes: range }).success,
+        JSON.stringify(range),
+      ).toBe(false)
+    }
+  })
+
+  it('is not a user event: the user domain union stays the user’s own two events', () => {
+    expect(UserEventSchema.safeParse(rewind).success).toBe(false)
+    expect(UserEventInputSchema.safeParse({ type: 'session.rewind', from_seq: 4 }).success).toBe(
+      false,
+    )
+  })
+
+  it('sends the message to restart from, not the range', () => {
+    // The store owns how far a rewind reaches — the end of the log is its to know — so the
+    // input names the edited message alone.
+    expect(SessionRewindEventInputSchema.parse({ type: 'session.rewind', from_seq: 4 })).toEqual({
+      type: 'session.rewind',
+      from_seq: 4,
+    })
+    expect(SessionRewindEventInputSchema.safeParse({ type: 'session.rewind' }).success).toBe(false)
+    expect(
+      SessionRewindEventInputSchema.safeParse({ type: 'session.rewind', from_seq: 0 }).success,
+    ).toBe(false)
+    // The stored shape is not the input shape: an input carrying a range names no `from_seq`.
+    expect(SessionRewindEventInputSchema.safeParse(rewind).success).toBe(false)
+  })
+
+  it('travels with the edited message in one batch a client may send', () => {
+    const batch = [
+      { type: 'session.rewind', from_seq: 4 },
+      { type: 'user.message', content: text('write a haiku about snow') },
+    ]
+    expect(batch.map((event) => EventInputSchema.parse(event).type)).toEqual([
+      'session.rewind',
+      'user.message',
+    ])
+    expect(EventInputSchema.safeParse({ type: 'user.interrupt' }).success).toBe(true)
   })
 })
 

@@ -12,6 +12,8 @@ import type {
   ModelRequestStartEvent,
   Session,
   SessionId,
+  SessionRewindEvent,
+  SessionRewindEventInput,
   StoredEvent,
   StoredEventType,
   StreamEvent,
@@ -65,7 +67,9 @@ export type { UserPreferences } from '@openharness/protocol'
  *   messages a request folds in, `span.model_request_end` for an interrupt that cut its
  *   request short, `session.status_idle` for an interrupt that arrived with nothing running
  *   (P4). A claim is recorded once and never removed; `processed_at` on a user event is
- *   derived from it on every read. An event that is claimed cannot be claimed again.
+ *   derived from it on every read. An event that is claimed cannot be claimed again — and
+ *   neither can one a recorded `supersedes` range covers, so nothing outside a rewound range
+ *   claims into it (#238).
  * - **Durability per append.** An append is one transaction. `initial_events` on
  *   {@link SessionStore.createSession} are part of the session's creation transaction, not
  *   appends that follow it.
@@ -364,6 +368,13 @@ export interface SessionStore {
    *   {@link SessionStore.compact} deletes it after the retention window. The range has to lie
    *   within this session and end before the superseding event's own `seq`, or the append is
    *   refused with a `RangeError`.
+   * - **A rewind** (#238). A {@link AppendableRewind} — a `session.rewind` naming the
+   *   `user.message` the session restarts from — is stored as a `session.rewind` whose
+   *   `supersedes` range runs from that message through the end of the log ahead of it
+   *   (`seq - 1`), which this store fills in and the caller does not. `from_seq` has to name a
+   *   `user.message` of this session that no recorded range already covers, or the append is
+   *   refused with a `RangeError`. Both the event and anything beside it land in one
+   *   transaction, so a session is never rewound without the message the reader sent with it.
    *
    * ## Supplying an id
    *
@@ -390,8 +401,9 @@ export interface SessionStore {
    * @throws FencedError when `options.fence` is not the partition's current live lease
    * @throws DuplicateEventIdError when an event id is already stored, or repeated in the batch
    * @throws ClaimConflictError when a `consumes` id is not a pending user event of this session
-   * @throws RangeError when an event's `id` is not a valid event id, or when a `supersedes`
-   *   range does not lie within this session before the superseding event's own `seq`
+   * @throws RangeError when an event's `id` is not a valid event id, when a `supersedes` range
+   *   does not lie within this session before the superseding event's own `seq`, or when a
+   *   rewind's `from_seq` does not name a `user.message` this session still has
    */
   appendEvents(
     sessionId: SessionId,
@@ -406,13 +418,15 @@ export interface SessionStore {
    * `seq`, whatever the order; `types` keeps only those event types (`[]` keeps none). `page`
    * resumes at a `seq` position. `next_page` is `null` on the last page.
    *
-   * This is the replay read, so since D9 (issue #46) it **skips superseded chunks**: a stored
-   * `event_start` / `event_delta` whose `seq` a recorded `supersedes` range covers is left out,
+   * This is the replay read, so since D9 (issue #46) it **skips superseded events**: a stored
+   * `event_start` / `event_delta` whose `seq` a reply's recorded range covers is left out,
    * which is what lets a client resuming by `seq` see a reply once, whole, however far into the
-   * stream it was when it disconnected. The chunks of a message still in flight are not
-   * superseded by anything, so they are included. Cursors stay `seq` positions and skipping
-   * leaves gaps in them; nothing else about reading changes. Pass `includeSuperseded: true` to
-   * read the raw log instead — for debugging and tests.
+   * stream it was when it disconnected — and every event a `session.rewind` replaced (#238) is
+   * left out too, whatever its type, so a reader loading the session after an edit sees the
+   * conversation as if the edited message had been the one sent. The chunks of a message still
+   * in flight are not superseded by anything, so they are included. Cursors stay `seq`
+   * positions and skipping leaves gaps in them; nothing else about reading changes. Pass
+   * `includeSuperseded: true` to read the raw log instead — for debugging and tests.
    *
    * **Owner-scoped, and the owner is required** (epic #65, A4): somebody else's session is
    * answered with {@link SessionNotFoundError}, exactly like a session that does not exist, so
@@ -449,6 +463,10 @@ export interface SessionStore {
   /**
    * The user events waiting to be folded into a turn: `processed_at` is `null`, ordered by `seq`.
    *
+   * An event a recorded range supersedes is not among them (#238): a message a rewind replaced
+   * is not waiting for an answer and never will be, so a session the reader restarted from an
+   * edit is not permanently "needing work" for the message the edit replaced.
+   *
    * The brain reads these at the start of every iteration of its loop, and the append that
    * follows claims them: the events it answers are named in its `consumes` list, and the store
    * takes them in the same transaction as the append (see {@link SessionStore.appendEvents}).
@@ -478,15 +496,16 @@ export interface SessionStore {
   getTurnState(sessionId: SessionId): Promise<TurnState>
 
   /**
-   * Delete the stored stream chunks a supersession covers — older than the retention window —
-   * and return how many went.
+   * Delete the stored events a supersession covers — older than the retention window — and
+   * return how many went.
    *
    * This is physical compaction: with {@link SessionStore.deleteSession} — which removes a
    * whole session and its log, and only the owner may ask — it is one of the only two ways
-   * anything is ever deleted (D9, issue #46). It deletes stored `event_start` / `event_delta`
-   * events whose `seq` a recorded `supersedes` range covers, and nothing else, ever: a chunk
-   * that is not superseded (one still in flight) and a superseded chunk inside the window
-   * stay where they are.
+   * anything is ever deleted (D9, issue #46). It deletes what a recorded `supersedes` range
+   * covers and nothing else, ever: the `event_start` / `event_delta` chunks a reply's range
+   * replaces, and — since #238 — every event in the tail a `session.rewind` replaced, whatever
+   * its type. A chunk that is not superseded (one still in flight) and a superseded event
+   * inside the window stay where they are.
    *
    * Deleting changes no reader's answer: replay with
    * {@link SessionStore.listEvents} already skips superseded chunks, so correctness does not
@@ -685,26 +704,57 @@ export interface SessionStore {
 }
 
 /**
- * The events a caller may append: a `StoredEvent` without the fields the store assigns.
+ * The events a caller may append.
  *
- * Derived from the protocol's union rather than restated, so adding an event type to the
- * protocol makes it appendable without touching this package. The omitted fields are the
- * store's to write — `seq` identifies the event's position in the log, and `processed_at` is
- * `null` for user events and the clock's instant for everything else — with one exception:
- * `id`, which a caller may supply and the store then stores as given.
+ * Two shapes, and between them they are everything a log can receive:
  *
- * Supplying an id is how a reply's chunks and its message are one identity: the brain mints a
- * `sevt_` id, appends the `event_start` and `event_delta` chunks under it, and appends the
- * finished `agent.message` carrying the same id. The id it supplies has to be a valid event
- * id and one the store does not already hold, or the append is refused whole; see
- * {@link SessionStore.appendEvents}.
+ * - **A stored event**, minus the fields the store assigns. Derived from the protocol's union
+ *   rather than restated, so adding an event type to the protocol makes it appendable without
+ *   touching this package. The omitted fields are the store's to write — `seq` identifies the
+ *   event's position in the log, and `processed_at` is `null` for user events and the clock's
+ *   instant for everything else — with one exception: `id`, which a caller may supply and the
+ *   store then stores as given. Supplying an id is how a reply's chunks and its message are
+ *   one identity: the brain mints a `sevt_` id, appends the `event_start` and `event_delta`
+ *   chunks under it, and appends the finished `agent.message` carrying the same id.
+ * - **A `session.rewind`** (#238) as a client sends one: {@link AppendableRewind}, which names
+ *   the message the session restarts from instead of carrying the range the stored event will
+ *   have. A rewind reaches to the end of the log, and only the store knows where that is.
+ *
+ * The id a caller supplies has to be a valid event id and one the store does not already
+ * hold, or the append is refused whole; see {@link SessionStore.appendEvents}.
  */
-export type AppendableEvent = DistributiveOmit<StoredEvent, 'id' | 'seq' | 'processed_at'> & {
+export type AppendableEvent = AppendableStoredEvent | AppendableRewind
+
+/** A stored event a caller may append: the protocol's shape without the fields the store assigns. */
+export type AppendableStoredEvent = DistributiveOmit<
+  Exclude<StoredEvent, SessionRewindEvent>,
+  'id' | 'seq' | 'processed_at'
+> & {
   /**
    * The event's id, when the caller already has one — the id its previews were published
    * under. Omitted, the store generates one, as it does for every event that does not
    * preview itself.
    */
+  readonly id?: EventId
+}
+
+/**
+ * A `session.rewind` as a caller appends it (#238): the `user.message` the session restarts
+ * from, and nothing else.
+ *
+ * A rewind always covers through the end of the log, so `to_seq` is not the caller's to say:
+ * the store records the range on the stored `session.rewind` — from `from_seq` to the `seq`
+ * the rewind event itself follows — in the same append that writes it. That is what makes the
+ * rule exact under concurrency: the end of the log is read inside the append's transaction,
+ * with the session's row locked, so no event can slip between the range a caller imagined and
+ * the range the log gets.
+ *
+ * `from_seq` has to name a `user.message` of this session that no recorded range already
+ * covers, or the append is refused whole with a `RangeError` — see
+ * {@link SessionStore.appendEvents}.
+ */
+export interface AppendableRewind extends SessionRewindEventInput {
+  /** The event's id, when the caller already has one. Omitted, the store generates one. */
   readonly id?: EventId
 }
 

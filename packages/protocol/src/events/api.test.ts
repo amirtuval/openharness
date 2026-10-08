@@ -31,6 +31,54 @@ describe('SendEventsRequestSchema', () => {
     ).toBe(true)
   })
 
+  it('accepts a rewind alongside the message it belongs to (#238)', () => {
+    expect(
+      SendEventsRequestSchema.safeParse({
+        events: [
+          { type: 'session.rewind', from_seq: 3 },
+          { type: 'user.message', content: text('write a haiku about snow') },
+        ],
+      }).success,
+    ).toBe(true)
+  })
+
+  it('accepts a rewind with no message behind it', () => {
+    // The reader took the edit back: the rewind alone restarts the session and nothing follows.
+    expect(
+      SendEventsRequestSchema.safeParse({ events: [{ type: 'session.rewind', from_seq: 3 }] })
+        .success,
+    ).toBe(true)
+  })
+
+  it('rejects a rewind that is not the first event of its batch (#238)', () => {
+    // A message ahead of the rewind would be stored and then swallowed by the range the rewind
+    // records: the answer would carry it as accepted and no turn would ever answer it.
+    const parsed = SendEventsRequestSchema.safeParse({
+      events: [
+        { type: 'user.message', content: text('write a haiku about snow') },
+        { type: 'session.rewind', from_seq: 3 },
+      ],
+    })
+    expect(parsed.success).toBe(false)
+    expect(parsed.error?.issues[0]?.message).toContain('first event')
+    expect(parsed.error?.issues[0]?.path).toEqual(['events', 1])
+  })
+
+  it('rejects a batch that carries two rewinds (#238)', () => {
+    // Two restarts in one append: the second's range begins inside the first's, and the
+    // message between them would be swallowed the same way.
+    const parsed = SendEventsRequestSchema.safeParse({
+      events: [
+        { type: 'session.rewind', from_seq: 3 },
+        { type: 'user.message', content: text('write a haiku about snow') },
+        { type: 'session.rewind', from_seq: 5 },
+      ],
+    })
+    expect(parsed.success).toBe(false)
+    expect(parsed.error?.issues[0]?.message).toContain('at most one')
+    expect(parsed.error?.issues[0]?.path).toEqual(['events', 2])
+  })
+
   it('rejects an empty batch, a missing batch and non-user events', () => {
     expect(SendEventsRequestSchema.safeParse({ events: [] }).success).toBe(false)
     expect(SendEventsRequestSchema.safeParse({}).success).toBe(false)
@@ -45,6 +93,16 @@ describe('SendEventsRequestSchema', () => {
       }).success,
     ).toBe(false)
   })
+
+  it('rejects a rewind that names no message to restart from', () => {
+    expect(
+      SendEventsRequestSchema.safeParse({ events: [{ type: 'session.rewind' }] }).success,
+    ).toBe(false)
+    expect(
+      SendEventsRequestSchema.safeParse({ events: [{ type: 'session.rewind', from_seq: 0 }] })
+        .success,
+    ).toBe(false)
+  })
 })
 
 describe('SendEventsResponseSchema', () => {
@@ -57,6 +115,21 @@ describe('SendEventsResponseSchema', () => {
     expect(
       SendEventsResponseSchema.safeParse({
         data: [{ ...storedMessage, type: 'agent.message', content: text('hi') }],
+      }).success,
+    ).toBe(false)
+    // A rewind the request carried is not the answer either: the server wrote it, and a
+    // client reads it back from the log or the stream (#238).
+    expect(
+      SendEventsResponseSchema.safeParse({
+        data: [
+          {
+            id: newEventId(),
+            type: 'session.rewind',
+            seq: 2,
+            processed_at: '2026-03-15T10:00:00Z',
+            supersedes: { from_seq: 1, to_seq: 1 },
+          },
+        ],
       }).success,
     ).toBe(false)
   })

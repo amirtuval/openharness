@@ -37,6 +37,19 @@ export const EVENT_TYPES = {
   /** Incremental content for a previewed event. A stored chunk since D9; stream-only before it. */
   eventDelta: 'event_delta',
   /**
+   * // extension: the session restarts from an earlier `user.message` (#238).
+   *
+   * The log stays append-only: nothing already stored is changed. A rewind is a superseding
+   * event like the one that finishes a reply (see {@link SupersedesSchema}) — it carries a
+   * range, replay skips it, and compaction deletes it after the retention window — but the
+   * range covers the whole tail of the log from the edited message on, not a reply's chunks.
+   * The edited text is then an ordinary `user.message` appended right behind the rewind, so a
+   * reader sees the conversation restart from the edit and the model never sees the original.
+   *
+   * Anthropic has no equivalent: editing a sent message is an openharness extension.
+   */
+  sessionRewind: 'session.rewind',
+  /**
    * // extension: the session this stream was following no longer exists (#111).
    *
    * Stream-only: it is **not** in {@link STORED_EVENT_TYPES} and never lands in a log — the
@@ -70,6 +83,7 @@ export const STORED_EVENT_TYPES = [
   EVENT_TYPES.modelRequestEnd,
   EVENT_TYPES.eventStart,
   EVENT_TYPES.eventDelta,
+  EVENT_TYPES.sessionRewind,
 ] as const
 
 /** A persisted event type. */
@@ -115,20 +129,30 @@ export const QueuedProcessedAtSchema = TimestampSchema.nullable()
 export const ProcessedAtSchema = TimestampSchema
 
 /**
- * // extension: the range of stored events a later event replaces (D9, issue #46).
+ * // extension: the range of stored events a later event replaces (D9, issue #46; #238).
  *
- * A streamed reply is stored twice over: once as the chunks it arrived in — the stored
- * `event_start` and `event_delta` events — and once as the finished `agent.message`. The
- * finished event carries `supersedes` over the chunks it replaces: `from_seq` is its own
- * `event_start` and `to_seq` its last `event_delta`, inclusive on both ends. An interrupt
- * stores the partial `agent.message` the same way, and a request that ends without one — a
- * crash the recovering brain closes with `span.model_request_end { brain_lost }`, or a message
- * that streamed no text at all — carries the range on that span end instead.
+ * Two events supersede a range, and the event that carries it says which kind it is:
+ *
+ * - **A reply.** A streamed reply is stored twice over: once as the chunks it arrived in — the
+ *   stored `event_start` and `event_delta` events — and once as the finished `agent.message`.
+ *   The finished event carries `supersedes` over the chunks it replaces: `from_seq` is its own
+ *   `event_start` and `to_seq` its last `event_delta`, inclusive on both ends. An interrupt
+ *   stores the partial `agent.message` the same way, and a request that ends without one — a
+ *   crash the recovering brain closes with `span.model_request_end { brain_lost }`, or a
+ *   message that streamed no text at all — carries the range on that span end instead. Only
+ *   chunks are ever covered: a range from one of these events replaces the reply's previews
+ *   and nothing else.
+ * - **A rewind** ({@link EVENT_TYPES.sessionRewind}). `from_seq` is the `user.message` the
+ *   session restarts from and `to_seq` the last event before the rewind, so the range covers
+ *   the whole tail of the log: the message, its reply, every span and status event between
+ *   them. Unlike a reply's range it covers events of any type, and it reaches the log's end —
+ *   the event that carries it is the next one written.
  *
  * Readers use it for one thing: replay (and the client's transcript) **skips superseded
- * chunks**, so a client that resumes by `seq` sees the reply once, whole, however far into the
- * stream it was when it disconnected. A later background job deletes the range physically,
- * after the retention window, without changing what any reader sees.
+ * events**, so a client that resumes by `seq` sees a reply once, whole, however far into the
+ * stream it was when it disconnected, and a conversation restarted from an edit without the
+ * messages the edit replaced. A later background job deletes the range physically, after the
+ * retention window, without changing what any reader sees.
  *
  * `from_seq <= to_seq`, and both are positive `seq` values of the same session — this is a
  * position in the log, not an `EventId`, which is why the fields are `seq`-shaped rather than

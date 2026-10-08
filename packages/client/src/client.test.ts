@@ -659,6 +659,48 @@ describe('helpers', () => {
     })
   })
 
+  it('sendMessage rewinds the session in the same request as the edit (#238)', async () => {
+    const stored = makeUserMessage('write a haiku about snow', { seq: 10 })
+    const { client, mock } = clientWith(() => jsonResponse({ data: [stored] }))
+
+    const message = await client.sendMessage('sesn_1', 'write a haiku about snow', { rewindTo: 5 })
+
+    expect(message).toEqual(stored)
+    // One request, one batch: the rewind is the first event, so an append that stores either
+    // stores both — and `data` carries the message alone, because the rewind's event is the
+    // server's.
+    expect(bodyOf(mock.requests[0]?.init)).toEqual({
+      events: [
+        { type: 'session.rewind', from_seq: 5 },
+        {
+          type: 'user.message',
+          content: [{ type: 'text', text: 'write a haiku about snow' }],
+        },
+      ],
+    })
+  })
+
+  it('sendMessage carries a rewind and a model switch in one batch (#238)', async () => {
+    const stored = makeUserMessage('again', { seq: 10, model: { id: 'openai/gpt-4.1-mini' } })
+    const { client, mock } = clientWith(() => jsonResponse({ data: [stored] }))
+
+    await client.sendMessage('sesn_1', 'again', {
+      rewindTo: 5,
+      model: { id: 'openai/gpt-4.1-mini' },
+    })
+
+    expect(bodyOf(mock.requests[0]?.init)).toEqual({
+      events: [
+        { type: 'session.rewind', from_seq: 5 },
+        {
+          type: 'user.message',
+          content: [{ type: 'text', text: 'again' }],
+          model: { id: 'openai/gpt-4.1-mini' },
+        },
+      ],
+    })
+  })
+
   it('sendMessage fails loudly when the answer does not carry the message', async () => {
     const { client } = clientWith(() =>
       jsonResponse({ data: [makeAgentMessage('not what we sent')] }),

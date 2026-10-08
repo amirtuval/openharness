@@ -5,20 +5,23 @@ import { AgentMessageEventSchema } from './agent'
 import {
   SessionDeletedEventSchema,
   SessionErrorEventSchema,
+  SessionRewindEventInputSchema,
+  SessionRewindEventSchema,
   SessionStatusIdleEventSchema,
   SessionStatusRescheduledEventSchema,
   SessionStatusRunningEventSchema,
 } from './session'
 import { ModelRequestEndEventSchema, ModelRequestStartEventSchema } from './span'
 import { StoredEventDeltaSchema, StoredEventStartSchema } from './stream'
-import { UserInterruptEventSchema, UserMessageEventSchema } from './user'
+import { UserEventInputSchema, UserInterruptEventSchema, UserMessageEventSchema } from './user'
 
 /**
  * The event unions a consumer should code against.
  *
  * Pick the narrowest one that fits: {@link StoredEventSchema} for anything read out of the
- * log, {@link StreamEventSchema} for anything read off a stream, and
- * {@link UserEventInputSchema} (in `events/user.ts`) for anything a client sends.
+ * log, {@link StreamEventSchema} for anything read off a stream, and {@link EventInputSchema}
+ * for anything a client sends — the user's own events, and the one rewind instruction whose
+ * event the server writes (#238).
  *
  * Since D9 (issue #46) a streamed reply is stored chunk by chunk, so a stream carries the
  * log's events; the one exception is `session.deleted` (#111), which is stream-only because
@@ -48,12 +51,13 @@ const StoredEventCoreSchema = z.discriminatedUnion('type', [
   SessionErrorEventSchema,
   ModelRequestStartEventSchema,
   ModelRequestEndEventSchema,
+  SessionRewindEventSchema,
 ])
 
 /**
  * Every event a session can store, discriminated on `type`.
  *
- * The nine core members are one discriminated union; the two stored chunks are members too,
+ * The ten core members are one discriminated union; the two stored chunks are members too,
  * reached first by `type` and then by shape.
  */
 export const StoredEventSchema = z.union([
@@ -99,3 +103,22 @@ export type ImmutableStreamEvent = StreamEvent
 export function isStoredEvent(event: StreamEvent): event is StoredEvent {
   return 'seq' in event
 }
+
+/**
+ * Every event a client may append to a session's log, as it sends it.
+ *
+ * The user's own events — `user.message` and `user.interrupt` — plus one instruction the
+ * server turns into a session event of its own: a `session.rewind` (#238). A rewind is not a
+ * user event — the session's status events are no more the user's for being asked for — but
+ * the client is the one that knows which message the reader edited, so it travels on the same
+ * `events` array and the same request as the message that follows it, which is what makes the
+ * two atomic: either the session is rewound and the edited message is stored, or neither is.
+ * A batch carries **at most one rewind, and it comes first**: see `SendEventsRequestSchema`
+ * for why anything else would be swallowed by the range the rewind records.
+ *
+ * This is the member type of `SendEventsRequest.events`; read a log with
+ * {@link StoredEventSchema} and a stream with {@link StreamEventSchema}.
+ */
+export const EventInputSchema = z.union([UserEventInputSchema, SessionRewindEventInputSchema])
+
+export type EventInput = z.infer<typeof EventInputSchema>

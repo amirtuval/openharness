@@ -513,6 +513,7 @@ if (target === null) {
       expect(files).toContain('0017_scheduler_instances.sql')
       expect(files).toContain('0018_credential_key_provider.sql')
       expect(files).toContain('0019_user_preferences_theme.sql')
+      expect(files).toContain('0020_rewind_supersessions.sql')
       expect(await migrate(db)).toEqual(files)
 
       const { store, session } = await seeded()
@@ -531,6 +532,54 @@ if (target === null) {
       expect(await store.listLiveInstances(30_000)).toEqual(['after-a-re-run'])
       await store.removeInstance('after-a-re-run')
       expect(await store.listLiveInstances(30_000)).toEqual([])
+
+      // `0020`'s column is exercised after the re-run too: a rewind records its range and its
+      // kind, and a replay still reads the session the way a rewind means it to (#238).
+      const [queued] = await store.appendEvents(session.id, [userMessage('hi')])
+      const [rewind, edited] = await store.appendEvents(session.id, [
+        { type: EVENT_TYPES.sessionRewind, from_seq: queued?.seq ?? 0 },
+        userMessage('hi again'),
+      ])
+      expect((await store.listEventsUnscoped(session.id)).data).toEqual([rewind, edited])
+    })
+
+    it('stores a rewind’s range and its kind, beside the chunk range a reply records (#238)', async () => {
+      const { store, session } = await seeded()
+      const previewed = newEventId()
+      await store.appendEvents(session.id, [userMessage('first')])
+      await store.appendEvents(session.id, [{ type: EVENT_TYPES.sessionStatusRunning }])
+      // A reply whose chunks its own message supersedes: the range is `chunks` and covers
+      // exactly the two chunk rows.
+      await store.appendEvents(session.id, [
+        storedEventStart(previewed),
+        storedEventDelta(previewed, 'hi'),
+      ])
+      await store.appendEvents(session.id, [
+        {
+          type: EVENT_TYPES.agentMessage,
+          content: [{ type: 'text', text: 'hi' }],
+          supersedes: { from_seq: 3, to_seq: 4 },
+        },
+      ])
+      await store.appendEvents(session.id, [
+        { type: EVENT_TYPES.sessionStatusIdle, stop_reason: { type: 'end_turn' } },
+      ])
+      // A rewind over the whole log: the range is `rewind`, and it reaches the event before it.
+      await store.appendEvents(session.id, [
+        { type: EVENT_TYPES.sessionRewind, from_seq: 1 },
+        userMessage('edited'),
+      ])
+
+      const rows = await sql<{ from_seq: number; to_seq: number; kind: string; by_seq: number }>`
+        select from_seq, to_seq, kind, by_seq
+          from event_supersessions
+         where session_id = ${session.id}
+         order by by_seq asc
+      `.execute(db)
+      expect(rows.rows).toEqual([
+        { from_seq: 3, to_seq: 4, kind: 'chunks', by_seq: 5 },
+        { from_seq: 1, to_seq: 6, kind: 'rewind', by_seq: 7 },
+      ])
     })
 
     it('backfills model and system for a session stored before #93, and reads it back', async () => {

@@ -2,13 +2,17 @@ import { z } from 'zod'
 
 import { EventIdSchema, SessionIdSchema } from '../ids'
 import type { DeepReadonly } from '../readonly'
-import { EVENT_TYPES, EventSeqSchema, ProcessedAtSchema } from './common'
+import { EVENT_TYPES, EventSeqSchema, ProcessedAtSchema, SupersedesSchema } from './common'
 
 /**
- * Events the session itself emits: status transitions and errors.
+ * Events the session itself emits: status transitions, errors, and the rewind that restarts
+ * the conversation from an earlier message (#238).
  *
  * They bracket a turn — `session.status_running` opens it, `session.status_idle` closes it —
- * so replaying just these events gives the session's state at any point in the log.
+ * so replaying just these events gives the session's state at any point in the log. A
+ * `session.rewind` is the one member a client asks for rather than the brain writing it, and
+ * the one that changes what the log *means* rather than what the session is doing: it is a
+ * statement about the transcript, not about a turn.
  */
 
 /**
@@ -204,12 +208,66 @@ export const SessionDeletedEventSchema = z.object({
 /** A `session.deleted` stream event, deep-readonly like every event. */
 export type SessionDeletedEvent = DeepReadonly<z.infer<typeof SessionDeletedEventSchema>>
 
+/**
+ * // extension: the session restarts from an earlier `user.message` (#238).
+ *
+ * Editing a message never changes what is stored: this event supersedes the tail of the log
+ * from the message the reader is editing, and the edited text follows it as an ordinary
+ * `user.message`. `supersedes.from_seq` is that message's `seq` and `supersedes.to_seq` the
+ * last event before this one, so the range runs to the end of the log as it stood — see
+ * {@link SupersedesSchema} for what a range means and who reads it. Replay and compaction
+ * treat the whole range as gone: a reader that loads the session later never sees the
+ * messages it replaced, and a client that was already rendering them drops them when it
+ * receives this event (it is never itself superseded, so it is always delivered).
+ *
+ * The event is the server's, not the brain's, and like the status events it takes effect in
+ * the append that writes it: it is stored with its `processed_at` set and is not claimed by
+ * any span. A session accepts one only while it is idle — a turn in flight would be appending
+ * into the range it just lost — which the server enforces (a 409).
+ *
+ * Anthropic has no equivalent: editing a sent message is an openharness extension.
+ */
+export const SessionRewindEventSchema = z.object({
+  id: EventIdSchema,
+  type: z.literal(EVENT_TYPES.sessionRewind),
+  seq: EventSeqSchema,
+  processed_at: ProcessedAtSchema,
+  /**
+   * The range this rewind replaces: from the edited `user.message` to the last event of the
+   * log as it stood. Both ends are `seq`s of this session, and `to_seq` is always the `seq`
+   * this event's own `seq` follows — a rewind restarts from a message through the end of what
+   * has been written, never a window in the middle.
+   */
+  supersedes: SupersedesSchema,
+})
+
+/** A stored `session.rewind`, deep-readonly like every event (#238). */
+export type SessionRewindEvent = DeepReadonly<z.infer<typeof SessionRewindEventSchema>>
+
+/**
+ * A `session.rewind` as a client sends it: the message the session should restart from.
+ *
+ * The input names `from_seq` alone. How far the restart reaches is not the caller's to say:
+ * a rewind always covers through the end of the log, and the store records that end — the
+ * `seq` the rewind event itself follows — in the `supersedes` range of the stored event, in
+ * the same append, so there is no window in which the caller's idea of the log's end and the
+ * store's could differ.
+ */
+export const SessionRewindEventInputSchema = z.object({
+  type: z.literal(EVENT_TYPES.sessionRewind),
+  /** The `seq` of the `user.message` the session restarts from, inclusive. */
+  from_seq: EventSeqSchema,
+})
+
+export type SessionRewindEventInput = z.infer<typeof SessionRewindEventInputSchema>
+
 /** Any stored session event. */
 export const SessionEventSchema = z.discriminatedUnion('type', [
   SessionStatusRunningEventSchema,
   SessionStatusIdleEventSchema,
   SessionStatusRescheduledEventSchema,
   SessionErrorEventSchema,
+  SessionRewindEventSchema,
 ])
 
 /** Any stored session event, deep-readonly (D9, issue #46). */

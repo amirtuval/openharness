@@ -23,10 +23,12 @@ import { WorkingRow, type WorkingState } from './working-row'
  * {@link WorkingRow} at the foot — in the same scroll column, so it moves with the transcript
  * and stays where the reply is about to appear.
  *
- * It is also the one component that can answer the two questions a single message cannot
- * (#212): what the reply *before* this one ran on (so the meta line names a model only when it
- * changed) and which user message is the last one (so Edit and resend appears exactly once).
- * Both are read off the list here and handed down, rather than carried out of the map.
+ * It is also the one component that can answer the question a single message cannot (#212):
+ * what the reply *before* this one ran on, so the meta line names a model only when it changed.
+ * That is read off the list here and handed down, rather than carried out of the map.
+ *
+ * Edit and resend (#238) is offered on **every** message the reader wrote, not just the last:
+ * sending one rewinds the session to it, so the edit is what the conversation continues from.
  */
 export function MessageList({
   messages,
@@ -34,6 +36,8 @@ export function MessageList({
   nameOf,
   working = null,
   onEdit,
+  editDisabled = false,
+  replacingFrom,
 }: {
   messages: readonly TranscriptMessage[]
   loading: boolean
@@ -41,8 +45,18 @@ export function MessageList({
   nameOf?: ModelNameLookup | undefined
   /** The state row at the foot of the transcript, or `null` for none ({@link workingState}). */
   working?: WorkingState | null
-  /** Put a message's text back in the composer — offered on the last user message (#212). */
-  onEdit?: ((text: string) => void) | undefined
+  /** Rewrite a message the reader wrote (#238): its text goes back in the composer, and
+   *  sending it rewinds the session to that message. */
+  onEdit?: ((message: TranscriptMessage) => void) | undefined
+  /** Whether rewriting is unavailable right now — the session is not idle (#238). */
+  editDisabled?: boolean
+  /**
+   * The `position` of the message being rewritten (#238), when one is: every message **after**
+   * it is about to be replaced — sending the edit rewinds the session to that message — and is
+   * drawn as on its way out. The edited message itself stays as it is; its words are in the
+   * composer, not gone.
+   */
+  replacingFrom?: number | undefined
 }) {
   const last = messages.at(-1)
   const { ref, onScroll, isStuck, scrollToLatest } = useStickToBottom(
@@ -53,10 +67,6 @@ export function MessageList({
   // that has the neighbouring replies, so it is computed here rather than guessed at in the
   // item; {@link previousReplyModels} keeps the rule itself out of this component.
   const previousModels = previousReplyModels(messages)
-  // The reader's own last message: the one "Edit and resend" belongs to. A steering message
-  // waiting its turn is still the last one they said — there is nothing after it yet — so it
-  // gets the action too, which is right: rewriting it is exactly what they would want.
-  const lastUserIndex = messages.findLastIndex((message) => message.role === 'user')
 
   return (
     <div className="relative min-h-0 flex-1">
@@ -81,10 +91,12 @@ export function MessageList({
                 message={message}
                 nameOf={nameOf}
                 previousModel={previousModels[index]}
+                editDisabled={editDisabled}
+                replacing={replacingFrom !== undefined && message.position > replacingFrom}
                 onEdit={
-                  index === lastUserIndex && onEdit !== undefined
+                  message.role === 'user' && onEdit !== undefined
                     ? () => {
-                        onEdit(message.text)
+                        onEdit(message)
                       }
                     : undefined
                 }

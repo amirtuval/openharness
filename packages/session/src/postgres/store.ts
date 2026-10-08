@@ -51,10 +51,15 @@ import {
   SessionNotFoundError,
 } from '../errors'
 import {
+  assertRewinds,
   carriesConsumes,
   cutoffOf,
+  isEventSeq,
   isUserEventType,
+  REWIND_KIND,
   supersessionsOf,
+  type AppendedEvent,
+  type RewindTarget,
   type SupersessionRecord,
 } from '../events'
 import { deepFreeze } from '../freeze'
@@ -556,15 +561,17 @@ export class PostgresSessionStore implements SessionStore {
       .select('c.claimed_at as claimed_at')
       .where('e.session_id', '=', sessionId)
     if (options.includeSuperseded !== true) {
-      // Replay skips superseded chunks: an `event_start` / `event_delta` in a recorded range
-      // does not come back. The filter is part of the query, so a page is a page of what a
-      // reader gets and the `seq` cursor keeps seeking exactly the same way.
+      // Replay skips superseded events: a chunk in a reply's recorded range, and every event
+      // a rewind's range covers, does not come back (#238). The filter is part of the query,
+      // so a page is a page of what a reader gets and the `seq` cursor keeps seeking exactly
+      // the same way.
       query = query.where(sql<SqlBool>`not exists (
         select 1
           from event_supersessions s
          where s.session_id = e.session_id
-           and e.type in (${EVENT_TYPES.eventStart}, ${EVENT_TYPES.eventDelta})
            and e.seq between s.from_seq and s.to_seq
+           and (s.kind = ${REWIND_KIND}
+                or e.type in (${EVENT_TYPES.eventStart}, ${EVENT_TYPES.eventDelta}))
       )`)
     }
     if (cursor !== null) {
@@ -593,6 +600,9 @@ export class PostgresSessionStore implements SessionStore {
     }
     // Pending is "no claim", not "no `processed_at`": the claim is the fact, and the events
     // that do not have one are the ones a turn has not folded in yet, in `seq` order.
+    // A message a rewind replaced (#238) is not waiting for an answer and never will be, so it
+    // is not pending — a session the reader restarted from an edit is not permanently needing
+    // work for the message the edit replaced.
     const rows = await this.#db
       .selectFrom('events as e')
       .leftJoin('event_claims as c', 'c.event_id', 'e.id')
@@ -601,6 +611,15 @@ export class PostgresSessionStore implements SessionStore {
       .where('e.session_id', '=', sessionId)
       .where('e.type', 'in', [EVENT_TYPES.userMessage, EVENT_TYPES.userInterrupt])
       .where('c.event_id', 'is', null)
+      .where(
+        sql<SqlBool>`not exists (
+        select 1
+          from event_supersessions s
+         where s.session_id = e.session_id
+           and s.kind = ${REWIND_KIND}
+           and e.seq between s.from_seq and s.to_seq
+      )`,
+      )
       .orderBy('e.seq', 'asc')
       .execute()
     return rows.map(eventFromRow).filter(isUserEvent)
@@ -633,17 +652,19 @@ export class PostgresSessionStore implements SessionStore {
 
   async compact(options: CompactOptions): Promise<number> {
     const cutoff = cutoffOf(options)
-    // One statement: delete what a recorded supersession covers, that is a chunk, that is old
-    // enough — and nothing else. Two instances running this at once simply split the rows
-    // between them; a second run finds nothing and deletes nothing, because the rows a first
-    // run deleted are gone rather than merely matched again.
+    // One statement: delete what a recorded supersession covers that is old enough — and
+    // nothing else. A reply's range covers the chunks it replaces; a rewind's covers every
+    // event in the tail it restarted, whatever the type (#238). Two instances running this at
+    // once simply split the rows between them; a second run finds nothing and deletes nothing,
+    // because the rows a first run deleted are gone rather than merely matched again.
     const deleted = await sql<{ count: number }>`
       with deleted as (
         delete from events e
          using event_supersessions s
          where e.session_id = s.session_id
-           and e.type in (${EVENT_TYPES.eventStart}, ${EVENT_TYPES.eventDelta})
            and e.seq between s.from_seq and s.to_seq
+           and (s.kind = ${REWIND_KIND}
+                or e.type in (${EVENT_TYPES.eventStart}, ${EVENT_TYPES.eventDelta}))
            and e.created_at < ${instant(cutoff)}
         returning e.id
       )
@@ -792,6 +813,13 @@ export class PostgresSessionStore implements SessionStore {
                 and e.type in (${EVENT_TYPES.userMessage}, ${EVENT_TYPES.userInterrupt})
                 and not exists (
                   select 1 from event_claims c where c.event_id = e.id
+                )
+                -- A message a rewind replaced (#238) is not work: it will never be answered.
+                and not exists (
+                  select 1 from event_supersessions x
+                   where x.session_id = e.session_id
+                     and x.kind = ${REWIND_KIND}
+                     and e.seq between x.from_seq and x.to_seq
                 )
            )
            -- An open turn: the last status event is not session.status_idle. A log with no
@@ -996,13 +1024,17 @@ export class PostgresSessionStore implements SessionStore {
     const rows: Insertable<EventsTable>[] = events.map((input, index) => {
       // The id is a column, so a supplied one is written there and not repeated in the body:
       // `payload` is the event as the caller sent it, without the fields the store assigns.
-      const { id, ...payload } = input
+      const { id, ...body } = input
+      const seq = base + index + 1
       return {
         id: id ?? newEventId(now),
         session_id: sessionId,
-        seq: base + index + 1,
+        seq,
         type: input.type,
-        payload,
+        payload:
+          input.type === EVENT_TYPES.sessionRewind
+            ? { type: input.type, supersedes: { from_seq: input.from_seq, to_seq: seq - 1 } }
+            : body,
         created_at: at,
         // A user event is queued until a turn claims it, and its `processed_at` is derived
         // from that claim on read; the column is *never written* for one (P4) — `undefined`
@@ -1014,8 +1046,16 @@ export class PostgresSessionStore implements SessionStore {
     // What the batch records beside its events, checked before anything commits. The events
     // go in first so the claim rows can reference the span starts that carry them; a refusal
     // rolls the whole transaction back, so nothing of the batch survives it.
+    const appended = appendedEvents(events, rows)
+    if (events.some((event) => event.type === EVENT_TYPES.sessionRewind)) {
+      // A rewind's `from_seq` is checked against the log as it stands, inside this
+      // transaction and before a row is written (#238): a message that is gone, is not the
+      // user's, or lies in a range this log already replaced cannot be restarted from.
+      const targets = await this.#rewindTargets(trx, sessionId, appended)
+      assertRewinds(appended, (seq) => targets.get(seq))
+    }
     const claims = claimsOf(events, rows)
-    const supersessions = supersessionsOf(appendedEvents(events, rows), now)
+    const supersessions = supersessionsOf(appended, now)
     await trx.insertInto('events').values(rows).execute()
     if (claims.length > 0) {
       const conflicts = await this.#claim(trx, sessionId, claims, at)
@@ -1100,6 +1140,14 @@ export class PostgresSessionStore implements SessionStore {
           on e.id = claim.event_id
          and e.session_id = ${sessionId}
          and e.type in (${EVENT_TYPES.userMessage}, ${EVENT_TYPES.userInterrupt})
+         -- Nothing outside a rewound range claims into it (#238): the messages a rewind
+         -- replaced answer no request, so a claim naming one is refused like any other.
+         and not exists (
+           select 1 from event_supersessions s
+            where s.session_id = e.session_id
+              and s.kind = ${REWIND_KIND}
+              and e.seq between s.from_seq and s.to_seq
+         )
       on conflict (event_id) do nothing
       returning event_id
     `.execute(trx)
@@ -1124,15 +1172,54 @@ export class PostgresSessionStore implements SessionStore {
     at: Date,
   ): Promise<void> {
     await sql`
-      insert into event_supersessions (session_id, from_seq, to_seq, by_event_id, by_seq, created_at)
-      select ${sessionId}, range.from_seq, range.to_seq, range.by_event_id, range.by_seq, ${at}::timestamptz
+      insert into event_supersessions (session_id, from_seq, to_seq, kind, by_event_id, by_seq, created_at)
+      select ${sessionId}, range.from_seq, range.to_seq, range.kind, range.by_event_id, range.by_seq, ${at}::timestamptz
         from unnest(
                ${supersessions.map((range) => range.fromSeq)}::int[],
                ${supersessions.map((range) => range.toSeq)}::int[],
+               ${supersessions.map((range) => range.kind)}::text[],
                ${supersessions.map((range) => range.byEventId)}::text[],
                ${supersessions.map((range) => range.bySeq)}::int[]
-             ) as range (from_seq, to_seq, by_event_id, by_seq)
+             ) as range (from_seq, to_seq, kind, by_event_id, by_seq)
     `.execute(trx)
+  }
+
+  /**
+   * What the log says about each `seq` a rewind in this batch starts from (#238): the type of
+   * the event there, and whether a recorded rewind range already covers it.
+   *
+   * One query for the whole batch, inside the append's transaction, before any row is written
+   * — so the answer is the log as the append will find it. {@link assertRewinds} is what reads
+   * it; this only fetches.
+   */
+  async #rewindTargets(
+    trx: Transaction<PostgresSchema>,
+    sessionId: SessionId,
+    events: readonly AppendedEvent[],
+  ): Promise<Map<number, RewindTarget>> {
+    const wanted = events.flatMap((event) =>
+      event.type === EVENT_TYPES.sessionRewind && isEventSeq(event.from_seq)
+        ? [event.from_seq]
+        : [],
+    )
+    if (wanted.length === 0) {
+      return new Map()
+    }
+    const rows = await sql<{ seq: number; type: string; superseded: boolean }>`
+      select e.seq, e.type,
+             exists (
+               select 1 from event_supersessions s
+                where s.session_id = e.session_id
+                  and s.kind = ${REWIND_KIND}
+                  and e.seq between s.from_seq and s.to_seq
+             ) as superseded
+        from events e
+       where e.session_id = ${sessionId}
+         and e.seq = any(${wanted}::int[])
+    `.execute(trx)
+    return new Map(
+      rows.rows.map((row) => [row.seq, { type: row.type, superseded: row.superseded }]),
+    )
   }
 
   /** The `seq` of the session's last event, or `0` when the log is empty. */
@@ -1628,7 +1715,7 @@ function claimsOf(
 function appendedEvents(
   events: readonly AppendableEvent[],
   rows: readonly Insertable<EventsTable>[],
-): (AppendableEvent & { readonly id: EventId; readonly seq: number })[] {
+): AppendedEvent[] {
   return events.flatMap((input, index) => {
     const row = rows[index]
     return row === undefined ? [] : [{ ...input, id: row.id as EventId, seq: row.seq }]

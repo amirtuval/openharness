@@ -1,4 +1,4 @@
-import { SendHorizontal, Square } from 'lucide-react'
+import { Pencil, SendHorizontal, Square } from 'lucide-react'
 import { useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
 
 import { cn } from '../../lib/utils'
@@ -38,6 +38,30 @@ export function focusComposer(): void {
 }
 
 /**
+ * Edit mode, as the composer renders it (#238).
+ *
+ * "Edit and resend" puts an earlier message's words back in the box, and a send then rewinds
+ * the session to that message — everything after it is replaced. The screen owns that mode:
+ * *which* message is being rewritten, and whether a send is allowed right now. This is the
+ * part of it the box itself draws.
+ */
+export interface ComposerEdit {
+  /**
+   * Whether a send would be refused right now, because the rewound session is not idle.
+   *
+   * Only an idle session accepts a rewind (#238): the turn in flight owns the branch being
+   * replaced. While one is running the composer says why, offers no send, and keeps the
+   * draft — the screen refuses the send itself, so Enter goes nowhere either.
+   */
+  readonly blocked: boolean
+  /**
+   * Leave edit mode. The screen decides what happens to the draft; by the box's own rule —
+   * clearing it cancels the edit — it clears.
+   */
+  readonly onCancel: () => void
+}
+
+/**
  * The message box, and the model control that sits with it.
  *
  * Enter sends, Shift+Enter starts a new line. It stays **enabled while the agent is running**:
@@ -50,7 +74,8 @@ export function focusComposer(): void {
  * The model selector is a **prop, not state in here** (epic #116): which model a send carries
  * is the screen's decision — `sessions.create({ model })` on a new chat, `send(text, { model })`
  * in an open one — and the composer stays a text box that can be rendered, and tested, with or
- * without one.
+ * without one. {@link ComposerEdit} follows the same rule (#238): the screen owns the edit and
+ * hands down what the box draws of it.
  *
  * Three things about how it is built are load-bearing:
  *
@@ -72,6 +97,7 @@ export function Composer({
   modelSelector,
   value,
   onValueChange,
+  edit,
 }: {
   /** Whether the agent is working, which is when Stop makes sense. */
   running: boolean
@@ -91,6 +117,12 @@ export function Composer({
   value?: string | undefined
   /** Every keystroke, and the clear after a stored send, when {@link value} is given. */
   onValueChange?: ((text: string) => void) | undefined
+  /**
+   * Edit mode (#238), when the box is rewriting an earlier message. Omitted, the box is an
+   * ordinary one; given, the indicator above it says what a send would do, Escape leaves the
+   * mode, and a send is withheld while {@link ComposerEdit.blocked}.
+   */
+  edit?: ComposerEdit | undefined
 }) {
   const [ownText, setOwnText] = useState('')
   const controlled = value !== undefined
@@ -134,7 +166,9 @@ export function Composer({
 
   const submit = async (): Promise<void> => {
     const body = text.trim()
-    if (body === '' || disabled) {
+    // A blocked send is withheld here as well as offered as a disabled button: Enter is the
+    // other way in, and a button that is off while the key still fires would be a bug.
+    if (body === '' || disabled || edit?.blocked === true) {
       return
     }
     const accepted = await onSend(body)
@@ -158,6 +192,7 @@ export function Composer({
         void submit()
       }}
     >
+      {edit === undefined ? null : <EditBanner edit={edit} />}
       <Label htmlFor={COMPOSER_INPUT_ID} className="sr-only">
         Message
       </Label>
@@ -181,7 +216,14 @@ export function Composer({
           // handler because the box *is* half the condition — "Escape, while the composer has
           // focus, while a turn is running" — and the other half is a prop this component
           // already has. Escape anywhere else is still the overlays': the drawer, a dialog.
-          if (event.key === 'Escape' && running && onStop !== undefined) {
+          //
+          // Edit mode takes it when it is on (#238): Escape leaves the mode, exactly as the
+          // indicator's Cancel does, because that is what the reader is being offered above
+          // the box — and Stop is still one click away in the foot.
+          if (event.key === 'Escape' && edit !== undefined) {
+            event.preventDefault()
+            edit.onCancel()
+          } else if (event.key === 'Escape' && running && onStop !== undefined) {
             event.preventDefault()
             void onStop()
           }
@@ -209,12 +251,47 @@ export function Composer({
             type="submit"
             size="icon-sm"
             aria-label="Send message"
-            disabled={disabled || text.trim() === ''}
+            disabled={disabled || text.trim() === '' || edit?.blocked === true}
           >
             <SendHorizontal aria-hidden="true" />
           </Button>
         </div>
       </div>
     </form>
+  )
+}
+
+/**
+ * The edit-mode indicator (#238): what the box is about to do, and the way out of it.
+ *
+ * Sending rewinds the session to the message being rewritten, so everything the transcript
+ * shows *after* it is replaced — the reader is told that before they press Send, not after.
+ * While a turn is running the rewind would be refused (the server's 409), so the same row says
+ * what to wait for instead. Cancel and Escape do the same thing: leave the mode.
+ *
+ * `data-slot` is the handle its tests read, like the action row's.
+ */
+function EditBanner({ edit }: { edit: ComposerEdit }) {
+  return (
+    <div
+      data-slot="composer-edit"
+      className="flex items-center gap-control border-b px-3 py-1.5 text-xs text-muted-foreground"
+    >
+      <Pencil aria-hidden="true" className="size-3.5 shrink-0" />
+      <span className="min-w-0 truncate">
+        {edit.blocked
+          ? 'Editing message · wait for the reply to finish'
+          : 'Editing message · sending replaces what follows it'}
+      </span>
+      <Button
+        type="button"
+        variant="ghost"
+        size="xs"
+        className="ml-auto shrink-0"
+        onClick={edit.onCancel}
+      >
+        Cancel
+      </Button>
+    </div>
   )
 }

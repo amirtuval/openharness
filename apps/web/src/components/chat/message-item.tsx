@@ -57,14 +57,25 @@ export function MessageItem({
   nameOf,
   previousModel,
   onEdit,
+  editDisabled = false,
+  replacing = false,
 }: {
   message: TranscriptMessage
   /** The catalog lookup for the marker's display name; the id when the catalog does not know it. */
   nameOf?: ModelNameLookup | undefined
   /** The previous reply's model, so the meta line names one only when it changed (#212). */
   previousModel?: string | undefined
-  /** Pre-fill the composer with this message — given for the last user message, and no other. */
+  /** Rewrite this message — given for the reader's own messages (#238, "edit and resend"). */
   onEdit?: (() => void) | undefined
+  /** Whether rewriting is unavailable right now, because the session is not idle (#238). */
+  editDisabled?: boolean
+  /**
+   * Whether this message is about to be replaced (#238): an edit of an earlier message is
+   * pending in the composer, and sending it rewinds the session to that point. Drawn dimmed —
+   * one opacity step, no movement — so "what a send would take back" is visible in the
+   * transcript and not only in the composer's indicator.
+   */
+  replacing?: boolean
 }) {
   const isUser = message.role === 'user'
 
@@ -82,9 +93,13 @@ export function MessageItem({
       data-role={message.role}
       data-streaming={message.streaming}
       data-pending={message.pending}
+      data-replacing={replacing}
       className={cn(
-        'group/message flex w-full flex-col gap-0.5',
+        'group/message flex w-full flex-col gap-0.5 transition-opacity',
         isUser ? 'items-end' : 'items-start',
+        // About to be replaced (#238): an edit pending in the composer will rewind past this
+        // message, so it is on its way out. The fade is the whole statement — nothing moves.
+        replacing && 'opacity-40',
       )}
     >
       {message.modelChangedTo === undefined ? null : (
@@ -127,7 +142,7 @@ export function MessageItem({
         {isUser ? null : (
           <MessageMeta message={message} previousModel={previousModel} nameOf={nameOf} />
         )}
-        <MessageActions text={message.text} onEdit={onEdit} />
+        <MessageActions text={message.text} onEdit={onEdit} editDisabled={editDisabled} />
       </div>
     </article>
   )

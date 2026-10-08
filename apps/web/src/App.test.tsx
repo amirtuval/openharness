@@ -1,4 +1,5 @@
 import { ApiError, AuthenticationError } from '@openharness/client'
+import { EVENT_TYPES } from '@openharness/protocol'
 import type { ModelEntry } from '@openharness/protocol'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -868,7 +869,7 @@ describe('the sidebar below md', () => {
       expect(await within(reply).findByRole('button', { name: 'Copied' })).toBeInTheDocument()
     })
 
-    it('offers Edit and resend on the reader’s last message, and only there', async () => {
+    it('offers Edit and resend on every message the reader wrote (#238)', async () => {
       const user = userEvent.setup({ delay: null })
       const fake = makeFake()
       fake.respondWith('One.')
@@ -878,28 +879,232 @@ describe('the sidebar below md', () => {
       fake.respondWith('Two.')
       await send(user, 'the second thing')
 
-      // One action, on the message the reader said last: anywhere else it would be a way to
-      // say the same thing twice into the middle of a conversation.
-      const lastUserMessage = messageElements('user').at(-1) as HTMLElement
-      const edit = screen.getAllByRole('button', { name: 'Edit and resend' })
-      expect(edit).toHaveLength(1)
-      expect(within(lastUserMessage).getByRole('button', { name: 'Edit and resend' })).toBe(edit[0])
+      // One action per message the reader wrote, and none on the agent's replies: rewriting a
+      // reply is not a thing, and rewriting *any* of their own is — sending it rewinds the
+      // session to that message, so the branch behind it is what gets replaced.
+      const users = messageElements('user')
+      const edits = screen.getAllByRole('button', { name: 'Edit and resend' })
+      expect(users).toHaveLength(2)
+      expect(edits).toHaveLength(2)
       expect(
-        within(messageElements('user')[0] as HTMLElement).queryByRole('button', {
+        within(messageElements('agent')[0] as HTMLElement).queryByRole('button', {
           name: 'Edit and resend',
         }),
       ).toBeNull()
 
+      // The **first** one: its words go back in the box, with the cursor, and nothing else
+      // happens — an edit that is never sent is not an edit.
       const box = screen.getByLabelText('Message')
-      await user.hover(lastUserMessage)
-      await user.click(edit[0] as HTMLElement)
+      await user.hover(users[0] as HTMLElement)
+      await user.click(
+        within(users[0] as HTMLElement).getByRole('button', { name: 'Edit and resend' }),
+      )
 
-      // The box has the words and the cursor, and nothing else has happened: nothing was
-      // sent, and the message it came from is still in the transcript.
-      expect(box).toHaveValue('the second thing')
+      expect(box).toHaveValue('the first thing')
       expect(box).toHaveFocus()
-      expect(fake.history().filter((event) => event.type === 'user.message')).toHaveLength(2)
+      expect(fake.history().filter((event) => event.type === EVENT_TYPES.userMessage)).toHaveLength(
+        2,
+      )
       expect(visibleText(messageElements('agent').at(-1) ?? null)).toBe('Two.')
+    })
+
+    it('sends an edit as a rewind, and the transcript drops what it replaced (#238)', async () => {
+      const user = userEvent.setup({ delay: null })
+      const fake = makeFake()
+      fake.respondWith('Rain, on the window.')
+      renderApp(fake)
+
+      await send(user, 'write a haiku about rain')
+      const users = messageElements('user')
+      await user.hover(users[0] as HTMLElement)
+      await user.click(
+        within(users[0] as HTMLElement).getByRole('button', { name: 'Edit and resend' }),
+      )
+
+      // The reader edits the text and sends: the conversation restarts from the edit, so the
+      // original message and its reply are gone from the transcript and the model never sees
+      // them — which is the whole of "edit and resend" (#238).
+      fake.respondWith('Snow, on the window.')
+      const box = screen.getByLabelText('Message')
+      await user.click(box)
+      await user.keyboard('!')
+      await user.click(screen.getByRole('button', { name: 'Send message' }))
+
+      await waitFor(() => {
+        expect(visibleText(messageElements('agent').at(-1) ?? null)).toBe('Snow, on the window.')
+      })
+      expect(messageElements('user')).toHaveLength(1)
+      expect(visibleText(messageElements('user')[0] ?? null)).toBe('write a haiku about rain!')
+      // The log holds the rewind the server wrote, covering everything before it, and the
+      // transcript is the reply that followed the edit.
+      const rewind = fake.history().find((event) => event.type === 'session.rewind')
+      expect(rewind).toBeDefined()
+      expect(rewind).toMatchObject({
+        supersedes: { from_seq: 1, to_seq: (rewind?.seq ?? 0) - 1 },
+      })
+      expect(visibleText(messageElements('agent').at(-1) ?? null)).toBe('Snow, on the window.')
+    })
+
+    it('does not rewind when the edit is cancelled by clearing the box (#238)', async () => {
+      const user = userEvent.setup({ delay: null })
+      const fake = makeFake()
+      fake.respondWith('Rain, on the window.')
+      renderApp(fake)
+
+      await send(user, 'write a haiku about rain')
+      const users = messageElements('user')
+      await user.hover(users[0] as HTMLElement)
+      await user.click(
+        within(users[0] as HTMLElement).getByRole('button', { name: 'Edit and resend' }),
+      )
+
+      // The reader takes the edit back — the box is empty — and writes something else. That is
+      // a new message at the end of the conversation, not a rewind: the branch they almost took
+      // back is theirs to keep.
+      fake.respondWith('Another answer.')
+      const box = screen.getByLabelText('Message')
+      await user.clear(box)
+      await user.type(box, 'something else entirely')
+      await user.click(screen.getByRole('button', { name: 'Send message' }))
+
+      await waitFor(() => {
+        expect(visibleText(messageElements('agent').at(-1) ?? null)).toBe('Another answer.')
+      })
+      expect(fake.history().some((event) => event.type === EVENT_TYPES.sessionRewind)).toBe(false)
+      expect(messageElements('user').map(visibleText)).toEqual([
+        'write a haiku about rain',
+        'something else entirely',
+      ])
+    })
+
+    it('disables Edit and resend while the agent is working (#238)', async () => {
+      const user = userEvent.setup({ delay: null })
+      const fake = makeFake()
+      fake.respondWith(SLOW, { chunks: 8, delayMs: 20 })
+      renderApp(fake)
+
+      await user.type(await screen.findByLabelText('Message'), 'go')
+      await user.click(screen.getByRole('button', { name: 'Send message' }))
+      await waitFor(() => {
+        expect(screen.getByLabelText('Status: Running')).toBeInTheDocument()
+      })
+
+      // The turn in flight owns the branch being taken back, and the server refuses the rewind
+      // (409) while it runs — so the action is not offered until it is done.
+      const users = messageElements('user')
+      const edit = within(users[0] as HTMLElement).getByRole('button', { name: 'Edit and resend' })
+      expect(edit).toBeDisabled()
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('Status: Idle')).toBeInTheDocument()
+      })
+      expect(edit).toBeEnabled()
+    })
+
+    /** Open the edit on `index` of the reader's own messages, the way the transcript offers it. */
+    async function startEditing(
+      user: ReturnType<typeof userEvent.setup>,
+      index: number,
+    ): Promise<void> {
+      const users = messageElements('user')
+      await user.hover(users[index] as HTMLElement)
+      await user.click(
+        within(users[index] as HTMLElement).getByRole('button', { name: 'Edit and resend' }),
+      )
+    }
+
+    it('shows what a send would replace while editing, and Cancel takes the edit back (#238)', async () => {
+      const user = userEvent.setup({ delay: null })
+      const fake = makeFake()
+      fake.respondWith('One.')
+      renderApp(fake)
+      await send(user, 'the first thing')
+
+      await startEditing(user, 0)
+
+      // The mode is visible, not remembered silently: the composer says what a send would do.
+      expect(
+        screen.getByText('Editing message · sending replaces what follows it'),
+      ).toBeInTheDocument()
+
+      // Cancel takes the edit back — the draft goes with it, which is what clearing the box does,
+      // and the action is gone.
+      await user.click(screen.getByRole('button', { name: 'Cancel' }))
+      expect(screen.queryByText(/Editing message/)).toBeNull()
+      expect(screen.getByLabelText('Message')).toHaveValue('')
+
+      // Nothing was rewound, and the conversation is exactly what it was.
+      expect(messageElements('user').map(visibleText)).toEqual(['the first thing'])
+      expect(visibleText(messageElements('agent')[0] ?? null)).toBe('One.')
+      expect(fake.history().some((event) => event.type === EVENT_TYPES.sessionRewind)).toBe(false)
+    })
+
+    it('leaves edit mode on Escape (#238)', async () => {
+      const user = userEvent.setup({ delay: null })
+      const fake = makeFake()
+      fake.respondWith('One.')
+      renderApp(fake)
+      await send(user, 'the first thing')
+
+      await startEditing(user, 0)
+      expect(screen.getByText(/Editing message/)).toBeInTheDocument()
+
+      const box = screen.getByLabelText('Message')
+      await user.click(box)
+      await user.keyboard('{Escape}')
+
+      expect(screen.queryByText(/Editing message/)).toBeNull()
+      expect(box).toHaveValue('')
+    })
+
+    it('marks the messages an edit would replace (#238)', async () => {
+      const user = userEvent.setup({ delay: null })
+      const fake = makeFake()
+      fake.respondWith('One.')
+      renderApp(fake)
+      await send(user, 'the first thing')
+      fake.respondWith('Two.')
+      await send(user, 'the second thing')
+
+      // Editing the first message puts everything after it on its way out — the reader can see
+      // what the send would take back, not only read it in the composer.
+      await startEditing(user, 0)
+      expect(messageElements('user')[0]).toHaveAttribute('data-replacing', 'false')
+      expect(messageElements('agent')[0]).toHaveAttribute('data-replacing', 'true')
+      expect(messageElements('user')[1]).toHaveAttribute('data-replacing', 'true')
+      expect(messageElements('agent')[1]).toHaveAttribute('data-replacing', 'true')
+
+      // And taking the edit back puts them back: nothing is dimmed until an edit is pending.
+      await user.click(screen.getByRole('button', { name: 'Cancel' }))
+      expect(document.querySelectorAll('[data-replacing="true"]')).toHaveLength(0)
+    })
+
+    it('withholds an edit a running turn would refuse, and keeps the draft (#238)', async () => {
+      const user = userEvent.setup({ delay: null })
+      const fake = makeFake()
+      fake.respondWith('One.')
+      renderApp(fake)
+      await send(user, 'the first thing')
+
+      await startEditing(user, 0)
+      const box = screen.getByLabelText('Message')
+      await user.click(box)
+      await user.keyboard('!')
+
+      // Another tab sends: the turn starts while the edit is still pending, and the server
+      // would refuse the rewind now (409). Its own turn streams in like any other.
+      fake.respondWith(SLOW, { chunks: 8, delayMs: 20 })
+      await fake.sendMessage(fake.session.id, 'from another tab')
+      await waitFor(() => {
+        expect(screen.getByLabelText('Status: Running')).toBeInTheDocument()
+      })
+
+      // The box keeps the draft, says what to wait for, and nothing is posted — Enter included.
+      expect(screen.getByText('Editing message · wait for the reply to finish')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Send message' })).toBeDisabled()
+      await user.keyboard('{Enter}')
+      expect(box).toHaveValue('the first thing!')
+      expect(fake.history().some((event) => event.type === EVENT_TYPES.sessionRewind)).toBe(false)
     })
 
     it('is Ctrl/⌘+Shift+O for a new chat, from anywhere', async () => {

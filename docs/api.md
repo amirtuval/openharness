@@ -45,7 +45,12 @@ curl -N localhost:3000/v1/sessions/sesn_01H…/events/stream?event_deltas[]=agen
 
 The POST stores the message and answers immediately; the brain runs in the background and the
 stream carries what it does. `user.interrupt` is the same call with
-`{"type":"user.interrupt"}`, and it aborts the turn in flight.
+`{"type":"user.interrupt"}`, and it aborts the turn in flight. The same array may carry one
+instruction that is not the user's own event — `{"type":"session.rewind","from_seq":1}`
+(#238), "edit and resend" — which restarts the session from that message and is refused with
+`409 conflict_error` while a turn is running. Such a batch takes **at most one rewind, and
+only as its first event**; anything else is a 400 `invalid_request_error` (see
+[Claims, chunks and superseding](#claims-chunks-and-superseding-d9)).
 
 **Creating a session.** `POST /v1/sessions` takes a `model`, an `agent`, or both, and at least
 one of the two: a request that names neither is refused with a 400 `invalid_request_error`. An
@@ -129,6 +134,7 @@ session. It is also the SSE `id` and the resume position, so a client that recon
 | `span.model_request_end`     | the brain     | it finished — usage, any error, the interrupts it ends                               |
 | `event_start`                | the brain     | a reply started streaming — a stored chunk since D9                                  |
 | `event_delta`                | the brain     | a streamed fragment of it — a stored chunk since D9                                  |
+| `session.rewind`             | the server    | // extension: the session restarts from an earlier `user.message` (#238)             |
 | `session.deleted`            | the server    | stream-only: the session was deleted; sent last, then the stream closes (#111)       |
 
 A `user.message` may also carry a `model` (`{ "id": "provider/model" }`): it switches the
@@ -162,6 +168,23 @@ append-only. The rules that carry it:
   and with `from_seq <= to_seq`. **Replay skips superseded chunks**, so a resumed client sees
   the reply once, whole. The chunks stay for a retention window and are then deleted by
   compaction; whether compaction has run is invisible to a reader.
+- **Edit and resend is the same machinery over a different range** (`session.rewind`, #238).
+  Editing never changes an old event: the client sends the rewind and the edited text in one
+  `POST …/events`, the server writes the rewind with `supersedes: { from_seq, to_seq }` over
+  the **tail of the log** — from the edited `user.message` through the last event before the
+  rewind — and the message follows it as an ordinary `user.message`. So `from_seq` is the
+  message the reader edited, `to_seq` is where the log ended, and everything in between (the
+  message, its reply, the spans and status events around them) is superseded: a reader that
+  loads the session afterwards never sees any of it, a client that was showing it drops it
+  when the rewind arrives, and the model is never told about it. A rewind covers events of
+  **any** type, where a reply's range covers the chunks it was streamed as and nothing else —
+  the recorded range says which kind it is. It is accepted only while the session is idle
+  (409 `conflict_error` otherwise), because the turn in flight owns the branch being replaced.
+  A batch carries **at most one rewind, and only as its first event**: the batch is appended in
+  order and the rewind supersedes everything after the message it names, so a message ahead of
+  it — or anything behind a second rewind — would be stored and then swallowed by the range,
+  accepted by the response and answered by no turn. Either mistake is a 400
+  `invalid_request_error`, and nothing in the batch is stored.
 
 ```json
 {"type":"span.model_request_start","id":"sevt_…","seq":3,"processed_at":"…",
@@ -174,6 +197,27 @@ append-only. The rules that carry it:
  "content":[{"type":"text","text":"Hello there"}],"supersedes":{"from_seq":4,"to_seq":5}}
 ```
 
+The reader edits the message at `seq` 1, "write a haiku about rain", and sends "…about snow".
+The request carries both events — the instruction, and the message that replaces the one it
+takes back — and they are stored in one append:
+
+```jsonc
+// POST /v1/sessions/sesn_…/events
+{
+  "events": [
+    { "type": "session.rewind", "from_seq": 1 },
+    { "type": "user.message", "content": [{ "type": "text", "text": "write a haiku about snow" }] },
+  ],
+}
+// → {"data":[{"type":"user.message","id":"sevt_…","seq":9,"processed_at":null,…}]}
+//   the answer carries the stored *user* event; the rewind is the server's
+```
+
+The rewind must be the batch's **first** event, and there may be only one: `[user.message,
+session.rewind]` and `[session.rewind, session.rewind]` are both a 400 `invalid_request_error`
+that stores nothing, because the message the range would swallow would otherwise come back in
+the response as if a turn were going to answer it.
+
 An interrupt that arrives with nothing running is claimed by the `session.status_idle` that
 ends the turn — no span is opened for it, because no model request runs:
 
@@ -185,7 +229,10 @@ ends the turn — no span is opened for it, because no model request runs:
 ```
 
 `consumes`, `model` and `supersedes` are optional in the schema so that a log written before
-D9 keeps validating; the server writes them on every event that takes them.
+D9 keeps validating; the server writes them on every event that takes them. A
+`session.rewind`'s `supersedes` is **required** — the event exists only to carry the range —
+and the client's input names `from_seq` alone: how far the restart reaches is the log's end,
+which only the store knows.
 
 ## Reading the stream
 

@@ -15,7 +15,7 @@ import {
 import type { ListEventsOptions } from '@openharness/session'
 
 import type { AppEnv } from '../types'
-import { notFoundError } from '../http/errors'
+import { conflictError, notFoundError } from '../http/errors'
 import { parseBody, parseQuery, sessionIdParam } from '../http/request'
 import { SSE_HEADERS, createSessionEventStream } from '../sse'
 import { nameSessionFromFirstMessage } from '../titles'
@@ -36,6 +36,11 @@ const EVENT_DELTAS_PARAM = 'event_deltas'
  * order — store the events, then tell the scheduler. The store call is what makes the event
  * durable; the signal is only a latency optimization, and the scheduler recovers from a lost
  * one through `findSessionsNeedingWork` (see `@openharness/session`).
+ *
+ * The body may carry one instruction that is not the user's own event: a `session.rewind`
+ * (#238), "edit and resend". It travels with the edited message in the same batch so the two
+ * are one append, and it is refused with a 409 while a turn is running — see
+ * {@link requireIdleSession}.
  */
 export function registerEventRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
   const events = `${API_VERSION_PREFIX}/sessions/:session_id/events`
@@ -51,8 +56,15 @@ export function registerEventRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
     // checked for the model id's shape here, so a value no provider could resolve is a 400
     // before anything is appended.
     requireEventModelIds(body.events)
+    // A rewind restarts the session from a message the reader edited (#238). It is accepted
+    // only while the session is idle, and that is checked before anything is stored: the
+    // rewind and the message that follows it are one append.
+    if (body.events.some((event) => event.type === EVENT_TYPES.sessionRewind)) {
+      await requireIdleSession(deps, sessionId)
+    }
     // The store writes `processed_at: null` on every user event, which is what makes it
-    // queued work rather than history: the brain claims it at the start of a turn.
+    // queued work rather than history: the brain claims it at the start of a turn. A rewind
+    // it writes itself, processed as it lands — see `@openharness/session`.
     const stored = await deps.store.appendEvents(sessionId, body.events)
     // A session is named after the first thing said in it — once, and never over a title the
     // caller supplied at creation. This is the only writer of `title` in the system.
@@ -109,6 +121,28 @@ export function registerEventRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
 }
 
 /**
+ * Refuse a rewind while the session is not idle (#238): 409 `conflict_error`.
+ *
+ * A turn in flight owns the branch the reader is editing — the span it has open, the chunks it
+ * is streaming and the reply it is about to store are all inside the range a rewind would
+ * replace — so rewinding now would leave the brain appending into a log that no longer holds
+ * what it is answering. The refusal is the route's; the store refuses a brain that wins the
+ * race anyway, because a claim on a superseded message is not a claim the log accepts, so the
+ * turn ends at its next write rather than writing into the range.
+ *
+ * `unfinished` counts as busy: a turn is open with nothing in flight (a brain that died), and
+ * the next brain to pick the partition up will close the inherited span and run the turn.
+ */
+async function requireIdleSession(deps: RouteDeps, sessionId: SessionId): Promise<void> {
+  const turn = await deps.store.getTurnState(sessionId)
+  if (turn.state !== 'idle') {
+    throw conflictError(
+      `session ${sessionId} is ${turn.state}: a rewind needs an idle session, because the turn in flight owns the message being edited`,
+    )
+  }
+}
+
+/**
  * The session if it is the caller's, or the 404 another user's session always gets (A4).
  *
  * `appendEvents` is not owner-scoped — the brain's writes must not be — so the read here is
@@ -151,7 +185,12 @@ function resumeFrom(c: Context<AppEnv>, query: StreamEventsQuery): number | unde
   return /^\d+$/.test(trimmed) ? Number(trimmed) : undefined
 }
 
-/** Whether a stored event is one of the user's; `POST …/events` only ever writes those. */
+/**
+ * Whether a stored event is one of the user's.
+ *
+ * The response of `POST …/events` carries these and nothing else, so a `session.rewind` the
+ * request carried — an event the server writes on the caller's behalf (#238) — is not in it.
+ */
 function isUserEvent(event: StoredEvent): event is UserEvent {
   return event.type === EVENT_TYPES.userMessage || event.type === EVENT_TYPES.userInterrupt
 }

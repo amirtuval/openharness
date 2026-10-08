@@ -4,7 +4,7 @@ import {
   CreateSessionRequestSchema,
   EVENT_TYPES,
   ListSessionsQuerySchema,
-  type UserEventInput,
+  type EventInput,
 } from '@openharness/protocol'
 import type { CreateSessionOptions, ListSessionsOptions } from '@openharness/session'
 
@@ -141,7 +141,7 @@ export function requireModelId(id: string): void {
 }
 
 /** Refuse a `model` on any `user.message` among these events; see {@link requireModelId}. */
-export function requireEventModelIds(events: readonly UserEventInput[]): void {
+export function requireEventModelIds(events: readonly EventInput[]): void {
   for (const event of events) {
     if (event.type === EVENT_TYPES.userMessage && event.model !== undefined) {
       requireModelId(event.model.id)

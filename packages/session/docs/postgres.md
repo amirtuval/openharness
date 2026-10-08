@@ -52,7 +52,7 @@ Fourteen tables, in `migrations/`. Nine are this package's:
 | `sessions`             | a log's header: `owner_id`, `status`, `partition`, title, metadata, the effective `model`/`system`, and the agent snapshot (nullable, #93) |
 | `events`               | one stored event: `id`, `session_id`, `seq`, `type`, `payload jsonb`, `created_at`, `processed_at`                                         |
 | `event_claims`         | one claim of one user event: `event_id` (primary key), the claiming event or `null`, `claimed_at`                                          |
-| `event_supersessions`  | one recorded chunk range: `from_seq`, `to_seq`, `by_event_id` (primary key), `by_seq`, `created_at`                                        |
+| `event_supersessions`  | one recorded range: `from_seq`, `to_seq`, `kind` (`chunks` / `rewind`), `by_event_id` (primary key), `by_seq`, `created_at`                |
 | `partition_leases`     | who holds a partition, at which epoch, until when                                                                                          |
 | `scheduler_instances`  | one row per live scheduler instance: `instance_id` (primary key), `last_seen` (#122)                                                       |
 | `provider_credentials` | a user's sealed model-provider key, one per `(user_id, provider)`: the sealed blob, `last4`, timestamps                                    |
@@ -106,7 +106,8 @@ nothing`, so two writers racing for the same event cannot both win, and nothing 
   `span.model_request_start`, a `span.model_request_end` or a `session.status_idle`; the
   column is nullable only on pre-P4 rows.
 - **`event_supersessions` is insert-only too**, and `by_event_id` is its primary key: one
-  event carries one `supersedes` range. `check (to_seq >= from_seq)` and `check (by_seq >
+  event carries one range. `check (to_seq >= from_seq)`, `check (kind in ('chunks', 'rewind'))`
+  (#238) and `check (by_seq >
 to_seq)` are the range rules in the schema's own words (see
   [supersession and compaction](#supersession-and-compaction)).
 - **Neither of the two new tables has a foreign key**, on purpose. The log's tables are
@@ -170,6 +171,7 @@ databases while applying to new ones. Add a new file instead.
 | `0007_event_claims.sql`            | `event_claims`, the insert-only record of which events a turn claimed (D9)                                            |
 | `0008_event_claims_backfill.sql`   | the one-time copy of the pre-D9 `processed_at` values into claim rows (D9)                                            |
 | `0009_event_supersessions.sql`     | `event_supersessions`, the insert-only record of the ranges events replace                                            |
+| `0020_rewind_supersessions.sql`    | `event_supersessions.kind` (`chunks` / `rewind`, #238) and its check                                                  |
 | `0010_drop_session_previews.sql`   | drops `session_previews`; the chunks of a reply are rows of `events` since D9                                         |
 | `0011_better_auth.sql`             | Better Auth's tables: `user`, `session`, `account`, `verification`, `deviceCode` (epic #65, A1)                       |
 | `0012_ownership.sql`               | deletes the v1 data once, then `owner_id` on `agents` and `sessions` and the per-owner indexes (A4)                   |
@@ -406,16 +408,26 @@ range in `event_supersessions`, after checking in the store that `from_seq` is p
 anything else is a `RangeError` and the append is refused whole. The table's `check`
 constraints say the same thing in the schema's own words.
 
-Readers then skip it. `listEvents` leaves a stored chunk out when a recorded range covers its
-`seq`:
+Since #238 a range has a **kind**, and the second kind is a `session.rewind`: the event that
+restarts a conversation from an edited `user.message`. It arrives as `{ type, from_seq }` and
+the store fills in the rest — the range runs from that message through the event before the
+rewind, so `to_seq` is the rewind's own `seq` minus one, read inside the append's transaction,
+under the session's row lock. The append also checks, in the same transaction, that the
+message is still one the log has and is not already inside a recorded rewind range
+(`assertRewinds`, shared with the in-memory store); a rewind that cannot be honoured is a
+`RangeError` and the append stores nothing. The row it records is marked `kind = 'rewind'`,
+which is what tells a reader the range covers every event in it rather than only chunks.
+
+Readers then skip it. `listEvents` leaves an event out when a recorded range covers its `seq`
+and its kind, or the range is a rewind's:
 
 ```sql
 not exists (
   select 1
     from event_supersessions s
    where s.session_id = e.session_id
-     and e.type in ('event_start', 'event_delta')
      and e.seq between s.from_seq and s.to_seq
+     and (s.kind = 'rewind' or e.type in ('event_start', 'event_delta'))
 )
 ```
 
@@ -425,24 +437,26 @@ is not filtered: a subscriber hears every event as it happens, and reconciling b
 client's business (the protocol's transcript rules are written for exactly that).
 
 `compact({ olderThan })` is one of the **only two** deletes in this package — the other is
-`deleteSession`, below — and it deletes only what a range covers, that is a chunk, and that is
-older than the cutoff:
+`deleteSession`, below — and it deletes only what a range covers, of the kind the range is,
+and older than the cutoff:
 
 ```sql
 delete from events e
  using event_supersessions s
  where e.session_id = s.session_id
-   and e.type in ('event_start', 'event_delta')
    and e.seq between s.from_seq and s.to_seq
+   and (s.kind = 'rewind' or e.type in ('event_start', 'event_delta'))
    and e.created_at < $1
 ```
 
 It returns how many events it deleted, is idempotent, and two instances running it at once
-simply split the rows between them. Compaction deletes nothing else: `event_claims` and
-`event_supersessions` are insert-only and outlive the chunks they name, and a superseded
-chunk always has the event that superseded it _after_ it, which is not a chunk and which
-compaction never deletes — so `seq` is never reused, and the gaps a compaction leaves are the
-normal state of a compacted log. The one other delete is `deleteSession` below, which is not compaction but
+simply split the rows between them. A row covered by two ranges — a reply's chunk range inside
+a rewind's, say — is deleted once, because it is one row. Compaction deletes nothing else:
+`event_claims` and `event_supersessions` are insert-only and outlive the events they name, and
+a range's events are always followed by the event that superseded them — the `agent.message`,
+or the `session.rewind` — which is not covered by its own range and which compaction never
+deletes, so `seq` is never reused and the gaps a compaction leaves are the normal state of a
+compacted log. The one other delete is `deleteSession` below, which is not compaction but
 removal: it takes the whole session, so nothing of it is left to read. `src/postgres/no-updates.test.ts`
 scans this package's source for the two spellings a write back to `events` would use, so
 "written once, read forever" cannot break unnoticed.

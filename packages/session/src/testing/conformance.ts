@@ -105,8 +105,16 @@ import { type TestClock, createTestClock } from './clock'
  * - **supersession and replay** — a recorded `supersedes` range skipped by reads but included
  *   still in flight, `includeSuperseded` as the debugging read, and the `RangeError` a range
  *   that does not fit raises.
- * - **compaction** — the retention window, only superseded chunks deleted, idempotence, and
- *   readers seeing the same log before and after.
+ * - **rewind** (#238) — a `session.rewind` stored as an ordinary event with a range over the
+ *   tail from the edited `user.message`, replay showing the conversation restarted from it,
+ *   the replaced events gone from the pending list and from `findSessionsNeedingWork`, a
+ *   claim into the range refused, the `RangeError` a `from_seq` that is not a still-visible
+ *   message raises, the `RangeError` a batch whose rewind is not its first event — or that
+ *   carries two — raises, an earlier rewind surviving a later one, and overlapping ranges
+ *   treated as one union by replay and compaction.
+ * - **compaction** — the retention window, only what a recorded range covers deleted
+ *   (a reply's chunks, a rewind's whole tail), idempotence, and readers seeing the same log
+ *   before and after.
  * - **deletion** (#111, epic #116 U5) — `deleteSession`: owner-scoped `true`/`false`, the
  *   whole log gone from every read, the event ids it held free again, and a subscription that
  *   ends with one final `session.deleted` delivery and nothing after it.
@@ -1503,6 +1511,198 @@ export function runSessionStoreConformance(
       })
     })
 
+    // -------------------------------------------------------- rewind (#238)
+
+    describe('rewind (#238)', () => {
+      it('restarts the session from an edited message, and replay shows just that', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const turn = await completeTurn(store, session.id, 'write a haiku about rain')
+        const [rewind, edited] = await append(store, session.id, [
+          rewindTo(1),
+          userMessage('write a haiku about snow'),
+        ])
+
+        // The stored rewind: an ordinary session event, processed when it was written, and
+        // carrying the range the store recorded — the edited message through the last event
+        // before it.
+        expect(rewind).toMatchObject({
+          type: EVENT_TYPES.sessionRewind,
+          seq: 7,
+          supersedes: { from_seq: 1, to_seq: 6 },
+        })
+        expect(rewind?.processed_at).not.toBeNull()
+        expect(edited?.seq).toBe(8)
+
+        // Replay is the conversation the reader would have had. The raw log keeps every event
+        // of the turn that was replaced: nothing already stored was modified.
+        expect((await store.listEventsUnscoped(session.id)).data).toEqual([rewind, edited])
+        // The raw log keeps every event of the turn that was replaced, in place: nothing
+        // already stored was modified, the claim on the original message included — it still
+        // reads processed, because the request inside the range took it.
+        const raw = (await store.listEventsUnscoped(session.id, { includeSuperseded: true })).data
+        expect(raw.map((event) => event.id)).toEqual([
+          ...turn.events.map((event) => event.id),
+          rewind?.id,
+          edited?.id,
+        ])
+        expect(raw[0]?.processed_at).not.toBeNull()
+
+        // The model's view: the original message and its reply are not waiting for anything,
+        // and the edit is the only thing that is.
+        expect(await store.getPendingUserEvents(session.id)).toEqual([edited])
+        expect(await store.findSessionsNeedingWork([partitionOf(session.id)])).toEqual([session.id])
+
+        // The rewind reaches a subscriber like every other stored event.
+        const seen: StoredEvent[] = []
+        const unsubscribe = await store.subscribe(session.id, (event) => {
+          if (isStoredEvent(event)) {
+            seen.push(event)
+          }
+        })
+        const [later] = await append(store, session.id, [rewindTo(8)])
+        await waitFor(() => seen.length === 1, 'the rewind delivery')
+        unsubscribe()
+        expect(seen).toEqual([later])
+      })
+
+      it('refuses a claim into a rewound range: nothing outside it reaches it', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const turn = await completeTurn(store, session.id, 'first')
+        const [, edited] = await append(store, session.id, [rewindTo(1), userMessage('edited')])
+
+        // The message the rewind replaced already had its claim — its request is inside the
+        // range too. A fresh span naming it is a claim into a range that is gone, refused
+        // whole, exactly like a claim on an event another claim already took.
+        const error = await thrownBy(() =>
+          store.appendEvents(session.id, [spanStartFor([turn.message.id])]),
+        )
+        expectErrorIdentity(error, 'ClaimConflictError', CLAIM_CONFLICT_ERROR_CODE)
+        expect(await store.getPendingUserEvents(session.id)).toEqual([edited])
+        expect((await store.listEventsUnscoped(session.id)).data).toHaveLength(2)
+      })
+
+      it('refuses a rewind that starts anywhere but a still-visible user.message', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        await completeTurn(store, session.id, 'first')
+
+        // 1 is the message; 2..6 are the turn's other events, and 99 is a seq the log has
+        // never had. None of them is something a reader could have edited.
+        for (const fromSeq of [0, 2, 4, 6, 99]) {
+          const error = await thrownBy(() => store.appendEvents(session.id, [rewindTo(fromSeq)]))
+          expect(error, `from_seq ${fromSeq}`).toBeInstanceOf(RangeError)
+        }
+        // Every refusal left the log exactly as it was.
+        expect((await store.listEventsUnscoped(session.id)).data).toHaveLength(6)
+
+        await append(store, session.id, [rewindTo(1), userMessage('edited')])
+        // The message is still there in the raw log, but the range that replaced it is not —
+        // a second restart from it would begin in a tail that is already gone.
+        const again = await thrownBy(() => store.appendEvents(session.id, [rewindTo(1)]))
+        expect(again).toBeInstanceOf(RangeError)
+      })
+
+      it('refuses a batch whose rewind is not first, or one that carries two', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        await completeTurn(store, session.id, 'first')
+        const before = (await store.listEventsUnscoped(session.id, { includeSuperseded: true }))
+          .data
+
+        // A message ahead of the rewind would be stored and then swallowed by the range the
+        // rewind records — the append would answer with it as if a turn were going to answer
+        // it — and a second rewind would supersede the first's restart. Neither is a batch the
+        // store records, whatever the caller is: both are refused whole, like a bad `from_seq`.
+        const batches: AppendableEvent[][] = [
+          [userMessage('edited'), rewindTo(1)],
+          [rewindTo(1), userMessage('edited'), rewindTo(1)],
+        ]
+        for (const batch of batches) {
+          const error = await thrownBy(() => store.appendEvents(session.id, batch))
+          expect(error).toBeInstanceOf(RangeError)
+        }
+        // Every refusal left the log exactly as it was — the message behind the refused rewind
+        // included, since a batch is one append.
+        expect(
+          (await store.listEventsUnscoped(session.id, { includeSuperseded: true })).data,
+        ).toEqual(before)
+
+        // The shape the rule allows is untouched: the rewind first, the edit behind it.
+        const [rewind, edited] = await append(store, session.id, [
+          rewindTo(1),
+          userMessage('edited'),
+        ])
+        expect(rewind).toMatchObject({ type: EVENT_TYPES.sessionRewind })
+        expect(edited).toMatchObject({ type: EVENT_TYPES.userMessage })
+      })
+
+      it('leaves a session with nothing to do when the rewind replaced everything', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const turn = await completeTurn(store, session.id, 'first')
+        // A rewind with no message behind it: the reader took the edit back. Nothing of the
+        // replaced turn is work — the session is idle with a queue that is empty.
+        await append(store, session.id, [rewindTo(1)])
+
+        expect(await store.getPendingUserEvents(session.id)).toEqual([])
+        expect(await store.findSessionsNeedingWork([partitionOf(session.id)])).toEqual([])
+        expect(await store.getTurnState(session.id)).toEqual({ state: 'idle', openSpan: null })
+        expect(turn.events).toHaveLength(6)
+      })
+
+      it('keeps an earlier rewind when a later one restarts from what followed it', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        await completeTurn(store, session.id, 'first')
+        // 1..6 is the turn, 7 the rewind, 8 the message that followed it.
+        const [before, first] = await append(store, session.id, [
+          rewindTo(1),
+          userMessage('edited'),
+        ])
+        const [second, after] = await append(store, session.id, [
+          rewindTo(first?.seq ?? 0),
+          userMessage('edited again'),
+        ])
+
+        // The first rewind is nobody's message, so no later range can start at it: it stays
+        // part of what a reader sees, and only the tail after it moves on.
+        expect(second).toMatchObject({ supersedes: { from_seq: 8, to_seq: 8 } })
+        expect((await store.listEventsUnscoped(session.id)).data).toEqual([before, second, after])
+      })
+
+      it('treats a reply’s range inside a rewind’s as one union, in replay and in compaction', async () => {
+        const { store, clock } = await setup()
+        const { session } = await seed(store)
+        // A turn whose reply's chunks a chunk range already superseded, then a rewind over the
+        // whole log: the chunk range (3..4) lies inside the rewind's (1..6), and both a read
+        // and a delete have to treat them as one span — the events go once, not twice.
+        const replied = suppliedEventId()
+        await append(store, session.id, [userMessage('first')])
+        await append(store, session.id, [statusRunning()])
+        await append(store, session.id, [eventStart(replied), deltaOf(replied, 'hi')])
+        await append(store, session.id, [supersedingMessage(3, 4)])
+        await append(store, session.id, [statusIdle()])
+        const [rewind, edited] = await append(store, session.id, [
+          rewindTo(1),
+          userMessage('edited'),
+        ])
+
+        const replay = (await store.listEventsUnscoped(session.id)).data
+        expect(replay).toEqual([rewind, edited])
+
+        expect(await store.compact({ olderThan: clock.currentMs })).toBe(0)
+        expect(await store.compact({ olderThan: clock.currentMs + SECOND })).toBe(6)
+        // Idempotent, and invisible: the raw log now reads like the replay read did.
+        expect(await store.compact({ olderThan: clock.currentMs + SECOND })).toBe(0)
+        expect((await store.listEventsUnscoped(session.id)).data).toEqual(replay)
+        expect(
+          (await store.listEventsUnscoped(session.id, { includeSuperseded: true })).data,
+        ).toEqual(replay)
+      })
+    })
+
     // ------------------------------------------------------------- compaction
 
     describe('compaction', () => {
@@ -1560,6 +1760,29 @@ export function runSessionStoreConformance(
         // Once the cutoff has moved past them, they go.
         expect(await store.compact({ olderThan: clock.currentMs })).toBe(2)
         expect((await store.listEventsUnscoped(session.id)).data).toHaveLength(1)
+      })
+
+      it('leaves a rewound range inside the window where it is, and deletes it past it', async () => {
+        const { store, clock } = await setup()
+        const { session } = await seed(store)
+        await completeTurn(store, session.id, 'first')
+        const [rewind, edited] = await append(store, session.id, [
+          rewindTo(1),
+          userMessage('edited'),
+        ])
+
+        clock.advance(30 * SECOND)
+        // The turn was written after this cutoff, so its window is not over: nothing goes.
+        expect(await store.compact({ olderThan: clock.currentMs - 60 * SECOND })).toBe(0)
+        expect(
+          (await store.listEventsUnscoped(session.id, { includeSuperseded: true })).data,
+        ).toHaveLength(8)
+        // Past it, the whole replaced tail goes — and the rewind that replaced it stays.
+        expect(await store.compact({ olderThan: clock.currentMs })).toBe(6)
+        expect((await store.listEventsUnscoped(session.id)).data).toEqual([rewind, edited])
+        expect(
+          (await store.listEventsUnscoped(session.id, { includeSuperseded: true })).data,
+        ).toEqual([rewind, edited])
       })
 
       it('rejects a cutoff that is not an instant', async () => {
@@ -2637,6 +2860,45 @@ function spanStart(): AppendableEvent {
 /** A `span.model_request_start` claiming the user events it is given (D9). */
 function spanStartFor(consumes: EventId[]): AppendableEvent {
   return { type: EVENT_TYPES.modelRequestStart, consumes, model: 'anthropic/claude-sonnet-5' }
+}
+
+/**
+ * A `session.rewind` to append (#238): restart the session from the `user.message` at
+ * `fromSeq`. The range it records — through the end of the log — is the store's to fill in.
+ */
+function rewindTo(fromSeq: number): AppendableEvent {
+  return { type: EVENT_TYPES.sessionRewind, from_seq: fromSeq }
+}
+
+/**
+ * One whole turn: the user speaks, the brain claims the message in a request, answers, closes
+ * the span and goes idle — the six events of a complete turn, in order.
+ *
+ * That is what a rewind is aimed at, so the tests that need one start from here rather than
+ * spelling the same six appends out again.
+ */
+async function completeTurn(
+  store: SessionStore,
+  sessionId: SessionId,
+  text: string,
+): Promise<{ events: StoredEvent[]; message: { readonly id: EventId } }> {
+  const events: StoredEvent[] = []
+  const message = await append(store, sessionId, [userMessage(text)])
+  const [first] = message
+  if (first === undefined) {
+    throw new Error('the store did not return the message it was given')
+  }
+  events.push(first)
+  events.push(...(await append(store, sessionId, [statusRunning()])))
+  const [start] = await append(store, sessionId, [spanStartFor([first.id])])
+  if (start?.type !== EVENT_TYPES.modelRequestStart) {
+    throw new Error('the store did not return the span start it was given')
+  }
+  events.push(start)
+  events.push(...(await append(store, sessionId, [agentMessage(`reply to ${text}`)])))
+  events.push(...(await append(store, sessionId, [spanEnd(start)])))
+  events.push(...(await append(store, sessionId, [statusIdle()])))
+  return { events, message: first }
 }
 
 /** An `agent.message` that supersedes the chunk range `from`..`to`, inclusive (D9). */

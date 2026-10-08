@@ -4,8 +4,8 @@ import { useCopy } from '../../hooks/use-copy'
 import { Button } from '../ui/button'
 
 /**
- * What can be done with a message: copy it, and — on the reader's own last one — write it
- * again (#212).
+ * What can be done with a message: copy it, and — on the reader's own — write it again (#212,
+ * #238).
  *
  * The row is **in the layout** rather than floating over it, and hidden with `opacity` alone:
  * a control that appears on hover and moves nothing is the point, and an overlay that shifted
@@ -18,20 +18,27 @@ import { Button } from '../ui/button'
  * always there (`no-hover:`, the `@media (hover: none)` variant from `index.css`): a touch
  * screen shows the actions the way a mouse shows them on hover — permanently.
  *
- * **Edit and resend pre-fills the composer and stops.** It is not a rewind: the log is
- * append-only (#201), nothing here deletes the message it copies, and what the reader gets is
- * their own words back in the box to change and send — a new message, at the end, like any
- * other. That is why the button exists only on the **last** user message: anywhere else it
- * would be a way to say the same thing twice into the middle of a conversation.
+ * **Edit and resend rewinds the session** (#238). The reader's own words go back in the box,
+ * and sending them restarts the conversation from that message: the original and everything
+ * after it drop out of the transcript and out of the model's context, and the edited text
+ * takes their place. That is why the button is offered on **any** of the reader's messages
+ * and not only the last one — the branch behind it is what gets replaced, which is exactly
+ * what someone who wants to say something differently means.
+ *
+ * It is **disabled while the agent is running**: the turn in flight owns the branch being
+ * taken back, and the server refuses the rewind (409) while it runs.
  */
 export function MessageActions({
   text,
   onEdit,
+  editDisabled = false,
 }: {
   /** The message's source — what Copy puts on the clipboard. */
   text: string
-  /** Pre-fill the composer with this text. Given for the last user message, and no other. */
+  /** Rewrite this message: put its text back in the composer, to send as a rewind (#238). */
   onEdit?: (() => void) | undefined
+  /** Whether that action is unavailable right now — the agent is working, so nothing can be. */
+  editDisabled?: boolean
 }) {
   const { copied, copy } = useCopy(text)
 
@@ -62,6 +69,7 @@ export function MessageActions({
           data-slot="message-edit"
           aria-label="Edit and resend"
           className="text-muted-foreground"
+          disabled={editDisabled}
           onClick={onEdit}
         >
           <Pencil aria-hidden="true" />

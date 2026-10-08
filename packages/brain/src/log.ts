@@ -20,11 +20,17 @@ import type {
  */
 
 /**
- * The session's whole log, oldest first.
+ * The session's whole log, oldest first — as a reader sees it.
  *
  * Paged, because the store's `listEvents` is: a log longer than one page has to be read in
  * several reads and stitched back together. Nothing is cached between turns — the point of the
  * log is that the next turn reads it again.
+ *
+ * This is the store's replay read, so it leaves out what a recorded range supersedes: the
+ * chunks a finished reply replaced, and everything a `session.rewind` replaced (#238). That is
+ * what makes the brain's history the conversation the reader is looking at — a message an edit
+ * took back is not something the model was told, and a request built from this log never asks
+ * about it.
  *
  * @throws SessionNotFoundError when the session does not exist
  */

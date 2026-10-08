@@ -81,7 +81,8 @@ migrations/             the SQL the Postgres stores need, applied by `migrate()`
                         0016 the per-user preferences (#111),
                         0017 the scheduler-instance membership (#122),
                         0018 the credential key provider (#150),
-                        0019 the theme on the per-user preferences (#203)
+                        0019 the theme on the per-user preferences (#203),
+                        0020 what a supersession range covers — chunks or a rewind (#238)
 docs/postgres.md        the Postgres stores: schema, migrations, delivery, local setup
 ```
 
@@ -93,7 +94,7 @@ docs/postgres.md        the Postgres stores: schema, migrations, delivery, local
 | --------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `SessionStore`                                                                                                                                      | the storage and signaling contract; every method is async, and documented below. Since #111 it also carries `getPreferences`/`putPreferences` (the per-user settings beside the log) and `deleteSession` (the owner-scoped hard delete); since #122 the scheduler membership (`heartbeatInstance`, `listLiveInstances`, `removeInstance`) |
 | `UserPreferences`                                                                                                                                   | a user's stored preferences, `{ default_model: string \| null, theme: 'system' \| 'light' \| 'dim' \| 'dark' }` (#111, epic #116 U1; theme: #203, epic #201 X3) — the vocabulary of `getPreferences`/`putPreferences`                                                                                                                     |
-| `AppendableEvent`                                                                                                                                   | an event a caller appends: a `StoredEvent` minus `seq` and `processed_at`, plus an optional `id` the caller supplies                                                                                                                                                                                                                      |
+| `AppendableEvent`, `AppendableStoredEvent`, `AppendableRewind`                                                                                      | an event a caller appends: a `StoredEvent` minus `seq` and `processed_at` (plus an optional `id` the caller supplies), or a `session.rewind` input that names the message the session restarts from (#238)                                                                                                                                |
 | `CreateSessionOptions`, `ListAgentsOptions`, `ListSessionsOptions`, `ListEventsOptions`                                                             | the options objects of the list and create methods (`CreateSessionOptions` carries the effective `model`/`system`, #93)                                                                                                                                                                                                                   |
 | `OwnerScope`                                                                                                                                        | `{ ownerId }`: how a read is scoped to one owner (A4) — required, so forgetting it is a compile error; see [the contract](#the-contract)                                                                                                                                                                                                  |
 | `UnscopedListEventsOptions`                                                                                                                         | the filters of `listEventsUnscoped`, the brain's replay                                                                                                                                                                                                                                                                                   |
@@ -246,25 +247,39 @@ claim alone. The column stays for the other event types, and for rows written be
 anything else, and the stored form is the only one. The chunks of a reply in flight
 are resumable by `seq` like every other event.
 
-**Supersession.** The event that finishes a reply — the stored `agent.message`, or the
-`span.model_request_end` when the request ended without one — carries `supersedes:
-{ from_seq, to_seq }` over the chunks it replaces. `appendEvents` records the range,
-insert-only, after checking it lies within the session and ends before the superseding event's
-own `seq`; a range that does not fit is a `RangeError` and the whole append is refused. Replay
-then skips it: `listEvents` leaves out stored chunks whose `seq` a recorded range covers,
-while the chunks of a message still in flight — nothing supersedes them — come back like any
-other event. `includeSuperseded: true` reads the raw log instead, for debugging and tests.
-Cursors stay `seq` positions, and skipped chunks leave gaps in them; nothing else changes.
+**Supersession.** A recorded `supersedes` range has a **kind**, and the event that carries it
+decides which one. A **reply's** range — the stored `agent.message`, or the
+`span.model_request_end` when the request ended without one — covers the `event_start` /
+`event_delta` chunks it replaces and nothing else. A **rewind's** range (#238) — the stored
+`session.rewind` a client asks for by naming the `user.message` a reader edited — covers the
+whole tail of the log from that message through the event before it, of any type:
+`appendEvents` fills in how far it reaches (`to_seq` is the rewind event's own `seq` minus
+one), inside the append's transaction, so only the store ever decides it. `appendEvents`
+records the range insert-only, after checking it lies within the session and ends before the
+superseding event's own `seq` — and, for a rewind, that the batch carries **at most one and as
+its first event** (anything else would be stored and then swallowed by the range the rewind
+records) and that `from_seq` names a `user.message` the log still has and no recorded range
+already covers (`assertRewinds`, shared by both stores); anything else is a `RangeError` and
+the whole append is refused. Replay then skips it:
+`listEvents` leaves out the chunks a reply's range covers and every event a rewind's covers,
+so a reader loading a session after an edit sees the conversation as if the edited message had
+been the one sent, while the chunks of a message still in flight — nothing supersedes them —
+come back like any other event. `isSuperseded` is the one test all of that asks, and the
+pending list, the work scan and the claim check ask it too: a message a rewind replaced is not
+waiting for an answer, and nothing outside a range can claim into it. `includeSuperseded: true`
+reads the raw log instead, for debugging and tests. Cursors stay `seq` positions, and skipped
+events leave gaps in them; nothing else changes.
 
 **Compaction** — `compact({ olderThan })` — is one of the only two code paths that delete from
-a log: it removes stored chunks a recorded supersession covers, once the store wrote them
-strictly before the cutoff, and nothing else, ever. It returns how many events it deleted, is
-idempotent, and is safe to run from several instances at once. It changes no reader's answer —
-replay already skips those chunks — so a client never needs to know whether, or how recently,
-it ran; the retention window only keeps raw chunks around for debugging. `seq` values are
-never reused (a superseded chunk is always followed by the event that superseded it, which is
-not a chunk and is never deleted), so gaps in the sequence are the normal state of a compacted
-log.
+a log: it removes what a recorded supersession covers — a reply's chunks, or every event in a
+rewind's tail — once the store wrote it strictly before the cutoff, and nothing else, ever. It
+returns how many events it deleted, is idempotent, and is safe to run from several instances at
+once. It changes no reader's answer — replay already skips those events — so a client never
+needs to know whether, or how recently, it ran; the retention window only keeps the raw rows
+around for debugging. `seq` values are never reused (a range's events are always followed by
+the event that superseded them — the `agent.message`, or the `session.rewind` — which is not
+covered by its own range and is never deleted), so gaps in the sequence are the normal state of
+a compacted log.
 
 **Deletion** — `deleteSession(sessionId, { ownerId })` — is the other, and the only one that
 removes a session itself (epic #116 U5, issue #111). It is **owner-scoped**: it answers `true`
@@ -410,9 +425,12 @@ and answers what was stored. Both answers are deep-frozen, like a credential's.
 `AgentNotFoundError` (`createSession` with an unknown agent), `FencedError` (`appendEvents`),
 `DuplicateEventIdError` (`appendEvents` carrying an id the log already
 holds, or the same id twice) and `ClaimConflictError` (`appendEvents` whose `consumes` names
-an event that is not a pending user event of the session). A `supersedes` range that does not
-fit before its own event is a `RangeError`, like the other argument checks — `page` cursors,
-supplied event ids, lease ttls, and `compact()`'s cutoff. `getSession`, `getSessionUnscoped`,
+an event that is not a pending, uncovered user event of the session — a message a rewind
+replaced is neither, #238). A `supersedes` range that does not fit before its own event, a
+rewind whose `from_seq` names no `user.message` this session still shows, and a batch whose
+rewind is not its first event or that carries two of them (#238), are a `RangeError`,
+like the other argument checks — `page` cursors, supplied event ids, lease ttls, and
+`compact()`'s cutoff. `getSession`, `getSessionUnscoped`,
 `updateSession`, `getAgent` and `updateAgent` answer `null` instead.
 Each error is a real class with a stable `name` and `code`, so `instanceof` works from the
 built output and `isFencedError()` recognises one that crossed a bundle boundary.
@@ -481,8 +499,9 @@ events), `event_claims` (one row per claim of a user event: `event_id` primary k
 `claimed_by_event_id` — the event whose `consumes` claimed it, `null` only on pre-P4 rows —
 and `claimed_at`; the primary key is what makes double-claiming fail atomically),
 `event_supersessions` (one row per
-recorded `{ from_seq, to_seq }` range: `by_event_id` primary key, `by_seq`, and a `check
-(by_seq > to_seq)`), `partition_leases` (`partition`, `owner`, `epoch`, `expires_at`),
+recorded range: `from_seq`, `to_seq`, `kind` (`chunks`/`rewind`, #238), `by_event_id` primary
+key, `by_seq`, and `check`s that the range is well-formed and lies before the event that
+carries it), `partition_leases` (`partition`, `owner`, `epoch`, `expires_at`),
 `scheduler_instances` (one row per live scheduler instance: `instance_id` primary key and the
 `last_seen` of its last heartbeat; see `0017`), `provider_credentials` (a sealed credential per
 `(user_id, provider)`, with the key provider that wrapped its data key — NULL meaning `local`;
@@ -597,6 +616,18 @@ The partition scheduler's membership (issue #122) added another:
   `last_seen > now - withinMs`) and deleted by `removeInstance` on a graceful `stop()`. There
   is nothing to backfill — an absent row means nobody has announced that id — and a lost row
   costs one heartbeat's announcement rather than anything durable.
+
+Editing a sent message (#238) added one more:
+
+- **`0020_rewind_supersessions.sql` — what a recorded range covers** (#238): one
+  `add column if not exists kind text not null default 'chunks'` on `event_supersessions`,
+  plus a `check (kind in ('chunks', 'rewind'))` added through a `do` block (Postgres has no
+  `add constraint if not exists`). **Every existing row takes `chunks`**, which is not a guess:
+  rewinds did not exist, so a ranged row could only have come from D9's `agent.message` or
+  span end. The column is what tells a reply's range — which covers its chunks, and only those
+  — from a `session.rewind`'s, which covers every event in the tail it restarted; without it a
+  reply's range could hide an event that is not a chunk. Nothing else to backfill, and the
+  `if not exists` keeps a re-run leaving every row as it was.
 
 The web theme (issue #203, chat-UX epic #201 decision X3) added one more:
 

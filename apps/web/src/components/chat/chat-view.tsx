@@ -1,4 +1,4 @@
-import { providerName } from '@openharness/client'
+import { providerName, type TranscriptMessage } from '@openharness/client'
 import { Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
@@ -41,6 +41,16 @@ import { workingState } from './working-row'
  *   already in the transcript back in the box. A send clears it the same way the composer's
  *   own text used to be cleared — through `onValueChange('')` — so there is still exactly one
  *   rule about what is in the box.
+ * - **Edit and resend rewinds (#238).** Putting the words back in the box also remembers
+ *   *which* message they came from, and that is what the send that follows rewinds the session
+ *   to: the conversation restarts from the edited message, the transcript drops what it
+ *   replaced, and the model never sees it. The memory is dropped when the box is **cleared**
+ *   (how an edit is cancelled — a cancelled edit must not rewind, and Cancel and Escape are
+ *   spelled as clearing it) and after a send, so the composer is never left in an editing mode
+ *   the reader cannot see: the indicator the composer draws from it says what a send will do.
+ *   The action is disabled — and a send withheld — whenever the session is **not idle**: the
+ *   server takes a rewind only from an idle session (409 otherwise), because the turn in
+ *   flight owns the branch being taken back.
  */
 export function ChatView({
   sessionId,
@@ -95,6 +105,11 @@ export function ChatView({
   // open with the provider left to the reader (the picker's "+ Add provider"), and a provider
   // id is open on that provider's form (the missing-key banner, which knows which one failed).
   const [addingProvider, setAddingProvider] = useState<string | null | undefined>(undefined)
+  // The message an edit is rewriting (#238): "Edit and resend" puts the reader's own words back
+  // in the box and remembers where they came from, and the send that follows rewinds the
+  // session to that message. Cleared when the box is emptied (an edit the reader took back) and
+  // after a send.
+  const [editing, setEditing] = useState<{ readonly seq: number } | null>(null)
   // The reader has pressed Stop on this turn (U10). Nothing in the log says a request was
   // interrupted *by the reader* — the log says the turn ended — so the screen remembers the one
   // action that can only have come from here, and drops it the moment a new message is sent:
@@ -117,21 +132,45 @@ export function ChatView({
     onDeleted(sessionId)
   }, [deleted, onDeleted, sessionId])
 
+  // Whether the session is idle, which is the state the server takes a rewind in (#238). The
+  // web's status is exactly that state — `running` is the whole of "not idle" — so the
+  // transcript's Edit action and a send of a pending edit read it here rather than each
+  // spelling out a status of their own.
+  const idle = status === 'idle'
+  // A pending edit whose rewind the server would refuse: the send is withheld, and the
+  // composer's indicator says what to wait for.
+  const editBlocked = editing !== null && !idle
+
   const sendFromComposer = useCallback(
     async (text: string): Promise<boolean> => {
+      // A pending edit is a rewind, and the server takes one only while the session is idle
+      // (#238): the turn in flight owns the branch being replaced. Keep the draft and the edit
+      // — the composer's indicator says why — and send nothing, rather than fire a request
+      // that comes back a 409.
+      if (editBlocked) {
+        return false
+      }
       // Sending is the start of a new turn: whatever the last one was stopped short of is no
       // longer what the foot of the transcript is about.
       setInterrupted(false)
       const switching = chosen !== null && chosen !== sessionModel
-      const stored = await send(text, switching ? { model: chosen } : undefined)
-      if (stored && switching) {
-        // The stored event moves the transcript's model to the pick; from here the selector
-        // reads the log, and the message carries the "Switched to …" marker.
-        setChosen(null)
+      const stored = await send(text, {
+        ...(switching && chosen !== null ? { model: chosen } : {}),
+        ...(editing === null ? {} : { rewindTo: editing.seq }),
+      })
+      if (stored) {
+        // The edit has been sent (or the message was an ordinary one): either way this is no
+        // longer an edit, and the next send must not rewind the session to the same message.
+        setEditing(null)
+        if (switching) {
+          // The stored event moves the transcript's model to the pick; from here the selector
+          // reads the log, and the message carries the "Switched to …" marker.
+          setChosen(null)
+        }
       }
       return stored
     },
-    [chosen, sessionModel, send],
+    [chosen, editBlocked, editing, sessionModel, send],
   )
 
   // Stop, and the word for it (U10): the interrupt request goes out, and the row at the foot
@@ -141,13 +180,31 @@ export function ChatView({
     await interrupt()
   }, [interrupt])
 
-  // "Edit and resend" (#212): the message goes back in the box, with the cursor in it, and
-  // that is the whole of it — nothing here removes the message it came from, because the log
-  // is append-only (#201) and the reader is writing a new message, not repairing an old one.
-  const editFromTranscript = useCallback((text: string): void => {
-    setDraft(text)
+  // "Edit and resend" (#238): the message goes back in the box, with the cursor in it, and the
+  // screen remembers which one it was. Everything stays where it is until the reader sends —
+  // an edit that is never sent is not an edit, which is why nothing is rewound here.
+  const editFromTranscript = useCallback((message: TranscriptMessage): void => {
+    setDraft(message.text)
+    setEditing({ seq: message.position })
     focusComposer()
   }, [])
+
+  // The composer's text, and the one rule about the edit: **clearing the box cancels it**. A
+  // reader who empties the box and types something else is writing a new message at the end of
+  // the conversation — the branch they were about to take back is theirs to keep.
+  const changeDraft = useCallback((text: string): void => {
+    setDraft(text)
+    if (text === '') {
+      setEditing(null)
+    }
+  }, [])
+
+  // Cancel, and Escape beside it in the composer: leave edit mode the way clearing the box
+  // does, so there is still exactly one rule about what ends an edit — the draft goes with it,
+  // because a cancelled edit is not a message waiting to be sent.
+  const cancelEdit = useCallback((): void => {
+    changeDraft('')
+  }, [changeDraft])
 
   // The transcript's own foot (U10). "No text has arrived" means the turn has not drawn
   // anything yet: an agent message is the newest one and it is still empty, so an ordinary
@@ -233,6 +290,8 @@ export function ChatView({
         nameOf={nameOf}
         working={statusRow}
         onEdit={editFromTranscript}
+        editDisabled={!idle}
+        replacingFrom={editing?.seq}
       />
 
       <div className="border-t px-4 py-3">
@@ -281,7 +340,8 @@ export function ChatView({
             onStop={stop}
             inputRef={inputRef}
             value={draft}
-            onValueChange={setDraft}
+            onValueChange={changeDraft}
+            edit={editing === null ? undefined : { blocked: editBlocked, onCancel: cancelEdit }}
             modelSelector={
               <ModelPicker
                 variant="compact"

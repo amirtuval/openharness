@@ -5,6 +5,7 @@ import {
   SendEventsResponseSchema,
 } from '@openharness/protocol'
 import type {
+  EventSeq,
   ModelConfig,
   User,
   UserEvent,
@@ -70,6 +71,21 @@ export interface RequestOptions {
 export interface SendMessageOptions extends RequestOptions {
   /** The model the message's turn should run, e.g. `{ id: 'provider/model' }`. */
   model?: ModelConfig | undefined
+  /**
+   * The `seq` of a message already in the session to restart the conversation from (#238):
+   * "edit and resend".
+   *
+   * The session is rewound to that message and the new text appended in one request, so there
+   * is never a moment where the session is rewound but the message is missing — and the
+   * rewrite is atomic in the log, too: one append, one commit. Everything from the edited
+   * message on — the message, its reply, the turn around them — drops out of the transcript
+   * and out of the model's context, as if the edit had been what was sent.
+   *
+   * The server refuses one while a turn is running (409 `conflict_error`): the reply in flight
+   * belongs to the branch being taken back. The `seq` is the message's own position, which
+   * {@link TranscriptMessage.position} carries for a message the client already has.
+   */
+  rewindTo?: EventSeq | undefined
 }
 
 /**
@@ -219,11 +235,17 @@ export function createClient(options: ClientOptions): Client {
     },
 
     sendMessage(sessionId, text, messageOptions) {
+      const rewind = messageOptions?.rewindTo
       return transport.json(storedUserEventParser<UserMessageEvent>(EVENT_TYPES.userMessage), {
         method: 'POST',
         path: sessionEventsPath(sessionId),
         body: {
           events: [
+            // The rewind travels with the message it belongs to, in one array and one request,
+            // so the append stores both or neither (#238).
+            ...(rewind === undefined
+              ? []
+              : [{ type: EVENT_TYPES.sessionRewind, from_seq: rewind } as const]),
             {
               type: EVENT_TYPES.userMessage,
               content: [{ type: 'text', text }],

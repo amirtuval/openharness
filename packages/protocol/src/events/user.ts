@@ -9,8 +9,10 @@ import { EVENT_TYPES, EventSeqSchema, QueuedProcessedAtSchema } from './common'
 /**
  * Events the user sends to a session.
  *
- * These are the only events a client may append; `POST /v1/sessions/{session_id}/events`
- * accepts them and nothing else. A user event is written to the log the moment it is
+ * These are the events a client appends on its own behalf, and the ones a session queues for
+ * the brain: `POST /v1/sessions/{session_id}/events` accepts them, and one instruction more —
+ * a `session.rewind` (#238), whose event the server writes. A user event is written to the
+ * log the moment it is
  * accepted and is never modified after that (D9, issue #46): it is stored as written — with
  * `processed_at: null` — and the claim the brain takes on it is a fact recorded beside it,
  * so a read derives the `processed_at` it reports from the claim that took the event. `null`

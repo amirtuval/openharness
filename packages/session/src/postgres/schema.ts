@@ -138,10 +138,15 @@ export interface EventClaimsTable {
  */
 export interface EventSupersessionsTable {
   session_id: string
-  /** The first replaced `seq` — the reply's `event_start`. */
+  /** The first replaced `seq` — the reply's `event_start`, or the edited `user.message`. */
   from_seq: number
-  /** The last replaced `seq` — the reply's final `event_delta`. */
+  /** The last replaced `seq` — the reply's final `event_delta`, or the log's end at a rewind. */
   to_seq: number
+  /**
+   * What the range covers (#238): `chunks` for a reply's range, `rewind` for a
+   * `session.rewind`'s. Only `rewind` ranges cover events that are not chunks.
+   */
+  kind: string
   /** The event that carries the range; primary key, so a range is recorded once. */
   by_event_id: string
   /** The superseding event's own `seq`; strictly after `to_seq`. */

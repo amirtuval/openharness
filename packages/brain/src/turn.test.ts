@@ -88,7 +88,7 @@ function overloaded(): Error {
 }
 
 /** Whether an appendable event opens a model-request span. */
-function isSpanStart(event: AppendableEvent): boolean {
+function isSpanStart(event: { readonly type: string }): boolean {
   return event.type === EVENT_TYPES.modelRequestStart
 }
 
@@ -1279,6 +1279,56 @@ describe('runTurn', () => {
         message: `Rate limited for key ${REDACTED_PLACEHOLDER} (…${REDACTED_PLACEHOLDER}).`,
       },
     })
+  })
+
+  it('never shows the model what a rewind replaced (#238)', async () => {
+    const { store, sessionId } = await newSession()
+    // A finished exchange: a message, and the reply that answered it.
+    const [original] = await store.appendEvents(sessionId, [
+      makeUserMessage('write a haiku about rain'),
+    ])
+    const start = spanStartOf(
+      (
+        await store.appendEvents(sessionId, [
+          makeStatusRunning(),
+          spanStart([original?.id ?? newEventId()], TEST_MODEL_ID),
+        ])
+      )[1],
+    )
+    await store.appendEvents(sessionId, [
+      { type: EVENT_TYPES.agentMessage, content: [{ type: 'text', text: 'rain, on the window' }] },
+      makeModelRequestEnd(start),
+      { type: EVENT_TYPES.sessionStatusIdle, stop_reason: { type: 'end_turn' } },
+    ])
+
+    // The reader edits the message: the session restarts from it and the edit follows it.
+    await store.appendEvents(sessionId, [
+      { type: EVENT_TYPES.sessionRewind, from_seq: original?.seq ?? 0 },
+      makeUserMessage('write a haiku about snow'),
+    ])
+
+    const { factory, calls } = mockModel({ text: ['snow, on the window'] })
+    const outcome = await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+    })
+
+    expect(outcome).toEqual({ outcome: 'idle' })
+    expect(calls).toHaveLength(1)
+    // The prompt is the conversation as the reader left it: their edit, and nothing of the
+    // branch the edit replaced — the original message and its reply are not history the brain
+    // can see, whatever the raw log still holds.
+    expect(readPrompt(calls[0]!)).toEqual([
+      { role: 'system', text: 'You are a concise technical assistant.' },
+      { role: 'user', text: 'write a haiku about snow' },
+    ])
+    const read = await logOf(store, sessionId)
+    expect(read.some((event) => JSON.stringify(event).includes('rain'))).toBe(false)
+
+    // The rewind is not a message either: the prompt has one user turn, and the reply the
+    // turn stored follows it.
+    expect(textOf((await rawLogOf(store, sessionId)).at(-3))).toBe('snow, on the window')
   })
 
   it('stops at a fenced write and writes nothing more', async () => {

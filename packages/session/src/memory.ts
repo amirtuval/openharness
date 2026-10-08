@@ -26,6 +26,7 @@ import {
   type Session,
   type SessionId,
   type StoredEvent,
+  type Supersedes,
   type Timestamp,
   type UpdateAgentRequest,
   type UserEvent,
@@ -50,11 +51,13 @@ import {
   SessionNotFoundError,
 } from './errors'
 import {
+  assertRewinds,
   carriesConsumes,
   cutoffOf,
-  isSupersededChunk,
+  isSuperseded,
   isUserEventType,
   supersessionsOf,
+  type AppendedEvent,
   type SupersessionRecord,
 } from './events'
 import { deepFreeze } from './freeze'
@@ -420,7 +423,7 @@ export class InMemorySessionStore implements SessionStore {
     let events = record.events.map((entry) => entry.event)
     if (options.includeSuperseded !== true) {
       const ranges = this.#supersessions.get(sessionId)
-      events = events.filter((event) => !isSupersededChunk(event, ranges))
+      events = events.filter((event) => !isSuperseded(event, ranges))
     }
     if (cursor !== null) {
       events = events.filter((event) =>
@@ -445,10 +448,15 @@ export class InMemorySessionStore implements SessionStore {
   getPendingUserEvents(sessionId: SessionId): Promise<UserEvent[]> {
     const record = this.#requireSession(sessionId)
     // Pending is "no claim", not "no `processed_at`": the claim is the fact, and the
-    // timestamp a reader sees is derived from it.
+    // timestamp a reader sees is derived from it. A superseded event is neither: a message a
+    // rewind replaced (#238) is not waiting for an answer and never will be.
+    const ranges = this.#supersessions.get(sessionId)
     const pending = record.events
       .map((entry) => entry.event)
-      .filter((event): event is UserEvent => isUserEvent(event) && !this.#claims.has(event.id))
+      .filter(
+        (event): event is UserEvent =>
+          isUserEvent(event) && !this.#claims.has(event.id) && !isSuperseded(event, ranges),
+      )
       .map((event) => this.#share(event))
     return resolved(pending)
   }
@@ -473,7 +481,7 @@ export class InMemorySessionStore implements SessionStore {
       }
       const kept: EventRecord[] = []
       for (const entry of record.events) {
-        if (isSupersededChunk(entry.event, ranges) && entry.createdAtMs < cutoffMs) {
+        if (isSuperseded(entry.event, ranges) && entry.createdAtMs < cutoffMs) {
           // One of this store's two deletions, beside `deleteSession`. The id goes back into
           // the free pool with the row, exactly as deleting the row does in Postgres — and no
           // reader is affected, because replay already skipped the chunk.
@@ -660,36 +668,51 @@ export class InMemorySessionStore implements SessionStore {
    *
    * Build first, commit second: an event this store refuses — one the protocol schema rejects,
    * an id that is not an event id or one the log already holds, a `consumes` id that is not a
-   * pending user event of this session, or a `supersedes` range that does not fit — leaves the
+   * pending user event of this session, a `supersedes` range that does not fit, or a rewind
+   * whose `from_seq` is not a still-visible `user.message` of this session (#238) — leaves the
    * log exactly as it was, because an append is one transaction.
    */
   #append(record: SessionRecord, events: readonly AppendableEvent[], now: number): StoredEvent[] {
     assertEventIds(record.session.id, events)
     const processedAt = timestampAt(now)
-    const stored: StoredEvent[] = []
-    let seq = record.nextSeq
-    for (const input of events) {
+    // The batch as it will be recorded: the id and the `seq` this store gives each event. The
+    // ranges are checked in this shape before anything is built, so a `from_seq` the log
+    // cannot honour is refused as a range rather than as a malformed event — and the stored
+    // events follow only once the batch is known to be usable.
+    const appended: AppendedEvent[] = events.map((input, index) => ({
+      ...input,
+      id: input.id ?? newEventId(now),
+      seq: record.nextSeq + index,
+    }))
+    for (const event of appended) {
       // The event's own id when it brought one — the one its previews carried — and a fresh
       // one otherwise. Either way the id is checked against the whole log before anything is
       // written, so a batch with a taken id is refused whole.
-      const id = input.id ?? newEventId(now)
-      if (this.#eventIds.has(id)) {
-        throw new DuplicateEventIdError(record.session.id, id)
+      if (this.#eventIds.has(event.id)) {
+        throw new DuplicateEventIdError(record.session.id, event.id)
       }
-      stored.push(storedEventFrom(input, { id, seq, processedAt }))
-      seq += 1
     }
+    const recorded = this.#supersessions.get(record.session.id) ?? []
+    assertRewinds(appended, (at) => {
+      const event = eventAtSeq(record, at)
+      return event === undefined
+        ? undefined
+        : { type: event.type, superseded: isSuperseded(event, recorded) }
+    })
+    const stored = appended.map((event) =>
+      storedEventFrom(event, { id: event.id, seq: event.seq, processedAt }),
+    )
     // Everything this batch records beside the events is checked first, so a batch that cannot
-    // be recorded whole is refused whole — nothing stored, nothing claimed.
+    // be recorded whole is refused whole — nothing stored, nothing claimed, no range recorded.
     const claims = this.#claimsFor(record, stored, now)
-    const supersessions = supersessionsOf(stored, now)
+    const supersessions = supersessionsOf(appended, now)
     for (const event of stored) {
       // Frozen before it reaches the log: the store's own state is immutable too, not only the
       // copies it hands out.
       record.events.push({ event: deepFreeze(event), createdAtMs: now })
       this.#eventIds.add(event.id)
     }
-    record.nextSeq = seq
+    record.nextSeq += events.length
     for (const claim of claims) {
       this.#claims.set(claim.eventId, {
         claimedAtMs: claim.claimedAtMs,
@@ -745,7 +768,10 @@ export class InMemorySessionStore implements SessionStore {
           namedHere.has(consumed) ||
           target === undefined ||
           !isUserEvent(target) ||
-          this.#claims.has(consumed)
+          this.#claims.has(consumed) ||
+          // A message a rewind replaced (#238) answers nothing: nothing outside a range may
+          // claim into it.
+          isSuperseded(target, this.#supersessions.get(record.session.id))
         ) {
           conflicts.push(consumed)
           continue
@@ -797,8 +823,12 @@ export class InMemorySessionStore implements SessionStore {
 
   /** Whether a session has work waiting: a pending user event, or an open turn. */
   #needsWork(record: SessionRecord): boolean {
+    const ranges = this.#supersessions.get(record.session.id)
     const pending = record.events.some(
-      (entry) => isUserEvent(entry.event) && !this.#claims.has(entry.event.id),
+      (entry) =>
+        isUserEvent(entry.event) &&
+        !this.#claims.has(entry.event.id) &&
+        !isSuperseded(entry.event, ranges),
     )
     return pending || turnStateOf(record).state !== 'idle'
   }
@@ -1053,11 +1083,40 @@ function matchesOwner(resource: { readonly owner_id?: UserId }, options: OwnerSc
  */
 function storedEventFrom(input: AppendableEvent, assigned: AssignedEventFields): StoredEvent {
   return StoredEventSchema.parse({
-    ...input,
+    ...storedPayload(input, assigned),
     id: assigned.id,
     seq: assigned.seq,
     processed_at: isUserEventType(input.type) ? null : assigned.processedAt,
   })
+}
+
+/**
+ * The body of the event to store: the caller's, with the one field the store fills in.
+ *
+ * A `session.rewind` (#238) arrives as the message the session restarts from; how far the
+ * restart reaches is the log's own answer, and the event being written right behind the end
+ * of the log is what makes it `seq - 1`. That range is what the stored event records, so a
+ * reader never has to work it out.
+ */
+function storedPayload(
+  input: AppendableEvent,
+  assigned: AssignedEventFields,
+): AppendableEvent | StoredRewindBody {
+  if (input.type === EVENT_TYPES.sessionRewind) {
+    return { type: input.type, supersedes: { from_seq: input.from_seq, to_seq: assigned.seq - 1 } }
+  }
+  return input
+}
+
+/** A stored rewind's body: the type, and the range the store recorded for it (#238). */
+interface StoredRewindBody {
+  readonly type: string
+  readonly supersedes: Supersedes
+}
+
+/** The stored event at a `seq` of this log, or `undefined` when the log has none. */
+function eventAtSeq(record: SessionRecord, seq: number): StoredEvent | undefined {
+  return record.events.find((entry) => entry.event.seq === seq)?.event
 }
 
 /** Whether a stored event is a user event. */
