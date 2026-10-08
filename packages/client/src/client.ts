@@ -28,6 +28,7 @@ import {
   sessionEventsPath,
   type SessionsResource,
 } from './resources/sessions'
+import { createUsageResource, type UsageResource } from './resources/usage'
 
 /**
  * The openharness client: typed access to the API, in a browser or in Node.
@@ -162,6 +163,12 @@ export interface Client {
   readonly preferences: PreferencesResource
 
   /**
+   * What was spent (epic #245, A2; issue #247): one session's totals, and the caller's own
+   * usage over a date range, both priced from the model catalog's rates when they are read.
+   */
+  readonly usage: UsageResource
+
+  /**
    * The signed-in user: `GET /v1/me`.
    *
    * The identity every request is scoped to, and the proof the CLI has a usable token —
@@ -225,6 +232,7 @@ export function createClient(options: ClientOptions): Client {
     models: createModelsResource(transport),
     auth: createAuthResource(transport),
     preferences: createPreferencesResource(transport),
+    usage: createUsageResource(transport),
 
     me(requestOptions) {
       return transport.json(GetMeResponseSchema, {

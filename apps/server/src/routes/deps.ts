@@ -2,6 +2,7 @@ import type { SessionStore } from '@openharness/session'
 
 import type { SocialProviderName } from '../auth-profile'
 import type { ModelCatalog } from '../catalog/catalog'
+import type { UsageReader } from '../usage'
 import type { DefaultModelPicker } from '../default-model'
 import type { SessionScheduler } from '../scheduler'
 import type { SessionRevocations } from '../session-watch'
@@ -34,6 +35,11 @@ export interface RouteDeps {
    * clear a user's default, and the preferences route tells it a choice was the user's own.
    */
   readonly defaultModel: DefaultModelPicker
+  /**
+   * What a session and a user spent (epic #245, A2; issue #247): the two usage routes read the
+   * log through this, and it holds the model catalog's prices.
+   */
+  readonly usage: UsageReader
   /** The SSE keepalive interval; tests shorten it. */
   readonly sseKeepaliveMs?: number
   /** The re-check interval of the long-lived routes (A2/#76); tests shorten it. */

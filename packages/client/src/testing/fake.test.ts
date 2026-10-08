@@ -14,6 +14,7 @@ import type { StoredEvent, StreamEvent, UserEventInput } from '@openharness/prot
 import {
   fixtureTimestamp,
   makeModelEntry,
+  makeSession,
   makeUserPreferences,
 } from '@openharness/protocol/fixtures'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -22,7 +23,7 @@ import { createClient, type SendMessageOptions } from '../client'
 import { ApiError, AuthenticationError } from '../errors'
 import { initialTranscriptState, reduceTranscriptAll, type TranscriptState } from '../transcript'
 import { createMockFetch, sseLines, sseResponse } from '../test-support/mock-fetch'
-import { FAKE_SESSION_TOKEN, createFakeClient, type FakeClient } from './index'
+import { FAKE_MODEL_USAGE, FAKE_SESSION_TOKEN, createFakeClient, type FakeClient } from './index'
 
 afterEach(() => {
   // The device-flow timing test runs on fake timers; nothing else may inherit them.
@@ -78,6 +79,7 @@ describe('the fake client', () => {
       EVENT_TYPES.eventDelta,
       EVENT_TYPES.agentMessage,
       EVENT_TYPES.modelRequestEnd,
+      EVENT_TYPES.sessionUsage,
       EVENT_TYPES.sessionStatusIdle,
     ])
 
@@ -86,7 +88,7 @@ describe('the fake client', () => {
     // without a position, and this turn has none.)
     expect(events.every(isStoredEvent)).toBe(true)
     expect(events.filter(isStoredEvent).map((event) => event.seq)).toEqual([
-      1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
     ])
     const message = events.find((event) => event.type === EVENT_TYPES.agentMessage)
     expect(message).toMatchObject({
@@ -218,6 +220,7 @@ describe('the fake client', () => {
       EVENT_TYPES.eventDelta,
       EVENT_TYPES.agentMessage,
       EVENT_TYPES.modelRequestEnd,
+      EVENT_TYPES.sessionUsage,
       EVENT_TYPES.sessionStatusIdle,
     ])
     // The failed span says why it ended; the retry answered.
@@ -298,6 +301,8 @@ describe('the fake client', () => {
       EVENT_TYPES.modelRequestStart,
       EVENT_TYPES.eventStart,
     ])
+    // An interrupted request adds no running totals: it closes its span with nothing to add
+    // (#247), so the pair of events after the reply is the span end and the idle.
     expect(types.slice(-3)).toEqual([
       EVENT_TYPES.agentMessage,
       EVENT_TYPES.modelRequestEnd,
@@ -928,6 +933,7 @@ describe('the fake rewinds a session (#238)', () => {
       EVENT_TYPES.modelRequestStart,
       EVENT_TYPES.agentMessage,
       EVENT_TYPES.modelRequestEnd,
+      EVENT_TYPES.sessionUsage,
       EVENT_TYPES.sessionStatusIdle,
     ])
 
@@ -1321,6 +1327,7 @@ describe("the fake's authentication", () => {
           name: 'Claude Sonnet 5',
           context_window: 200_000,
           max_output_tokens: 64_000,
+          cost: { input: 2, output: 10, cache_read: 0.2, cache_write: 2.5 },
           source: 'provider',
         },
         {
@@ -1329,6 +1336,7 @@ describe("the fake's authentication", () => {
           name: 'GPT-4.1 mini',
           context_window: 128_000,
           max_output_tokens: 16_000,
+          cost: null,
           source: 'provider',
         },
       ],
@@ -1516,3 +1524,113 @@ async function replayThroughClient(
   await iterating
   return reduceTranscriptAll(initialTranscriptState(), collecting)
 }
+
+describe('the fake’s usage reads (#247)', () => {
+  const PRICED = 'anthropic/claude-sonnet-5'
+
+  it('answers a session’s totals, per model, priced from its own catalog', async () => {
+    const fake = createFakeClient()
+    fake.respondWith('hello there')
+    await runTurn(fake)
+
+    const usage = await fake.usage.session(fake.session.id)
+    expect(usage.session_id).toBe(fake.session.id)
+    expect(usage.totals).toEqual(FAKE_MODEL_USAGE)
+    expect(usage.by_model).toEqual([
+      {
+        model: PRICED,
+        usage: FAKE_MODEL_USAGE,
+        requests: 1,
+        // The default catalog entry is priced like the real Sonnet rates: 512 in at $2/Mtok
+        // and 32 out at $10/Mtok.
+        cost: usage.cost,
+      },
+    ])
+    expect(usage.cost).toBeCloseTo((512 * 2 + 32 * 10) / 1_000_000, 12)
+  })
+
+  it('answers the totals the transcript derives, so a client reads the same number twice', async () => {
+    const fake = createFakeClient()
+    fake.respondWith('hello there')
+    const { transcript } = await runTurn(fake)
+
+    // The turn wrote a `session.usage` event and the transcript folded it in; the fake's route
+    // folds the same spans. The two are the same numbers by construction (the fake restates
+    // the server's arithmetic), which is what a component test relies on.
+    const fromRoute = await fake.usage.session(fake.session.id)
+    expect(fromRoute.totals).toEqual({
+      input_tokens: transcript.usage?.totals.input,
+      output_tokens: transcript.usage?.totals.output,
+      cache_creation_input_tokens: transcript.usage?.totals.cacheCreation,
+      cache_read_input_tokens: transcript.usage?.totals.cacheRead,
+    })
+  })
+
+  it('says a model nobody prices has no cost, and keeps its tokens', async () => {
+    const fake = createFakeClient({
+      session: makeSession({ model: { id: 'acme/mystery-1' } }),
+      models: [makeModelEntry({ id: 'acme/mystery-1', provider: 'acme', cost: null })],
+    })
+    fake.respondWith('hello there')
+    await runTurn(fake)
+
+    const usage = await fake.usage.session(fake.session.id)
+    expect(usage.cost).toBeNull()
+    expect(usage.by_model[0]?.cost).toBeNull()
+    expect(usage.totals).toEqual(FAKE_MODEL_USAGE)
+  })
+
+  it('groups the caller’s usage by local day in the zone it is given', async () => {
+    // One request, and the fake's timestamps come from its clock: hand it two instants that
+    // are one UTC day and two Kolkata days.
+    let now = new Date('2026-10-08T18:00:00.000Z')
+    const fake = createFakeClient({ now: () => now })
+    fake.respondWith('first')
+    await runTurn(fake)
+    now = new Date('2026-10-08T19:00:00.000Z')
+    fake.respondWith('second')
+    await runTurn(fake)
+
+    const utc = await fake.usage.me({ from: '2026-10-01', to: '2026-10-31', tz: 'UTC' })
+    expect(utc.by_day.map((day) => day.day)).toEqual(['2026-10-08'])
+    expect(utc.by_day[0]?.totals.input_tokens).toBe(1024)
+
+    const ist = await fake.usage.me({
+      from: '2026-10-01',
+      to: '2026-10-31',
+      tz: 'Asia/Kolkata',
+    })
+    expect(ist.by_day.map((day) => day.day)).toEqual(['2026-10-08', '2026-10-09'])
+    expect(ist.by_model.map((entry) => entry.requests)).toEqual([2])
+  })
+
+  it('defaults to the current month, and refuses a zone it does not know', async () => {
+    const now = new Date('2026-10-08T12:00:00.000Z')
+    const fake = createFakeClient({ now: () => now })
+    const usage = await fake.usage.me()
+    expect(usage).toMatchObject({ from: '2026-10-01', to: '2026-10-08', tz: 'UTC' })
+
+    await expect(fake.usage.me({ tz: 'Mars/Phobos' })).rejects.toMatchObject({
+      status: 400,
+      type: 'invalid_request_error',
+    })
+  })
+
+  it('answers an unknown session as the 404 the server answers', async () => {
+    const fake = createFakeClient()
+
+    await expect(fake.usage.session('sesn_01JQZ8R6X9M4V0W7Y2B3C5D6E7')).rejects.toMatchObject({
+      status: 404,
+      type: 'not_found_error',
+    })
+  })
+
+  it('is behind the 401 when the fake is signed out, like every /v1 method', async () => {
+    const fake = createFakeClient({ authenticated: false })
+
+    await expect(fake.usage.session('sesn_01JQZ8R6X9M4V0W7Y2B3C5D6E7')).rejects.toBeInstanceOf(
+      AuthenticationError,
+    )
+    await expect(fake.usage.me()).rejects.toBeInstanceOf(AuthenticationError)
+  })
+})

@@ -10,6 +10,7 @@ import {
   SessionStatusIdleEventSchema,
   SessionStatusRescheduledEventSchema,
   SessionStatusRunningEventSchema,
+  SessionUsageEventSchema,
 } from './session'
 import { ModelRequestEndEventSchema, ModelRequestStartEventSchema } from './span'
 import { StoredEventDeltaSchema, StoredEventStartSchema } from './stream'
@@ -52,12 +53,13 @@ const StoredEventCoreSchema = z.discriminatedUnion('type', [
   ModelRequestStartEventSchema,
   ModelRequestEndEventSchema,
   SessionRewindEventSchema,
+  SessionUsageEventSchema,
 ])
 
 /**
  * Every event a session can store, discriminated on `type`.
  *
- * The ten core members are one discriminated union; the two stored chunks are members too,
+ * The core members are one discriminated union; the two stored chunks are members too,
  * reached first by `type` and then by shape.
  */
 export const StoredEventSchema = z.union([

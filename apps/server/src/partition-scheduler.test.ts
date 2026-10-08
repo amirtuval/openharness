@@ -577,6 +577,7 @@ if (SOURCE === null) {
         EVENT_TYPES.modelRequestStart,
         EVENT_TYPES.agentMessage,
         EVENT_TYPES.modelRequestEnd,
+        EVENT_TYPES.sessionUsage,
         EVENT_TYPES.sessionStatusIdle,
       ])
       expect(repliesIn(await readHistory(store, session.id))).toEqual(['answered once'])
@@ -694,9 +695,12 @@ if (SOURCE === null) {
         EVENT_TYPES.sessionStatusRunning,
         EVENT_TYPES.modelRequestStart,
         EVENT_TYPES.modelRequestEnd,
+        // The recovered turn's own request: its reply, its span end, and the running totals
+        // that ride with it (#247).
         EVENT_TYPES.modelRequestStart,
         EVENT_TYPES.agentMessage,
         EVENT_TYPES.modelRequestEnd,
+        EVENT_TYPES.sessionUsage,
         EVENT_TYPES.sessionStatusIdle,
       ])
       expect(spanErrors(history)).toEqual(['brain_lost', null])

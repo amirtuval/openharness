@@ -779,3 +779,91 @@ describe('the default fetch', () => {
     expect(stub).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('usage (#247)', () => {
+  const totals = {
+    input_tokens: 1000,
+    output_tokens: 200,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+  }
+  const entry = { model: 'anthropic/claude-sonnet-5', usage: totals, requests: 2, cost: 0.0045 }
+
+  it('reads one session’s usage from GET /v1/sessions/{id}/usage', async () => {
+    const usage = {
+      session_id: 'sesn_01JQZ8R6X9M4V0W7Y2B3C5D6E7',
+      totals,
+      cost: 0.0045,
+      by_model: [entry],
+    }
+    const { client, mock } = clientWith(() => jsonResponse(usage))
+
+    await expect(client.usage.session(usage.session_id)).resolves.toEqual(usage)
+    expect(mock.requests[0]?.init?.method).toBe('GET')
+    expect(mock.urlOf(0)).toBe(`${BASE_URL}/v1/sessions/${usage.session_id}/usage`)
+  })
+
+  it('reads the caller’s own usage, with the range and zone it was given', async () => {
+    const usage = {
+      from: '2026-10-01',
+      to: '2026-10-08',
+      tz: 'Asia/Kolkata',
+      totals,
+      cost: 0.0045,
+      by_model: [entry],
+      by_day: [{ day: '2026-10-08', totals, cost: 0.0045 }],
+    }
+    const { client, mock } = clientWith(() => jsonResponse(usage))
+
+    await expect(
+      client.usage.me({ from: '2026-10-01', to: '2026-10-08', tz: 'Asia/Kolkata' }),
+    ).resolves.toEqual(usage)
+    expect(mock.requests[0]?.init?.method).toBe('GET')
+    expect(mock.urlOf(0)).toBe(
+      `${BASE_URL}/v1/me/usage?from=2026-10-01&to=2026-10-08&tz=Asia%2FKolkata`,
+    )
+  })
+
+  it('leaves the parameters off the wire when none were given, so the server defaults apply', async () => {
+    const { client, mock } = clientWith(() =>
+      jsonResponse({
+        from: '2026-10-01',
+        to: '2026-10-08',
+        tz: 'UTC',
+        totals,
+        cost: 0.0045,
+        by_model: [entry],
+        by_day: [],
+      }),
+    )
+
+    await client.usage.me()
+
+    expect(mock.urlOf(0)).toBe(`${BASE_URL}/v1/me/usage`)
+  })
+
+  it('reads an unknown cost as null, never as a number', async () => {
+    const { client } = clientWith(() =>
+      jsonResponse({
+        session_id: 'sesn_01JQZ8R6X9M4V0W7Y2B3C5D6E7',
+        totals,
+        cost: null,
+        by_model: [{ ...entry, cost: null }],
+      }),
+    )
+
+    const usage = await client.usage.session('sesn_01JQZ8R6X9M4V0W7Y2B3C5D6E7')
+    expect(usage.cost).toBeNull()
+    expect(usage.by_model[0]?.cost).toBeNull()
+    expect(usage.totals.input_tokens).toBe(1000)
+  })
+
+  it('propagates another user’s session as the not_found_error it is', async () => {
+    const { client } = clientWith(() => errorResponse(404, 'not_found_error', 'no session'))
+
+    await expect(client.usage.session('sesn_01JQZ8R6X9M4V0W7Y2B3C5D6E7')).rejects.toMatchObject({
+      status: 404,
+      type: 'not_found_error',
+    })
+  })
+})

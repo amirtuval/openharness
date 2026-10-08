@@ -97,6 +97,17 @@ describe('the session’s current model is resolved per request (U3)', () => {
     expect(models).toEqual([TEST_MODEL_ID, SWITCH.id])
     expect(recorded).toEqual([TEST_MODEL_ID, SWITCH.id])
     expect(recordedProviders).toEqual(['anthropic', 'openai'])
+    // The running totals break down by model (#247): the switch is exactly why a session's
+    // usage is not one number — the two models are priced at different rates, so a reader has
+    // to be able to tell which requests ran on which.
+    const totals = (await logOf(store, sessionId)).flatMap((event) =>
+      event.type === EVENT_TYPES.sessionUsage ? [event] : [],
+    )
+    expect(totals).toHaveLength(2)
+    expect(totals[1]?.models.map((entry) => entry.model)).toEqual([TEST_MODEL_ID, SWITCH.id])
+    expect(totals[1]?.input_tokens).toBe(
+      (totals[0]?.input_tokens ?? 0) * 2,
+    )
     // The log is the source of truth and the projection follows it: the session keeps running
     // the switched model.
     expect((await store.getSessionUnscoped(sessionId))?.model).toEqual(SWITCH)

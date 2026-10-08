@@ -141,6 +141,36 @@ const storedSamples = {
     processed_at: '2026-03-15T10:00:00Z',
     supersedes: { from_seq: 1, to_seq: 11 },
   },
+  'session.usage': {
+    id: eventId(),
+    type: 'session.usage',
+    seq: 13,
+    processed_at: '2026-03-15T10:00:00Z',
+    input_tokens: 10,
+    output_tokens: 2,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 4,
+    models: [
+      {
+        model: 'anthropic/claude-sonnet-5',
+        usage: {
+          input_tokens: 6,
+          output_tokens: 2,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 4,
+        },
+      },
+      {
+        model: 'openai/gpt-4.1-mini',
+        usage: {
+          input_tokens: 4,
+          output_tokens: 0,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+        },
+      },
+    ],
+  },
 } as const
 
 describe('stored event schemas', () => {

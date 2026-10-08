@@ -9,9 +9,11 @@ import {
   PutPreferencesRequestSchema,
   SendEventsRequestSchema,
   SessionSchema,
+  SessionUsageSchema,
   UpdateAgentRequestSchema,
   UserMessageEventInputSchema,
   UserPreferencesSchema,
+  UserUsageSchema,
   encodeKeyCursor,
   newAgentId,
   newProviderCredentialId,
@@ -29,6 +31,8 @@ import type {
   ListSessionsResponse,
   ModelEntry,
   ProviderCatalogStatus,
+  SessionUsage,
+  UserUsage,
   ProviderCredential,
   SendEventsResponse,
   Session,
@@ -50,6 +54,14 @@ import { sleep } from '../internal/async'
 import { DeviceLoginError, SLOW_DOWN_INCREMENT_SECONDS } from '../resources/auth'
 import type { DeviceLoginStart, PollDeviceLoginOptions } from '../resources/auth'
 import { FakeBrain, clampLimit, type FakeScript, type RewindRefusal } from './fake-brain'
+import {
+  fakeLocalDay,
+  fakeRequestsOf,
+  fakeUsage,
+  fakeUsageRange,
+  type ModelPriceLookup,
+  type RecordedRequest,
+} from './usage'
 
 export { FAKE_MODEL_USAGE } from './fake-brain'
 export type { FakeFailure, FakeReply, FakeScript } from './fake-brain'
@@ -883,6 +895,62 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
     },
   }
 
+  /**
+   * The usage reads (#247), answered from the fake's own logs.
+   *
+   * The fake restates the server's reads the way it restates every other rule a UI depends on:
+   * pair the spans of a session's log — through the replay read, so a rewound branch is not
+   * counted — price each request with the catalog's rates, and group the caller's requests by
+   * the local day they fell on in `tz`. Cost is computed here and never stored, exactly as the
+   * server computes it.
+   */
+  const priceOf: ModelPriceLookup = (modelId) =>
+    models.find((entry) => entry.id === modelId)?.cost ?? null
+
+  const usageResource: Client['usage'] = {
+    async session(sessionId, requestOptions): Promise<SessionUsage> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      const brain = brains.get(sessionId)
+      if (brain === undefined) {
+        throw new ApiError(404, `No session ${sessionId}.`, { type: 'not_found_error' })
+      }
+      return SessionUsageSchema.parse({
+        session_id: sessionId,
+        ...fakeUsage(fakeRequestsOf(brain), priceOf),
+      })
+    },
+
+    async me(params, requestOptions): Promise<UserUsage> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      const range = fakeUsageRange(params)
+      const inRange: RecordedRequest[] = []
+      const byDay = new Map<string, RecordedRequest[]>()
+      for (const brain of brains.values()) {
+        for (const request of fakeRequestsOf(brain)) {
+          const day = fakeLocalDay(request.at, range.tz)
+          if (day < range.from || day > range.to) {
+            continue
+          }
+          inRange.push(request)
+          byDay.set(day, [...(byDay.get(day) ?? []), request])
+        }
+      }
+      return UserUsageSchema.parse({
+        ...range,
+        ...fakeUsage(inRange, priceOf),
+        by_day: [...byDay]
+          .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+          .map(([day, requests]) => ({ day, ...fakeUsage(requests, priceOf) })),
+      })
+    },
+  }
+
   const fake: FakeClient = {
     // The seeded agent and session are read back through the fake's own maps, not held by
     // reference (issue #106): an update through `agents.update` is visible here at once, and
@@ -900,6 +968,7 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
     sessions: sessionsResource,
     providerCredentials: providerCredentialsResource,
     models: modelsResource,
+    usage: usageResource,
     auth: authResource,
     preferences: preferencesResource,
 

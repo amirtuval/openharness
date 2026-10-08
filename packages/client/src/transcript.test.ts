@@ -8,6 +8,7 @@ import {
   makeSessionDeleted,
   makeSessionRewind,
   makeSessionError,
+  makeSessionUsage,
   makeStatusIdle,
   makeStatusRescheduled,
   makeStatusRunning,
@@ -28,7 +29,12 @@ import {
   selectIsRunning,
   selectLastMessage,
   selectMessages,
+  selectSessionUsage,
   selectStreamingMessage,
+  replyCost,
+  sessionCost,
+  sessionUsageOf,
+  type ModelPriceLookup,
   type TranscriptMessage,
   type TranscriptState,
 } from './transcript'
@@ -100,6 +106,7 @@ describe('reduceTranscript', () => {
       deleted: false,
       model: null,
       pendingRequests: [],
+      usage: null,
     })
   })
 
@@ -692,7 +699,7 @@ describe('per-reply metadata (#201, U1)', () => {
     expect(messageById(state, idA).meta).toEqual({
       model: 'anthropic/claude-sonnet-5',
       durationMs: 2000,
-      usage: { input: 10, output: 4, total: 14 },
+      usage: { input: 10, output: 4, cacheCreation: 0, cacheRead: 0, total: 14 },
     })
   })
 
@@ -746,14 +753,14 @@ describe('per-reply metadata (#201, U1)', () => {
     expect(messageById(beforeEnd, idA).meta).toEqual({
       model: 'anthropic/claude-opus-5-5',
       durationMs: 1000,
-      usage: { input: 10, output: 4, total: 14 },
+      usage: { input: 10, output: 4, cacheCreation: 0, cacheRead: 0, total: 14 },
     })
 
     const state = reduceEvents([failedStart, failedEnd, retryStart, reply, retryEnd])
     expect(messageById(state, idA).meta).toEqual({
       model: 'anthropic/claude-opus-5-5',
       durationMs: 4000,
-      usage: { input: 20, output: 8, total: 28 },
+      usage: { input: 20, output: 8, cacheCreation: 0, cacheRead: 0, total: 28 },
     })
   })
 
@@ -790,7 +797,7 @@ describe('per-reply metadata (#201, U1)', () => {
 
     expect(messageById(state, idA).meta).toEqual({
       durationMs: 2000,
-      usage: { input: 10, output: 4, total: 14 },
+      usage: { input: 10, output: 4, cacheCreation: 0, cacheRead: 0, total: 14 },
     })
   })
 
@@ -802,17 +809,17 @@ describe('per-reply metadata (#201, U1)', () => {
     // Turn 1: one request, 2 s of span, the fixture's tokens.
     expect(metaOf('openharness is an open-source implementation of Managed Agents.')).toEqual({
       durationMs: 2000,
-      usage: { input: 640, output: 24, total: 664 },
+      usage: { input: 640, output: 24, cacheCreation: 0, cacheRead: 0, total: 664 },
     })
     // Turn 3: an interrupt keeps the partial reply, and its span's tokens with it.
     expect(metaOf('Events in a log,')).toEqual({
       durationMs: 3000,
-      usage: { input: 720, output: 6, total: 726 },
+      usage: { input: 720, output: 6, cacheCreation: 0, cacheRead: 0, total: 726 },
     })
     // Turn 4: the failed attempt reported nothing and the retry reported the answer.
     expect(metaOf('MIT.')).toEqual({
       durationMs: 7000,
-      usage: { input: 768, output: 2, total: 770 },
+      usage: { input: 768, output: 2, cacheCreation: 0, cacheRead: 0, total: 770 },
     })
   })
 })
@@ -925,7 +932,7 @@ describe('one reply, five clients (D9 convergence)', () => {
     expect(expected.messages[0]?.meta).toEqual({
       model: 'anthropic/claude-sonnet-5',
       durationMs: 0,
-      usage: { input: 512, output: 64, total: 576 },
+      usage: { input: 512, output: 64, cacheCreation: 0, cacheRead: 0, total: 576 },
     })
     // A client that joined after the span start cannot tie the span end it *did* see to the
     // reply — the end names the request that opened it, which is the event it missed — so the
@@ -1330,5 +1337,212 @@ describe('the state a UI reads', () => {
       'streaming',
       'text',
     ])
+  })
+})
+
+describe('the session’s usage (#247)', () => {
+  const priced: ModelPriceLookup = (modelId) =>
+    modelId === 'anthropic/claude-sonnet-5'
+      ? { input: 2, output: 10, cache_read: 0.2, cache_write: 2.5 }
+      : null
+
+  it('keeps the running totals a session.usage event carries', () => {
+    const snapshot = makeSessionUsage(
+      [
+        {
+          model: 'anthropic/claude-sonnet-5',
+          usage: {
+            input_tokens: 512,
+            output_tokens: 64,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+          },
+        },
+      ],
+      { seq: 10 },
+    )
+    const state = reduceEvents([snapshot])
+
+    // The event carries the totals directly, and the per-model breakdown beside them.
+    expect(state.usage?.totals).toEqual({
+      input: 512,
+      output: 64,
+      cacheCreation: 0,
+      cacheRead: 0,
+    })
+    expect(selectSessionUsage(state).models).toEqual([
+      {
+        model: 'anthropic/claude-sonnet-5',
+        usage: { input: 512, output: 64, cacheCreation: 0, cacheRead: 0 },
+      },
+    ])
+  })
+
+  it('derives the same totals from the spans for a log that has no session.usage', () => {
+    // A session stored before the event existed: the newest one it can have is the spans, and
+    // the fold over them is exactly what the event carries, which is what makes a replay equal
+    // a live stream.
+    const start = makeModelRequestStart({
+      seq: 1,
+      processed_at: fixtureTimestamp(1),
+      model: 'anthropic/claude-sonnet-5',
+    })
+    const reply = makeAgentMessage('hello', { seq: 2, id: idE })
+    const end = makeModelRequestEnd(start, {
+      seq: 3,
+      processed_at: fixtureTimestamp(3),
+      model_usage: {
+        input_tokens: 512,
+        output_tokens: 64,
+        cache_creation_input_tokens: 8,
+        cache_read_input_tokens: 256,
+      },
+    })
+    // The reply is what the derivation reads: its metadata is where the turn's tokens landed.
+    const state = reduceEvents([start, reply, end])
+
+    expect(state.usage).toBeNull()
+    expect(selectSessionUsage(state)).toEqual({
+      totals: { input: 512, output: 64, cacheCreation: 8, cacheRead: 256 },
+      models: [
+        {
+          model: 'anthropic/claude-sonnet-5',
+          usage: { input: 512, output: 64, cacheCreation: 8, cacheRead: 256 },
+        },
+      ],
+    })
+  })
+
+  it('prefers the log’s own totals over the derivation when it has them', () => {
+    // A reply the turn stored whose request reported nothing (a pre-#201 log) would derive to
+    // zero; the event the server wrote is the better answer and is what is read.
+    const start = makeModelRequestStart({ seq: 1, model: 'anthropic/claude-sonnet-5' })
+    const reply = makeAgentMessage('hello', { seq: 2, id: idA })
+    const snapshot = makeSessionUsage(undefined, { seq: 9 })
+    const state = reduceEvents([start, reply, snapshot])
+
+    // `makeSessionUsage` reports the fixtures' tokens, which the reply's spans never did —
+    // so the value read is provably the event's and not the derivation's.
+    expect(selectSessionUsage(state).totals).toEqual({
+      input: 512,
+      output: 64,
+      cacheCreation: 0,
+      cacheRead: 0,
+    })
+    expect(selectSessionUsage(state).models.map((entry) => entry.model)).toEqual([
+      'anthropic/claude-sonnet-5',
+    ])
+  })
+
+  it('prices a session per model, and answers null when a model has no price', () => {
+    const state = reduceEvents([
+      makeSessionUsage(
+        [
+          {
+            model: 'anthropic/claude-sonnet-5',
+            usage: {
+              input_tokens: 1_000_000,
+              output_tokens: 0,
+              cache_creation_input_tokens: 0,
+              cache_read_input_tokens: 0,
+            },
+          },
+        ],
+        { seq: 1 },
+      ),
+    ])
+
+    expect(sessionCost(selectSessionUsage(state), priced)).toBeCloseTo(2, 10)
+    // A model nobody prices makes the whole total unknown, and never cheaper.
+    expect(sessionCost(selectSessionUsage(state), () => null)).toBeNull()
+    expect(
+      sessionCost(selectSessionUsage(state), (id) =>
+        id === 'anthropic/claude-sonnet-5' ? null : null,
+      ),
+    ).toBeNull()
+  })
+
+  it('prices one reply, and answers null when the log or the catalog cannot', () => {
+    const start = makeModelRequestStart({
+      seq: 1,
+      processed_at: fixtureTimestamp(1),
+      model: 'anthropic/claude-sonnet-5',
+    })
+    const reply = makeAgentMessage('hi', { seq: 2, id: idA })
+    const end = makeModelRequestEnd(start, {
+      seq: 3,
+      processed_at: fixtureTimestamp(3),
+      model_usage: {
+        input_tokens: 1000,
+        output_tokens: 100,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      },
+    })
+    const meta = messageById(reduceEvents([start, reply, end]), idA).meta
+
+    // 1,000 input at $2/Mtok and 100 output at $10/Mtok.
+    expect(replyCost(meta, priced)).toBeCloseTo((1000 * 2 + 100 * 10) / 1_000_000, 12)
+    expect(replyCost(meta, () => null)).toBeNull()
+    expect(replyCost(undefined, priced)).toBeNull()
+  })
+
+  it('drops the running totals a rewind took back, falling back to what is left', () => {
+    const start = makeModelRequestStart({
+      seq: 1,
+      processed_at: fixtureTimestamp(1),
+      model: 'anthropic/claude-sonnet-5',
+    })
+    const reply = makeAgentMessage('old reply', { seq: 2, id: idA })
+    const end = makeModelRequestEnd(start, { seq: 3, processed_at: fixtureTimestamp(3) })
+    const message = makeUserMessage('write a haiku', { seq: 4, processed_at: fixtureTimestamp(4) })
+    const snapshot = makeSessionUsage(undefined, { seq: 5 })
+    const rewind = makeSessionRewind({ seq: 6, supersedes: { from_seq: 4, to_seq: 5 } })
+    const edited = makeUserMessage('write a haiku about snow', {
+      seq: 7,
+      processed_at: null,
+      id: idB,
+    })
+
+    const before = reduceEvents([start, reply, end, message, snapshot])
+    expect(before.usage).not.toBeNull()
+
+    const after = reduceEvents([start, reply, end, message, snapshot, rewind, edited])
+    // The totals the rewind replaced counted a branch that is gone: the state starts over, and
+    // the derivation from the messages that survived is what a UI reads until the next request
+    // writes a fresh snapshot.
+    expect(after.usage).toBeNull()
+    expect(selectSessionUsage(after).totals).toEqual({
+      input: 512,
+      output: 64,
+      cacheCreation: 0,
+      cacheRead: 0,
+    })
+    expect(selectSessionUsage(after).models).toEqual([
+      {
+        model: 'anthropic/claude-sonnet-5',
+        usage: { input: 512, output: 64, cacheCreation: 0, cacheRead: 0 },
+      },
+    ])
+  })
+
+  it('derives nothing from a reply the log does not name a model for', () => {
+    // A reply with tokens but no model is in no breakdown: the totals stay the models' sum, so
+    // a reader never sees a total it cannot break down.
+    const message: TranscriptMessage = {
+      id: idC,
+      role: 'agent',
+      parts: [{ type: 'text', text: 'hi' }],
+      text: 'hi',
+      pending: false,
+      streaming: false,
+      position: 1,
+      meta: { usage: { input: 10, output: 2, cacheCreation: 0, cacheRead: 0, total: 12 } },
+    }
+
+    expect(sessionUsageOf([message])).toEqual({
+      totals: { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 },
+      models: [],
+    })
   })
 })

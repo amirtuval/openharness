@@ -13,6 +13,7 @@ const entry = {
   name: 'Claude Sonnet 5',
   context_window: 200_000,
   max_output_tokens: 64_000,
+  cost: { input: 2, output: 10, cache_read: 0.2, cache_write: 2.5 },
   source: 'provider',
 }
 
@@ -50,6 +51,7 @@ describe('ModelEntrySchema', () => {
       'name',
       'context_window',
       'max_output_tokens',
+      'cost',
       'source',
     ] as const) {
       const { [field]: _dropped, ...partial } = entry
@@ -64,6 +66,26 @@ describe('ModelEntrySchema', () => {
     expect(ModelEntrySchema.safeParse({ ...entry, context_window: '200k' }).success).toBe(false)
     expect(ModelEntrySchema.safeParse({ ...entry, max_output_tokens: -1 }).success).toBe(false)
     expect(ModelEntrySchema.safeParse({ ...entry, context_window: 1.5 }).success).toBe(false)
+  })
+
+  it('takes a price, a half-known one, or none at all (#247)', () => {
+    expect(ModelEntrySchema.parse({ ...entry, cost: null }).cost).toBeNull()
+    expect(ModelEntrySchema.safeParse({ ...entry, cost: { input: 0, output: 0 } }).success).toBe(
+      false,
+    )
+    expect(
+      ModelEntrySchema.parse({
+        ...entry,
+        cost: { input: 1, output: 2, cache_read: null, cache_write: null },
+      }).cost,
+    ).toEqual({ input: 1, output: 2, cache_read: null, cache_write: null })
+    // A rate is never negative: a model nobody charges for says `0`, not `-1`.
+    expect(
+      ModelEntrySchema.safeParse({
+        ...entry,
+        cost: { input: -1, output: 2, cache_read: null, cache_write: null },
+      }).success,
+    ).toBe(false)
   })
 })
 

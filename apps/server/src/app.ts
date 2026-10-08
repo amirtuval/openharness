@@ -17,6 +17,7 @@ import { rewriteDevLoginRequest, type BetterAuthInstance } from './auth'
 import { FORWARDED_FOR_HEADER, resolveClientIp, withClientIpHeader } from './client-ip'
 import { emptyRegistry, type ModelRegistry } from './catalog/registry'
 import { DefaultModelPicker } from './default-model'
+import { registryPrices, createUsageReader } from './usage'
 import { createSessionRevocations } from './session-watch'
 import { parseTraceContext, runWithTraceContext } from './observability/trace-context'
 import { noopTracer, type Tracer } from './observability/tracing'
@@ -32,6 +33,7 @@ import {
   type ProviderCredentialDeps,
 } from './routes/provider-credentials'
 import { registerSessionRoutes } from './routes/sessions'
+import { registerUsageRoutes } from './routes/usage'
 import type { SessionScheduler } from './scheduler'
 import { serveWebAsset } from './static'
 
@@ -91,9 +93,10 @@ export interface AppOptions {
    */
   readonly catalog: RouteDeps['catalog']
   /**
-   * Where the automatic default's registry fallback reads model ids (epic #116, U4). The
-   * bundled models.dev snapshot in production — `main.ts` passes the same one the
-   * catalogue was built with — and `emptyRegistry` (no fallback) otherwise.
+   * The registry the automatic default's fallback reads model ids from (epic #116, U4) and the
+   * usage routes read model **prices** from (epic #245, A2; #247). The bundled models.dev
+   * snapshot in production — `main.ts` passes the same one the catalogue was built with — and
+   * `emptyRegistry` (no fallback, no prices) otherwise.
    */
   readonly registry?: ModelRegistry
   /**
@@ -356,6 +359,9 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
   // registry of who is streaming under which session — swept by the store's revocation
   // notifications — and the re-validation the streams run on their own timer.
   const revocations = createSessionRevocations({ store: options.store, logger })
+  // Where a usage read gets its prices. Built once per app over the same registry the catalogue
+  // and the automatic default use, so a model's price is one fact in one place.
+  const registry = options.registry ?? emptyRegistry
   const revalidateSession = async (headers: Headers): Promise<boolean> =>
     (await options.auth.instance.api.getSession({ headers })) !== null
 
@@ -370,9 +376,10 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
     defaultModel: new DefaultModelPicker({
       store: options.store,
       catalog: options.catalog,
-      registry: options.registry ?? emptyRegistry,
+      registry,
       logger,
     }),
+    usage: createUsageReader({ store: options.store, prices: registryPrices(registry) }),
     revocations,
     revalidateSession,
     ...(options.sseKeepaliveMs === undefined ? {} : { sseKeepaliveMs: options.sseKeepaliveMs }),
@@ -400,6 +407,7 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
   registerMeRoutes(app, deps)
   registerAgentRoutes(app, deps)
   registerSessionRoutes(app, deps)
+  registerUsageRoutes(app, deps)
   registerEventRoutes(app, deps)
   registerAiSdkRoutes(app, deps)
   registerProviderCredentialRoutes(app, deps)

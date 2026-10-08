@@ -89,6 +89,7 @@ describe('running a session', () => {
       EVENT_TYPES.modelRequestStart,
       EVENT_TYPES.agentMessage,
       EVENT_TYPES.modelRequestEnd,
+      EVENT_TYPES.sessionUsage,
       EVENT_TYPES.sessionStatusIdle,
     ])
     expect(repliesOf(history)).toEqual(['Hello there'])

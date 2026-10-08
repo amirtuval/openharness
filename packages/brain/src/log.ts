@@ -1,7 +1,10 @@
 import type { SessionStore } from '@openharness/session'
 import { EVENT_TYPES, MAX_PAGE_LIMIT } from '@openharness/protocol'
 import type {
+  EventId,
+  ModelUsage,
   SessionId,
+  SessionModelUsage,
   StoredEvent,
   StoredEventDelta,
   StoredEventStart,
@@ -168,4 +171,90 @@ export function chunkRangeAfter(
     to = event.seq
   }
   return from === null || to === null ? null : { from_seq: from, to_seq: to }
+}
+
+/**
+ * The session's usage so far, folded from its log: every request's tokens summed, one entry per
+ * model (epic #245, A2; issue #247).
+ *
+ * A `span.model_request_end` reports the tokens but not the model — that is on the
+ * `span.model_request_start` it closes — so the fold pairs them by `model_request_start_id` and
+ * attributes each request to the model that served it. Models appear in the order their first
+ * request did, which is the order a reader of the log would name them in.
+ *
+ * The fold is over what {@link readLog} returned, which is the whole log **as a reader sees it**:
+ * a branch a `session.rewind` replaced is not in it, so the requests it contained are not in the
+ * totals — the same rule the rest of the brain follows about an edit. Compaction changes
+ * nothing: it deletes what replay already skips.
+ *
+ * A span end whose start is not in the log (a log trimmed below it, a client's partial view)
+ * contributes its tokens to no model and so to no total; that is the honest reading, since the
+ * totals are what a writer of this event would have written, and every start a brain writes is
+ * in the log it just read.
+ *
+ * @param events the session's log, as {@link readLog} handed it over
+ */
+export function usageByModel(events: readonly StoredEvent[]): SessionModelUsage[] {
+  const modelOf = new Map<EventId, string>()
+  for (const event of events) {
+    if (event.type === EVENT_TYPES.modelRequestStart && event.model !== undefined) {
+      modelOf.set(event.id, event.model)
+    }
+  }
+
+  const totals = new Map<string, ModelUsage>()
+  for (const event of events) {
+    if (event.type !== EVENT_TYPES.modelRequestEnd) {
+      continue
+    }
+    const model = modelOf.get(event.model_request_start_id)
+    if (model === undefined) {
+      continue
+    }
+    totals.set(model, addUsage(totals.get(model), event.model_usage))
+  }
+
+  return [...totals].map(([model, usage]) => ({ model, usage }))
+}
+
+/**
+ * {@link usageByModel}'s fold after one more request.
+ *
+ * The loop writes the running totals right after a request that reported usage, and the log it
+ * folded them from was read *before* that request's span end — so the new request is added here
+ * rather than re-read. The model joins the list where its first request would have, at the end,
+ * which keeps `models` in the order the requests happened.
+ *
+ * @param models the session's tokens per model, as {@link usageByModel} folded them
+ * @param model the model the request ran on
+ * @param usage what it reported
+ */
+export function withRequestUsage(
+  models: readonly SessionModelUsage[],
+  model: string,
+  usage: ModelUsage,
+): SessionModelUsage[] {
+  const known = models.some((entry) => entry.model === model)
+  if (!known) {
+    return [...models.map(copyUsage), { model, usage: { ...usage } }]
+  }
+  return models.map((entry) =>
+    entry.model === model ? { model, usage: addUsage(entry.usage, usage) } : copyUsage(entry),
+  )
+}
+
+/** A usage entry the caller may keep, so the fold never hands out what it holds. */
+function copyUsage(entry: SessionModelUsage): SessionModelUsage {
+  return { model: entry.model, usage: { ...entry.usage } }
+}
+
+/** Two usage reports added up counter by counter. */
+function addUsage(current: ModelUsage | undefined, next: ModelUsage): ModelUsage {
+  return {
+    input_tokens: (current?.input_tokens ?? 0) + next.input_tokens,
+    output_tokens: (current?.output_tokens ?? 0) + next.output_tokens,
+    cache_creation_input_tokens:
+      (current?.cache_creation_input_tokens ?? 0) + next.cache_creation_input_tokens,
+    cache_read_input_tokens: (current?.cache_read_input_tokens ?? 0) + next.cache_read_input_tokens,
+  }
 }

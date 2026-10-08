@@ -52,6 +52,7 @@ function listedOf(models: readonly string[]): ListModelsResponse {
       name: id,
       context_window: null,
       max_output_tokens: null,
+      cost: null,
       source: 'provider' as const,
     })),
     providers: providers.map((provider): ProviderCatalogStatus => ({

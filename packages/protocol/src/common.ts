@@ -55,3 +55,19 @@ export type PageLimit = z.infer<typeof PageLimitSchema>
 export const ListOrderSchema = z.enum(['asc', 'desc'])
 
 export type ListOrder = z.infer<typeof ListOrderSchema>
+
+/**
+ * // extension: a calendar day in a reader's own time zone, as `YYYY-MM-DD` (issue #247).
+ *
+ * Usage is reported per **local** day — "what did I spend today" means the reader's today, not
+ * UTC's — so the usage routes take and answer with days rather than instants, and the zone they
+ * were read in travels beside them. The shape is the date half of an RFC 3339 timestamp, which
+ * is what `Intl`'s `en-CA` locale and `Date.prototype.toISOString().slice(0, 10)` both produce
+ * and what a `date` column answers with.
+ *
+ * It carries no zone of its own: the same day means different instants in different zones,
+ * which is exactly why every response that holds one says which zone it was read in.
+ */
+export const LocalDaySchema = z.iso.date()
+
+export type LocalDay = z.infer<typeof LocalDaySchema>

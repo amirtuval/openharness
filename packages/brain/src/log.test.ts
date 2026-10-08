@@ -2,7 +2,14 @@ import { EVENT_TYPES, newEventId } from '@openharness/protocol'
 import type { StoredEvent } from '@openharness/protocol'
 import { describe, expect, it } from 'vitest'
 
-import { contextView, lastStatusEventType, needsModelRequest, readLog } from './log'
+import {
+  contextView,
+  lastStatusEventType,
+  needsModelRequest,
+  readLog,
+  usageByModel,
+  withRequestUsage,
+} from './log'
 import { newSession } from './testing/harness'
 
 /** A message event, queued or claimed. */
@@ -27,13 +34,32 @@ function reply(seq: number): StoredEvent {
   }
 }
 
-/** A span start, as the log stores one. */
-function spanStart(seq: number): StoredEvent {
+/** A span start, as the log stores one, naming the model that serves the request. */
+function spanStart(seq: number, model?: string): StoredEvent {
   return {
     id: newEventId(),
     type: EVENT_TYPES.modelRequestStart,
     seq,
     processed_at: '2026-03-15T10:00:00.000Z',
+    ...(model === undefined ? {} : { model }),
+  }
+}
+
+/** A span end closing `start`, with the tokens it reported. */
+function spanEnd(seq: number, start: StoredEvent, tokens: number): StoredEvent {
+  return {
+    id: newEventId(),
+    type: EVENT_TYPES.modelRequestEnd,
+    seq,
+    processed_at: '2026-03-15T10:00:00.000Z',
+    model_request_start_id: start.id,
+    model_usage: {
+      input_tokens: tokens,
+      output_tokens: tokens / 2,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+    },
+    is_error: null,
   }
 }
 
@@ -140,5 +166,115 @@ describe('needsModelRequest', () => {
   it('has nothing to answer when the only message is still queued', () => {
     // Which is why the loop builds its view first: an unclaimed message is the next turn's.
     expect(needsModelRequest(contextView([message(1, false)]))).toBe(false)
+  })
+})
+
+describe('usageByModel', () => {
+  it('folds every request onto the model its span start named', () => {
+    const first = spanStart(1, 'anthropic/claude-sonnet-5')
+    const second = spanStart(3, 'anthropic/claude-sonnet-5')
+    const switched = spanStart(5, 'openai/gpt-5.1')
+    const events = [
+      message(0, true),
+      first,
+      spanEnd(2, first, 100),
+      second,
+      spanEnd(4, second, 200),
+      switched,
+      spanEnd(6, switched, 8),
+    ]
+    expect(usageByModel(events)).toEqual([
+      {
+        model: 'anthropic/claude-sonnet-5',
+        usage: {
+          input_tokens: 300,
+          output_tokens: 150,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+        },
+      },
+      {
+        model: 'openai/gpt-5.1',
+        usage: {
+          input_tokens: 8,
+          output_tokens: 4,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+        },
+      },
+    ])
+  })
+
+  it('is empty for a log with no request in it', () => {
+    expect(usageByModel([message(1, true), reply(2)])).toEqual([])
+    // A span still in flight reports nothing yet: an end is what carries tokens.
+    expect(usageByModel([spanStart(1, 'anthropic/claude-sonnet-5')])).toEqual([])
+  })
+
+  it('leaves out a request whose model the log does not name', () => {
+    // A span start from before the `model` field existed names no model, and a span end whose
+    // start is not in the log names nothing either. Neither invents a model to bill — the
+    // totals are per model, and a request that cannot be attributed to one is not in them.
+    const unnamed = spanStart(1)
+    const named = spanStart(2, 'anthropic/claude-sonnet-5')
+    const orphanEnd = spanEnd(3, { ...named, id: newEventId() }, 100)
+    const events = [unnamed, spanEnd(2, unnamed, 7), named, orphanEnd, spanEnd(5, named, 5)]
+    expect(usageByModel(events)).toEqual([
+      {
+        model: 'anthropic/claude-sonnet-5',
+        usage: {
+          input_tokens: 5,
+          output_tokens: 2.5,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+        },
+      },
+    ])
+  })
+})
+
+describe('withRequestUsage', () => {
+  const usage = {
+    input_tokens: 10,
+    output_tokens: 4,
+    cache_creation_input_tokens: 2,
+    cache_read_input_tokens: 1,
+  }
+
+  it('adds a request to the model it ran on, keeping the order of first appearance', () => {
+    expect(
+      withRequestUsage(
+        [{ model: 'anthropic/claude-sonnet-5', usage }],
+        'anthropic/claude-sonnet-5',
+        { ...usage, input_tokens: 1 },
+      ),
+    ).toEqual([
+      {
+        model: 'anthropic/claude-sonnet-5',
+        // Every counter adds: the same request counted twice.
+        usage: {
+          input_tokens: 11,
+          output_tokens: 8,
+          cache_creation_input_tokens: 4,
+          cache_read_input_tokens: 2,
+        },
+      },
+    ])
+  })
+
+  it('adds the model a switch introduced after the ones already there', () => {
+    expect(
+      withRequestUsage([{ model: 'anthropic/claude-sonnet-5', usage }], 'openai/gpt-5.1', usage),
+    ).toEqual([
+      { model: 'anthropic/claude-sonnet-5', usage },
+      { model: 'openai/gpt-5.1', usage },
+    ])
+  })
+
+  it('hands back copies: the fold never shares what it holds', () => {
+    const held = [{ model: 'anthropic/claude-sonnet-5', usage }]
+    const next = withRequestUsage(held, 'anthropic/claude-sonnet-5', usage)
+    expect(next[0]?.usage).not.toBe(held[0]?.usage)
+    expect(Object.isFrozen(next)).toBe(false)
   })
 })

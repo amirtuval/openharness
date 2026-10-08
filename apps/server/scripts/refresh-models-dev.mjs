@@ -6,8 +6,8 @@
  * (`src/catalog/models-dev.json`, bundled into `dist/`), never from the network (C2's rule,
  * unchanged). This script is the one place that reaches out: it fetches models.dev once,
  * keeps the 11 providers this server can validate a key for
- * (`VALIDATABLE_PROVIDERS`), reduces each model to the four fields the catalogue's join
- * reads, and writes the file back.
+ * (`VALIDATABLE_PROVIDERS`), reduces each model to the fields the catalogue's join and the
+ * usage routes read — name, limits and list prices — and writes the file back.
  *
  * Run it by hand when the data should move — `yarn workspace @openharness/server
  * catalog:refresh` — and commit the diff. Nothing runs it at build, test or boot time, so a
@@ -50,8 +50,39 @@ function today() {
 }
 
 /**
+ * One model's prices, or nothing when models.dev has none for it: US dollars per **million**
+ * tokens, straight from `cost.{input,output,cache_read,cache_write}`.
+ *
+ * models.dev publishes rates per million tokens and only some of them: `input` and `output` for
+ * every priced model, and the two cache rates for the models whose provider charges them
+ * separately (Anthropic has all four; a provider with no prompt-cache pricing has none). A rate
+ * that is not a number is left out rather than written as `0` — a missing rate is "nobody
+ * published one", and the server's pricing reads that as unknown rather than free (`ModelCost`
+ * in `@openharness/protocol`). A model with no `input` or no `output` has no price at all and
+ * gets no `cost` entry, which is what makes its requests report tokens and no cost (epic #245).
+ */
+function reduceCost(model) {
+  const cost = model.cost
+  if (cost === undefined || cost === null) {
+    return undefined
+  }
+  if (typeof cost.input !== 'number' || typeof cost.output !== 'number') {
+    return undefined
+  }
+  const reduced = { input: cost.input, output: cost.output }
+  if (typeof cost.cache_read === 'number') {
+    reduced.cacheRead = cost.cache_read
+  }
+  if (typeof cost.cache_write === 'number') {
+    reduced.cacheWrite = cost.cache_write
+  }
+  return reduced
+}
+
+/**
  * One model, reduced to what the catalogue's registry join reads: its name, its context
- * window and its output limit, straight from models.dev's `name` and `limit.{context,output}`.
+ * window, its output limit and its list price, straight from models.dev's `name`,
+ * `limit.{context,output}` and `cost`.
  *
  * **No chat verdict.** models.dev carries no chat flag, and the fields it does carry are not
  * one: `modalities.output` is `["text"]` even for `text-embedding-3-small`, and `family` is a
@@ -66,6 +97,10 @@ function reduceModel(model) {
   }
   if (typeof model.limit?.output === 'number') {
     reduced.maxOutput = model.limit.output
+  }
+  const cost = reduceCost(model)
+  if (cost !== undefined) {
+    reduced.cost = cost
   }
   return reduced
 }

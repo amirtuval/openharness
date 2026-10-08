@@ -104,6 +104,8 @@ describe('user isolation (A4)', () => {
         },
       ],
       ['GET', `${API_VERSION_PREFIX}/sessions/${a.session.id}/events`],
+      // What A spent is A's too (#247): the usage of a session B does not own is the same 404.
+      ['GET', `${API_VERSION_PREFIX}/sessions/${a.session.id}/usage`],
       ['GET', `${API_VERSION_PREFIX}/sessions/${a.session.id}/events/stream`],
       [
         'POST',
