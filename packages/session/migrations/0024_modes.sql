@@ -1,4 +1,4 @@
--- 0023_modes.sql — per-user *modes* and the mode a session follows (epic #245, A4b; decision
+-- 0024_modes.sql — per-user *modes* and the mode a session follows (epic #245, A4b; decision
 -- M6).
 --
 -- A mode is a user's own named preset — a model, a reasoning effort and a system-prompt
@@ -22,16 +22,21 @@
 -- package stores what it is given.
 --
 -- `sessions.mode` is the mode a chat follows, or NULL for a chat without one, and deliberately
+-- **The cap is a count then an insert.** The store takes a per-owner `pg_advisory_xact_lock`
+-- inside the creating transaction before it counts, so two concurrent creates racing for the
+-- last of MAX_MODES_PER_USER slots cannot both read a count below it and both insert. The lock
+-- is keyed by the owner, so two users' creates never wait on each other.
+--
 -- carries **no foreign key**: deleting a mode must not delete a session that ran it, and the
 -- store nulls the column itself, in the same transaction as the mode's deletion, so a chat
 -- keeps running on the model it last ran (`sessions.model`). It is `C`-collated like the other
 -- id columns, and a session created before this migration simply has NULL — there is nothing
 -- to backfill, because modes did not exist.
 --
--- **Migration number.** 0023 is the next free number on this branch's base (epic #245, branch
--- `a4a-reasoning-effort`, which already carries `0022_credential_name.sql` from the
--- named-credentials step of the same stack). Every file runs on every `migrate()` in name
--- order, so the numbers have to be unique and ordered.
+-- **Migration number.** 0024 is the next free number on this branch's base (epic #245, branch
+-- `a3d-vertex`, whose own tip already carries `0022_credential_name.sql` and
+-- `0023_credential_details.sql` from the credential steps of the same stack). Every file runs
+-- on every `migrate()` in name order, so the numbers have to be unique and ordered.
 
 create table if not exists modes (
   id text collate "C" primary key,

@@ -381,6 +381,33 @@ export function runSessionStoreConformance(
         expect((await store.getMode(second.id, { ownerId: OWNER_A }))?.name).toBe('fast')
       })
 
+      it('caps a user at MAX_MODES_PER_USER modes however many creates race for the last one', async () => {
+        // The cap is a count followed by an insert, so the store has to make the two one
+        // critical section — a transaction alone does not, and two creates at the limit would
+        // each read a count below it and both insert (the Postgres store takes a per-owner
+        // advisory lock first, and the in-memory store is serial by construction). Fired at
+        // once and past the cap, exactly the cap succeed and the rest are refused.
+        const { store } = await setup()
+        const attempts = MAX_MODES_PER_USER + 5
+        const results = await Promise.allSettled(
+          // Deferred to a microtask: the in-memory store refuses synchronously (its whole
+          // body runs before it answers), so a bare call would throw while the array is being
+          // built rather than settling as a rejection.
+          Array.from({ length: attempts }, (_, index) =>
+            Promise.resolve().then(() => store.createMode(modeInput(`raced ${index}`), OWNER_A)),
+          ),
+        )
+
+        const created = results.filter((result) => result.status === 'fulfilled')
+        const refused = results.filter((result) => result.status === 'rejected')
+        expect(created).toHaveLength(MAX_MODES_PER_USER)
+        expect(refused).toHaveLength(attempts - MAX_MODES_PER_USER)
+        for (const result of refused) {
+          expect(result.reason).toBeInstanceOf(ModeLimitReachedError)
+        }
+        expect(await store.listModes({ ownerId: OWNER_A })).toHaveLength(MAX_MODES_PER_USER)
+      })
+
       it('caps a user at MAX_MODES_PER_USER modes', async () => {
         const { store } = await setup()
         for (let index = 0; index < MAX_MODES_PER_USER; index += 1) {

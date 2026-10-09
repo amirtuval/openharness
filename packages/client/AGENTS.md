@@ -89,7 +89,7 @@ src/
 | `AgentsResource`, `SessionsResource`, `SessionEventsResource`                                   | the resource interfaces                                                                                                                                                          |
 | `ProviderCredentialsResource`                                                                   | `providerCredentials.list/put/delete`                                                                                                                                            |
 | `ModelsResource`                                                                                | `models.list`: the chat models the caller's keys can use (epic #92)                                                                                                              |
-| `ModesResource`                                                                                | `modes.create/get/list/update/delete`: the caller's named presets (#245, M6)                                                                                 |
+| `ModesResource`                                                                                 | `modes.create/get/list/update/delete`: the caller's named presets (#245, M6)                                                                                                     |
 | `PreferencesResource`                                                                           | `preferences.get/put`: the caller's stored default model (#111)                                                                                                                  |
 | `UsageResource`                                                                                 | `usage.session(id)` and `usage.me(range)`: what was spent, priced on the server (#247)                                                                                           |
 | `AuthResource`                                                                                  | `auth.startDeviceLogin/pollDeviceLogin/signOut`                                                                                                                                  |
@@ -109,6 +109,7 @@ src/
 | `CREDENTIAL_TARGETS`, `CredentialTarget`                                                        | every provider _and_ named credential type a form or a tile offers (#245 A3a)                                                                                                    |
 | `credentialDisplayName()`, `credentialTargetFor()`, `credentialFacts()`                         | what to call a stored credential, which tile its row reopens, and the non-secret facts its row shows (a Bedrock credential's region, a Vertex one's email, project and location) |
 | `PACKAGE_NAME`                                                                                  | the package name; a dependent's cheap proof that the import resolved                                                                                                             |
+
 ### `@openharness/client/testing`
 
 | export                                                                      | what it is                                                                                 |

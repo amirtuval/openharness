@@ -730,6 +730,13 @@ polls it once, and stores its `FAKE_SESSION_TOKEN` in the real credentials file 
 `XDG_CONFIG_HOME` at a scratch directory when you do that by hand. `oh logout` signs the fake
 out; `oh whoami` reads what the login stored.
 
+**No provider credential is seeded by default**, on purpose: a signed-in account with no
+credentials is exactly what the _first-run_ flow — the connect-a-provider screen — is for, and
+seeding a key per provider would make it unreachable in fake mode. `OPENHARNESS_FAKE_CREDENTIALS=1`
+(beside `OPENHARNESS_FAKE=1`) seeds one credential per provider the catalog lists **and** the
+`DEV_MODES` modes — the account that can actually run a mode, since a mode's model is usable
+only when its provider has a credential (#245, M6).
+
 `OPENHARNESS_FAKE_SIGNED_OUT=1` (beside `OPENHARNESS_FAKE=1`) makes the fake start **signed
 out**, which is how the sign-in a chat offers with no session — and the 401 a stale one gets —
 is seen without a server and a second terminal (#210). The seeding happens first and the

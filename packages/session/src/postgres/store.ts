@@ -327,10 +327,9 @@ export class PostgresSessionStore implements SessionStore {
       updated_at: instant(now),
     }
     return this.#db.transaction().execute(async (trx) => {
-      // The cap is checked and the row written in one transaction. Two concurrent creates at
-      // the limit could still both pass the count (each reads before either writes); the name
-      // uniqueness below is enforced by the database, and the cap is a courtesy that a
-      // sequential caller cannot slip past.
+      // The per-owner lock first, so the count below and the insert it guards are one critical
+      // section: two creates at the cap cannot both read a count below it and both insert.
+      await sql`select pg_advisory_xact_lock(hashtext(${MODE_CREATE_LOCK + ownerId}))`.execute(trx)
       const existing = await trx
         .selectFrom('modes')
         .select(({ fn }) => fn.countAll<string>().as('count'))
@@ -1955,8 +1954,24 @@ const UNIQUE_VIOLATION = '23505'
  */
 const EVENT_ID_CONSTRAINTS = new Set(['events_pkey', 'events_id_key'])
 
-/** The constraint a duplicate mode name is reported under (`0023_modes.sql`). */
+/** The constraint a duplicate mode name is reported under (`0024_modes.sql`). */
 const MODE_NAME_CONSTRAINTS = new Set(['modes_owner_name_key'])
+
+/**
+ * The advisory lock a mode creation takes, keyed by its owner (`0024_modes.sql`).
+ *
+ * The `MAX_MODES_PER_USER` cap is a count followed by an insert, and a transaction alone does
+ * not make that atomic: at the limit, two concurrent creates each read a count below it and
+ * both insert, so the user ends up with twenty-one. The transaction takes this lock **before**
+ * it counts, so the two serialize — the first counts nineteen and inserts the twentieth, the
+ * second counts twenty and is refused — and the lock is released when the transaction ends.
+ *
+ * The key is the owner, so two users' creates never wait on each other, and the name is
+ * prefixed so it cannot collide with the migrator's own advisory lock (`migrate.ts`); a hash
+ * collision between two owners would only make two of their creates serialize, which is
+ * correct, just slower.
+ */
+const MODE_CREATE_LOCK = 'openharness:mode-create:'
 
 /**
  * Whether `error` is Postgres refusing a write because one of `constraints` was violated.

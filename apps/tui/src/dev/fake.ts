@@ -6,6 +6,19 @@ import { makeProviderCredential } from '@openharness/protocol/fixtures'
 export const FAKE_MODE_ENV = 'OPENHARNESS_FAKE'
 
 /**
+ * Set this beside {@link FAKE_MODE_ENV} and the dev fake seeds **provider credentials** — and,
+ * with them, the {@link DEV_MODES} modes, whose models are only usable when a credential for
+ * their provider exists (#245, M6).
+ *
+ * **Off by default, on purpose.** A key behind every provider makes the *first-run* flow — the
+ * connect-a-provider screen a signed-in account with no credentials lands on — unreachable in
+ * plain fake mode, and that flow is a thing a dev needs to look at. So the default fake is the
+ * account with no credentials, exactly as it was before modes, and the keyed account is this
+ * switch.
+ */
+export const FAKE_CREDENTIALS_ENV = 'OPENHARNESS_FAKE_CREDENTIALS'
+
+/**
  * Set this beside {@link FAKE_MODE_ENV} and the dev fake starts **signed out** (#210).
  *
  * The fake is signed in by default, which is the state to develop in — but the sign-in a chat
@@ -21,6 +34,13 @@ export const FAKE_BANNER = 'fake client (dev)'
 /** Is the CLI in fake mode? Empty, `0` and `false` all mean "no". */
 export function isFakeMode(env: Record<string, string | undefined> = process.env): boolean {
   return isTruthy(env[FAKE_MODE_ENV])
+}
+
+/** Does the dev fake seed credentials and modes? The same spelling as {@link isFakeMode}. */
+export function isFakeWithCredentials(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  return isTruthy(env[FAKE_CREDENTIALS_ENV])
 }
 
 /** Does the dev fake start signed out? The same spelling as {@link isFakeMode}. */
@@ -153,6 +173,9 @@ export const DEV_DEFAULT_MODEL = 'anthropic/claude-sonnet-5'
  *
  * - a three-provider model catalog ({@link DEV_MODELS}), so the model picker — `/model` in
  *   a chat, and a new chat whose default is cleared — has groups and context windows;
+ * - **no provider credentials**, so the first-run flow is what plain fake mode shows; under
+ *   {@link FAKE_CREDENTIALS_ENV} a key per provider and the {@link DEV_MODES} modes are seeded
+ *   instead, which is the account that can actually run one;
  * - the stored default model ({@link DEV_DEFAULT_MODEL}), the way a real account that has
  *   saved one looks: `oh` starts chatting on it, no picker;
  * - three agents, for `oh agents` and the `--agent` preset path — a new chat without
@@ -170,15 +193,21 @@ export async function createDevClient(
   env: Record<string, string | undefined> = process.env,
 ): Promise<FakeClient> {
   const { createFakeClient } = await import('@openharness/client/testing')
+  const withCredentials = isFakeWithCredentials(env)
   const fake = createFakeClient({
     delayMs: 12,
     models: DEV_MODELS,
     preferences: { default_model: DEV_DEFAULT_MODEL },
-    // Keys for every provider the catalog lists, so a mode whose model is one of them is
-    // usable (the fake decides availability the way the server does, #245, M6).
-    credentials: [...new Set(DEV_MODELS.map((model) => model.provider))].map((provider) =>
-      makeProviderCredential({ name: provider }),
-    ),
+    // Keys for every provider the catalog lists — but only under
+    // {@link FAKE_CREDENTIALS_ENV}: without it, a signed-in account with no credentials is
+    // the state a dev needs, because that is what the first-run flow is for.
+    ...(withCredentials
+      ? {
+          credentials: [...new Set(DEV_MODELS.map((model) => model.provider))].map((provider) =>
+            makeProviderCredential({ name: provider }),
+          ),
+        }
+      : {}),
     // The seeded order is the order they were created in, and the fake orders a list by
     // `(created_at, id)`. A clock that only moves when it is asked — `new Date()` returns the
     // same millisecond twice under a fast seeding run — leaves the two agents below tied, and
@@ -186,8 +215,13 @@ export async function createDevClient(
     now: tickingClock(),
   })
 
-  for (const mode of DEV_MODES) {
-    await fake.modes.create(mode)
+  // The modes ride with the credentials: a mode's model is only usable when the account has a
+  // credential for its provider, so seeding one without the other would offer a dev a preset
+  // every chat refuses.
+  if (withCredentials) {
+    for (const mode of DEV_MODES) {
+      await fake.modes.create(mode)
+    }
   }
   await fake.agents.create({
     name: 'Reviewer',

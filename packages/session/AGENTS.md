@@ -455,7 +455,11 @@ the per-user presets beside the log, keyed by `mode_id` and scoped by owner like
 resources above: another user's mode is `null` on a read and `false` on a delete, never a 403.
 A name is unique among its owner's modes and a user may hold at most `MAX_MODES_PER_USER` of
 them — both enforced by the store, not only checked by the caller, so two concurrent creates
-cannot both take a name. `deleteMode` is the one cross-table write: in the same transaction as
+cannot both take a name. The **cap** is a count followed by an insert, which a transaction
+alone does not make atomic: the Postgres store takes a per-owner `pg_advisory_xact_lock` before
+it counts, so two creates racing for the last slot serialize and exactly the cap succeed — the
+conformance suite fires `MAX_MODES_PER_USER + 5` creates at once and asserts it. The in-memory
+store is serial by construction and needs nothing. `deleteMode` is the one cross-table write: in the same transaction as
 the delete it clears the column on every session that followed the mode, which is what lands
 those chats on the model they last ran rather than orphaning them (a mode is never a foreign
 key on a session, so deleting one can never delete a chat).
