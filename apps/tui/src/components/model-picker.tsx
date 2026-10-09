@@ -1,6 +1,8 @@
-import type { ModelEntry } from '@openharness/protocol'
+import type { Mode, ModelEntry } from '@openharness/protocol'
 import { Box, Text, useInput } from 'ink'
 import { useRef, useState, type ReactElement } from 'react'
+
+import { modeLabel } from '../modes'
 
 /**
  * How many models the picker draws at once.
@@ -19,20 +21,33 @@ export const OTHER_MODEL_LABEL = 'Other model id…'
 export interface ModelPickerProps {
   /** The catalog, as `client.models.list()` returned it: sorted by provider, then name. */
   readonly models: readonly ModelEntry[]
+  /**
+   * The user's modes (#245, M6), offered as a group above the providers.
+   *
+   * Omitted by the picker a new chat draws with no modes to offer.
+   */
+  readonly modes?: readonly Mode[]
+  /** Called with the chosen mode, which the chat then follows. */
+  readonly onSelectMode?: ((mode: Mode) => void) | undefined
   /** Called with the chosen model's router id (`provider/model`). */
   readonly onSelect: (modelId: string) => void
   /** Called when the user gives up (Ctrl+C, or Esc with nothing to clear). */
   readonly onCancel: () => void
 }
 
-/** One selectable row: a model, or the free-text entry. */
+/** The heading the mode rows are drawn under, above every provider (#245, M6). */
+export const MODES_HEADING = 'Modes'
+
+/** One selectable row: a mode, a model, or the free-text entry. */
 export interface PickerRow {
-  /** The provider the row is grouped under; `''` for the free-text row. */
+  /** The provider the row is grouped under, {@link MODES_HEADING} for a mode, `''` for free text. */
   readonly provider: string
   /** What the row says. */
   readonly text: string
-  /** The id to start a session with — the model's, or {@link OTHER_ID} for free text. */
+  /** The id to start a session with — the mode's, the model's, or {@link OTHER_ID} for free text. */
   readonly id: string
+  /** The mode this row picks, when it is a mode row (#245, M6). */
+  readonly mode?: Mode
 }
 
 /** The sentinel the free-text row selects; not a router id any model could have. */
@@ -49,14 +64,33 @@ const OTHER_ID = '\u0000other'
  * is this function's first result), and the free-text row is always there, always last,
  * because a model the catalog does not know must stay reachable however narrow the list.
  */
-export function pickerRows(models: readonly ModelEntry[], query: string): readonly PickerRow[] {
+export function pickerRows(
+  models: readonly ModelEntry[],
+  query: string,
+  modes: readonly Mode[] = [],
+): readonly PickerRow[] {
   const needle = query.trim().toLowerCase()
   return [
+    // Modes first, above the providers (#245, M6): a mode is the coarser choice, and the group
+    // heading follows from the rows, so it appears only when a mode survived the query.
+    ...modes
+      .filter((mode) => matchesModeQuery(mode, needle))
+      .map((mode) => ({
+        provider: MODES_HEADING,
+        text: `${mode.name} · ${modeLabel(mode)}`,
+        id: mode.id,
+        mode,
+      })),
     ...models
       .filter((model) => matchesQuery(model, needle))
       .map((model) => ({ provider: model.provider, text: modelText(model), id: model.id })),
     { provider: '', text: OTHER_MODEL_LABEL, id: OTHER_ID },
   ]
+}
+
+/** Whether a mode's name or the model it runs holds `needle` — already trimmed, lower-cased. */
+function matchesModeQuery(mode: Mode, needle: string): boolean {
+  return mode.name.toLowerCase().includes(needle) || mode.model.toLowerCase().includes(needle)
 }
 
 /** Whether a model's display name, id or provider holds `needle` — already trimmed, lower-cased. */
@@ -84,7 +118,13 @@ function matchesQuery(model: ModelEntry, needle: string): boolean {
  * numbers name the rows of the whole list, but they are a keystroke only while the query is
  * empty and the list is short enough for one (see the handler).
  */
-export function ModelPicker({ models, onSelect, onCancel }: ModelPickerProps) {
+export function ModelPicker({
+  models,
+  modes = [],
+  onSelectMode,
+  onSelect,
+  onCancel,
+}: ModelPickerProps) {
   const [query, setQuery] = useState('')
   const [index, setIndex] = useState(0)
   // `null` while the list is shown; the buffer while the free-text entry is being typed.
@@ -102,7 +142,7 @@ export function ModelPicker({ models, onSelect, onCancel }: ModelPickerProps) {
   const indexRef = useRef(0)
   const typedRef = useRef<string | null>(null)
 
-  const rows = pickerRows(models, query)
+  const rows = pickerRows(models, query, modes)
 
   const moveTo = (next: number): void => {
     indexRef.current = next
@@ -123,6 +163,10 @@ export function ModelPicker({ models, onSelect, onCancel }: ModelPickerProps) {
 
   const choose = (row: PickerRow | undefined): void => {
     if (row === undefined) return
+    if (row.mode !== undefined) {
+      onSelectMode?.(row.mode)
+      return
+    }
     if (row.id === OTHER_ID) {
       // Carry the query into the free-text entry, so a half-typed id is finished rather than
       // retyped.
@@ -163,7 +207,7 @@ export function ModelPicker({ models, onSelect, onCancel }: ModelPickerProps) {
     // The rows these keys act on, built from the refs: a keystroke in front of Enter may not
     // have been rendered yet, and Enter must pick from the list it has already narrowed — not
     // from the one on screen before it.
-    const current = pickerRows(models, queryRef.current)
+    const current = pickerRows(models, queryRef.current, modes)
 
     if (key.escape) {
       if (queryRef.current !== '') {

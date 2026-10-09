@@ -1,5 +1,6 @@
 import type { FakeClient } from '@openharness/client/testing'
-import type { ModelEntry } from '@openharness/protocol'
+import { MODE_DEFAULT_MODEL, type CreateModeRequest, type ModelEntry } from '@openharness/protocol'
+import { makeProviderCredential } from '@openharness/protocol/fixtures'
 
 /** Set this (to `1`, `true` or `yes`) and `oh` runs against the in-memory fake client. */
 export const FAKE_MODE_ENV = 'OPENHARNESS_FAKE'
@@ -84,6 +85,22 @@ export const DEV_MODELS: readonly ModelEntry[] = [
   },
 ]
 
+/**
+ * The modes the dev fake seeds (#245, M6): a `smart` preset on the default model, a `fast` one
+ * on a cheap model, and one that follows the account's default — so `oh --mode <name>`, the
+ * picker's Modes group and the status line have all three shapes to show.
+ */
+export const DEV_MODES: readonly CreateModeRequest[] = [
+  {
+    name: 'smart',
+    model: 'anthropic/claude-sonnet-5',
+    reasoning_effort: 'high',
+    system_prompt_addition: 'Think step by step before answering.',
+  },
+  { name: 'fast', model: 'openai/gpt-4.1-mini' },
+  { name: 'mine', model: MODE_DEFAULT_MODEL },
+]
+
 /** The replies the seeded session is scripted with, in order, before echoing. */
 export const DEV_REPLIES: readonly string[] = [
   'Hello from the openharness dev fake. Nothing here leaves your machine: no server, no model, just a scripted reply stream.',
@@ -157,6 +174,11 @@ export async function createDevClient(
     delayMs: 12,
     models: DEV_MODELS,
     preferences: { default_model: DEV_DEFAULT_MODEL },
+    // Keys for every provider the catalog lists, so a mode whose model is one of them is
+    // usable (the fake decides availability the way the server does, #245, M6).
+    credentials: [...new Set(DEV_MODELS.map((model) => model.provider))].map((provider) =>
+      makeProviderCredential({ name: provider }),
+    ),
     // The seeded order is the order they were created in, and the fake orders a list by
     // `(created_at, id)`. A clock that only moves when it is asked — `new Date()` returns the
     // same millisecond twice under a fast seeding run — leaves the two agents below tied, and
@@ -164,6 +186,9 @@ export async function createDevClient(
     now: tickingClock(),
   })
 
+  for (const mode of DEV_MODES) {
+    await fake.modes.create(mode)
+  }
   await fake.agents.create({
     name: 'Reviewer',
     description: 'Reviews a diff and says what is wrong with it.',

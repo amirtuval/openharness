@@ -284,6 +284,8 @@ export class FakeBrain {
             processed_at: null,
             content: input.content,
             ...(input.model === undefined ? {} : { model: input.model }),
+            // The mode a message carried rides it too (#245, M6), stored exactly as sent.
+            ...(input.mode === undefined ? {} : { mode: input.mode }),
           }
         : {
             id: newEventId(),

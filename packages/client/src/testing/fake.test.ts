@@ -1543,9 +1543,12 @@ describe('the fake’s modes (#245, M6)', () => {
     expect(session.mode).toBe(mode.id)
     expect(session.model).toEqual({ id: 'anthropic/claude-sonnet-5' })
 
-    // Continuing on the mode keeps following it, and a plain model detaches.
+    // Continuing on the mode keeps following it, and the stored message carries it, exactly
+    // as the wire would.
     await fake.sendMessage(session.id, 'go deeper', { mode: mode.id })
     expect((await fake.sessions.get(session.id)).mode).toBe(mode.id)
+    const sent = fake.history(session.id).find((event) => event.type === 'user.message')
+    expect(sent?.type === 'user.message' && sent.mode).toBe(mode.id)
 
     await fake.sendMessage(session.id, 'plain', { model: { id: 'openai/gpt-4.1-mini' } })
     const detached = await fake.sessions.get(session.id)

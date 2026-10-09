@@ -135,13 +135,15 @@ describe('run', () => {
     expect(out).toContain('A session with history')
   })
 
-  it('lists the provider keys of the dev fake — none, with how to add one (#210)', async () => {
+  it('lists the provider keys of the dev fake (#210)', async () => {
+    // The dev fake seeds a key per catalog provider — a mode whose model is one of them has
+    // to be usable (#245, M6) — so this lists them rather than the empty state.
     const { code, out, err } = await runCaptured(['providers'], FAKE_ENV)
 
     expect(code).toBe(0)
     expect(err).toBe('')
-    expect(out).toContain('No credentials yet')
-    expect(out).toContain('oh providers add')
+    expect(out).toContain('Anthropic')
+    expect(out).not.toContain('No provider keys yet')
   })
 
   it('removes a key from the dev fake without asking, with --yes (#210)', async () => {

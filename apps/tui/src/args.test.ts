@@ -46,6 +46,26 @@ describe('parseArgs', () => {
     expect(server).toMatchObject({ kind: 'chat', options: { server: 'http://example.test' } })
   })
 
+  it('reads --mode, and refuses it beside --model (#245, M6)', () => {
+    expect(commandOf(['--mode', 'smart'])).toMatchObject({
+      kind: 'chat',
+      options: { mode: 'smart' },
+    })
+    expect(errorOf(['--model', 'openai/gpt-4.1-mini', '--mode', 'smart'])).toMatch(
+      /either --model or --mode/u,
+    )
+    expect(errorOf(['--mode', ''])).toMatch(/--mode needs a mode name/u)
+  })
+
+  it('recognises `oh modes` (#245, M6)', () => {
+    expect(commandOf(['modes'])).toEqual({
+      kind: 'modes',
+      options: { server: undefined, debug: false },
+    })
+    expect(errorOf(['modes', 'extra'])).toMatch(/takes no arguments/u)
+    expect(errorOf(['modes', '--mode', 'smart'])).toMatch(/does not take --mode <name>/u)
+  })
+
   it('rejects the removed --api-key: `oh login` is the way in', () => {
     const error = errorOf(['--api-key', 'oh_key'])
     expect(error).toContain('--api-key')

@@ -105,6 +105,13 @@ describe('StatusLine', () => {
     expect(frameOf()).toBe('anthropic/claude-sonnet-5 · sesn_…Q092B1 · idle')
   })
 
+  it('puts the mode in front of the model, which is what it resolved to (#245, M6)', () => {
+    expect(frameOf({ mode: 'smart' })).toContain('smart · anthropic/claude-sonnet-5')
+    expect(frameOf({ mode: 'smart', agentName: 'Summarizer' })).toContain(
+      'smart · Summarizer · anthropic/claude-sonnet-5',
+    )
+  })
+
   it('puts the agent in front of the model when the session has one', () => {
     expect(frameOf({ agentName: 'Reviewer' })).toBe(
       'Reviewer · anthropic/claude-sonnet-5 · sesn_…Q092B1 · idle',
