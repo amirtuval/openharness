@@ -20,8 +20,10 @@ import { createXai } from '@ai-sdk/xai'
 import type { LanguageModel, ModelMessage } from 'ai'
 import { streamText } from 'ai'
 
-import { azureBaseUrl, azureFetch, type ProviderFetch } from './azure-fetch'
+import { azureBaseUrl, azureFetch } from './azure-fetch'
 import { isOwnershipError } from './errors'
+import { openAICompatibleBaseUrl, openAICompatibleFetch } from './openai-compatible-fetch'
+import type { ProviderFetch } from './provider-fetch'
 
 /**
  * Making a model request, and the seam that keeps the brain testable.
@@ -44,7 +46,8 @@ import { isOwnershipError } from './errors'
  * the model id's first half to a stored credential, and its type is what the factory builds
  * with.
  */
-export type ModelCredential = ApiKeyModelCredential | AzureOpenAIModelCredential
+export type ModelCredential =
+  ApiKeyModelCredential | AzureOpenAIModelCredential | OpenAICompatibleModelCredential
 
 /** An `api_key` credential: a single secret, passed to one of the eleven provider clients. */
 export interface ApiKeyModelCredential {
@@ -69,6 +72,25 @@ export interface AzureOpenAIModelCredential {
    * base URL `@ai-sdk/azure` needs is derived from it by {@link azureBaseUrl}.
    */
   readonly endpoint: string
+}
+
+/**
+ * An `openai_compatible` credential: a base URL a user chose, and the key that authenticates
+ * it — if the endpoint wants one (epic #245, A3b).
+ *
+ * The model is the id's second half (`custom/llama3.3` names the model `llama3.3` on the
+ * `custom` credential), the same shape an Azure deployment takes, because one credential
+ * serves every model its endpoint lists.
+ */
+export interface OpenAICompatibleModelCredential {
+  readonly type: 'openai_compatible'
+  /** The API key, or `''` when the endpoint takes none (a local server, say). */
+  readonly apiKey: string
+  /**
+   * The OpenAI-compatible API root the user saved, e.g. `http://127.0.0.1:11434/v1`. Passed to
+   * `@ai-sdk/openai-compatible` as-is, normalized by {@link openAICompatibleBaseUrl}.
+   */
+  readonly baseUrl: string
 }
 
 /**
@@ -257,6 +279,12 @@ export function isUnsupportedProviderError(value: unknown): value is Unsupported
 export interface ProviderModelFactoryOptions {
   /** The `fetch` every Azure OpenAI request goes through. Defaults to the safeFetch guard. */
   readonly azureFetch?: ProviderFetch
+  /**
+   * The `fetch` every custom OpenAI-compatible request goes through. Defaults to the safeFetch
+   * guard with private addresses refused; the server passes its self-host flag through
+   * {@link createOpenAICompatibleFetch} when that setting is on.
+   */
+  readonly openAICompatibleFetch?: ProviderFetch
 }
 
 /**
@@ -276,10 +304,10 @@ export interface ProviderModelFactoryOptions {
  * (`xai.responses(id)`). Every other provider is a chat-completions client.
  *
  * A first half that is **not** one of the eleven provider ids names a *named credential*
- * instead (epic #245, A3a): an `azure` credential's model ids are `azure/<deployment>`, and
- * the credential's type decides the client. The credential's type is the discriminant, so a
- * name nothing stores a credential for is still an `UnsupportedProviderError` — the same
- * ending as before, and the turn writes no span for it.
+ * instead (epic #245, A3a/A3b): an `azure` credential's model ids are `azure/<deployment>`,
+ * and a `custom` one's are `custom/<model>` — the credential's type decides the client. The
+ * credential's type is the discriminant, so a name nothing stores a credential for is still an
+ * `UnsupportedProviderError` — the same ending as before, and the turn writes no span for it.
  *
  * No `maxRetries`/`streamRetries` is configured here, because a provider client has neither:
  * both options live on the `streamText` call in {@link streamModelRequest}, which is the only
@@ -292,7 +320,8 @@ export interface ProviderModelFactoryOptions {
 export function createProviderModelFactory(
   options: ProviderModelFactoryOptions = {},
 ): ModelFactory {
-  const fetch = options.azureFetch ?? azureFetch
+  const azureGuard = options.azureFetch ?? azureFetch
+  const customGuard = options.openAICompatibleFetch ?? openAICompatibleFetch
   return (modelId, credential) => {
     const provider = providerOf(modelId)
     // Everything after the first slash: the provider's own id for the model. A fireworks,
@@ -313,8 +342,24 @@ export function createProviderModelFactory(
         baseURL: azureBaseUrl(credential.endpoint),
         // The user's endpoint is a URL a user typed, so every request to it is guarded: private
         // addresses are refused on the model call exactly as they are on the save-time check.
-        fetch,
+        fetch: azureGuard,
       }).chat(id)
+    }
+    if (credential.type === 'openai_compatible') {
+      // The official package for exactly this API, at the base URL the user chose. `name` is the
+      // credential name, so a provider error names the credential the user sees in Settings.
+      // `apiKey` is passed even when empty: the package sends no `Authorization` header for a
+      // falsy key and has no environment fallback, which is what a keyless local endpoint wants.
+      // `chatModel`, not the provider's default, for the same reason as Azure: the deployment is
+      // a string the user typed, and chat completions is the API the family actually serves.
+      return createOpenAICompatible({
+        name: provider,
+        baseURL: openAICompatibleBaseUrl(credential.baseUrl),
+        apiKey: credential.apiKey,
+        // A URL the user typed is guarded on every request: private addresses are refused unless
+        // the server's self-host setting turned that off (`createOpenAICompatibleFetch`).
+        fetch: customGuard,
+      }).chatModel(id)
     }
     throw new UnsupportedProviderError(provider)
   }
@@ -345,14 +390,24 @@ export function providerOf(modelId: string): string {
  * own `*_API_KEY` environment variable when the key it was constructed with is falsy, so a
  * blank key would silently become "no key given" and hand the request to whatever the process
  * happens to have set — the fallback epic #65 (A5) forbids. So everything that is not a
- * usable key ends the request the same way.
+ * usable key ends the request the same way. A custom OpenAI-compatible credential is the one
+ * exception: its endpoint may take no key, so for it the base URL is what is checked instead.
  *
  * @param credential what {@link ResolveCredential} answered
  */
 export function isUsableCredential(
   credential: ModelCredential | null,
 ): credential is ModelCredential {
-  if (credential === null || credential.apiKey.trim().length === 0) {
+  if (credential === null) {
+    return false
+  }
+  // A custom OpenAI-compatible endpoint may take no key at all, so for it the **base URL**, not
+  // the key, is what has to be non-blank — a missing one could not build a request, which is a
+  // "save a credential" ending (`missing_provider_credential`), not a malformed-URL span.
+  if (credential.type === 'openai_compatible') {
+    return credential.baseUrl.trim().length > 0
+  }
+  if (credential.apiKey.trim().length === 0) {
     return false
   }
   // An Azure credential with no endpoint could not build a request at all. It is refused here

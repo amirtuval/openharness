@@ -1,13 +1,16 @@
 import { STREAMING_LIMITS, safeFetch } from '@openharness/hands'
 
+import { createSafeProviderFetch, type ProviderFetch, type SafeFetch } from './provider-fetch'
+
 /**
  * The `fetch` every Azure OpenAI model request is made through (epic #245, A3a).
  *
  * The endpoint an Azure credential carries is a URL a **user** typed, so a model request to it
  * goes through `@openharness/hands`' `safeFetch` — the SSRF guard — exactly as the save-time
  * check does. This is not a second, weaker path: the guard runs on every request, and private
- * addresses are always refused (the `allowPrivate` option safeFetch has exists for the later
- * custom-URL credential type, and is never passed here).
+ * addresses are always refused (the `allowPrivate` option safeFetch has exists for the custom
+ * OpenAI-compatible credential type — `openai-compatible-fetch.ts`, A3b — and is never passed
+ * here; Azure is a hosted public service, so a private address can only be a mistake).
  *
  * The limits are the **streaming-safe** ones: a model streams a long reply, so there is no
  * total deadline and no size cap, and what is bounded instead is an idle stream — a connection
@@ -17,26 +20,16 @@ import { STREAMING_LIMITS, safeFetch } from '@openharness/hands'
  */
 
 /**
- * The `fetch` shape a model client is given: the platform's own, minus everything
- * `safeFetch` decides for itself.
- */
-export type SafeFetch = (input: string | URL, init?: RequestInit) => Promise<Response>
-
-/** The `fetch` shape `@ai-sdk/azure` accepts — the AI SDK's `FetchFunction`. */
-export type ProviderFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
-
-/**
  * `safeFetch` with the streaming-safe limits, as the AI SDK's `FetchFunction`.
  *
- * The AI SDK may hand a `Request` rather than a URL; only its URL is used, because the guard
- * has to resolve the host itself and a `Request` carries headers the model client already put
- * in `init`.
+ * @param options.safeFetch the guard to call; defaults to the real one, and a test injects a
+ *   stub to watch the request the guard allows.
  */
 export function createAzureFetch(options: { readonly safeFetch?: SafeFetch } = {}): ProviderFetch {
-  const fetch: SafeFetch =
-    options.safeFetch ?? ((input, init) => safeFetch(input, init, STREAMING_LIMITS))
-  return (input, init) =>
-    fetch(typeof input === 'string' || input instanceof URL ? input : input.url, init)
+  return createSafeProviderFetch({
+    safeFetch: options.safeFetch ?? safeFetch,
+    limits: STREAMING_LIMITS,
+  })
 }
 
 /** The production Azure `fetch`: safeFetch under the streaming-safe limits. */
