@@ -107,9 +107,14 @@ export function ChatView({
   // its text (U10) — the composer is the box, not the thing that decides what is in it.
   const [draft, setDraft] = useState('')
 
-  // The model the session runs as the log last said it; a session created with a model shows
-  // it through the header resource until a message carries one (the transcript's `model`).
-  const sessionModel = model ?? session?.model.id ?? null
+  // The model the session runs: the log's last explicit switch (the transcript's `model`), the
+  // model the last request **ran** (`meta.model`, off its span — which for a chat on a mode is
+  // the mode's resolved model, so an edit to the mode shows here from the next reply on), or
+  // the session resource's, on a chat that has not made a request yet.
+  const lastReplyModel =
+    [...messages].reverse().find((message) => message.role === 'agent' && message.meta?.model !== undefined)
+      ?.meta?.model ?? null
+  const sessionModel = model ?? lastReplyModel ?? session?.model.id ?? null
   // The mode the session resource says the chat follows, before this tab has sent a switch (#245,
   // M6). The tab's own memory (above) wins once it has one.
   const sessionModeId = session?.mode ?? null
@@ -187,7 +192,10 @@ export function ChatView({
       // Sending is the start of a new turn: whatever the last one was stopped short of is no
       // longer what the foot of the transcript is about.
       setInterrupted(false)
-      const switching = chosen !== null && chosen !== sessionModel
+      // A picked model is a switch when it differs from what the session runs — or when the
+      // session is on a **mode**: picking the very model the mode resolves to is still a switch
+      // away from the mode, and it is what detaches the chat (#245, M6).
+      const switching = chosen !== null && (chosen !== sessionModel || currentModeId !== null)
       const switchingMode = pendingMode !== null && pendingMode.id !== sessionModeId
       const stored = await send(text, {
         ...(switchingMode && pendingMode !== null ? { mode: pendingMode.id } : {}),

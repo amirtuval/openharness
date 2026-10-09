@@ -952,7 +952,7 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
         return Promise.reject(
           new ApiError(
             409,
-            `cannot create a mode: ${user.id} already has the limit of ${MAX_MODES_PER_USER}`,
+            `cannot create a mode: the limit of ${MAX_MODES_PER_USER} modes is reached`,
             { type: 'conflict_error' },
           ),
         )

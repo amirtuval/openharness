@@ -242,7 +242,9 @@ export class ModeLimitReachedError extends Error {
   readonly limit: number
 
   constructor(ownerId: UserId, limit: number) {
-    super(`cannot create a mode: ${ownerId} already has the limit of ${limit}`)
+    // The caller's own id is not in the message: it is noise to the person reading it, and it
+    // is the sort of thing that ends up pasted into a screenshot.
+    super(`cannot create a mode: the limit of ${limit} modes is reached`)
     this.name = 'ModeLimitReachedError'
     this.ownerId = ownerId
     this.limit = limit
