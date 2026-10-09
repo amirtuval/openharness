@@ -104,6 +104,8 @@ src/
 | `SessionUsage`, `SessionModelUsage`, `SessionUsageTotals`, `ModelPriceLookup`                   | the session's totals as the transcript keeps them, and how a frontend prices them (#247) |
 | `selectSessionUsage()`, `sessionUsageOf()`, `sessionCost()`, `replyCost()`                      | what a session and a reply cost, from the log's tokens and the catalog's rates (#247)    |
 | `PROVIDERS`, `providerInfo()`, `providerName()`, `ProviderInfo`                                 | the model providers a form or a tile needs (#209; built from the shared list, #245)      |
+| `CREDENTIAL_TARGETS`, `CredentialTarget`                                                        | every provider *and* named credential type a form or a tile offers (#245 A3a)            |
+| `credentialDisplayName()`, `credentialTargetFor()`                                              | what to call a stored credential, and which tile its row reopens                         |
 | `PACKAGE_NAME`                                                                                  | the package name; a dependent's cheap proof that the import resolved                     |
 
 ### `@openharness/client/testing`
@@ -229,12 +231,13 @@ try {
 
 ### Provider credentials
 
-`client.providerCredentials` is the write-only credential API (epic #65, A5): `put` sends
-`{ type: 'api_key', api_key }` to `PUT /v1/provider-credentials/{provider}` and returns the
-stored **metadata** — the key itself is never in a response, an error or a type here; `list`
-reads the metadata array; `delete` answers `204`, so it resolves `void`. `put` requires a fresh
-session server-side, and a key the provider rejects comes back as a 422
-`invalid_provider_credential`.
+`client.providerCredentials` is the write-only credential API (epic #65, A5; named credentials:
+#245 A3a): `put` sends the request body to `PUT /v1/provider-credentials/{name}` and returns the
+stored **metadata** — the secret itself is never in a response, an error or a type here; `list`
+reads the metadata array; `delete` answers `204`, so it resolves `void`. The name is the
+credential's own: a provider id for an `api_key`, or one the reader chose (`azure`, `azure-eu`)
+for a named type. `put` requires a fresh session server-side, and a credential the provider
+rejects comes back as a 422 `invalid_provider_credential`.
 
 ### The model catalog
 
@@ -509,16 +512,26 @@ true`, keyed by the id of the event it previews; `event_delta`s extend it (per c
 free-tier hint (X8) and an optional key-format hint for an input's placeholder.
 
 It is presentation metadata, not a capability list: authorization is still the server's
-(`PUT /v1/provider-credentials/{provider}`). Since #245 it is **built from** the shared provider
+(`PUT /v1/provider-credentials/{name}`). Since #245 it is **built from** the shared provider
 list (`@openharness/protocol`'s `PROVIDERS`, epic #245, A0) rather than restated: the id, the
 name, the credential type and the key URL come from that list, and `PRESENTATION` — a
 `Record<ProviderId, …>` — adds the two hints only a form or a tile needs. That is what makes "it
 describes providers the server will accept a key for" a compile-time property: there is one
 list, so there is nothing left for `e2e`'s removed `provider-metadata.test.ts` to hold together.
 
-`providerName(id)` answers the display name and falls back to the id — the credentials API takes
-any router provider, so a reader who typed an id this list does not carry sees what they typed,
-never a blank.
+`providerName(id)` answers the display name for a **provider id** and falls back to the id — the
+credentials API takes any router provider, so a reader who typed an id this list does not carry
+sees what they typed, never a blank.
+
+**`CREDENTIAL_TARGETS` is what an Add-provider surface offers** (epic #245, A3a): the eleven
+providers, then the named credential types. A `CredentialTarget` carries the *name* a first save
+uses (a provider id, or the type's default — `azure`), the display name, the credential type
+that selects the form (X6), the key URL, and `named` — whether the reader may keep more than
+one, each under a name they choose. `credentialTargetFor(credential)` answers the target a
+*stored* credential's Replace reopens, and `credentialDisplayName(credential)` is what a list
+row is called: the provider's name, the type's display name where the name is its default, and
+the reader's own label otherwise — so `azure-eu` is called `azure-eu` and two Azure rows are
+told apart.
 
 The web app builds its first-run tiles, its Add-provider dialog and its Settings list from this
 (#209); `oh` will offer the same providers in the terminal (#210, X7).

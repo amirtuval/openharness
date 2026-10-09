@@ -42,7 +42,7 @@ repo.
 | `oh sessions delete <id>`               | delete a chat and everything in it (asks; `--yes` skips) |
 | `oh agents`                             | list the saved agents (optional presets): id, name       |
 | `oh providers`                          | list the stored model-provider keys: provider, last 4    |
-| `oh providers add [provider]`           | connect a provider — paste its key into a hidden prompt  |
+| `oh providers add [name]`               | connect a provider or a named credential — answer its fields, secrets hidden |
 | `oh providers remove <provider>`        | forget a key (asks; `--yes` skips the question)          |
 | `oh default-model [provider/model]`     | print or set the model a new chat starts on              |
 | `oh login`                              | sign in through the browser (the device flow)            |
@@ -221,12 +221,14 @@ that are one component (`src/components/provider-setup.tsx`):
   flow; **non-empty** (keys, but a catalog that listed nothing) is the message that says so;
 - **`/providers [provider]`** in a chat, through the inline prompt slot — so the flow takes the
   input area over and gives it back, and no new mechanism was needed for a multi-step form;
-- **`oh providers add [provider]`**, on its own.
+- **`oh providers add [name]`**, on its own — a provider id, or the name a named credential was
+  stored under; without one the flow starts on the list.
 
-The flow is two steps. It picks a provider from the list built from `PROVIDERS` (the metadata
-both frontends share, #209 — itself built from the protocol's provider list, #245), each row
-with its **free-tier hint** (X8), and then asks for the
-key. The "get a key" URL is printed and `o` opens it in the browser (the same `openBrowser`
+The flow is two steps. It picks a target from the list built from `CREDENTIAL_TARGETS` (the
+metadata both frontends share, #209 — the eleven providers and the named credential types,
+#245), each row with its **free-tier hint** (X8), and then answers its fields — **one prompt
+each**, masked where the value is a secret and shown where it is not (an Azure endpoint, a
+deployment list). The "get a key" URL is printed and `o` opens it in the browser (the same `openBrowser`
 rules as `oh login`; a terminal that cannot open one says so and leaves the URL on screen).
 The key goes into **`components/secret-input.tsx`** — a hidden input: `•` per character, never
 the characters, and a bracketed paste taken as one value because a pasted key is the normal
@@ -245,9 +247,15 @@ screen running a login itself.
 
 The **form is built from the credential type** (X6), mirroring the web app: `CREDENTIAL_FORMS`
 in `src/providers/credential-form.ts` is a `Record<ProviderCredentialType, …>` of the fields
-and the request body they build, with `api_key` the only member today. A new member of the
-protocol's union is a compile error there until it has a form, which is where Bedrock, Vertex
-and Azure land.
+and the request body they build — `api_key`'s one secret, and `azure_openai`'s endpoint, key
+and deployment names (#245, A3a). A new member of the protocol's union is a compile error there
+until it has a form, which is where Bedrock and Vertex land.
+
+A **named** target also asks for a **credential name**, and only when one of its type is already
+stored — the first Azure credential takes the type's default (`azure`), and a second has to be
+told apart from it (`azure-eu`), because the name is the `provider` half of the model ids it
+serves. That is why the flow reads `providerCredentials.list()` once, the same read the web
+dialog makes.
 
 On success the server has picked a default model — the first key saved makes it do so (U4) —
 and it is named back: `You're set: default model X`, the sentence the web app's first-run flow
@@ -258,9 +266,11 @@ key already drops that provider's cache entry server-side.
 
 `oh providers` lists what is stored: the display name, the credential type, the last four
 characters and when it was added. That is the whole of what the API can say — it is
-**write-only** (epic #65, A5) — and `oh providers remove <provider>` forgets a key after a
-`[y/N]` question (`--yes` skips it); deleting one that is not there is not an error, because
-the route answers `204` either way.
+**write-only** (epic #65, A5). The display name is the provider's, the credential type's where
+the name is that type's default (`azure`), or the reader's own label otherwise — so two Azure
+credentials are told apart by the names they were saved under. `oh providers remove <name>`
+forgets a credential after a `[y/N]` question (`--yes` skips it); deleting one that is not
+there is not an error, because the route answers `204` either way.
 
 ### Slash commands, the menu, and the prompt slot (#207)
 
@@ -769,9 +779,9 @@ denial, cancellation, revoke failures); `src/index.test.ts` drives `run()` all t
 | `src/chat/commands.test.ts`                       | the registry, the parse (`//`, unknown, aliases), the filter, the closest match, `currentModelOf`, and every command's `run` (#207)                                                                                                                                                                                                       |
 | `src/components/command-menu.test.tsx`            | the menu's rows, the highlight, and the usage column padded to the whole registry (#207)                                                                                                                                                                                                                                                  |
 | `src/components/prompt-slot.test.tsx`             | a flow in the prompt's place, its result, its steps, and a flow that replaces one that is up (#207)                                                                                                                                                                                                                                       |
-| `src/providers/credential-form.test.ts`           | the form table: a form per credential type, the body it builds, and the fallback for an unknown provider (#210, X6)                                                                                                                                                                                                                       |
+| `src/providers/credential-form.test.ts`           | the form table: a form per credential type (the `api_key` one, and azure's three fields with the deployments split), the body it builds, `nameErrorMessage`, and the fallback for an unknown provider (#210, X6; #245 A3a)                                                                                                                |
 | `src/components/secret-input.test.tsx`            | the hidden input: no echo, the mask's length, paste (newline and all), Enter/Esc, and the character the flow claims before it is inserted (#210)                                                                                                                                                                                          |
-| `src/components/provider-setup.test.tsx`          | the connect flow: the provider list and its free-tier hints, the key page and `o`, a save, a rejected key asking again, a stale session, Esc back and Esc out (#210)                                                                                                                                                                      |
+| `src/components/provider-setup.test.tsx`          | the connect flow: the provider list and its free-tier hints, the key page and `o`, a save, a rejected key asking again, a stale session, Esc back and Esc out (#210) — and the Azure form: its three fields one prompt at a time, the endpoint shown because it is not a secret, the name prompt a second credential gets, and a name already taken refused before the fields (#245 A3a) |
 | `src/commands/providers.test.tsx`                 | `oh providers`: the list's columns, the remove question, `--yes`, and the connect screen end to end (#210)                                                                                                                                                                                                                                |
 | `src/markdown/text.test.ts`                       | the wrapper: prose and pasted indentation, wide characters, long words, truncation and alignment (#205)                                                                                                                                                                                                                                   |
 | `src/markdown/theme.test.ts`                      | `COLORFGBG`, `NO_COLOR`, the colour level (`COLORTERM`, `-256color`, and nothing), the config's `theme`, the two syntax palettes, and the band and panel per level and background (#205, #231)                                                                                                                                            |

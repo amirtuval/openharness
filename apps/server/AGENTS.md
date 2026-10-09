@@ -61,9 +61,9 @@ protocol's schemas, so the shapes are not repeated here — see
 | `GET`    | `/v1/models`                              | `ListModelsQuerySchema` (`refresh`)         | `{ data, providers }`; 429 for a refresh inside the minute                                                                                           |
 | `GET`    | `/v1/sessions/{session_id}/usage`         | —                                           | what one session spent: totals, cost and the per-model breakdown; 404 for another owner's                                                            |
 | `GET`    | `/v1/me/usage`                            | `UserUsageQuerySchema` (`from`, `to`, `tz`) | the caller's own usage: totals, cost, by model and by day; 400 for a zone or range it cannot read                                                    |
-| `PUT`    | `/v1/provider-credentials/{provider}`     | `PutProviderCredentialRequestSchema`        | the credential's metadata; 422 if the key is refused                                                                                                 |
+| `PUT`    | `/v1/provider-credentials/{name}`         | `PutProviderCredentialRequestSchema`        | the credential's metadata; 422 if it is refused, 400 for a name its type may not take                                                                |
 | `GET`    | `/v1/provider-credentials`                | —                                           | `{ data: ProviderCredential[] }`, metadata only                                                                                                      |
-| `DELETE` | `/v1/provider-credentials/{provider}`     | —                                           | 204; never an error for one that is not there                                                                                                        |
+| `DELETE` | `/v1/provider-credentials/{name}`         | —                                           | 204; never an error for one that is not there                                                                                                        |
 
 Every `/v1` route except `auth-config` requires a session (see "Authentication"), and every
 resource is scoped to its owner. `/api/auth/*` is Better Auth's own surface: sign-in, sign-out,
@@ -269,10 +269,10 @@ Better Auth's own schema check passes on the migrated database.
   **required** owner scope (`getAgent(…, { ownerId })`, `listAgents({ ownerId })`, …); another
   user's resource is a 404. The brain and the scheduler use the explicitly unscoped methods.
   `apps/server/src/isolation.test.ts` sweeps every `/v1` route with a second user.
-- **Provider credentials** (A5) live in `credentials.ts`: a `PUT` validates the key with one
-  cheap provider call (`provider-validation.ts`, injectable so tests never hit a network),
-  seals `{ type: 'api_key', api_key }` with `@openharness/vault` under AAD `userId|provider`,
-  and stores it through `CredentialStore`. `createSessionCredentialResolver` — the resolver the
+- **Provider credentials** (A5) live in `credentials.ts`: a `PUT` validates the credential
+  with one cheap call (`provider-validation.ts`, injectable so tests never hit a network), seals
+  the request body with `@openharness/vault` under AAD `userId|name`, and stores it through
+  `CredentialStore`. `createSessionCredentialResolver` — the resolver the
   runner hands the brain, bound to the session — looks up the session's owner (unscoped read:
   a turn acts for a session), opens the sealed row for the one request, and answers the
   brain's `(provider) => …` question. Nothing caches a plaintext; nothing echoes one. Both
@@ -688,6 +688,40 @@ most `OPENHARNESS_MAX_CONCURRENT_SESSIONS` sessions run at once; the rest wait t
 `stop()` accepts nothing more, aborts the turns in flight and gives them the drain timeout to
 write their last events.
 
+#### Named credentials, and Azure OpenAI (epic #245, A3a)
+
+A credential is keyed by its **name**, which is the `provider` half of the model ids it serves —
+and that is what the route's path parameter has always been, so its shape did not change:
+`PUT /v1/provider-credentials/anthropic` stores the Anthropic key, `PUT …/azure-eu` stores a
+second Azure OpenAI credential.
+
+- **Which names a type may take is checked against the body's type.** An `api_key` credential
+  may only be stored under one of the eleven provider ids (one each); a named type
+  (`azure_openai`) under any short, lowercase name that is *not* one of them — otherwise
+  `openai/gpt-5` would be ambiguous between the provider and an Azure credential that called
+  itself `openai`. Both refusals are the 400 `invalid_request_error` a bad path parameter gets.
+  `DELETE` checks the format only: removing a fixed provider's credential must keep working.
+- **The save-time check is a function of the type** (`provider-validation.ts`). An `api_key`
+  gets the provider's own cheap read, exactly as before. An `azure_openai` credential gets one
+  chat request — `max_completion_tokens: 1`, no streaming — to its **first deployment**, sent
+  through `@openharness/hands`' `safeFetch` under `SAVE_TIME_LIMITS` (10 s, at most 1 MiB). That
+  is where the SSRF guard runs on save: a loopback, private, link-local or metadata endpoint is
+  refused **before it can be stored**, so it can never be reached from the model path later.
+  The request goes to `${azureBaseUrl(endpoint)}/v1/chat/completions?api-version=v1`, the same
+  URL the brain builds, through the same helper (`@openharness/brain`'s `azureBaseUrl`).
+- **The vault's AAD is `userId|name`** — the same string it always was for the eleven, since
+  their name *is* their provider id, so a row stored before this change still opens.
+- **The catalogue gives an Azure credential one model per deployment name.** Azure offers no
+  endpoint that lists deployments, so `catalog.ts` reads the credential, opens the payload and
+  turns `deployments` into entries `<name>/<deployment>` — with models.dev's `azure` entry
+  supplying a context window only when the deployment name matches a model it knows, and `null`
+  otherwise rather than a guessed number. The status is `ok` with the time the credential was
+  read (nothing was fetched, and the deployment list is the answer rather than a stand-in).
+  The registry snapshot gained that `azure` entry by the same refresh script
+  (`scripts/refresh-models-dev.mjs` now walks `CREDENTIAL_TYPES` as well as `PROVIDERS`).
+- **A model id resolves by name, then by type**: the brain's `providerModelFactory` takes the
+  first half as a credential name, and builds an Azure model when the credential says so.
+
 ### `PostgresPartitionScheduler`
 
 ```ts
@@ -1002,12 +1036,12 @@ before the instance stops serving it (#151).
 | `SessionRunner`                                                                                                                  | the per-session turn loop, reusable: what both schedulers run passes with                   |
 | `createAuth(config, database, logger)`                                                                                           | Better Auth configured for this server (A1/A2/A3/A7), plus `Auth`, `AuthConfig`             |
 | `createSessionCredentialResolver(deps)`                                                                                          | the session owner's sealed key, opened per model request (A5)                               |
-| `sealApiKey` / `openApiKey` / `credentialAad` / `credentialUpsert`                                                               | the credential sealing helpers (A5)                                                         |
+| `sealCredential` / `openCredential` / `credentialPayload` / `credentialAad` / `credentialUpsert` / `modelCredential`             | the credential sealing helpers, and the payload -> `ModelCredential` mapping (A5, #245 A3a) |
 | `createAuthGuard(options)`                                                                                                       | the `/v1` session + CSRF middleware (A2)                                                    |
 | `createSessionRevocations(options)`                                                                                              | the registry of open responses a revocation closes, subscribed to the store (#76)           |
 | `startSessionRecheck(options)`, `DEFAULT_SESSION_RECHECK_MS`                                                                     | the periodic session re-check of a long-lived response (#76)                                |
 | `SESSION_INVALID_MESSAGE`, `SSE_SESSION_INVALID`                                                                                 | what a stream says when its session is revoked or expires (#76)                             |
-| `validateProviderApiKey`, `VALIDATABLE_PROVIDERS`                                                                                | the one cheap provider call a saved key is checked with (#245: the protocol's provider ids) |
+| `createProviderCredentialValidator`, `validateProviderCredential`, `VALIDATABLE_PROVIDERS`                                        | the one cheap call a saved credential is checked with — a provider list for `api_key`, a guarded Azure request for `azure_openai` (#245 A3a) |
 | `ModelCatalog`, `ModelCatalogOptions`, `CatalogRefreshLimitedError`                                                              | the model catalogue: provider lists, registry join, cache, fallback (#90)                   |
 | `createBundledRegistry()`, `emptyRegistry`, `SNAPSHOT_DATE`, `ModelRegistry`, `RegistryModel`                                    | the registry join's seam, over the bundled models.dev snapshot                              |
 | `contextTokenBudget`, `createTokenBudgetResolver`, `OUTPUT_RESERVE_RATIO`                                                        | the per-model context budget: `contextWindow − min(maxOutput, 25%)`, per request (#246)     |
@@ -1218,6 +1252,13 @@ parallel with each other.
   name appears anywhere in the serialized line.
 - `isolation.test.ts` — two users, every `/v1` route walked as the second one: 404 for a
   by-id read, empty lists, no credentials of the other's, `/v1/me` answering the caller.
+- `azure-credentials.test.ts` (#245, A3a) — the named-credential route end to end: the metadata
+  an azure save returns, a second credential under `azure-eu`, the 400s (a name a provider id
+  owns, an `api_key` under a named one, a malformed name, a non-https endpoint, no deployments),
+  the 422 and the SSRF refusals (a loopback, link-local and metadata endpoint, through the real
+  validator), the catalogue's one-model-per-deployment answer with the registry's window on a
+  known deployment and `null` on an unknown one, and a turn that reaches the endpoint through
+  the real guard with an injected transport standing in for Azure.
 - `credentials.test.ts` — the write-only round trip, the 422 a refused key gets, the fresh
   session rule, the vault's AAD binding, "never in a response or a log", and the env-key test:
   with `OPENAI_API_KEY` set and no stored credential, a turn ends with

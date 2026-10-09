@@ -485,19 +485,26 @@ centred when it fits and scrolled from the top when it does not), and its headin
 two the violet→coral gradient is on — see "The palette" below. `FIRST_RUN_HEADING` is exported
 the way `NEW_CHAT_GREETING` is, and the ✨ sits outside the gradient span.
 
-- **Tiles** come from `@openharness/client`'s `PROVIDERS`, one per provider, each with its mark
-  and its free-tier hint (X8) drawn as a coral chip (`components/providers/free-tier-chip.tsx`,
-  the one place that hint is styled — the tiles and the key form both render it). The list is
-  complete by construction: since #245 it is built from the shared provider list in
-  `@openharness/protocol`, the same list the server's validation and model-list tables are keyed
-  by, so the two cannot drift.
-- **The form** is `components/providers/provider-key-form.tsx`, and it is the only place a key is
-  typed in this app — the first-run screen, the Add-provider dialog and Settings all render it,
-  so "paste and validate" means the same thing everywhere. **Its fields come from the credential
-  type** (X6): `CREDENTIAL_FORMS` is a `Record<ProviderCredentialType, …>` holding the fields and
-  the request body they build, and `api_key` is the only member today. A new member of the
-  protocol's credential union is a compile error there until it has a form — which is where
-  Bedrock, Vertex and Azure land in phase 4.
+- **Tiles** come from `@openharness/client`'s `CREDENTIAL_TARGETS` — the eleven providers and
+  then the named credential types (`Azure OpenAI`) — each with its mark and its free-tier hint
+  (X8) drawn as a coral chip (`components/providers/free-tier-chip.tsx`, the one place that hint
+  is styled — the tiles and the key form both render it). The list is complete by construction:
+  since #245 it is built from the shared provider list in `@openharness/protocol`, the same list
+  the server's validation and model-list tables are keyed by, so the two cannot drift.
+- **The form** is `components/providers/provider-key-form.tsx`, and it is the only place a
+  secret is typed in this app — the first-run screen, the Add-provider dialog and Settings all
+  render it, so "paste and validate" means the same thing everywhere. **Its fields come from the
+  credential type** (X6): `CREDENTIAL_FORMS` is a `Record<ProviderCredentialType, …>` holding the
+  fields and the request body they build — `api_key`'s one secret, and `azure_openai`'s endpoint,
+  key and comma-separated deployment names (#245, A3a). A new member of the protocol's credential
+  union is a compile error there until it has a form — which is where Bedrock and Vertex land.
+- **A named target may also ask for a name** (#245, A3a). The eleven providers are one each
+  (`name` is their id); an Azure credential keeps as many as the reader wants, each under a name
+  that becomes the `provider` half of its model ids. The name field appears **only when one of
+  that type is already stored** — the first takes the type's default, `azure` — and the three
+  rules the server enforces (short and lowercase; not a fixed provider id; not already taken) are
+  shown next to the field, with the save held until they pass. A row's Replace reopens the form
+  prefilled with the name it replaces, which is how a second Azure credential's row edits *it*.
 - **Errors are inline**, in the three classes the credentials API has: a refused key
   (`invalid_provider_credential`, titled "Hmm, <provider> didn't accept that key" since #227
   while the server's own 422 message stays the body — warm, never vague), a stale session (401,

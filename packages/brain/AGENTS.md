@@ -49,6 +49,7 @@ src/
   log.ts                reading the log, and the questions the loop asks of it
   context.ts            ContextStrategy: the log as model messages, trimmed
   model.ts              ModelFactory, credentials, and streaming one request through the AI SDK
+  azure-fetch.ts        the Azure endpoint's base URL, and the safeFetch guard a model call goes through
   redact.ts             redactSecret: scrubbing a provider key out of error text
   errors.ts             classifyModelError: retryable or terminal, and which session.error
   retry.ts              RetryPolicy, backoff, and the injectable sleep
@@ -75,10 +76,11 @@ emits what that reaches.
 | `createContextStrategy(config?)`, `ContextStrategyConfig`                     | the default strategy: the conversation, trimmed to a token budget resolved per model             |
 | `DEFAULT_CONTEXT_STRATEGY`, `DEFAULT_CONTEXT_TOKEN_BUDGET`, `CHARS_PER_TOKEN` | its defaults                                                                                     |
 | `estimateTokens(text)`                                                        | the chars/4 estimate the budget is measured in                                                   |
-| `ModelCredential`                                                             | `{ apiKey }` — the credential one model request is made with                                     |
-| `ResolveCredential`                                                           | `(provider) => Promise<ModelCredential \| null>` — where it comes from                           |
+| `ModelCredential`                                                             | `{ type: 'api_key', apiKey }` or `{ type: 'azure_openai', apiKey, endpoint }` — one request's credential |
+| `ResolveCredential`                                                           | `(name) => Promise<ModelCredential \| null>` — where it comes from                               |
 | `ModelFactory`                                                                | `(modelId, credential) => LanguageModel` — how a `provider/model` becomes a model                |
-| `providerModelFactory`                                                        | the `ModelFactory` hosts normally pass: the official AI SDK providers, the key passed explicitly |
+| `providerModelFactory`, `createProviderModelFactory(options)`                 | the `ModelFactory` hosts normally pass: the official AI SDK providers, the key passed explicitly |
+| `azureFetch`, `createAzureFetch(options)`, `azureBaseUrl(endpoint)`           | the Azure `fetch` (safeFetch under the streaming-safe limits) and the base URL it builds         |
 | `providerOf(modelId)`                                                         | the provider of a `provider/model` id: the part before the first slash                           |
 | `isUsableCredential(credential)`                                              | whether a resolved credential is a key at all (a blank one is not)                               |
 | `missingCredentialMessage(provider)`                                          | the `session.error` sentence for a provider with no key                                          |
@@ -389,6 +391,38 @@ than eight characters is left alone, as is a trimmed variant that falls below ei
 whole, so the log still says what the provider said. The brain itself never logs; the tests
 capture the console anyway, because the libraries on this path could.
 
+### Named credentials, and Azure OpenAI (epic #245, A3a)
+
+The first half of a `provider/model` id is not always one of the eleven provider ids. A
+**named credential** — an Azure OpenAI credential stored under `azure` or `azure-eu` — takes
+the model ids `<name>/<deployment>`, and the credential's `type` is what decides which client
+builds it:
+
+```
+providerOf('azure/gpt-4o') → 'azure'   → not one of the eleven → the credential's type decides
+                                       → azure_openai → createAzure(...).chat('gpt-4o')
+```
+
+- **The type is the discriminant, and it is checked.** For a first half that *is* one of the
+  eleven, the request is built from `credential.apiKey` as it always was. For any other first
+  half, the credential must be an `azure_openai` one; an `api_key` credential under a name no
+  provider carries is still an `UnsupportedProviderError`, which ends a turn with no span and
+  no request, exactly as before.
+- **`createAzure` gets the key and a base URL, both explicit.** `azureBaseUrl(endpoint)` turns
+  the resource endpoint a user saved (`https://my-resource.openai.azure.com`) into the base URL
+  `@ai-sdk/azure` appends `/v1` to — deriving and normalizing the `/openai` segment, so the
+  three spellings a user might paste land on the same API. `apiKey` is a constructor argument,
+  so `AZURE_API_KEY` is never read.
+- **`.chat(id)`, not the provider's default.** The default is the Responses API, which newer
+  deployments support and older ones do not; the deployment name is a string the user typed, so
+  the factory cannot know. Chat completions is the API every Azure deployment answers.
+- **Every Azure request goes through `safeFetch`.** `azureFetch` is `safeFetch` under
+  `STREAMING_LIMITS` — no total deadline and no size cap, because a model streams a long reply,
+  and an idle timeout instead, because a stream that stops producing is hung rather than slow.
+  Private addresses are **always** refused: the `allowPrivate` option safeFetch has is for the
+  later custom-URL credential type and is never passed here. The endpoint is a URL a user typed,
+  so the guard runs on the model call exactly as it does on the save-time check (in the server).
+
 ### Usage
 
 `ai@7` reads a model's `specificationVersion` and reshapes what it reports to match. Every
@@ -479,6 +513,10 @@ retries run on an injected `sleep`, the clock is a `TestClock` from
   including the branches the loop cannot reach. `errors.test.ts` also covers the wrappers the
   classification follows (`AI_RetryError` and duck-typed ones), and `model.test.ts` pins the
   one-failure-one-call invariant with a failure the SDK's retry classifier would act on.
+- `azure-model.test.ts` — the named-credential path: `azureBaseUrl`'s normalization, the URL a
+  `azure/gpt-4o` request is sent to (the deployment from the id, the endpoint from the
+  credential), the key in the `api-key` header with `AZURE_API_KEY` set to a decoy, and that
+  the real `azureFetch` refuses a loopback, metadata or `http:` endpoint before any request.
 - `src/testing/harness.ts` builds the session and reads the log back; `src/testing/mock-model.ts`
   scripts what each model request answers with, records the prompts, and can act mid-stream
   (abort, append a steering message) between two chunks. Its `apiCallError` is the failure
