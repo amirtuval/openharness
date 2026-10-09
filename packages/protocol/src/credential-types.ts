@@ -62,7 +62,7 @@ export interface CredentialTypeDefinition {
 
 /**
  * The named credential types, in the order every side lists them. Today: Azure OpenAI, a
- * custom OpenAI-compatible endpoint and Amazon Bedrock.
+ * custom OpenAI-compatible endpoint, Amazon Bedrock and Google Vertex.
  *
  * `credential-types.test.ts` holds this list against the request union's members, so a type
  * added to the schema without its facts here — or the reverse — fails a named test rather than
@@ -101,6 +101,21 @@ const CREDENTIAL_TYPE_DEFINITIONS = [
     keyUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials',
     // A Bedrock credential's models are the Bedrock model ids: `bedrock/anthropic.claude-…-v1:0`.
     modelIdHint: 'model id',
+  },
+  {
+    type: 'vertex',
+    name: 'Google Vertex',
+    defaultName: 'vertex',
+    // models.dev files Vertex under `google-vertex`, and that entry carries the Anthropic
+    // models served there too — so one key covers everything a Vertex credential can run.
+    modelsDevKey: 'google-vertex',
+    // A service-account key is not created on a page of its own: it is issued from a service
+    // account, under IAM → Service Accounts. That list is where the reader starts, and the
+    // page's path is stable, so it is the honest link rather than a guessed one for one
+    // account.
+    keyUrl: 'https://console.cloud.google.com/iam-admin/serviceaccounts',
+    // A Vertex credential's models are `vertex/gemini-2.5-pro`: the second half is a model.
+    modelIdHint: 'model',
   },
 ] as const satisfies readonly CredentialTypeDefinition[]
 

@@ -305,6 +305,65 @@ export function runCredentialStoreConformance(
           'azure-eu',
         ])
       })
+
+      it('round-trips the non-secret details a type adds, and their absence', async () => {
+        // #245 A3d: a `vertex` credential's service-account email, project and location are
+        // metadata the type knows, and a *list* has to be able to show them — it never opens
+        // the sealed blob, where the same facts happen to be. A type with no details gets no
+        // field at all, which is a different statement from an empty map.
+        const { store, clock } = await setup()
+        const details = {
+          email: 'vertex-runner@openharness-vertex.iam.gserviceaccount.com',
+          project: 'openharness-vertex',
+          location: 'us-central1',
+        }
+        const vertex = await store.upsert({
+          userId: OWNER_A,
+          name: 'vertex',
+          type: 'vertex',
+          sealed: sealedSecret('a-vertex'),
+          last4: 'k1d4',
+          details,
+          validatedAt: timestampAt(clock.currentMs),
+        })
+        expect(vertex.details).toEqual(details)
+        expect(await listedDetails(store, 'vertex')).toEqual(details)
+        expect((await store.get({ userId: OWNER_A, name: 'vertex' }))?.details).toEqual(details)
+        // What is written is copied, not referenced: a caller that mutates its own bag after
+        // the save cannot change what the store holds.
+        const stored = {
+          email: 'vertex-runner@openharness-vertex.iam.gserviceaccount.com',
+          project: 'openharness-vertex',
+          location: 'us-central1',
+        }
+        details.location = 'europe-west4'
+        expect(await listedDetails(store, 'vertex')).toEqual(stored)
+
+        const anthropic = await store.upsert({
+          userId: OWNER_A,
+          name: 'anthropic',
+          type: 'api_key',
+          sealed: sealedSecret('a-anthropic'),
+          last4: '4444',
+          validatedAt: timestampAt(clock.currentMs),
+        })
+        expect(anthropic).not.toHaveProperty('details')
+        expect(await listedDetails(store, 'anthropic')).toBeUndefined()
+
+        // A replacement takes the new payload's details, absent ones included: saving a
+        // credential whose type adds none must not leave the previous save's facts behind.
+        const replaced = await store.upsert({
+          userId: OWNER_A,
+          name: 'vertex',
+          type: 'vertex',
+          sealed: sealedSecret('a-vertex-2'),
+          last4: 'k2d4',
+          validatedAt: timestampAt(clock.currentMs),
+        })
+        expect(replaced.id).toBe(vertex.id)
+        expect(replaced).not.toHaveProperty('details')
+        expect(await listedDetails(store, 'vertex')).toBeUndefined()
+      })
     })
 
     describe('get', () => {
@@ -497,4 +556,18 @@ function legacySealedSecret(tag: string): SealedSecret {
 function expectExact<T>(schema: { parse(value: unknown): T }, value: unknown, what: string): void {
   const parsed = schema.parse(value)
   expect(parsed, `${what} is exactly its protocol shape`).toEqual(value)
+}
+
+/**
+ * One listed credential's `details`, by name — `undefined` when it has none.
+ *
+ * The suite reads a listing by name rather than by position: `list` is ordered by name, so an
+ * index would make every assertion depend on the names a test happens to have used.
+ */
+async function listedDetails(
+  store: CredentialStore,
+  name: string,
+): Promise<Record<string, string> | undefined> {
+  const listed = await store.list({ userId: OWNER_A })
+  return listed.find((entry) => entry.name === name)?.details
 }
