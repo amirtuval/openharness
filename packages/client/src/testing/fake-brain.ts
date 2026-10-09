@@ -116,7 +116,7 @@ const EMPTY_USAGE: ModelUsage = {
 
 /** A model's running total, created empty for a fold to add into. */
 function emptyModelUsage(model: string): SessionModelUsage {
-  return { model, usage: { ...EMPTY_USAGE } }
+  return { model, usage: { ...EMPTY_USAGE }, requests: 0 }
 }
 
 /** One usage report added into another, counter by counter. */
@@ -755,6 +755,7 @@ export class FakeBrain {
         models.push(usage)
       }
       addUsage(usage.usage, event.model_usage)
+      usage.requests += 1
       addUsage(totals, event.model_usage)
     }
     return deepFreeze({

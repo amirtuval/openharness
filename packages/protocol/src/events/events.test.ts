@@ -159,6 +159,7 @@ const storedSamples = {
           cache_creation_input_tokens: 0,
           cache_read_input_tokens: 4,
         },
+        requests: 1,
       },
       {
         model: 'openai/gpt-4.1-mini',
@@ -168,6 +169,7 @@ const storedSamples = {
           cache_creation_input_tokens: 0,
           cache_read_input_tokens: 0,
         },
+        requests: 2,
       },
     ],
   },

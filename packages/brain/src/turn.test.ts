@@ -335,7 +335,7 @@ describe('runTurn', () => {
       type: EVENT_TYPES.sessionUsage,
       input_tokens: FIXTURE_MODEL_USAGE.input_tokens,
       output_tokens: FIXTURE_MODEL_USAGE.output_tokens,
-      models: [{ model: TEST_MODEL_ID, usage: FIXTURE_MODEL_USAGE }],
+      models: [{ model: TEST_MODEL_ID, usage: FIXTURE_MODEL_USAGE, requests: 1 }],
     })
     expect(idle).toMatchObject({
       type: EVENT_TYPES.sessionStatusIdle,
@@ -490,7 +490,14 @@ describe('runTurn', () => {
     expect(totals[1]).toMatchObject({
       input_tokens: FIXTURE_MODEL_USAGE.input_tokens * 2,
       output_tokens: FIXTURE_MODEL_USAGE.output_tokens * 2,
-      models: [{ model: TEST_MODEL_ID, usage: { input_tokens: 1024, output_tokens: 128 } }],
+      models: [
+        {
+          model: TEST_MODEL_ID,
+          usage: { input_tokens: 1024, output_tokens: 128 },
+          // Both requests ran on the same model, so the running totals say two (#247).
+          requests: 2,
+        },
+      ],
     })
 
     // The second request claims the steering message; the first one claims only the message it

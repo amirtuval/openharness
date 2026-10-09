@@ -10,7 +10,13 @@ const totals = {
   cache_read_input_tokens: 400,
 }
 
-const entry = { model: 'anthropic/claude-sonnet-5', usage: totals, requests: 2, cost: 0.0045 }
+const entry = {
+  model: 'anthropic/claude-sonnet-5',
+  usage: totals,
+  requests: 2,
+  cost: 0.0045,
+  unpriced_requests: 0,
+}
 
 describe('SessionUsageSchema', () => {
   it('parses totals with their per-model breakdown and their costs', () => {
@@ -18,21 +24,38 @@ describe('SessionUsageSchema', () => {
       session_id: 'sesn_01JQZ8R6X9M4V0W7Y2B3C5D6E7',
       totals,
       cost: 0.0045,
+      unpriced_requests: 0,
       by_model: [entry],
     }
     expect(SessionUsageSchema.parse(usage)).toEqual(usage)
   })
 
-  it('takes a null cost for a model nobody published a price for', () => {
-    // The whole point of `null` (#245): the tokens are there, the money is not known, and the
-    // total is unknown with them.
+  it('parses a total that sums the priced requests and names the unpriced ones', () => {
+    // A session that ran a priced model and an unpriced one (#247, decided 2026-10-09): the
+    // total is what the priced requests came to, and `unpriced_requests` is how many were left
+    // out — never a `null` whole answer, and never an estimate folded into the number.
+    const usage = {
+      session_id: 'sesn_01JQZ8R6X9M4V0W7Y2B3C5D6E7',
+      totals,
+      cost: 0.0045,
+      unpriced_requests: 3,
+      by_model: [entry, { ...entry, model: 'acme/mystery-1', cost: null, unpriced_requests: 3 }],
+    }
+    expect(SessionUsageSchema.parse(usage)).toEqual(usage)
+  })
+
+  it('takes a null cost for a total with nothing priced, and counts what was left out', () => {
+    // The `null` of #245 kept its meaning — nothing here could be priced — but it is no longer
+    // the answer to a single unpriced request in a total that also holds priced ones.
     const parsed = SessionUsageSchema.parse({
       session_id: 'sesn_01JQZ8R6X9M4V0W7Y2B3C5D6E7',
       totals,
       cost: null,
-      by_model: [{ ...entry, cost: null }],
+      unpriced_requests: 1,
+      by_model: [{ ...entry, cost: null, unpriced_requests: 1 }],
     })
     expect(parsed.cost).toBeNull()
+    expect(parsed.unpriced_requests).toBe(1)
     expect(parsed.by_model[0]?.cost).toBeNull()
     expect(parsed.by_model[0]?.usage.input_tokens).toBe(1000)
   })
@@ -44,14 +67,23 @@ describe('SessionUsageSchema', () => {
         session_id: 'sesn_01JQZ8R6X9M4V0W7Y2B3C5D6E7',
         totals: totalsZero,
         cost: null,
+        unpriced_requests: 0,
         by_model: [],
       }),
-    ).toMatchObject({ cost: null, by_model: [] })
+    ).toMatchObject({ cost: null, unpriced_requests: 0, by_model: [] })
   })
 
   it('refuses a negative count, a fractional request count and a negative cost', () => {
-    const base = { session_id: 'sesn_01JQZ8R6X9M4V0W7Y2B3C5D6E7', totals, cost: 0, by_model: [] }
+    const base = {
+      session_id: 'sesn_01JQZ8R6X9M4V0W7Y2B3C5D6E7',
+      totals,
+      cost: 0,
+      unpriced_requests: 0,
+      by_model: [],
+    }
     expect(SessionUsageSchema.safeParse({ ...base, cost: -1 }).success).toBe(false)
+    expect(SessionUsageSchema.safeParse({ ...base, unpriced_requests: -1 }).success).toBe(false)
+    expect(SessionUsageSchema.safeParse({ ...base, unpriced_requests: 0.5 }).success).toBe(false)
     expect(
       SessionUsageSchema.safeParse({
         ...base,
@@ -72,8 +104,9 @@ describe('UserUsageSchema', () => {
       tz: 'Asia/Kolkata',
       totals,
       cost: 0.0045,
+      unpriced_requests: 0,
       by_model: [entry],
-      by_day: [{ day: '2026-10-08', totals, cost: 0.0045 }],
+      by_day: [{ day: '2026-10-08', totals, cost: 0.0045, unpriced_requests: 0 }],
     }
     expect(UserUsageSchema.parse(usage)).toEqual(usage)
   })
@@ -85,8 +118,9 @@ describe('UserUsageSchema', () => {
       tz: 'UTC',
       totals,
       cost: null,
+      unpriced_requests: 0,
       by_model: [],
-      by_day: [{ day: '2026-10-08T10:00:00Z', totals, cost: null }],
+      by_day: [{ day: '2026-10-08T10:00:00Z', totals, cost: null, unpriced_requests: 0 }],
     }
     expect(UserUsageSchema.safeParse(usage).success).toBe(false)
   })

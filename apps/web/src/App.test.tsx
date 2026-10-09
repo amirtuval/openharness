@@ -127,6 +127,43 @@ describe('App', () => {
     expect(document.querySelector('[data-slot="session-cost"]')?.textContent).toBe('—')
   })
 
+  it('sums the priced requests and names the unpriced ones in the session total (#247)', async () => {
+    // A session that ran a priced model and then a model nobody prices: the money is what the
+    // priced request came to, and the unpriced one is counted beside it (decided 2026-10-09) —
+    // one request with no published price no longer turns the whole total into `—`.
+    const fake = makeFake({
+      models: [
+        modelEntry({
+          id: 'anthropic/claude-sonnet-5',
+          provider: 'anthropic',
+          name: 'Claude Sonnet 5',
+          cost: { input: 2, output: 10, cache_read: 0.2, cache_write: 2.5 },
+        }),
+        modelEntry({ id: 'acme/mystery-1', provider: 'acme', name: 'Mystery' }),
+      ],
+    })
+    fake.respondWith('Hello there.')
+    await fake.sendMessage(fake.session.id, 'Hi there')
+    await fake.waitForIdle(fake.session.id)
+    fake.respondWith('On the other model.')
+    await fake.sendMessage(fake.session.id, 'Again', { model: { id: 'acme/mystery-1' } })
+    await fake.waitForIdle(fake.session.id)
+    renderApp(fake)
+
+    const total = await waitFor(() => {
+      const element = document.querySelector('[data-slot="session-cost"]')
+      expect(element?.textContent).toMatch(/unpriced/)
+      return element as HTMLElement
+    })
+    // 512 in at $2/Mtok and 32 out at $10/Mtok, once — the priced part — plus the one request
+    // on the unpriced model.
+    expect(total.textContent).toBe('$0.0013 + 1 unpriced')
+    // The count is explained, not just printed.
+    expect(total.getAttribute('title')).toBe(
+      '1 request had no published price and is not in the total.',
+    )
+  })
+
   it('stops a running reply with user.interrupt and keeps what was written', async () => {
     const user = userEvent.setup({ delay: null })
     const fake = makeFake()

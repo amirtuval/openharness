@@ -13,6 +13,7 @@ import type {
   SessionErrorType,
   SessionRewindEvent,
   SessionStatus,
+  TotalCost,
 } from '@openharness/protocol'
 
 /**
@@ -123,6 +124,14 @@ export interface SessionModelUsage {
   readonly model: string
   /** What those requests reported, summed. */
   readonly usage: SessionUsageTotals
+  /**
+   * How many requests ran on this model (epic #245, A2; #247).
+   *
+   * A `session.usage` event carries the count per model, and the derivation from a transcript's
+   * replies sets it to how many replies named the model. It is what lets {@link sessionCost}
+   * count the requests a model nobody prices leaves unpriced, rather than the model alone.
+   */
+  readonly requests: number
 }
 
 /**
@@ -870,7 +879,11 @@ function usageFrom(usage: ModelUsage): TranscriptUsage {
 function usageFromEvent(event: SessionUsageEvent): SessionUsage {
   return {
     totals: totalsOf(event),
-    models: event.models.map((entry) => ({ model: entry.model, usage: totalsOf(entry.usage) })),
+    models: event.models.map((entry) => ({
+      model: entry.model,
+      usage: totalsOf(entry.usage),
+      requests: entry.requests,
+    })),
   }
 }
 
@@ -1092,6 +1105,7 @@ export function selectSessionUsage(state: TranscriptState): SessionUsage {
  */
 export function sessionUsageOf(messages: readonly TranscriptMessage[]): SessionUsage {
   const models = new Map<string, SessionUsageTotals>()
+  const requests = new Map<string, number>()
   let totals = emptyTotals()
   for (const message of messages) {
     const model = message.meta?.model
@@ -1101,21 +1115,42 @@ export function sessionUsageOf(messages: readonly TranscriptMessage[]): SessionU
     }
     totals = plus(totals, usage)
     models.set(model, plus(models.get(model) ?? emptyTotals(), usage))
+    // One reply is one entry in the derivation: a reply the log retried carries the failed
+    // attempt's tokens in the same metadata, so its request count is the reply's, not the
+    // attempts'. The event's own count is exact; this is the best a transcript can say.
+    requests.set(model, (requests.get(model) ?? 0) + 1)
   }
-  return { totals, models: [...models].map(([model, usage]) => ({ model, usage })) }
+  return {
+    totals,
+    models: [...models].map(([model, usage]) => ({
+      model,
+      usage,
+      requests: requests.get(model) ?? 0,
+    })),
+  }
 }
 
 /**
- * What a session's tokens cost, in USD — or `null` when any part of them cannot be priced.
+ * What a session's tokens cost: the sum of the requests that could be priced, and how many could
+ * not (epic #245, A2; #247, decided 2026-10-09).
  *
- * `prices` is the model catalog's (`ModelEntry.cost`); a model it does not price makes the
- * total unknown rather than making it smaller, which is what "—" in a frontend means.
+ * `prices` is the model catalog's (`ModelEntry.cost`). A model it does not price makes its
+ * requests — all of them, which the totals count per model — unpriced rather than free: the cost
+ * is the priced part, and `unpriced_requests` names the rest, which is what a frontend renders as
+ * "+ N unpriced". The cost is `null` only when nothing in the session could be priced, which is
+ * what "—" means.
  *
  * @param usage the session's totals, as {@link selectSessionUsage} answers them
  * @param prices the price of a `provider/model` id, or `null` for one nobody publishes
  */
-export function sessionCost(usage: SessionUsage, prices: ModelPriceLookup): number | null {
-  return totalCost(usage.models.map((entry) => totalsCost(entry.usage, prices(entry.model))))
+export function sessionCost(usage: SessionUsage, prices: ModelPriceLookup): TotalCost {
+  // An unpriced model stands for every request that ran on it, so the count `totalCost` reports
+  // is requests — the same unit the usage routes count — rather than models.
+  const parts = usage.models.flatMap((entry) => {
+    const cost = totalsCost(entry.usage, prices(entry.model))
+    return cost === null ? Array<number | null>(entry.requests).fill(null) : [cost]
+  })
+  return totalCost(parts)
 }
 
 /**

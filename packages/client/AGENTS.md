@@ -262,14 +262,20 @@ The transcript carries the same numbers for a screen that is already following a
 is why a client rarely needs either route:
 
 - `TranscriptState.usage` is the newest `session.usage` event the reducer has folded in — the
-  session's **running** totals, per model (the event carries them cumulatively).
+  session's **running** totals, per model, each entry with its token counters and its request
+  count (the event carries them cumulatively).
 - `selectSessionUsage(state)` answers that, or **derives** the same totals from the transcript's
   replies for a session stored before the event existed. The two agree by construction: the
-  event is what a fold over the stored spans produces.
+  event is what a fold over the stored spans produces, and the derivation counts one request per
+  reply that named a model.
 - `sessionCost(usage, prices)` and `replyCost(meta, prices)` turn tokens into money with the
   catalog's rates (`ModelEntry.cost`), which is what a frontend passes in as a `ModelPriceLookup`
-  — `modelPriceLookup(models)` in the web app. A reply or a session whose model has no price is
-  `null`: `—` on screen, never a zero.
+  — `modelPriceLookup(models)` in the web app. `replyCost` is one request's money, `null` for a
+  reply whose model nobody prices — `—` on screen, never a zero. `sessionCost` is a **total**: a
+  `TotalCost` of `cost` (the priced requests summed, or `null` when none could be priced) and
+  `unpriced_requests` (how many were left out, counted per model from the event's request counts
+  — #247, decided 2026-10-09), which a frontend renders as `$1.23 + 4 unpriced` and `—` only for
+  the `null`.
 - A `session.rewind` drops `state.usage`: the totals the rewind replaced counted a branch that is
   gone, and the derivation from the messages that survived is right until the next request writes
   a fresh snapshot.

@@ -134,10 +134,11 @@ describe('fixture builders', () => {
     expect(StoredEventSchema.safeParse(inconsistent).success).toBe(false)
 
     const switched = makeSessionUsage([
-      { model: 'anthropic/claude-sonnet-5', usage: FIXTURE_MODEL_USAGE },
+      { model: 'anthropic/claude-sonnet-5', usage: FIXTURE_MODEL_USAGE, requests: 1 },
       {
         model: 'openai/gpt-5.1',
         usage: { ...FIXTURE_MODEL_USAGE, input_tokens: 1, output_tokens: 0 },
+        requests: 2,
       },
     ])
     expect(switched.input_tokens).toBe(FIXTURE_MODEL_USAGE.input_tokens + 1)
@@ -145,6 +146,9 @@ describe('fixture builders', () => {
       'anthropic/claude-sonnet-5',
       'openai/gpt-5.1',
     ])
+    // The request counts ride with each model (#247): a reader of the running totals needs them
+    // to count how many requests a model nobody prices leaves unpriced.
+    expect(switched.models.map((entry) => entry.requests)).toEqual([1, 2])
   })
 
   it('build content deltas that parse', () => {

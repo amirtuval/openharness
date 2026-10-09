@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   formatCost,
+  formatCostTotal,
   formatDuration,
   formatTokens,
   replyMetaLine,
@@ -242,5 +243,27 @@ describe('formatCost (#247)', () => {
 
   it('says so rather than rounding a cost too small to print to zero', () => {
     expect(formatCost(0.00001)).toBe('<$0.0001')
+  })
+})
+
+describe('formatCostTotal (#247, decided 2026-10-09)', () => {
+  it('is just the money when every request was priced', () => {
+    expect(formatCostTotal({ cost: 1.23, unpriced_requests: 0 })).toBe('$1.23')
+  })
+
+  it('sums the priced requests and names the unpriced ones', () => {
+    expect(formatCostTotal({ cost: 1.23, unpriced_requests: 4 })).toBe('$1.23 + 4 unpriced')
+  })
+
+  it('is a dash when nothing in the total is priced', () => {
+    expect(formatCostTotal({ cost: null, unpriced_requests: 3 })).toBe('—')
+    expect(formatCostTotal({ cost: null, unpriced_requests: 0 })).toBe('—')
+  })
+
+  it('shortens to a trailing plus for a terminal with no room for the words', () => {
+    expect(formatCostTotal({ cost: 1.23, unpriced_requests: 4 }, { compact: true })).toBe('$1.23+')
+    // Nothing unpriced, nothing to shorten: the compact spelling is the number itself.
+    expect(formatCostTotal({ cost: 1.23, unpriced_requests: 0 }, { compact: true })).toBe('$1.23')
+    expect(formatCostTotal({ cost: null, unpriced_requests: 2 }, { compact: true })).toBe('—')
   })
 })

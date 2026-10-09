@@ -127,6 +127,22 @@ describe('StatusLine', () => {
     expect(frameOf()).not.toContain('$')
   })
 
+  it('names the unpriced requests, and shortens instead of dropping them when tight (#247)', () => {
+    // A total that could not price every request carries the count beside the money.
+    const wide = spansOf({ cost: '$0.0013 + 1 unpriced' }, { columns: 100 })
+    expect(textOf(wide)).toContain('$0.0013 + 1 unpriced')
+
+    // At 50 columns there is room for the money but not the words: the compact spelling stays
+    // (`$0.0013+`), and the session handle — the line's least useful part — goes for it.
+    const narrow = spansOf(
+      { cost: '$0.0013 + 1 unpriced', costCompact: '$0.0013+' },
+      { columns: 50 },
+    )
+    expect(textOf(narrow)).toContain('$0.0013+')
+    expect(textOf(narrow)).not.toContain('unpriced')
+    expect(textOf(narrow)).not.toContain('sesn_')
+  })
+
   it('drops what the line is worth least when the terminal is too narrow', () => {
     const wide = spansOf({ cost: '$0.0013' }, { columns: 100 })
     expect(textOf(wide)).toContain('sesn_…Q092B1')

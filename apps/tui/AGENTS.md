@@ -552,10 +552,13 @@ parts are dropped — whole, least important first — when the terminal is too 
 status is the one that stays. Only named ANSI colours, and `NO_COLOR` drops them (#201, X4).
 
 The line also carries **what the session has spent** (#247), between the session handle and
-the status: `formatCost(sessionCost(selectSessionUsage(transcript), costOf))`, priced with the
-catalog's rates. Nothing is drawn until a request has run, `—` is drawn for a model nobody
-prices, and the segment is dropped before the session and the model when the terminal is narrow —
-the status is what the line exists for.
+the status: `formatCostTotal(sessionCost(selectSessionUsage(transcript), costOf))`, priced with
+the catalog's rates. A total **sums the requests it can price and counts the rest** (`$1.23 + 4
+unpriced`, decided 2026-10-09), and `—` is drawn only when nothing in the session could be
+priced. Nothing is drawn until a request has run. When the terminal is too narrow for the full
+line the cost is **shortened before it is dropped** — `$1.23+`, the money with the count
+collapsed to a trailing plus — and only then does the segment go, before the session and the
+model: the status is what the line exists for.
 
 The rates come from a catalog the screen reads **once, in the background**, purely for the
 prices and the display names (`chat/screen.tsx`): a chat opened on `--model` or on a stored

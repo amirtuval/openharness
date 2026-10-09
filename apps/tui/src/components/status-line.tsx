@@ -68,11 +68,18 @@ export interface StatusLineProps {
   /** Whether the history and the stream are in place yet. */
   readonly phase: ChatViewState['phase']
   /**
-   * What the session has spent (epic #245, A2; issue #247), already formatted — `$0.0042`, or
-   * `—` when a model it ran on has no published price. Omitted when there is nothing to say:
-   * a session that has not answered yet, or a caller with no catalog to price with.
+   * What the session has spent (epic #245, A2; issue #247), already formatted — `$0.0042`,
+   * `$1.23 + 4 unpriced`, or `—` when nothing in the session could be priced. Omitted when there
+   * is nothing to say: a session that has not answered yet, or a caller with no catalog to price
+   * with.
    */
   readonly cost?: string | undefined
+  /**
+   * The same money for a terminal with no room for the words — `$1.23+` — used only when the
+   * full line does not fit and the compact one does. Omitted alongside {@link cost} when there is
+   * nothing to say.
+   */
+  readonly costCompact?: string | undefined
   /** Extra context, e.g. that this is the dev fake. */
   readonly banner?: string | undefined
   /** When the turn in progress started, in epoch milliseconds; `null` when none is running. */
@@ -184,11 +191,17 @@ export function statusSpans(
     readonly theme: TerminalTheme
   },
 ): Span[] {
-  return fitSegments(
-    lineSegments(props, options.field, options.frame),
-    options.columns,
-    options.theme,
-  )
+  const full = lineSegments(props, options.field, options.frame, false)
+  // A cost that could not price every request carries a count the line may not have room for:
+  // try the compact spelling (`$1.23+`) before letting `fitSegments` drop the money whole, so a
+  // tight terminal shortens what it shows rather than losing it.
+  if (props.costCompact !== undefined && lineWidth(full) > options.columns) {
+    const compact = lineSegments(props, options.field, options.frame, true)
+    if (lineWidth(compact) < lineWidth(full)) {
+      return fitSegments(compact, options.columns, options.theme)
+    }
+  }
+  return fitSegments(full, options.columns, options.theme)
 }
 
 /** What the status field is saying, and how loudly (issue #208). */
@@ -327,14 +340,20 @@ interface Segment {
 const PRIORITY = { banner: 1, session: 2, who: 3, cost: 3, status: 4 } as const
 
 /** The line's parts, in the order they are drawn and with the weight they carry. */
-function lineSegments(props: StatusLineProps, field: StatusField, frame: string): Segment[] {
+function lineSegments(
+  props: StatusLineProps,
+  field: StatusField,
+  frame: string,
+  compactCost: boolean,
+): Segment[] {
   const who = props.agentName === undefined ? props.model : `${props.agentName} · ${props.model}`
   const status = field.spinner ? `${frame} ${field.text}` : field.text
+  const cost = compactCost ? (props.costCompact ?? props.cost) : props.cost
 
   const segments: Segment[] = [
     { span: chrome(who), priority: PRIORITY.who },
     { span: chrome(shortSessionId(props.sessionId)), priority: PRIORITY.session },
-    ...(props.cost === undefined ? [] : [{ span: chrome(props.cost), priority: PRIORITY.cost }]),
+    ...(cost === undefined ? [] : [{ span: chrome(cost), priority: PRIORITY.cost }]),
     {
       span: { text: status, color: toneColor(field.tone), dim: field.tone === 'plain' },
       priority: PRIORITY.status,

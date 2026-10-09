@@ -9,7 +9,7 @@ import { NoticeView } from '../components/notice-view'
 import { PromptInput } from '../components/prompt-input'
 import { usePromptSlot } from '../components/prompt-slot'
 import { ProviderSetup } from '../components/provider-setup'
-import { formatCost } from '../components/reply-meta'
+import { formatCostTotal } from '../components/reply-meta'
 import { InputRule, modelLabel, modelPriceLookup, StatusLine } from '../components/status-line'
 import { lastDrawn, TranscriptView } from '../components/transcript-view'
 import type { PromptHistory } from '../history'
@@ -161,11 +161,17 @@ export function ChatScreen({
   // ones the log reported, or the ones derived from its replies for a session stored before
   // they existed. Nothing until a request has run: a chat that has not answered has no cost
   // to report rather than a `$0.00` that claims its model is free.
+  //
+  // The total sums the requests the catalog could price and counts the rest (`$1.23 + 4
+  // unpriced`, decided 2026-10-09); `—` is reserved for a session where nothing could be priced.
+  // The compact form is what the status line falls back to when the terminal has no room for
+  // the words: `$1.23+`.
   const usage = selectSessionUsage(view.transcript)
-  const cost =
-    costOf === undefined || usage.models.length === 0
-      ? undefined
-      : formatCost(sessionCost(usage, costOf))
+  const costTotal =
+    costOf === undefined || usage.models.length === 0 ? undefined : sessionCost(usage, costOf)
+  const cost = costTotal === undefined ? undefined : formatCostTotal(costTotal)
+  const costCompact =
+    costTotal === undefined ? undefined : formatCostTotal(costTotal, { compact: true })
 
   // A turn the server is retrying says so in the status line rather than in a notice of its
   // own (#208) — one line, not two about the same thing. An error that outlives its turn,
@@ -366,6 +372,7 @@ export function ChatScreen({
         status={view.transcript.status}
         phase={view.phase}
         cost={cost}
+        costCompact={costCompact}
         banner={banner}
         runningSince={view.runningSince}
         lastTextAt={view.lastTextAt}

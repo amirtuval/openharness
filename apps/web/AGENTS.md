@@ -578,15 +578,21 @@ Three surfaces, and each is priced where it is read — the log holds tokens and
 - **the chat header** shows what the session has spent, beside the model id (`chat-view.tsx`):
   `selectSessionUsage(transcript)` — the log's running totals, or the ones derived from its
   replies — priced with the same lookup. It is absent until a request has run: a chat with no
-  answer has no cost to report.
+  answer has no cost to report. The total sums the requests the catalog could price and names the
+  rest (`$0.0013 + 1 unpriced`) in a `title`, and shows `—` only when nothing in the session
+  could be priced (#247, decided 2026-10-09).
 - **Settings → Usage** (`components/settings/usage.tsx` over `hooks/use-usage.ts`) is the month
   so far: the total, a table of models, and a bar per day. It reads `GET /v1/me/usage` with the
   zone the browser reports (`lib/usage.ts`: `localTimeZone`, `currentMonthRange`, `formatDay`),
-  because the server groups by **the reader's** days. Nothing polls and nothing is cached: it is
-  a screen a reader opens.
+  because the server groups by **the reader's** days. Every total there — the month, each model's
+  row, each day — carries the priced money and counts the unpriced requests, with the count
+  explained in a `title`. Nothing polls and nothing is cached: it is a screen a reader opens.
 
 `formatCost` (`lib/format.ts`) is the one place a number becomes money on screen — `—` for
-unknown, four decimals while the number is a fraction of a cent, and cents at dollar scale.
+unknown, four decimals while the number is a fraction of a cent, and cents at dollar scale — and
+`formatCostTotal` is the one place a **total** becomes money plus its unpriced count
+(`$1.23 + 4 unpriced`, or `—` when nothing was priced), which is what the header and the Usage
+card render. A single reply keeps `formatCost`/`replyCost`: one request with no price is `—`.
 
 ### The composer's model control (#113, U3)
 

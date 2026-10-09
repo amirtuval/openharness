@@ -144,6 +144,7 @@ describe('GET /v1/sessions/{session_id}/usage', () => {
       // Nothing was spent, and nothing was priced either: a session with no request has no
       // cost to report rather than a `$0.00` that claims its model is free.
       cost: null,
+      unpriced_requests: 0,
       by_model: [],
     })
   })
@@ -167,10 +168,13 @@ describe('GET /v1/sessions/{session_id}/usage', () => {
         usage: usage.totals,
         requests: 1,
         cost: usage.cost,
+        unpriced_requests: 0,
       },
     ])
-    // 10 input at $2/Mtok and 2 output at $10/Mtok.
+    // 10 input at $2/Mtok and 2 output at $10/Mtok. Every request was priced, so nothing is
+    // left out of the total.
     expect(usage.cost).toBeCloseTo((10 * 2 + 2 * 10) / 1_000_000, 12)
+    expect(usage.unpriced_requests).toBe(0)
   })
 
   it('agrees with the session.usage event the turn stored (#247)', async () => {
@@ -185,7 +189,13 @@ describe('GET /v1/sessions/{session_id}/usage', () => {
     expect(stored).toMatchObject({
       input_tokens: usage.totals.input_tokens,
       output_tokens: usage.totals.output_tokens,
-      models: usage.by_model.map((entry) => ({ model: entry.model, usage: entry.usage })),
+      // The event carries the same per-model tokens and request counts the route's breakdown
+      // does — minus the money, which is never stored (epic #245).
+      models: usage.by_model.map((entry) => ({
+        model: entry.model,
+        usage: entry.usage,
+        requests: entry.requests,
+      })),
     })
   })
 
@@ -206,11 +216,14 @@ describe('GET /v1/sessions/{session_id}/usage', () => {
     // order is a total order whatever the prices turn out to be.
     expect(usage.by_model.map((entry) => entry.model)).toEqual([UNPRICED_MODEL, PRICED_MODEL])
     expect(usage.by_model.map((entry) => entry.requests)).toEqual([1, 1])
-    // One of the two models has no published price, so the session's cost is unknown — not the
-    // price of the half that happens to be known (#245: a total is never an estimate).
-    expect(usage.cost).toBeNull()
+    // One of the two models has no published price: its request is the unpriced part, and the
+    // priced half is still the total (decided 2026-10-09) — never an estimate, never unknown.
+    expect(usage.unpriced_requests).toBe(1)
+    expect(usage.cost).toBeCloseTo((10 * 2 + 2 * 10) / 1_000_000, 12)
     expect(usage.by_model[0]?.cost).toBeNull()
+    expect(usage.by_model[0]?.unpriced_requests).toBe(1)
     expect(usage.by_model[1]?.cost).not.toBeNull()
+    expect(usage.by_model[1]?.unpriced_requests).toBe(0)
   })
 
   it('is owner-scoped: another user’s session is the 404 an unknown id gets', async () => {
@@ -254,6 +267,9 @@ describe('GET /v1/me/usage', () => {
     expect(usage.by_model.map((entry) => entry.requests)).toEqual([2])
     expect(usage.by_day.map((day) => day.day)).toEqual(['2026-10-08', '2026-10-09'])
     expect(usage.by_day.map((day) => day.totals.input_tokens)).toEqual([10, 10])
+    // Every request was priced, so no day's total leaves anything out.
+    expect(usage.unpriced_requests).toBe(0)
+    expect(usage.by_day.map((day) => day.unpriced_requests)).toEqual([0, 0])
 
     // The same requests read in UTC are one day of 20, which is what "the reader's days" means.
     const utc = (await (
@@ -316,6 +332,7 @@ describe('GET /v1/me/usage', () => {
     expect(empty.by_model).toEqual([])
     expect(empty.by_day).toEqual([])
     expect(empty.cost).toBeNull()
+    expect(empty.unpriced_requests).toBe(0)
   })
 
   it('is the caller’s own usage: another account reads theirs and nothing of this one', async () => {

@@ -451,7 +451,7 @@ export function makeModelRequestEnd(
  */
 export function makeSessionUsage(
   models: readonly SessionModelUsage[] = [
-    { model: 'anthropic/claude-sonnet-5', usage: { ...FIXTURE_MODEL_USAGE } },
+    { model: 'anthropic/claude-sonnet-5', usage: { ...FIXTURE_MODEL_USAGE }, requests: 1 },
   ],
   overrides: Partial<Omit<SessionUsageEvent, 'models'>> = {},
 ): SessionUsageEvent {
@@ -466,7 +466,11 @@ export function makeSessionUsage(
     output_tokens: sum((usage) => usage.output_tokens),
     cache_creation_input_tokens: sum((usage) => usage.cache_creation_input_tokens),
     cache_read_input_tokens: sum((usage) => usage.cache_read_input_tokens),
-    models: models.map((entry) => ({ model: entry.model, usage: { ...entry.usage } })),
+    models: models.map((entry) => ({
+      model: entry.model,
+      usage: { ...entry.usage },
+      requests: entry.requests,
+    })),
   }
   return { ...event, ...overrides }
 }

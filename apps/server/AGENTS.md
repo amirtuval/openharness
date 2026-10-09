@@ -436,9 +436,11 @@ prices each request with the registry's rates, and assembles the totals and the 
   lookup over the same bundled snapshot the catalogue joins (`cost` on a `RegistryModel`), and
   the arithmetic is the protocol's `usageCost`/`totalCost` — the same functions the frontends
   price a reply with. A model the snapshot does not price contributes its tokens and no cost, and
-  any total that includes it is `null`: never an estimate, and `—` in a client. A request whose
-  span start named no model (a log from before the field existed) is in the totals and in no
-  breakdown.
+  a total **sums the requests it can price and counts the rest** (`cost` plus
+  `unpriced_requests`, #247 decided 2026-10-09): one such request no longer turns a whole total
+  into `—`, the unknown part is named rather than guessed, and `cost` is `null` only when nothing
+  in the total could be priced. A request whose span start named no model (a log from before the
+  field existed) is in the totals and in no breakdown, and counts among the unpriced ones.
 - **The per-session route** is owner-scoped (another user's session is the store's
   `SessionNotFoundError`, which `app.onError` maps to the 404) and reads that session's whole
   log. **The per-user route** has no id in its path — it is always the caller — and is **one

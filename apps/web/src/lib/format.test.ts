@@ -4,10 +4,12 @@ import { describe, expect, it } from 'vitest'
 import {
   formatContextWindow,
   formatCost,
+  formatCostTotal,
   formatCount,
   formatDuration,
   modelLabel,
   sessionLabel,
+  unpricedExplanation,
 } from './format'
 import { modelNameLookup } from './models'
 
@@ -131,5 +133,29 @@ describe('formatCost (#247)', () => {
 
   it('says so rather than rounding a cost too small to print to zero', () => {
     expect(formatCost(0.00001)).toBe('<$0.0001')
+  })
+})
+
+describe('formatCostTotal (#247, decided 2026-10-09)', () => {
+  it('is just the money when every request was priced', () => {
+    expect(formatCostTotal({ cost: 1.23, unpriced_requests: 0 })).toBe('$1.23')
+  })
+
+  it('sums the priced requests and names the unpriced ones', () => {
+    expect(formatCostTotal({ cost: 1.23, unpriced_requests: 4 })).toBe('$1.23 + 4 unpriced')
+    expect(formatCostTotal({ cost: 0.0013, unpriced_requests: 1 })).toBe('$0.0013 + 1 unpriced')
+  })
+
+  it('is a dash when nothing in the total is priced', () => {
+    // There is no number to qualify: the whole total is the unknown part, and the dash says so.
+    expect(formatCostTotal({ cost: null, unpriced_requests: 3 })).toBe('—')
+    expect(formatCostTotal({ cost: null, unpriced_requests: 0 })).toBe('—')
+  })
+
+  it('explains the unpriced count in one sentence', () => {
+    expect(unpricedExplanation(1)).toBe('1 request had no published price and is not in the total.')
+    expect(unpricedExplanation(4)).toBe(
+      '4 requests had no published price and are not in the total.',
+    )
   })
 })

@@ -257,6 +257,16 @@ export const SessionModelUsageSchema = z.object({
   model: z.string().min(1),
   /** What they reported, summed. */
   usage: ModelUsageSchema,
+  /**
+   * How many requests ran on this model so far — at least one, since an entry exists because a
+   * request named it.
+   *
+   * The count is what lets a reader of the running totals price them per model the way the usage
+   * routes do: a model nobody publishes a price for contributes `requests` unpriced requests, and
+   * a priced one contributes none (#247). It is a fact about the log, not about money — no cost
+   * is stored — so it stays true whatever the catalog's prices turn out to be.
+   */
+  requests: z.number().int().positive(),
 })
 
 export type SessionModelUsage = z.infer<typeof SessionModelUsageSchema>

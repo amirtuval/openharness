@@ -180,7 +180,9 @@ export function chunkRangeAfter(
  * A `span.model_request_end` reports the tokens but not the model — that is on the
  * `span.model_request_start` it closes — so the fold pairs them by `model_request_start_id` and
  * attributes each request to the model that served it. Models appear in the order their first
- * request did, which is the order a reader of the log would name them in.
+ * request did, which is the order a reader of the log would name them in. Each entry also carries
+ * how many requests ran on its model (#247), which is what a reader of the running totals needs to
+ * count how many of them a catalog with no price for that model leaves unpriced.
  *
  * The fold is over what {@link readLog} returned, which is the whole log **as a reader sees it**:
  * a branch a `session.rewind` replaced is not in it, so the requests it contained are not in the
@@ -203,6 +205,7 @@ export function usageByModel(events: readonly StoredEvent[]): SessionModelUsage[
   }
 
   const totals = new Map<string, ModelUsage>()
+  const requests = new Map<string, number>()
   for (const event of events) {
     if (event.type !== EVENT_TYPES.modelRequestEnd) {
       continue
@@ -212,9 +215,16 @@ export function usageByModel(events: readonly StoredEvent[]): SessionModelUsage[
       continue
     }
     totals.set(model, addUsage(totals.get(model), event.model_usage))
+    // A count of span ends, so a retried reply counts twice — both attempts really ran, and both
+    // are really in the tokens (the same reading the usage routes' breakdown takes).
+    requests.set(model, (requests.get(model) ?? 0) + 1)
   }
 
-  return [...totals].map(([model, usage]) => ({ model, usage }))
+  return [...totals].map(([model, usage]) => ({
+    model,
+    usage,
+    requests: requests.get(model) ?? 0,
+  }))
 }
 
 /**
@@ -236,16 +246,18 @@ export function withRequestUsage(
 ): SessionModelUsage[] {
   const known = models.some((entry) => entry.model === model)
   if (!known) {
-    return [...models.map(copyUsage), { model, usage: { ...usage } }]
+    return [...models.map(copyUsage), { model, usage: { ...usage }, requests: 1 }]
   }
   return models.map((entry) =>
-    entry.model === model ? { model, usage: addUsage(entry.usage, usage) } : copyUsage(entry),
+    entry.model === model
+      ? { model, usage: addUsage(entry.usage, usage), requests: entry.requests + 1 }
+      : copyUsage(entry),
   )
 }
 
 /** A usage entry the caller may keep, so the fold never hands out what it holds. */
 function copyUsage(entry: SessionModelUsage): SessionModelUsage {
-  return { model: entry.model, usage: { ...entry.usage } }
+  return { model: entry.model, usage: { ...entry.usage }, requests: entry.requests }
 }
 
 /** Two usage reports added up counter by counter. */

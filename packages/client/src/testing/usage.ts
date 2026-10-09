@@ -68,13 +68,18 @@ export function fakeRequestsOf(brain: FakeBrain): RecordedRequest[] {
  * The totals, the cost and the per-model split of a set of requests.
  *
  * The same assembly the server's usage reader does: a request whose model the log does not name
- * is in the totals and in no breakdown, and one whose model nobody prices makes the totals'
- * cost unknown.
+ * is in the totals and in no breakdown, and one whose model nobody prices is left out of the
+ * money and counted in `unpriced_requests` (#247, decided 2026-10-09).
  */
 export function fakeUsage(
   requests: readonly RecordedRequest[],
   prices: ModelPriceLookup,
-): { totals: UsageTotals; cost: number | null; by_model: ModelUsageBreakdown[] } {
+): {
+  totals: UsageTotals
+  cost: number | null
+  unpriced_requests: number
+  by_model: ModelUsageBreakdown[]
+} {
   const totals = emptyUsage()
   const byModel = new Map<
     string,
@@ -94,16 +99,22 @@ export function fakeUsage(
     entry.costs.push(cost)
     byModel.set(request.model, entry)
   }
+  const total = totalCost(costs)
   return {
     totals,
-    cost: totalCost(costs),
+    cost: total.cost,
+    unpriced_requests: total.unpriced_requests,
     by_model: [...byModel]
-      .map(([model, entry]) => ({
-        model,
-        usage: entry.usage,
-        requests: entry.requests,
-        cost: totalCost(entry.costs),
-      }))
+      .map(([model, entry]) => {
+        const modelCost = totalCost(entry.costs)
+        return {
+          model,
+          usage: entry.usage,
+          requests: entry.requests,
+          cost: modelCost.cost,
+          unpriced_requests: modelCost.unpriced_requests,
+        }
+      })
       .sort((a, b) => tokensOf(b.usage) - tokensOf(a.usage) || (a.model < b.model ? -1 : 1)),
   }
 }

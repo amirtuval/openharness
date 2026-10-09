@@ -168,17 +168,20 @@ a turn reads the session's cost off the stream instead of adding the spans up it
         "output_tokens": 64,
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0
-      }
+      },
+      "requests": 2
     }
   ]
 }
 ```
 
 The four counters beside `models` are that breakdown's sum, and the schema refuses an event
-where they disagree. **It carries no cost**: money is computed when it is read, from these
-tokens and the model catalog's prices, and is never stored (see [Usage and cost](#usage-and-cost)).
-A session stored before the event existed has none, and its totals are derived on read from the
-`span.model_request_end` events it does have — the same numbers, from the events underneath.
+where they disagree. Each entry also carries `requests` — how many model requests ran on that
+model so far — which is a fact about the log rather than about money. **It carries no cost**:
+money is computed when it is read, from these tokens and the model catalog's prices, and is
+never stored (see [Usage and cost](#usage-and-cost)). A session stored before the event existed
+has none, and its totals are derived on read from the `span.model_request_end` events it does
+have — the same numbers, from the events underneath.
 
 ### Claims, chunks and superseding (D9)
 
@@ -578,8 +581,8 @@ prices when the request is answered, and nothing about cost is ever written down
 session does not have to ask.
 
 ```
-GET /v1/sessions/{session_id}/usage    -> { session_id, totals, cost, by_model }
-GET /v1/me/usage?from=&to=&tz=         -> { from, to, tz, totals, cost, by_model, by_day }
+GET /v1/sessions/{session_id}/usage    -> { session_id, totals, cost, unpriced_requests, by_model }
+GET /v1/me/usage?from=&to=&tz=         -> { from, to, tz, totals, cost, unpriced_requests, by_model, by_day }
 ```
 
 ```json
@@ -592,6 +595,7 @@ GET /v1/me/usage?from=&to=&tz=         -> { from, to, tz, totals, cost, by_model
     "cache_read_input_tokens": 0
   },
   "cost": 0.002792,
+  "unpriced_requests": 0,
   "by_model": [
     {
       "model": "anthropic/claude-sonnet-5",
@@ -602,17 +606,22 @@ GET /v1/me/usage?from=&to=&tz=         -> { from, to, tz, totals, cost, by_model
         "cache_read_input_tokens": 0
       },
       "requests": 2,
-      "cost": 0.002792
+      "cost": 0.002792,
+      "unpriced_requests": 0
     }
   ]
 }
 ```
 
-- **Cost is computed on read, and never estimated.** A model with no published price contributes
-  its tokens and no cost, and any total that includes one is `null` — which a client renders as
-  `—`. A model that publishes an input and output rate but no cache rates is priced for the
-  tokens whose rates exist and answers `null` for a request that spent cache tokens: charging
-  nothing for tokens that were really spent would understate the bill. Prices are USD per
+- **Cost is computed on read, and never estimated.** Every total carries `cost` and
+  `unpriced_requests`: a total **sums the requests it can price and counts the ones it cannot**
+  (#247, decided 2026-10-09). One request with no published price no longer turns a whole
+  session's total into `—` — the money is the priced part and the count names the rest (`—` on
+  screen is reserved for a total with nothing priced at all). A model that publishes an input and
+  output rate but no cache rates is priced for the tokens whose rates exist and answers `null`
+  for a request that spent cache tokens, and that request counts as unpriced: charging nothing
+  for tokens that were really spent would understate the bill. `session.usage` (above) carries no
+  cost, only the tokens and the per-model request counts a client prices with. Prices are USD per
   million tokens, from the vendored models.dev snapshot (see `apps/server/AGENTS.md`).
 - **Cache tokens are priced separately.** `cache_read` and `cache_write` are their own rates at
   every provider that publishes them, not a fraction of the input rate.

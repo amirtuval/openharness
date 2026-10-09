@@ -28,8 +28,10 @@ import { dayInRange, localDayOf, utcWindowOf, type UsageRange } from './local-da
  * - **Cost is computed when it is read.** Nothing here writes anything: a price is not in the
  *   log, so the money is derived on the read that asked for it, from tokens that are. A model
  *   nobody publishes a price for contributes its tokens and no cost, and the total it is part of
- *   is answered `null` rather than smaller — never an estimate (`usageCost` in the protocol is
- *   the arithmetic; this module is the reader).
+ *   **sums the priced requests and counts the unpriced ones** (`unpriced_requests`, decided
+ *   2026-10-09) rather than turning unknown — never an estimate (`usageCost`/`totalCost` in the
+ *   protocol are the arithmetic; this module is the reader). A total is `null` only when nothing
+ *   in it could be priced.
  * - **A rewind is not billed.** The reads go through the store's replay read, which skips what a
  *   recorded range supersedes, so a branch a reader edited away is not in anybody's totals —
  *   group, the same rule the brain's context and a client's transcript follow.
@@ -212,8 +214,8 @@ export function createUsageReader(options: UsageReaderOptions): UsageReader {
         by_day: [...byDay]
           .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
           .map(([day, requests]) => {
-            const { totals, cost } = assemble(requests, prices)
-            return { day, totals, cost }
+            const { totals, cost, unpriced_requests } = assemble(requests, prices)
+            return { day, totals, cost, unpriced_requests }
           }),
       }
     },
@@ -221,12 +223,14 @@ export function createUsageReader(options: UsageReaderOptions): UsageReader {
 }
 
 /**
- * The totals, their cost and the per-model split of a set of requests.
+ * The totals, their money and the per-model split of a set of requests.
  *
- * A request whose model the log does not name is in the totals and in no breakdown entry: it
- * really was spent, and there is no model to attribute it to. Its cost is not in the total
- * either — the total cost is `null` the moment anything about it is unknown, so an unattributable
- * request is not silently free.
+ * The total **sums the priced requests and counts the unpriced ones** (#247, decided 2026-10-09):
+ * a model nobody publishes a price for contributes its tokens and no cost, and the total names how
+ * many requests were left out rather than turning `null` on the first of them. A request whose
+ * model the log does not name is in the totals and in no breakdown entry — it really was spent,
+ * and there is no model to attribute it to — and is counted among the unpriced ones, so an
+ * unattributable request is not silently free.
  */
 function assemble(
   requests: readonly RecordedRequest[],
@@ -239,7 +243,7 @@ function assemble(
   for (const request of requests) {
     addTo(totals, request.usage)
     // One price lookup per request, shared by the total and the breakdown: a request whose model
-    // nobody prices is unknown in both, and is never looked up twice for a different answer.
+    // nobody prices is unpriced in both, and is never looked up twice for a different answer.
     const cost = usageCost(request.usage, request.model === null ? null : prices(request.model))
     costs.push(cost)
     if (request.model === null) {
@@ -252,16 +256,22 @@ function assemble(
     byModel.set(request.model, entry)
   }
 
+  const total = totalCost(costs)
   return {
     totals,
-    cost: totalCost(costs),
+    cost: total.cost,
+    unpriced_requests: total.unpriced_requests,
     by_model: [...byModel]
-      .map(([model, entry]): ModelUsageBreakdown => ({
-        model,
-        usage: entry.usage,
-        requests: entry.requests,
-        cost: totalCost(entry.costs),
-      }))
+      .map(([model, entry]): ModelUsageBreakdown => {
+        const modelCost = totalCost(entry.costs)
+        return {
+          model,
+          usage: entry.usage,
+          requests: entry.requests,
+          cost: modelCost.cost,
+          unpriced_requests: modelCost.unpriced_requests,
+        }
+      })
       // Biggest first by tokens, then by id: the order is about the tokens, so it stays the
       // same whatever the prices turn out to be.
       .sort((a, b) => tokensOf(b.usage) - tokensOf(a.usage) || (a.model < b.model ? -1 : 1)),

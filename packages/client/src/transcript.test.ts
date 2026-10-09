@@ -1357,6 +1357,7 @@ describe('the session’s usage (#247)', () => {
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
           },
+          requests: 1,
         },
       ],
       { seq: 10 },
@@ -1374,6 +1375,7 @@ describe('the session’s usage (#247)', () => {
       {
         model: 'anthropic/claude-sonnet-5',
         usage: { input: 512, output: 64, cacheCreation: 0, cacheRead: 0 },
+        requests: 1,
       },
     ])
   })
@@ -1408,6 +1410,7 @@ describe('the session’s usage (#247)', () => {
         {
           model: 'anthropic/claude-sonnet-5',
           usage: { input: 512, output: 64, cacheCreation: 8, cacheRead: 256 },
+          requests: 1,
         },
       ],
     })
@@ -1434,32 +1437,48 @@ describe('the session’s usage (#247)', () => {
     ])
   })
 
-  it('prices a session per model, and answers null when a model has no price', () => {
-    const state = reduceEvents([
-      makeSessionUsage(
-        [
-          {
-            model: 'anthropic/claude-sonnet-5',
-            usage: {
-              input_tokens: 1_000_000,
-              output_tokens: 0,
-              cache_creation_input_tokens: 0,
-              cache_read_input_tokens: 0,
+  it('prices a session per model, summing the priced requests and counting the unpriced', () => {
+    // 1M input at $2/Mtok on a priced model, and an unpriced model that ran three requests.
+    const usage = selectSessionUsage(
+      reduceEvents([
+        makeSessionUsage(
+          [
+            {
+              model: 'anthropic/claude-sonnet-5',
+              usage: {
+                input_tokens: 1_000_000,
+                output_tokens: 0,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+              },
+              requests: 2,
             },
-          },
-        ],
-        { seq: 1 },
-      ),
-    ])
+            {
+              model: 'acme/mystery-1',
+              usage: {
+                input_tokens: 1000,
+                output_tokens: 100,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+              },
+              requests: 3,
+            },
+          ],
+          { seq: 1 },
+        ),
+      ]),
+    )
 
-    expect(sessionCost(selectSessionUsage(state), priced)).toBeCloseTo(2, 10)
-    // A model nobody prices makes the whole total unknown, and never cheaper.
-    expect(sessionCost(selectSessionUsage(state), () => null)).toBeNull()
-    expect(
-      sessionCost(selectSessionUsage(state), (id) =>
-        id === 'anthropic/claude-sonnet-5' ? null : null,
-      ),
-    ).toBeNull()
+    // All priced: the sum, and nothing left out.
+    expect(sessionCost({ totals: usage.totals, models: [usage.models[0]!] }, priced)).toEqual({
+      cost: 2,
+      unpriced_requests: 0,
+    })
+    // Mixed (#247, decided 2026-10-09): the priced model's money, and the unpriced model's
+    // *requests* counted — not the whole total turned unknowable.
+    expect(sessionCost(usage, priced)).toEqual({ cost: 2, unpriced_requests: 3 })
+    // Nothing priced: unknown, and the request count still names what was left out.
+    expect(sessionCost(usage, () => null)).toEqual({ cost: null, unpriced_requests: 5 })
   })
 
   it('prices one reply, and answers null when the log or the catalog cannot', () => {
@@ -1522,6 +1541,7 @@ describe('the session’s usage (#247)', () => {
       {
         model: 'anthropic/claude-sonnet-5',
         usage: { input: 512, output: 64, cacheCreation: 0, cacheRead: 0 },
+        requests: 1,
       },
     ])
   })

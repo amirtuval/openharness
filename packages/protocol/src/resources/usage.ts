@@ -19,10 +19,12 @@ import { ModelUsageSchema } from '../events/span'
  *   `span.model_request_end`; a price is not in the log at all. So a response is assembled when
  *   it is asked for, from the tokens the log holds and the model catalog's prices, and nothing
  *   about cost is ever written down (epic #245).
- * - **A price nobody published makes the total unknown, not cheaper.** A request whose model
- *   the catalog has no price for contributes its tokens and nothing to the cost; `cost` is
- *   `null` when any part of the answer could not be priced, and never an estimate. `null` is
- *   what a client renders as "—".
+ * - **A price nobody published is named, not guessed.** A request whose model the catalog has no
+ *   price for contributes its tokens and nothing to the cost; a total **sums the priced requests
+ *   and counts the unpriced ones** (`unpriced_requests`), and its `cost` is `null` only when
+ *   nothing in it could be priced (decided 2026-10-09). One such request no longer makes a whole
+ *   session unreadable, and no part of the money is ever an estimate. `null` is what a client
+ *   renders as "—".
  * - **Every route is scoped to its owner.** The session route is the caller's session or a 404
  *   (A4); the user route can only ever be the caller — there is no id in the path — so a user
  *   never sees another's usage, and there is no operator-wide view at all.
@@ -56,13 +58,30 @@ export type UsageTotals = z.infer<typeof UsageTotalsSchema>
  *
  * `null` — on every shape below — means **unknown**, and it is the only way this package says
  * so: a model the catalog has no price for, or one whose cache rates nobody published, makes
- * the total it contributes unknown rather than making it smaller. Whole cents are not rounded
- * into the wire type: rounding is a presentation decision, and the reader is the one who knows
- * how many digits it wants.
+ * the request it belongs to unpriced rather than free. Whole cents are not rounded into the wire
+ * type: rounding is a presentation decision, and the reader is the one who knows how many digits
+ * it wants.
  */
 export const MoneySchema = z.number().nonnegative().nullable()
 
 export type Money = z.infer<typeof MoneySchema>
+
+/**
+ * The money of a total: `cost`, the sum of the requests that could be priced, and
+ * `unpriced_requests`, how many had no price (epic #245, A2; #247, decided 2026-10-09).
+ *
+ * Every total below carries these two fields together, so the shape is defined once here. A total
+ * **sums the priced requests and counts the unpriced ones** instead of turning unknown as soon as
+ * one request has no price: `cost` is the sum, or `null` when nothing in the total was priced,
+ * and `unpriced_requests` names the unknown part — it is never folded into the number as an
+ * estimate. A reader shows "—" for a `null` cost, and renders a count beside a number.
+ */
+export const TotalCostSchema = z.object({
+  /** The sum of the priced requests, or `null` when nothing in the total could be priced. */
+  cost: MoneySchema,
+  /** How many requests in the total had no published price. */
+  unpriced_requests: z.number().int().nonnegative(),
+})
 
 /**
  * One model's share of a usage answer: its totals, how many requests ran on it, and what they
@@ -70,6 +89,8 @@ export type Money = z.infer<typeof MoneySchema>
  *
  * `requests` is a count of `span.model_request_end` events, so a reply the brain retried counts
  * twice — which is right: both attempts really ran, and both are really in the tokens.
+ * `unpriced_requests` is how many of those requests had no price: they are among the `requests`
+ * and their tokens are in `usage`, but no money is claimed for them.
  */
 export const ModelUsageBreakdownSchema = z.object({
   /** The `provider/model` the requests named — the model that served them. */
@@ -78,8 +99,7 @@ export const ModelUsageBreakdownSchema = z.object({
   usage: UsageTotalsSchema,
   /** How many requests ran on this model. */
   requests: z.number().int().nonnegative(),
-  /** What those tokens cost, or `null` when this model's price is not known. */
-  cost: MoneySchema,
+  ...TotalCostSchema.shape,
 })
 
 export type ModelUsageBreakdown = z.infer<typeof ModelUsageBreakdownSchema>
@@ -100,8 +120,8 @@ export const SessionUsageSchema = z.object({
   session_id: SessionIdSchema,
   /** Every request the session made, summed. */
   totals: UsageTotalsSchema,
-  /** The cost of `totals`, or `null` when some part of it cannot be priced. */
-  cost: MoneySchema,
+  /** What `totals` cost, and how many of the session's requests had no price. */
+  ...TotalCostSchema.shape,
   /** The same totals per model, biggest first. */
   by_model: z.array(ModelUsageBreakdownSchema),
 })
@@ -121,8 +141,8 @@ export const DailyUsageSchema = z.object({
   day: LocalDaySchema,
   /** What was spent in it. */
   totals: UsageTotalsSchema,
-  /** The cost of `totals`, or `null` when some part of it cannot be priced. */
-  cost: MoneySchema,
+  /** What `totals` cost that day, and how many of its requests had no price. */
+  ...TotalCostSchema.shape,
 })
 
 export type DailyUsage = z.infer<typeof DailyUsageSchema>
@@ -152,8 +172,8 @@ export const UserUsageSchema = z.object({
   tz: z.string().min(1),
   /** Every request in the range, summed. */
   totals: UsageTotalsSchema,
-  /** The cost of `totals`, or `null` when some part of it cannot be priced. */
-  cost: MoneySchema,
+  /** What `totals` cost, and how many requests in the range had no price. */
+  ...TotalCostSchema.shape,
   /** The range's totals per model, biggest first. */
   by_model: z.array(ModelUsageBreakdownSchema),
   /** The range's totals per local day, ascending; days with no request are absent. */

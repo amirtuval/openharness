@@ -1544,9 +1544,11 @@ describe('the fake’s usage reads (#247)', () => {
         // The default catalog entry is priced like the real Sonnet rates: 512 in at $2/Mtok
         // and 32 out at $10/Mtok.
         cost: usage.cost,
+        unpriced_requests: 0,
       },
     ])
     expect(usage.cost).toBeCloseTo((512 * 2 + 32 * 10) / 1_000_000, 12)
+    expect(usage.unpriced_requests).toBe(0)
   })
 
   it('answers the totals the transcript derives, so a client reads the same number twice', async () => {
@@ -1575,8 +1577,12 @@ describe('the fake’s usage reads (#247)', () => {
     await runTurn(fake)
 
     const usage = await fake.usage.session(fake.session.id)
+    // Nothing in the session is priced, so the cost is `null` and the request that was left out
+    // is named (#247, decided 2026-10-09).
     expect(usage.cost).toBeNull()
+    expect(usage.unpriced_requests).toBe(1)
     expect(usage.by_model[0]?.cost).toBeNull()
+    expect(usage.by_model[0]?.unpriced_requests).toBe(1)
     expect(usage.totals).toEqual(FAKE_MODEL_USAGE)
   })
 

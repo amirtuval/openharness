@@ -165,6 +165,33 @@ function trimZero(value: string): string {
   return value.endsWith('.0') ? value.slice(0, -2) : value
 }
 
+/**
+ * A total's money, with the part nobody could price named beside it (epic #245, A2; #247,
+ * decided 2026-10-09).
+ *
+ * A total **sums the priced requests and counts the unpriced ones**: `$1.23 + 4 unpriced`. One
+ * request with no published price no longer turns a whole session's total into `—`; the money is
+ * the priced part and the count names the rest, and neither is guessed. A total with nothing
+ * priced is `—` alone; a fully priced one is just the number.
+ *
+ * `compact` is for the status line, where the terminal decides how much of the line fits: it
+ * shortens the count to a trailing `+` — `$1.23+` — and only ever drops the words, never the
+ * number.
+ */
+export function formatCostTotal(
+  total: { readonly cost: number | null; readonly unpriced_requests: number },
+  options: { readonly compact?: boolean } = {},
+): string {
+  if (total.cost === null) {
+    return '—'
+  }
+  const money = formatCost(total.cost)
+  if (total.unpriced_requests === 0) {
+    return money
+  }
+  return options.compact === true ? `${money}+` : `${money} + ${total.unpriced_requests} unpriced`
+}
+
 /** `0.0240` → `0.024`, `0.0100` → `0.01`: the same rule, for a number with more places. */
 function trimCost(value: string): string {
   const trimmed = value.replace(/0+$/, '')

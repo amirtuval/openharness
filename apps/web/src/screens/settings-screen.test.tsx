@@ -299,6 +299,41 @@ describe('Settings → Usage (#247)', () => {
     expect(document.querySelector('[data-slot="usage-model-cost"]')?.textContent).toBe('—')
   })
 
+  it('sums the priced requests and names the unpriced ones (#247, decided 2026-10-09)', async () => {
+    // The month ran one priced model and one nobody prices: the total is the priced part with
+    // the unpriced request counted beside it — not `—` — and each model's row keeps its own
+    // money or dash.
+    const fake = makeFake({
+      models: [
+        modelEntry({
+          id: 'anthropic/claude-sonnet-5',
+          provider: 'anthropic',
+          name: 'Claude Sonnet 5',
+          cost: { input: 2, output: 10, cache_read: 0.2, cache_write: 2.5 },
+        }),
+        modelEntry({ id: 'acme/mystery-1', provider: 'acme', name: 'Mystery' }),
+      ],
+    })
+    fake.respondWith('Hello there.')
+    await fake.sendMessage(fake.session.id, 'Hi there')
+    await fake.waitForIdle(fake.session.id)
+    fake.respondWith('On the other model.')
+    await fake.sendMessage(fake.session.id, 'Again', { model: { id: 'acme/mystery-1' } })
+    await fake.waitForIdle(fake.session.id)
+    renderApp(fake, { hash: '#/settings' })
+
+    await waitFor(() => {
+      expect(document.querySelector('[data-slot="usage-total"]')).not.toBeNull()
+    })
+    const total = document.querySelector('[data-slot="usage-total"]') as HTMLElement
+    expect(total.textContent).toContain('$0.0013 + 1 unpriced')
+    const rows = [...document.querySelectorAll('[data-slot="usage-model-cost"]')].map(
+      (cell) => cell.textContent,
+    )
+    expect(rows).toContain('$0.0013')
+    expect(rows).toContain('—')
+  })
+
   it('says nothing has run rather than showing an empty table', async () => {
     renderApp(makeFake(TWO_PROVIDERS), { hash: '#/settings' })
 

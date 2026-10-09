@@ -3,7 +3,7 @@ import type { ModelUsageBreakdown, UsageTotals } from '@openharness/protocol'
 import type { ReactNode } from 'react'
 
 import { useUsage } from '../../hooks/use-usage'
-import { formatCost, formatCount } from '../../lib/format'
+import { formatCount, formatCostTotal, unpricedExplanation } from '../../lib/format'
 import { formatDay } from '../../lib/usage'
 import { useClient } from '../client-provider'
 import { ErrorBanner } from '../chat/error-banner'
@@ -20,9 +20,9 @@ import { Skeleton } from '../ui/skeleton'
  *
  * Three things it does not do, each for a reason:
  *
- * - **It never estimates.** A model nobody publishes a price for shows `—`, and a total that
- *   includes one is `—` too: the tokens are real and the money is not known, and a made-up
- *   number would be worse than none.
+ * - **It never estimates.** A total **sums the requests it can price and counts the rest**
+ *   (`$1.23 + 4 unpriced`, #247 decided 2026-10-09): the known part is the money and the unknown
+ *   part is named, never made up. Only a total with nothing priced at all is `—`.
  * - **It does not roll anything up.** Days are the reader's local days, which is what the query
  *   says; a request made at 23:30 in their zone belongs to their day, wherever the server is.
  * - **It shows no breakdown by mode** — there is only one axis here, the model, because that is
@@ -55,7 +55,16 @@ export function UsageCard() {
         ) : usage === null ? null : (
           <>
             <div className="flex items-baseline gap-3" data-slot="usage-total">
-              <span className="text-lg font-medium">{formatCost(usage.cost)}</span>
+              <span
+                className="text-lg font-medium"
+                title={
+                  usage.unpriced_requests === 0
+                    ? undefined
+                    : unpricedExplanation(usage.unpriced_requests)
+                }
+              >
+                {formatCostTotal(usage)}
+              </span>
               <span className="text-xs text-muted-foreground">
                 {formatTokensFor(usage.totals)} tokens · {monthLabel(usage.from, usage.to)}
               </span>
@@ -115,8 +124,16 @@ function ModelTable({ entries }: { entries: readonly ModelUsageBreakdown[] }): R
             <td className="py-1 pl-2 text-right tabular-nums">
               {formatCount(entry.usage.output_tokens)}
             </td>
-            <td className="py-1 pl-2 text-right tabular-nums" data-slot="usage-model-cost">
-              {formatCost(entry.cost)}
+            <td
+              className="py-1 pl-2 text-right tabular-nums"
+              data-slot="usage-model-cost"
+              title={
+                entry.unpriced_requests === 0
+                  ? undefined
+                  : unpricedExplanation(entry.unpriced_requests)
+              }
+            >
+              {formatCostTotal(entry)}
             </td>
           </tr>
         ))}
@@ -138,6 +155,7 @@ function DayList({
     readonly day: string
     readonly totals: UsageTotals
     readonly cost: number | null
+    readonly unpriced_requests: number
   }[]
 }): ReactNode {
   if (days.length === 0) {
@@ -160,8 +178,13 @@ function DayList({
               width: `${String(Math.max(2, Math.round((tokensOf(day.totals) / widest) * 100)))}%`,
             }}
           />
-          <span className="ml-auto shrink-0 tabular-nums text-muted-foreground">
-            {formatTokensFor(day.totals)} tokens · {formatCost(day.cost)}
+          <span
+            className="ml-auto shrink-0 tabular-nums text-muted-foreground"
+            title={
+              day.unpriced_requests === 0 ? undefined : unpricedExplanation(day.unpriced_requests)
+            }
+          >
+            {formatTokensFor(day.totals)} tokens · {formatCostTotal(day)}
           </span>
         </div>
       ))}

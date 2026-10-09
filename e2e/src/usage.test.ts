@@ -105,13 +105,17 @@ describe('a session’s usage', () => {
         usage: usage.totals,
         requests: 2,
         cost: usage.cost,
+        unpriced_requests: 0,
       },
     ])
     // Two requests at the model's list rates, computed by the server from the vendored prices.
+    // Every request was priced, so nothing is left out of the total (#247).
     expect(usage.cost).toBeCloseTo(REQUEST_COST * 2, 12)
+    expect(usage.unpriced_requests).toBe(0)
 
     // The running totals the brain wrote are in the *stored* log (#247): a replay answers what
-    // the live stream did, and the newest event carries the session's whole history.
+    // the live stream did, and the newest event carries the session's whole history — tokens and
+    // request counts per model, and no money (cost is computed on read, never stored).
     const log = await readLog(client, sessionId)
     const stored = log.filter(
       (event): event is SessionUsageEvent => event.type === EVENT_TYPES.sessionUsage,
@@ -121,7 +125,7 @@ describe('a session’s usage', () => {
     expect(stored[1]).toMatchObject({
       input_tokens: usage.totals.input_tokens,
       output_tokens: usage.totals.output_tokens,
-      models: [{ model: MODEL, usage: usage.totals }],
+      models: [{ model: MODEL, usage: usage.totals, requests: 2 }],
     })
   })
 
@@ -142,6 +146,7 @@ describe('a session’s usage', () => {
     expect(theirs.totals.input_tokens).toBe(0)
     expect(theirs.by_model).toEqual([])
     expect(theirs.cost).toBeNull()
+    expect(theirs.unpriced_requests).toBe(0)
   })
 })
 
@@ -159,7 +164,9 @@ describe('a user’s usage', () => {
     expect(usage).toMatchObject({ from: today, to: today, tz: 'UTC' })
     expect(usage.totals.input_tokens).toBe(MOCK_MODEL_USAGE.input_tokens)
     expect(usage.by_model.map((entry) => entry.model)).toEqual([MODEL])
-    expect(usage.by_day).toEqual([{ day: today, totals: usage.totals, cost: usage.cost }])
+    expect(usage.by_day).toEqual([
+      { day: today, totals: usage.totals, cost: usage.cost, unpriced_requests: 0 },
+    ])
 
     // The same request, read in a zone on the other side of the date line: it is in a
     // *different* local day there — which is what "the reader's days" means, and why the zone

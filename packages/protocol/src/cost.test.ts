@@ -87,22 +87,27 @@ describe('usageCost', () => {
 })
 
 describe('totalCost', () => {
-  it('adds the parts up', () => {
-    expect(totalCost([0.002, 0.5, 1])).toBeCloseTo(1.502, 10)
+  it('adds every part up, and counts nothing unpriced', () => {
+    expect(totalCost([0.002, 0.5, 1])).toEqual({ cost: 1.502, unpriced_requests: 0 })
   })
 
-  it('is unknown when any part is unknown', () => {
-    // "Partly known" is not a total: a client that showed one would be showing a number that
-    // is definitely too small.
-    expect(totalCost([0.002, null, 1])).toBeNull()
-    expect(totalCost([null])).toBeNull()
+  it('sums the priced parts and counts the unpriced ones', () => {
+    // The 2026-10-09 decision (#247): one request nobody prices no longer makes the whole total
+    // unreadable — the priced part is the money, and the unknown part is named beside it.
+    expect(totalCost([0.002, null, 1])).toEqual({ cost: 1.002, unpriced_requests: 1 })
+    expect(totalCost([null, 0.5, null])).toEqual({ cost: 0.5, unpriced_requests: 2 })
   })
 
-  it('is unknown for an empty set', () => {
-    expect(totalCost([])).toBeNull()
+  it('is unknown, naming what it left out, when nothing in it is priced', () => {
+    expect(totalCost([null])).toEqual({ cost: null, unpriced_requests: 1 })
+    expect(totalCost([null, null])).toEqual({ cost: null, unpriced_requests: 2 })
+  })
+
+  it('is unknown, with nothing left out, for an empty set', () => {
+    expect(totalCost([])).toEqual({ cost: null, unpriced_requests: 0 })
   })
 
   it('is zero when every part is a real zero', () => {
-    expect(totalCost([0, 0])).toBe(0)
+    expect(totalCost([0, 0])).toEqual({ cost: 0, unpriced_requests: 0 })
   })
 })

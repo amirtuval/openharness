@@ -192,6 +192,9 @@ describe('usageByModel', () => {
           cache_creation_input_tokens: 0,
           cache_read_input_tokens: 0,
         },
+        // Two requests ran on this model (#247): the count is what a reader of the running
+        // totals needs to count a model nobody prices unpriced.
+        requests: 2,
       },
       {
         model: 'openai/gpt-5.1',
@@ -201,6 +204,7 @@ describe('usageByModel', () => {
           cache_creation_input_tokens: 0,
           cache_read_input_tokens: 0,
         },
+        requests: 1,
       },
     ])
   })
@@ -228,6 +232,7 @@ describe('usageByModel', () => {
           cache_creation_input_tokens: 0,
           cache_read_input_tokens: 0,
         },
+        requests: 1,
       },
     ])
   })
@@ -244,35 +249,40 @@ describe('withRequestUsage', () => {
   it('adds a request to the model it ran on, keeping the order of first appearance', () => {
     expect(
       withRequestUsage(
-        [{ model: 'anthropic/claude-sonnet-5', usage }],
+        [{ model: 'anthropic/claude-sonnet-5', usage, requests: 2 }],
         'anthropic/claude-sonnet-5',
         { ...usage, input_tokens: 1 },
       ),
     ).toEqual([
       {
         model: 'anthropic/claude-sonnet-5',
-        // Every counter adds: the same request counted twice.
+        // Every counter adds — and the request count with them (#247).
         usage: {
           input_tokens: 11,
           output_tokens: 8,
           cache_creation_input_tokens: 4,
           cache_read_input_tokens: 2,
         },
+        requests: 3,
       },
     ])
   })
 
   it('adds the model a switch introduced after the ones already there', () => {
     expect(
-      withRequestUsage([{ model: 'anthropic/claude-sonnet-5', usage }], 'openai/gpt-5.1', usage),
+      withRequestUsage(
+        [{ model: 'anthropic/claude-sonnet-5', usage, requests: 1 }],
+        'openai/gpt-5.1',
+        usage,
+      ),
     ).toEqual([
-      { model: 'anthropic/claude-sonnet-5', usage },
-      { model: 'openai/gpt-5.1', usage },
+      { model: 'anthropic/claude-sonnet-5', usage, requests: 1 },
+      { model: 'openai/gpt-5.1', usage, requests: 1 },
     ])
   })
 
   it('hands back copies: the fold never shares what it holds', () => {
-    const held = [{ model: 'anthropic/claude-sonnet-5', usage }]
+    const held = [{ model: 'anthropic/claude-sonnet-5', usage, requests: 1 }]
     const next = withRequestUsage(held, 'anthropic/claude-sonnet-5', usage)
     expect(next[0]?.usage).not.toBe(held[0]?.usage)
     expect(Object.isFrozen(next)).toBe(false)
