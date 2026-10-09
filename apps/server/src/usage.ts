@@ -13,7 +13,7 @@ import type {
 import type { OwnerScope, SessionStore } from '@openharness/session'
 
 import type { ModelRegistry } from './catalog/registry'
-import { dayInRange, localDayOf, type UsageRange } from './local-day'
+import { dayInRange, localDayOf, utcWindowOf, type UsageRange } from './local-day'
 
 /**
  * Usage and cost, read from the log (epic #245, A2; issue #247).
@@ -175,43 +175,33 @@ export function createUsageReader(options: UsageReaderOptions): UsageReader {
     },
 
     async user(userId, range) {
-      const owner: OwnerScope = { ownerId: userId }
+      // One read for the whole range: the store answers the caller's own model requests in the
+      // UTC window the range's local days span, so a month of heavy use is a window rather
+      // than every session read page by page. The days are grouped here — the window is UTC,
+      // and which day a request fell on is the reader's zone.
+      const requests = await store.listModelRequests({
+        ownerId: userId,
+        ...utcWindowOf(range),
+      })
       const byDay = new Map<LocalDay, RecordedRequest[]>()
       const inRange: RecordedRequest[] = []
 
-      let page: string | undefined
-      for (;;) {
-        const response = await store.listSessions({
-          ...owner,
-          limit: MAX_PAGE_LIMIT,
-          ...(page === undefined ? {} : { page }),
-        })
-        for (const session of response.data) {
-          // A session is read only when it can hold a request in the range: every append moves
-          // `updated_at`, so a session whose **last** write is before `from` has nothing in it
-          // — note it is the lower bound alone, since a session that is still being used has
-          // requests on both sides of any range that starts before today. One created after
-          // `to` has not started yet. Both tests are day comparisons of the session's own
-          // timestamps in the caller's zone, so they are exact wherever the caller is.
-          if (localDayOf(session.updated_at, range.tz) < range.from) {
-            continue
-          }
-          if (localDayOf(session.created_at, range.tz) > range.to) {
-            continue
-          }
-          for (const request of await readSession(session.id, owner)) {
-            const day = localDayOf(request.at, range.tz)
-            if (!dayInRange(day, range)) {
-              continue
-            }
-            inRange.push(request)
-            byDay.set(day, [...(byDay.get(day) ?? []), request])
-          }
+      for (const request of requests) {
+        const at = new Date(request.processed_at)
+        const day = localDayOf(at, range.tz)
+        if (!dayInRange(day, range)) {
+          continue
         }
-        if (response.next_page === null) {
-          break
+        const recorded: RecordedRequest = { model: request.model, usage: request.usage, at }
+        inRange.push(recorded)
+        // Appended into the day's own list rather than a fresh one per request: a day of heavy
+        // use is one array, and the copy a spread would make per request is quadratic in it.
+        const sameDay = byDay.get(day)
+        if (sameDay === undefined) {
+          byDay.set(day, [recorded])
+        } else {
+          sameDay.push(recorded)
         }
-        page = response.next_page
       }
 
       return {

@@ -441,21 +441,29 @@ prices each request with the registry's rates, and assembles the totals and the 
   breakdown.
 - **The per-session route** is owner-scoped (another user's session is the store's
   `SessionNotFoundError`, which `app.onError` maps to the 404) and reads that session's whole
-  log. **The per-user route** has no id in its path — it is always the caller — walks the
-  caller's sessions page by page, and skips any session that cannot hold a request in the range
-  (one whose `updated_at` is before the range's first day, since every append moves it; one
-  created after the last day). Usage is broken down **by model, never by mode**, and days are
-  **absent rather than zero** where nothing ran.
+  log. **The per-user route** has no id in its path — it is always the caller — and is **one
+  store read**, not a walk: the range's local days become a UTC window (`utcWindowOf`), the
+  store's `listModelRequests` answers the caller's own model requests in it in one query, and
+  what comes back is grouped by local day. Walking the caller's sessions and reading each log
+  page by page — what this did first — read every event of a month of heavy use on every
+  request, which is the cost the store method exists to remove. Usage is broken down **by
+  model, never by mode**, and days are **absent rather than zero** where nothing ran.
 - **Local days** are `local-day.ts`: `usageRange` reads the `tz` query parameter (400 for a zone
   the runtime does not know — never a silent UTC), defaults the range to the current month so
   far in that zone, and refuses a `from` after `to`. `localDayOf` reads an instant as the day it
   fell on there with `Intl`, rather than with Postgres' `AT TIME ZONE`: the in-memory store has
   no SQL at all, the frontends read their own zone from the same `Intl` data, and the semantics
-  (which day an instant belongs to, DST included) are identical. Nothing is rolled up or stored,
-  so two readers in two zones get two right answers from one log.
-- `usage.test.ts` (the routes: ownership, ranges, zones, a rewind not billed, unpriced models)
-  and `local-day.test.ts` (the day arithmetic on its own) are the in-process halves;
-  `e2e/src/usage.test.ts` is the same routes against a real server process and Postgres.
+  (which day an instant belongs to, DST included) are identical. `utcWindowOf` turns the range
+  into the half-open UTC window the store read takes — local midnight of `from` to local
+  midnight after `to` — by asking `localDayOf` for a day's first instant rather than by adding
+  offsets, so a 23- or 25-hour DST day and a zone whose day does not begin at midnight are both
+  exact. Nothing is rolled up or stored, so two readers in two zones get two right answers from
+  one log.
+- `usage.test.ts` (the routes: ownership, ranges, zones, a rewind not billed, unpriced models,
+  and the one store read — the store counts its calls, so a `listSessions`/`listEvents` walk
+  would fail the test) and `local-day.test.ts` (the day arithmetic on its own, DST-window
+  conversion included) are the in-process halves; `e2e/src/usage.test.ts` is the same routes
+  against a real server process and Postgres.
 
 ## Errors
 
@@ -1038,7 +1046,8 @@ src/
   session-watch.ts      revocation registry + periodic re-check for long-lived responses (#76)
   credentials.ts        sealing, opening and the session-bound credential resolver (A5)
   provider-validation.ts the one cheap provider call a saved key is checked with
-  local-day.ts        local calendar days: the zone a request named, and the day of an instant (#247)
+  local-day.ts        local calendar days: the zone a request named, the day of an instant, and
+                        the UTC window a range's days span (#247)
   usage.ts            what a session or a user spent: the log priced on read (#247)
   catalog/
     catalog.ts          ModelCatalog: per-provider fetch, join, filter, cache, fallback (#90)

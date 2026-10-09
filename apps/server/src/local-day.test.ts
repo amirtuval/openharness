@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import type { LocalDay } from '@openharness/protocol'
 
 import {
   dayInRange,
@@ -9,6 +10,7 @@ import {
   resolveTimeZone,
   todayIn,
   usageRange,
+  utcWindowOf,
 } from './local-day'
 import { HttpError } from './http/errors'
 
@@ -145,5 +147,91 @@ describe('dayInRange', () => {
     expect(dayInRange('2026-10-05', range)).toBe(true)
     expect(dayInRange('2026-09-30', range)).toBe(false)
     expect(dayInRange('2026-10-09', range)).toBe(false)
+  })
+})
+
+describe('utcWindowOf', () => {
+  /** The instants a range spans, as the ISO strings a failure is readable in. */
+  function windowOf(from: LocalDay, to: LocalDay, tz: string): { from: string; to: string } {
+    const window = utcWindowOf({ from, to, tz })
+    return { from: window.from.toISOString(), to: window.to.toISOString() }
+  }
+
+  it('spans the local days it was given, in UTC', () => {
+    // A month: from the first day's midnight through the last day's end — the midnight of the
+    // day after it, since the upper bound is exclusive.
+    expect(windowOf('2026-10-01', '2026-10-31', 'UTC')).toEqual({
+      from: '2026-10-01T00:00:00.000Z',
+      to: '2026-11-01T00:00:00.000Z',
+    })
+    expect(windowOf('2026-10-08', '2026-10-08', 'UTC')).toEqual({
+      from: '2026-10-08T00:00:00.000Z',
+      to: '2026-10-09T00:00:00.000Z',
+    })
+  })
+
+  it('moves the bounds with the zone, half-hour offsets included', () => {
+    // Midnight in Kolkata (UTC+05:30) is 18:30 the evening before, in UTC.
+    expect(windowOf('2026-10-08', '2026-10-08', 'Asia/Kolkata')).toEqual({
+      from: '2026-10-07T18:30:00.000Z',
+      to: '2026-10-08T18:30:00.000Z',
+    })
+    expect(windowOf('2026-10-08', '2026-10-08', 'America/New_York')).toEqual({
+      from: '2026-10-08T04:00:00.000Z',
+      to: '2026-10-09T04:00:00.000Z',
+    })
+  })
+
+  it('is DST-correct: the day the clocks go forward is 23 hours long', () => {
+    // 2026-03-08 in New York: midnight is EST (UTC-05:00, 05:00Z) and the next midnight is EDT
+    // (UTC-04:00, 04:00Z), so the window is 23 hours — not the 24 a fixed offset would give.
+    expect(windowOf('2026-03-08', '2026-03-08', 'America/New_York')).toEqual({
+      from: '2026-03-08T05:00:00.000Z',
+      to: '2026-03-09T04:00:00.000Z',
+    })
+    // And the day the clocks go back is 25: midnight EDT (04:00Z) to midnight EST (05:00Z).
+    expect(windowOf('2026-11-01', '2026-11-01', 'America/New_York')).toEqual({
+      from: '2026-11-01T04:00:00.000Z',
+      to: '2026-11-02T05:00:00.000Z',
+    })
+  })
+
+  it('keeps the offset it started with across a transition, not the one it ends on', () => {
+    // March in New York changes offset inside the range: the lower bound is EST and the upper
+    // is EDT, which is exactly what a fixed per-day 24 hours would get wrong.
+    expect(windowOf('2026-03-01', '2026-03-31', 'America/New_York')).toEqual({
+      from: '2026-03-01T05:00:00.000Z',
+      to: '2026-04-01T04:00:00.000Z',
+    })
+  })
+
+  it('answers a zone whose day does not begin at midnight', () => {
+    // Cuba moves its clocks at 00:00 on 2026-03-08, so that day has no midnight at all: the
+    // first instant that is the 8th there is 01:00 local, 05:00Z.
+    expect(windowOf('2026-03-08', '2026-03-08', 'America/Havana')).toEqual({
+      from: '2026-03-08T05:00:00.000Z',
+      to: '2026-03-09T04:00:00.000Z',
+    })
+  })
+
+  it('brackets exactly the instants whose local day is in the range', () => {
+    // The property the read depends on, over zones with a half-hour offset, both directions
+    // from UTC, and a DST transition inside the window.
+    const zones = ['UTC', 'Asia/Kolkata', 'America/New_York', 'Australia/Sydney']
+    for (const tz of zones) {
+      const range = { from: '2026-03-01', to: '2026-03-10', tz } as const
+      const { from, to } = utcWindowOf(range)
+      // The lower bound is the range's first day, and the instant before it is not.
+      expect(localDayOf(from, tz), tz).toBe(range.from)
+      expect(localDayOf(new Date(from.getTime() - 1), tz), tz).toBe('2026-02-28')
+      // The upper bound is the day after the range's last day, and the instant before it is
+      // the last day — the whole of `to` is inside the window.
+      expect(localDayOf(to, tz), tz).toBe('2026-03-11')
+      expect(localDayOf(new Date(to.getTime() - 1), tz), tz).toBe(range.to)
+      // Nothing is read outside the days asked for: every hour of the window is one of them.
+      for (let at = from.getTime(); at < to.getTime(); at += 3_600_000) {
+        expect(dayInRange(localDayOf(new Date(at), tz), range), `${tz} at ${at}`).toBe(true)
+      }
+    }
   })
 })

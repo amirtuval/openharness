@@ -144,6 +144,65 @@ export function dayInRange(day: LocalDay, range: UsageRange): boolean {
 }
 
 /**
+ * The UTC instants a range's local days span: local midnight of `from`, to local midnight of
+ * the day after `to`.
+ *
+ * Reading a user's usage is one store query over a window of instants (`listModelRequests`,
+ * A2/#247), so the local days the caller asked for have to become a window before the log is
+ * read. The window is exactly the instants whose local day falls inside the range: nothing
+ * outside it is read — which is what keeps a month of another year out of the answer — and
+ * nothing inside it is missed. The upper bound is the midnight **after** `to` because the
+ * window is half-open: an instant at exactly that midnight is already the next day.
+ *
+ * A local day is not always 24 hours — a DST transition makes it 23 or 25 — so a bound is a
+ * day's first instant as the runtime's zone data has it ({@link startOfLocalDay}), not
+ * midnight plus a fixed offset. That is also why a time zone whose transition lands at
+ * midnight answers the instant its day actually starts at.
+ */
+export function utcWindowOf(range: UsageRange): { from: Date; to: Date } {
+  return {
+    from: startOfLocalDay(range.from, range.tz),
+    to: startOfLocalDay(dayAfter(range.to), range.tz),
+  }
+}
+
+/**
+ * The first instant that falls on `day` in `tz` — the instant that local day starts at.
+ *
+ * Found by bisection rather than by arithmetic: `day`'s start is bracketed by a day either side
+ * of its UTC midnight — no zone is more than 14 hours from UTC, and no day is longer than 25
+ * hours, so the bracket contains it — and narrowed with {@link localDayOf}, the one place this
+ * module says which day an instant is on. Asking the same question of two instants and keeping
+ * the answer is what makes this exact in a zone where the day starts before or after midnight,
+ * or where it is 23 or 25 hours long: there is nothing to get wrong about an offset.
+ */
+function startOfLocalDay(day: LocalDay, tz: string): Date {
+  const utcMidnight = Date.parse(`${day}T00:00:00.000Z`)
+  // The invariant the loop holds: `low` is on a day before `day`, `high` is on `day` or after.
+  // A zoned day never runs backwards as the instant moves forward, so this step is monotone —
+  // the predicate is false once and true from then on, and the bisection finds the boundary.
+  let low = utcMidnight - DAY_MS
+  let high = utcMidnight + DAY_MS
+  while (high - low > 1) {
+    const middle = low + Math.floor((high - low) / 2)
+    if (localDayOf(new Date(middle), tz) < day) {
+      low = middle
+    } else {
+      high = middle
+    }
+  }
+  return new Date(high)
+}
+
+/** The local day after `day`: calendar arithmetic, so no zone is involved and DST cannot move it. */
+function dayAfter(day: LocalDay): LocalDay {
+  return new Date(Date.parse(`${day}T00:00:00.000Z`) + DAY_MS).toISOString().slice(0, 10)
+}
+
+/** One day in milliseconds. */
+const DAY_MS = 86_400_000
+
+/**
  * One formatter per zone, built once: `Intl.DateTimeFormat` construction is the expensive half
  * of formatting, and a usage read formats one instant per request.
  */

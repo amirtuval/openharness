@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { API_VERSION_PREFIX, ApiErrorBodySchema, SessionUsageSchema } from '@openharness/protocol'
 import type { Session, SessionId, SessionUsage, UserUsage } from '@openharness/protocol'
 import { InMemorySessionStore } from '@openharness/session'
+import type { SessionStore } from '@openharness/session'
 
 import { createBundledRegistry } from './catalog/registry'
 import { asUser, createTestApp, waitForIdle, type TestContext } from './test-support'
@@ -32,14 +33,41 @@ function movableClock(start: string): { now: () => number; set: (instant: string
   }
 }
 
-/** An app on a clock, a store a test can read, and the bundled prices. */
-function usageApp(): {
+/**
+ * An app on a clock, a store a test can read, and the bundled prices.
+ *
+ * `recordStoreCalls` has the store count every method a request reaches it through — the app,
+ * the scheduler and the routes all hold the same instance — which is how the per-user read is
+ * shown to be one store call rather than a walk over every session. The recorded names are the
+ * method names, in order, in `calls`.
+ */
+function usageApp(options: { readonly recordStoreCalls?: boolean } = {}): {
   test: TestContext
   clock: ReturnType<typeof movableClock>
+  calls: string[]
 } {
   const clock = movableClock('2026-10-01T00:00:00.000Z')
   const store = new InMemorySessionStore({ now: clock.now })
-  return { test: createTestApp({ store, registry: createBundledRegistry() }), clock }
+  const calls: string[] = []
+  const log = options.recordStoreCalls === true ? countingCalls(store, calls) : store
+  return { test: createTestApp({ store: log, registry: createBundledRegistry() }), clock, calls }
+}
+
+/** The store, answering everything as itself while recording each method name it is asked for. */
+function countingCalls(store: SessionStore, calls: string[]): SessionStore {
+  // The real store is always the receiver, so its private state is the one a method reads.
+  return new Proxy(store, {
+    get(target, property, receiver) {
+      const value: unknown = Reflect.get(target, property, receiver)
+      if (typeof value !== 'function') {
+        return value
+      }
+      return (...args: unknown[]): unknown => {
+        calls.push(String(property))
+        return (value as (...parameters: unknown[]) => unknown).apply(target, args)
+      }
+    },
+  })
 }
 
 /** Create a session over HTTP, on a model the test names. */
@@ -324,6 +352,27 @@ describe('GET /v1/me/usage', () => {
 
     // A day that is not a day at all is refused by the query schema, before any zone is read.
     expect((await userUsageRequest(test, 'from=2026-02-30')).status).toBe(400)
+  })
+
+  it('reads the log once, and never walks the caller’s sessions (#247)', async () => {
+    const { test, calls } = usageApp({ recordStoreCalls: true })
+    const session = await createSession(test)
+    await turn(test, session.id)
+    // Two sessions, so a read that walked them would have to page twice — and would show up.
+    const other = await createSession(test)
+    await turn(test, other.id)
+
+    // From here, everything the request does to the log is recorded.
+    calls.length = 0
+    const response = await userUsageRequest(test, 'from=2026-10-01&to=2026-10-31&tz=UTC')
+    expect(response.status).toBe(200)
+    expect(((await response.json()) as UserUsage).totals.input_tokens).toBe(20)
+
+    // One read, and it is the windowed one: no page-walk over the caller's sessions, and no
+    // per-session read of each session's span events — which is what a month of heavy use used
+    // to cost on every request.
+    expect(calls).toEqual(['listModelRequests'])
+    expect(calls.filter((name) => name === 'listSessions' || name === 'listEvents')).toEqual([])
   })
 
   it('does not bill a branch a rewind replaced (#238)', async () => {
