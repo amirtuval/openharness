@@ -1,0 +1,86 @@
+Text captures from the manual pass over `oh` (#253), against a local server with a real OpenAI
+key. Captured with `tmux capture-pane` at 100x30 (the chat) and plain stdout (the commands).
+
+## `oh modes` — the modes and what each resolves to
+
+    $ oh --server http://localhost:3000 modes
+    smart                                                             openai/gpt-5-mini · high
+    fast                                                              openai/gpt-5-nano · low
+    deep                                                              openai/gpt-5-mini
+    mine                                                              my default model
+    no-key                                                            anthropic/claude-sonnet-5
+
+Each name is padded to the protocol's longest name (`MODE_NAME_MAX_LENGTH`) and the second
+column is what the mode resolves to — its model (or "my default model") and its effort, when it
+carries one.
+
+## `oh --mode mine` — the status line names the mode, then what it resolved to
+
+    $ oh --server http://localhost:3000 --mode mine
+    ───────────────────────────────────────────────────────────────────────────────────────────
+    mine · GPT-5 Nano · sesn_…6W8F5W · idle
+    ❯
+
+After a message (the chat follows the mode; the answer came from the mode's model, and the
+session's cost follows it on the same line):
+
+    Reply with exactly: pong
+
+    pong
+
+    2.8s · 194 tokens · <$0.0001
+
+    ───────────────────────────────────────────────────────────────────────────────────────────
+    mine · GPT-5 Nano · sesn_…6W8F5W · <$0.0001 · idle
+    ❯
+
+## `/model` — the Modes group above the providers, with the search line
+
+    Which model?
+    Search: type to filter
+      Modes
+    ❯ 1. smart · openai/gpt-5-mini · high
+      2. fast · openai/gpt-5-nano · low
+      3. deep · openai/gpt-5-mini
+      4. mine · my default model
+      5. no-key · anthropic/claude-sonnet-5
+      openai
+      6. GPT-3.5-turbo · 16k context
+      7. GPT-4 · 8k context
+      8. GPT-4 Turbo · 128k context
+      9. GPT-4.1 · 1M context
+      10. GPT-4.1 mini · 1M context
+      ↓ 82 more
+
+The search filters the modes and the models together (and hides a provider heading when none of
+its models survive):
+
+    Search: mi
+      Modes
+    ❯ 1. smart · openai/gpt-5-mini · high
+      2. deep · openai/gpt-5-mini
+      3. mine · my default model
+      openai
+      4. GPT-4.1 mini · 1M context
+      5. GPT-4o mini · 128k context
+      6. GPT-5 Mini · 400k context
+      7. GPT-5.4 mini · 400k context
+      8. o3-mini · 200k context
+      9. o4-mini · 200k context
+      10. openai/gpt-4.1-mini-2025-04-14
+      ↓ 9 more
+
+Picking one is **pending**, exactly as a model pick is — the next message carries it, and the
+status line names it with `(next message)` until then:
+
+    fast (next message) · GPT-5 Nano · sesn_…6W8F5W · <$0.0001 · idle
+    ❯
+
+## `--mode` beside `--model` is a usage error
+
+    $ oh --server http://localhost:3000 --mode mine --model openai/gpt-5-nano
+    oh: use either --model or --mode, not both: a chat follows a model or a mode.
+
+An unknown mode name is refused with the modes the account has (covered by
+`apps/tui/src/chat/target.test.ts`: `no mode matches 'nope'. This account has: smart, mine,
+no-key. Run 'oh modes' to list them.`).

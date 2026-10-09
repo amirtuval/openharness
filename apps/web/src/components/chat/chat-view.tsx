@@ -112,8 +112,10 @@ export function ChatView({
   // the mode's resolved model, so an edit to the mode shows here from the next reply on), or
   // the session resource's, on a chat that has not made a request yet.
   const lastReplyModel =
-    [...messages].reverse().find((message) => message.role === 'agent' && message.meta?.model !== undefined)
-      ?.meta?.model ?? null
+    [...messages]
+      .reverse()
+      .find((message) => message.role === 'agent' && message.meta?.model !== undefined)?.meta
+      ?.model ?? null
   const sessionModel = model ?? lastReplyModel ?? session?.model.id ?? null
   // The mode the session resource says the chat follows, before this tab has sent a switch (#245,
   // M6). The tab's own memory (above) wins once it has one.
