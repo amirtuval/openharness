@@ -18,13 +18,21 @@
  *    resolves to is checked against {@link isBlockedAddress}. A hostname that resolves to even
  *    one private address is refused whole: a DNS answer that mixes a public and a private
  *    address is an attack, not a coincidence.
- * 4. **Connect to the address that was checked.** The dispatcher's `connect.lookup` answers
- *    from the addresses step 3 approved, so the connection cannot be re-resolved — a second
- *    lookup cannot rebind the name to an internal address between the check and the connect.
- *    SNI and the `Host` header stay the original hostname; only the socket's address is pinned.
+ * 4. **Connect to the address that was checked.** Each hop builds its own dispatcher, whose
+ *    `connect.lookup` answers from exactly the addresses step 3 approved **for that hop** and
+ *    refuses every other name, so the connection cannot be re-resolved: a second lookup cannot
+ *    rebind the name to an internal address between the check and the connect, and a
+ *    concurrent call to the same host cannot move this one's socket. SNI and the `Host` header
+ *    stay the original hostname; only the socket's address is pinned. The dispatcher is closed
+ *    when the hop's body is finished — read whole, failed or cancelled — so neither a pin nor
+ *    a socket outlives the call.
  * 5. **Redirects, one hop at a time.** `redirect: 'manual'` means undici never follows a
  *    `Location` for us, so steps 1–4 run again for every hop, and a redirect to a private
- *    address is refused exactly as a direct one is. The number of hops is capped.
+ *    address is refused exactly as a direct one is. The number of hops is capped — and the two
+ *    presets cap it at **zero**, so a provider call that answers a redirect is refused rather
+ *    than sent somewhere else. A hop that leaves the origin the request started on carries no
+ *    credential header (`CREDENTIAL_HEADERS`), and a redirect that would have to resend a body
+ *    this call cannot replay is refused.
  * 6. **Limits.** A response body is capped in bytes and a call in total time — per call, because
  *    a save-time check and a model request want very different numbers (see
  *    {@link SAVE_TIME_LIMITS} and {@link STREAMING_LIMITS}).
@@ -33,17 +41,18 @@
  *
  * A deployment that reaches the internet through a proxy sets `HTTP_PROXY` / `HTTPS_PROXY` /
  * `NO_PROXY`. `catalog/provider-fetch.ts` in the server reads them through undici's
- * {@link EnvHttpProxyAgent} for the catalogue's constant URLs; `safeFetch` uses the same agent,
- * so a proxied deployment works with no extra flag, and with no proxy configured it is an
- * ordinary direct connection.
+ * {@link EnvHttpProxyAgent} for the catalogue's constant URLs; each hop here builds its own
+ * `EnvHttpProxyAgent`, so a proxied deployment works with no extra flag, and with no proxy
+ * configured it is an ordinary direct connection.
  *
  * Through a proxy the **check still runs on the target host** (steps 1–3, which is the half
  * that matters), but the *pin* does not: an HTTP proxy resolves the target itself and there is
  * no way to hand it an address to connect to, so the connection step belongs to the proxy. A
- * direct connection pins. Which is why the range check is unconditional and the pin is what
- * the proxy path gives up — the check is the guard, the pin is the hardening on top of it.
- * `NO_PROXY` is honoured by the agent: a host the deployment exempts is connected to directly,
- * and then it is pinned like any other.
+ * direct connection pins, and so does a host `NO_PROXY` exempts. Which is why the range check
+ * is unconditional and the pin is what the proxy path gives up — and why **a deployment that
+ * sets a proxy must have the proxy refuse private ranges itself**: behind one, that check is
+ * all that stands between a user-supplied URL and the internal network. Production egresses
+ * through Cloud NAT with no proxy; the variables exist for e2e's stub and for sandboxes.
  *
  * ## What it is not
  *
@@ -116,6 +125,15 @@ export interface SafeFetchRequest {
   readonly signal: AbortSignal
   /** Always `manual`: {@link safeFetch} follows a `Location` itself, re-checking each hop. */
   readonly redirect: 'manual'
+  /**
+   * The addresses the guard approved for this hop's host — every one of them checked, and the
+   * only ones the connection may use.
+   *
+   * A transport that pins hands them to its socket (the default one does, under the hostname
+   * the URL carries); one that does not can ignore them, which is what a test's transport
+   * does.
+   */
+  readonly addresses: readonly string[]
 }
 
 /** How {@link safeFetch} reaches the network. The default pins the socket; a test replaces it. */
@@ -137,7 +155,11 @@ export interface SafeFetchOptions {
   readonly timeoutMs?: number | null
   /** How long the body may stall between chunks; `null` disables it. Off by default. */
   readonly idleTimeoutMs?: number | null
-  /** How many redirects may be followed, each re-checked. Defaults to {@link DEFAULT_MAX_REDIRECTS}. */
+  /**
+   * How many redirects may be followed, each re-checked. Defaults to
+   * {@link DEFAULT_MAX_REDIRECTS}; `0` refuses a redirect instead of following it, which is
+   * what the two presets do — a provider API call has no business being sent elsewhere.
+   */
   readonly maxRedirects?: number
   /** How hostnames resolve. Defaults to `node:dns`' `lookup`. Injectable for tests. */
   readonly resolver?: AddressResolver
@@ -160,12 +182,15 @@ export const DEFAULT_MAX_REDIRECTS = 5
  *
  * Tight on purpose. The request is a small JSON body or none, so a body over a megabyte is a
  * provider that has gone wrong or a server that is not the provider; and ten seconds is the
- * same deadline the catalogue's own calls carry (C1).
+ * same deadline the catalogue's own calls carry (C1). A redirect is refused rather than
+ * followed: the endpoint is a URL the user typed, and a provider that answers `Location` is a
+ * provider sending this credential somewhere the user did not name.
  */
 export const SAVE_TIME_LIMITS = {
   maxBytes: 1024 * 1024,
   timeoutMs: 10_000,
   idleTimeoutMs: null,
+  maxRedirects: 0,
 } as const satisfies SafeFetchOptions
 
 /**
@@ -174,12 +199,14 @@ export const SAVE_TIME_LIMITS = {
  * A model streams a long reply, and a cap on either would cut a legitimate answer. What is
  * still bounded is an idle stream: {@link STREAMING_IDLE_TIMEOUT_MS} without a single byte is
  * a hung connection, not a slow answer. The caller passes its own abort signal for the cases
- * only it knows about (a user pressing stop).
+ * only it knows about (a user pressing stop). A redirect is refused, as at save time: the
+ * endpoint is the user's, and the model's key must not follow a `Location` off it.
  */
 export const STREAMING_LIMITS = {
   maxBytes: null,
   timeoutMs: null,
   idleTimeoutMs: 120_000,
+  maxRedirects: 0,
 } as const satisfies SafeFetchOptions
 
 /** How long a streaming body may stall before it is treated as hung. */
@@ -199,6 +226,25 @@ const NULL_BODY_STATUSES = new Set([101, 204, 205, 304])
 
 /** The statuses that mean "look somewhere else", and the `Location` header that says where. */
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
+
+/**
+ * The headers that carry a credential, and the ones a redirect must never take to another
+ * origin.
+ *
+ * `authorization` is what the fetch spec strips on a cross-origin redirect; the rest are the
+ * headers the providers openharness speaks to authenticate with (Azure's `api-key`,
+ * Anthropic's `x-api-key`, Gemini's `x-goog-api-key`), plus the two that are just as much the
+ * caller's to keep (`cookie`, `proxy-authorization`). All comparisons are case-insensitive,
+ * which is what `Headers` does.
+ */
+const CREDENTIAL_HEADERS: readonly string[] = [
+  'authorization',
+  'api-key',
+  'x-api-key',
+  'x-goog-api-key',
+  'cookie',
+  'proxy-authorization',
+]
 
 /**
  * Make a request to a URL the user supplied, refusing anything that could reach a private
@@ -231,6 +277,10 @@ export async function safeFetch(
   const signal = withTimeout(init.signal, timeoutMs)
 
   let current = typeof input === 'string' ? input : input.href
+  // Whether a hop has already left the origin the request started on. Once one has, the
+  // caller's credential headers are gone for the rest of the call: a redirect chain that comes
+  // back to the original origin must not pick them up again.
+  let leftOrigin = false
   for (let hop = 0; ; hop += 1) {
     const url = parseUrl(current)
     const hostname = url.hostname.replace(/^\[|\]$/g, '')
@@ -245,19 +295,26 @@ export async function safeFetch(
     if (!options.allowPrivate) {
       assertAddressesAllowed(hostname, addresses)
     }
-    pinAddresses(hostname, addresses)
 
     const headers = new Headers(headerInit)
+    if (leftOrigin) {
+      stripCredentialHeaders(headers)
+    }
+
     const response = await transport(url.href, {
       method,
       headers,
       body,
       signal,
       redirect: 'manual',
+      addresses,
     })
 
-    const location = response.headers.get('location')
     if (REDIRECT_STATUSES.has(response.status)) {
+      const location = response.headers.get('location')
+      // This hop is over. Release its body — and with it the socket the default transport
+      // pinned for it — before a refusal or the next hop decides anything else.
+      await discardBody(response)
       if (location === null) {
         throw new SafeFetchError(
           'invalid_redirect',
@@ -267,30 +324,66 @@ export async function safeFetch(
       if (hop >= maxRedirects) {
         throw new SafeFetchError(
           'too_many_redirects',
-          `${url.href} redirected more than ${maxRedirects} times`,
+          maxRedirects === 0
+            ? `${url.href} answered ${response.status}, and this request does not follow redirects`
+            : `${url.href} redirected more than ${maxRedirects} times`,
         )
       }
-      // Per the fetch spec: 303 always becomes a GET, a 301/302 on a POST becomes a GET, and
-      // 307/308 keep the method and the body. A body that cannot be sent twice (a stream) is
-      // dropped with the redirect rather than reused.
       let next: URL
       try {
         next = new URL(location, url)
       } catch {
         throw new SafeFetchError('invalid_redirect', `${url.href} sent a malformed Location`)
       }
+      if (next.origin !== url.origin) {
+        leftOrigin = true
+      }
+      // Per the fetch spec: 303 always becomes a GET, a 301/302 on a POST becomes a GET, and
+      // 307/308 keep the method and the body. A body the redirect keeps has to be sent a
+      // second time — which a stream cannot do, so that is refused rather than resent.
       if (
         response.status === 303 ||
         (method === 'POST' && (response.status === 301 || response.status === 302))
       ) {
         method = 'GET'
         body = undefined
+      } else if (isStreamBody(body)) {
+        throw new SafeFetchError(
+          'invalid_redirect',
+          `${url.href} answered ${response.status}, which resends the request body, and the ` +
+            `body is a stream that cannot be replayed`,
+        )
       }
       current = next.href
       continue
     }
     return guardBody(response, limits)
   }
+}
+
+/** Let go of a hop's response body; the default transport closes its socket with it. */
+async function discardBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel()
+  } catch {
+    // The body is already gone; there is nothing left to release.
+  }
+}
+
+/** Remove every credential header from a hop that has left the origin the call started on. */
+function stripCredentialHeaders(headers: Headers): void {
+  for (const name of CREDENTIAL_HEADERS) {
+    headers.delete(name)
+  }
+}
+
+/** Whether a body is a stream, and so cannot be sent a second time after a redirect. */
+function isStreamBody(body: Body): boolean {
+  return (
+    body !== undefined &&
+    body !== null &&
+    typeof (body as { getReader?: unknown }).getReader === 'function'
+  )
 }
 
 /** The URL a hop is about to be made to, or a refusal. */
@@ -342,38 +435,6 @@ function assertAddressesAllowed(hostname: string, addresses: readonly string[]):
   }
 }
 
-/**
- * The `connect.lookup` undici hands the socket, and the addresses each checked host resolved to.
- *
- * This is what makes step 4 of the module doc real: the socket is opened at the address the
- * guard approved, never at whatever a second DNS lookup would return. A host that is not in the
- * map — the proxy, or a host some other caller connects to — is resolved ordinarily.
- */
-const pinnedAddresses = new Map<string, LookupAddress[]>()
-
-function pinAddresses(hostname: string, addresses: readonly string[]): void {
-  pinnedAddresses.set(
-    hostname.toLowerCase(),
-    addresses.map((address) => ({ address, family: address.includes(':') ? 6 : 4 })),
-  )
-}
-
-/** One dispatcher for the process, built on first use with the environment it started in. */
-let proxyDispatcher: EnvHttpProxyAgent | null = null
-
-function dispatcher(): Dispatcher {
-  proxyDispatcher ??= new EnvHttpProxyAgent({ connect: { lookup: pinnedLookup } })
-  return proxyDispatcher
-}
-
-/**
- * The lookup undici's connector calls for a new socket.
- *
- * A pinned host answers with the addresses the guard checked; anything else — the proxy's own
- * host, a host never passed through {@link safeFetch} — is resolved with the ordinary resolver.
- * Node calls this with `all: true` when `autoSelectFamily` is on (the default) and with a bare
- * address otherwise, so both shapes are answered.
- */
 /** The lookup shape `node:net` declares — what undici's connector hands to the socket. */
 type LookupCallback = (
   error: NodeJS.ErrnoException | null,
@@ -381,25 +442,98 @@ type LookupCallback = (
   family?: number,
 ) => void
 
-function pinnedLookup(hostname: string, options: LookupOptions, callback: LookupCallback): void {
-  const pinned = pinnedAddresses.get(hostname.toLowerCase())
-  const answer = (addresses: readonly LookupAddress[]): void => {
-    if (options.all === true) {
-      callback(null, [...addresses])
+/**
+ * A dispatcher for **one hop**, whose connections to that hop's host are pinned to the
+ * addresses the guard checked.
+ *
+ * This is what makes step 4 of the module doc real. The dispatcher is built per hop and owned
+ * by the hop's request, so the answer it gives belongs to this call alone: two concurrent
+ * calls to one hostname cannot overwrite each other's addresses, and a call with
+ * `allowPrivate` cannot re-pin a host another call checked as public — the module-global map
+ * this replaced could do both.
+ *
+ * The lookup answers the checked hostname from the approved list and **refuses every other
+ * name** rather than resolving it, so an unchecked answer can never reach a socket. The one
+ * exception is a host the environment names as the egress proxy: that socket belongs to the
+ * deployment, undici's proxy path resolves it the same way, and behind a proxy the pin is the
+ * thing that is given up (see the module doc).
+ */
+function pinnedDispatcher(hostname: string, addresses: readonly string[]): EnvHttpProxyAgent {
+  const checked = normalizeHostname(hostname)
+  const pinned: LookupAddress[] = addresses.map((address) => ({
+    address,
+    family: address.includes(':') ? 6 : 4,
+  }))
+  const proxies = configuredProxyHostnames()
+  const lookup = (name: string, options: LookupOptions, callback: LookupCallback): void => {
+    const asked = normalizeHostname(name)
+    if (asked === checked) {
+      answerLookup(pinned, options, callback)
       return
     }
-    const first = addresses[0]
-    callback(null, first?.address ?? '', first?.family)
+    if (proxies.has(asked)) {
+      dnsResolve(name, { all: true, verbatim: true }).then(
+        (found) => answerLookup(found, options, callback),
+        (error: unknown) => callback(error instanceof Error ? error : new Error(String(error)), ''),
+      )
+      return
+    }
+    // A name the guard did not check is not a name this connection may reach. Answering it
+    // with a fresh lookup is the rebinding this whole step exists to stop.
+    callback(new Error(`${name} was not checked, so it will not be resolved`), '')
   }
-  if (pinned !== undefined && pinned.length > 0) {
-    answer(pinned)
+  return new EnvHttpProxyAgent({ connect: { lookup } })
+}
+
+/**
+ * Answer a lookup in the shape it asked for.
+ *
+ * Node calls the lookup with `all: true` when `autoSelectFamily` is on (the default) and with a
+ * bare address otherwise, so both shapes are answered.
+ */
+function answerLookup(
+  addresses: readonly LookupAddress[],
+  options: LookupOptions,
+  callback: LookupCallback,
+): void {
+  if (options.all === true) {
+    callback(null, [...addresses])
     return
   }
-  dnsResolve(hostname, { all: true, verbatim: true }).then(answer, (error: unknown) => {
-    // A failed lookup is reported with an empty address: the error is the answer, and the
-    // callback's own type requires one either way.
-    callback(error instanceof Error ? error : new Error(String(error)), '')
-  })
+  const first = addresses[0]
+  callback(null, first?.address ?? '', first?.family)
+}
+
+/** A hostname as a lookup key: lowercased, without a trailing dot or IPv6 brackets. */
+function normalizeHostname(hostname: string): string {
+  return hostname
+    .replace(/^\[|\]$/g, '')
+    .toLowerCase()
+    .replace(/\.$/, '')
+}
+
+/**
+ * The hosts the environment's egress-proxy variables name — the only names a pinned lookup
+ * resolves afresh.
+ *
+ * Read per dispatcher rather than cached, so a process that sets or clears the variables (a
+ * test, a sandbox) is honoured. A value that is not a URL is skipped, as undici's own proxy
+ * path would not use it either.
+ */
+function configuredProxyHostnames(): ReadonlySet<string> {
+  const hosts = new Set<string>()
+  for (const name of ['http_proxy', 'HTTP_PROXY', 'https_proxy', 'HTTPS_PROXY']) {
+    const value = process.env[name]
+    if (value === undefined || value === '') {
+      continue
+    }
+    try {
+      hosts.add(normalizeHostname(new URL(value).hostname))
+    } catch {
+      // Not a URL: nothing undici would proxy through either.
+    }
+  }
+  return hosts
 }
 
 /**
@@ -416,13 +550,96 @@ const dispatcherFetch = undiciFetch as unknown as (
 ) => Promise<Response>
 
 /**
- * The default transport: undici's `fetch` over the pinned, proxy-aware dispatcher.
+ * The default transport: undici's `fetch` over a dispatcher built for this one hop.
  *
- * Every request carries {@link dispatcher}, whose `connect.lookup` answers from the addresses
- * the guard approved — which is what makes step 4 of the module doc real.
+ * The dispatcher is pinned to the addresses the guard approved for the hop ({@link
+ * pinnedDispatcher}) and closed when the response is finished — body read whole, failed or
+ * cancelled — so no socket and no pin outlives the call. A response with no body is already
+ * finished and closes at once.
  */
-const defaultTransport: SafeFetchTransport = (url, init) =>
-  dispatcherFetch(url, { ...init, dispatcher: dispatcher() })
+const defaultTransport: SafeFetchTransport = async (url, init) => {
+  const dispatcher = pinnedDispatcher(new URL(url).hostname, init.addresses)
+  let closing: Promise<void> | null = null
+  const close = (): Promise<void> => {
+    // Closing is idempotent and never throws: a second caller joining the first, a dispatcher
+    // that has already gone, both resolve.
+    closing ??= dispatcher.close().then(
+      () => undefined,
+      () => undefined,
+    )
+    return closing
+  }
+
+  let response: Response
+  try {
+    response = await dispatcherFetch(url, {
+      method: init.method,
+      headers: init.headers,
+      body: init.body,
+      signal: init.signal,
+      redirect: init.redirect,
+      dispatcher,
+    })
+  } catch (error) {
+    await close()
+    throw error
+  }
+  return settleDispatcher(response, close)
+}
+
+/**
+ * The response, with `close` run once its body has finished, failed or been cancelled.
+ *
+ * This is the transport's half of "no socket outlives the call": the guard's own
+ * {@link guardBody} wrapper composes over the stream this returns, so a body it caps, errors
+ * on a stall or the caller cancels all propagate down and close the connection.
+ */
+function settleDispatcher(response: Response, close: () => Promise<void>): Response {
+  const body = response.body
+  if (body === null) {
+    void close()
+    return response
+  }
+  const reader = body.getReader()
+  let finished = false
+  const finish = async (): Promise<void> => {
+    if (finished) {
+      return
+    }
+    finished = true
+    await close()
+  }
+  const settled = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const result = await reader.read()
+        if (result.done) {
+          // The connection is closed before the stream ends, so a caller that has read the
+          // whole body knows the socket is already gone.
+          await finish()
+          controller.close()
+          return
+        }
+        controller.enqueue(result.value)
+      } catch (error) {
+        await finish()
+        controller.error(error)
+      }
+    },
+    async cancel(reason) {
+      try {
+        await reader.cancel(reason)
+      } finally {
+        await finish()
+      }
+    },
+  })
+  return new Response(settled, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  })
+}
 
 /** The default resolver: every address `node:dns` has for the name. */
 const defaultResolver: AddressResolver = async (hostname) => {

@@ -60,32 +60,50 @@ documents them in full):
    documentation ranges, IPv6 unique-local and link-local — and the IPv4-mapped, IPv4-compatible,
    NAT64 and 6to4 forms that carry an IPv4 inside them, judged by that IPv4. An address that
    does not parse is refused: an unknown form is not a public one.
-4. **Connect to the address that was checked.** The dispatcher's `connect.lookup` answers from
-   the approved list, so the socket can never be re-resolved between the check and the connect.
-   SNI and `Host` stay the original hostname; only the socket's address is pinned.
+4. **Connect to the address that was checked.** Each hop builds its **own** dispatcher, whose
+   `connect.lookup` answers from the addresses that hop was checked against and **refuses every
+   other name** — a lookup never falls back to an unchecked DNS answer. The dispatcher is closed
+   when the hop's body has been read, failed or been cancelled, so neither a pin nor a socket
+   outlives the call, and two calls can never share a connection opened under a different pin;
+   two concurrent calls to one hostname keep their own answers. SNI and `Host` stay the original
+   hostname; only the socket's address is pinned. The one name a lookup resolves afresh is a
+   host the deployment named as its egress proxy (below).
 5. **Redirects, one hop at a time.** `redirect: 'manual'`, so undici never follows a
    `Location` for us and steps 1–4 run again for every hop; the number of hops is capped (5).
-   303 — and a 301/302 on a POST — becomes a GET with no body, per the fetch spec.
+   303 — and a 301/302 on a POST — becomes a GET with no body, per the fetch spec, and a 307/308
+   that would have to resend a body this call cannot replay is refused. A hop that leaves the
+   origin the request started on carries **no credential header**: `authorization`, `api-key`,
+   `x-api-key`, `x-goog-api-key`, `cookie` and `proxy-authorization` are stripped, and are not
+   picked up again if a later hop returns to the origin.
 6. **Limits, per call.** `maxBytes`, `timeoutMs` (the whole call, body included) and
    `idleTimeoutMs` (a stalled body).
 
 ### The egress proxy
 
-A proxied deployment sets `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`; `safeFetch` reads them
-through undici's `EnvHttpProxyAgent`, the same agent the server's `catalog/provider-fetch.ts`
-uses for its constant URLs. Through a proxy the **check still runs on the target host** (step
-3), but the **pin does not**: an HTTP proxy resolves the target itself and there is no way to
-hand it an address to connect to. The check is the guard; the pin is the hardening on top of
-it, and it applies to a direct connection (and to a host `NO_PROXY` exempts).
+A proxied deployment sets `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`; each hop reads them through
+its own undici `EnvHttpProxyAgent`, the same agent the server's `catalog/provider-fetch.ts` uses
+for its constant URLs. Through a proxy the **check still runs on the target host** (step 3), but
+the **pin does not**: an HTTP proxy resolves the target itself and there is no way to hand it an
+address to connect to. The check is the guard; the pin is the hardening on top of it, and it
+applies to a direct connection (and to a host `NO_PROXY` exempts). **A deployment that sets a
+proxy must have the proxy refuse private ranges itself**: behind one, the pre-check is all that
+stands between a user-supplied URL and the internal network. Production egresses through Cloud
+NAT with no proxy; the variables exist for e2e's stub and for sandboxes.
 
 ### The limits, and who picks them
 
-- **`SAVE_TIME_LIMITS`** (`{ maxBytes: 1 MiB, timeoutMs: 10 s, idleTimeoutMs: null }`) is what
-  a save-time check uses: one small authenticated request whose answer nobody reads.
-- **`STREAMING_LIMITS`** (`{ maxBytes: null, timeoutMs: null, idleTimeoutMs: 2 min }`) is what
-  a model call uses: a model streams a long reply, so a size or time cap would cut a legitimate
-  answer — what is bounded instead is an idle stream, which is a hung connection rather than a
-  slow answer. The caller's own abort signal covers the rest.
+- **`SAVE_TIME_LIMITS`** (`{ maxBytes: 1 MiB, timeoutMs: 10 s, idleTimeoutMs: null,
+maxRedirects: 0 }`) is what a save-time check uses: one small authenticated request whose answer
+  nobody reads.
+- **`STREAMING_LIMITS`** (`{ maxBytes: null, timeoutMs: null, idleTimeoutMs: 2 min,
+maxRedirects: 0 }`) is what a model call uses: a model streams a long reply, so a size or time
+  cap would cut a legitimate answer — what is bounded instead is an idle stream, which is a hung
+  connection rather than a slow answer. The caller's own abort signal covers the rest.
+
+Both presets set **`maxRedirects: 0`**, so a provider API call that answers a redirect is refused
+(`too_many_redirects`) rather than sent somewhere else — the endpoint is a URL the user typed, and
+neither the key nor the model request should follow a `Location` off it. Following redirects (up
+to `DEFAULT_MAX_REDIRECTS`) is the default policy, which the tools' `web_fetch` will use.
 
 ## Allowed `@openharness/*` dependencies
 
@@ -108,13 +126,18 @@ dependency table.
   — the IPv4 blocks, the IPv6 blocks, the IPv4-mapped and tunnelled forms, the metadata
   hostnames — and the global unicast addresses that must stay accepted, mapped ones included.
 - `safe-fetch.test.ts` has two halves. The **logic** — scheme, hostname, ranges, redirects and
-  their re-checks — runs on an injected resolver and transport, so a refusal is deterministic
-  and no socket is opened. The **transport** — the address the socket is actually opened at,
-  and the three limits — runs against a real HTTP server on loopback reached through a resolver
-  the test supplies; that is the only way to see the pin, because the host name resolves to an
-  address only the test's resolver knows. Those tests delete the proxy variables at module load
-  (`safeFetch` honours the environment, and a sandbox's egress proxy would otherwise answer for
-  `127.0.0.2`).
+  their re-checks, and which credential header a hop carries — runs on an injected resolver and
+  transport, so a refusal is deterministic and no socket is opened. The **transport** — the
+  address the socket is actually opened at, the three limits, and the connection's lifetime —
+  runs against a real HTTP server on loopback reached through a resolver the test supplies; that
+  is the only way to see the pin, because the host name resolves to an address only the test's
+  resolver knows. Two servers on **one port**, one per loopback alias, name themselves in their
+  bodies, so a response says which address was dialled: that is how the per-call pin is pinned
+  down (a call after another call to the same origin, two calls released together, and one with
+  `allowPrivate` under another without), and how a connection is shown to be closed after a body
+  is read, errors or is cancelled — the server's own socket set goes empty. Those tests delete
+  the proxy variables at module load (`safeFetch` honours the environment, and a sandbox's egress
+  proxy would otherwise answer for `127.0.0.2`).
 - `index.test.ts` covers the barrel.
 
 ## Rules
