@@ -1,0 +1,73 @@
+# The Helm chart's own check (#154): lint it, render the realistic staging values, and validate
+# every rendered object against the Kubernetes schema. A job of its own rather than a step in
+# `ci.yml`, so it runs when the chart changes and stays out of the Node suites' way — the chart
+# has no JavaScript to build and the Node jobs have no chart to render.
+#
+# It runs on changes to `charts/**` and to itself. Validation is strict, with two schema
+# sources: kubeconform's own Kubernetes schemas, and the datreeio CRDs-catalog, which carries
+# the Gateway API and GKE policy CRDs the chart renders now that the Ingress is gone (#159) —
+# `gateway.networking.k8s.io/{gateway,httproute}_v1`, `networking.gke.io/{healthcheckpolicy,
+# gcpbackendpolicy}_v1` and `secrets-store.csi.x-k8s.io/secretproviderclass_v1`. So a
+# misspelled field in the Gateway or a policy is caught here rather than by the controller.
+# `-ignore-missing-schemas` stays for `GCPHTTPFilter`, the one object the catalog does not
+# carry yet (Cloud CDN for a Gateway is GKE 1.35.2+ and still new).
+name: Chart
+
+on:
+  pull_request:
+    paths:
+      - charts/**
+      - .github/workflows/chart.yml
+  push:
+    branches: [main]
+    paths:
+      - charts/**
+      - .github/workflows/chart.yml
+
+concurrency:
+  group: chart-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+
+      # `helm lint` renders an extra pass for every `ci/*-values.yaml` it finds, so the staging
+      # values are linted too, not only validated below.
+      - name: Lint the chart
+        run: helm lint charts/openharness
+
+      # The rendering this job validates — and the same command the README documents. Written to
+      # a file so kubeconform sees exactly what was rendered and the log shows it.
+      - name: Render with the ci staging values
+        run: |
+          helm template openharness charts/openharness \
+            --namespace openharness \
+            --values charts/openharness/ci/staging-values.yaml \
+            > rendered.yaml
+          cat rendered.yaml
+
+      - name: Install kubeconform
+        run: |
+          curl -fsSL \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | sudo tar xz -C /usr/local/bin kubeconform
+
+      # Two schema locations: the default (Kubernetes' own), and the datreeio CRDs-catalog for
+      # the Gateway API and GKE CRDs. The catalog is keyed by group, kind and version, so a
+      # `Gateway` is validated against gateway.networking.k8s.io/v1 and a `GCPBackendPolicy`
+      # against networking.gke.io/v1 — not skipped. `-ignore-missing-schemas` keeps
+      # GCPHTTPFilter, which the catalog does not carry, a skip rather than a failure.
+      - name: Validate the rendered objects
+        run: >-
+          kubeconform -strict -summary -ignore-missing-schemas
+          -kubernetes-version 1.30.0
+          -schema-location default
+          -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+          rendered.yaml

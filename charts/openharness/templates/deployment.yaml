@@ -1,0 +1,218 @@
+# The server — one container, one port, the API and the web app together. With
+# `cloudSqlProxy.enabled` a second container joins it as a native sidecar (below), so the pod is
+# two containers and the app still has one port.
+#
+# Hardened for a shared cluster: it runs as the image's non-root `node` user (uid 1000), with a
+# read-only root filesystem, no Linux capabilities, no way to gain privilege, and the default
+# seccomp profile. Nothing it needs to write is on the image: the store is Postgres, the static
+# assets are read-only, and the one writable path it has is an emptyDir at /tmp.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "openharness.fullname" . }}
+  labels:
+    {{- include "openharness.labels" . | nindent 4 }}
+spec:
+  # Declared here so the chart is complete without the autoscaler; when the HPA is enabled it
+  # owns this field from here on (the two agree at minReplicas == replicaCount == 2).
+  replicas: {{ .Values.replicaCount }}
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # The whole point: a rolling update never takes the last ready pod out of service. One
+      # extra pod comes up (maxSurge: 1) and is ready before an old one goes.
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "openharness.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openharness.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "openharness.serviceAccountName" . }}
+      # Longer than the server's drain timeout (OPENHARNESS_DRAIN_TIMEOUT_MS, 5s by default) and
+      # than the load balancer's connection draining, so SIGTERM has time to finish the turns in
+      # flight and an in-place migration has time to finish too.
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      {{- if .Values.cloudSqlProxy.enabled }}
+      # The Cloud SQL Auth Proxy, as a **native sidecar**: an init container with
+      # `restartPolicy: Always` (Kubernetes 1.29+, so GKE 1.29+; the cluster is 1.35). It is
+      # started before the app container and, because it declares a startup probe, the app
+      # container does not start until that probe passes — which is what the app needs, since
+      # it runs the session store's migrations at boot and must find the database immediately.
+      # Unlike a plain init container it is not reaped when it exits: it stays up for the
+      # pod's lifetime alongside the app.
+      #
+      # It authenticates with the pod's Workload Identity (the annotated ServiceAccount above),
+      # so the app GSA needs `roles/cloudsql.client` — a Terraform grant, not the chart's.
+      initContainers:
+        - name: cloud-sql-proxy
+          image: "{{ .Values.cloudSqlProxy.image.repository }}:{{ .Values.cloudSqlProxy.image.tag }}"
+          imagePullPolicy: {{ .Values.cloudSqlProxy.image.pullPolicy }}
+          restartPolicy: Always
+          args:
+            # The instance to connect to: <project>:<region>:<instance>, from the cloudsql
+            # module's `instance_connection_name` output. Terraform always sets it; an empty
+            # value fails the render here rather than shipping a proxy with no target.
+            - {{ required "cloudSqlProxy.enabled is true but cloudSqlProxy.instanceConnectionName is empty — set it to the instance's connection name (<project>:<region>:<instance>), the cloudsql module's instance_connection_name output" .Values.cloudSqlProxy.instanceConnectionName | quote }}
+            {{- if .Values.cloudSqlProxy.privateIp }}
+            # The instance has no public address (`ipv4_enabled = false`), so the only way in
+            # is over the private services access peering.
+            - --private-ip
+            {{- end }}
+            # Listen on the pod's loopback only, on the port `database_url` names; nothing
+            # outside the pod can reach it.
+            - --port={{ .Values.cloudSqlProxy.port }}
+            - --address=127.0.0.1
+            # JSON logs to stdout, which Cloud Logging reads (#158), and the health-check
+            # server the probes below use.
+            - --structured-logs
+            - --health-check
+            - --http-address=0.0.0.0
+            - --http-port=9090
+          # The container is prevented from gaining anything it did not start with, cannot
+          # write the root filesystem, and holds no Linux capabilities — the same hardening the
+          # app container uses below. It runs as the image's non-root user.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            privileged: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+            runAsUser: 1000
+          ports:
+            # The health-check server. The proxy's own listener is on 127.0.0.1 and is not
+            # declared: it is not reachable from outside the pod.
+            - name: proxy-http
+              containerPort: 9090
+              protocol: TCP
+          # Startup: the proxy is listening and ready to forward. This is the probe the kubelet
+          # waits for before it starts the app container, so it must not be generous — the app
+          # is blocked behind it. 5s × 30 = 2.5 minutes, past a cold instance's first connect.
+          startupProbe:
+            httpGet:
+              path: /startup
+              port: proxy-http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30
+          # Liveness: the proxy's own event loop is alive. A tunnel that drops reconnects on its
+          # own, so this only trips on a wedged process.
+          livenessProbe:
+            httpGet:
+              path: /liveness
+              port: proxy-http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.cloudSqlProxy.resources | nindent 12 }}
+      {{- end }}
+      containers:
+        - name: openharness
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            # The container cannot gain a privilege it did not start with, cannot write the
+            # root filesystem, and holds no Linux capabilities at all.
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            privileged: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+            runAsUser: 1000
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          env:
+            # The image's port, named here so the probes and the Service have one place to
+            # point at. Overridable through `env` below, which is where Terraform puts the
+            # app's own settings.
+            - name: PORT
+              value: "3000"
+            # The image's root filesystem is read-only, so the two paths a Node process may
+            # write to are pointed at the writable emptyDir mounted below.
+            - name: TMPDIR
+              value: /tmp
+            - name: HOME
+              value: /tmp
+            {{- range $name, $value := .Values.env }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- range .Values.secrets }}
+            # The value itself lives in the mounted file; the server reads it because of the
+            # `_FILE` suffix (#154).
+            - name: {{ .env }}_FILE
+              value: /var/run/secrets/openharness/{{ .secret }}
+            {{- end }}
+          # Liveness: this process is alive. /health does not touch the database — a database
+          # blip must not restart every pod — so this only trips on a wedged event loop.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # Readiness: this process can serve. /ready is 503 while the store is down or the pod
+          # is draining (W1, #151), which is exactly when it should be taken out of a Service —
+          # and out of the load balancer's NEG.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Startup: the first boot runs the Postgres migrations before it listens, which on a
+          # cold database can take a while. A generous budget here (5s × 60 = 5 minutes) keeps
+          # the liveness probe from killing a pod that is only migrating; once this passes, the
+          # liveness probe takes over.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 60
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.secrets }}
+            - name: secrets
+              mountPath: /var/run/secrets/openharness
+              readOnly: true
+            {{- end }}
+      volumes:
+        # The one writable path: /tmp, for whatever Node writes there on a read-only rootfs.
+        - name: tmp
+          emptyDir: {}
+        {{- if .Values.secrets }}
+        # Secret Manager, through the GKE Secret Manager add-on: the driver fetches each secret
+        # into this volume at pod start (and refreshes it), and the Secret Provider Class below
+        # says which ones and where they land.
+        - name: secrets
+          csi:
+            driver: secrets-store-gke.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: {{ include "openharness.fullname" . }}
+        {{- end }}

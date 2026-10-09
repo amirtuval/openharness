@@ -1,0 +1,90 @@
+# Realistic staging values, the shape Terraform passes for the `openharness-dev` project (#154).
+#
+# `helm lint` renders an extra pass for every `ci/*-values.yaml`, and the CI job renders this
+# one before `kubeconform` validates it — so this file is what proves the chart renders the way
+# staging is deployed, not just its empty defaults. Production differs only in the project, the
+# host, the static IP, the Cloud SQL instance's connection name and the secret names; the image
+# tag is a git sha in both.
+
+image:
+  repository: us-central1-docker.pkg.dev/openharness-dev/openharness/server
+  tag: 4b0c557 # a git sha, one image per commit
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 70
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    memory: 512Mi
+
+serviceAccount:
+  name: openharness
+  # The app GSA Terraform creates in openharness-dev.
+  gcpServiceAccount: openharness-app@openharness-dev.iam.gserviceaccount.com
+
+# The Cloud SQL Auth Proxy sidecar (#159), on in both environments: the app has no way to reach
+# the instance's private IP over TLS the way `node-postgres` wants it (Cloud SQL's server
+# certificate is signed by a per-instance CA Node does not trust), so it connects to this proxy
+# on 127.0.0.1 instead. The connection name is the staging instance's — Cloud SQL's
+# `connection_name` for the `openharness` instance in `openharness-dev`, `us-central1` — which
+# Terraform passes from `infra/modules/cloudsql`'s `instance_connection_name` output.
+cloudSqlProxy:
+  enabled: true
+  instanceConnectionName: openharness-dev:us-central1:openharness
+
+gateway:
+  host: staging.oharness.dev
+  staticIpName: openharness-staging-ip
+  # The Certificate Manager certificate map Terraform creates for the host
+  # (`infra/modules/certs`) and puts in the Gateway's `networking.gke.io/certmap` annotation.
+  certificateMapName: openharness-staging-certmap
+  cdn:
+    enabled: true
+
+backend:
+  timeoutSec: 3600
+  drainingTimeoutSec: 30
+
+gcpProject: openharness-dev
+
+# The plain settings Terraform passes for this environment. BETTER_AUTH_URL is the host above;
+# the dev login is off because the variable is *unset* here — the server refuses to boot on any
+# value other than 1/true, so `OPENHARNESS_DEV_LOGIN: '0'` crash-looped the pod (#159); Cloud KMS
+# wraps the vault's keys, and its key is a resource name, not a secret; GCLB appends one entry
+# to x-forwarded-for; and Cloud Logging reads stdout as JSON with spans in Cloud Trace (#158).
+#
+# `infra/modules/app/locals.tf` sets the same variables, and a server test boots from this file
+# (apps/server/src/chart-values.test.ts) — so whoever edits one updates the other.
+#
+# A sign-in provider is *not* shown here: this file keeps to the two secrets below. A real
+# environment signs in with one, which Terraform passes as a client id here plus that
+# provider's client secret as a third `secrets` entry (e.g. GOOGLE_CLIENT_ID +
+# {env: GOOGLE_CLIENT_SECRET, secret: google-client-secret}).
+env:
+  BETTER_AUTH_URL: https://staging.oharness.dev
+  OPENHARNESS_TRUSTED_PROXY_HOPS: '1'
+  OPENHARNESS_KEY_PROVIDER: gcp-kms
+  OPENHARNESS_KMS_KEY: projects/openharness-dev/locations/global/keyRings/openharness/cryptoKeys/credentials
+  OPENHARNESS_LOG_FORMAT: json
+  OPENHARNESS_TRACING: cloud-trace
+  OPENHARNESS_TRACE_SAMPLE_RATE: '0.1'
+
+# Two secrets, mounted from Secret Manager: the database URL and the Better Auth signing
+# secret, each landing under /var/run/secrets/openharness/ and read through its `_FILE`
+# variable (#154). `database-url` points at the proxy sidecar above —
+# `postgres://…@127.0.0.1:5432/openharness?sslmode=disable` — not at the instance's private IP;
+# `infra/modules/secrets/locals.tf` builds it.
+secrets:
+  - env: DATABASE_URL
+    secret: database-url
+  - env: BETTER_AUTH_SECRET
+    secret: better-auth-secret

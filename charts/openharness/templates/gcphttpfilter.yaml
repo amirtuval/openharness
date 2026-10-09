@@ -1,0 +1,25 @@
+{{- if and .Values.gateway.host .Values.gateway.cdn.enabled }}
+# Cloud CDN on the backend service (#159) — the HTTPFilter extension the Gateway controller
+# reads, which is what the BackendConfig's `cdn` block did for the Ingress.
+#
+# `cacheMode: USE_ORIGIN_HEADERS` is the point, and it is the same mode the BackendConfig asked
+# for: the CDN follows the origin's own `Cache-Control` rather than a policy of its own, so a
+# response that says `no-store` is never stored and one that says `max-age` is cached for
+# exactly that long. The server sets those headers per route (W1, #151): long-lived immutable
+# for /assets/*, `no-store` for index.html, /v1/*, /api/auth/*, /health, /ready, /device and
+# every non-2xx. Cloud CDN's own rule is what makes that a guarantee — a response carrying
+# `Cache-Control: no-store` (or `private`) is not cached in this mode; only FORCE_CACHE_ALL
+# overrides that, and this filter does not ask for it.
+#
+# The CDN is inline on the same hostname: there is no separate CDN domain, so the Vite base
+# stays '/'. GKE ≥ 1.35.2-gke.1751000 is what exposes this filter; the cluster is 1.35.8-gke.
+apiVersion: networking.gke.io/v1
+kind: GCPHTTPFilter
+metadata:
+  name: {{ include "openharness.fullname" . }}-cdn
+  labels:
+    {{- include "openharness.labels" . | nindent 4 }}
+spec:
+  cachePolicy:
+    cacheMode: USE_ORIGIN_HEADERS
+{{- end }}

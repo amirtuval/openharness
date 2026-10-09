@@ -1,0 +1,206 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # A fresh, uncached run of the whole suite on demand (Actions → CI → Run workflow). Cached
+  # turbo results replay a task's earlier outcome, so only an uncached run proves the current
+  # tree passes and surfaces flaky tests.
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Run every task without the turbo cache
+        type: boolean
+        default: true
+  # The same fresh run every night, against main.
+  schedule:
+    - cron: '0 3 * * *'
+
+concurrency:
+  # Per event, so a nightly or manual run is not cancelled by (and does not cancel) a push.
+  group: ci-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    services:
+      # A Postgres for the suites that test against a real database: `packages/session`'s store
+      # tests and `e2e/`, which runs the built server in its own process.
+      #
+      # The e2e suite reads this service through DATABASE_URL — turbo's default environment
+      # mode hands a task only the variables its configuration names, and `e2e/turbo.json` is
+      # where DATABASE_URL is passed through for that task. It creates a database of its own
+      # per test file (`openharness_e2e_<label>_<random>`, dropped afterwards), so the user
+      # has to be allowed to create databases: the image's POSTGRES_USER is a superuser, which
+      # is what makes that work.
+      #
+      # The session tests, by the same rule, do not see DATABASE_URL and still bring up their
+      # own `postgres:18-alpine` with testcontainers (Docker is available on the runner).
+      # Passing it through for that task too would save them the pull.
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: openharness
+          POSTGRES_PASSWORD: openharness
+          POSTGRES_DB: openharness
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U openharness -d openharness"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # --affected compares against the PR base branch and needs history.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - run: corepack enable
+
+      - id: yarn-cache
+        run: echo "dir=$(yarn config get cacheFolder)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.yarn-cache.outputs.dir }}
+          key: yarn-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
+          restore-keys: yarn-${{ runner.os }}-
+
+      - run: yarn install --immutable
+
+      - uses: actions/cache@v4
+        with:
+          path: .turbo/cache
+          key: turbo-${{ runner.os }}-${{ github.sha }}
+          restore-keys: turbo-${{ runner.os }}-
+
+      - name: Check dependency rules
+        run: yarn check:deps
+
+      - name: Check root formatting
+        run: yarn format:check:repo
+
+      # PRs: only packages changed vs the base branch, plus their dependents. `e2e` depends on
+      # the server, the client and the web app, so a change to any of those runs the
+      # end-to-end suite here too — against the postgres service above.
+      - name: Build, typecheck, lint, test (affected)
+        if: github.event_name == 'pull_request'
+        env:
+          # actions/checkout only creates remote-tracking refs, so point turbo at origin/<base>.
+          TURBO_SCM_BASE: origin/${{ github.base_ref }}
+          # The postgres service above. The session tests truncate their tables, so a scratch
+          # database is all this has to be.
+          DATABASE_URL: postgres://openharness:openharness@localhost:5432/openharness
+        run: yarn turbo run build typecheck lint format:check test --affected --cache-dir=.turbo/cache
+
+      # main: everything. On a push, unchanged packages are turbo cache hits; the nightly run and
+      # a manual run with `force` (the default) bypass the cache, so every task really runs.
+      - name: Build, typecheck, lint, test (all)
+        if: github.event_name != 'pull_request'
+        env:
+          DATABASE_URL: postgres://openharness:openharness@localhost:5432/openharness
+          TURBO_FORCE_FLAG: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.force)) && '--force' || '' }}
+        run: |
+          # The unquoted expansion is the point: an empty TURBO_FORCE_FLAG must disappear from
+          # the command line, and "yarn turbo ... ''" is not the same command. The lint pass
+          # reads it as a word-splitting bug; it is not one.
+          # shellcheck disable=SC2086
+          yarn turbo run build typecheck lint format:check test --cache-dir=.turbo/cache $TURBO_FORCE_FLAG
+
+      # The published shape of the CLI (#152): `npm pack`, and only the expected files in the
+      # tarball; `npm install` of that tarball **offline** into a temp directory outside the
+      # workspace, with no dependencies to resolve; the installed `oh --version`/`oh --help`
+      # run there; and a grep of the bundle for an `import`/`require` it would still have to
+      # resolve at runtime. `check:pack` dependsOn `build`, so turbo builds the CLI (and
+      # everything inlined into it, e.g. ink's `yoga-layout`) first; a PR that does not touch
+      # any of them is a turbo cache hit. It runs on both the affected and the all-packages
+      # paths, since a cached hit there is what lets it run on every PR cheaply.
+      - name: Check the CLI package (npm pack, install it, run the installed `oh`)
+        run: yarn turbo run check:pack --filter=@openh/cli --cache-dir=.turbo/cache
+
+  # The provider-credential success path, end to end with a real key (#120). `PUT
+  # /v1/provider-credentials` validates the key with one real provider call, and no test seam
+  # crosses the process boundary (`e2e/src/harness/credentials.ts` documents why the rest of the
+  # suite seeds the row instead) — so without this job the route's success path (validate →
+  # seal → store → resolve on the next turn) runs in no automatic test: the smoke file skips
+  # without a key and `credentials.test.ts` covers only refusals. This job runs **only** the
+  # smoke file, against a real (low-limit) repository key.
+  #
+  # The key is this job's alone: it is never printed, and it is not given to the job above or
+  # to any other step. Fork pull requests receive no repository secrets, so the job is skipped
+  # there (`OPENHARNESS_REQUIRE_PROVIDER_SMOKE=1` makes a missing key a **failure** rather than
+  # a skip, so the job can never pass by quietly not running the test).
+  provider-smoke:
+    if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    services:
+      # The same Postgres the `ci` job uses: a database per test file, created and dropped by
+      # the suite, so the user has to be allowed to create databases (the image's
+      # POSTGRES_USER is a superuser).
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: openharness
+          POSTGRES_PASSWORD: openharness
+          POSTGRES_DB: openharness
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U openharness -d openharness"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        # No `fetch-depth: 0`: only the `--affected` run needs history, and this job does not
+        # compare against a base branch.
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - run: corepack enable
+
+      - id: yarn-cache
+        run: echo "dir=$(yarn config get cacheFolder)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.yarn-cache.outputs.dir }}
+          key: yarn-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
+          restore-keys: yarn-${{ runner.os }}-
+
+      - run: yarn install --immutable
+
+      # Its own key, so it never races the `ci` job over the same cache entry; the restore-key
+      # still picks up that job's .turbo/cache for the build below.
+      - uses: actions/cache@v4
+        with:
+          path: .turbo/cache
+          key: turbo-smoke-${{ runner.os }}-${{ github.sha }}
+          restore-keys: turbo-${{ runner.os }}-
+
+      # Only what the smoke test runs against: e2e and everything it depends on (server,
+      # client, protocol, session, vault, web, cli, brain, hands). Nothing here is cached
+      # across runs beyond turbo's own cache.
+      - name: Build the packages the smoke test runs against
+        run: yarn turbo run build --filter=@openharness/e2e --cache-dir=.turbo/cache
+
+      - name: Provider smoke test (a real key)
+        working-directory: e2e
+        env:
+          # The postgres service above. The suite creates its own database on it.
+          DATABASE_URL: postgres://openharness:openharness@localhost:5432/openharness
+          # The only place the repository's provider key is given to: the test PUTs it through
+          # the real route. Never echoed (the test asserts that) and never passed anywhere else.
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # A missing key must fail the job, not skip the test it exists to run.
+          OPENHARNESS_REQUIRE_PROVIDER_SMOKE: '1'
+        run: yarn vitest run src/provider-smoke.test.ts

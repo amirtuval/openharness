@@ -1,0 +1,429 @@
+name: deploy-staging
+
+# Build the image for a commit, apply staging, and prove it answers (issue #155, epic #148).
+#
+# Triggered by CI finishing successfully on main. `workflow_run` is the point: the deploy
+# must be of the commit CI **passed**, which is `github.event.workflow_run.head_sha` — not
+# whatever main happens to be when the deploy starts, which a merge landing in between
+# would silently make it. Everything below is pinned to that SHA.
+#
+# workflow_dispatch re-runs a deploy by hand, optionally for another commit.
+on:
+  workflow_run:
+    # ci.yml's `name:`. This is the string `workflows:` matches, not the filename.
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: 'Commit to deploy. Empty deploys the tip of the branch this is run from.'
+        required: false
+        type: string
+
+# No cancel-in-progress: two deploys queue. Cancelling a deploy mid-apply is how a
+# half-applied environment happens.
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  TF_IN_AUTOMATION: 'true'
+  TERRAFORM_VERSION: '1.9.8'
+  # Constants of the epic, matching the defaults in infra/modules/gke/variables.tf: the
+  # cluster the `gke` module creates and the region it creates it in. They are Terraform
+  # defaults, not per-environment settings — everything that differs between environments
+  # is a GitHub variable.
+  CLUSTER_NAME: openharness
+  REGION: us-central1
+  # The registry the `registry` module creates in the staging project, and the repository
+  # inside it. The project is a variable; the host and the repository path are what infra/
+  # fixes (`image_repository` in envs/staging/variables.tf), so they are constants here.
+  REGISTRY_HOST: us-central1-docker.pkg.dev
+  IMAGE_REPOSITORY: openharness/server
+
+jobs:
+  deploy:
+    name: build, deploy and smoke test
+    # `workflow_run` fires on every completion, successes and failures alike: this is the
+    # branch that decides. Only a CI run that succeeded on a push to main is deployed — the
+    # `branches: [main]` filter above covers the branch, and this covers the rest. A manual
+    # run is the exception, because a human asked for it.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    # The environment is what makes impersonating deploy@ possible at all: the OIDC token
+    # carries `attribute.environment` only for a job that declares one, and deploy@'s
+    # binding matches it. It is also where the environment-scoped variables live.
+    environment: staging
+    # A first apply creates a GKE cluster (~10 minutes) before the release is even
+    # rendered, and then waits for the rollout. A re-deploy is a few minutes.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      # The head SHA of the CI run, or the SHA given by hand. Never `github.sha` on a
+      # workflow_run — on that event it is the SHA of the default branch's tip, which is
+      # the whole reason `head_sha` is spelled out here.
+      - name: Resolve the commit to deploy
+        id: commit
+        env:
+          EVENT: ${{ github.event_name }}
+          WORKFLOW_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          INPUT_SHA: ${{ inputs.sha }}
+          DISPATCH_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT" == workflow_run ]]; then
+            sha="$WORKFLOW_RUN_SHA"
+          elif [[ -n "$INPUT_SHA" ]]; then
+            sha="$INPUT_SHA"
+          else
+            sha="$DISPATCH_SHA"
+          fi
+          if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error title=Cannot resolve a SHA::'$sha' is not a 40-character commit SHA."
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Deploying $sha" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.commit.outputs.sha }}
+
+      - uses: google-github-actions/auth@v2
+        id: auth
+        with:
+          # The environment-scoped copies: this job declared `environment: staging`, so it
+          # reads the ones the setup script set there.
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SA }}
+          # docker/login-action below needs an OAuth access token as its password; the action
+          # only outputs `access_token` when asked for one.
+          token_format: access_token
+
+      # Every cluster client below — the rollout wait, and the diagnostics step when an apply
+      # fails — talks to the cluster through the `gke-gcloud-auth-plugin` exec credential that
+      # `gcloud container clusters get-credentials` writes into the kubeconfig. Without the
+      # plugin each of them dies with
+      # `getting credentials: exec: executable gke-gcloud-auth-plugin not found` (#159). The
+      # gcloud that ubuntu-latest ships is the apt build and cannot
+      # `gcloud components install` into itself, so the setup-gcloud action installs a Cloud
+      # SDK that can and leaves the plugin on PATH for the rest of the job. (`get-credentials`
+      # itself needs no plugin — it only writes the kubeconfig; the plugin is what `kubectl`
+      # and `helm` run.) The Terraform helm and kubernetes providers are unaffected: they
+      # authenticate with the google_client_config token, not this plugin.
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: 'gke-gcloud-auth-plugin'
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: terraform init
+        working-directory: infra/envs/staging
+        run: terraform init -input=false -no-color
+
+      # The cluster decides whether this is a first deploy. `gcloud container clusters
+      # describe` is the check the issue asks for and the honest one: on a fresh project the
+      # container API is not even enabled, so it fails, which is exactly the answer.
+      - name: Is this the first deploy?
+        id: cluster
+        env:
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          if gcloud container clusters describe "$CLUSTER_NAME" \
+            --region "$REGION" --project "$PROJECT_ID" >/dev/null 2>&1; then
+            echo "first=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Cluster $CLUSTER_NAME exists — a single apply."
+          else
+            echo "first=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::No cluster yet — first deploy: a targeted apply, the image push, then the full apply."
+          fi
+
+      # Two-stage on a fresh project (#153). The helm and kubernetes providers are
+      # configured from module.gke's endpoint and CA, which do not exist until the cluster
+      # does, so the first apply has to stop at the cluster and its prerequisites — and the
+      # Artifact Registry repository is one of them, because the image push below has
+      # nowhere to go until Terraform has created it. That is why this comes **before** the
+      # build on a first deploy, and why a re-deploy (which skips straight to the build)
+      # runs a single apply. Every apply here is idempotent, so a first deploy that fails
+      # halfway converges when it is re-run.
+      - name: terraform apply (first deploy — the cluster, the registry, and their prerequisites)
+        if: steps.cluster.outputs.first == 'true'
+        working-directory: infra/envs/staging
+        env:
+          IMAGE_TAG: ${{ steps.commit.outputs.sha }}
+          # Production's node service account, granted read on this project's registry. Empty
+          # on a first deploy — the account does not exist until production's Terraform creates
+          # it, and GCP rejects an IAM member that does not exist. Set TF_PRODUCTION_NODE_SA
+          # after the first production deploy and re-run this workflow to turn the grant on:
+          # docs/DEPLOYMENT.md, "The first deploy".
+          PRODUCTION_NODE_SA: ${{ vars.TF_PRODUCTION_NODE_SA }}
+          # The sign-in providers and the alert address (#159). Repository-level variables with
+          # an environment suffix — one naming scheme for the deploys and the PR plan, which
+          # runs outside any GitHub environment and so can only read repository-level ones.
+          # An unset variable still reaches Terraform, as its own default: the -var below always
+          # passes a value, and "" is the default of each of these.
+          GOOGLE_CLIENT_ID: ${{ vars.OAUTH_GOOGLE_CLIENT_ID_STAGING }}
+          GITHUB_CLIENT_ID: ${{ vars.OAUTH_GITHUB_CLIENT_ID_STAGING }}
+          MICROSOFT_CLIENT_ID: ${{ vars.OAUTH_MICROSOFT_CLIENT_ID_STAGING }}
+          MICROSOFT_TENANT_ID: ${{ vars.OAUTH_MICROSOFT_TENANT_ID_STAGING }}
+          ALERT_EMAIL: ${{ vars.TF_ALERT_EMAIL_STAGING }}
+          # One billing account for both projects, so this one carries no environment suffix.
+          BILLING_ACCOUNT_ID: ${{ vars.TF_BILLING_ACCOUNT_ID }}
+          # The monthly budget amount, in the billing account's currency — this account is
+          # denominated in ILS, and the module sends no currency code (#159). Unset is not an
+          # error: the -var below is only passed when it is set, so Terraform's default stands.
+          BUDGET_AMOUNT: ${{ vars.TF_BUDGET_AMOUNT_STAGING }}
+        run: |
+          set -euo pipefail
+          args=(
+            -auto-approve -input=false -no-color -lock-timeout=10m
+            -var "image_tag=$IMAGE_TAG"
+            -var "production_node_service_account=${PRODUCTION_NODE_SA:-}"
+            -var "google_client_id=${GOOGLE_CLIENT_ID:-}"
+            -var "github_client_id=${GITHUB_CLIENT_ID:-}"
+            -var "microsoft_client_id=${MICROSOFT_CLIENT_ID:-}"
+            -var "microsoft_tenant_id=${MICROSOFT_TENANT_ID:-}"
+            -var "alert_email=${ALERT_EMAIL:-}"
+          )
+          # The budget is off unless there is a billing account to put it on — and the account
+          # needs roles/billing.costsManager, granted by hand (infra/README.md, "Manual steps").
+          # enable_budget is passed either way so the value applied is the one the plan showed.
+          if [[ -n "${BILLING_ACCOUNT_ID:-}" ]]; then
+            args+=(-var "enable_budget=true" -var "billing_account_id=$BILLING_ACCOUNT_ID")
+          else
+            args+=(-var "enable_budget=false")
+          fi
+          # The amount is in the billing account's currency, and the module sends no currency
+          # code (#159). Unset means "leave Terraform's default" — it is only passed when the
+          # repository variable is set, which is what lets the maintainer change it without a
+          # code change.
+          if [[ -n "${BUDGET_AMOUNT:-}" ]]; then
+            args+=(-var "budget_amount=$BUDGET_AMOUNT")
+          fi
+          terraform apply "${args[@]}" \
+            -target=google_project_service.services \
+            -target=module.network \
+            -target=module.gke \
+            -target=module.registry
+
+      - uses: docker/setup-buildx-action@v3
+
+      # No stored credential: this logs the push in with the short-lived access token the
+      # auth step just minted for deploy@ (the documented recipe for Artifact Registry).
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY_HOST }}
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+
+      # Re-running a deploy must not rebuild a commit that is already in the registry, and
+      # an image already there is by definition the same commit's build.
+      - name: Check whether the image already exists
+        id: image
+        env:
+          IMAGE: ${{ env.REGISTRY_HOST }}/${{ vars.GCP_PROJECT_ID }}/${{ env.IMAGE_REPOSITORY }}
+          SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if gcloud artifacts docker images describe "$IMAGE:$SHA" --format='value(image_summary.digest)' >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$IMAGE:$SHA is already in the registry — skipping the build."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push
+        if: steps.image.outputs.exists != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: true
+          tags: ${{ env.REGISTRY_HOST }}/${{ vars.GCP_PROJECT_ID }}/${{ env.IMAGE_REPOSITORY }}:${{ steps.commit.outputs.sha }}
+          # The layer cache lives in the Actions cache, not in the registry: staging is the
+          # only place that builds, so a cache in the registry would be a second artefact
+          # to keep.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The second half of the two-stage apply, and the only apply on a re-deploy: the
+      # cluster exists now, so the helm and kubernetes providers can be configured and the
+      # release rendered.
+      - name: terraform apply
+        working-directory: infra/envs/staging
+        env:
+          IMAGE_TAG: ${{ steps.commit.outputs.sha }}
+          # Same value as the targeted apply above; on a first deploy the first stage already
+          # granted it, and this apply is the one that adds it on every re-run after that.
+          PRODUCTION_NODE_SA: ${{ vars.TF_PRODUCTION_NODE_SA }}
+          # Same values as the targeted apply above — every apply reads the same inputs, so a
+          # re-deploy cannot drift from the first one (#159).
+          GOOGLE_CLIENT_ID: ${{ vars.OAUTH_GOOGLE_CLIENT_ID_STAGING }}
+          GITHUB_CLIENT_ID: ${{ vars.OAUTH_GITHUB_CLIENT_ID_STAGING }}
+          MICROSOFT_CLIENT_ID: ${{ vars.OAUTH_MICROSOFT_CLIENT_ID_STAGING }}
+          MICROSOFT_TENANT_ID: ${{ vars.OAUTH_MICROSOFT_TENANT_ID_STAGING }}
+          ALERT_EMAIL: ${{ vars.TF_ALERT_EMAIL_STAGING }}
+          BILLING_ACCOUNT_ID: ${{ vars.TF_BILLING_ACCOUNT_ID }}
+          BUDGET_AMOUNT: ${{ vars.TF_BUDGET_AMOUNT_STAGING }}
+        run: |
+          set -euo pipefail
+          args=(
+            -auto-approve -input=false -no-color -lock-timeout=10m
+            -var "image_tag=$IMAGE_TAG"
+            -var "production_node_service_account=${PRODUCTION_NODE_SA:-}"
+            -var "google_client_id=${GOOGLE_CLIENT_ID:-}"
+            -var "github_client_id=${GITHUB_CLIENT_ID:-}"
+            -var "microsoft_client_id=${MICROSOFT_CLIENT_ID:-}"
+            -var "microsoft_tenant_id=${MICROSOFT_TENANT_ID:-}"
+            -var "alert_email=${ALERT_EMAIL:-}"
+          )
+          # As in the targeted apply: the budget is on only with a billing account.
+          if [[ -n "${BILLING_ACCOUNT_ID:-}" ]]; then
+            args+=(-var "enable_budget=true" -var "billing_account_id=$BILLING_ACCOUNT_ID")
+          else
+            args+=(-var "enable_budget=false")
+          fi
+          # As in the targeted apply: the amount only when it is set, in the account's currency.
+          if [[ -n "${BUDGET_AMOUNT:-}" ]]; then
+            args+=(-var "budget_amount=$BUDGET_AMOUNT")
+          fi
+          terraform apply "${args[@]}"
+
+      # What a failed apply left behind (#159). The release is installed `atomic = true`
+      # (infra/modules/app/main.tf), so a rollout that never became ready has **already been
+      # rolled back** by the time this runs: the pods are usually gone, and `helm history` may
+      # report no release at all. That is why the Kubernetes events (which the cluster keeps
+      # for about an hour) and Cloud Logging (which outlives the rollback entirely) are read
+      # alongside the live objects — they are the parts of a rolled-back rollout that survive.
+      #
+      # Every probe is best-effort: the step attaches evidence to a failure that has already
+      # happened and must never fail the job a second time. It prints names, statuses, events
+      # and container logs — never a secret value. `helm history` and the log probes are
+      # expected to error on a rolled-back release, which is why each one tolerates a non-zero
+      # exit rather than stopping the report.
+      - name: Rollout diagnostics (on failure)
+        if: failure()
+        env:
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          # The app module's defaults (infra/modules/app/variables.tf) — the same release and
+          # namespace the rollout wait below names.
+          NAMESPACE: openharness
+          RELEASE_NAME: openharness
+          # The chart's selector labels (charts/openharness/templates/_helpers.tpl), scoped by
+          # release instance so this never picks up another release's pods.
+          POD_SELECTOR: app.kubernetes.io/instance=openharness
+        run: |
+          set -uo pipefail
+
+          if ! gcloud container clusters get-credentials "$CLUSTER_NAME" \
+            --region "$REGION" --project "$PROJECT_ID" 2>&1; then
+            echo "::warning title=No cluster credentials::Could not fetch credentials for $CLUSTER_NAME — skipping the Kubernetes diagnostics."
+            {
+              echo '### Rollout diagnostics'
+              echo
+              echo "Could not fetch credentials for \`$CLUSTER_NAME\` in \`$PROJECT_ID\` — there is"
+              echo "nothing to report from the cluster. The apply's own error is above."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          report="$RUNNER_TEMP/rollout-diagnostics.txt"
+
+          # probe <title> <shell>: a heading, then the command's output from both streams, then
+          # the exit code if it failed. Nothing here is allowed to end the step early.
+          probe() {
+            local title="$1" shell="$2" status=0
+            printf '\n===== %s =====\n' "$title"
+            bash -c "$shell" 2>&1 || status=$?
+            if (( status != 0 )); then printf '(exited %d — continuing)\n' "$status"; fi
+          }
+
+          {
+            probe "helm -n $NAMESPACE list -a" \
+              'helm -n "$NAMESPACE" list -a'
+            probe "helm -n $NAMESPACE history $RELEASE_NAME" \
+              'helm -n "$NAMESPACE" history "$RELEASE_NAME"'
+            probe "kubectl -n $NAMESPACE get pods -o wide" \
+              'kubectl -n "$NAMESPACE" get pods -o wide'
+            probe "kubectl -n $NAMESPACE describe pods" \
+              'kubectl -n "$NAMESPACE" describe pods'
+            probe "kubectl -n $NAMESPACE get events --sort-by=.lastTimestamp (last 50)" \
+              'kubectl -n "$NAMESPACE" get events --sort-by=.lastTimestamp | tail -50'
+            probe "kubectl -n $NAMESPACE logs (current, all containers, tail 200)" \
+              'for pod in $(kubectl -n "$NAMESPACE" get pods -l "$POD_SELECTOR" -o name); do echo "--- $pod"; kubectl -n "$NAMESPACE" logs "$pod" --all-containers=true --tail=200; done'
+            probe "kubectl -n $NAMESPACE logs --previous (all containers, tail 200)" \
+              'for pod in $(kubectl -n "$NAMESPACE" get pods -l "$POD_SELECTOR" -o name); do echo "--- $pod (previous)"; kubectl -n "$NAMESPACE" logs "$pod" --previous --all-containers=true --tail=200; done'
+            probe "Cloud Logging — k8s_container in $NAMESPACE, last 30m (needs roles/logging.viewer)" \
+              'gcloud logging read "resource.type=\"k8s_container\" AND resource.labels.namespace_name=\"$NAMESPACE\"" --project "$PROJECT_ID" --freshness=30m --limit=200 --format="value(timestamp,resource.labels.pod_name,textPayload,jsonPayload.message)"'
+          } > "$report" 2>&1
+
+          cat "$report"
+          {
+            echo '### Rollout diagnostics'
+            echo
+            echo 'The release is installed `atomic`, so a failed rollout has already been rolled'
+            echo 'back — the events and the Cloud Logging entries are the parts that outlive it.'
+            echo
+            echo '```'
+            cat "$report"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Print the staging name servers
+        # Production delegates staging.oharness.dev to these. It cannot read this state
+        # (deploy@openharness-510710 holds no rights on this project's bucket) and the
+        # staging job cannot write a variable into the production environment
+        # (GITHUB_TOKEN has no `variables: write`, and environment variables of another
+        # environment are out of its reach), so they are printed and copied into the
+        # repository variable TF_STAGING_NAME_SERVERS by hand — a one-time step, documented
+        # in docs/DEPLOYMENT.md.
+        working-directory: infra/envs/staging
+        run: |
+          set -euo pipefail
+          name_servers="$(terraform output -json name_servers)"
+          echo "::notice::Staging name servers: $name_servers — copy these into the repository variable TF_STAGING_NAME_SERVERS for production."
+          {
+            echo '### Staging name servers'
+            echo
+            echo 'Production delegates staging.oharness.dev to these, and reads them from the'
+            echo 'repository variable TF_STAGING_NAME_SERVERS. Setting it is a one-time step'
+            echo '(docs/DEPLOYMENT.md, "The first deploy"):'
+            echo
+            echo '~~~'
+            echo "gh variable set TF_STAGING_NAME_SERVERS --body '$name_servers'"
+            echo '~~~'
+            echo
+            echo '~~~json'
+            echo "$name_servers"
+            echo '~~~'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Wait for the rollout
+        env:
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          gcloud container clusters get-credentials "$CLUSTER_NAME" \
+            --region "$REGION" --project "$PROJECT_ID"
+          kubectl -n openharness rollout status deployment/openharness --timeout=10m
+
+      # The URL comes from the state Terraform just wrote (`output url` is
+      # `https://<var.host>`), not from a second copy of the hostname in the workflow — the
+      # deploy and the test then cannot disagree about which environment was deployed.
+      - name: Smoke test
+        working-directory: infra/envs/staging
+        run: |
+          set -euo pipefail
+          "$GITHUB_WORKSPACE/.github/scripts/smoke-test.sh" "$(terraform output -no-color -raw url)"

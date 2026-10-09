@@ -1,0 +1,376 @@
+@import 'tailwindcss';
+
+/*
+ * The design tokens are shadcn/ui's "neutral" theme, in Tailwind v4's CSS-first form:
+ * `@theme inline` maps them to utilities (`bg-background`, `text-muted-foreground`, ...).
+ *
+ * There are four themes (epic #201, X3) and one block of variables per theme: `:root` (light,
+ * which is also what a page whose inline script never ran gets), `[data-theme='light']`,
+ * `[data-theme='dim']` and `[data-theme='dark']`. The attribute is set on `<html>` — by the
+ * inline script in `index.html` before the first paint, and by `src/lib/theme.ts` after that —
+ * so a theme is one attribute, never a class on every element.
+ *
+ * `system` is resolved to `light` or `dark` in JavaScript rather than here, and re-resolved
+ * when the operating system changes, so the attribute always names a theme that exists. There
+ * is no `prefers-color-scheme` block: the browser's own preference is the *System* choice, not
+ * a second source of truth the stylesheet would have to agree with.
+ *
+ * `dark:` still means "dark chrome": `@custom-variant` re-points it at the attribute, and both
+ * Dim and Dark count (they are both dark; Dim is the softer one).
+ */
+@custom-variant dark (&:where(
+  [data-theme='dark'],
+  [data-theme='dark'] *,
+  [data-theme='dim'],
+  [data-theme='dim'] *
+));
+
+/*
+ * `no-hover:` is "a device that cannot hover" — a touch screen (#212). The message actions
+ * are revealed by hovering the message, and there is no hover there to reveal them with; the
+ * variant is what makes them permanently visible instead. It is the inversion of the media
+ * query Tailwind already wraps `hover:` in, and deliberately not `pointer-coarse`: a laptop
+ * with a touch screen hovers with its mouse and should keep its hover.
+ */
+@custom-variant no-hover (@media (hover: none));
+
+@theme inline {
+  /*
+   * The type scale (epic #201, U10). One scale for the whole app, and `text-2xs` is the one
+   * step Tailwind does not ship: the metadata line — a model id, a timestamp, a badge — which
+   * used to be an arbitrary `text-[0.65rem]` in three different components. The rest are
+   * Tailwind's own steps, named here so the scale is one list rather than a habit:
+   *
+   *   2xs  11px  metadata, badges
+   *   xs   12px  secondary lines (the sidebar's model · time)
+   *   sm   14px  body: a message, a control, a form label
+   *   base 16px  a first-run screen's body
+   *   lg   18px  an empty-state or first-run heading
+   *
+   * The line height stays Tailwind's for those; `2xs` carries its own so a caller never has to
+   * pair it with a leading utility by hand.
+   */
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
+
+  /*
+   * The spacing scale (U10): Tailwind's numeric steps, plus four names for the distances the
+   * app repeats — inside a control, between the rows of a list, between the blocks of a panel,
+   * and between the sections of a screen. They are aliases, not new sizes: a component that
+   * needs 6px says `gap-inline` because that is what 6px is *for* here.
+   */
+  --spacing-inline: 0.375rem;
+  --spacing-control: 0.5rem;
+  --spacing-block: 1rem;
+  --spacing-section: 1.5rem;
+
+  /*
+   * Elevation (U10): three raised surfaces, one per job. Each theme defines the three
+   * `--elevation-*` values, because a shadow has to be re-decided per theme — a black shadow
+   * on a near-black page is invisible, and the dark themes need a stronger one to read at all.
+   */
+  --shadow-raised: var(--elevation-raised);
+  --shadow-popover: var(--elevation-popover);
+  --shadow-panel: var(--elevation-panel);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  /*
+   * The brand pair (U12, #227): the app's own two colours, beside shadcn's neutral tokens.
+   *
+   *   coral      the warm highlight itself — a caret, a dot, a chip's tint
+   *   coral-ink  the same hue as *text*, tuned per theme so a chip can carry it at AA
+   *   link       the primary violet as ink, which is a different value on the dark themes
+   *              (a filled violet button is fine on dark; violet *text* on it is not)
+   *   hero-*     the two ends of the heading gradient, chosen per theme so both ends of the
+   *              gradient are still legible as text (see the blocks below)
+   */
+  --color-coral: var(--coral);
+  --color-coral-ink: var(--coral-ink);
+  --color-link: var(--link);
+  --color-hero-from: var(--hero-from);
+  --color-hero-to: var(--hero-to);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+}
+
+/*
+ * Light — the palette, retuned violet + coral (U12, #227). It is also what `:root` alone
+ * renders, so a page that somehow has no `data-theme` at all still looks like the app rather
+ * than like nothing.
+ *
+ * Not one pure gray survives: the page is a faint violet (`#F7F5FF`), the borders, the muted
+ * surfaces and the muted text are all violet-leaning, and the user's own message is a violet
+ * tint rather than a gray pill. The primary is the vivid violet `#7C3AED`; the coral is
+ * `#FB7185` where it is a *mark* (a caret, a spinner, a dot) and `#BE123C` — the same hue,
+ * dark enough to read — where it is *text* (`--coral-ink`).
+ *
+ * Every pair below is at or above WCAG AA (4.5:1), measured against this block (sRGB relative
+ * luminance, WCAG 2.x). The ones that matter, darkest ink first:
+ *
+ *   body text on the page            15.6:1
+ *   muted text on the page            6.5:1   (7.0:1 on a card)
+ *   white on the primary violet       5.7:1   ← the Send button's label
+ *   coral ink on the page             5.8:1   (5.1:1 on its own chip tint)
+ *   the violet ink on a violet tint   4.8:1   ← a selected row, an accent surface
+ *   the user's own text on its bubble 9.2:1
+ *
+ * `--link` is the primary violet again here: as *text* on a light page it clears the same
+ * 5.3:1, so there is nothing to separate. On the two dark themes there is (see below).
+ */
+:root {
+  /* Native controls (select popups, option lists, datalists, scrollbars, date inputs)
+   * follow the app theme. Without this the browser paints the option list with its own
+   * light colors while the app renders dark, i.e. white text on a white list (#87). */
+  color-scheme: light;
+  --radius: 0.625rem;
+  --background: oklch(0.975 0.0134 295.3);
+  --foreground: oklch(0.235 0.0362 290.6);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.235 0.0362 290.6);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.235 0.0362 290.6);
+  --primary: oklch(0.541 0.2466 293);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.943 0.0284 294.6);
+  --secondary-foreground: oklch(0.38 0.1783 293.7);
+  --muted: oklch(0.955 0.0163 297.5);
+  --muted-foreground: oklch(0.467 0.0485 293.6);
+  --accent: oklch(0.943 0.0284 294.6);
+  --accent-foreground: oklch(0.38 0.1783 293.7);
+  --destructive: oklch(0.577 0.245 27.325);
+  --destructive-foreground: oklch(0.985 0 0);
+  --border: oklch(0.914 0.0315 295.7);
+  --input: oklch(0.914 0.0315 295.7);
+  --ring: oklch(0.541 0.2466 293);
+  --link: oklch(0.541 0.2466 293);
+  /* The coral as a mark (`#FB7185`), and the same hue as text (`#BE123C`). */
+  --coral: oklch(0.719 0.169 13.4);
+  --coral-ink: oklch(0.514 0.1978 16.9);
+  /* The heading gradient: violet into the coral ink, so both ends are readable as text. */
+  --hero-from: oklch(0.541 0.2466 293);
+  --hero-to: oklch(0.514 0.1978 16.9);
+  /* Elevation (U10): a light page wants a soft, wide, low-alpha shadow. */
+  --elevation-raised: 0 1px 2px oklch(0 0 0 / 6%), 0 1px 3px oklch(0 0 0 / 8%);
+  --elevation-popover: 0 4px 12px oklch(0 0 0 / 10%), 0 1px 3px oklch(0 0 0 / 8%);
+  --elevation-panel: 0 8px 28px oklch(0 0 0 / 14%), 0 2px 6px oklch(0 0 0 / 8%);
+}
+
+/*
+ * Dim — the soft one (epic #201, X3), now violet-leaning (U12, #227): a violet-ink background
+ * rather than a gray one (`#1E1B2E`), with the same violet tint carried through the cards, the
+ * borders and the muted text, and the muted text kept readable instead of going faint.
+ *
+ * The numbers behind the description, all measured against this block (sRGB relative
+ * luminance, WCAG 2.x): body text 14.0:1, muted text 7.8:1 on the background and 7.1:1 on a
+ * card, white on the primary violet 5.7:1, the coral highlight 6.2:1 and `destructive` 6.7:1
+ * as text on the background — every one of them above the 4.5:1 AA floor, and every one of
+ * them below Dark's, which is the point.
+ *
+ * Two things differ from Light on purpose. The primary stays the vivid violet as a *fill*
+ * (white on `#7C3AED` is 5.7:1 there too), but violet as *text* on this background is only
+ * 2.9:1 — so links, focus rings and the gradient's violet end use `--link`/`--ring`, the same
+ * hue lifted to `#A78BFA` (6.2:1). And the coral needs no lift: `#FB7185` is 6.2:1 here, so
+ * `--coral` and `--coral-ink` are the same value.
+ */
+[data-theme='dim'] {
+  color-scheme: dark;
+  --background: oklch(0.235 0.0362 290.6);
+  --foreground: oklch(0.94 0.019 295.9);
+  --card: oklch(0.267 0.0407 291.8);
+  --card-foreground: oklch(0.94 0.019 295.9);
+  --popover: oklch(0.267 0.0407 291.8);
+  --popover-foreground: oklch(0.94 0.019 295.9);
+  --primary: oklch(0.541 0.2466 293);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.295 0.054 293.6);
+  --secondary-foreground: oklch(0.943 0.0284 294.6);
+  --muted: oklch(0.281 0.051 292.7);
+  --muted-foreground: oklch(0.761 0.0447 297.1);
+  --accent: oklch(0.314 0.0601 292);
+  --accent-foreground: oklch(0.943 0.0284 294.6);
+  /* A soft red with dark ink on it: the dark theme's white-on-red is 2.8:1, which is below AA,
+   * and a new palette has no reason to inherit that. As text on the background it is 6.7:1. */
+  --destructive: oklch(0.8 0.13 25);
+  --destructive-foreground: oklch(0.24 0.03 25);
+  /* Violet-tinted, not white-alpha: the hairline should read as part of the palette. */
+  --border: oklch(0.709 0.1592 293.5 / 22%);
+  --input: oklch(0.709 0.1592 293.5 / 28%);
+  --ring: oklch(0.709 0.1592 293.5);
+  --link: oklch(0.709 0.1592 293.5);
+  --coral: oklch(0.719 0.169 13.4);
+  --coral-ink: oklch(0.719 0.169 13.4);
+  --hero-from: oklch(0.709 0.1592 293.5);
+  --hero-to: oklch(0.719 0.169 13.4);
+  /* Elevation (U10): on a gray page a black shadow reads, so these are the light theme's
+   * with a little more alpha — enough for the drawer to look like it is over the content. */
+  --elevation-raised: 0 1px 2px oklch(0 0 0 / 30%), 0 1px 3px oklch(0 0 0 / 25%);
+  --elevation-popover: 0 4px 14px oklch(0 0 0 / 45%), 0 1px 3px oklch(0 0 0 / 30%);
+  --elevation-panel: 0 10px 32px oklch(0 0 0 / 55%), 0 2px 8px oklch(0 0 0 / 35%);
+}
+
+/*
+ * Dark — the deep one (U12, #227): the same violet-leaning palette as Dim, taken down to a
+ * near-black violet (`#12101B`) instead of a soft one, and — like Dim — it fills the primary
+ * violet but ink-limits it, so links, rings and the gradient read through `--link`. Note that
+ * `--destructive-foreground` on `--destructive` is 2.8:1 here, below AA: it is the old pair
+ * and U12 does not change it (see the PR).
+ *
+ * Measured here: body text 16.8:1, muted 7.7:1 on the background and 7.1:1 on a card, white on
+ * the primary 5.7:1, the coral 7.0:1, `--link` 6.9:1.
+ */
+[data-theme='dark'] {
+  color-scheme: dark;
+  --background: oklch(0.181 0.0225 292.3);
+  --foreground: oklch(0.962 0.0121 296.4);
+  --card: oklch(0.221 0.0311 292.3);
+  --card-foreground: oklch(0.962 0.0121 296.4);
+  --popover: oklch(0.221 0.0311 292.3);
+  --popover-foreground: oklch(0.962 0.0121 296.4);
+  --primary: oklch(0.541 0.2466 293);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.257 0.0519 292.2);
+  --secondary-foreground: oklch(0.943 0.0284 294.6);
+  --muted: oklch(0.248 0.0415 293.6);
+  --muted-foreground: oklch(0.728 0.0436 296);
+  --accent: oklch(0.281 0.051 292.7);
+  --accent-foreground: oklch(0.943 0.0284 294.6);
+  --destructive: oklch(0.704 0.191 22.216);
+  --destructive-foreground: oklch(0.985 0 0);
+  --border: oklch(0.709 0.1592 293.5 / 16%);
+  --input: oklch(0.709 0.1592 293.5 / 22%);
+  --ring: oklch(0.709 0.1592 293.5);
+  --link: oklch(0.709 0.1592 293.5);
+  --coral: oklch(0.719 0.169 13.4);
+  --coral-ink: oklch(0.719 0.169 13.4);
+  --hero-from: oklch(0.709 0.1592 293.5);
+  --hero-to: oklch(0.719 0.169 13.4);
+  /* Elevation (U10): a near-black page eats a black shadow, so Dark's are the strongest of
+   * the four — the popover and the drawer have to read as *over* the page, not on it. */
+  --elevation-raised: 0 1px 2px oklch(0 0 0 / 60%), 0 1px 3px oklch(0 0 0 / 45%);
+  --elevation-popover: 0 4px 16px oklch(0 0 0 / 70%), 0 1px 3px oklch(0 0 0 / 50%);
+  --elevation-panel: 0 12px 36px oklch(0 0 0 / 75%), 0 2px 8px oklch(0 0 0 / 55%);
+}
+
+/*
+ * The hero gradient (U12, #227): the one place the two brand colours meet, on the two
+ * headings that greet a reader — New chat's and the first-run screen's.
+ *
+ * It is text, so both ends are `--hero-*`: the violet end is `--link` on the dark themes
+ * because the fill violet is not legible as type there, and the coral end is `--coral-ink` in
+ * Light for the same reason. The emoji a greeting carries sits *outside* the clipped span:
+ * `background-clip: text` on a colour-emoji glyph paints the gradient over the glyph's own
+ * colours, so the two are kept apart deliberately.
+ */
+[data-slot='hero-title'] {
+  background-image: linear-gradient(to right, var(--hero-from), var(--hero-to));
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+}
+
+/*
+ * Code blocks (#204). Shiki writes the three palettes as variables on the block itself —
+ * `--shiki-light`, `--shiki-dim`, `--shiki-dark` and the matching `-bg` — with
+ * `defaultColor: false`, so nothing is inline and no rule here needs `!important`. One block
+ * per theme paints the surface, the ink and the tokens from the palette that theme names, and
+ * a block that is **not** highlighted (Shiki has not loaded yet, or the language is not one
+ * the chat ships) has no variables at all: the `var()` fallbacks are the design tokens, so it
+ * is drawn as an ordinary muted panel.
+ *
+ * The three Shiki themes are `github-light`, `github-dark-dimmed` and `github-dark` — Dim
+ * borrows Shiki's own soft palette, and using each theme's own background is what keeps its
+ * token colours at the contrast they were designed for. See `src/lib/highlight.ts`.
+ *
+ * U12 (#227) left all three alone: a code block is its own surface, its three palettes are
+ * measured against their own backgrounds, and none of the retuned design tokens above is
+ * read inside one (the `var()` fallbacks are all that touch them). Only the fallback panel a
+ * not-yet-highlighted block gets follows the palette, because that is `--muted`.
+ */
+[data-slot='code-block'] {
+  background-color: var(--shiki-light-bg, var(--muted));
+  color: var(--shiki-light, var(--foreground));
+}
+
+[data-slot='code-block'] [data-slot='code-token'] {
+  color: var(--shiki-light, inherit);
+}
+
+[data-theme='dim'] [data-slot='code-block'] {
+  background-color: var(--shiki-dim-bg, var(--muted));
+  color: var(--shiki-dim, var(--foreground));
+}
+
+[data-theme='dim'] [data-slot='code-block'] [data-slot='code-token'] {
+  color: var(--shiki-dim, inherit);
+}
+
+[data-theme='dark'] [data-slot='code-block'] {
+  background-color: var(--shiki-dark-bg, var(--muted));
+  color: var(--shiki-dark, var(--foreground));
+}
+
+[data-theme='dark'] [data-slot='code-block'] [data-slot='code-token'] {
+  color: var(--shiki-dark, inherit);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
+
+  /* The fallback for browsers that ignore `color-scheme` for the option list: the
+   * popup tokens are the app's own colors, so a closed select, its options and a
+   * datalist's suggestions stay readable in either scheme. Utility classes on a
+   * select (e.g. `bg-transparent`) still win over these. */
+  select,
+  option {
+    @apply bg-popover text-popover-foreground;
+  }
+
+  /* Motion is decoration here: the pulsing status dot, the streaming caret, the spinner. A
+   * reader who has asked their system for less of it gets none of it — every animation is
+   * collapsed to a single frame rather than removed, so nothing that is only *revealed* by an
+   * animation (none, today) would be lost. This is the one rule that has to be global: an
+   * `animate-pulse` on a component three levels down cannot be reached by a variant. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}

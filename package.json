@@ -1,0 +1,37 @@
+{
+  "name": "openharness-monorepo",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Open-source implementation of Anthropic's Managed Agents architecture: brain, session and hands.",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "yarn@4.18.1",
+  "engines": {
+    "node": ">=24"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "e2e"
+  ],
+  "scripts": {
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "lint": "turbo run lint",
+    "format": "prettier --write .",
+    "format:check": "turbo run format:check",
+    "format:check:repo": "prettier --check .",
+    "test": "turbo run test",
+    "dev": "turbo run dev",
+    "oh": "node scripts/oh.mjs dev",
+    "oh:staging": "node scripts/oh.mjs staging",
+    "oh:prod": "node scripts/oh.mjs prod",
+    "check:deps": "node scripts/check-deps.mjs"
+  },
+  "devDependencies": {
+    "@openharness/config": "workspace:*",
+    "prettier": "3.9.9",
+    "turbo": "2.11.4",
+    "typescript": "6.0.3"
+  }
+}

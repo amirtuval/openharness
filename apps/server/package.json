@@ -1,0 +1,69 @@
+{
+  "name": "@openharness/server",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The openharness HTTP server: Hono app served by `@hono/node-server`. For now it only answers `GET /health`; the chat API lands in the v1 epic.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsdown",
+    "build:deps": "turbo run build --filter=@openharness/server^...",
+    "catalog:refresh": "node scripts/refresh-models-dev.mjs",
+    "dev": "tsdown --watch --on-success \"node dist/index.js\"",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@google-cloud/opentelemetry-cloud-trace-exporter": "3.1.0",
+    "@hono/node-server": "2.1.1",
+    "@openharness/brain": "workspace:*",
+    "@openharness/hands": "workspace:*",
+    "@openharness/protocol": "workspace:*",
+    "@openharness/session": "workspace:*",
+    "@openharness/vault": "workspace:*",
+    "@opentelemetry/api": "1.9.1",
+    "@opentelemetry/core": "2.11.0",
+    "@opentelemetry/resources": "2.11.0",
+    "@opentelemetry/sdk-trace-base": "2.11.0",
+    "@opentelemetry/sdk-trace-node": "2.11.0",
+    "ai": "7.0.118",
+    "better-auth": "1.7.6",
+    "hono": "4.13.9",
+    "kysely": "0.29.6",
+    "pg": "8.23.0",
+    "undici": "8.11.2",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@ai-sdk/provider": "4.0.18",
+    "@openharness/config": "workspace:*",
+    "@testcontainers/postgresql": "12.1.0",
+    "@types/node": "26.6.3",
+    "@types/pg": "8.23.1",
+    "eslint": "10.11.0",
+    "prettier": "3.9.9",
+    "tsdown": "0.23.0",
+    "turbo": "2.11.4",
+    "typescript": "6.0.3",
+    "vite": "8.3.1",
+    "vitest": "5.0.2",
+    "yaml": "2.9.1"
+  }
+}

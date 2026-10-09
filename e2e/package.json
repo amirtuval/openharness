@@ -1,0 +1,44 @@
+{
+  "name": "@openharness/e2e",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Cross-package (end-to-end) tests: real server processes, a real Postgres and the client the frontends use.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "echo '@openharness/e2e: nothing to build (test-only package)'",
+    "build:deps": "turbo run build --filter=@openharness/e2e^...",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "qa:web": "playwright test --config=playwright.config.ts"
+  },
+  "dependencies": {
+    "@openh/cli": "workspace:*",
+    "@openharness/client": "workspace:*",
+    "@openharness/protocol": "workspace:*",
+    "@openharness/server": "workspace:*",
+    "@openharness/session": "workspace:*",
+    "@openharness/vault": "workspace:*",
+    "@openharness/web": "workspace:*",
+    "better-auth": "1.7.6",
+    "pg": "8.23.0"
+  },
+  "devDependencies": {
+    "@openharness/config": "workspace:*",
+    "@playwright/test": "1.63.0",
+    "@types/node": "26.6.3",
+    "@types/pg": "8.23.1",
+    "eslint": "10.11.0",
+    "prettier": "3.9.9",
+    "turbo": "2.11.4",
+    "typescript": "6.0.3",
+    "vite": "8.3.1",
+    "vitest": "5.0.2"
+  }
+}

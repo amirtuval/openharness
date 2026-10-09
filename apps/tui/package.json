@@ -1,0 +1,82 @@
+{
+  "name": "@openh/cli",
+  "version": "0.1.1",
+  "description": "The openharness terminal UI: an Ink (React) chat client installed as the `oh` command.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "oh": "dist/index.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist/index.js",
+    "dist/index.d.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "homepage": "https://github.com/amirtuval/openharness#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/amirtuval/openharness.git",
+    "directory": "apps/tui"
+  },
+  "keywords": [
+    "openharness",
+    "cli",
+    "terminal",
+    "tui",
+    "ink",
+    "react",
+    "ai",
+    "agents",
+    "chat"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "tsdown",
+    "build:deps": "turbo run build --filter=@openh/cli^...",
+    "dev": "tsdown --watch",
+    "check:pack": "node scripts/check-pack.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@openharness/client": "workspace:*",
+    "@openharness/config": "workspace:*",
+    "@openharness/protocol": "workspace:*",
+    "@types/mdast": "4.0.4",
+    "@types/node": "26.6.3",
+    "@types/react": "19.3.0",
+    "eslint": "10.11.0",
+    "highlight.js": "11.12.0",
+    "ink": "7.1.1",
+    "ink-testing-library": "4.0.0",
+    "prettier": "3.9.9",
+    "react": "19.3.0",
+    "remark-gfm": "4.0.1",
+    "remark-parse": "11.0.0",
+    "string-width": "8.3.0",
+    "tsdown": "0.23.0",
+    "turbo": "2.11.4",
+    "typescript": "6.0.3",
+    "unified": "11.0.5",
+    "vite": "8.3.1",
+    "vitest": "5.0.2"
+  }
+}

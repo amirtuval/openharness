@@ -1,0 +1,182 @@
+import { vi } from 'vitest'
+
+/** The part of `ink-testing-library`'s stdin these helpers need. */
+export interface TestStdin {
+  write(data: string): void
+  /** `ink-testing-library`'s stdin is an EventEmitter; Ink 7 attaches its listener to it. */
+  listenerCount?(event: string): number
+}
+
+/** The part of an `ink-testing-library` instance these helpers need. */
+export interface TestInstance {
+  readonly stdin: TestStdin
+  lastFrame(): string | undefined
+}
+
+/**
+ * Type text the way a terminal delivers it: one keystroke per `data` event.
+ *
+ * Writing a whole string at once would arrive as a single chunk, which Ink reports as one
+ * multi-character `input` — that is a paste, and the prompt treats it as one (newlines and
+ * all), so a test that means "type, then press Enter" has to say so keystroke by keystroke.
+ */
+export function typeText(instance: TestInstance, text: string): void {
+  for (const character of text) {
+    instance.stdin.write(character)
+  }
+}
+
+/** The bytes each key sends, as a terminal would. */
+const KEYS = {
+  enter: '\r',
+  /** Line feed: what Ctrl+J sends, and the prompt's newline. */
+  newline: '\n',
+  ctrlA: '\u0001',
+  ctrlC: '\u0003',
+  ctrlE: '\u0005',
+  ctrlK: '\u000B',
+  ctrlL: '\u000C',
+  ctrlU: '\u0015',
+  ctrlW: '\u0017',
+  /** Alt+letter is `ESC` + the letter, which Ink reports with the meta flag. */
+  altB: '\u001Bb',
+  altF: '\u001Bf',
+  /** Alt+Enter: `ESC` + `\r`, the second binding for a newline. */
+  altEnter: '\u001B\r',
+  /** Alt+Backspace is `ESC` + `0x7F`; a terminal sends it for "delete the word behind". */
+  altBackspace: '\u001B\u007F',
+  /** Ctrl+← and Ctrl+→ are the modifiable-cursor sequences, modifier 5 (Ctrl). */
+  ctrlLeft: '\u001B[1;5D',
+  ctrlRight: '\u001B[1;5C',
+  up: '\u001B[A',
+  down: '\u001B[B',
+  left: '\u001B[D',
+  right: '\u001B[C',
+  home: '\u001B[H',
+  end: '\u001B[F',
+  delete: '\u001B[3~',
+  backspace: '\u007F',
+  tab: '\t',
+  escape: '\u001B',
+} as const
+
+/** Press a named key. */
+export function pressKey(instance: TestInstance, key: keyof typeof KEYS): void {
+  instance.stdin.write(KEYS[key])
+}
+
+/** What a terminal wraps a paste in, once bracketed paste mode is on. */
+const PASTE_START = '\u001B[200~'
+const PASTE_END = '\u001B[201~'
+
+/**
+ * Paste `text`, the way a terminal with bracketed paste mode does.
+ *
+ * The whole thing arrives as one write — one `data` event, one bracketed-paste sequence —
+ * which is exactly the difference between a paste and a very fast typist: writing the same
+ * characters one at a time is {@link typeText}, and the prompt handles it as keystrokes.
+ */
+export function paste(instance: TestInstance, text: string): void {
+  instance.stdin.write(`${PASTE_START}${text}${PASTE_END}`)
+}
+
+/** Type `text` and press Enter. */
+export function submit(instance: TestInstance, text: string): void {
+  typeText(instance, text)
+  pressKey(instance, 'enter')
+}
+
+/** The frame as it stands, or `''` before the first render. */
+export function frameOf(instance: TestInstance): string {
+  return instance.lastFrame() ?? ''
+}
+
+/**
+ * Wait until the rendered frame contains `expected`.
+ *
+ * The UI is fed by streams and effects, so nothing is on screen the instant a keystroke is
+ * written. Retrying the assertion is the only honest way to test a rendered terminal app;
+ * the failure message prints the frame that was there instead.
+ */
+export async function waitForFrame(
+  instance: TestInstance,
+  expected: string | RegExp,
+  timeoutMs = 2000,
+): Promise<void> {
+  await vi.waitFor(
+    () => {
+      const frame = frameOf(instance)
+      const found = typeof expected === 'string' ? frame.includes(expected) : expected.test(frame)
+      if (!found) {
+        throw new Error(`the frame never showed ${String(expected)}. It was:\n${frame}`)
+      }
+    },
+    { timeout: timeoutMs, interval: 20 },
+  )
+}
+
+/**
+ * Wait for a *screen* to appear, and for it to be ready for keys.
+ *
+ * React runs passive effects — which is where `useInput` subscribes — after the frame is
+ * written, so a key pressed the instant a screen shows up is a key nobody is listening for.
+ * A person cannot type that fast; a test can.
+ *
+ * The wait for keys is a condition, not a fixed sleep (the review of #105, P1). Ink's App
+ * attaches a `readable` listener to stdin when `useInput`'s effect enables raw mode and
+ * detaches it when the last one unmounts, so a non-zero listener count is the observable
+ * proof that the current screen has subscribed. The one `tick()` first is what gives a
+ * scheduled passive flush — the frame is written during React's commit, before it — the
+ * event-loop turn it needs; it is a yield, not a timeout, so a loaded machine pays the same
+ * nothing a fast one does.
+ */
+export async function waitForScreen(
+  instance: TestInstance,
+  expected: string | RegExp,
+  timeoutMs = 2000,
+): Promise<void> {
+  await waitForFrame(instance, expected, timeoutMs)
+  await tick(0)
+  await waitFor(() => inputReady(instance), {
+    timeoutMs,
+    describe: () => 'the screen appeared but never subscribed for keys',
+  })
+}
+
+/** Whether the mounted screen's `useInput` effect has run, as far as the mock can tell. */
+function inputReady(instance: TestInstance): boolean {
+  const { stdin } = instance
+  // A stdin that cannot report listeners is not one of ours; waiting for a frame is all
+  // that can be done.
+  return typeof stdin.listenerCount !== 'function' || stdin.listenerCount('readable') > 0
+}
+
+/** Wait until `check` holds, for state that is not on screen. */
+export async function waitFor(
+  check: () => boolean,
+  options: { readonly timeoutMs?: number; readonly describe?: () => string } = {},
+): Promise<void> {
+  await vi
+    .waitFor(
+      () => {
+        if (!check()) throw new Error('not there yet')
+      },
+      { timeout: options.timeoutMs ?? 2000, interval: 10 },
+    )
+    .catch((error: unknown) => {
+      const detail = options.describe?.()
+      throw new Error(
+        detail === undefined
+          ? 'the condition never became true'
+          : `the condition never became true: ${detail}`,
+        { cause: error },
+      )
+    })
+}
+
+/** Let the event loop turn over: enough for a stream to deliver what it has queued. */
+export function tick(ms = 0): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}

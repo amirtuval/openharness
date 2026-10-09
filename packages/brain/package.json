@@ -1,0 +1,65 @@
+{
+  "name": "@openharness/brain",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The stateless brain: the harness loop that drives a session.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsdown",
+    "build:deps": "turbo run build --filter=@openharness/brain^...",
+    "dev": "tsdown --watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@ai-sdk/amazon-bedrock": "5.0.111",
+    "@ai-sdk/anthropic": "4.0.73",
+    "@ai-sdk/azure": "4.0.97",
+    "@ai-sdk/cerebras": "3.0.64",
+    "@ai-sdk/deepseek": "3.0.60",
+    "@ai-sdk/fireworks": "3.0.67",
+    "@ai-sdk/google": "4.0.89",
+    "@ai-sdk/groq": "4.0.56",
+    "@ai-sdk/mistral": "4.0.58",
+    "@ai-sdk/openai": "4.0.85",
+    "@ai-sdk/openai-compatible": "3.0.64",
+    "@ai-sdk/togetherai": "3.0.65",
+    "@ai-sdk/xai": "5.0.16",
+    "@openharness/hands": "workspace:*",
+    "@openharness/protocol": "workspace:*",
+    "@openharness/session": "workspace:*",
+    "ai": "7.0.118",
+    "aws4fetch": "1.0.20",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@ai-sdk/provider": "4.0.18",
+    "@openharness/config": "workspace:*",
+    "@types/node": "26.6.3",
+    "eslint": "10.11.0",
+    "prettier": "3.9.9",
+    "tsdown": "0.23.0",
+    "turbo": "2.11.4",
+    "typescript": "6.0.3",
+    "vite": "8.3.1",
+    "vitest": "5.0.2"
+  }
+}

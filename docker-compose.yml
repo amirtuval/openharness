@@ -1,0 +1,91 @@
+# openharness, the way to run it: one Postgres, one server that serves the API and the web app.
+#
+#   echo "BETTER_AUTH_SECRET=$(openssl rand -base64 32)" >> .env
+#   echo "OPENHARNESS_SECRETS_KEY=$(openssl rand -base64 32)" >> .env
+#   docker compose up --build          # then open http://localhost:3000
+#
+# The quick start signs in with the development login (the seeded `dev@localhost` / `dev`
+# user, see `OPENHARNESS_DEV_LOGIN` below) — localhost only, by design — and each user adds
+# their own model-provider key in Settings → Model providers. The server holds no provider
+# keys of its own, and `OPENAI_API_KEY` and friends are not read (epic #65, A5): without a
+# stored credential a turn ends with `missing_provider_credential`. `OPENHARNESS_TEST_MODEL=mock`
+# runs the deterministic test model instead, which is what the e2e suite uses.
+#
+# The credentials below are the *local* ones: the database is reachable from this compose
+# network only, and nothing here is meant to face the internet as it stands. The seeding
+# defaults are the development values; see `.env.example` for what production wants.
+
+name: openharness
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-openharness}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-openharness}
+      POSTGRES_DB: ${POSTGRES_DB:-openharness}
+    volumes:
+      # Postgres 18 keeps its data under /var/lib/postgresql (PGDATA is the version-specific
+      # directory inside it), so that is what is mounted.
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test:
+        ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-openharness} -d ${POSTGRES_DB:-openharness}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  server:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        # The server migrates on boot, so it must not start before Postgres accepts
+        # connections — and a container that has merely started is not yet one that does.
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-openharness}:${POSTGRES_PASSWORD:-openharness}@postgres:5432/${POSTGRES_DB:-openharness}
+      PORT: '3000'
+      # The two required secrets, from `.env` (see the header). The `.env.example` shows how
+      # to generate them: `openssl rand -base64 32`.
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?set BETTER_AUTH_SECRET in .env — see .env.example}
+      OPENHARNESS_SECRETS_KEY: ${OPENHARNESS_SECRETS_KEY:?set OPENHARNESS_SECRETS_KEY in .env — see .env.example}
+      # The public URL. `localhost` is what the dev login below is allowed on (A7).
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://localhost:3000}
+      # The quick start: the seeded dev user on localhost. Turn it off, and set the provider
+      # credentials in `.env`, for anything that is not a laptop.
+      OPENHARNESS_DEV_LOGIN: ${OPENHARNESS_DEV_LOGIN:-1}
+      # Optional sign-in providers; each is enabled when both of its variables are set.
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID:-}
+      MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET:-}
+      MICROSOFT_TENANT_ID: ${MICROSOFT_TENANT_ID:-}
+      # Optional: everything below is off unless it is set, and every one has a working
+      # default when it is empty. `OPENHARNESS_TEST_MODEL=mock` runs the deterministic test
+      # model; the two compaction variables control the job that deletes superseded stream
+      # chunks (retention 1 h by default; an interval of 0 disables it).
+      OPENHARNESS_TEST_MODEL: ${OPENHARNESS_TEST_MODEL:-}
+      OPENHARNESS_DELTA_RETENTION_MS: ${OPENHARNESS_DELTA_RETENTION_MS:-}
+      OPENHARNESS_COMPACT_INTERVAL_MS: ${OPENHARNESS_COMPACT_INTERVAL_MS:-}
+      # This file passes the variables above only. The rest of the server's environment — the
+      # multi-instance scheduler and its partitions, the drain timeout, OPENHARNESS_WEB_DIR
+      # (set in the image) — is documented in `.env.example`.
+    ports:
+      - '3000:3000'
+    healthcheck:
+      # busybox wget, which the Alpine base image has: no curl to install just for this.
+      test: ['CMD', 'wget', '--quiet', '--output-document=-', 'http://127.0.0.1:3000/health']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  postgres-data:

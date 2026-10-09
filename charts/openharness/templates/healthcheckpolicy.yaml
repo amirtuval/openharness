@@ -1,0 +1,33 @@
+{{- if .Values.gateway.host }}
+# The load balancer's health check on the app (#159). What the BackendConfig's `healthCheck`
+# block did, in the policy GKE's Gateway controller reads instead.
+#
+# It is not inferred from the pod's readiness probe: a Gateway-created backend service gets its
+# own health check, and without this policy it is the default — path /, port 80 — which the app
+# does not answer. `/ready` is the readiness route on purpose: 503 while the store is down or
+# the pod is draining (W1, #151), which is exactly when an endpoint must leave the backend.
+# A NEG's endpoints follow the readiness probe too, so the two agree.
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: {{ include "openharness.fullname" . }}
+  labels:
+    {{- include "openharness.labels" . | nindent 4 }}
+spec:
+  targetRef:
+    group: ''
+    kind: Service
+    name: {{ include "openharness.fullname" . }}
+  default:
+    # The protocol block is nested under `config`, with `type` beside it — not a bare
+    # `httpHealthCheck:` under `default`.
+    config:
+      type: HTTP
+      httpHealthCheck:
+        port: 3000
+        requestPath: /ready
+    checkIntervalSec: 15
+    timeoutSec: 5
+    healthyThreshold: 1
+    unhealthyThreshold: 2
+{{- end }}

@@ -1,0 +1,46 @@
+{
+  "name": "@openharness/vault",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Envelope encryption for user secrets: per-secret AES-256-GCM data keys wrapped by a key-encryption key from the server environment.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsdown",
+    "build:deps": "turbo run build --filter=@openharness/vault^...",
+    "dev": "tsdown --watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@openharness/config": "workspace:*",
+    "@types/node": "26.6.3",
+    "eslint": "10.11.0",
+    "prettier": "3.9.9",
+    "tsdown": "0.23.0",
+    "turbo": "2.11.4",
+    "typescript": "6.0.3",
+    "vite": "8.3.1",
+    "vitest": "5.0.2"
+  },
+  "dependencies": {
+    "@google-cloud/kms": "6.2.1"
+  }
+}

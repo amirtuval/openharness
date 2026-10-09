@@ -1,0 +1,15 @@
+# A voluntary disruption — a node drain, autoscaler scale-down, or upgrade — must never take
+# every pod at once: with two replicas, one is always available to serve. minAvailable: 1 is
+# the chart's floor in every environment, and with maxUnavailable: 0 on the rollout the only
+# way a pod goes is after its replacement is ready.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "openharness.fullname" . }}
+  labels:
+    {{- include "openharness.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "openharness.selectorLabels" . | nindent 6 }}

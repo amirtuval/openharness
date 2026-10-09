@@ -1,0 +1,21 @@
+# The openharness server, deployed to GKE (deployment epic #148, issue #154).
+#
+# One image serves the API under `/v1` and the web app at `/` on port 3000; this chart
+# describes the workload, the GKE Gateway in front of it, and the Secret Manager mount that
+# feeds it its secrets. Terraform installs it with `helm_release` — Terraform is the only
+# thing that deploys — and passes every environment-specific value (the image, the host, the
+# project) in from its own variables.
+apiVersion: v2
+name: openharness
+description: openharness — API under /v1 and web app at /, on GKE behind the global external HTTPS load balancer
+type: application
+version: 0.1.0
+appVersion: '0.0.0' # informational: the real image tag is a git sha Terraform passes as image.tag
+kubeVersion: '>=1.27.0-0'
+keywords:
+  - openharness
+  - gke
+  - autopilot
+home: https://github.com/amirtuval/openharness
+sources:
+  - https://github.com/amirtuval/openharness

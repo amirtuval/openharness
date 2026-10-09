@@ -1,0 +1,52 @@
+{
+  "name": "@openharness/client",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Client for talking to an openharness server: used by both the web app and the TUI. Placeholder, implemented in the v1 epic.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/index.d.ts",
+      "import": "./dist/testing/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsdown",
+    "build:deps": "turbo run build --filter=@openharness/client^...",
+    "dev": "tsdown --watch",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.tooling.json",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@openharness/protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@openharness/config": "workspace:*",
+    "@types/jsdom": "^30",
+    "@types/node": "26.6.3",
+    "eslint": "10.11.0",
+    "jsdom": "30.1.1",
+    "prettier": "3.9.9",
+    "tsdown": "0.23.0",
+    "turbo": "2.11.4",
+    "typescript": "6.0.3",
+    "vite": "8.3.1",
+    "vitest": "5.0.2"
+  }
+}

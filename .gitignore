@@ -1,0 +1,42 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+*.tsbuildinfo
+
+# tooling
+.turbo/
+coverage/
+
+# yarn
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+
+# playwright
+/test-results/
+e2e/test-results/
+
+# local configuration and secrets: `.env.example` is the committed template
+.env
+.env.*
+!.env.example
+
+# terraform: provider binaries, state and crash logs. The .terraform.lock.hcl files
+# under infra/ are committed on purpose — they pin the provider hashes.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+.terraform.tfstate.lock.info
+
+# misc
+.DS_Store
+*.log
+
+# QA screenshots (yarn qa:web)
+e2e/qa-output/

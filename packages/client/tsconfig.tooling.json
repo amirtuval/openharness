@@ -1,0 +1,8 @@
+{
+  // `tsdown.config.ts` and `vitest.config.ts`: the only files in this package that are Node
+  // programs rather than code a browser also loads. Keeping them out of `tsconfig.json` is
+  // what stops `@types/node` from reaching `src/`, and they are checked here, where Node's
+  // types are the truth.
+  "extends": "@openharness/config/tsconfig/node.json",
+  "include": ["*.config.ts"]
+}

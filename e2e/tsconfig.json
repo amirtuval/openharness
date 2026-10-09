@@ -1,0 +1,10 @@
+{
+  "extends": "@openharness/config/tsconfig/node.json",
+  "compilerOptions": {
+    // The Playwright specs under `qa/` hand callbacks to `page.evaluate`, which run in the
+    // browser: without the DOM lib those callbacks are `document` and `window` on an
+    // unknown type. Nothing else in this package reads a DOM.
+    "lib": ["ES2023", "DOM", "DOM.Iterable"]
+  },
+  "include": ["src", "qa", "*.config.ts"]
+}
