@@ -96,10 +96,42 @@ describe('the vertex credential form', () => {
     })
     await user.upload(within(dialog).getByLabelText('Upload Service account key'), file)
 
-    await waitFor(() => {
-      expect(within(dialog).getByLabelText('Service account key')).toHaveValue(SERVICE_ACCOUNT_JSON)
-    })
+    // The uploaded document parses, so the box is replaced by its summary — the same thing a
+    // paste does. What is on screen is the document's public facts, never the key.
+    const summary = await within(dialog).findByText(
+      'vertex-runner@openharness-vertex.iam.gserviceaccount.com',
+    )
+    expect(summary).toBeInTheDocument()
+    expect(dialog.textContent).not.toContain('VERTEX-PRIVATE-KEY-DO-NOT-LOG')
     expect(within(dialog).getByLabelText('Project ID')).toHaveValue('openharness-vertex')
+  })
+
+  it('collapses a pasted document to a summary, and Replace brings the empty field back', async () => {
+    const user = userEvent.setup({ delay: null })
+    renderApp(makeFake({ models: [], providers: [] }), { hash: '#/settings' })
+
+    const dialog = await openVertexForm(user)
+    await user.click(within(dialog).getByLabelText('Service account key'))
+    await user.paste(SERVICE_ACCOUNT_JSON)
+
+    // The textarea is gone the moment the document parses: a service-account key is the one
+    // field drawn unmasked, and a private key left on a shared screen is the risk this closes.
+    expect(within(dialog).queryByLabelText('Service account key')).not.toBeInTheDocument()
+    const summary = within(dialog).getByText(
+      'vertex-runner@openharness-vertex.iam.gserviceaccount.com',
+    )
+    expect(summary).toBeInTheDocument()
+    // The public facts and the key id's tail; no part of the document itself.
+    expect(dialog.textContent).toContain(
+      `project openharness-vertex · key ${SERVICE_ACCOUNT.private_key_id}`,
+    )
+    expect(dialog.textContent).not.toContain('VERTEX-PRIVATE-KEY-DO-NOT-LOG')
+
+    // Replace clears it and shows the empty field again.
+    await user.click(within(dialog).getByRole('button', { name: 'Replace' }))
+    const box = within(dialog).getByLabelText('Service account key')
+    expect(box).toHaveValue('')
+    expect(within(dialog).getByLabelText('Upload Service account key')).toBeInTheDocument()
   })
 
   it('refuses a document that is not a service-account key, before a save is attempted', async () => {

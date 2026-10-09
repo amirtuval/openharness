@@ -61,7 +61,6 @@ import {
   type ProviderResponse,
 } from './catalog/provider-fetch'
 import { vertexPublisherModelsUrl, vertexTokenProvider, type VertexTokenProvider } from './vertex'
-import { vertexPublisherModelsUrl, vertexTokenProvider, type VertexTokenProvider } from './vertex'
 
 /** The provider HTTP client, built once: one outbound path for validation and listing. */
 const providerFetch: ProviderFetch = createProviderFetch()

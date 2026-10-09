@@ -309,7 +309,7 @@ export function ProviderSetup({
       }
       if (key.return) {
         const picked = options[choiceRef.current]
-        if (picked !== undefined) submitStep(picked)
+        if (picked !== undefined) void submitStep(picked)
       }
       return
     }

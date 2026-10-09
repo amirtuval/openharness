@@ -22,6 +22,7 @@ import { ErrorBanner } from '../chat/error-banner'
 import { Button } from '../ui/button'
 import { Input } from '../ui/input'
 import { Label } from '../ui/label'
+import { Textarea } from '../ui/textarea'
 import { FreeTierChip } from './free-tier-chip'
 
 /**
@@ -539,7 +540,7 @@ export function ProviderKeyForm({
             {nameError ??
               `What this credential is called. Its models are named after it — ${
                 typedName === '' ? target.name : typedName
-              }/${modelIdHint}.`}
+              }/<${modelIdHint}>.`}
           </p>
         </div>
       ) : null}

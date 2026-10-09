@@ -1,4 +1,8 @@
-import { ProviderCredentialSchema, type UserId } from '@openharness/protocol'
+import {
+  ProviderCredentialSchema,
+  type ProviderCredentialDetails,
+  type UserId,
+} from '@openharness/protocol'
 import { describe, expect, it } from 'vitest'
 
 import { timestampAt } from '../clock'
@@ -326,9 +330,9 @@ export function runCredentialStoreConformance(
           details,
           validatedAt: timestampAt(clock.currentMs),
         })
-        expect(vertex.details).toEqual(details)
+        expect(vertex).toMatchObject({ details })
         expect(await listedDetails(store, 'vertex')).toEqual(details)
-        expect((await store.get({ userId: OWNER_A, name: 'vertex' }))?.details).toEqual(details)
+        expect(await store.get({ userId: OWNER_A, name: 'vertex' })).toMatchObject({ details })
         // What is written is copied, not referenced: a caller that mutates its own bag after
         // the save cannot change what the store holds.
         const stored = {
@@ -567,7 +571,10 @@ function expectExact<T>(schema: { parse(value: unknown): T }, value: unknown, wh
 async function listedDetails(
   store: CredentialStore,
   name: string,
-): Promise<Record<string, string> | undefined> {
+): Promise<ProviderCredentialDetails | undefined> {
   const listed = await store.list({ userId: OWNER_A })
-  return listed.find((entry) => entry.name === name)?.details
+  const entry = listed.find((candidate) => candidate.name === name)
+  // `details` is keyed by the credential's type: only the variants that publish facts have the
+  // field at all, so the suite asks whether this one does before reading it.
+  return entry !== undefined && 'details' in entry ? entry.details : undefined
 }

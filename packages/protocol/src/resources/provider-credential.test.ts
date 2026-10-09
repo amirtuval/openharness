@@ -249,9 +249,9 @@ describe('VertexCredentialDetailsSchema', () => {
   })
 
   it('strips a field it does not know — details is a closed, per-type shape', () => {
-    expect(
-      VertexCredentialDetailsSchema.parse({ ...details, private_key: '-----BEGIN…' }),
-    ).toEqual(details)
+    expect(VertexCredentialDetailsSchema.parse({ ...details, private_key: '-----BEGIN…' })).toEqual(
+      details,
+    )
   })
 })
 
@@ -547,7 +547,14 @@ describe('VertexCredentialSchema', () => {
   })
 
   it('refuses a project that is not a Google Cloud project id', () => {
-    for (const project of ['', 'Openharness', 'ab', '1-openharness', 'openharness-', 'open harness']) {
+    for (const project of [
+      '',
+      'Openharness',
+      'ab',
+      '1-openharness',
+      'openharness-',
+      'open harness',
+    ]) {
       expect(VertexCredentialSchema.safeParse({ ...vertex, project }).success, project).toBe(false)
     }
     expect(

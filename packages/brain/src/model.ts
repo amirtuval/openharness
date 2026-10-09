@@ -14,8 +14,6 @@ import { createFireworks } from '@ai-sdk/fireworks'
 import { createGoogleGenerativeAI } from '@ai-sdk/google'
 import { createVertex } from '@ai-sdk/google-vertex'
 import { createVertexAnthropic } from '@ai-sdk/google-vertex/anthropic'
-import { createVertex } from '@ai-sdk/google-vertex'
-import { createVertexAnthropic } from '@ai-sdk/google-vertex/anthropic'
 import { createGroq } from '@ai-sdk/groq'
 import { createMistral } from '@ai-sdk/mistral'
 import { createOpenAI } from '@ai-sdk/openai'
@@ -640,9 +638,6 @@ export function isUsableCredential(
       credential.location.trim().length > 0
     )
   }
-  if (credential.apiKey.trim().length === 0) {
-    return false
-  }
   // A custom OpenAI-compatible endpoint may take no key at all, so for it the **base URL**, not
   // the key, is what has to be non-blank — a missing one could not build a request, which is a
   // "save a credential" ending (`missing_provider_credential`), not a malformed-URL span.
@@ -667,6 +662,10 @@ export function isUsableCredential(
       credential.region.trim().length > 0
     )
   }
+  // The key-shaped credentials are what is left, and a blank key counts as none: every provider
+  // in {@link providerModelFactory} reads its own `*_API_KEY` variable when the key it was
+  // constructed with is falsy, so a blank one would silently become "no key given" and hand the
+  // request to whatever the process happens to have set — the fallback epic #65 (A5) forbids.
   return credential.apiKey.trim().length > 0
 }
 

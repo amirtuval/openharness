@@ -2,6 +2,9 @@ import { ApiError } from '@openharness/client'
 import { createFakeClient } from '@openharness/client/testing'
 import { makeProviderCredential } from '@openharness/protocol/fixtures'
 import { cleanup, render } from 'ink-testing-library'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import {

@@ -113,6 +113,11 @@ function catalogue(
   return new ModelCatalog({ credentials, vault, registry, fetch })
 }
 
+/** A credential's published `details`, or `undefined` for a type that carries none. */
+function detailsOf(credential: ProviderCredential): unknown {
+  return 'details' in credential ? credential.details : undefined
+}
+
 describe('the vertex credential API', () => {
   it('stores a service-account key and lists its email, project and location', async () => {
     const test = createTestApp({ validateProviderCredential: acceptAny })
@@ -125,7 +130,9 @@ describe('the vertex credential API', () => {
     // `last4` is the **key id**'s last four, never a piece of the private key: the id is what
     // a reader can match against the console, and the key must not be echoed at all.
     expect(created.last4).toBe(PRIVATE_KEY_ID.slice(-4))
-    expect(created.details).toEqual({ email: EMAIL, project: PROJECT, location: LOCATION })
+    expect(created).toMatchObject({
+      details: { email: EMAIL, project: PROJECT, location: LOCATION },
+    })
     expect(Object.keys(created).sort()).toEqual(
       ['created_at', 'details', 'id', 'last4', 'name', 'type', 'updated_at', 'validated_at'].sort(),
     )
@@ -155,7 +162,7 @@ describe('the vertex credential API', () => {
 
     const stored = (await list(test)).data
     expect(stored.map((entry) => entry.name)).toEqual(['vertex', 'vertex-eu'])
-    expect(stored.map((entry) => entry.details)).toEqual([
+    expect(stored.map(detailsOf)).toEqual([
       { email: EMAIL, project: PROJECT, location: LOCATION },
       {
         email: 'other@openharness-other.iam.gserviceaccount.com',

@@ -8,7 +8,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 
 import {
   createProviderModelFactory,
-  credentialSecret,
+  credentialSecrets,
   isUsableCredential,
   missingCredentialMessage,
   providerModelFactory,
@@ -114,24 +114,24 @@ describe('a Vertex credential’s usability', () => {
   })
 })
 
-describe('credentialSecret', () => {
+describe('credentialSecrets', () => {
   it('is the private key, not the whole document and not the metadata around it', () => {
     // What is scrubbed out of a provider's error text is the secret a request authenticates
     // with. The project, the client email and the key id are metadata a reader may see.
-    expect(credentialSecret(CREDENTIAL)).toBe(SERVICE_ACCOUNT.private_key)
-    expect(credentialSecret(CREDENTIAL)).not.toContain(SERVICE_ACCOUNT.client_email)
+    expect(credentialSecrets(CREDENTIAL)).toEqual([SERVICE_ACCOUNT.private_key])
+    expect(credentialSecrets(CREDENTIAL).join()).not.toContain(SERVICE_ACCOUNT.client_email)
   })
 
   it('is the api key for the key-shaped credentials', () => {
-    expect(credentialSecret({ type: 'api_key', apiKey: 'sk-ant-x' })).toBe('sk-ant-x')
+    expect(credentialSecrets({ type: 'api_key', apiKey: 'sk-ant-x' })).toEqual(['sk-ant-x'])
     expect(
-      credentialSecret({ type: 'azure_openai', apiKey: 'az-x', endpoint: 'https://a.example' }),
-    ).toBe('az-x')
+      credentialSecrets({ type: 'azure_openai', apiKey: 'az-x', endpoint: 'https://a.example' }),
+    ).toEqual(['az-x'])
   })
 
   it('is nothing at all for a document that cannot be read', () => {
-    expect(credentialSecret({ ...CREDENTIAL, serviceAccount: 'not json' })).toBe('')
-    expect(credentialSecret({ ...CREDENTIAL, serviceAccount: '[]' })).toBe('')
+    expect(credentialSecrets({ ...CREDENTIAL, serviceAccount: 'not json' })).toEqual([])
+    expect(credentialSecrets({ ...CREDENTIAL, serviceAccount: '[]' })).toEqual([])
   })
 })
 

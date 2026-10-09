@@ -220,7 +220,7 @@ describe('CREDENTIAL_TYPE_REASONING', () => {
     // `@ai-sdk/azure`'s chat model is an `OpenAIChatLanguageModel` (`azure.chat`) under an Azure
     // URL, and it reads `providerOptions.openai` — never `providerOptions.azure`, which it does
     // not look at. So an Azure deployment gets the OpenAI option.
-    expect(CREDENTIAL_TYPE_REASONING.azure_openai.options('high')).toEqual({
+    expect(CREDENTIAL_TYPE_REASONING.azure_openai.options('high', 'gpt-5.4')).toEqual({
       openai: { reasoningEffort: 'high' },
     })
   })
@@ -244,7 +244,7 @@ describe('CREDENTIAL_TYPE_REASONING', () => {
     // `@ai-sdk/amazon-bedrock` reads `providerOptions.bedrock` and maps `maxReasoningEffort`
     // onto the model's own vendor field (Anthropic's `output_config.effort`, an OpenAI model's
     // `reasoning_effort`); its levels are `low | medium | high | xhigh | max`.
-    expect(CREDENTIAL_TYPE_REASONING.bedrock.options('high')).toEqual({
+    expect(CREDENTIAL_TYPE_REASONING.bedrock.options('high', 'anthropic.claude-v1:0')).toEqual({
       bedrock: { reasoningConfig: { maxReasoningEffort: 'high' } },
     })
   })
@@ -260,6 +260,29 @@ describe('CREDENTIAL_TYPE_REASONING', () => {
       bedrock: { reasoningConfig: { maxReasoningEffort: 'high' } },
     })
     expect(result.record).toEqual({ requested: 'high', applied: 'high' })
+  })
+
+  it('asks a Vertex credential through the client the model’s family builds', () => {
+    // One credential, two clients: `claude-*` is served by
+    // `@ai-sdk/google-vertex/anthropic` and reads the Anthropic option, everything else by
+    // `@ai-sdk/google-vertex` and reads Gemini's `thinkingConfig` — the same family rule the
+    // model factory and the server's catalogue use (#245, A3d).
+    expect(
+      CREDENTIAL_TYPE_REASONING.vertex.options('medium', 'claude-sonnet-4-5@20250929'),
+    ).toEqual({ anthropic: { effort: 'medium' } })
+    expect(CREDENTIAL_TYPE_REASONING.vertex.options('medium', 'gemini-3-pro')).toEqual({
+      google: { thinkingConfig: { thinkingLevel: 'medium' } },
+    })
+  })
+
+  it('plans a vertex credential by its type, family and all', () => {
+    const claude = planReasoning('vertex/claude-sonnet-4-5@20250929', 'vertex', 'high', EVERY_LEVEL)
+    expect(claude.providerOptions).toEqual({ anthropic: { effort: 'high' } })
+    expect(claude.record).toEqual({ requested: 'high', applied: 'high' })
+
+    const gemini = planReasoning('vertex-eu/gemini-3-pro', 'vertex', 'low', EVERY_LEVEL)
+    expect(gemini.providerOptions).toEqual({ google: { thinkingConfig: { thinkingLevel: 'low' } } })
+    expect(gemini.record).toEqual({ requested: 'low', applied: 'low' })
   })
 })
 

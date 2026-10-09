@@ -118,9 +118,7 @@ export type VertexCredentialDetails = z.infer<typeof VertexCredentialDetailsSche
  * object to this union when it adds its variant there.
  */
 export type ProviderCredentialDetails =
-  | OpenAICompatibleCredentialDetails
-  | BedrockCredentialDetails
-  | VertexCredentialDetails
+  OpenAICompatibleCredentialDetails | BedrockCredentialDetails | VertexCredentialDetails
 
 /** The fields every credential's metadata carries, whatever its type. */
 const ProviderCredentialMetadataBaseSchema = z.object({

@@ -5,7 +5,7 @@ import {
   type CredentialTarget,
 } from '@openharness/client'
 import type { ProviderCredential } from '@openharness/protocol'
-import { Fragment, useState } from 'react'
+import { useState } from 'react'
 
 import { useProviderCredentials, type CredentialResult } from '../../hooks/use-provider-credentials'
 import { relativeTime } from '../../lib/format'
@@ -128,76 +128,72 @@ export function ProvidersCard() {
                     </span>
                   </p>
                   <p className="text-xs break-words text-muted-foreground">
-                    {credentialEndpointLabel(credential)}
                     {/* The non-secret facts that tell two credentials of one type apart — a
-                        Bedrock credential's region, a Vertex one's email, project and
-                        location. `last4` alone cannot, and they wrap rather than truncate so
-                        the part that differs is never the part hidden (#245, A3c/A3d). */}
-                    {credentialFacts(credential).map((fact) => (
-                      <Fragment key={fact}>
-                        <span>{fact}</span>
-                        {' · '}
-                      </Fragment>
-                    ))}
+                        custom endpoint's host, a Bedrock credential's region, a Vertex one's
+                        email, project and location. `last4` alone cannot, and they wrap rather
+                        than truncate so the part that differs is never the part hidden (#245,
+                        A3b/A3c/A3d). */}
+                    {credentialSummaryLabel(credential)}
+                  </p>
+                  <p className="truncate text-xs text-muted-foreground">
                     {validatedLabel(credential)}
                   </p>
                 </div>
-                  {confirming === credential.name ? (
-                    <div className="flex shrink-0 items-center gap-2">
-                      <span className="text-xs text-muted-foreground">Delete this key?</span>
-                      <Button
-                        type="button"
-                        variant="destructive"
-                        size="sm"
-                        disabled={deleting !== null}
-                        onClick={() => void confirmDelete(credential.name)}
-                      >
-                        {deleting === credential.name ? 'Deleting…' : 'Delete'}
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        disabled={deleting !== null}
-                        onClick={() => setConfirming(null)}
-                      >
-                        Cancel
-                      </Button>
-                    </div>
-                  ) : (
-                    <div className="flex shrink-0 items-center gap-1">
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        aria-label={`Replace the ${credential.name} credential`}
-                        onClick={() => {
-                          setAdding({
-                            target: credentialTargetFor(credential),
-                            name: credential.name,
-                          })
-                          setNotice(null)
-                        }}
-                      >
-                        Replace
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        aria-label={`Delete the ${credential.name} credential`}
-                        onClick={() => {
-                          setConfirming(credential.name)
-                          setNotice(null)
-                        }}
-                      >
-                        Delete
-                      </Button>
-                    </div>
-                  )}
-                </li>
-              )
-            })}
+                {confirming === credential.name ? (
+                  <div className="flex shrink-0 items-center gap-2">
+                    <span className="text-xs text-muted-foreground">Delete this key?</span>
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      size="sm"
+                      disabled={deleting !== null}
+                      onClick={() => void confirmDelete(credential.name)}
+                    >
+                      {deleting === credential.name ? 'Deleting…' : 'Delete'}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      disabled={deleting !== null}
+                      onClick={() => setConfirming(null)}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="flex shrink-0 items-center gap-1">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      aria-label={`Replace the ${credential.name} credential`}
+                      onClick={() => {
+                        setAdding({
+                          target: credentialTargetFor(credential),
+                          name: credential.name,
+                        })
+                        setNotice(null)
+                      }}
+                    >
+                      Replace
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      aria-label={`Delete the ${credential.name} credential`}
+                      onClick={() => {
+                        setConfirming(credential.name)
+                        setNotice(null)
+                      }}
+                    >
+                      Delete
+                    </Button>
+                  </div>
+                )}
+              </li>
+            ))}
           </ul>
         </section>
 
@@ -251,15 +247,19 @@ function credentialKeyLabel(credential: ProviderCredential): string {
 }
 
 /**
- * The endpoint a credential points at, when its type publishes one, and a separator.
+ * The non-secret facts a credential's row shows under its name, one line of them.
  *
  * A custom credential's public detail is its base URL's **host** (#249) — the one thing that
- * tells two custom endpoints apart — so the row shows it; every other type has no such fact and
- * gets an empty string.
+ * tells two custom endpoints apart — and every type's own facts come from
+ * `credentialFacts` (#245, A3c/A3d). They are joined with `·` and the row wraps them rather
+ * than truncating, because the part that differs between two credentials is the whole point of
+ * showing them.
  */
-function credentialEndpointLabel(credential: ProviderCredential): string {
+function credentialSummaryLabel(credential: ProviderCredential): string {
   // `details` is keyed by type, so only the type that publishes it has the field.
   const host =
     credential.type === 'openai_compatible' ? credential.details?.base_url_host : undefined
-  return host === undefined ? '' : `${host} · `
+  return [host, ...credentialFacts(credential)]
+    .filter((fact) => fact !== undefined && fact !== '')
+    .join(' · ')
 }

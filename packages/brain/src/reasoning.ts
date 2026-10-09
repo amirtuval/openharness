@@ -9,6 +9,7 @@ import {
 } from '@openharness/protocol'
 import type { ProviderOptions } from './model'
 import { providerOf } from './model'
+import { isVertexAnthropicModel } from './vertex'
 
 /**
  * Reasoning effort: the three levels a session can ask for, and how each provider is asked.
@@ -69,8 +70,17 @@ export type ReasoningSupportFor = (
  * resolver's answer, not this table's.
  */
 interface ProviderReasoning {
-  /** The provider's own options for an effort, keyed the way its AI SDK client reads them. */
-  readonly options: (effort: ReasoningEffort) => ProviderOptions
+  /**
+   * The provider's own options for an effort, keyed the way its AI SDK client reads them.
+   *
+   * The model half of the id travels with the level because one credential type can serve more
+   * than one family through more than one client — a Vertex credential runs Google's models and
+   * Anthropic's, and each is asked through the options key its own client reads — and which
+   * family a model belongs to is the same rule the model factory builds clients by
+   * ({@link isVertexAnthropicModel}), so it is asked in one place. It is the part after the
+   * first slash, the same string the factory builds a model from.
+   */
+  readonly options: (effort: ReasoningEffort, model: string) => ProviderOptions
   /**
    * The level the provider actually runs at, when its own knob has fewer levels than ours.
    * Omitted by every provider that takes `low`/`medium`/`high` as they are.
@@ -187,6 +197,20 @@ export const CREDENTIAL_TYPE_REASONING: Readonly<Record<NamedCredentialType, Pro
     // our three need no clamp.
     options: (effort) => ({ bedrock: { reasoningConfig: { maxReasoningEffort: effort } } }),
   },
+  vertex: {
+    // One credential, two clients: `@ai-sdk/google-vertex` builds Google's own models and
+    // `@ai-sdk/google-vertex/anthropic` the Anthropic models Vertex serves, and the family is
+    // the `claude-*` prefix — the same rule `isVertexAnthropicModel` gives the model factory
+    // and the server's catalogue (#245, A3d). Each side keeps the option its own client reads:
+    // the Anthropic one's `effort`, and Gemini's `thinkingConfig.thinkingLevel`, exactly as
+    // the fixed `anthropic` and `google` rows above send them.
+    options: (effort, model): ProviderOptions => {
+      if (isVertexAnthropicModel(model)) {
+        return { anthropic: { effort } }
+      }
+      return { google: { thinkingConfig: { thinkingLevel: effort } } }
+    },
+  },
 }
 
 /** What one model request does with the effort the log asked for. */
@@ -240,7 +264,8 @@ export function planReasoning(
   if (requested === null) {
     return NO_REASONING
   }
-  const reasoning = reasoningFor(providerOf(modelId), credentialType)
+  const provider = providerOf(modelId)
+  const reasoning = reasoningFor(provider, credentialType)
   if (reasoning === undefined) {
     return unapplied(requested)
   }
@@ -255,7 +280,7 @@ export function planReasoning(
   return {
     requested,
     applied,
-    providerOptions: reasoning.options(applied),
+    providerOptions: reasoning.options(applied, modelId.slice(provider.length + 1)),
     record: { requested, applied },
   }
 }

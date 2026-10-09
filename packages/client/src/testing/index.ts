@@ -38,7 +38,6 @@ import type {
   SessionUsage,
   UserUsage,
   ProviderCredential,
-  PutProviderCredentialRequest,
   SendEventsResponse,
   Session,
   SessionErrorType,
@@ -1344,4 +1343,3 @@ function pageByKey<T extends Keyed>(
   const more = last !== undefined && items.length > start + data.length
   return { data, next_page: more ? encodeKeyCursor(last) : null }
 }
-

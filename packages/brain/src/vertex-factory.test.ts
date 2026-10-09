@@ -2,7 +2,7 @@ import { generateKeyPairSync } from 'node:crypto'
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { ProviderFetch } from './azure-fetch'
+import type { ProviderFetch } from './provider-fetch'
 import type { VertexModelCredential } from './model'
 
 /**
