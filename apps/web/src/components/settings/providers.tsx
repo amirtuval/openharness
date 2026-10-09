@@ -1,10 +1,11 @@
 import {
   credentialDisplayName,
+  credentialFacts,
   credentialTargetFor,
   type CredentialTarget,
 } from '@openharness/client'
 import type { ProviderCredential } from '@openharness/protocol'
-import { useState } from 'react'
+import { Fragment, useState } from 'react'
 
 import { useProviderCredentials, type CredentialResult } from '../../hooks/use-provider-credentials'
 import { relativeTime } from '../../lib/format'
@@ -125,6 +126,15 @@ export function ProvidersCard() {
                   </p>
                   <p className="truncate text-xs text-muted-foreground">
                     {credentialEndpointLabel(credential)}
+                    {/* The non-secret facts that tell two credentials of one type apart — a
+                        Bedrock credential's region. `last4` alone cannot, and the second line
+                        is where they stay visible at every width (#245, A3c). */}
+                    {credentialFacts(credential).map((fact) => (
+                      <Fragment key={fact}>
+                        <span className="text-muted-foreground">{fact}</span>
+                        {' · '}
+                      </Fragment>
+                    ))}
                     {validatedLabel(credential)}
                   </p>
                 </div>

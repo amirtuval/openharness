@@ -30,6 +30,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@ai-sdk/amazon-bedrock": "5.0.111",
     "@ai-sdk/anthropic": "4.0.73",
     "@ai-sdk/azure": "4.0.97",
     "@ai-sdk/cerebras": "3.0.64",
@@ -46,6 +47,7 @@
     "@openharness/protocol": "workspace:*",
     "@openharness/session": "workspace:*",
     "ai": "7.0.118",
+    "aws4fetch": "1.0.20",
     "zod": "4.6.5"
   },
   "devDependencies": {

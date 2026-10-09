@@ -33,6 +33,7 @@ import type {
   ListSessionsResponse,
   ModelEntry,
   ProviderCatalogStatus,
+  PutProviderCredentialRequest,
   SessionUsage,
   UserUsage,
   ProviderCredential,
@@ -772,8 +773,7 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       // which is the one rejection a test can spell without a provider. A custom
       // OpenAI-compatible credential's key is optional (#249), so an absent or empty one is
       // **not** a rejection for it.
-      const apiKey = parsed.data.api_key ?? ''
-      if (parsed.data.type !== 'openai_compatible' && apiKey.trim() === '') {
+      if (parsed.data.type !== 'openai_compatible' && credentialSecret(parsed.data).trim() === '') {
         throw new ApiError(422, `The ${name} credential was rejected by the provider.`, {
           type: 'invalid_provider_credential',
         })
@@ -787,7 +787,7 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
         id: existing?.id ?? newProviderCredentialId(),
         type: parsed.data.type,
         name,
-        last4: apiKey.slice(-4),
+        last4: credentialSecret(parsed.data).slice(-4),
         ...(details === undefined ? {} : { details }),
         created_at: existing?.created_at ?? timestamp,
         updated_at: timestamp,
@@ -1247,6 +1247,19 @@ function requirePageCursor(page: string | undefined, kind: 'key' | 'seq'): ApiEr
 function isModelId(id: string): boolean {
   const parts = id.split('/')
   return parts.length >= 2 && parts.every((part) => part.length > 0)
+}
+
+/**
+ * The secret a credential request body carries, and what `last4` is the last four characters
+ * of (#245, A3c).
+ *
+ * An `api_key` credential's secret is `api_key`; a Bedrock one's is its access key ID, which
+ * is the half of an AWS credential a reader recognises and the only half that is safe to show.
+ * The `api_key` form is the fallback rather than a branch on the literal, so a type this fake
+ * does not know still reads as the one-field shape it almost certainly is.
+ */
+function credentialSecret(body: PutProviderCredentialRequest): string {
+  return body.type === 'bedrock' ? body.access_key_id : (body.api_key ?? '')
 }
 
 /** Reject the way `fetch` does when the caller has already aborted. */

@@ -1,4 +1,8 @@
-import { PutProviderCredentialRequestSchema } from '@openharness/protocol'
+import {
+  PutProviderCredentialRequestSchema,
+  type ProviderCredentialType,
+  type PutProviderCredentialRequest,
+} from '@openharness/protocol'
 import { describe, expect, it } from 'vitest'
 
 import {
@@ -8,6 +12,33 @@ import {
   providerInfo,
   providerName,
 } from './providers'
+
+/**
+ * One body the protocol's request union parses, per credential type — what the target check
+ * below needs, and the one place the test has to know each type's payload fields.
+ */
+const REPRESENTATIVE_BODIES: Readonly<
+  Record<ProviderCredentialType, PutProviderCredentialRequest>
+> = {
+  api_key: { type: 'api_key', api_key: 'k' },
+  azure_openai: {
+    type: 'azure_openai',
+    endpoint: 'https://x.openai.azure.com',
+    api_key: 'k',
+    deployments: ['d'],
+  },
+  bedrock: {
+    type: 'bedrock',
+    access_key_id: 'AKIAIOSFODNN7EXAMPLE',
+    secret_access_key: 'secret',
+    region: 'us-east-1',
+  },
+  openai_compatible: {
+    type: 'openai_compatible',
+    base_url: 'https://x.example.com/v1',
+    api_key: 'k',
+  },
+}
 
 /**
  * The provider metadata both frontends offer (#209).
@@ -60,10 +91,11 @@ describe('CREDENTIAL_TARGETS', () => {
       ...PROVIDERS.map((provider) => provider.id),
       'azure',
       'custom',
+      'bedrock',
     ])
     expect(
       CREDENTIAL_TARGETS.filter((target) => target.named).map((target) => target.credential),
-    ).toEqual(['azure_openai', 'openai_compatible'])
+    ).toEqual(['azure_openai', 'openai_compatible', 'bedrock'])
   })
 
   it('gives every target what a tile and a form need', () => {
@@ -76,17 +108,7 @@ describe('CREDENTIAL_TARGETS', () => {
       }
       // The credential type is what selects the form, so it has to be one the protocol's
       // request union parses — for a named target with a representative payload.
-      const body =
-        target.credential === 'azure_openai'
-          ? {
-              type: 'azure_openai',
-              endpoint: 'https://x.openai.azure.com',
-              api_key: 'k',
-              deployments: ['d'],
-            }
-          : target.credential === 'openai_compatible'
-            ? { type: 'openai_compatible', base_url: 'https://x.example.com/v1', api_key: 'k' }
-            : { type: 'api_key', api_key: 'k' }
+      const body = REPRESENTATIVE_BODIES[target.credential]
       expect(PutProviderCredentialRequestSchema.safeParse(body).success, target.name).toBe(true)
     }
   })
@@ -95,6 +117,17 @@ describe('CREDENTIAL_TARGETS', () => {
     const custom = CREDENTIAL_TARGETS.find((target) => target.credential === 'openai_compatible')
     expect(custom).toMatchObject({ name: 'custom', named: true })
     expect(custom?.keyUrl).toBeUndefined()
+  })
+
+  it('carries a representative payload for every credential type a target can name', () => {
+    // The `Record` is what keeps the bodies above total: a credential type the protocol grows
+    // without a body here is a compile error rather than a target silently left unchecked.
+    expect(Object.keys(REPRESENTATIVE_BODIES).sort()).toEqual([
+      'api_key',
+      'azure_openai',
+      'bedrock',
+      'openai_compatible',
+    ])
   })
 })
 

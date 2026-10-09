@@ -239,6 +239,28 @@ describe('CREDENTIAL_TYPE_REASONING', () => {
     expect(result.providerOptions).toBeUndefined()
     expect(result.record).toEqual({ requested: 'high', applied: null })
   })
+
+  it('asks Amazon Bedrock through its own `reasoningConfig`', () => {
+    // `@ai-sdk/amazon-bedrock` reads `providerOptions.bedrock` and maps `maxReasoningEffort`
+    // onto the model's own vendor field (Anthropic's `output_config.effort`, an OpenAI model's
+    // `reasoning_effort`); its levels are `low | medium | high | xhigh | max`.
+    expect(CREDENTIAL_TYPE_REASONING.bedrock.options('high')).toEqual({
+      bedrock: { reasoningConfig: { maxReasoningEffort: 'high' } },
+    })
+  })
+
+  it('plans a bedrock credential by its type, like every other named one', () => {
+    const result = planReasoning(
+      'bedrock/anthropic.claude-sonnet-4-20250514-v1:0',
+      'bedrock',
+      'high',
+      EVERY_LEVEL,
+    )
+    expect(result.providerOptions).toEqual({
+      bedrock: { reasoningConfig: { maxReasoningEffort: 'high' } },
+    })
+    expect(result.record).toEqual({ requested: 'high', applied: 'high' })
+  })
 })
 
 describe('requestedReasoningEffort', () => {

@@ -1,7 +1,12 @@
 import { PutProviderCredentialRequestSchema } from '@openharness/protocol'
 import { describe, expect, it } from 'vitest'
 
-import { CREDENTIAL_FORMS, formForCredential, nameErrorMessage } from './credential-form'
+import {
+  CREDENTIAL_FORMS,
+  formForCredential,
+  isChoiceField,
+  nameErrorMessage,
+} from './credential-form'
 
 describe('CREDENTIAL_FORMS', () => {
   it('has a form for every credential type the protocol knows (X6)', () => {
@@ -10,6 +15,7 @@ describe('CREDENTIAL_FORMS', () => {
     expect(Object.keys(CREDENTIAL_FORMS).sort()).toEqual([
       'api_key',
       'azure_openai',
+      'bedrock',
       'openai_compatible',
     ])
   })
@@ -141,5 +147,73 @@ describe('nameErrorMessage', () => {
     // provider's, and a second credential called that would make `openai/gpt-5` ambiguous.
     expect(nameErrorMessage('openai', [])).toMatch(/built-in provider id/)
     expect(nameErrorMessage('azure', ['azure'])).toMatch(/already taken/)
+  })
+})
+
+describe('the bedrock form', () => {
+  it('collects a region chosen from a list, the two keys and an optional token', () => {
+    const form = CREDENTIAL_FORMS.bedrock
+    expect(form.fields.map((field) => field.name)).toEqual([
+      'region',
+      'access_key_id',
+      'secret_access_key',
+      'session_token',
+    ])
+    // The region is a list rather than a box — it goes into an AWS hostname — and it is the
+    // only field with a starting value, because a region has no unset a save could carry.
+    const region = form.fields[0]
+    expect(region === undefined ? false : isChoiceField(region)).toBe(true)
+    expect(region?.defaultValue).toBe('us-east-1')
+    expect((region?.options ?? []).length).toBeGreaterThan(20)
+    // Both keys are masked; the token is masked and may be skipped.
+    expect(form.fields.filter((field) => field.secret).map((field) => field.name)).toEqual([
+      'secret_access_key',
+      'session_token',
+    ])
+    expect(form.fields.filter((field) => field.optional).map((field) => field.name)).toEqual([
+      'session_token',
+    ])
+  })
+
+  it('builds a body the protocol accepts, with and without a session token', () => {
+    const form = CREDENTIAL_FORMS.bedrock
+    expect(
+      form.build({
+        region: 'eu-west-1',
+        access_key_id: 'AKIAIOSFODNN7EXAMPLE',
+        secret_access_key: 'secret',
+        session_token: 'token',
+      }),
+    ).toEqual({
+      type: 'bedrock',
+      region: 'eu-west-1',
+      access_key_id: 'AKIAIOSFODNN7EXAMPLE',
+      secret_access_key: 'secret',
+      session_token: 'token',
+    })
+
+    // A skipped token is left out of the body rather than sent as an empty string, which the
+    // protocol refuses (its `min(1)`), so skipping the prompt cannot produce a rejected save.
+    const withoutToken = form.build({
+      region: 'us-east-2',
+      access_key_id: 'AKIAIOSFODNN7EXAMPL2',
+      secret_access_key: 'secret',
+      session_token: '   ',
+    })
+    expect(withoutToken).toEqual({
+      type: 'bedrock',
+      region: 'us-east-2',
+      access_key_id: 'AKIAIOSFODNN7EXAMPL2',
+      secret_access_key: 'secret',
+    })
+    expect(PutProviderCredentialRequestSchema.safeParse(withoutToken).success).toBe(true)
+  })
+
+  it('refuses an empty body the protocol refuses, and never invents a region', () => {
+    const body = CREDENTIAL_FORMS.bedrock.build({})
+    // The fallback is the default region — the field is a list over the protocol's own list, so
+    // this is unreachable from the flow — and the body is still refused for its missing keys.
+    expect(body).toMatchObject({ type: 'bedrock', region: 'us-east-1' })
+    expect(PutProviderCredentialRequestSchema.safeParse(body).success).toBe(false)
   })
 })

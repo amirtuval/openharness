@@ -55,6 +55,8 @@ src/
   reasoning.ts          the reasoning effort: per provider, gated by the injected resolver
   provider-fetch.ts     the one guarded `fetch` (safeFetch + a limits preset + allowPrivate) both types build from
   openai-compatible-fetch.ts  a custom endpoint's base URL, and the safeFetch guard its model call goes through (#249)
+  bedrock.ts            Bedrock's two AWS hosts, and the SigV4 signing the server borrows for a
+                        control-plane read
   redact.ts             redactSecret: scrubbing a provider key out of error text
   errors.ts             classifyModelError: retryable or terminal, and which session.error
   retry.ts              RetryPolicy, backoff, and the injectable sleep
@@ -72,38 +74,42 @@ emits what that reaches.
 
 ### `@openharness/brain`
 
-| export                                                                                                                                 | what it is                                                                                                                                                        |
-| -------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `runTurn(sessionId, options)`                                                                                                          | run one turn; resolves to a `TurnOutcome`                                                                                                                         |
-| `RunTurnOptions`                                                                                                                       | `{ store, model, resolveCredential, signal?, fence?, contextStrategy?, reasoningSupportFor?, retry? }`                                                            |
-| `TurnOutcome`, `TurnOutcomeKind`                                                                                                       | `{ outcome: 'idle' \| 'noop' \| 'interrupted' \| 'error' }`                                                                                                       |
-| `ContextStrategy`, `ContextStrategyOptions`                                                                                            | `(events, { model, system }) => ModelMessage[]`                                                                                                                   |
-| `createContextStrategy(config?)`, `ContextStrategyConfig`                                                                              | the default strategy: the conversation, trimmed to a token budget resolved per model                                                                              |
-| `DEFAULT_CONTEXT_STRATEGY`, `DEFAULT_CONTEXT_TOKEN_BUDGET`, `CHARS_PER_TOKEN`                                                          | its defaults                                                                                                                                                      |
-| `estimateTokens(text)`                                                                                                                 | the chars/4 estimate the budget is measured in                                                                                                                    |
-| `ModelCredential`                                                                                                                      | `{ type: 'api_key', apiKey }`, `{ type: 'azure_openai', apiKey, endpoint }` or `{ type: 'openai_compatible', apiKey, baseUrl }` — one request's credential        |
-| `ResolveCredential`                                                                                                                    | `(name) => Promise<ModelCredential \| null>` — where it comes from                                                                                                |
-| `ModelFactory`                                                                                                                         | `(modelId, credential) => LanguageModel` — how a `provider/model` becomes a model                                                                                 |
-| `providerModelFactory`, `createProviderModelFactory(options)`                                                                          | the `ModelFactory` hosts normally pass: the official AI SDK providers, the key passed explicitly                                                                  |
-| `azureFetch`, `createAzureFetch(options)`, `azureBaseUrl(endpoint)`                                                                    | the Azure `fetch` (safeFetch under the streaming-safe limits) and the base URL it builds                                                                          |
-| `openAICompatibleFetch`, `createOpenAICompatibleFetch(options)`, `openAICompatibleBaseUrl(baseUrl)`                                    | the custom endpoint's `fetch` (safeFetch under the streaming-safe limits, with the self-host `allowPrivate` option, #249) and the base URL it normalizes          |
-| `SafeFetch`, `ProviderFetch`, `SafeProviderFetchOptions`, `createSafeProviderFetch(options)`                                           | the one guarded `fetch` the two URL-typed types are built from                                                                                                    |
-| `providerOf(modelId)`                                                                                                                  | the provider of a `provider/model` id: the part before the first slash                                                                                            |
-| `isUsableCredential(credential)`                                                                                                       | whether a resolved credential is a key at all (a blank one is not)                                                                                                |
-| `missingCredentialMessage(provider)`                                                                                                   | the `session.error` sentence for a provider with no key                                                                                                           |
-| `redactSecret(text, secret)`, `REDACTED_PLACEHOLDER`                                                                                   | the credential scrubbed out of provider error text                                                                                                                |
-| `streamModelRequest(params)`, `ModelRequestParams`, `ModelRequestResult`                                                               | one model request, as text, usage, error and abort                                                                                                                |
-| `ProviderOptions`                                                                                                                      | the AI SDK's per-provider options for one call, read off `streamText`                                                                                             |
-| `PROVIDER_REASONING`, `CREDENTIAL_TYPE_REASONING`, `planReasoning`, `ReasoningPlan`, `ReasoningSupportFor`, `requestedReasoningEffort` | `low \| medium \| high` in each provider's — and named credential type's — own option, gated by the injected resolver, and what the log asks a request for (#252) |
-| `toModelUsage(usage)`, `ZERO_MODEL_USAGE`                                                                                              | what a request reported → the protocol's four counters, always integers                                                                                           |
-| `classifyModelError(error)`, `ModelErrorClassification`                                                                                | retryable or not, and the `session.error` type that says so                                                                                                       |
-| `isRetryableModelError(error)`                                                                                                         | the same answer, when only the boolean is wanted                                                                                                                  |
-| `isClaimConflictError(error)`                                                                                                          | whether the store refused a claim another owner had taken                                                                                                         |
-| `isOwnershipError(error)`                                                                                                              | a fenced write or a claim conflict: the log is somebody else's (D9)                                                                                               |
-| `RetryPolicy`, `ResolvedRetryPolicy`, `resolveRetryPolicy(policy?)`                                                                    | how failures are retried                                                                                                                                          |
-| `backoffDelay(attempt, policy)`, `abortableSleep`, `Sleep`                                                                             | the delay, and the sleep that honors an abort                                                                                                                     |
-| `DEFAULT_MAX_RETRIES`, `DEFAULT_BASE_DELAY_MS`, `DEFAULT_MAX_DELAY_MS`                                                                 | `3`, `500`, `8000`                                                                                                                                                |
-| `PACKAGE_NAME`, `DEPENDENCIES`                                                                                                         | the package name, and the edges that must resolve through built output                                                                                            |
+| export                                                                                                                                 | what it is                                                                                                                                                                                                                             |
+| -------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `runTurn(sessionId, options)`                                                                                                          | run one turn; resolves to a `TurnOutcome`                                                                                                                                                                                              |
+| `RunTurnOptions`                                                                                                                       | `{ store, model, resolveCredential, signal?, fence?, contextStrategy?, reasoningSupportFor?, retry? }`                                                                                                                                 |
+| `TurnOutcome`, `TurnOutcomeKind`                                                                                                       | `{ outcome: 'idle' \| 'noop' \| 'interrupted' \| 'error' }`                                                                                                                                                                            |
+| `ContextStrategy`, `ContextStrategyOptions`                                                                                            | `(events, { model, system }) => ModelMessage[]`                                                                                                                                                                                        |
+| `createContextStrategy(config?)`, `ContextStrategyConfig`                                                                              | the default strategy: the conversation, trimmed to a token budget resolved per model                                                                                                                                                   |
+| `DEFAULT_CONTEXT_STRATEGY`, `DEFAULT_CONTEXT_TOKEN_BUDGET`, `CHARS_PER_TOKEN`                                                          | its defaults                                                                                                                                                                                                                           |
+| `estimateTokens(text)`                                                                                                                 | the chars/4 estimate the budget is measured in                                                                                                                                                                                         |
+| `ModelCredential`                                                                                                                      | `{ type: 'api_key', apiKey }`, `{ type: 'azure_openai', apiKey, endpoint }`, `{ type: 'openai_compatible', apiKey, baseUrl }` or `{ type: 'bedrock', accessKeyId, secretAccessKey, sessionToken?, region }` — one request's credential |
+| `credentialSecrets(credential)`                                                                                                        | every secret a credential carries, for redaction — a Bedrock credential has three                                                                                                                                                      |
+| `ResolveCredential`                                                                                                                    | `(name) => Promise<ModelCredential \| null>` — where it comes from                                                                                                                                                                     |
+| `ModelFactory`                                                                                                                         | `(modelId, credential) => LanguageModel` — how a `provider/model` becomes a model                                                                                                                                                      |
+| `providerModelFactory`, `createProviderModelFactory(options)`                                                                          | the `ModelFactory` hosts normally pass: the official AI SDK providers, the key passed explicitly                                                                                                                                       |
+| `azureFetch`, `createAzureFetch(options)`, `azureBaseUrl(endpoint)`                                                                    | the Azure `fetch` (safeFetch under the streaming-safe limits) and the base URL it builds                                                                                                                                               |
+| `redactSecrets(text, secrets)`                                                                                                         | `redactSecret` for a credential that carries more than one secret                                                                                                                                                                      |
+| `BEDROCK_SERVICE`, `bedrockRuntimeBaseUrl(region)`, `bedrockControlPlaneUrl(region, path)`                                             | the SigV4 service both Bedrock hosts are signed for, and the two AWS hosts a region derives                                                                                                                                            |
+| `signBedrockRequest(credential, url, input?)`, `SignedBedrockRequest`, `BedrockRequestInput`                                           | one SigV4-signed Bedrock request, returned rather than sent — what the server's save-time check and catalogue read use                                                                                                                 |
+| `openAICompatibleFetch`, `createOpenAICompatibleFetch(options)`, `openAICompatibleBaseUrl(baseUrl)`                                    | the custom endpoint's `fetch` (safeFetch under the streaming-safe limits, with the self-host `allowPrivate` option, #249) and the base URL it normalizes                                                                               |
+| `SafeFetch`, `ProviderFetch`, `SafeProviderFetchOptions`, `createSafeProviderFetch(options)`                                           | the one guarded `fetch` the two URL-typed types are built from                                                                                                                                                                         |
+| `providerOf(modelId)`                                                                                                                  | the provider of a `provider/model` id: the part before the first slash                                                                                                                                                                 |
+| `isUsableCredential(credential)`                                                                                                       | whether a resolved credential is a key at all (a blank one is not)                                                                                                                                                                     |
+| `missingCredentialMessage(provider)`                                                                                                   | the `session.error` sentence for a provider with no key                                                                                                                                                                                |
+| `redactSecret(text, secret)`, `REDACTED_PLACEHOLDER`                                                                                   | the credential scrubbed out of provider error text                                                                                                                                                                                     |
+| `streamModelRequest(params)`, `ModelRequestParams`, `ModelRequestResult`                                                               | one model request, as text, usage, error and abort                                                                                                                                                                                     |
+| `ProviderOptions`                                                                                                                      | the AI SDK's per-provider options for one call, read off `streamText`                                                                                                                                                                  |
+| `PROVIDER_REASONING`, `CREDENTIAL_TYPE_REASONING`, `planReasoning`, `ReasoningPlan`, `ReasoningSupportFor`, `requestedReasoningEffort` | `low \| medium \| high` in each provider's — and named credential type's — own option, gated by the injected resolver, and what the log asks a request for (#252)                                                                      |
+| `toModelUsage(usage)`, `ZERO_MODEL_USAGE`                                                                                              | what a request reported → the protocol's four counters, always integers                                                                                                                                                                |
+| `classifyModelError(error)`, `ModelErrorClassification`                                                                                | retryable or not, and the `session.error` type that says so                                                                                                                                                                            |
+| `isRetryableModelError(error)`                                                                                                         | the same answer, when only the boolean is wanted                                                                                                                                                                                       |
+| `isClaimConflictError(error)`                                                                                                          | whether the store refused a claim another owner had taken                                                                                                                                                                              |
+| `isOwnershipError(error)`                                                                                                              | a fenced write or a claim conflict: the log is somebody else's (D9)                                                                                                                                                                    |
+| `RetryPolicy`, `ResolvedRetryPolicy`, `resolveRetryPolicy(policy?)`                                                                    | how failures are retried                                                                                                                                                                                                               |
+| `backoffDelay(attempt, policy)`, `abortableSleep`, `Sleep`                                                                             | the delay, and the sleep that honors an abort                                                                                                                                                                                          |
+| `DEFAULT_MAX_RETRIES`, `DEFAULT_BASE_DELAY_MS`, `DEFAULT_MAX_DELAY_MS`                                                                 | `3`, `500`, `8000`                                                                                                                                                                                                                     |
+| `PACKAGE_NAME`, `DEPENDENCIES`                                                                                                         | the package name, and the edges that must resolve through built output                                                                                                                                                                 |
 
 `log.ts`, `events.ts` and `validate.ts` are internal: they are how the loop is written, not what
 a host talks to.
@@ -403,7 +409,7 @@ than eight characters is left alone, as is a trimmed variant that falls below ei
 whole, so the log still says what the provider said. The brain itself never logs; the tests
 capture the console anyway, because the libraries on this path could.
 
-### Named credentials, Azure OpenAI and custom OpenAI-compatible endpoints (epic #245, A3a/A3b)
+### Named credentials, Azure OpenAI, custom OpenAI-compatible endpoints and Amazon Bedrock (epic #245, A3a/A3b/A3c)
 
 The first half of a `provider/model` id is not always one of the eleven provider ids. A
 **named credential** — an Azure OpenAI credential stored under `azure` or `azure-eu`, or a
@@ -411,17 +417,21 @@ custom endpoint stored under `custom` — takes the model ids `<name>/<deploymen
 `<name>/<model>` (custom), and the credential's `type` is what decides which client builds it:
 
 ```
-providerOf('azure/gpt-4o')  → 'azure'  → not one of the eleven → the credential's type decides
+providerOf('azure/gpt-4o')  → 'azure'   → not one of the eleven → the credential's type decides
                                         → azure_openai → createAzure(...).chat('gpt-4o')
-providerOf('custom/llama3') → 'custom' → not one of the eleven → openai_compatible
+providerOf('custom/llama3') → 'custom'  → not one of the eleven → openai_compatible
                                         → createOpenAICompatible(...).chatModel('llama3')
+providerOf('bedrock/…-v1:0') → 'bedrock' → not one of the eleven → bedrock
+                                        → createAmazonBedrock(…)(modelId)
 ```
 
 - **The type is the discriminant, and it is checked.** For a first half that _is_ one of the
-  eleven, the request is built from `credential.apiKey` as it always was. For any other first
-  half, the credential must be an `azure_openai` or `openai_compatible` one; an `api_key`
-  credential under a name no provider carries is still an `UnsupportedProviderError`, which ends
-  a turn with no span and no request, exactly as before.
+  eleven, the request is built from an `api_key` credential (`credential.apiKey`); a credential
+  of another type under a fixed provider id is an `UnsupportedProviderError`, because the server
+  cannot store one — the name and the type have to agree. For any other first half the
+  credential's own type decides which client is built; an `api_key` credential under a name no
+  provider carries is still an `UnsupportedProviderError`, which ends a turn with no span and no
+  request, exactly as before.
 - **`createAzure` gets the key and a base URL, both explicit.** `azureBaseUrl(endpoint)` turns
   the resource endpoint a user saved (`https://my-resource.openai.azure.com`) into the base URL
   `@ai-sdk/azure` appends `/v1` to — deriving and normalizing the `/openai` segment, so the
@@ -451,6 +461,33 @@ providerOf('custom/llama3') → 'custom' → not one of the eleven → openai_co
   refusal applies. `azureFetch` never passes it. Both are built by the one
   `createSafeProviderFetch` (`provider-fetch.ts`), which is where the AI SDK's `Request`-or-URL
   shape and the `STREAMING_LIMITS` preset meet.
+
+**Bedrock is the other named type, and it is signed rather than guarded.** A `bedrock` model id
+is `<name>/<bedrock model id>`, and the client is `createAmazonBedrock(…)(modelId)`:
+
+- **The address is derived from the region, so there is no URL to guard.** `bedrock.ts` builds
+  `https://bedrock-runtime.<region>.amazonaws.com`, and the region came from the protocol's list
+  — validated on save, because it is spliced into the host. That is why this type, alone among
+  the three, needs no `safeFetch`: nothing here is a user-supplied address.
+- **Every setting is passed explicitly, and one of them looks like a no-op.** `region`,
+  `accessKeyId`, `secretAccessKey`, `sessionToken` and `baseURL` are all constructor arguments,
+  so `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` and
+  `AWS_ENDPOINT_URL_BEDROCK_RUNTIME` are never read. `apiKey: ''` is the subtle one: a
+  non-blank `apiKey` — or the `AWS_BEARER_TOKEN_BEDROCK` variable — flips the provider to bearer
+  auth and skips SigV4, so an explicit empty string _seals_ that variable and keeps the client on
+  the user's stored keys. A deployment with the variable set would otherwise authenticate every
+  request with a token nobody saved.
+- **The control plane is signed here, not by the provider package.** `@ai-sdk/amazon-bedrock`
+  has no control-plane surface, so the server's `ListFoundationModels` check and its catalogue
+  read use `signBedrockRequest` — `aws4fetch`, the same signer the provider uses internally, so
+  both paths sign identically. The two AWS hosts are signed for the one `bedrock` service, and a
+  returned value rather than a `fetch` keeps the server's own egress-proxy-aware client in the
+  path. Nothing in this module reads an `AWS_*` variable or a shared credentials file; the decoy
+  test sets the lot and asserts none of them reaches a request.
+- **A credential's secrets are plural, and redaction knows it.** `credentialSecrets` lists the
+  access key ID, the secret and the session token, and `turn.ts` scrubs a provider's error text
+  with all of them — a rejected request echoed back can quote any of the three. `last4` is drawn
+  from the **access key ID**, the one half a reader recognises and the only one safe to show.
 
 ### Usage
 
@@ -601,6 +638,18 @@ retries run on an injected `sleep`, the clock is a `TestClock` from
   including the branches the loop cannot reach. `errors.test.ts` also covers the wrappers the
   classification follows (`AI_RetryError` and duck-typed ones), and `model.test.ts` pins the
   one-failure-one-call invariant with a failure the SDK's retry classifier would act on.
+- `bedrock-model.test.ts` — the Bedrock path: both endpoint builders, the request the real
+  factory sends (a stubbed global `fetch`, because the provider resolves `globalThis.fetch` at
+  request time and the host comes from the region rather than from a user-typed URL), the URL
+  shape `/model/<id>/converse-stream` with the model id's colon percent-encoded, the **decoy
+  environment** — `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`,
+  `AWS_DEFAULT_REGION`, `AWS_PROFILE`, a shared credentials file through
+  `AWS_SHARED_CREDENTIALS_FILE`, the two endpoint overrides and `AWS_BEARER_TOKEN_BEDROCK`, with
+  the request asserted to carry none of them and to be SigV4-signed with the stored key for the
+  stored region — the stored session token riding along when there is one and no
+  `x-amz-security-token` invented when there is not, `signBedrockRequest`'s signature and the
+  service it scopes to, `isUsableCredential`'s three blanks, `credentialSecrets`, and the
+  unsupported-provider endings.
 - `azure-model.test.ts` — the named-credential path: `azureBaseUrl`'s normalization, the URL a
   `azure/gpt-4o` request is sent to (the deployment from the id, the endpoint from the
   credential), the key in the `api-key` header with `AZURE_API_KEY` set to a decoy, and that

@@ -22,7 +22,10 @@ import { useCallback, useRef, useState } from 'react'
  * inside one render — so reading state there would drop all but the last of them.
  */
 export interface SecretInputProps {
-  /** The whole value was submitted (Enter). Never called with an empty or blank value. */
+  /**
+   * The whole value was submitted (Enter). Never called with an empty or blank value — unless
+   * {@link SecretInputProps.optional} says the field may be skipped.
+   */
   readonly onSubmit: (value: string) => void
   /** The user gave up (Esc). */
   readonly onCancel: () => void

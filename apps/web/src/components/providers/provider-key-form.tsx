@@ -1,6 +1,9 @@
 import { type CredentialTarget, credentialDisplayName } from '@openharness/client'
 import { ArrowUpRight } from 'lucide-react'
 import {
+  BEDROCK_REGIONS,
+  DEFAULT_BEDROCK_REGION,
+  isBedrockRegion,
   isReservedCredentialName,
   isValidCredentialName,
   type ProviderCredential,
@@ -47,13 +50,19 @@ interface CredentialField {
   /** The line under the input. Says what happens to what was typed. */
   readonly help: string
   /**
-   * Whether the value is a secret, rendered as a masked input. False for a URL a reader can see
-   * — hiding an endpoint would make a typo invisible (#249).
+   * What the field is drawn as. `password` is the default — a credential field is usually a
+   * secret and is masked — and `select` is a value from a fixed list, which is what a region is:
+   * a free-text one would go into an AWS hostname.
    */
-  readonly secret: boolean
+  readonly kind?: 'password' | 'text' | 'select'
+  /** The choices a `select` offers, in order. */
+  readonly options?: readonly string[]
+  /** The value a field starts at, for a field that is never empty. A `select` needs one. */
+  readonly defaultValue?: string
   /**
-   * Whether the field may be left empty. False for every secret but a custom endpoint's key,
-   * which is optional (#249): a local server may take none, and the save must not wait for one.
+   * Whether the field may be left blank. An absent optional field is omitted from the request
+   * body rather than sent as an empty string, which is what the protocol's optional fields
+   * (Bedrock's session token) accept and an empty one does not.
    */
   readonly optional?: boolean
 }
@@ -67,6 +76,13 @@ interface CredentialForm {
 
 /** The values key the credential-name input uses; not a field of any payload. */
 const NAME_FIELD = 'credential_name'
+
+/**
+ * What a `select` is drawn as: the input's own box, with room on the right for the arrow the
+ * platform draws. Tokens rather than colours, so it follows the theme like every other control.
+ */
+const SELECT_CLASS =
+  'h-9 w-full min-w-0 rounded-md border border-input bg-transparent px-3 py-1 text-base shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50 md:text-sm dark:bg-input/30'
 
 /** Split the deployment list a reader typed: commas or newlines, blanks dropped. */
 function splitDeployments(value: string): string[] {
@@ -84,6 +100,9 @@ function splitDeployments(value: string): string[] {
  * Azure offers no endpoint that lists deployments, so the reader types them and each becomes a
  * model. `openai_compatible` (#249, A3b) collects a base URL and an **optional** key: the
  * endpoint's own `/models` list is what becomes the models, so there is nothing else to type.
+ * `bedrock` (#245, A3c) collects the region (a dropdown, because the region is spliced
+ * into an AWS hostname and free text could only name a host that does not exist) and the two
+ * IAM keys, plus the session token temporary credentials carry when there is one.
  */
 const CREDENTIAL_FORMS: Record<ProviderCredentialType, CredentialForm> = {
   api_key: {
@@ -93,7 +112,6 @@ const CREDENTIAL_FORMS: Record<ProviderCredentialType, CredentialForm> = {
         label: 'API key',
         placeholder: 'sk-…',
         help: 'Sent once, stored encrypted on the server, never shown again. Saving replaces the key stored for this provider.',
-        secret: true,
       },
     ],
     build: (values) => ({ type: 'api_key', api_key: values.api_key ?? '' }),
@@ -105,21 +123,18 @@ const CREDENTIAL_FORMS: Record<ProviderCredentialType, CredentialForm> = {
         label: 'Endpoint',
         placeholder: 'https://my-resource.openai.azure.com',
         help: 'The Azure OpenAI resource endpoint from the portal, over https.',
-        secret: false,
       },
       {
         name: 'api_key',
         label: 'API key',
         placeholder: '…',
         help: 'Sent once, stored encrypted on the server, never shown again. Saving replaces the key stored under this name.',
-        secret: true,
       },
       {
         name: 'deployments',
         label: 'Deployments',
         placeholder: 'gpt-4o, gpt-4o-mini',
         help: 'The deployment names your resource serves, separated by commas. Each becomes a model you can pick.',
-        secret: false,
       },
     ],
     build: (values) => ({
@@ -136,14 +151,13 @@ const CREDENTIAL_FORMS: Record<ProviderCredentialType, CredentialForm> = {
         label: 'Base URL',
         placeholder: 'http://localhost:11434/v1',
         help: 'The OpenAI-compatible API root — the address its /models endpoint lives under. It is checked on save, and only http and https are accepted.',
-        secret: false,
+        kind: 'text',
       },
       {
         name: 'api_key',
         label: 'API key (optional)',
         placeholder: '…',
         help: 'Sent once, stored encrypted on the server, never shown again. Leave it empty for an endpoint that takes no key, such as a local server.',
-        secret: true,
         optional: true,
       },
     ],
@@ -158,11 +172,62 @@ const CREDENTIAL_FORMS: Record<ProviderCredentialType, CredentialForm> = {
       }
     },
   },
+  bedrock: {
+    fields: [
+      {
+        name: 'region',
+        label: 'Region',
+        kind: 'select',
+        options: BEDROCK_REGIONS,
+        defaultValue: DEFAULT_BEDROCK_REGION,
+        placeholder: DEFAULT_BEDROCK_REGION,
+        help: 'The AWS region the models run in. Your credential lists and calls this region only.',
+      },
+      {
+        name: 'access_key_id',
+        label: 'Access key ID',
+        kind: 'text',
+        placeholder: 'AKIA…',
+        help: 'The IAM access key ID. Sent once, stored encrypted on the server, never shown again — only its last four characters are.',
+      },
+      {
+        name: 'secret_access_key',
+        label: 'Secret access key',
+        placeholder: '…',
+        help: 'The IAM secret access key. Sent once, stored encrypted, never returned by any response or written to a log.',
+      },
+      {
+        name: 'session_token',
+        label: 'Session token',
+        optional: true,
+        placeholder: 'Optional',
+        help: 'Only for temporary credentials (SSO, an assumed role). Leave it empty for a long-lived IAM user key.',
+      },
+    ],
+    build: (values) => {
+      const region = values.region ?? ''
+      const sessionToken = (values.session_token ?? '').trim()
+      return {
+        type: 'bedrock',
+        // The field is a `select` over the protocol's list, so the fallback is unreachable; it
+        // is what makes the value a region to the compiler without a cast.
+        region: isBedrockRegion(region) ? region : DEFAULT_BEDROCK_REGION,
+        access_key_id: (values.access_key_id ?? '').trim(),
+        secret_access_key: values.secret_access_key ?? '',
+        ...(sessionToken === '' ? {} : { session_token: sessionToken }),
+      }
+    },
+  },
 }
 
-/** The empty value for every field of a form: what a successful save resets to. */
+/**
+ * The value every field of a form starts at: empty, or the field's own default.
+ *
+ * A `select` is never empty — there is no "no region" a Bedrock credential could be saved
+ * with — so it starts at its default and a successful save resets to the same place.
+ */
 function emptyValues(form: CredentialForm): Record<string, string> {
-  return Object.fromEntries(form.fields.map((field) => [field.name, '']))
+  return Object.fromEntries(form.fields.map((field) => [field.name, field.defaultValue ?? '']))
 }
 
 /** What the form takes. */
@@ -357,20 +422,46 @@ export function ProviderKeyForm({
       {form.fields.map((field, index) => (
         <div key={field.name} className="flex flex-col gap-1.5">
           <Label htmlFor={`provider-${field.name}`}>{field.label}</Label>
-          <Input
-            id={`provider-${field.name}`}
-            ref={index === 0 && !asksForName ? inputRef : undefined}
-            type={field.secret ? 'password' : 'text'}
-            value={values[field.name] ?? ''}
-            autoComplete="off"
-            spellCheck={false}
-            placeholder={
-              field.name === 'api_key' ? (target.keyHint ?? field.placeholder) : field.placeholder
-            }
-            onChange={(event) => {
-              setValues((current) => ({ ...current, [field.name]: event.target.value }))
-            }}
-          />
+          {field.kind === 'select' ? (
+            // A native `<select>`: the list is short and fixed, and `index.css` sets
+            // `color-scheme` per theme, so its popup follows Light/Dim/Dark like the rest of
+            // the page. (The model picker cannot be one — its list is long, searchable and
+            // live — which is why that one is the app's own listbox.)
+            <select
+              id={`provider-${field.name}`}
+              aria-label={field.label}
+              className={SELECT_CLASS}
+              value={values[field.name] ?? ''}
+              onChange={(event) => {
+                setValues((current) => ({ ...current, [field.name]: event.target.value }))
+              }}
+            >
+              {(field.options ?? []).map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <Input
+              id={`provider-${field.name}`}
+              ref={index === 0 && !asksForName ? inputRef : undefined}
+              type={
+                field.kind === 'text' || field.name === 'endpoint' || field.name === 'deployments'
+                  ? 'text'
+                  : 'password'
+              }
+              value={values[field.name] ?? ''}
+              autoComplete="off"
+              spellCheck={false}
+              placeholder={
+                field.name === 'api_key' ? (target.keyHint ?? field.placeholder) : field.placeholder
+              }
+              onChange={(event) => {
+                setValues((current) => ({ ...current, [field.name]: event.target.value }))
+              }}
+            />
+          )}
           <p className="text-xs text-muted-foreground">{field.help}</p>
         </div>
       ))}

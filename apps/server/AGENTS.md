@@ -309,7 +309,12 @@ parses the query and maps the one error it can raise.
   shared by all pages of one provider. The catalogue asks for a page size of 1000 and follows
   Anthropic's `has_more`/`last_id` and Gemini's `nextPageToken`; OpenRouter and the
   OpenAI-compatible family answer in one page. A provider that pages forever stops at
-  `MAX_PAGES`.
+  `MAX_PAGES`. The two URL-less named types have calls of their own rather than entries in that
+  table, because neither has a URL a user typed nor a bearer key: an `azure_openai` credential
+  contributes the deployments the user named (nothing is fetched), and a `bedrock` one
+  contributes what a SigV4-signed `ListFoundationModels` answers in its own region (the host
+  comes from the region, which the protocol's list validated), so "no request ever supplies a
+  URL" holds for all three.
 - **C2 — the registry join and the filter.** `catalog/registry.ts` reads
   `apps/server/src/catalog/models-dev.json`, a snapshot of models.dev committed to this
   package and bundled into `dist/index.js` — never read from the network, and never from a
@@ -751,7 +756,7 @@ most `OPENHARNESS_MAX_CONCURRENT_SESSIONS` sessions run at once; the rest wait t
 `stop()` accepts nothing more, aborts the turns in flight and gives them the drain timeout to
 write their last events.
 
-#### Named credentials, Azure OpenAI and custom OpenAI-compatible endpoints (epic #245, A3a/A3b)
+#### Named credentials, Azure OpenAI, custom OpenAI-compatible endpoints and Amazon Bedrock (epic #245, A3a/A3b/A3c)
 
 A credential is keyed by its **name**, which is the `provider` half of the model ids it serves —
 and that is what the route's path parameter has always been, so its shape did not change:
@@ -772,6 +777,23 @@ second Azure OpenAI credential.
   refused **before it can be stored**, so it can never be reached from the model path later.
   The request goes to `${azureBaseUrl(endpoint)}/v1/chat/completions?api-version=v1`, the same
   URL the brain builds, through the same helper (`@openharness/brain`'s `azureBaseUrl`).
+- **A Bedrock credential is checked with one `ListFoundationModels` read**, not a chat request:
+  `GET https://bedrock.<region>.amazonaws.com/foundation-models?byOutputModality=TEXT&byInferenceType=ON_DEMAND`,
+  SigV4-signed with the user's keys by `@openharness/brain`'s `signBedrockRequest` (the same
+  `aws4fetch` signer the model path's provider package uses) and sent through the server's own
+  provider HTTP client, so it goes out through the same egress-proxy-aware path every other
+  provider call does. **No SSRF guard is needed and none runs**: the host is derived from the
+  region, and the region was validated against the protocol's list before this point, so there
+  is no user-supplied address to check. A refusal carries AWS's own reason — `answered 403 for
+ListFoundationModels: The security token included in the request is invalid.` — bounded to 200
+  characters and scrubbed of all three secrets before it reaches the 422 body, because a
+  provider that quotes a rejected request can quote a key.
+- **A credential reports its non-secret per-type facts as `details`.** `credentialUpsert` in
+  `credentials.ts` computes them from the payload — `{ region }` for a bedrock body, nothing for
+  the other two — and they ride in the one shared JSON column the store writes
+  (`0023_credential_details.sql`). `last4` is drawn from the **access key ID** for Bedrock: the
+  half a reader recognises, and the only one safe to show, since the secret access key and the
+  session token are never any part of a response.
 - **The vault's AAD is `userId|name`** — the same string it always was for the eleven, since
   their name _is_ their provider id, so a row stored before this change still opens.
 - **The catalogue gives an Azure credential one model per deployment name.** Azure offers no
@@ -783,8 +805,27 @@ second Azure OpenAI credential.
   The registry snapshot gained that `azure` entry by the same refresh script
   (`scripts/refresh-models-dev.mjs` now walks `CREDENTIAL_TYPES` as well as `PROVIDERS`; a type
   with no `modelsDevKey` — a custom endpoint — contributes no entry).
+  (`scripts/refresh-models-dev.mjs` now walks `CREDENTIAL_TYPES` as well as `PROVIDERS`).
+- **A Bedrock credential lists the region's on-demand text models.** `bedrockCatalog` reads
+  `ListFoundationModels` in the credential's region with the stored keys and enters each summary
+  as `<name>/<bedrock model id>` with `source: 'provider'`; names, context windows and prices
+  come from models.dev's `amazon-bedrock` entry where it has them. Two filters are deliberate:
+  a model whose `inferenceTypesSupported` names only `INFERENCE_PROFILE` is left out — its
+  cross-region profile id (or ARN) is account- and region-specific, so the bare model id would
+  be a model that fails on the first message — and a model AWS has marked `LEGACY` is left out
+  too. A read that fails is the same visible `fallback` every other provider gets: the
+  registry's Bedrock models, acknowledged to their model ids. Because a Bedrock credential's
+  registry key (`amazon-bedrock`) is not its name, `joinProviderList`/`registryFallback` take
+  the key as an argument rather than assuming the provider — the one place the two differ.
 - **A model id resolves by name, then by type**: the brain's `providerModelFactory` takes the
-  first half as a credential name, and builds an Azure model when the credential says so.
+  first half as a credential name, and builds an Azure or Bedrock model when the credential
+  says so.
+- **No `AWS_*` variable is ever read.** The Bedrock paths pass every setting explicitly — as
+  `provider-validation.ts` does when it signs, and as the brain does when it builds the client —
+  so a decoy `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`/`AWS_REGION`/
+  `AWS_PROFILE`/`AWS_ENDPOINT_URL_BEDROCK_RUNTIME` in the server's or the user's environment
+  changes nothing. That is the same rule as the provider keys: the environment is never a
+  fallback (A5).
 
 ##### A custom OpenAI-compatible endpoint (epic #245, A3b)
 
@@ -1137,6 +1178,7 @@ before the instance stops serving it (#151).
 | `createSessionRevocations(options)`                                                                                              | the registry of open responses a revocation closes, subscribed to the store (#76)                                                                                                                           |
 | `startSessionRecheck(options)`, `DEFAULT_SESSION_RECHECK_MS`                                                                     | the periodic session re-check of a long-lived response (#76)                                                                                                                                                |
 | `SESSION_INVALID_MESSAGE`, `SSE_SESSION_INVALID`                                                                                 | what a stream says when its session is revoked or expires (#76)                                                                                                                                             |
+| `createProviderCredentialValidator`, `validateProviderCredential`, `VALIDATABLE_PROVIDERS`                                       | the one cheap call a saved credential is checked with — a provider list for `api_key`, a guarded Azure request for `azure_openai`, a signed `ListFoundationModels` for `bedrock` (#245 A3a/A3c)             |
 | `createProviderCredentialValidator`, `validateProviderCredential`, `VALIDATABLE_PROVIDERS`                                       | the one cheap call a saved credential is checked with — a provider list for `api_key`, a guarded Azure request for `azure_openai`, a guarded `GET {base_url}/models` for `openai_compatible` (#245 A3a/A3b) |
 | `ProviderValidatorFetch`                                                                                                         | the `safeFetch` shape the URL-typed checks (Azure, custom) take, injectable for a test                                                                                                                      |
 | `parseOpenAICompatibleModelList`                                                                                                 | the OpenAI-compatible `/models` parser, shared by the fixed adapters and a custom credential's catalogue (#249)                                                                                             |
@@ -1225,7 +1267,8 @@ src/
   routes/               agents.ts, sessions.ts, events.ts, ai-sdk.ts, me.ts, models.ts, usage.ts,
                         provider-credentials.ts, plus deps.ts (RouteDeps) and signals.ts
                         (what a stored user event tells the scheduler)
-  test-support/         test-only: scripted model, SSE reader, the server harness, Postgres
+  test-support/         test-only: scripted model, SSE reader, the server harness, Postgres,
+                        and the AWS event-stream frames a mocked Bedrock reply is made of
 docs/scheduling.md      the multi-instance scheduler: partitions, leases, epochs, recovery
 ```
 
@@ -1373,6 +1416,22 @@ parallel with each other.
   never sees it) and the real guard's private/loopback/metadata refusals, the catalogue listing
   the endpoint's models with metadata borrowed only on an exact match, and a turn that streams
   through the guard with an injected transport standing in for the endpoint.
+- `bedrock-credentials.test.ts` (#245, A3c) — the Bedrock route end to end: the metadata a save
+  returns (`last4` from the access key ID, `details.region`), a second credential in another
+  region under `bedrock-us`, the 400s (a region AWS does not serve, a missing key, a name a
+  provider id owns, an `api_key` under a named one), the 422 with AWS's reason in it, "no key,
+  secret or token in any response or log line"; the save-time check over an injected
+  `ProviderFetch` (the URL and query, the SigV4 scope, the decoy `AWS_*` environment, the
+  scrubbed reason, a transport failure); the catalogue (the region's on-demand text models
+  joined with a registry stub — an inference-profile-only model, a `LEGACY` one and an
+  embeddings one all dropped; a second credential reading its own region; the fallback; a row
+  that cannot be opened); and a whole turn through the **real factory** with the global `fetch`
+  stubbed to answer with a hand-built AWS event stream — the reply streams, its tokens reach the
+  log's `session.usage`, the request goes to the region's runtime host signed with the stored
+  access key — plus the missing-credential ending. `src/test-support/bedrock-stream.ts` is what
+  builds those frames: length-prefixed, CRC-32 preluded and trailered, exactly as the provider's
+  decoder reads them, which is what makes a mocked happy path prove something rather than
+  nothing.
 - `credentials.test.ts` — the write-only round trip, the 422 a refused key gets, the fresh
   session rule, the vault's AAD binding, "never in a response or a log", and the env-key test:
   with `OPENAI_API_KEY` set and no stored credential, a turn ends with

@@ -5,6 +5,7 @@ import {
   type ModelUsage,
   type ProviderId,
 } from '@openharness/protocol'
+import { createAmazonBedrock } from '@ai-sdk/amazon-bedrock'
 import { createAnthropic } from '@ai-sdk/anthropic'
 import { createAzure } from '@ai-sdk/azure'
 import { createCerebras } from '@ai-sdk/cerebras'
@@ -21,6 +22,7 @@ import type { LanguageModel, ModelMessage } from 'ai'
 import { streamText } from 'ai'
 
 import { azureBaseUrl, azureFetch } from './azure-fetch'
+import { bedrockRuntimeBaseUrl } from './bedrock'
 import { isOwnershipError } from './errors'
 import { openAICompatibleBaseUrl, openAICompatibleFetch } from './openai-compatible-fetch'
 import type { ProviderFetch } from './provider-fetch'
@@ -47,7 +49,10 @@ import type { ProviderFetch } from './provider-fetch'
  * with.
  */
 export type ModelCredential =
-  ApiKeyModelCredential | AzureOpenAIModelCredential | OpenAICompatibleModelCredential
+  | ApiKeyModelCredential
+  | AzureOpenAIModelCredential
+  | OpenAICompatibleModelCredential
+  | BedrockModelCredential
 
 /** An `api_key` credential: a single secret, passed to one of the eleven provider clients. */
 export interface ApiKeyModelCredential {
@@ -91,6 +96,54 @@ export interface OpenAICompatibleModelCredential {
    * `@ai-sdk/openai-compatible` as-is, normalized by {@link openAICompatibleBaseUrl}.
    */
   readonly baseUrl: string
+}
+
+/**
+ * A `bedrock` credential: an IAM principal's static access keys, and the region they act in
+ * (epic #245, A3c).
+ *
+ * The model id is not here — it is the model id's second half (`bedrock/anthropic.claude-…-v1:0`
+ * names a Bedrock model on the `bedrock` credential) — and neither is an endpoint: Bedrock's
+ * hosts are derived from the region by `./bedrock.ts`. There is no assume-role in v1 (epic
+ * #245, decision M4): these are static keys, and the save-time check is what proves them.
+ */
+export interface BedrockModelCredential {
+  readonly type: 'bedrock'
+  /** The IAM access key ID. Passed to the provider explicitly; never read from the environment. */
+  readonly accessKeyId: string
+  /** The IAM secret access key. Passed explicitly; never read from the environment. */
+  readonly secretAccessKey: string
+  /** The session token temporary credentials carry, when the principal has one. */
+  readonly sessionToken?: string
+  /**
+   * The AWS region the credential acts in, validated against the protocol's list of the
+   * regions AWS serves Bedrock in. Both the runtime host and the signature use it.
+   */
+  readonly region: string
+}
+
+/**
+ * Every secret a credential carries, in the order a redactor should scrub them.
+ *
+ * `redactSecret` takes one secret, and a credential stopped being a single string when Bedrock
+ * arrived: an AWS credential is an access key ID **and** a secret access key, plus a session
+ * token when the principal has one, and a provider that echoes a rejected request back can echo
+ * any of them. Which strings are secret is a property of the credential type, so it is stated
+ * here, beside the types, and every path that scrubs (the turn's error text) asks this rather
+ * than reaching for a field that only one type has.
+ *
+ * An Azure credential's endpoint is deliberately not in the list: it is a URL the user typed,
+ * it rides on the credential's `details` in an API response, and it is not a secret.
+ */
+export function credentialSecrets(credential: ModelCredential): readonly string[] {
+  if (credential.type === 'bedrock') {
+    return [
+      credential.accessKeyId,
+      credential.secretAccessKey,
+      ...(credential.sessionToken === undefined ? [] : [credential.sessionToken]),
+    ]
+  }
+  return [credential.apiKey]
 }
 
 /**
@@ -304,10 +357,11 @@ export interface ProviderModelFactoryOptions {
  * (`xai.responses(id)`). Every other provider is a chat-completions client.
  *
  * A first half that is **not** one of the eleven provider ids names a *named credential*
- * instead (epic #245, A3a/A3b): an `azure` credential's model ids are `azure/<deployment>`,
- * and a `custom` one's are `custom/<model>` — the credential's type decides the client. The
- * credential's type is the discriminant, so a name nothing stores a credential for is still an
- * `UnsupportedProviderError` — the same ending as before, and the turn writes no span for it.
+ * instead (epic #245, A3a/A3b/A3c): an `azure` credential's model ids are `azure/<deployment>`,
+ * a `custom` one's are `custom/<model>` and a `bedrock` one's are `bedrock/<bedrock model id>`,
+ * and the credential's type decides the client. The credential's type is the discriminant, so a
+ * name nothing stores a credential for is still an `UnsupportedProviderError` — the same ending
+ * as before, and the turn writes no span for it.
  *
  * No `maxRetries`/`streamRetries` is configured here, because a provider client has neither:
  * both options live on the `streamText` call in {@link streamModelRequest}, which is the only
@@ -330,6 +384,14 @@ export function createProviderModelFactory(
     const id = modelId.slice(provider.length + 1)
     const client = providerClientFor(provider)
     if (client !== undefined) {
+      // A fixed provider id is authenticated with an `api_key` credential and nothing else: the
+      // API refuses to store any other type under one, so a credential that is not one here is
+      // a configuration the server cannot produce. It is answered like an unsupported provider
+      // rather than by reaching for a key this credential does not have — a blank one would be
+      // worse than an error, since the provider package would read its own environment.
+      if (credential.type !== 'api_key') {
+        throw new UnsupportedProviderError(provider)
+      }
       return client.model({ apiKey: credential.apiKey, baseURL: client.baseURL })(id)
     }
     if (credential.type === 'azure_openai') {
@@ -360,6 +422,32 @@ export function createProviderModelFactory(
         // the server's self-host setting turned that off (`createOpenAICompatibleFetch`).
         fetch: customGuard,
       }).chatModel(id)
+    }
+
+    if (credential.type === 'bedrock') {
+      // Every setting the provider needs is passed explicitly, so nothing is read from the
+      // environment (epic #65, A5): the region, both keys and the session token would each fall
+      // back to their `AWS_*` variable otherwise, and the base URL to
+      // `AWS_ENDPOINT_URL_BEDROCK_RUNTIME` — a request a deployment could redirect, and one the
+      // decoy test in `bedrock-model.test.ts` pins.
+      //
+      // `apiKey: ''` is the one setting that looks like a no-op and is not. The provider treats
+      // a non-blank `apiKey` (or `AWS_BEARER_TOKEN_BEDROCK`) as "authenticate with a bearer
+      // token" and skips SigV4 entirely; an explicit empty string is a *string*, so the provider
+      // sees a setting rather than an absent one and never consults that variable — an empty
+      // bearer token is not a credential, so the client stays on the SigV4 path with the user's
+      // stored keys. Without it, a deployment with `AWS_BEARER_TOKEN_BEDROCK` in its environment
+      // would silently authenticate every Bedrock request with a token no user saved.
+      return createAmazonBedrock({
+        region: credential.region,
+        accessKeyId: credential.accessKeyId,
+        secretAccessKey: credential.secretAccessKey,
+        // Both keys are explicit, so the provider uses this field alone — an absent token stays
+        // absent and `AWS_SESSION_TOKEN` is never read.
+        ...(credential.sessionToken === undefined ? {} : { sessionToken: credential.sessionToken }),
+        apiKey: '',
+        baseURL: bedrockRuntimeBaseUrl(credential.region),
+      })(id)
     }
     throw new UnsupportedProviderError(provider)
   }
@@ -407,16 +495,25 @@ export function isUsableCredential(
   if (credential.type === 'openai_compatible') {
     return credential.baseUrl.trim().length > 0
   }
-  if (credential.apiKey.trim().length === 0) {
-    return false
+  if (credential.type === 'azure_openai') {
+    // An Azure credential with no endpoint could not build a request at all. It is refused here
+    // rather than at the factory, so the turn ends with `missing_provider_credential` — the
+    // ending that says "save one" — instead of a span that fails on a malformed URL.
+    return credential.apiKey.trim().length > 0 && credential.endpoint.trim().length > 0
   }
-  // An Azure credential with no endpoint could not build a request at all. It is refused here
-  // rather than at the factory, so the turn ends with `missing_provider_credential` — the
-  // ending that says "save one" — instead of a span that fails on a malformed URL.
-  if (credential.type === 'azure_openai' && credential.endpoint.trim().length === 0) {
-    return false
+  if (credential.type === 'bedrock') {
+    // Neither half of a SigV4 signature may be blank, and neither may the region of the host it
+    // signs for. A blank half is not merely useless: `@ai-sdk/amazon-bedrock` resolves each of
+    // its three `AWS_*` variables only when the matching setting is absent, and an empty string
+    // is the shape that could slip past that test — the same danger the blank api_key rule is
+    // about. A session token is genuinely optional, so an absent one is fine.
+    return (
+      credential.accessKeyId.trim().length > 0 &&
+      credential.secretAccessKey.trim().length > 0 &&
+      credential.region.trim().length > 0
+    )
   }
-  return true
+  return credential.apiKey.trim().length > 0
 }
 
 /**

@@ -178,8 +178,8 @@ export function makeProviderCredential(
   }
   // `ProviderCredential` is a discriminated union, and the fixture's caller decides which
   // variant it means: a `type` and its own `details` are consistent by construction, so the
-  // spread is the union's own shape (the wide `ProviderCredentialMetadata`) narrowed by `type`.
-  return { ...credential, ...overrides }
+  // wide `ProviderCredentialMetadata` the spread builds is the union the caller asked for.
+  return { ...credential, ...overrides } as ProviderCredential
 }
 
 /**

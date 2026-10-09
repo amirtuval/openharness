@@ -1,4 +1,4 @@
-import { credentialDisplayName, type Client } from '@openharness/client'
+import { credentialDisplayName, credentialFacts, type Client } from '@openharness/client'
 import type { ProviderCredential } from '@openharness/protocol'
 import { Box, render, Text, useApp } from 'ink'
 import { useCallback } from 'react'
@@ -30,6 +30,8 @@ import { pad } from './list'
 /** How wide the credential-name column gets before it is cut; the other columns are short. */
 const NAME_WIDTH = 18
 const TYPE_WIDTH = 8
+/** Wide enough for AWS's longest region id (`ap-southeast-2`, `mx-central-1`). */
+const FACTS_WIDTH = 15
 const LAST4_WIDTH = 6
 
 /** `oh providers list` — the caller's stored keys, oldest first. */
@@ -222,11 +224,15 @@ function isOutcome(result: unknown): result is ProvidersAddOutcome {
 }
 
 /**
- * One line per stored credential: display name, credential type, last four, when it was added.
+ * One line per stored credential: display name, credential type, what else it reports, last
+ * four, when it was added.
  *
  * The order is the server's (oldest first). The display name is the provider's, the credential
  * type's where the name is that type's default (`azure`), or the reader's own label otherwise —
- * so two Azure credentials are told apart by the names they were saved under.
+ * so two Azure credentials are told apart by the names they were saved under. The extra column
+ * is the per-type non-secret facts (#245, A3c) — a Bedrock credential's region — because
+ * `last4` alone cannot tell two credentials of one type apart when they are two accounts or two
+ * regions of one account.
  */
 export function formatCredentials(credentials: readonly ProviderCredential[]): readonly string[] {
   if (credentials.length === 0) {
@@ -237,6 +243,7 @@ export function formatCredentials(credentials: readonly ProviderCredential[]): r
     [
       pad(credentialDisplayName(credential), NAME_WIDTH),
       pad(credential.type, TYPE_WIDTH),
+      pad(credentialFacts(credential).join(', '), FACTS_WIDTH),
       // A custom OpenAI-compatible credential may carry no key at all (#249); its `last4` is
       // empty, and `…` alone would read as a key that failed to load rather than one a local
       // endpoint does not need.

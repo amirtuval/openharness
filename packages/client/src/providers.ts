@@ -1,6 +1,8 @@
 import {
   CREDENTIAL_TYPES,
   PROVIDERS as SHARED_PROVIDERS,
+  bedrockRegionOf,
+  type ProviderCredentialDetails,
   type ProviderCredentialType,
   type ProviderId,
 } from '@openharness/protocol'
@@ -112,11 +114,11 @@ export function providerName(id: string): string {
  * One thing a reader may add in an Add-provider surface: a fixed provider, or a **named**
  * credential type (epic #245, A3a).
  *
- * The eleven providers are one each, under their own id. A named type — today Azure OpenAI —
- * may be added more than once, each under a name the reader chooses or the type's default
- * (`azure`), and that name is the `provider` half of the model ids it serves. `named` is the
- * one thing a form needs to know beyond the tile's text: only a named target asks for a name,
- * and only when one of that type is already stored.
+ * The eleven providers are one each, under their own id. A named type — Azure OpenAI, Amazon
+ * Bedrock — may be added more than once, each under a name the reader chooses or the type's
+ * default (`azure`, `bedrock`), and that name is the `provider` half of the model ids it
+ * serves. `named` is the one thing a form needs to know beyond the tile's text: only a named
+ * target asks for a name, and only when one of that type is already stored.
  */
 export interface CredentialTarget {
   /** The credential name a first save uses: a fixed provider id, or the type's default name. */
@@ -204,4 +206,46 @@ export function credentialTargetFor(credential: {
     return CREDENTIAL_TARGETS.find((target) => target.name === credential.name)
   }
   return CREDENTIAL_TARGETS.find((target) => target.named && target.credential === credential.type)
+}
+
+/** What a list row reads beyond a credential's name and `last4`. */
+interface CredentialFacts {
+  readonly type: ProviderCredentialType
+  readonly details?: ProviderCredentialDetails | undefined
+}
+
+/**
+ * The non-secret facts a credential's row shows beside its name, in the order every side lists
+ * them (epic #245, A3c).
+ *
+ * `last4` tells two credentials of one type apart but not which service one *is*: a Bedrock key
+ * belongs to a region, and an account with `bedrock` and `bedrock-us` needs to see which is
+ * which. The facts come from the credential's `details` — the per-type object the server
+ * reports and never the secret — and a type with nothing to add returns none.
+ *
+ * The table is a `Record<ProviderCredentialType, …>` on purpose: a new credential type is a
+ * compile error here until someone decides what its row says, in one place both frontends read,
+ * rather than a row that silently shows nothing.
+ */
+const CREDENTIAL_FACT_RENDERERS: Readonly<
+  Record<ProviderCredentialType, (credential: CredentialFacts) => readonly string[]>
+> = {
+  api_key: () => [],
+  // Azure's endpoint is not on the wire yet; when it is, this is where its host goes.
+  azure_openai: () => [],
+  // A custom endpoint's public fact is its base URL's host, which the web list shows as the
+  // row's endpoint; the CLI's extra column is for facts `last4` cannot carry, and this one is
+  // already rendered. Its `details` is typed for that type, so it is read where it is shown.
+  openai_compatible: () => [],
+  bedrock: (credential) => {
+    const details = credential.details
+    const region =
+      details !== undefined && 'region' in details ? bedrockRegionOf(details) : undefined
+    return region === undefined ? [] : [region]
+  },
+}
+
+/** The facts one stored credential's row shows beside its name and `last4`. */
+export function credentialFacts(credential: CredentialFacts): readonly string[] {
+  return CREDENTIAL_FACT_RENDERERS[credential.type](credential)
 }

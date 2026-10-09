@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   ApiErrorBodySchema,
   EVENT_TYPES,
+  type BedrockRegion,
   type ProviderCredential,
   type SessionErrorEvent,
 } from '@openharness/protocol'
@@ -15,6 +16,7 @@ import {
   personFor,
   readLog,
   seedAzureCredential,
+  seedBedrockCredential,
   seedProviderCredential,
   waitForTurnEnd,
   withDatabaseClient,
@@ -366,6 +368,76 @@ describe('provider credentials (A5)', () => {
     // Nothing about the credential leaks into the catalog: not the key, not the endpoint.
     expect(JSON.stringify(catalog)).not.toContain('openai.azure.com')
     expect(JSON.stringify(catalog)).not.toContain(MIDDLE)
+  })
+
+  it('refuses a bedrock region AWS does not serve, and a name a provider owns (#245, A3c)', async () => {
+    const server = await harness.server()
+    const me = await person(server, 'bedrock-refusals')
+    // The cast is the point of the test: these are the strings a client should never send, and
+    // the request schema is what refuses them.
+    const bedrock = (region: string) => ({
+      type: 'bedrock' as const,
+      access_key_id: 'AKIAIOSFODNN7EXAMPLE',
+      secret_access_key: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+      region: region as BedrockRegion,
+    })
+
+    // The region goes into an AWS hostname, so it is validated against the protocol's list
+    // before anything is called: a region that is not one is the schema's 400, not a request
+    // to a host nobody chose.
+    for (const region of ['us-east-3', 'evil.example', 'us-gov-west-1']) {
+      const refused = await errorOf(() =>
+        me.client.providerCredentials.put('bedrock', bedrock(region)),
+      )
+      expect([region, refused.status]).toEqual([region, 400])
+      expect([region, refused.type]).toEqual([region, 'invalid_request_error'])
+      expect([region, refused.message.includes('AKIAIOSFODNN7EXAMPLE')]).toEqual([region, false])
+    }
+
+    // A named credential may not take a fixed provider id — it would make `openai/gpt-5`
+    // ambiguous between the provider and a Bedrock credential that called itself openai.
+    const taken = await errorOf(() =>
+      me.client.providerCredentials.put('openai', bedrock('us-east-1')),
+    )
+    expect([taken.status, taken.type]).toEqual([400, 'invalid_request_error'])
+
+    // Nothing was stored by any of them.
+    await expect(me.client.providerCredentials.list()).resolves.toEqual({ data: [] })
+  })
+
+  it('serves a seeded bedrock credential’s models from the registry, visibly (#245, A3c)', async () => {
+    const server = await harness.server()
+    const me = await person(server, 'bedrock-catalog')
+    await seedBedrockCredential(await harness.database(), {
+      userId: me.signedIn.user.id,
+      name: 'bedrock',
+      region: 'eu-west-1',
+      accessKeyId: 'AKIAIOSFODNN7EXAMPLE',
+      secretAccessKey: PLAINTEXT,
+    })
+
+    // AWS refuses the fake keys (or is unreachable), so the region's own list cannot be read —
+    // and the answer is the registry's Bedrock models, reported as a visible `fallback` (C3)
+    // exactly as an unreachable provider is for the eleven fixed ids. The suite is
+    // deterministic either way: a 403 and a transport failure both land here.
+    const catalog = await me.client.models.list()
+    expect(catalog.providers).toEqual([
+      expect.objectContaining({ provider: 'bedrock', status: 'fallback' }),
+    ])
+    expect(catalog.data.length).toBeGreaterThan(0)
+    expect(catalog.data.every((entry) => entry.provider === 'bedrock')).toBe(true)
+    // The ids are `<credential name>/<bedrock model id>` and the list is models.dev's Amazon
+    // Bedrock models, acknowledged to the model id and priced where the registry has a rate.
+    // No particular upstream id is asserted — the snapshot moves with models.dev — only that the
+    // join reached it: every entry carries the credential's own name, some entry is a family
+    // models.dev files under Bedrock, and the prices came with them.
+    expect(catalog.data.some((entry) => entry.id.startsWith('bedrock/anthropic.'))).toBe(true)
+    expect(catalog.data.some((entry) => entry.cost !== null)).toBe(true)
+    // Nothing about the credential leaks into the catalog: not the keys, not the name.
+    const serialized = JSON.stringify(catalog)
+    for (const secret of ['AKIAIOSFODNN7EXAMPLE', MIDDLE]) {
+      expect(serialized).not.toContain(secret)
+    }
   })
 
   it('answers 404 in the envelope for a route that does not exist', async () => {

@@ -27,10 +27,11 @@ import type { Logger } from './types'
  * this half never sees the database.
  *
  * A credential's **name** is the `provider` half of the model ids it serves: `anthropic` for a
- * fixed provider, `azure` or `azure-eu` for a named one. The **payload** sealed is whatever
- * the protocol's PUT body carries for its type, so adding a credential type is a schema
- * change plus the one place below that turns it into a {@link ModelCredential} — never a new
- * column.
+ * fixed provider, `azure` or `bedrock-us` for a named one. The **payload** sealed is whatever
+ * the protocol's PUT body carries for its type, so adding a credential type is a schema change
+ * plus the two places below that turn it into the metadata a list shows
+ * ({@link credentialDetails}) and the {@link ModelCredential} a request runs under — never a
+ * new column, since the details a type reports ride in one shared JSON column.
  */
 
 /** The AAD a credential is bound to: its owner and its name, and nothing else. */
@@ -73,21 +74,24 @@ export function credentialUpsert(
     name: input.name,
     type: input.body.type,
     sealed: { ...sealed },
-    last4: lastFour(secretOf(input.body)),
     ...(details === undefined ? {} : { details }),
+    last4: lastFour(secretOf(input.body)),
     validatedAt,
   }
 }
 
 /**
- * The secret a payload carries — what `last4` is the last four characters of.
+ * The secret a payload carries — what `last4` is the last four characters of (epic #245, A3c).
  *
- * A custom OpenAI-compatible credential's key is optional (#249, A3b), so a keyless one stores
- * an empty `last4`: the settings list tells "no key" from a key by exactly that, and nothing
- * else about the secret is kept.
+ * An `api_key` credential has one secret and a Bedrock credential has three, of which the
+ * access key ID is the one a reader recognises ("which of my keys is this?") and the only one
+ * that may be shown in part: a secret access key's last four characters would be four more
+ * characters of a secret. A session token is never the identifying half of anything. A custom
+ * OpenAI-compatible credential's key is optional (#249, A3b), so a keyless one stores an empty
+ * `last4`: the settings list tells "no key" from a key by exactly that.
  */
 function secretOf(body: PutProviderCredentialRequest): string {
-  return body.api_key ?? ''
+  return body.type === 'bedrock' ? body.access_key_id : (body.api_key ?? '')
 }
 
 /**
@@ -135,6 +139,17 @@ export function modelCredential(body: PutProviderCredentialRequest): ModelCreden
     // The key is optional (#249, A3b); a keyless endpoint is authenticated by nothing, and
     // the brain's `isUsableCredential` asks this type for a base URL rather than a key.
     return { type: 'openai_compatible', apiKey: body.api_key ?? '', baseUrl: body.base_url }
+  }
+  if (body.type === 'bedrock') {
+    return {
+      type: 'bedrock',
+      accessKeyId: body.access_key_id,
+      secretAccessKey: body.secret_access_key,
+      // An absent session token stays absent: a long-lived IAM user key has none, and an
+      // explicit `undefined` is what tells the provider package not to look for one.
+      ...(body.session_token === undefined ? {} : { sessionToken: body.session_token }),
+      region: body.region,
+    }
   }
   return { type: 'api_key', apiKey: body.api_key }
 }

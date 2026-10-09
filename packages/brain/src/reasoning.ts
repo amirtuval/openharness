@@ -178,6 +178,15 @@ export const CREDENTIAL_TYPE_REASONING: Readonly<Record<NamedCredentialType, Pro
     // default), and a level is sent only where a host's resolver grants one.
     options: (effort) => ({ openaiCompatible: { reasoningEffort: effort } }),
   },
+  bedrock: {
+    // `createAmazonBedrock(...)(id)` reads `providerOptions.bedrock` (and, first, the
+    // `amazonBedrock` alias), whose `reasoningConfig.maxReasoningEffort` it maps onto the right
+    // vendor field for the model — Anthropic's `output_config.effort`, an OpenAI model's
+    // `reasoning_effort`, the generic `reasoningConfig` — checked against
+    // `@ai-sdk/amazon-bedrock@5.0.111`. Its levels are `low | medium | high | xhigh | max`, so
+    // our three need no clamp.
+    options: (effort) => ({ bedrock: { reasoningConfig: { maxReasoningEffort: effort } } }),
+  },
 }
 
 /** What one model request does with the effort the log asked for. */

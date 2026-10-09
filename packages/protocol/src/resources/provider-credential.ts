@@ -1,5 +1,6 @@
 import { z } from 'zod'
 
+import { BEDROCK_REGIONS } from '../bedrock'
 import { TimestampSchema } from '../common'
 import { ProviderCredentialIdSchema } from '../ids'
 
@@ -30,11 +31,16 @@ import { ProviderCredentialIdSchema } from '../ids'
  *
  * `api_key` is one secret, for the providers the model factory authenticates that way (OpenAI,
  * Anthropic, Google AI Studio, OpenRouter, Groq, …) — the eleven fixed provider ids. The record
- * is a discriminated union on `type`, so `aws` and `gcp_service_account` later become new types
- * with their own payload fields rather than a new design; `azure_openai` (epic #245, A3a) and
- * `openai_compatible` (epic #245, A3b) are the first two such types.
+ * is a discriminated union on `type`, so `gcp_service_account` later becomes a new type with its
+ * own payload fields rather than a new design; `azure_openai` (epic #245, A3a),
+ * `openai_compatible` (epic #245, A3b) and `bedrock` (epic #245, A3c) are the three such types.
  */
-export const ProviderCredentialTypeSchema = z.enum(['api_key', 'azure_openai', 'openai_compatible'])
+export const ProviderCredentialTypeSchema = z.enum([
+  'api_key',
+  'azure_openai',
+  'openai_compatible',
+  'bedrock',
+])
 
 export type ProviderCredentialType = z.infer<typeof ProviderCredentialTypeSchema>
 
@@ -72,9 +78,10 @@ export type OpenAICompatibleCredentialDetails = z.infer<
  * Every type's published details, as one union: what a credential store persists and hands back
  * (`UpsertCredentialInput.details`), where which type a value belongs to is the credential's own
  * `type` beside it. The wire — {@link ProviderCredentialSchema} — is where the union is keyed
- * per type; this is the storage-level spelling of the same values.
+ * per type; this is the storage-level spelling of the same values. A new type adds its details
+ * object to this union when it adds its variant there.
  */
-export type ProviderCredentialDetails = OpenAICompatibleCredentialDetails
+export type ProviderCredentialDetails = OpenAICompatibleCredentialDetails | BedrockCredentialDetails
 
 /** The fields every credential's metadata carries, whatever its type. */
 const ProviderCredentialMetadataBaseSchema = z.object({
@@ -121,6 +128,26 @@ export const OpenAICompatibleProviderCredentialMetadataSchema =
   })
 
 /**
+ * The public facts an Amazon Bedrock credential publishes (epic #245, A3c): its **region**.
+ *
+ * A Bedrock request is addressed by region, and one account's keys in one region is one
+ * credential — so `last4` alone leaves two Bedrock rows indistinguishable. The region is not a
+ * secret and is what a list shows (`BEDROCK_REGIONS` is the vocabulary the request validates
+ * against; a `details` read back is a string, the stored value).
+ */
+export const BedrockCredentialDetailsSchema = z.object({
+  region: z.string().min(1),
+})
+
+export type BedrockCredentialDetails = z.infer<typeof BedrockCredentialDetailsSchema>
+
+/** The `bedrock` metadata, with the region a list may show (#245, A3c). */
+export const BedrockProviderCredentialMetadataSchema = ProviderCredentialMetadataBaseSchema.extend({
+  type: z.literal('bedrock'),
+  details: BedrockCredentialDetailsSchema.optional(),
+})
+
+/**
  * A stored provider credential, as the API returns it: **metadata only**.
  *
  * The secret itself never appears here or anywhere else in a response — `last4` is what a UI
@@ -129,13 +156,14 @@ export const OpenAICompatibleProviderCredentialMetadataSchema =
  *
  * A **discriminated union on `type`**: each type carries exactly the public facts it publishes,
  * so `details` is typed for the type that has it — a base-URL host on a custom credential, a
- * region on a Bedrock one later — and a type with none carries no `details` key at all. That is
- * what keeps the JSON of the types that existed before this field byte-for-byte unchanged.
+ * region on a Bedrock one — and a type with none carries no `details` key at all. That is what
+ * keeps the JSON of the types that existed before this field byte-for-byte unchanged.
  */
 export const ProviderCredentialSchema = z.discriminatedUnion('type', [
   ApiKeyProviderCredentialMetadataSchema,
   AzureOpenAIProviderCredentialMetadataSchema,
   OpenAICompatibleProviderCredentialMetadataSchema,
+  BedrockProviderCredentialMetadataSchema,
 ])
 
 export type ProviderCredential = z.infer<typeof ProviderCredentialSchema>
@@ -249,6 +277,48 @@ export const OpenAICompatibleCredentialSchema = z.object({
 export type OpenAICompatibleCredential = z.infer<typeof OpenAICompatibleCredentialSchema>
 
 /**
+ * The `bedrock` form of {@link PutProviderCredentialRequestSchema} (epic #245, A3c).
+ *
+ * Amazon Bedrock authenticates with an IAM principal's static access keys, and a request is
+ * addressed by **region** — there is no endpoint to type, and no deployment to name: the
+ * catalog is the region's own `ListFoundationModels`, and a model id's second half is a Bedrock
+ * model id (`anthropic.claude-sonnet-4-20250514-v1:0`). The fields are therefore the three
+ * credentials SigV4 signs with, plus the region:
+ *
+ * - `access_key_id` — the access key ID (`AKIA…`). Sent once, stored encrypted, never returned;
+ *   only its last four characters come back, as `last4`.
+ * - `secret_access_key` — the secret. Write-only, exactly like the `api_key` form's.
+ * - `session_token` — the token temporary credentials (STS, SSO, an assumed role) carry, when
+ *   there is one. Optional: long-lived IAM user keys have none.
+ * - `region` — an AWS region from {@link BEDROCK_REGIONS}. Validated against that list, not
+ *   accepted as free text: the region is spliced into an AWS hostname, and a string that is not
+ *   a real region could not name one (`bedrock.ts` has the rule and the list).
+ *
+ * The whole payload is **sealed as one secret** — keys, token and region together. The region is
+ * not itself secret, but a credential is stored as the single JSON value its type parsed to, so
+ * there is one sealed blob per credential and no second place a field could live; the region
+ * also rides on the metadata as `details.region`, which is what a list shows.
+ *
+ * // extension: assume-role and instance-profile credentials are out of v1 (epic #245, decision
+ * M4). A role ARN is a different shape and a different signing path, and the save-time check
+ * cannot complete an `sts:AssumeRole` on a user's behalf without a trust relationship that says
+ * it may. Static keys are checked on save; a role would have to be checked by assuming it.
+ */
+export const BedrockCredentialSchema = z.object({
+  type: z.literal('bedrock'),
+  /** The IAM access key ID; `last4` is its last four characters. */
+  access_key_id: z.string().min(1),
+  /** The IAM secret access key. Sent once, stored encrypted, never returned. */
+  secret_access_key: z.string().min(1),
+  /** The session token temporary credentials carry; absent for long-lived IAM user keys. */
+  session_token: z.string().min(1).optional(),
+  /** The AWS region the credential runs in; one of {@link BEDROCK_REGIONS}. */
+  region: z.enum(BEDROCK_REGIONS),
+})
+
+export type BedrockCredential = z.infer<typeof BedrockCredentialSchema>
+
+/**
  * Body of `PUT /v1/provider-credentials/{name}`. Response: {@link ProviderCredentialSchema}.
  *
  * A discriminated union on `type`. The path's `name` is the credential's name — the provider
@@ -263,6 +333,7 @@ export const PutProviderCredentialRequestSchema = z.discriminatedUnion('type', [
   ApiKeyProviderCredentialSchema,
   AzureOpenAICredentialSchema,
   OpenAICompatibleCredentialSchema,
+  BedrockCredentialSchema,
 ])
 
 export type PutProviderCredentialRequest = z.infer<typeof PutProviderCredentialRequestSchema>
@@ -276,13 +347,17 @@ export type PutProviderCredentialRequest = z.infer<typeof PutProviderCredentialR
  * credential's stored `details` from the body it seals, and a client that fakes the server
  * (the web app's and the TUI's `@openharness/client/testing`) must produce the same answer.
  * Only facts safe to publish are read out — a custom base URL's **host**, never its path and
- * never any part of a key.
+ * never any part of a key, and a Bedrock credential's **region**, which rides on the row's
+ * `details` as `{ region }` and never the keys beside it.
  */
 export function credentialDetails(
   body: PutProviderCredentialRequest,
 ): ProviderCredentialDetails | undefined {
   if (body.type === 'openai_compatible') {
     return { base_url_host: new URL(body.base_url).host }
+  }
+  if (body.type === 'bedrock') {
+    return { region: body.region }
   }
   return undefined
 }

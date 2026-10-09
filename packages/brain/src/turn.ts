@@ -40,6 +40,7 @@ import {
 } from './log'
 import type { ModelFactory, ResolveCredential } from './model'
 import {
+  credentialSecrets,
   isUnsupportedProviderError,
   isUsableCredential,
   missingCredentialMessage,
@@ -48,7 +49,7 @@ import {
   ZERO_MODEL_USAGE,
 } from './model'
 import { planReasoning, type ReasoningSupportFor, requestedReasoningEffort } from './reasoning'
-import { redactSecret } from './redact'
+import { redactSecrets } from './redact'
 import type { RetryPolicy } from './retry'
 import { backoffDelay, resolveRetryPolicy } from './retry'
 
@@ -534,7 +535,7 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       // A provider that rejected the key may quote it back in the error text (a 401 naming
       // the key it did not like); it is scrubbed before the message reaches the log, and the
       // rest of what the provider said is kept.
-      const message = redactSecret(classification.message, credential.apiKey)
+      const message = redactSecrets(classification.message, credentialSecrets(credential))
       // Partial output is never stored, so the span end supersedes the chunks this attempt
       // streamed. The retry below mints a new message id and its own `event_start`.
       await append([

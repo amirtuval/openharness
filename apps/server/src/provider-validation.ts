@@ -1,6 +1,6 @@
 /**
  * Validating a provider credential with one cheap provider call (epic #65, A5; Azure: epic
- * #245 A3a).
+ * #245 A3a; Bedrock: A3c).
  *
  * A credential is checked on save: the server makes one cheap, authenticated call and stores
  * nothing unless it succeeds. Which call is a function of the credential's **type** —
@@ -13,19 +13,25 @@
  * - `openai_compatible`: one `GET {base_url}/models`, the same call the catalogue makes, sent
  *   through `safeFetch` — the base URL is the user's, and the answer both proves the endpoint
  *   (and key) and is exactly the list the credential will contribute.
+ * - `bedrock`: one `ListFoundationModels` read in the credential's region, SigV4-signed with the
+ *   user's keys. The host is derived from the region — there is no user-supplied URL and so
+ *   nothing for a guard to check — and the region itself was validated against the protocol's
+ *   list before this ran.
  *
  * The check is a real request to the provider, which is exactly why it is a seam
  * (`ProviderCredentialValidator`) the server's tests inject a fake into: no test should reach
  * a provider, and no test should need a real key.
  *
  * The validator never logs, echoes or includes a secret in an error message: a rejected
- * credential answers with the provider's status, not with what was sent.
+ * credential answers with the provider's status — and, for AWS, its own reason, scrubbed — not
+ * with what was sent.
  *
  * The `api_key` call goes through the provider HTTP client the model catalogue uses
  * (`catalog/provider-fetch.ts`): the one outbound path that honors the egress-proxy variables
  * a deployment sets, so saving a key works behind a proxy exactly as listing models does. An
  * Azure endpoint goes through `safeFetch`, which reads the same variables (see that module)
- * and additionally refuses every address a user-supplied URL must not reach.
+ * and additionally refuses every address a user-supplied URL must not reach. A Bedrock read
+ * signs first and then goes through the same provider HTTP client as `api_key`.
  */
 
 import {
@@ -33,7 +39,13 @@ import {
   safeFetch as defaultSafeFetch,
   type SafeFetchOptions,
 } from '@openharness/hands'
-import { azureBaseUrl, openAICompatibleBaseUrl } from '@openharness/brain'
+import {
+  azureBaseUrl,
+  bedrockControlPlaneUrl,
+  openAICompatibleBaseUrl,
+  redactSecrets,
+  signBedrockRequest,
+} from '@openharness/brain'
 import {
   PROVIDER_IDS,
   type ProviderId,
@@ -125,6 +137,9 @@ export function createProviderCredentialValidator(
     }
     if (body.type === 'openai_compatible') {
       return validateOpenAICompatibleCredential(name, body, guard, allowPrivate)
+    }
+    if (body.type === 'bedrock') {
+      return validateBedrockCredential(name, body, fetch)
     }
     return validateApiKey(name, body.api_key, fetch)
   }
@@ -258,6 +273,105 @@ async function validateOpenAICompatibleCredential(
   }
   // The body is drained so the connection can be released; nothing in it is read or stored.
   await response.text()
+}
+
+/**
+ * One `ListFoundationModels` read in the credential's region, proving the access keys (epic
+ * #245, A3c).
+ *
+ * This is the control plane — `bedrock.<region>.amazonaws.com` — not the runtime the model
+ * requests go to: `ListFoundationModels` is what tells whether the keys and the region work
+ * together, it answers in a page of small JSON rather than a model call, and it is the same
+ * call the catalogue makes, so a credential that saves can also list. AWS's own reason for a
+ * refusal is what the caller sees ("the security token included in the request is invalid"),
+ * scrubbed of every secret before it is, because the message travels into a 422 body.
+ *
+ * The request is SigV4-signed by `@openharness/brain` (the same `aws4fetch` signer the model
+ * path's provider package uses) and sent through the server's provider client, so a Bedrock
+ * check reaches AWS the way every other provider call does, egress proxy included.
+ *
+ * There is **no SSRF guard here and none is needed**: the host is derived from the region, and
+ * the region was validated against the protocol's list of Bedrock regions before this ran, so
+ * there is no user-supplied address for a guard to check.
+ */
+async function validateBedrockCredential(
+  name: string,
+  body: Extract<PutProviderCredentialRequest, { type: 'bedrock' }>,
+  fetch: ProviderFetch,
+): Promise<void> {
+  const secrets = [body.access_key_id, body.secret_access_key, body.session_token]
+  const signed = await signBedrockRequest(
+    {
+      type: 'bedrock',
+      accessKeyId: body.access_key_id,
+      secretAccessKey: body.secret_access_key,
+      ...(body.session_token === undefined ? {} : { sessionToken: body.session_token }),
+      region: body.region,
+    },
+    bedrockControlPlaneUrl(body.region, FOUNDATION_MODELS_PATH),
+  )
+  let response: ProviderResponse
+  try {
+    response = await fetch(signed.url, {
+      headers: signed.headers,
+      signal: AbortSignal.timeout(VALIDATION_TIMEOUT_MS),
+    })
+  } catch (error) {
+    throw new Error(
+      `could not reach Bedrock in ${body.region} to validate the credential: ` +
+        (error instanceof Error ? error.message : 'the request failed'),
+      { cause: error },
+    )
+  }
+  if (!response.ok) {
+    // AWS's reason, bounded and scrubbed: it names what was wrong with the request (an invalid
+    // key, a region the principal cannot use) without ever echoing a secret.
+    const reason = redactSecrets(await awsReason(response), secrets)
+    throw new Error(
+      `Bedrock in ${body.region} answered ${response.status} for ListFoundationModels` +
+        (reason === '' ? '; the credential was rejected' : `: ${reason}`),
+    )
+  }
+  // The body is drained so the connection can be released; the model list it carries is the
+  // catalogue's to read, not this call's.
+  await response.text()
+}
+
+/** What the validating read asks for: on-demand, text-output models — the catalogue's filter. */
+const FOUNDATION_MODELS_PATH = '/foundation-models?byOutputModality=TEXT&byInferenceType=ON_DEMAND'
+
+/** How much of AWS's own message an error carries. */
+const AWS_REASON_LIMIT = 200
+
+/**
+ * AWS's reason for a refusal, from either envelope it uses.
+ *
+ * The JSON protocol answers `{ message }`, and the query-ish protocol around it `{ Message }`;
+ * a body that is neither (an XML error, an HTML proxy page) is passed through as trimmed text,
+ * so a refusal always says something rather than nothing.
+ */
+async function awsReason(response: ProviderResponse): Promise<string> {
+  let body: string
+  try {
+    body = await response.text()
+  } catch {
+    return ''
+  }
+  try {
+    const parsed: unknown = JSON.parse(body)
+    if (typeof parsed === 'object' && parsed !== null) {
+      const record = parsed as Record<string, unknown>
+      for (const key of ['message', 'Message']) {
+        const value = record[key]
+        if (typeof value === 'string' && value.trim() !== '') {
+          return value.trim().slice(0, AWS_REASON_LIMIT)
+        }
+      }
+    }
+  } catch {
+    // Not JSON: fall through to the trimmed text below.
+  }
+  return body.trim().replace(/\s+/g, ' ').slice(0, AWS_REASON_LIMIT)
 }
 
 /** The api-version the validating call uses: Azure's current `v1` API, what the model path uses. */

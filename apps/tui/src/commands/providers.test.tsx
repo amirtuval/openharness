@@ -58,6 +58,30 @@ describe('formatCredentials', () => {
     expect(lines.join('\n')).not.toContain(KEY)
   })
 
+  it('shows the per-type facts beside the name — a bedrock credential’s region', () => {
+    // `last4` cannot tell two credentials of one type apart when they are two accounts or two
+    // regions of one account, so the row carries the non-secret facts too (#245, A3c).
+    const lines = formatCredentials([
+      makeProviderCredential({
+        name: 'bedrock',
+        type: 'bedrock',
+        details: { region: 'eu-west-1' },
+      }),
+      makeProviderCredential({
+        name: 'bedrock-us',
+        type: 'bedrock',
+        details: { region: 'us-east-2' },
+      }),
+      makeProviderCredential({ name: 'anthropic' }),
+    ])
+    expect(lines[0]).toContain('Amazon Bedrock')
+    expect(lines[0]).toContain('eu-west-1')
+    expect(lines[1]).toContain('bedrock-us')
+    expect(lines[1]).toContain('us-east-2')
+    // A credential whose type reports nothing has an empty column, not an invented one.
+    expect(lines[2]).not.toContain('eu-west-1')
+  })
+
   it('falls back to the router id for a provider the metadata list does not carry', () => {
     const [line] = formatCredentials([makeProviderCredential({ name: 'acme' })])
     expect(line).toContain('acme')

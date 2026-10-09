@@ -52,6 +52,19 @@ describe('CREDENTIAL_TYPES', () => {
     expect(defaultCredentialName('openai_compatible')).toBe('custom')
   })
 
+  it('carries bedrock with a display name, a default name and its models.dev key', () => {
+    expect(credentialTypeInfo('bedrock')).toEqual({
+      type: 'bedrock',
+      name: 'Amazon Bedrock',
+      defaultName: 'bedrock',
+      // models.dev files Bedrock's models under the product's full name.
+      modelsDevKey: 'amazon-bedrock',
+      keyUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials',
+    })
+    expect(credentialTypeName('bedrock')).toBe('Amazon Bedrock')
+    expect(defaultCredentialName('bedrock')).toBe('bedrock')
+  })
+
   it('has no facts for api_key — its name is always the fixed provider id', () => {
     expect(credentialTypeInfo('api_key')).toBeUndefined()
     expect(credentialTypeName('api_key')).toBeUndefined()

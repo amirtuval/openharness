@@ -41,6 +41,7 @@ export {
   CREDENTIAL_TARGETS,
   PROVIDERS,
   credentialDisplayName,
+  credentialFacts,
   credentialTargetFor,
   providerInfo,
   providerName,

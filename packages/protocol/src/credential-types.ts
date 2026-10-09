@@ -50,8 +50,8 @@ export interface CredentialTypeDefinition {
 }
 
 /**
- * The named credential types, in the order every side lists them. Today: Azure OpenAI and a
- * custom OpenAI-compatible endpoint.
+ * The named credential types, in the order every side lists them. Today: Azure OpenAI, a
+ * custom OpenAI-compatible endpoint and Amazon Bedrock.
  *
  * `credential-types.test.ts` holds this list against the request union's members, so a type
  * added to the schema without its facts here — or the reverse — fails a named test rather than
@@ -74,6 +74,16 @@ const CREDENTIAL_TYPE_DEFINITIONS = [
     defaultName: 'custom',
     // No `modelsDevKey`: the base URL is the user's, so there is no single models.dev provider
     // to file its models under. No `keyUrl`: a self-hosted endpoint has no console to link to.
+  },
+  {
+    type: 'bedrock',
+    name: 'Amazon Bedrock',
+    defaultName: 'bedrock',
+    // models.dev files Bedrock under the full product name, `amazon-bedrock`.
+    modelsDevKey: 'amazon-bedrock',
+    // IAM's Security credentials page: the documented place an access key is created, and the
+    // one page of the IAM console a reader with no key yet needs. Base URL, not a per-key path.
+    keyUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials',
   },
 ] as const satisfies readonly CredentialTypeDefinition[]
 

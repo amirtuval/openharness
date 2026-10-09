@@ -4,6 +4,7 @@
  *
  * Nothing here is exported from `src/index.ts`, so none of it ships.
  */
+export * from './bedrock-stream'
 export * from './harness'
 export * from './model'
 export * from './postgres'

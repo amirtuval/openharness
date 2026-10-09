@@ -387,3 +387,98 @@ describe('ProviderSetup — the custom OpenAI-compatible form (#249, A3b)', () =
     expect(data.map((credential) => credential.name).sort()).toEqual(['custom', 'my-local'])
   })
 })
+
+describe('ProviderSetup — the bedrock form (#245, A3c)', () => {
+  it('offers the region as a list, and saves the chosen one with the keys', async () => {
+    const setup = renderSetup({ provider: 'bedrock' })
+
+    await waitForScreen(setup, 'Region')
+    // The region is a list, not a box: the default is highlighted and the list is the
+    // protocol's, so a typed region could never name a host that does not exist.
+    await waitForFrame(setup, 'us-east-1')
+    expect(frameOf(setup)).toContain('❯ us-east-1')
+    expect(frameOf(setup)).toContain('eu-west-1')
+
+    pressKey(setup, 'down')
+    pressKey(setup, 'down')
+    // The list is the protocol's order, so two rows down from `us-east-1` is `us-west-1`.
+    await waitForFrame(setup, '❯ us-west-1')
+    pressKey(setup, 'enter')
+
+    await waitForScreen(setup, 'Access key ID')
+    typeText(setup, 'AKIAIOSFODNN7EXAMPLE')
+    pressKey(setup, 'enter')
+
+    await waitForScreen(setup, 'Secret access key')
+    typeText(setup, 'wJalrXUtnFEMI-K7MDENG')
+    pressKey(setup, 'enter')
+
+    // The token is optional: Enter alone skips it, and the field is masked like the secret it
+    // is — the frame holds a mask, never the characters.
+    await waitForScreen(setup, 'Session token')
+    pressKey(setup, 'enter')
+
+    await waitFor(() => setup.saved.length === 1)
+    expect(setup.saved).toEqual(['bedrock'])
+    const { data } = await setup.fake.providerCredentials.list()
+    expect(data).toEqual([
+      expect.objectContaining({
+        type: 'bedrock',
+        name: 'bedrock',
+        last4: 'MPLE',
+        details: { region: 'us-west-1' },
+      }),
+    ])
+    // Nothing a secret was typed into appears in the frame — the mask is all that is drawn.
+    expect(frameOf(setup)).not.toContain('wJalrXUtnFEMI-K7MDENG')
+  })
+
+  it('sends a typed session token, and keeps it out of the frame', async () => {
+    const setup = renderSetup({ provider: 'bedrock' })
+
+    await waitForScreen(setup, 'Region')
+    pressKey(setup, 'enter')
+    await waitForScreen(setup, 'Access key ID')
+    typeText(setup, 'AKIAIOSFODNN7EXAMPL2')
+    pressKey(setup, 'enter')
+    await waitForScreen(setup, 'Secret access key')
+    typeText(setup, 'wJalrXUtnFEMI-K7MDENG')
+    pressKey(setup, 'enter')
+    await waitForScreen(setup, 'Session token')
+    typeText(setup, 'FwoGZXIvYXdzEBYaD-secret-token')
+    // Masked: the token is a secret too, so no frame holds it.
+    expect(frameOf(setup)).not.toContain('FwoGZXIvYXdzEBYaD-secret-token')
+    pressKey(setup, 'enter')
+
+    await waitFor(() => setup.saved.length === 1)
+    const { data } = await setup.fake.providerCredentials.list()
+    expect(data[0]).toMatchObject({ name: 'bedrock', details: { region: 'us-east-1' } })
+  })
+
+  it('asks for a name for a second credential, and lists each one’s region', async () => {
+    const setup = renderSetup({ provider: 'bedrock', stored: ['bedrock'] })
+
+    await waitForScreen(setup, 'Name (its models will be bedrock/<model>)')
+    typeText(setup, 'bedrock-us')
+    pressKey(setup, 'enter')
+    await waitForScreen(setup, 'Region')
+    pressKey(setup, 'down')
+    pressKey(setup, 'enter')
+    await waitForScreen(setup, 'Access key ID')
+    typeText(setup, 'AKIAIOSFODNN7EXAMPL3')
+    pressKey(setup, 'enter')
+    await waitForScreen(setup, 'Secret access key')
+    typeText(setup, 'wJalrXUtnFEMI-K7MDENG')
+    pressKey(setup, 'enter')
+    await waitForScreen(setup, 'Session token')
+    pressKey(setup, 'enter')
+
+    await waitFor(() => setup.saved.length === 1)
+    expect(setup.saved).toEqual(['bedrock-us'])
+    const { data } = await setup.fake.providerCredentials.list()
+    expect(data.map((entry) => entry.name).sort()).toEqual(['bedrock', 'bedrock-us'])
+    expect(data.find((entry) => entry.name === 'bedrock-us')).toMatchObject({
+      details: { region: 'us-east-2' },
+    })
+  })
+})
