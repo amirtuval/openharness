@@ -33,6 +33,12 @@ export interface CredentialTypeDefinition {
    * `azure-eu` credential still reads models.dev's single `azure` entry.
    */
   readonly modelsDevKey: string
+  /**
+   * Where a reader creates the secret. Opened in a new tab, and never a page whose path is a
+   * guess — the same rule the provider list's `keyUrl` follows. A named type talks to a
+   * service the reader reaches through its own console, so this is that console's entry page.
+   */
+  readonly keyUrl: string
 }
 
 /**
@@ -49,6 +55,9 @@ export const CREDENTIAL_TYPES = [
     defaultName: 'azure',
     // models.dev files Azure OpenAI under `azure`.
     modelsDevKey: 'azure',
+    // The Azure portal's home: the resource's own page is under a subscription and a resource
+    // group, so its path is a guess and the portal root is the honest link.
+    keyUrl: 'https://portal.azure.com/',
   },
 ] as const satisfies readonly CredentialTypeDefinition[]
 

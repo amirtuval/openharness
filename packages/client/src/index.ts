@@ -37,8 +37,15 @@ export type { ModelsResource } from './resources/models'
 export type { PreferencesResource } from './resources/preferences'
 export type { UsageResource } from './resources/usage'
 
-export { PROVIDERS, providerInfo, providerName } from './providers'
-export type { ProviderInfo } from './providers'
+export {
+  CREDENTIAL_TARGETS,
+  PROVIDERS,
+  credentialDisplayName,
+  credentialTargetFor,
+  providerInfo,
+  providerName,
+} from './providers'
+export type { CredentialTarget, ProviderInfo } from './providers'
 
 export { DeviceLoginError, OPENHARNESS_CLI_CLIENT_ID } from './resources/auth'
 export type { AuthResource, DeviceLoginStart, PollDeviceLoginOptions } from './resources/auth'

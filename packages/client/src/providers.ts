@@ -1,4 +1,5 @@
 import {
+  CREDENTIAL_TYPES,
   PROVIDERS as SHARED_PROVIDERS,
   type ProviderCredentialType,
   type ProviderId,
@@ -105,4 +106,98 @@ export function providerInfo(id: string): ProviderInfo | undefined {
  */
 export function providerName(id: string): string {
   return providerInfo(id)?.name ?? id
+}
+
+/**
+ * One thing a reader may add in an Add-provider surface: a fixed provider, or a **named**
+ * credential type (epic #245, A3a).
+ *
+ * The eleven providers are one each, under their own id. A named type — today Azure OpenAI —
+ * may be added more than once, each under a name the reader chooses or the type's default
+ * (`azure`), and that name is the `provider` half of the model ids it serves. `named` is the
+ * one thing a form needs to know beyond the tile's text: only a named target asks for a name,
+ * and only when one of that type is already stored.
+ */
+export interface CredentialTarget {
+  /** The credential name a first save uses: a fixed provider id, or the type's default name. */
+  readonly name: string
+  /** What a reader calls it. */
+  readonly displayName: string
+  /** Which form collects it — the key of the frontends' form table (#201, X6). */
+  readonly credential: ProviderCredentialType
+  /** Where a reader creates the secret. Opened in a new tab. */
+  readonly keyUrl: string
+  /** Whether the reader may keep more than one, each under a name they choose. */
+  readonly named: boolean
+  /** The free-tier hint, where the target has one (X8). */
+  readonly freeTier?: string
+  /** The key-format hint for an input's placeholder, where the provider has a distinctive one. */
+  readonly keyHint?: string
+}
+
+/**
+ * Everything the Add-provider surfaces offer, in order: the eleven providers (the shared
+ * list's order) and then the named credential types.
+ *
+ * A tile is drawn per entry, and which form collects the secret is
+ * {@link CredentialTarget.credential} — so a new credential type with no form is a compile
+ * error in the frontend's form table rather than a tile that does nothing.
+ */
+export const CREDENTIAL_TARGETS: readonly CredentialTarget[] = [
+  ...PROVIDERS.map((provider) => ({
+    name: provider.id,
+    displayName: provider.name,
+    credential: provider.credential,
+    keyUrl: provider.keyUrl,
+    named: false,
+    ...(provider.freeTier === undefined ? {} : { freeTier: provider.freeTier }),
+    ...(provider.keyHint === undefined ? {} : { keyHint: provider.keyHint }),
+  })),
+  ...CREDENTIAL_TYPES.map((entry) => ({
+    name: entry.defaultName,
+    displayName: entry.name,
+    credential: entry.type,
+    keyUrl: entry.keyUrl,
+    named: true,
+  })),
+]
+
+/**
+ * What to call a **stored** credential in a list: the provider's display name where the name
+ * is a provider id, the type's display name where the name is its default, and the reader's
+ * own label otherwise.
+ *
+ * A second Azure credential is stored as `azure-eu`, and that is what it is called — the label
+ * is the reader's, and a row that hid it would leave two identical-looking rows.
+ */
+export function credentialDisplayName(credential: {
+  readonly name: string
+  readonly type: ProviderCredentialType
+}): string {
+  const known = providerInfo(credential.name)
+  if (known !== undefined) {
+    return known.name
+  }
+  const entry = CREDENTIAL_TYPES.find((candidate) => candidate.type === credential.type)
+  return entry !== undefined && entry.defaultName === credential.name ? entry.name : credential.name
+}
+
+/**
+ * The Add-provider target a **stored** credential belongs to: the provider it names, or the
+ * named type it is.
+ *
+ * A row's Replace opens the form on this target, and the credential's own name is what the form
+ * saves under — which is how a second Azure credential's row reopens *its* form rather than the
+ * first one's.
+ */
+export function credentialTargetFor(credential: {
+  readonly name: string
+  readonly type: ProviderCredentialType
+}): CredentialTarget | undefined {
+  if (providerInfo(credential.name) !== undefined) {
+    return CREDENTIAL_TARGETS.find((target) => target.name === credential.name)
+  }
+  return CREDENTIAL_TARGETS.find(
+    (target) => target.named && target.credential === credential.type,
+  )
 }

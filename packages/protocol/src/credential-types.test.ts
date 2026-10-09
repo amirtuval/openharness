@@ -34,6 +34,7 @@ describe('CREDENTIAL_TYPES', () => {
       name: 'Azure OpenAI',
       defaultName: 'azure',
       modelsDevKey: 'azure',
+      keyUrl: 'https://portal.azure.com/',
     })
     expect(credentialTypeName('azure_openai')).toBe('Azure OpenAI')
     expect(defaultCredentialName('azure_openai')).toBe('azure')
@@ -49,6 +50,12 @@ describe('CREDENTIAL_TYPES', () => {
     for (const entry of CREDENTIAL_TYPES) {
       expect(isValidCredentialName(entry.defaultName), entry.defaultName).toBe(true)
       expect(isReservedCredentialName(entry.defaultName), entry.defaultName).toBe(false)
+    }
+  })
+
+  it('sends every reader to an https page to create the secret', () => {
+    for (const entry of CREDENTIAL_TYPES) {
+      expect(entry.keyUrl, entry.type).toMatch(/^https:\/\/[^/]+/)
     }
   })
 

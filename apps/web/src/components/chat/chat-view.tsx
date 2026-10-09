@@ -1,5 +1,9 @@
-import { providerName, sessionCost } from '@openharness/client'
-import type { ModelPriceLookup, TranscriptMessage } from '@openharness/client'
+import { CREDENTIAL_TARGETS, sessionCost } from '@openharness/client'
+import type {
+  CredentialTarget,
+  ModelPriceLookup,
+  TranscriptMessage,
+} from '@openharness/client'
 import { Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
@@ -118,7 +122,9 @@ export function ChatView({
   // The Add-provider dialog (X5). Three states in one value: `undefined` is closed, `null` is
   // open with the provider left to the reader (the picker's "+ Add provider"), and a provider
   // id is open on that provider's form (the missing-key banner, which knows which one failed).
-  const [addingProvider, setAddingProvider] = useState<string | null | undefined>(undefined)
+  const [addingProvider, setAddingProvider] = useState<CredentialTarget | null | undefined>(
+    undefined,
+  )
   // The message an edit is rewriting (#238): "Edit and resend" puts the reader's own words back
   // in the box and remembers where they came from, and the send that follows rewinds the
   // session to that message. Cleared when the box is emptied (an edit the reader took back) and
@@ -357,7 +363,7 @@ export function ChatView({
                     variant="link"
                     size="xs"
                     className="h-auto p-0 text-destructive"
-                    onClick={() => setAddingProvider(providerOf(sessionModel))}
+                    onClick={() => setAddingProvider(targetFor(providerOf(sessionModel)))}
                   >
                     Add a provider key
                   </Button>
@@ -397,10 +403,12 @@ export function ChatView({
 
       <AddProviderDialog
         open={addingProvider !== undefined}
-        initialProvider={addingProvider ?? undefined}
-        onSaved={(provider) => {
+        {...(addingProvider === undefined || addingProvider === null
+          ? {}
+          : { initialTarget: addingProvider })}
+        onSaved={(name) => {
           setAddingProvider(undefined)
-          showNotice(`Saved the ${providerName(provider)} key.`)
+          showNotice(`Saved the ${name} credential.`)
           // A key that was not there a moment ago is a provider's models that were not there
           // either: the picker offers them from here, without leaving the chat (X5).
           void catalog.reload()
@@ -409,4 +417,16 @@ export function ChatView({
       />
     </div>
   )
+}
+
+/**
+ * The Add-provider target a model id's provider half names: the provider's tile, or — for a
+ * named credential's default name, `azure` — the credential type's tile.
+ *
+ * The banner that opens the dialog knows a provider *id*; the dialog opens on a
+ * {@link CredentialTarget}. A name nothing carries is left as the provider tile, which is what
+ * the target list answers for everything the shared provider list knows.
+ */
+function targetFor(provider: string | null): CredentialTarget | undefined {
+  return CREDENTIAL_TARGETS.find((target) => target.name === provider)
 }

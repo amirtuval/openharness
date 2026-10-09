@@ -412,7 +412,7 @@ describe('provider credentials', () => {
   })
 
   it('puts one credential and reads back its metadata, never the key', async () => {
-    const credential = makeProviderCredential({ provider: 'anthropic', last4: 'k9Z2' })
+    const credential = makeProviderCredential({ name: 'anthropic', last4: 'k9Z2' })
     const { client, mock } = clientWith(() => jsonResponse(credential))
 
     const stored = await client.providerCredentials.put('anthropic', {
