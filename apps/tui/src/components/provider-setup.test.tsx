@@ -1,5 +1,6 @@
 import { ApiError } from '@openharness/client'
 import { createFakeClient } from '@openharness/client/testing'
+import { makeProviderCredential } from '@openharness/protocol/fixtures'
 import { cleanup, render } from 'ink-testing-library'
 import { afterEach, describe, expect, it } from 'vitest'
 
@@ -17,8 +18,23 @@ import { ProviderSetup } from './provider-setup'
 const KEY = 'sk-test-0000'
 
 /** Render the flow and record how it settled. */
-function renderSetup(options: { readonly provider?: string; readonly openUrl?: boolean } = {}) {
-  const fake = createFakeClient()
+function renderSetup(
+  options: {
+    readonly provider?: string
+    readonly openUrl?: boolean
+    /** Credential names the fake already has, for a named type's second credential. */
+    readonly stored?: readonly string[]
+  } = {},
+) {
+  const fake = createFakeClient({
+    ...(options.stored === undefined
+      ? {}
+      : {
+          credentials: options.stored.map((name) =>
+            makeProviderCredential({ name, last4: '1111' }),
+          ),
+        }),
+  })
   const saved: string[] = []
   let cancelled = 0
   let stale = 0
@@ -121,7 +137,7 @@ describe('ProviderSetup', () => {
     // The stored metadata is the server's answer; the key itself is never read back.
     const { data } = await setup.fake.providerCredentials.list()
     expect(data).toEqual([
-      expect.objectContaining({ provider: 'anthropic', type: 'api_key', last4: '0000' }),
+      expect.objectContaining({ name: 'anthropic', type: 'api_key', last4: '0000' }),
     ])
   })
 
@@ -171,7 +187,7 @@ describe('ProviderSetup', () => {
     typeText(retry, KEY)
     pressKey(retry, 'enter')
 
-    await waitForFrame(retry, 'The key was rejected: The anthropic credential was rejected')
+    await waitForFrame(retry, 'It was rejected: The anthropic credential was rejected')
     // The box is still there — the usual mistake is a key pasted with a space in it, and the
     // fix is to paste it again rather than to start over.
     await waitForFrame(retry, '❯ ')
@@ -233,5 +249,82 @@ describe('ProviderSetup', () => {
     pressKey(setup, 'ctrlC')
 
     await waitFor(() => setup.cancelled() === 1)
+  })
+})
+
+describe('ProviderSetup — the azure form (#245, A3a)', () => {
+  it('offers the named credential type in the list, and asks its three fields', async () => {
+    const setup = renderSetup()
+
+    await waitForScreen(setup, 'No provider key yet')
+    await waitForFrame(setup, 'Azure OpenAI')
+
+    // Walk to the azure row (the last one) and open its form.
+    for (let step = 0; step < 11; step += 1) pressKey(setup, 'down')
+    pressKey(setup, 'enter')
+
+    await waitForScreen(setup, 'Endpoint')
+    // The first credential of the type takes the default name, so nothing asks for one.
+    expect(frameOf(setup)).not.toContain('Name (its models will be')
+
+    typeText(setup, 'https://my-resource.openai.azure.com')
+    // The endpoint is not a secret: what was typed is on screen.
+    await waitForFrame(setup, 'https://my-resource.openai.azure.com')
+    pressKey(setup, 'enter')
+
+    await waitForScreen(setup, 'API key')
+    typeText(setup, 'az-key-4242')
+    pressKey(setup, 'enter')
+
+    await waitForScreen(setup, 'Deployments')
+
+    typeText(setup, 'gpt-4o, gpt-4o-mini')
+    pressKey(setup, 'enter')
+
+    await waitFor(() => setup.saved.length === 1)
+    expect(setup.saved).toEqual(['azure'])
+    const { data } = await setup.fake.providerCredentials.list()
+    expect(data).toEqual([
+      expect.objectContaining({
+        type: 'azure_openai',
+        name: 'azure',
+        last4: '4242',
+      }),
+    ])
+  })
+
+  it('asks for a name when one azure credential is already stored, and saves under it', async () => {
+    const setup = renderSetup({ provider: 'azure', stored: ['azure'] })
+
+    await waitForScreen(setup, 'Name (its models will be azure/<deployment>)')
+
+    typeText(setup, 'azure-eu')
+    pressKey(setup, 'enter')
+    await waitForScreen(setup, 'Endpoint')
+    typeText(setup, 'https://my-resource.openai.azure.com')
+    pressKey(setup, 'enter')
+    await waitForScreen(setup, 'API key')
+    typeText(setup, 'az-eu-7777')
+    pressKey(setup, 'enter')
+    await waitForScreen(setup, 'Deployments')
+    typeText(setup, 'gpt-4o')
+    pressKey(setup, 'enter')
+
+    await waitFor(() => setup.saved.length === 1)
+    expect(setup.saved).toEqual(['azure-eu'])
+  })
+
+  it('refuses a name already taken, before the fields are asked', async () => {
+    const setup = renderSetup({ provider: 'azure', stored: ['azure'] })
+
+    await waitForScreen(setup, 'Name (its models will be azure/<deployment>)')
+
+    typeText(setup, 'azure')
+    pressKey(setup, 'enter')
+
+    await waitForFrame(setup, 'already taken')
+    // Still on the name prompt: nothing was sent, and the form did not move on.
+    expect(setup.saved).toEqual([])
+    expect(frameOf(setup)).toContain('Name (its models will be')
   })
 })

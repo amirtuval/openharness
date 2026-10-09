@@ -1,38 +1,49 @@
 import {
   ApiError,
   AuthenticationError,
-  PROVIDERS,
-  providerInfo,
-  providerName,
+  CREDENTIAL_TARGETS,
+  credentialDisplayName,
+  type Client,
+  type CredentialTarget,
 } from '@openharness/client'
-import type { Client } from '@openharness/client'
 import { Box, Text, useInput } from 'ink'
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { describeError, type ErrorContext } from '../errors'
-import { formForCredential } from '../providers/credential-form'
+import {
+  CREDENTIAL_NAME_FIELD,
+  type CredentialField,
+  formForCredential,
+  nameErrorMessage,
+} from '../providers/credential-form'
 import { SecretInput } from './secret-input'
 
 /**
- * Connecting a model provider from the terminal (#210, epic #201 X7/X8) — the CLI's mirror of
- * the web app's first-run flow and its Add-provider dialog.
+ * Connecting a model provider from the terminal (#210, epic #201 X7/X8; named credentials:
+ * #245 A3a) — the CLI's mirror of the web app's first-run flow and its Add-provider dialog.
  *
- * Two steps, one component: pick a provider from the list built from `PROVIDERS`, then paste
- * its key into a hidden input. On success the caller is told which provider was saved; on a
- * key the provider refuses, the reason is shown and the same box asks again, because the usual
- * mistake is a key copied with a space in it. The flow settles exactly once — the caller's
- * business is what happens next, and there are three callers: the app's no-credentials screen,
- * the `/providers` slash command (`chat/commands.ts`) through the inline prompt slot, and
+ * Two steps, one component: pick a target from `CREDENTIAL_TARGETS` (the eleven providers, then
+ * the named credential types), then answer its fields — one prompt each, masked where the value
+ * is a secret. On success the caller is told which credential was saved; on a secret the
+ * provider refuses, the reason is shown and the same box asks again, because the usual mistake
+ * is a key copied with a space in it. The flow settles exactly once — the caller's business is
+ * what happens next, and there are three callers: the app's no-credentials screen, the
+ * `/providers` slash command (`chat/commands.ts`) through the inline prompt slot, and
  * `oh providers add`.
  *
- * Three things about it are load-bearing, and all three are about the key:
+ * Three things about it are load-bearing, and all three are about the secret:
  *
- * - the key is typed into {@link SecretInput}, which echoes nothing and masks what it holds —
- *   so no frame, log or test snapshot can contain it;
+ * - a secret field is typed into {@link SecretInput}, which echoes nothing and masks what it
+ *   holds — so no frame, log or test snapshot can contain it;
  * - it goes straight to `client.providerCredentials.put`, which is the *same* write the web app
  *   makes (X7): the server validates it once against the provider and seals it. Nothing is
- *   written to this machine — there is no config-directory file a key could land in;
- * - a failure is reported by the server's own message, which never carries the key back.
+ *   written to this machine — there is no config-directory file a secret could land in;
+ * - a failure is reported by the server's own message, which never carries the secret back.
+ *
+ * A **named** target also asks for a name, and only when one of its type is already stored: the
+ * first Azure credential takes the type's default (`azure`), and a second has to be told apart
+ * from it. That is why the flow reads the credential list once — the same read the web dialog
+ * makes through its hook.
  *
  * The "get a key" URL is always printed, so a terminal that cannot open a browser (SSH, CI,
  * no display) still has what it needs; `o` opens it where a browser exists. Free-tier hints
@@ -40,16 +51,16 @@ import { SecretInput } from './secret-input'
  */
 
 export interface ProviderSetupProps {
-  /** The client the key is saved through — `providerCredentials.put`. */
+  /** The client the credential is saved through — `providerCredentials.put`. */
   readonly client: Client
   /** What the error messages should mention. */
   readonly context?: ErrorContext | undefined
-  /** Start on this provider's key form, skipping the list; without one the flow starts on it. */
+  /** Start on this target's form, skipping the list; without one the flow starts on it. */
   readonly initialProvider?: string | undefined
   /** Open a URL in the browser; returns whether one was launched. Injectable for tests. */
   readonly openUrl: (url: string) => boolean
-  /** The credential was stored. `provider` is the router id that was saved. */
-  readonly onSaved: (provider: string) => void
+  /** The credential was stored. `name` is the name it is stored under. */
+  readonly onSaved: (name: string) => void
   /** The user gave up: Esc at the list, or Ctrl+C anywhere. */
   readonly onCancel: () => void
   /**
@@ -69,50 +80,92 @@ export function ProviderSetup({
   onCancel,
   onStaleSession,
 }: ProviderSetupProps) {
-  const [provider, setProvider] = useState<string | null>(initialProvider ?? null)
-  const [index, setIndex] = useState(() => providerIndex(initialProvider))
+  const [target, setTarget] = useState<CredentialTarget | null>(() =>
+    targetForName(initialProvider),
+  )
+  const [index, setIndex] = useState(() => targetIndex(initialProvider))
   const [error, setError] = useState<string | null>(null)
   const [note, setNote] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  /** The names already stored, or `null` until the one read lands. */
+  const [storedNames, setStoredNames] = useState<readonly string[] | null>(null)
+  /** Which prompt of the form is on screen. */
+  const [step, setStep] = useState(0)
 
-  // The cursor and the pending values the handlers read, for the reason the model picker keeps
-  // refs too: Ink hands `useInput` the latest *committed* render, so two keystrokes inside one
-  // render would both read the position — and the provider — from before them.
+  // The cursor, the pending values and the position the handlers read, for the reason the model
+  // picker keeps refs too: Ink hands `useInput` the latest *committed* render, so two keystrokes
+  // inside one render would both read the state from before them.
   const indexRef = useRef(index)
-  const providerRef = useRef(provider)
+  const targetRef = useRef(target)
   const savingRef = useRef(false)
+  const valuesRef = useRef<Record<string, string>>({})
+  const stepRef = useRef(0)
 
-  const info = provider === null ? undefined : providerInfo(provider)
+  // One read, for the one thing it decides: whether a named target has to ask for a name.
+  useEffect(() => {
+    let live = true
+    void client.providerCredentials
+      .list()
+      .then((response) => {
+        if (live) setStoredNames(response.data.map((credential) => credential.name))
+      })
+      .catch(() => {
+        // A list that cannot be read must not block adding a credential. No names known means
+        // a named target does not ask — and the server still refuses a name that is taken.
+        if (live) setStoredNames([])
+      })
+    return () => {
+      live = false
+    }
+  }, [client])
+
+  const form = target === null ? null : formForCredential(target.credential)
+  const asksForName =
+    target !== null && target.named && storedNames !== null && storedNames.includes(target.name)
+  const nameField: CredentialField = {
+    name: CREDENTIAL_NAME_FIELD,
+    label: `Name (its models will be ${target?.name ?? ''}/<deployment>)`,
+    secret: false,
+  }
+  const steps: readonly CredentialField[] =
+    form === null ? [] : [...(asksForName ? [nameField] : []), ...form.fields]
+  const current = steps[step]
 
   const moveTo = (next: number): void => {
-    const clamped = Math.min(Math.max(next, 0), PROVIDERS.length - 1)
+    const clamped = Math.min(Math.max(next, 0), CREDENTIAL_TARGETS.length - 1)
     indexRef.current = clamped
     setIndex(clamped)
   }
 
-  const choose = (id: string): void => {
-    providerRef.current = id
-    setProvider(id)
+  const choose = (picked: CredentialTarget): void => {
+    targetRef.current = picked
+    setTarget(picked)
+    valuesRef.current = {}
+    stepRef.current = 0
+    setStep(0)
     setError(null)
     setNote(null)
   }
 
   const backToPick = useCallback((): void => {
     if (initialProvider !== undefined) {
-      // There is no list to go back to when the provider was named: the flow's own cancel is
-      // the way out, exactly as the web dialog's is.
+      // There is no list to go back to when the target was named: the flow's own cancel is the
+      // way out, exactly as the web dialog's is.
       onCancel()
       return
     }
-    providerRef.current = null
-    setProvider(null)
+    targetRef.current = null
+    setTarget(null)
+    valuesRef.current = {}
+    stepRef.current = 0
+    setStep(0)
     setError(null)
     setNote(null)
   }, [initialProvider, onCancel])
 
-  /** Open the provider's key page, saying what came of it. */
+  /** Open the target's page, saying what came of it. */
   const openKeyPage = useCallback((): void => {
-    const url = providerInfo(providerRef.current ?? '')?.keyUrl
+    const url = targetRef.current?.keyUrl
     if (url === undefined) return
     setNote(
       openUrl(url)
@@ -121,31 +174,57 @@ export function ProviderSetup({
     )
   }, [openUrl])
 
-  const save = useCallback(
-    (apiKey: string): void => {
-      const target = providerRef.current
-      if (target === null || savingRef.current) return
-      savingRef.current = true
-      setSaving(true)
-      setError(null)
-      setNote(null)
-      void (async () => {
-        try {
-          const form = formForCredential(providerInfo(target)?.credential)
-          await client.providerCredentials.put(target, form.build({ api_key: apiKey }))
-          onSaved(target)
-        } catch (failure) {
-          if (failure instanceof AuthenticationError) {
-            onStaleSession()
-            return
-          }
-          setError(describeSaveFailure(failure, context))
-          savingRef.current = false
-          setSaving(false)
+  const save = useCallback((): void => {
+    const picked = targetRef.current
+    if (picked === null || savingRef.current || form === null) return
+    const name = asksForName ? (valuesRef.current[CREDENTIAL_NAME_FIELD] ?? '') : picked.name
+    const nameError = asksForName ? nameErrorMessage(name, storedNames ?? []) : null
+    if (nameError !== null) {
+      setError(nameError)
+      return
+    }
+    savingRef.current = true
+    setSaving(true)
+    setError(null)
+    setNote(null)
+    void (async () => {
+      try {
+        await client.providerCredentials.put(name, form.build(valuesRef.current))
+        onSaved(name)
+      } catch (failure) {
+        if (failure instanceof AuthenticationError) {
+          onStaleSession()
+          return
         }
-      })()
+        setError(describeSaveFailure(failure, context))
+        savingRef.current = false
+        setSaving(false)
+      }
+    })()
+  }, [asksForName, client, context, form, onSaved, onStaleSession, storedNames])
+
+  /** One prompt answered: remember it, and move on — or save on the last one. */
+  const submitStep = useCallback(
+    (value: string): void => {
+      const field = steps[stepRef.current]
+      if (field === undefined) return
+      valuesRef.current = { ...valuesRef.current, [field.name]: value }
+      if (field.name === CREDENTIAL_NAME_FIELD) {
+        const nameError = nameErrorMessage(value, storedNames ?? [])
+        if (nameError !== null) {
+          setError(nameError)
+          return
+        }
+        setError(null)
+      }
+      if (stepRef.current >= steps.length - 1) {
+        save()
+        return
+      }
+      stepRef.current += 1
+      setStep(stepRef.current)
     },
-    [client, context, onSaved, onStaleSession],
+    [save, steps, storedNames],
   )
 
   useInput((input, key) => {
@@ -154,8 +233,8 @@ export function ProviderSetup({
       return
     }
 
-    // The key step's own keys belong to the SecretInput; only the shared cancel is read here.
-    if (providerRef.current !== null) return
+    // The form's own keys belong to the SecretInput; only the shared cancel is read here.
+    if (targetRef.current !== null) return
 
     if (key.escape) {
       onCancel()
@@ -170,15 +249,15 @@ export function ProviderSetup({
       return
     }
     if (key.return) {
-      const picked = PROVIDERS[indexRef.current]
-      if (picked !== undefined) choose(picked.id)
+      const picked = CREDENTIAL_TARGETS[indexRef.current]
+      if (picked !== undefined) choose(picked)
       return
     }
-    // `o` on the list opens the highlighted provider's key page — the same key the form binds.
+    // `o` on the list opens the highlighted target's page — the same key the form binds.
     if (input === 'o') openKeyPage()
   })
 
-  if (provider === null) {
+  if (target === null) {
     return (
       <Box flexDirection="column">
         <Text>
@@ -189,9 +268,9 @@ export function ProviderSetup({
           server, never on this machine.
         </Text>
         <Box flexDirection="column" marginTop={1}>
-          {PROVIDERS.map((entry, position) => (
-            <Text key={entry.id} color={position === index ? 'cyan' : undefined}>
-              {`${position === index ? '❯' : ' '} ${entry.name}${
+          {CREDENTIAL_TARGETS.map((entry, position) => (
+            <Text key={entry.name} color={position === index ? 'cyan' : undefined}>
+              {`${position === index ? '❯' : ' '} ${entry.displayName}${
                 entry.freeTier === undefined ? '' : ` · ${entry.freeTier}`
               }`}
             </Text>
@@ -203,28 +282,51 @@ export function ProviderSetup({
     )
   }
 
+  // A named target waits for the one list read: without it the flow cannot know whether to ask
+  // for a name, and asking after the fields were answered would be a second form.
+  if (target.named && storedNames === null) {
+    return (
+      <Box flexDirection="column">
+        <Text>{`Connect ${target.displayName}`}</Text>
+        <Text dimColor>checking what you already have…</Text>
+      </Box>
+    )
+  }
+
+  if (current === undefined) {
+    return (
+      <Box flexDirection="column">
+        <Text>{`Connect ${target.displayName}`}</Text>
+        <Text dimColor>this credential type has no fields yet</Text>
+      </Box>
+    )
+  }
+
   return (
     <Box flexDirection="column">
-      <Text>{`Connect ${providerName(provider)}`}</Text>
-      {info !== undefined && (
-        <Text>
-          {`Get a key: ${info.keyUrl}`}
-          <Text dimColor> — press o to open it</Text>
-        </Text>
-      )}
-      {info?.freeTier !== undefined && <Text dimColor>{info.freeTier}</Text>}
+      <Text>{`Connect ${target.displayName}`}</Text>
+      <Text>
+        {`Get a key: ${target.keyUrl}`}
+        <Text dimColor> — press o to open it</Text>
+      </Text>
+      {target.freeTier !== undefined && <Text dimColor>{target.freeTier}</Text>}
       {error !== null && <Text color="red">{error}</Text>}
       {note !== null && <Text dimColor>{note}</Text>}
-      <Box marginTop={1}>
+      <Box flexDirection="column" marginTop={1}>
+        <Text>{current.label}</Text>
         <SecretInput
-          placeholder={info?.keyHint ?? 'paste the key'}
+          // A new prompt is a new input: the key keeps Ink from reusing the previous field's
+          // value, which would silently carry a secret into the next answer.
+          key={`${target.name}:${current.name}:${step}`}
+          placeholder={current.secret ? (target.keyHint ?? 'paste the key') : 'type it'}
+          mask={current.secret}
           busy={saving}
           onChar={(character) => {
             if (character !== 'o') return false
             openKeyPage()
             return true
           }}
-          onSubmit={save}
+          onSubmit={submitStep}
           onCancel={backToPick}
         />
       </Box>
@@ -232,7 +334,7 @@ export function ProviderSetup({
         <Text dimColor>saving…</Text>
       ) : (
         <Text dimColor>
-          {`Enter to save, Esc to go back${info?.keyUrl === undefined ? '' : ', o (before typing) for the key page'}.`}
+          {`Enter to continue, Esc to go back${target.keyUrl === undefined ? '' : ', o (before typing) for the key page'}.`}
         </Text>
       )}
     </Box>
@@ -240,28 +342,38 @@ export function ProviderSetup({
 }
 
 /**
- * Which row the list starts on: the named provider where the caller named one, the first row
- * otherwise. A provider the metadata list has never heard of starts on the first row, because
- * there is no row to sit on — the key form is reached directly either way.
+ * The target a name picked: the tile whose name it is.
+ *
+ * A caller that named a credential the list does not carry — a router id nobody configured —
+ * gets `null` and the list, which is where they can pick one that exists.
  */
-function providerIndex(initialProvider: string | undefined): number {
-  if (initialProvider === undefined) return 0
-  const found = PROVIDERS.findIndex((entry) => entry.id === initialProvider)
+function targetForName(name: string | undefined): CredentialTarget | null {
+  if (name === undefined) return null
+  return CREDENTIAL_TARGETS.find((target) => target.name === name) ?? null
+}
+
+/** Which row the list starts on: the named target where the caller named one, the first otherwise. */
+function targetIndex(name: string | undefined): number {
+  if (name === undefined) return 0
+  const found = CREDENTIAL_TARGETS.findIndex((target) => target.name === name)
   return found === -1 ? 0 : found
 }
 
 /**
  * The one line a failed save gets.
  *
- * A rejected key is the case worth a sentence of its own: the provider said no, and the fix is
- * almost always to paste again. Everything else is the server's message as it stands. Neither
- * can carry the key — the API is write-only, and no response, error or debug line echoes it
- * (epic #65, A5) — which is the property the security tests assert.
+ * A rejected credential is the case worth a sentence of its own: the provider said no, and the
+ * fix is almost always to paste again. Everything else is the server's message as it stands.
+ * Neither can carry the secret — the API is write-only, and no response, error or debug line
+ * echoes it (epic #65, A5) — which is the property the security tests assert.
  */
 function describeSaveFailure(failure: unknown, context: ErrorContext | undefined): string {
   if (failure instanceof ApiError && failure.type === 'invalid_provider_credential') {
-    return `The key was rejected: ${failure.message} Try again, or Esc to go back.`
+    return `It was rejected: ${failure.message} Try again, or Esc to go back.`
   }
   const report = describeError(failure, context)
   return report.hints.length === 0 ? report.message : `${report.message} ${report.hints.join(' ')}`
 }
+
+/** The display name of a stored credential, re-exported for the callers that print one. */
+export { credentialDisplayName }

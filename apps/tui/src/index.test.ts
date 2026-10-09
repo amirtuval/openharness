@@ -140,7 +140,7 @@ describe('run', () => {
 
     expect(code).toBe(0)
     expect(err).toBe('')
-    expect(out).toContain('No provider keys yet')
+    expect(out).toContain('No credentials yet')
     expect(out).toContain('oh providers add')
   })
 
@@ -152,7 +152,7 @@ describe('run', () => {
     )
 
     expect(code).toBe(0)
-    expect(out).toContain('Removed the Anthropic key.')
+    expect(out).toContain('Removed the anthropic credential.')
   })
 
   it('asks before removing, and a piped answer nobody wrote is a no (#210)', async () => {

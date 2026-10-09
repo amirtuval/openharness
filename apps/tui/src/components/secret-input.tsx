@@ -44,6 +44,15 @@ export interface SecretInputProps {
    * handler, so a sibling hook binding `o` would open the page *and* put an `o` in the key.
    */
   readonly onChar?: ((character: string) => boolean) | undefined
+  /**
+   * Whether the value is drawn as masks (the default) or as what was typed.
+   *
+   * A secret field is the first thing this component exists for, and it is the default; a field
+   * that is **not** a secret — an Azure endpoint, a deployment list — says so, and then the
+   * reader can see what they typed. Nothing else about the component changes: the value still
+   * lives in a ref, and only a masked field's frame is free of it by construction.
+   */
+  readonly mask?: boolean | undefined
 }
 
 /** The character a typed key is drawn as. Never the character itself. */
@@ -55,6 +64,7 @@ export function SecretInput({
   placeholder,
   busy = false,
   onChar,
+  mask = true,
 }: SecretInputProps) {
   // What was typed lives here and only here; the render knows how many characters it holds,
   // never which ones. A frame can therefore not contain the secret, and neither can a
@@ -114,7 +124,13 @@ export function SecretInput({
     <Box flexDirection="column">
       <Text>
         {'❯ '}
-        {length === 0 ? <Text dimColor>{placeholder ?? ''}</Text> : SECRET_MASK.repeat(length)}
+        {length === 0 ? (
+          <Text dimColor>{placeholder ?? ''}</Text>
+        ) : mask ? (
+          SECRET_MASK.repeat(length)
+        ) : (
+          value.current
+        )}
       </Text>
     </Box>
   )

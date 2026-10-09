@@ -1,4 +1,4 @@
-import { providerName, type Client } from '@openharness/client'
+import { credentialDisplayName, type Client } from '@openharness/client'
 import type { ProviderCredential } from '@openharness/protocol'
 import { Box, render, Text, useApp } from 'ink'
 import { useCallback } from 'react'
@@ -15,18 +15,20 @@ import { pad } from './list'
  *
  * | command                        | what it does                                        |
  * | ------------------------------ | --------------------------------------------------- |
- * | `oh providers` / `... list`    | the stored keys: provider, type, last four, added   |
+ * | `oh providers` / `... list`    | the stored credentials: name, type, last four, added |
  * | `oh providers add [provider]`  | the connect flow, on its own                        |
  * | `oh providers remove <p>`      | forget a key (asks; `--yes` skips)                  |
  *
- * The API these drive is **write-only** (epic #65, A5): a key goes up on `put` and only
- * metadata ever comes back, so `list` is the whole of what this CLI can show — a name, the
- * credential type, the last four characters and when it was added. The key itself is never
- * read back, never written to this machine, and never printed.
+ * The API these drive is **write-only** (epic #65, A5): the secret goes up on `put` and only
+ * metadata ever comes back, so `list` is the whole of what this CLI can show — the credential's
+ * name, its type, the last four characters and when it was added. A credential is stored under
+ * a **name** (#245, A3a), which is the `provider` half of the models it serves: a provider id
+ * for the eleven fixed providers, a name the reader chose (`azure-eu`) for a named type. The
+ * secret itself is never read back, never written to this machine, and never printed.
  */
 
-/** How wide the provider column gets before it is cut; the other columns are short by nature. */
-const PROVIDER_WIDTH = 18
+/** How wide the credential-name column gets before it is cut; the other columns are short. */
+const NAME_WIDTH = 18
 const TYPE_WIDTH = 8
 const LAST4_WIDTH = 6
 
@@ -63,9 +65,11 @@ export async function runProvidersRemove(
   provider: string,
   options: { readonly yes: boolean },
 ): Promise<number> {
-  const name = providerName(provider)
+  // The name is what it is stored under, printed as given: the remove command does not read
+  // the list first, so it has no display name to prefer — and the name is the thing the reader
+  // typed on the command line.
   if (!options.yes) {
-    io.prompt(`Remove the ${name} key? [y/N] `)
+    io.prompt(`Remove the ${provider} credential? [y/N] `)
     if (!isYes(await readLine(io.stdin))) {
       io.stdout('Not removed.')
       return 0
@@ -74,7 +78,7 @@ export async function runProvidersRemove(
 
   try {
     await client.providerCredentials.delete(provider)
-    io.stdout(`Removed the ${name} key.`)
+    io.stdout(`Removed the ${provider} credential.`)
     return 0
   } catch (error) {
     return reportFailure(io, error)
@@ -218,20 +222,20 @@ function isOutcome(result: unknown): result is ProvidersAddOutcome {
 }
 
 /**
- * One line per stored key: display name, credential type, last four, when it was added.
+ * One line per stored credential: display name, credential type, last four, when it was added.
  *
- * The order is the server's (oldest first). A provider the metadata list does not carry is
- * shown by its router id, the way `providerName` falls back — a key saved from the web app's
- * free-text field is still a key this command can list.
+ * The order is the server's (oldest first). The display name is the provider's, the credential
+ * type's where the name is that type's default (`azure`), or the reader's own label otherwise —
+ * so two Azure credentials are told apart by the names they were saved under.
  */
 export function formatCredentials(credentials: readonly ProviderCredential[]): readonly string[] {
   if (credentials.length === 0) {
-    return ['No provider keys yet. Add one with `oh providers add`.']
+    return ['No credentials yet. Add one with `oh providers add`.']
   }
 
   return credentials.map((credential) =>
     [
-      pad(providerName(credential.provider), PROVIDER_WIDTH),
+      pad(credentialDisplayName(credential), NAME_WIDTH),
       pad(credential.type, TYPE_WIDTH),
       pad(`…${credential.last4}`, LAST4_WIDTH),
       credential.created_at,
