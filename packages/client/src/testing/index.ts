@@ -928,7 +928,10 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       if (!authenticated) {
         return unauthenticated()
       }
-      const range = fakeUsageRange(params)
+      // The fake's own clock, not the wall clock: every other instant it answers with comes
+      // from there, so "this month so far" has to move when a test fixes `now` — otherwise the
+      // default range drifts a day and a test that pins the date fails on the next one.
+      const range = fakeUsageRange(params, now())
       const inRange: RecordedRequest[] = []
       const byDay = new Map<string, RecordedRequest[]>()
       for (const brain of brains.values()) {
