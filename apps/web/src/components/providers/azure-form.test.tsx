@@ -2,6 +2,8 @@ import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 
+import type { ProviderCredential } from '@openharness/protocol'
+
 import { credential } from '../../test-support/catalog'
 import { makeFake, renderApp } from '../../test-support/render-app'
 
@@ -131,6 +133,53 @@ describe('the azure credential form', () => {
     // A name of its own is accepted, and the save goes through.
     await user.clear(name)
     await user.type(name, 'azure-eu')
+    await waitFor(() => {
+      expect(save).toBeEnabled()
+    })
+  })
+
+  it('replaces a stored named credential under its own name', async () => {
+    const user = userEvent.setup({ delay: null })
+    // A second azure credential, stored under a name the reader chose.
+    const stored: ProviderCredential = { ...credential('azure-eu', '1111'), type: 'azure_openai' }
+    const fake = makeFake({ credentials: [stored], models: [], providers: [] })
+    renderApp(fake, { hash: '#/settings' })
+
+    // A row's Replace opens the form on **that** credential: the name it is stored under is
+    // prefilled, and saving it must not be refused as "already taken" — the row could never be
+    // replaced otherwise.
+    await user.click(await screen.findByRole('button', { name: 'Replace the azure-eu credential' }))
+    const dialog = await screen.findByRole('dialog')
+    const name = within(dialog).getByLabelText<HTMLInputElement>('Name')
+    expect(name.value).toBe('azure-eu')
+    await fill(user, dialog, { apiKey: 'az-eu-9999' })
+    // "Replace key", because the name is one that is already stored.
+    const save = within(dialog).getByRole('button', { name: 'Replace key' })
+    expect(save).toBeEnabled()
+    await user.click(save)
+
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    })
+    const { data } = await fake.providerCredentials.list()
+    // The same credential, with the new key: one row, not two.
+    expect(data).toHaveLength(1)
+    expect(data[0]).toMatchObject({ name: 'azure-eu', last4: '9999' })
+  })
+
+  it('holds the save until a name is answered, for a second credential', async () => {
+    const user = userEvent.setup({ delay: null })
+    const fake = makeFake({ credentials: [credential('azure', '1111')], models: [], providers: [] })
+    renderApp(fake, { hash: '#/settings' })
+
+    const dialog = await openDialog(user)
+    await user.click(within(dialog).getByRole('button', { name: 'Azure OpenAI' }))
+    await fill(user, dialog, {})
+    const save = within(dialog).getByRole('button', { name: 'Save key' })
+    // The name is not one of the form's fields, so an unanswered one has to hold the save by
+    // itself: a blank name would be a request against an empty path segment.
+    expect(save).toBeDisabled()
+    await user.type(within(dialog).getByLabelText('Name'), 'azure-eu')
     await waitFor(() => {
       expect(save).toBeEnabled()
     })

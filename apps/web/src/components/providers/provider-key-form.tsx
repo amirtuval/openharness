@@ -201,9 +201,16 @@ export function ProviderKeyForm({
 
   const typedName = (values[NAME_FIELD] ?? '').trim()
   const name = asksForName ? typedName : target.name
-  const nameError = !asksForName ? null : nameErrorMessage(typedName, storedNames, target)
+  const nameError = !asksForName
+    ? null
+    : nameErrorMessage(typedName, storedNames, target, initialName)
+  // Every field has to be filled before a save is offered, so the reader is not sent a request
+  // the provider will refuse over a field the form could have shown as missing. A name the form
+  // asks for counts as filled only when it has been answered, and it is not one of `form.fields`.
   const filled =
-    form.fields.every((field) => (values[field.name] ?? '').trim() !== '') && nameError === null
+    (!asksForName || typedName !== '') &&
+    form.fields.every((field) => (values[field.name] ?? '').trim() !== '') &&
+    nameError === null
   const replacing = name !== '' && storedNames.includes(name)
 
   const submit = async (): Promise<void> => {
@@ -339,14 +346,20 @@ export function ProviderKeyForm({
  *
  * The server enforces exactly these two rules (the format, and that no fixed provider id is
  * taken), so this is the form saying what the route would say — before a round trip, and next
- * to the field rather than in a banner. A name already in use is refused here too: replacing a
- * credential is a row's Replace, and a name the reader typed by accident should not silently
- * overwrite another credential.
+ * to the field rather than in a banner. A name already in use is refused here too: adding a
+ * credential is not how one replaces another, and a name the reader typed by accident should
+ * not silently overwrite one.
+ *
+ * `replacingName` is the name of the credential a row's Replace is editing, and it is exempt
+ * from that last rule: the form opens prefilled with **its own** name, so refusing that name
+ * would leave the Save button disabled for every named credential — a row that could never be
+ * replaced.
  */
 function nameErrorMessage(
   name: string,
   storedNames: readonly string[],
   target: CredentialTarget,
+  replacingName?: string,
 ): string | null {
   if (name === '') {
     return null
@@ -357,7 +370,7 @@ function nameErrorMessage(
   if (isReservedCredentialName(name)) {
     return 'That name belongs to one of the built-in providers. Pick another.'
   }
-  if (storedNames.includes(name)) {
+  if (name !== replacingName && storedNames.includes(name)) {
     return `You already have a ${credentialDisplayName({ name, type: target.credential })} credential called that. Pick another name.`
   }
   return null
