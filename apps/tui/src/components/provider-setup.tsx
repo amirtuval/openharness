@@ -7,6 +7,7 @@ import {
   type CredentialTarget,
 } from '@openharness/client'
 import { Box, Text, useInput } from 'ink'
+import { readFile } from 'node:fs/promises'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { describeError, type ErrorContext } from '../errors'
@@ -126,7 +127,6 @@ export function ProviderSetup({
   const form = target === null ? null : formForCredential(target.credential)
   const asksForName =
     target !== null && target.named && storedNames !== null && storedNames.includes(target.name)
-
   const nameField: CredentialField = {
     name: CREDENTIAL_NAME_FIELD,
     label: `Name (its models will be ${target?.name ?? ''}/<${target?.modelIdHint ?? 'model'}>)`,
@@ -214,18 +214,44 @@ export function ProviderSetup({
 
   /** One prompt answered: remember it, and move on — or save on the last one. */
   const submitStep = useCallback(
-    (value: string): void => {
+    async (value: string): Promise<void> => {
       const field = steps[stepRef.current]
       if (field === undefined) return
-      valuesRef.current = { ...valuesRef.current, [field.name]: value }
+      // A field the reader answers with a path holds the **file's contents**, so the build
+      // below sees the document exactly as the web form's paste box does — and the path, never
+      // the contents, is what a frame draws. A file that cannot be read is a refusal to
+      // retype, not a step to move past: the reader stays on the prompt, with the reason.
+      let answer = value
+      if (field.file === true) {
+        const path = value.trim()
+        try {
+          answer = await readFile(path, 'utf8')
+        } catch (failure) {
+          setError(
+            `could not read ${path === '' ? 'a file with no name' : path}: ` +
+              (failure instanceof Error ? failure.message : 'the read failed'),
+          )
+          return
+        }
+      }
+      // The field's own rule next: it is what says a value the terminal cannot offer a picker
+      // for — a Vertex location — is one the server will take.
+      const fieldError = field.validate?.(answer) ?? null
+      if (fieldError !== null) {
+        setError(fieldError)
+        return
+      }
       if (field.name === CREDENTIAL_NAME_FIELD) {
         const nameError = nameErrorMessage(value, storedNames ?? [])
         if (nameError !== null) {
           setError(nameError)
           return
         }
-        setError(null)
       }
+      // The answer is good, so the previous field's refusal goes: an error stays on screen
+      // only while the value it is about is still the one on the prompt.
+      setError(null)
+      valuesRef.current = { ...valuesRef.current, [field.name]: answer }
       if (stepRef.current >= steps.length - 1) {
         save()
         return
@@ -393,7 +419,12 @@ export function ProviderSetup({
               return true
             }}
             optional={current.optional === true}
-            onSubmit={submitStep}
+            // What the flow can already read out of an earlier answer, if anything: nothing
+            // for most fields, and the key document's own project for a Vertex credential.
+            initialValue={current.prefill?.(valuesRef.current) ?? ''}
+            onSubmit={(value) => {
+              void submitStep(value)
+            }}
             onCancel={backToPick}
           />
         )}

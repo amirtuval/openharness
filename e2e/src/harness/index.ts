@@ -262,6 +262,7 @@ export {
   seedBedrockCredential,
   seedOpenAICompatibleCredential,
   seedProviderCredential,
+  seedVertexCredential,
 } from './credentials'
 export { createE2eDatabase, withDatabaseClient, type E2eDatabase } from './database'
 export { errorOf } from './errors'

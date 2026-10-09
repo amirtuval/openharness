@@ -18,6 +18,7 @@ import {
   seedAzureCredential,
   seedBedrockCredential,
   seedProviderCredential,
+  seedVertexCredential,
   waitForTurnEnd,
   withDatabaseClient,
   type Person,
@@ -52,6 +53,16 @@ import {
 const harness = e2eHarness('credentials')
 
 /** A key with a recognisable middle, so a dump can be grepped for it meaningfully. */
+/** A service-account document for the vertex tests: shaped like one, and not a real key. */
+const VERTEX_KEY = JSON.stringify({
+  type: 'service_account',
+  project_id: 'openharness-vertex',
+  private_key_id: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678',
+  private_key:
+    '-----BEGIN PRIVATE KEY-----\\nVERTEX-PRIVATE-KEY-DO-NOT-LOG\\n-----END PRIVATE KEY-----\\n',
+  client_email: 'vertex-runner@openharness-vertex.iam.gserviceaccount.com',
+})
+
 const PLAINTEXT = 'sk-ant-e2e-must-never-be-stored-7c41'
 const MIDDLE = 'e2e-must-never-be-stored'
 const LAST_FOUR = '7c41'
@@ -438,6 +449,102 @@ describe('provider credentials (A5)', () => {
     for (const secret of ['AKIAIOSFODNN7EXAMPLE', MIDDLE]) {
       expect(serialized).not.toContain(secret)
     }
+  })
+
+  it('refuses a vertex document that is not a service-account key, and lists a seeded one (A3d)', async () => {
+    const server = await harness.server()
+    const me = await person(server, 'vertex-catalog')
+
+    // The document is checked **before** it is sealed, so a file that is not a service-account
+    // key — the wrong download from the console, a gcloud ADC file — is the schema's 400 and
+    // never reaches the vault or a provider call.
+    for (const service_account of [
+      '{}',
+      'not json',
+      JSON.stringify({ type: 'authorized_user', refresh_token: 'x' }),
+    ]) {
+      const refused = await errorOf(() =>
+        me.client.providerCredentials.put('vertex', {
+          type: 'vertex',
+          service_account,
+          project: 'openharness-vertex',
+          location: 'europe-west4',
+        }),
+      )
+      expect([service_account, refused.status]).toEqual([service_account, 400])
+      expect([service_account, refused.type]).toEqual([service_account, 'invalid_request_error'])
+    }
+    // A location outside Google's list, and a project that is not a project id: the same 400.
+    // A location outside Google's list, and a project that is not a project id. The typed
+    // client refuses both before a request exists, so these bodies go over the wire by hand —
+    // the same 400 either way, and nothing stored.
+    for (const body of [
+      {
+        type: 'vertex',
+        service_account: VERTEX_KEY,
+        project: 'openharness-vertex',
+        location: 'mars-north1',
+      },
+      {
+        type: 'vertex',
+        service_account: VERTEX_KEY,
+        project: 'Not A Project',
+        location: 'europe-west4',
+      },
+    ]) {
+      const refused = await fetch(`${server.baseUrl}/v1/provider-credentials/vertex`, {
+        method: 'PUT',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${me.signedIn.token}`,
+        },
+        body: JSON.stringify(body),
+      })
+      expect([body.location, body.project, refused.status]).toEqual([
+        body.location,
+        body.project,
+        400,
+      ])
+      expect(ApiErrorBodySchema.parse(await refused.json()).error.type).toBe(
+        'invalid_request_error',
+      )
+    }
+    // A named type may not take a fixed provider id — the Vertex form of the azure rule.
+    await expect(
+      me.client.providerCredentials.put('openai', {
+        type: 'vertex',
+        service_account: VERTEX_KEY,
+        project: 'openharness-vertex',
+        location: 'europe-west4',
+      }),
+    ).rejects.toMatchObject({ status: 400, type: 'invalid_request_error' })
+    await expect(me.client.providerCredentials.list()).resolves.toEqual({ data: [] })
+
+    // A stored credential lists the publisher models the build can run — Google's and
+    // Anthropic's, from the vendored models.dev snapshot — and nothing of the private key.
+    await seedVertexCredential(await harness.database(), {
+      userId: me.signedIn.user.id,
+      name: 'vertex',
+      serviceAccount: VERTEX_KEY,
+      project: 'openharness-vertex',
+      location: 'europe-west4',
+    })
+
+    const catalog = await me.client.models.list()
+    const ids = catalog.data.map((entry) => entry.id)
+    expect(ids).toContain('vertex/gemini-2.5-pro')
+    expect(ids).toContain('vertex/claude-sonnet-4-5@20250929')
+    // Nothing the build has no client for: the MaaS models Google resells on Vertex, and the
+    // non-chat families.
+    expect(ids.some((id) => id.includes('maas'))).toBe(false)
+    expect(ids.some((id) => id.includes('embedding'))).toBe(false)
+    const gemini = catalog.data.find((entry) => entry.id === 'vertex/gemini-2.5-pro')
+    expect(gemini).toMatchObject({ provider: 'vertex', context_window: 1048576 })
+    expect(typeof gemini?.cost?.input).toBe('number')
+    expect(catalog.providers).toEqual([
+      expect.objectContaining({ provider: 'vertex', status: 'ok', message: null }),
+    ])
+    expect(JSON.stringify(catalog)).not.toContain('VERTEX-PRIVATE-KEY')
   })
 
   it('answers 404 in the envelope for a route that does not exist', async () => {

@@ -1,4 +1,4 @@
-import { ApiError, AuthenticationError, PROVIDERS } from '@openharness/client'
+import { ApiError, AuthenticationError, CREDENTIAL_TARGETS } from '@openharness/client'
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
@@ -47,16 +47,18 @@ describe('the first-run screen', () => {
     renderApp(makeFake({ models: [], providers: [] }), { hash: '#/' })
 
     expect(await screen.findByRole('button', { name: /Anthropic/ })).toBeInTheDocument()
-    // A hint follows the provider's name on its own tile (X8).
+    // A hint follows the provider's name on its own tile (X8), and it is what tells Google's
+    // tile from Google Vertex's — both start with the same word (#245 A3d).
     expect(screen.getByRole('button', { name: /Groq/ })).toHaveTextContent('Free tier available')
-    expect(screen.getByRole('button', { name: /Google/ })).toHaveTextContent(
-      'Free tier in Google AI Studio',
+    expect(screen.getByRole('button', { name: /Free tier in Google AI Studio/ })).toHaveTextContent(
+      'Google',
     )
     expect(screen.getByRole('button', { name: 'OpenAI' })).toHaveTextContent('OpenAI')
     expect(screen.getByRole('button', { name: 'OpenAI' })).not.toHaveTextContent('Free tier')
-    // The named credential type is a tile too (#245, A3a): an exact name, because "Azure
-    // OpenAI" also matches a loose /OpenAI/.
+    // The named credential types are tiles too (#245, A3a/A3d): exact names, because "Azure
+    // OpenAI" also matches a loose /OpenAI/ and "Google Vertex" a loose /Google/.
     expect(screen.getByRole('button', { name: 'Azure OpenAI' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Google Vertex' })).toBeInTheDocument()
   })
 
   it('saves a key, names the default model, and starts chatting with the cursor in the box', async () => {
@@ -206,13 +208,22 @@ describe('the first-run screen', () => {
   it('draws the tiles from the shared provider list', async () => {
     renderApp(makeFake({ models: [], providers: [] }), { hash: '#/' })
 
-    // One tile per provider `@openharness/client` carries, and no others: that list is built
-    // from `@openharness/protocol`'s provider list (#245), so it is the server's set too.
+    // One tile per target `@openharness/client` carries, and no others: the eleven providers
+    // (#245) and the named credential types (A3a/A3d). The tile's own element is what is read
+    // — a tile's accessible name carries its free-tier hint, and "Google Vertex" starts with
+    // the same word as "Google".
     await screen.findByRole('heading', { name: new RegExp(FIRST_RUN_HEADING) })
-    for (const provider of PROVIDERS) {
+    const labels = [...document.querySelectorAll<HTMLElement>('[data-slot="provider-tile"]')].map(
+      (tile) => tile.textContent ?? '',
+    )
+    expect(labels).toHaveLength(CREDENTIAL_TARGETS.length)
+    for (const target of CREDENTIAL_TARGETS) {
+      // `includes`, not `startsWith`: a tile without a brand mark draws a monogram before its
+      // label, so the display name is not always the first characters of the element.
       expect(
-        screen.getByRole('button', { name: new RegExp(`^${provider.name}`) }),
-      ).toBeInTheDocument()
+        labels.some((label) => label.includes(target.displayName)),
+        target.displayName,
+      ).toBe(true)
     }
   })
 })

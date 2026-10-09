@@ -527,11 +527,13 @@ curl -X DELETE localhost:3000/v1/provider-credentials/azure-eu \
   none).
 - **Non-secret per-type facts ride in `details`.** `last4` tells two credentials of one type
   apart but not which service one is: a Bedrock credential is one account's keys in one region,
-  and a user may keep `bedrock` and `bedrock-us`. Each type's `details` is its own typed object
-  — `{"base_url_host":"127.0.0.1:11434"}` for a custom endpoint (#249) and
-  `{"region":"eu-west-1"}` for a Bedrock credential (#250) — and it never carries a secret or
-  anything a secret could be recovered from. It is **absent** for a credential whose type has
-  nothing to report, which is every `api_key` and `azure_openai` one.
+  and a user may keep `bedrock` and `bedrock-us`; a Vertex credential is one service account in
+  one project and one location, and a user may keep `vertex` and `vertex-eu`. Each type's
+  `details` is its own typed object — `{"base_url_host":"127.0.0.1:11434"}` for a custom
+  endpoint (#249), `{"region":"eu-west-1"}` for a Bedrock credential (#250) and
+  `{"email":"…","project":"…","location":"us-central1"}` for a Vertex one (#251) — and it never
+  carries a secret or anything a secret could be recovered from. It is **absent** for a
+  credential whose type has nothing to report, which is every `api_key` and `azure_openai` one.
 - **Validated on save** with one cheap call. An `api_key` is checked against the provider's own
   model list; an `azure_openai` credential is checked with one chat request to its **first
   deployment**; an `openai_compatible` credential is checked with `GET {base_url}/models` — the
@@ -539,31 +541,40 @@ curl -X DELETE localhost:3000/v1/provider-credentials/azure-eu \
   endpoint that resolves inside the network (loopback, private, link-local, the cloud metadata
   service) is refused before it can be stored; a `bedrock` credential is checked with one
   `ListFoundationModels` read in its region, SigV4-signed with the user's keys (the host comes
-  from the region, so there is no user-supplied address to guard). A credential the provider
-  rejects is an `invalid_provider_credential` with status `422` — for Bedrock, AWS's own reason
-  for the refusal, scrubbed — and nothing is stored.
-- **A credential is keyed by its `name`**, which is the `provider` half of the model ids it
+  from the region, so there is no user-supplied address to guard); a `vertex` credential is
+  checked by signing an OAuth token with its service-account key — never Application Default
+  Credentials — and listing one page of **publisher models** of its project and location
+  (Google's own endpoint, derived from the validated location, so there is nothing to guard). A
+  credential the provider rejects is an `invalid_provider_credential` with status `422` — for
+  Bedrock and Vertex, the provider's own reason for the refusal, scrubbed — and nothing is
+  stored.- **A credential is keyed by its `name`**, which is the `provider` half of the model ids it
   serves — and that is also the path parameter, which is why the route's shape did not change
   when names arrived. `PUT` replaces the credential with that name; deletion is immediate.
 - **The eleven fixed providers keep their ids as names**, one each: an `api_key` credential may
   only be stored under `anthropic`, `openai`, … A **named credential type** — `azure_openai`
-  and `openai_compatible` or `bedrock` today — may be stored under any short, lowercase name
-  (`[a-z0-9-]`, at most 32 characters) that is not one of those ids, which is how a user keeps
-  `azure` _and_ `azure-eu`, `custom` _and_ `my-local`, or two Bedrock credentials in two
-  regions. Only the first credential of a type defaults to the type's name (`azure`, `custom`,
-  `bedrock`); the frontends ask for a name for a second one. Anything else is a
-  `400 invalid_request_error`.
+  `openai_compatible`, `bedrock` and `vertex` today — may be stored under any short, lowercase
+  name (`[a-z0-9-]`, at most 32 characters) that is not one of those ids, which is how a user
+  keeps `azure` _and_ `azure-eu`, `custom` _and_ `my-local`, two Bedrock credentials in two
+  regions, or `vertex` _and_ `vertex-eu`. Only the first credential of a type defaults to the
+  type's name (`azure`, `custom`, `bedrock`, `vertex`); the frontends ask for a name for a
+  second one. Anything else is a `400 invalid_request_error`.
 - `type` is a discriminated union: `api_key` (`api_key`); `azure_openai` (`endpoint`, an
   `https` URL; `api_key`; `deployments`, at least one); `openai_compatible` (`base_url`, an
-  absolute `http`/`https` URL; an **optional** `api_key`); and `bedrock` (`access_key_id`,
+  absolute `http`/`https` URL; an **optional** `api_key`); `bedrock` (`access_key_id`,
   `secret_access_key`, an optional `session_token`, and `region` — validated against the list
   of AWS regions that serve Bedrock, because the value goes into an AWS hostname; no
-  assume-role in v1). Vertex comes later.
+  assume-role in v1); and `vertex` (`service_account`, the JSON key file Google Cloud issued
+  for a service account — it must parse, say `type: service_account` and carry the fields a
+  request needs, or it is a `400` before it reaches the vault; `project`, a Google Cloud project
+  id; and `location`, one of Google's Vertex regions, because the location is the host every
+  request goes to). The whole Vertex document is sealed as text, exactly as it was pasted, and
+  its models are `<name>/<model>`.
 - **The public facts a list shows.** Metadata is the same fields for every type, plus the
-  `details` object its own type publishes — the base URL's **host** for an `openai_compatible`
-  credential and the **region** for a `bedrock` one, never the whole URL and never any part of a
-  key. A type with no such facts (an `api_key`, an `azure_openai`) carries no `details` at all.
-- A turn whose model's provider half names no stored credential fails with a `session.error`
+  `details` object its own type publishes — the base URL's **host** for an
+  `openai_compatible` credential, the **region** for a `bedrock` one and the service-account
+  **email**, **project** and **location** for a `vertex` one, never the whole URL and never any
+  part of a key. A type with no such facts (an `api_key`, an `azure_openai`) carries no
+  `details` at all.- A turn whose model's provider half names no stored credential fails with a `session.error`
   whose type is `missing_provider_credential` — non-retryable, the message names the provider.
   The server never falls back to provider keys from the environment.
 
@@ -641,7 +652,15 @@ is the usual one; the optional `refresh=true` query parameter bypasses the serve
   matches exactly one models.dev entry borrows its metadata, and an id that matches none or more
   than one (`gpt-4o` is filed under both `openai` and `azure`) gets `null` for both limits, no
   name and no price rather than a guess.
-- **Where the list comes from.** Per provider, the server calls that provider's own
+- **A Vertex credential contributes the publisher models this build can run.** Google's and
+  Anthropic's models served from Vertex are both filed under models.dev's `google-vertex`
+  entry, so a `vertex` credential contributes those — `vertex/gemini-2.5-pro`,
+  `vertex/claude-sonnet-4-5@20250929` — with `source: "registry"`, their prices and context
+  windows, and a status of `ok` (`fetched_at` is when the credential was read). The entry
+  carries more than a request can run — Gemini's image, speech and embedding families, and the
+  MaaS models Google resells (`xai/…`, `meta/…`) — and two rules keep those out: only
+  `gemini-*` and `claude-*` ids have a client here, and the catalogue's own chat filter drops
+  the non-chat families.- **Where the list comes from.** Per provider, the server calls that provider's own
   list-models endpoint with the caller's credential (`GET /v1/models` for OpenAI and
   Anthropic, `GET /v1beta/models` for Gemini, `GET /api/v1/models` for OpenRouter,
   `GET /models` for the OpenAI-compatible providers), from a fixed, known table. Each call has

@@ -257,7 +257,6 @@ with ↑/↓ and takes with Enter, because the value goes into an AWS hostname a
 only name a host that does not exist. A custom endpoint's target carries no `keyUrl`, so no key
 page is printed and `o` is not bound — the letter stays typeable in the URL. A new member of the
 protocol's union is a compile error there until it has a form, which is where Vertex lands.
-
 A **named** target also asks for a **credential name**, and only when one of its type is already
 stored — the first Azure credential takes the type's default (`azure`), a first Bedrock one takes
 `bedrock`, and a second has to be told apart from it (`azure-eu`, `bedrock-us`), because the name
@@ -275,13 +274,16 @@ key already drops that provider's cache entry server-side.
 
 `oh providers` lists what is stored: the display name, the credential type, the non-secret facts
 the credential reports, the last four characters and when it was added. The facts are
-`credentialFacts`, read from the credential's `details` (#245, A3c) — a Bedrock credential's
-region — because `last4` alone cannot tell two credentials of one type apart when they are two
-accounts or two regions of one account. That is the whole of what the API can say — it is
-**write-only** (epic #65, A5). The display name is the provider's, the credential type's where
-the name is that type's default (`azure`, `bedrock`), or the reader's own label otherwise — so two
-Azure credentials are told apart by the names they were saved under. `oh providers remove <name>`
-forgets a credential after a `[y/N]` question (`--yes` skips it); deleting one that is not
+`credentialFacts`, read from the credential's typed `details` (#245, A3c/A3d) — a Bedrock
+credential's region, a Vertex one's service-account email, project and location, and never any
+part of a private key — because `last4` alone cannot tell two credentials of one type apart when
+they are two accounts or two regions of one account. They are the last field of the line rather
+than a fixed column: an email address is wider than any column worth reserving on every key's
+row. That is the whole of what the API can say — it is **write-only** (epic #65, A5). The
+display name is the provider's, the credential type's where the name is that type's default
+(`azure`, `bedrock`, `vertex`), or the reader's own label otherwise — so two Azure credentials
+are told apart by the names they were saved under.
+`oh providers remove <name>` forgets a credential after a `[y/N]` question (`--yes` skips it); deleting one that is not
 there is not an error, because the route answers `204` either way.
 
 ### Slash commands, the menu, and the prompt slot (#207)

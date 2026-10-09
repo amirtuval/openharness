@@ -115,7 +115,10 @@ export function ProvidersCard() {
               <li
                 key={credential.name}
                 data-slot="provider-credential"
-                className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"
+                // Stacked below `sm`: a long email, a project and a location beside two
+                // buttons leaves the facts a handful of characters wide, and they break
+                // mid-word. From `sm` up it is the row it always was (#251).
+                className="flex flex-col gap-3 rounded-md border px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
               >
                 <div className="min-w-0">
                   <p className="truncate text-sm">
@@ -124,76 +127,77 @@ export function ProvidersCard() {
                       {credentialKeyLabel(credential)}
                     </span>
                   </p>
-                  <p className="truncate text-xs text-muted-foreground">
+                  <p className="text-xs break-words text-muted-foreground">
                     {credentialEndpointLabel(credential)}
                     {/* The non-secret facts that tell two credentials of one type apart — a
-                        Bedrock credential's region. `last4` alone cannot, and the second line
-                        is where they stay visible at every width (#245, A3c). */}
+                        Bedrock credential's region, a Vertex one's email, project and
+                        location. `last4` alone cannot, and they wrap rather than truncate so
+                        the part that differs is never the part hidden (#245, A3c/A3d). */}
                     {credentialFacts(credential).map((fact) => (
                       <Fragment key={fact}>
-                        <span className="text-muted-foreground">{fact}</span>
+                        <span>{fact}</span>
                         {' · '}
                       </Fragment>
                     ))}
                     {validatedLabel(credential)}
                   </p>
                 </div>
-
-                {confirming === credential.name ? (
-                  <div className="flex shrink-0 items-center gap-2">
-                    <span className="text-xs text-muted-foreground">Delete this key?</span>
-                    <Button
-                      type="button"
-                      variant="destructive"
-                      size="sm"
-                      disabled={deleting !== null}
-                      onClick={() => void confirmDelete(credential.name)}
-                    >
-                      {deleting === credential.name ? 'Deleting…' : 'Delete'}
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      disabled={deleting !== null}
-                      onClick={() => setConfirming(null)}
-                    >
-                      Cancel
-                    </Button>
-                  </div>
-                ) : (
-                  <div className="flex shrink-0 items-center gap-1">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      aria-label={`Replace the ${credential.name} credential`}
-                      onClick={() => {
-                        setAdding({
-                          target: credentialTargetFor(credential),
-                          name: credential.name,
-                        })
-                        setNotice(null)
-                      }}
-                    >
-                      Replace
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      aria-label={`Delete the ${credential.name} credential`}
-                      onClick={() => {
-                        setConfirming(credential.name)
-                        setNotice(null)
-                      }}
-                    >
-                      Delete
-                    </Button>
-                  </div>
-                )}
-              </li>
-            ))}
+                  {confirming === credential.name ? (
+                    <div className="flex shrink-0 items-center gap-2">
+                      <span className="text-xs text-muted-foreground">Delete this key?</span>
+                      <Button
+                        type="button"
+                        variant="destructive"
+                        size="sm"
+                        disabled={deleting !== null}
+                        onClick={() => void confirmDelete(credential.name)}
+                      >
+                        {deleting === credential.name ? 'Deleting…' : 'Delete'}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        disabled={deleting !== null}
+                        onClick={() => setConfirming(null)}
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="flex shrink-0 items-center gap-1">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        aria-label={`Replace the ${credential.name} credential`}
+                        onClick={() => {
+                          setAdding({
+                            target: credentialTargetFor(credential),
+                            name: credential.name,
+                          })
+                          setNotice(null)
+                        }}
+                      >
+                        Replace
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        aria-label={`Delete the ${credential.name} credential`}
+                        onClick={() => {
+                          setConfirming(credential.name)
+                          setNotice(null)
+                        }}
+                      >
+                        Delete
+                      </Button>
+                    </div>
+                  )}
+                </li>
+              )
+            })}
           </ul>
         </section>
 

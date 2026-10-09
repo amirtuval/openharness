@@ -31,6 +31,15 @@ export interface SecretInputProps {
   readonly onCancel: () => void
   /** What the input shows while it is empty; usually the provider's key format. */
   readonly placeholder?: string | undefined
+  /**
+   * What the box holds before the reader types — nothing, unless a flow has a value it can
+   * derive (a Vertex project, from the key document it just read).
+   *
+   * It is the *field's* value from the start, not a placeholder: Enter submits it, and the
+   * reader can edit or clear it like anything they typed. Nothing about the ref changes — a
+   * masked field still draws masks, so a frame can still not hold the value.
+   */
+  readonly initialValue?: string | undefined
   /** Suppress keys while a save is in flight — the value is already on its way. */
   readonly busy?: boolean | undefined
   /**
@@ -73,6 +82,7 @@ export function SecretInput({
   onSubmit,
   onCancel,
   placeholder,
+  initialValue,
   busy = false,
   onChar,
   mask = true,
@@ -81,8 +91,8 @@ export function SecretInput({
   // What was typed lives here and only here; the render knows how many characters it holds,
   // never which ones. A frame can therefore not contain the secret, and neither can a
   // snapshot of the tree React draws from.
-  const value = useRef('')
-  const [length, setLength] = useState(0)
+  const value = useRef(initialValue ?? '')
+  const [length, setLength] = useState((initialValue ?? '').length)
 
   const set = useCallback((next: string): void => {
     value.current = next

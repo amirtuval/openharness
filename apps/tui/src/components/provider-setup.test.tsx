@@ -482,3 +482,129 @@ describe('ProviderSetup — the bedrock form (#245, A3c)', () => {
     })
   })
 })
+
+describe('ProviderSetup — the vertex form (#245, A3d)', () => {
+  it('asks for a name for a second credential, named the way its models are', async () => {
+    // A Vertex credential's models are `<name>/<model>` — not Azure's `<deployment>`, which is
+    // what the label said before the noun became the type's to say.
+    const setup = renderSetup({ provider: 'vertex', stored: ['vertex'] })
+
+    await waitForScreen(setup, 'Name (its models will be vertex/<model>)')
+  })
+
+  /** A service-account key document on disk, as the console downloads one. */
+  function keyFile(): string {
+    const directory = mkdtempSync(join(tmpdir(), 'oh-vertex-'))
+    const path = join(directory, 'openharness-vertex.json')
+    writeFileSync(
+      path,
+      JSON.stringify({
+        type: 'service_account',
+        project_id: 'openharness-vertex',
+        private_key_id: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678',
+        private_key:
+          '-----BEGIN PRIVATE KEY-----\nVERTEX-AT-THE-PROMPT\n-----END PRIVATE KEY-----\n',
+        client_email: 'vertex-runner@openharness-vertex.iam.gserviceaccount.com',
+      }),
+    )
+    return path
+  }
+
+  it('reads the key from the path the reader gives, and never puts it on the screen', async () => {
+    const path = keyFile()
+    const setup = renderSetup({ provider: 'vertex' })
+
+    await waitForScreen(setup, 'Service account JSON file path')
+    typeText(setup, path)
+    pressKey(setup, 'enter')
+
+    // The path is what was typed and what the flow echoes; the document the file holds is read
+    // here and goes no further than the request.
+    await waitForScreen(setup, 'Project ID (the key’s own by default)')
+    expect(frameOf(setup)).not.toContain('VERTEX-AT-THE-PROMPT')
+    expect(frameOf(setup)).not.toContain('BEGIN PRIVATE KEY')
+
+    // The prompt opens with the project the document names, so Enter takes the key's own.
+    expect(frameOf(setup)).toContain('openharness-vertex')
+    pressKey(setup, 'enter')
+    await waitForScreen(setup, 'Location (e.g. us-central1')
+    typeText(setup, 'us-central1')
+    pressKey(setup, 'enter')
+
+    await waitFor(() => setup.saved.length === 1)
+    expect(setup.saved).toEqual(['vertex'])
+    const { data } = await setup.fake.providerCredentials.list()
+    expect(data).toEqual([
+      expect.objectContaining({
+        type: 'vertex',
+        name: 'vertex',
+        // The key **id**'s tail, and the three facts that are not secret.
+        last4: '5678',
+        details: {
+          email: 'vertex-runner@openharness-vertex.iam.gserviceaccount.com',
+          project: 'openharness-vertex',
+          location: 'us-central1',
+        },
+      }),
+    ])
+  })
+
+  it('refuses a path it cannot read, and stays on the prompt', async () => {
+    const setup = renderSetup({ provider: 'vertex' })
+
+    await waitForScreen(setup, 'Service account JSON file path')
+    typeText(setup, '/nowhere/no-key-here.json')
+    pressKey(setup, 'enter')
+
+    await waitForScreen(setup, 'could not read /nowhere/no-key-here.json')
+    // Still the same field: a path that reads nothing is retyped, not skipped.
+    expect(frameOf(setup)).toContain('Service account JSON file path')
+    expect(setup.saved).toEqual([])
+  })
+
+  it('clears a field’s refusal once the answer is corrected', async () => {
+    // The refusal is about the value on the prompt: it goes when a good one replaces it, so a
+    // reader never sees last field's error above the next field's question.
+    const setup = renderSetup({ provider: 'vertex', stored: ['vertex'] })
+
+    await waitForScreen(setup, 'Name (its models will be vertex/<model>)')
+    typeText(setup, 'vertex-check')
+    pressKey(setup, 'enter')
+    await waitForScreen(setup, 'Service account JSON file path')
+    typeText(setup, keyFile())
+    pressKey(setup, 'enter')
+    await waitForScreen(setup, 'Project ID (the key’s own by default)')
+    pressKey(setup, 'enter')
+    await waitForScreen(setup, 'Location (e.g. us-central1')
+
+    typeText(setup, 'mars-north1')
+    pressKey(setup, 'enter')
+    await waitForScreen(setup, 'A Vertex location is one of Google’s regions')
+
+    for (let i = 0; i < 'mars-north1'.length; i += 1) pressKey(setup, 'backspace')
+    typeText(setup, 'europe-west4')
+    pressKey(setup, 'enter')
+
+    await waitFor(() => setup.saved.length === 1)
+    expect(frameOf(setup)).not.toContain('A Vertex location is one of')
+  })
+
+  it('refuses a location outside Google’s list, rather than sending it', async () => {
+    const setup = renderSetup({ provider: 'vertex' })
+
+    await waitForScreen(setup, 'Service account JSON file path')
+    typeText(setup, keyFile())
+    pressKey(setup, 'enter')
+    await waitForScreen(setup, 'Project ID (the key’s own by default)')
+    pressKey(setup, 'enter')
+    await waitForScreen(setup, 'Location (e.g. us-central1')
+
+    typeText(setup, 'mars-north1')
+    pressKey(setup, 'enter')
+
+    await waitForScreen(setup, 'A Vertex location is one of Google’s regions')
+    expect(setup.saved).toEqual([])
+    const { data } = await setup.fake.providerCredentials.list()
+    expect(data).toEqual([])
+  })
+})

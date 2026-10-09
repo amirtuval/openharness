@@ -1,11 +1,14 @@
 import {
   BEDROCK_REGIONS,
   DEFAULT_BEDROCK_REGION,
+  VERTEX_LOCATIONS,
   isBedrockRegion,
   isReservedCredentialName,
   isValidCredentialName,
+  parseServiceAccountKey,
   type ProviderCredentialType,
   type PutProviderCredentialRequest,
+  type VertexLocation,
 } from '@openharness/protocol'
 
 /**
@@ -50,6 +53,35 @@ export interface CredentialField {
    * empty string (Bedrock's session token).
    */
   readonly optional?: boolean
+  /**
+   * Whether the reader answers with a **path**, and the flow reads the file at it.
+   *
+   * A key document is not something a reader types: a Vertex service account is a JSON file
+   * Google's console downloaded, and pasting it into a terminal is what this exists to avoid.
+   * The flow reads the file, and it is the file's **contents** that become the field's value —
+   * so what the build below sees is the document, exactly as the web form's paste box sees it —
+   * and what a frame shows is the path, never the document.
+   */
+  readonly file?: boolean
+  /**
+   * Why what the reader typed cannot be used, or `null` — shown in place of the prompt's help,
+   * and it holds the flow on the field.
+   *
+   * This is the flow saying what the route would say, for a value the server validates against
+   * a closed set the terminal has no picker for: a Vertex location, which Google's own list
+   * defines and which becomes the host a request is sent to.
+   */
+  readonly validate?: (value: string) => string | null
+  /**
+   * What the prompt starts out holding, from what the flow already knows — nothing, unless one
+   * answer can be read out of another.
+   *
+   * A Vertex credential's project is in the key document the reader just pointed at, so the
+   * prompt opens with it and Enter takes it; the reader who needs another project types over
+   * it. A prefilled value is the field's value from the start, which is why the field's
+   * `validate` still runs on it.
+   */
+  readonly prefill?: (values: Readonly<Record<string, string>>) => string
 }
 
 /** One credential type's form: the fields, and how they become a request body. */
@@ -57,6 +89,12 @@ export interface CredentialForm {
   readonly fields: readonly CredentialField[]
   /** The body `PUT /v1/provider-credentials/{name}` takes. */
   readonly build: (values: Readonly<Record<string, string>>) => PutProviderCredentialRequest
+  /**
+   * What the half of a model id that follows the credential name is called — a Vertex
+   * credential's models are `<name>/<model>`, an Azure one's are its deployments. Defaults to
+   * `model`.
+   */
+  readonly modelNoun?: string
 }
 
 /** The values key the credential-name input uses; not a field of any payload. */
@@ -82,6 +120,7 @@ export const CREDENTIAL_FORMS: Record<ProviderCredentialType, CredentialForm> = 
     build: (values) => ({ type: 'api_key', api_key: values['api_key'] ?? '' }),
   },
   azure_openai: {
+    modelNoun: 'deployment',
     fields: [
       { name: 'endpoint', label: 'Endpoint (https://…openai.azure.com)', secret: false },
       { name: 'api_key', label: 'API key', secret: true },
@@ -141,6 +180,49 @@ export const CREDENTIAL_FORMS: Record<ProviderCredentialType, CredentialForm> = 
         ...(sessionToken === '' ? {} : { session_token: sessionToken }),
       }
     },
+  },
+  vertex: {
+    fields: [
+      // The document is read from a path rather than typed: it is a file the console
+      // downloaded, and a private key has no business being pasted into a terminal. Only the
+      // path is ever drawn — the flow keeps the file's contents, and no frame holds them.
+      {
+        name: 'service_account',
+        label: 'Service account JSON file path',
+        secret: false,
+        file: true,
+      },
+      {
+        name: 'project',
+        label: 'Project ID (the key’s own by default)',
+        secret: false,
+        prefill: (values) =>
+          parseServiceAccountKey(values['service_account'] ?? '')?.project_id ?? '',
+      },
+      {
+        name: 'location',
+        label: 'Location (e.g. us-central1, europe-west4, global)',
+        secret: false,
+        // Google's list, checked here because there is no picker in a terminal: the location is
+        // the host a request goes to, so an invented one is a credential that saves and then
+        // cannot make a request.
+        validate: (value) =>
+          (VERTEX_LOCATIONS as readonly string[]).includes(value)
+            ? null
+            : 'A Vertex location is one of Google’s regions — us-central1, europe-west4, ' +
+              'asia-northeast1, global. The key’s project page lists the regions it serves.',
+      },
+    ],
+    build: (values) => ({
+      type: 'vertex',
+      service_account: values['service_account'] ?? '',
+      // Filled in by the project field's `prefill` from the document, and editable — a service
+      // account with access to several projects may name another.
+      project: (values['project'] ?? '').trim(),
+      // Checked by the field's own `validate` before the flow gets here, so this is one of
+      // Google's locations — the cast is what the protocol's enumeration needs, not a hope.
+      location: (values['location'] ?? '').trim() as VertexLocation,
+    }),
   },
 }
 
