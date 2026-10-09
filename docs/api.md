@@ -132,7 +132,7 @@ session. It is also the SSE `id` and the resume position, so a client that recon
 | `session.status_idle`        | the brain     | the turn ended; the session is waiting for input                                     |
 | `session.status_rescheduled` | the brain     | a transient failure; it is retrying                                                  |
 | `session.error`              | the brain     | what went wrong, and whether it is retrying — `missing_provider_credential` never is |
-| `span.model_request_start`   | the brain     | a model request began, and the messages it claims                                    |
+| `span.model_request_start`   | the brain     | a model request began, the messages it claims, and the effort it ran at              |
 | `span.model_request_end`     | the brain     | it finished — usage, any error, the interrupts it ends                               |
 | `event_start`                | the brain     | a reply started streaming — a stored chunk since D9                                  |
 | `event_delta`                | the brain     | a streamed fragment of it — a stored chunk since D9                                  |
@@ -145,6 +145,29 @@ model the session runs from that message on, and the session keeps running it un
 message changes it (epic #116, U3). The switch is stored on the message — the log stays the
 source of truth — and each `span.model_request_start` still records the model its request
 actually used.
+
+It may carry a `reasoning_effort` (`"low"`, `"medium"` or `"high"`) the same way: the effort
+the session runs at from that message on, until another message changes it or clears it with
+`null` — which is the provider's default, and what a message that leaves the field out keeps
+(#252). The brain maps the effort onto each provider's own knob, and a model that takes no
+effort runs the provider's default instead; either way the request's
+`span.model_request_start` records what it was asked for and what it ran with:
+
+```json
+{
+  "type": "span.model_request_start",
+  "id": "sevt_…",
+  "seq": 3,
+  "processed_at": "…",
+  "consumes": ["sevt_…"],
+  "model": "openai/o4-mini",
+  "reasoning_effort": { "requested": "high", "applied": "high" }
+}
+```
+
+`applied` is `null` when the model took none — an effort asked for and not applied — and the
+field is absent entirely for a session that never set one, which is every session stored
+before #252.
 
 `session.usage` is the session's **running** totals, written by the brain in the same append as
 the `span.model_request_end` that closes a request which reported usage — so a client watching
