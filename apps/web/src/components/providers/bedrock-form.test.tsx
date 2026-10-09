@@ -157,3 +157,95 @@ describe('the bedrock credential form', () => {
     expect(list.getByText('us-east-2')).toBeInTheDocument()
   })
 })
+
+describe('the bedrock form’s name field and a replaced credential', () => {
+  it('replaces a stored credential under its own name', async () => {
+    const user = userEvent.setup({ delay: null })
+    const fake = makeFake({
+      credentials: [
+        credential('bedrock-us', '1111', { type: 'bedrock', details: { region: 'us-east-2' } }),
+      ],
+      models: [],
+      providers: [],
+    })
+    renderApp(fake, { hash: '#/settings' })
+
+    // A row's Replace opens the form on **that** credential: the name it is stored under is
+    // prefilled, and saving it must not be refused as "already taken" — the row could never be
+    // replaced otherwise.
+    await user.click(
+      await screen.findByRole('button', { name: 'Replace the bedrock-us credential' }),
+    )
+    const dialog = await screen.findByRole('dialog')
+    const name = within(dialog).getByLabelText<HTMLInputElement>('Name')
+    expect(name.value).toBe('bedrock-us')
+    await fill(user, dialog, { accessKeyId: 'AKIAIOSFODNN7EXAMPL9' })
+    // "Replace key", because the name is one that is already stored.
+    const save = within(dialog).getByRole('button', { name: 'Replace key' })
+    expect(save).toBeEnabled()
+    await user.click(save)
+
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    })
+    const { data } = await fake.providerCredentials.list()
+    // The same credential, with the new key: one row, not two.
+    expect(data).toHaveLength(1)
+    expect(data[0]).toMatchObject({ name: 'bedrock-us', last4: 'MPL9' })
+  })
+
+  it('holds the save until a name is answered, for a second credential', async () => {
+    const user = userEvent.setup({ delay: null })
+    const fake = makeFake({
+      credentials: [credential('bedrock', '1111', { type: 'bedrock' })],
+      models: [],
+      providers: [],
+    })
+    renderApp(fake, { hash: '#/settings' })
+
+    const dialog = await openDialog(user)
+    await user.click(within(dialog).getByRole('button', { name: 'Amazon Bedrock' }))
+    await fill(user, dialog)
+    const save = within(dialog).getByRole('button', { name: 'Save key' })
+    // The name is not one of the form's fields, so an unanswered one has to hold the save by
+    // itself: a blank name would be a request against an empty path segment.
+    expect(save).toBeDisabled()
+    await user.type(within(dialog).getByLabelText('Name'), 'bedrock-eu')
+    await waitFor(() => {
+      expect(save).toBeEnabled()
+    })
+  })
+
+  it('trims the keys a reader pasted with surrounding whitespace', async () => {
+    const user = userEvent.setup({ delay: null })
+    const fake = makeFake({ models: [], providers: [] })
+    // What the form sends, as the client sees it: the fake keeps the metadata only, so the
+    // body is the only place a trim can be observed.
+    const bodies: unknown[] = []
+    const put = fake.providerCredentials.put.bind(fake.providerCredentials)
+    fake.providerCredentials.put = (name, body, options) => {
+      bodies.push(body)
+      return put(name, body, options)
+    }
+    renderApp(fake, { hash: '#/settings' })
+
+    const dialog = await openDialog(user)
+    await user.click(within(dialog).getByRole('button', { name: 'Amazon Bedrock' }))
+    await fill(user, dialog, {
+      accessKeyId: `  ${ACCESS_KEY_ID}  `,
+      secretAccessKey: `  ${SECRET_ACCESS_KEY}  `,
+    })
+    await user.click(within(dialog).getByRole('button', { name: 'Save key' }))
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    })
+    // A key copied out of a console or a downloaded `.csv` arrives with whitespace around it —
+    // often a newline — and a signature computed over that whitespace is one AWS rejects.
+    expect(bodies[0]).toEqual({
+      type: 'bedrock',
+      region: 'us-east-1',
+      access_key_id: ACCESS_KEY_ID,
+      secret_access_key: SECRET_ACCESS_KEY,
+    })
+  })
+})

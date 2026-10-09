@@ -10,7 +10,7 @@ import {
   type ProviderCredentialType,
   type PutProviderCredentialRequest,
 } from '@openharness/protocol'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import type { CredentialWriteResult } from '../../hooks/use-provider-credentials'
 import { signInHash } from '../../lib/router'
@@ -213,7 +213,10 @@ const CREDENTIAL_FORMS: Record<ProviderCredentialType, CredentialForm> = {
         // is what makes the value a region to the compiler without a cast.
         region: isBedrockRegion(region) ? region : DEFAULT_BEDROCK_REGION,
         access_key_id: (values.access_key_id ?? '').trim(),
-        secret_access_key: values.secret_access_key ?? '',
+        // Both halves are trimmed, because both are copied out of a console or a downloaded
+        // `.csv` — where a trailing newline is the normal case, and a signature computed over
+        // one is a signature AWS rejects while the reader looks at two correct-looking keys.
+        secret_access_key: (values.secret_access_key ?? '').trim(),
         ...(sessionToken === '' ? {} : { session_token: sessionToken }),
       }
     },
@@ -289,7 +292,18 @@ export function ProviderKeyForm({
     kind: 'invalid' | 'session' | 'error'
     message: string
   } | null>(null)
-  const inputRef = useRef<HTMLInputElement>(null)
+  /**
+   * The first field of the form, whichever element it is — an `<Input>` for most types, the
+   * region's `<select>` for Bedrock — so the caret lands in it when the form opens.
+   *
+   * A callback ref rather than a `RefObject`: a shared `useRef` would have to be typed as the
+   * union, and neither `<input>` nor `<select>` accepts a ref of the union. The callback takes
+   * the union as its *parameter*, which both elements satisfy.
+   */
+  const inputRef = useRef<HTMLInputElement | HTMLSelectElement | null>(null)
+  const firstFieldRef = useCallback((element: HTMLInputElement | HTMLSelectElement | null) => {
+    inputRef.current = element
+  }, [])
 
   // A form for another target — the dialog swaps it under the form — starts empty, so one
   // credential's secret can never be sent for another.
@@ -314,9 +328,10 @@ export function ProviderKeyForm({
   const nameError = !asksForName
     ? null
     : nameErrorMessage(typedName, storedNames, target, initialName)
-  // Every field has to be filled before a save is offered, so the reader is not sent a request
-  // the provider will refuse over a field the form could have shown as missing. A name the form
-  // asks for counts as filled only when it has been answered, and it is not one of `form.fields`.
+  // An optional field — Bedrock's session token — may be blank; everything else has to be
+  // filled before a save is offered, so the reader is not sent a request the provider will
+  // refuse over a field the form could have shown as missing. A name the form asks for counts
+  // as filled only when it has been answered, and it is not one of `form.fields`.
   const filled =
     (!asksForName || typedName !== '') &&
     form.fields.every(
@@ -402,7 +417,7 @@ export function ProviderKeyForm({
           <Input
             id={`provider-${NAME_FIELD}`}
             aria-label="Name"
-            ref={inputRef}
+            ref={firstFieldRef}
             value={values[NAME_FIELD] ?? ''}
             autoComplete="off"
             spellCheck={false}
@@ -431,6 +446,7 @@ export function ProviderKeyForm({
             <select
               id={`provider-${field.name}`}
               aria-label={field.label}
+              ref={index === 0 && !asksForName ? firstFieldRef : undefined}
               className={SELECT_CLASS}
               value={values[field.name] ?? ''}
               onChange={(event) => {
@@ -446,7 +462,7 @@ export function ProviderKeyForm({
           ) : (
             <Input
               id={`provider-${field.name}`}
-              ref={index === 0 && !asksForName ? inputRef : undefined}
+              ref={index === 0 && !asksForName ? firstFieldRef : undefined}
               type={
                 field.kind === 'text' || field.name === 'endpoint' || field.name === 'deployments'
                   ? 'text'
