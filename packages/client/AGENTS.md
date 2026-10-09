@@ -81,32 +81,32 @@ src/
 
 ### `@openharness/client`
 
-| export                                                                                          | what it is                                                                               |
-| ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `createClient(options)`                                                                         | build a client                                                                           |
-| `Client`, `ClientOptions`, `RequestOptions`                                                     | the interface both the real and the fake client implement                                |
-| `AgentsResource`, `SessionsResource`, `SessionEventsResource`                                   | the resource interfaces                                                                  |
-| `ProviderCredentialsResource`                                                                   | `providerCredentials.list/put/delete`                                                    |
-| `ModelsResource`                                                                                | `models.list`: the chat models the caller's keys can use (epic #92)                      |
-| `PreferencesResource`                                                                           | `preferences.get/put`: the caller's stored default model (#111)                          |
-| `UsageResource`                                                                                 | `usage.session(id)` and `usage.me(range)`: what was spent, priced on the server (#247)   |
-| `AuthResource`                                                                                  | `auth.startDeviceLogin/pollDeviceLogin/signOut`                                          |
-| `OPENHARNESS_CLI_CLIENT_ID`                                                                     | the `client_id` the device flow presents: `'openharness-cli'`                            |
-| `DeviceLoginError`, `DeviceLoginStart`, `PollDeviceLoginOptions`                                | the device flow's error, its start result and its poll options                           |
-| `StreamOptions`                                                                                 | `{ deltas?, afterSeq?, signal? }` for `events.stream`                                    |
+| export                                                                                          | what it is                                                                                                           |
+| ----------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `createClient(options)`                                                                         | build a client                                                                                                       |
+| `Client`, `ClientOptions`, `RequestOptions`                                                     | the interface both the real and the fake client implement                                                            |
+| `AgentsResource`, `SessionsResource`, `SessionEventsResource`                                   | the resource interfaces                                                                                              |
+| `ProviderCredentialsResource`                                                                   | `providerCredentials.list/put/delete`                                                                                |
+| `ModelsResource`                                                                                | `models.list`: the chat models the caller's keys can use (epic #92)                                                  |
+| `PreferencesResource`                                                                           | `preferences.get/put`: the caller's stored default model (#111)                                                      |
+| `UsageResource`                                                                                 | `usage.session(id)` and `usage.me(range)`: what was spent, priced on the server (#247)                               |
+| `AuthResource`                                                                                  | `auth.startDeviceLogin/pollDeviceLogin/signOut`                                                                      |
+| `OPENHARNESS_CLI_CLIENT_ID`                                                                     | the `client_id` the device flow presents: `'openharness-cli'`                                                        |
+| `DeviceLoginError`, `DeviceLoginStart`, `PollDeviceLoginOptions`                                | the device flow's error, its start result and its poll options                                                       |
+| `StreamOptions`                                                                                 | `{ deltas?, afterSeq?, signal? }` for `events.stream`                                                                |
 | `SendMessageOptions`                                                                            | `sendMessage`'s options: cancellation, the `model` to switch to, the `reasoningEffort` (#252), and `rewindTo` (#238) |
-| `FetchLike`, `DebugHook`, `RawResponse`                                                         | the `fetch` seam, the hook for what the client skips, the raw answer                     |
-| `ApiError`, `AuthenticationError`, `ResponseValidationError`, `errorTypeForStatus()`            | the three errors and the status → `error.type` map                                       |
-| `createTranscript()`, `reduceTranscript()`, `reduceTranscriptAll()`, `initialTranscriptState()` | the transcript store and the pure reducer                                                |
-| `selectMessages()`, `selectIsRunning()`, `selectLastMessage()`, `selectStreamingMessage()`      | selectors                                                                                |
-| `Transcript`, `TranscriptState`, `TranscriptMessage`, `TranscriptError`                         | the transcript's types                                                                   |
-| `MessagePart`, `TextPart`, `TranscriptMessageMeta`, `TranscriptUsage`, `PendingModelRequest`    | a message's typed parts, a reply's metadata, and its bookkeeping (#201)                  |
-| `SessionUsage`, `SessionModelUsage`, `SessionUsageTotals`, `ModelPriceLookup`                   | the session's totals as the transcript keeps them, and how a frontend prices them (#247) |
-| `selectSessionUsage()`, `sessionUsageOf()`, `sessionCost()`, `replyCost()`                      | what a session and a reply cost, from the log's tokens and the catalog's rates (#247)    |
-| `PROVIDERS`, `providerInfo()`, `providerName()`, `ProviderInfo`                                 | the model providers a form or a tile needs (#209; built from the shared list, #245)      |
-| `CREDENTIAL_TARGETS`, `CredentialTarget`                                                        | every provider _and_ named credential type a form or a tile offers (#245 A3a)            |
-| `credentialDisplayName()`, `credentialTargetFor()`                                              | what to call a stored credential, and which tile its row reopens                         |
-| `PACKAGE_NAME`                                                                                  | the package name; a dependent's cheap proof that the import resolved                     |
+| `FetchLike`, `DebugHook`, `RawResponse`                                                         | the `fetch` seam, the hook for what the client skips, the raw answer                                                 |
+| `ApiError`, `AuthenticationError`, `ResponseValidationError`, `errorTypeForStatus()`            | the three errors and the status → `error.type` map                                                                   |
+| `createTranscript()`, `reduceTranscript()`, `reduceTranscriptAll()`, `initialTranscriptState()` | the transcript store and the pure reducer                                                                            |
+| `selectMessages()`, `selectIsRunning()`, `selectLastMessage()`, `selectStreamingMessage()`      | selectors                                                                                                            |
+| `Transcript`, `TranscriptState`, `TranscriptMessage`, `TranscriptError`                         | the transcript's types                                                                                               |
+| `MessagePart`, `TextPart`, `TranscriptMessageMeta`, `TranscriptUsage`, `PendingModelRequest`    | a message's typed parts, a reply's metadata, and its bookkeeping (#201)                                              |
+| `SessionUsage`, `SessionModelUsage`, `SessionUsageTotals`, `ModelPriceLookup`                   | the session's totals as the transcript keeps them, and how a frontend prices them (#247)                             |
+| `selectSessionUsage()`, `sessionUsageOf()`, `sessionCost()`, `replyCost()`                      | what a session and a reply cost, from the log's tokens and the catalog's rates (#247)                                |
+| `PROVIDERS`, `providerInfo()`, `providerName()`, `ProviderInfo`                                 | the model providers a form or a tile needs (#209; built from the shared list, #245)                                  |
+| `CREDENTIAL_TARGETS`, `CredentialTarget`                                                        | every provider _and_ named credential type a form or a tile offers (#245 A3a)                                        |
+| `credentialDisplayName()`, `credentialTargetFor()`                                              | what to call a stored credential, and which tile its row reopens                                                     |
+| `PACKAGE_NAME`                                                                                  | the package name; a dependent's cheap proof that the import resolved                                                 |
 
 ### `@openharness/client/testing`
 
