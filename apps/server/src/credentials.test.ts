@@ -11,7 +11,7 @@ import { InMemoryCredentialStore, InMemorySessionStore } from '@openharness/sess
 import { createVault, envKeyProvider } from '@openharness/vault'
 
 import { SESSION_FRESH_AGE_SECONDS } from './auth'
-import { createSessionCredentialResolver, openApiKey } from './credentials'
+import { createSessionCredentialResolver, openCredential } from './credentials'
 import {
   TEST_SECRETS_KEY,
   createTestApp,
@@ -76,7 +76,7 @@ describe('the provider-credential API', () => {
     expect(put.status).toBe(200)
     const created = (await put.json()) as ProviderCredential
     expect(created.type).toBe('api_key')
-    expect(created.provider).toBe('anthropic')
+    expect(created.name).toBe('anthropic')
     expect(created.last4).toBe(SECRET.slice(-4))
     expect(created.validated_at).toBeDefined()
     expect(JSON.stringify(created)).not.toContain(SECRET)
@@ -115,7 +115,7 @@ describe('the provider-credential API', () => {
     await putCredential(test, 'openai', { type: 'api_key', api_key: SECRET })
 
     const user = await test.currentUser()
-    const stored = await test.credentials.get({ userId: user.id, provider: 'openai' })
+    const stored = await test.credentials.get({ userId: user.id, name: 'openai' })
     expect(stored).not.toBeNull()
     expect(JSON.stringify(stored)).not.toContain(SECRET)
     expect(stored?.sealed.kekVersion).toBe('v1')
@@ -123,23 +123,24 @@ describe('the provider-credential API', () => {
     // The vault opens it with the same AAD, and only that one: another user or another
     // provider cannot decrypt the row.
     const sealed = stored?.sealed as never
+    const payload = { type: 'api_key', api_key: SECRET }
     await expect(
-      openApiKey(test.vault, { userId: user.id, provider: 'openai', sealed }),
-    ).resolves.toBe(SECRET)
+      openCredential(test.vault, { userId: user.id, name: 'openai', sealed }),
+    ).resolves.toEqual(payload)
     await expect(
-      openApiKey(test.vault, { userId: 'somebody-else', provider: 'openai', sealed }),
+      openCredential(test.vault, { userId: 'somebody-else', name: 'openai', sealed }),
     ).resolves.toBeNull()
     await expect(
-      openApiKey(test.vault, { userId: user.id, provider: 'anthropic', sealed }),
+      openCredential(test.vault, { userId: user.id, name: 'anthropic', sealed }),
     ).resolves.toBeNull()
   })
 
   it('validates the key with one provider call, and answers 422 when it is refused', async () => {
-    const calls: { provider: string; apiKey: string }[] = []
+    const calls: { name: string; apiKey: string }[] = []
     const test = createTestApp({
-      validateProviderCredential: (provider, apiKey) => {
-        calls.push({ provider, apiKey })
-        if (apiKey !== SECRET) {
+      validateProviderCredential: (name, body) => {
+        calls.push({ name, apiKey: body.api_key })
+        if (body.api_key !== SECRET) {
           return Promise.reject(
             new Error('openai answered 401 for the validating request; the key was rejected'),
           )
@@ -154,7 +155,7 @@ describe('the provider-credential API', () => {
     expect(body.error.type).toBe('invalid_provider_credential')
     expect(body.error.message).toContain('openai')
     expect(body.error.message).not.toContain('sk-nope')
-    expect(calls).toEqual([{ provider: 'openai', apiKey: 'sk-nope' }])
+    expect(calls).toEqual([{ name: 'openai', apiKey: 'sk-nope' }])
 
     // Nothing was stored by the failed save.
     expect((await listCredentials(test)).data).toEqual([])
@@ -301,7 +302,10 @@ describe('the environment is not a credential source (A5)', () => {
     const session = await store.createSession(agent.id, { ownerId: user.id })
     const resolver = createSessionCredentialResolver({ store, credentials, vault })
 
-    await expect(resolver(session.id, 'openai')).resolves.toEqual({ apiKey: SECRET })
+    await expect(resolver(session.id, 'openai')).resolves.toEqual({
+      type: 'api_key',
+      apiKey: SECRET,
+    })
     // A provider the user has no key for, and a session that does not exist, both answer none.
     await expect(resolver(session.id, 'anthropic')).resolves.toBeNull()
     await expect(resolver('sesn_01HZZZZZZZZZZZZZZZZZZZZZZZ' as never, 'openai')).resolves.toBeNull()

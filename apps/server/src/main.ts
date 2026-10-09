@@ -36,7 +36,7 @@ import { createSessionCredentialResolver, type ResolveSessionCredential } from '
 import { createConfigVault } from './key-provider'
 import { resolveMockCredential, resolveModelFactory } from './model'
 import { PostgresPartitionScheduler } from './partition-scheduler'
-import { validateProviderApiKey, type ProviderCredentialValidator } from './provider-validation'
+import { validateProviderCredential, type ProviderCredentialValidator } from './provider-validation'
 import { LocalScheduler, type SessionScheduler } from './scheduler'
 
 /**
@@ -105,7 +105,7 @@ export interface StartServerOptions {
   /** Use this vault instead of one built from `OPENHARNESS_SECRETS_KEY`. */
   readonly vault?: Vault
   /**
-   * How a saved provider key is validated. Defaults to {@link validateProviderApiKey}, the
+   * How a saved provider key is validated. Defaults to {@link validateProviderCredential}, the
    * real one cheap provider call; tests inject a fake so nothing reaches a provider.
    */
   readonly validateProviderCredential?: ProviderCredentialValidator
@@ -263,7 +263,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     credentialRoutes: {
       credentials,
       vault,
-      validate: options.validateProviderCredential ?? validateProviderApiKey,
+      validate: options.validateProviderCredential ?? validateProviderCredential,
     },
     catalog,
     registry,

@@ -13,7 +13,7 @@ import { ModelCatalog } from './catalog/catalog'
 import { createBundledRegistry } from './catalog/registry'
 import type { ModelRegistry, RegistryModel } from './catalog/registry'
 import type { ProviderFetch, ProviderResponse } from './catalog/provider-fetch'
-import { credentialUpsert } from './credentials'
+import { credentialUpsert, sealCredential } from './credentials'
 import { TEST_SECRETS_KEY, createTestApp, type TestContext } from './test-support'
 import type { Logger } from './types'
 
@@ -88,6 +88,14 @@ interface CatalogueFixture {
   list(query?: string): Promise<Response>
   /** `PUT /v1/provider-credentials/{provider}` with a key the fake validator accepts. */
   putKey(provider: string, apiKey: string): Promise<void>
+  /**
+   * Seal and store a credential **without** the route, for a row the route would refuse.
+   *
+   * The only such row now is a provider string that is not one of the eleven ids — what a
+   * database written before named credentials (#245, A3a) can still hold. The catalogue has to
+   * degrade on one rather than dialing it, and this is how a test makes one.
+   */
+  seedKey(name: string, apiKey: string): Promise<void>
 }
 
 /** An app whose catalogue runs over the given responders (keyed by a substring of the URL). */
@@ -146,6 +154,14 @@ function catalogueApp(options: {
         },
       )
       expect([provider, response.status]).toEqual([provider, 200])
+    },
+    seedKey: async (name, apiKey) => {
+      const user = await test.currentUser()
+      const body = { type: 'api_key' as const, api_key: apiKey }
+      const sealed = await sealCredential(vault, { userId: user.id, name, body })
+      await credentials.upsert(
+        credentialUpsert({ userId: user.id, name, body }, sealed, clock.now().toISOString()),
+      )
     },
   }
 }
@@ -593,7 +609,9 @@ describe('GET /v1/models', () => {
         ],
       },
     })
-    await fixture.putKey('acme', KEY_A)
+    // Seeded rather than PUT: no route stores an `api_key` under a name that is not a
+    // provider id any more (A3a), but a database written before that rule can still hold one.
+    await fixture.seedKey('acme', KEY_A)
 
     const response = await modelsOf(fixture)
 
@@ -620,7 +638,7 @@ describe('GET /v1/models', () => {
     // Tamper with the sealed row the way a corrupted database row would be: the vault cannot
     // open it, and the catalogue must degrade rather than throw.
     const user = await fixture.test.currentUser()
-    const stored = await fixture.test.credentials.get({ userId: user.id, provider: 'openai' })
+    const stored = await fixture.test.credentials.get({ userId: user.id, name: 'openai' })
     expect(stored).not.toBeNull()
     const tampered = {
       ...stored!.sealed,
@@ -628,7 +646,7 @@ describe('GET /v1/models', () => {
     }
     await fixture.test.credentials.upsert(
       credentialUpsert(
-        { userId: user.id, provider: 'openai', apiKey: 'irrelevant' },
+        { userId: user.id, name: 'openai', body: { type: 'api_key', api_key: 'irrelevant' } },
         tampered,
         START.toISOString(),
       ),

@@ -1,21 +1,41 @@
 /**
- * Validating a provider key with one cheap provider call (epic #65, A5).
+ * Validating a provider credential with one cheap provider call (epic #65, A5; Azure: epic
+ * #245 A3a).
  *
- * A credential is checked on save: the server asks the provider for one page of its model
- * list (or an equivalent cheap, authenticated read) and stores nothing unless that call
- * succeeds. The check is a real request to the provider, which is exactly why it is a seam
+ * A credential is checked on save: the server makes one cheap, authenticated call and stores
+ * nothing unless it succeeds. Which call is a function of the credential's **type** —
+ *
+ * - `api_key`: one page of the provider's own model list (or an equivalent cheap read), the
+ *   same call the model catalogue makes (C1);
+ * - `azure_openai`: one chat request to the first deployment the user typed, sent through the
+ *   SSRF guard (`@openharness/hands`' `safeFetch`), because the endpoint is a URL the user
+ *   typed and Azure offers no endpoint that lists deployments.
+ *
+ * The check is a real request to the provider, which is exactly why it is a seam
  * (`ProviderCredentialValidator`) the server's tests inject a fake into: no test should reach
  * a provider, and no test should need a real key.
  *
- * The validator never logs, echoes or includes the key in an error message: a rejected
+ * The validator never logs, echoes or includes a secret in an error message: a rejected
  * credential answers with the provider's status, not with what was sent.
  *
- * The call goes through the same provider HTTP client the model catalogue uses
+ * The `api_key` call goes through the provider HTTP client the model catalogue uses
  * (`catalog/provider-fetch.ts`): the one outbound path that honors the egress-proxy variables
- * a deployment sets, so saving a key works behind a proxy exactly as listing models does.
+ * a deployment sets, so saving a key works behind a proxy exactly as listing models does. An
+ * Azure endpoint goes through `safeFetch`, which reads the same variables (see that module)
+ * and additionally refuses every address a user-supplied URL must not reach.
  */
 
-import { PROVIDER_IDS, type ProviderId } from '@openharness/protocol'
+import {
+  SAVE_TIME_LIMITS,
+  safeFetch as defaultSafeFetch,
+  type SafeFetchOptions,
+} from '@openharness/hands'
+import { azureBaseUrl } from '@openharness/brain'
+import {
+  PROVIDER_IDS,
+  type ProviderId,
+  type PutProviderCredentialRequest,
+} from '@openharness/protocol'
 
 import {
   createProviderFetch,
@@ -27,10 +47,10 @@ import {
 const providerFetch: ProviderFetch = createProviderFetch()
 
 /**
- * The providers this server can validate — the `provider/model` provider ids whose one-key
- * providers have a cheap authenticated read. The protocol stores any provider string; a key for
- * one outside this set is refused on save because it cannot be validated, rather than stored
- * unchecked.
+ * The providers the server can validate an `api_key` for — the `provider/model` provider ids
+ * whose one-key providers have a cheap authenticated read. The protocol stores any provider
+ * string; a key for one outside this set is refused on save because it cannot be validated,
+ * rather than stored unchecked.
  *
  * The set is the shared provider list's (`@openharness/protocol`): every provider openharness
  * knows has a cheap read here, a model-list adapter in `catalog/adapters.ts` and a model client
@@ -42,48 +62,151 @@ export const VALIDATABLE_PROVIDERS: readonly ProviderId[] = PROVIDER_IDS
 /** A provider id {@link VALIDATABLE_PROVIDERS} knows. */
 export type ValidatableProvider = ProviderId
 
-/** Checks that a key authenticates against a provider; throws when it does not. */
-export type ProviderCredentialValidator = (provider: string, apiKey: string) => Promise<void>
+/**
+ * Checks that a credential authenticates against its provider; throws when it does not.
+ *
+ * The name is the credential's name — its provider id for the eleven fixed providers, a name
+ * the user chose for a named type — and the body is the whole PUT payload, because what a
+ * check needs differs by type.
+ */
+export type ProviderCredentialValidator = (
+  name: string,
+  body: PutProviderCredentialRequest,
+) => Promise<void>
 
 /** How long the validating call may take before it counts as a failure. */
 const VALIDATION_TIMEOUT_MS = 10_000
 
+/** The `safeFetch` shape the Azure check uses. Injectable so a route test can drive a stub. */
+export type AzureValidatorFetch = (
+  url: string,
+  init?: RequestInit,
+  options?: SafeFetchOptions,
+) => Promise<Response>
+
+/** What a validator needs: the two outbound paths. */
+export interface ProviderCredentialValidatorOptions {
+  /** The provider HTTP client the `api_key` read goes through. Defaults to the egress-proxy one. */
+  readonly providerFetch?: ProviderFetch
+  /** The guard an Azure check goes through. Defaults to `@openharness/hands`' `safeFetch`. */
+  readonly safeFetch?: AzureValidatorFetch
+}
+
 /**
- * The production validator: one authenticated `GET` per provider.
+ * The production validator: the one cheap call a saved credential is checked with.
  *
  * A non-2xx answer, a transport failure or a timeout all throw — the caller turns that into
- * the protocol's 422 `invalid_provider_credential`. The error's message names the provider
- * and the status, never the key.
+ * the protocol's 422 `invalid_provider_credential`. The error's message names the credential
+ * and the status, never the secret.
  */
-export const validateProviderApiKey: ProviderCredentialValidator = async (provider, apiKey) => {
-  const request = requestFor(provider, apiKey)
+export function createProviderCredentialValidator(
+  options: ProviderCredentialValidatorOptions = {},
+): ProviderCredentialValidator {
+  const fetch = options.providerFetch ?? providerFetch
+  const guard = options.safeFetch ?? defaultSafeFetch
+  return async (name, body) => {
+    if (body.type === 'azure_openai') {
+      return validateAzureCredential(name, body, guard)
+    }
+    return validateApiKey(name, body.api_key, fetch)
+  }
+}
+
+/** The validator the server runs unless a host injects one. */
+export const validateProviderCredential: ProviderCredentialValidator =
+  createProviderCredentialValidator()
+
+/** One authenticated `GET` of a provider's own model list, proving an `api_key`. */
+async function validateApiKey(name: string, apiKey: string, fetch: ProviderFetch): Promise<void> {
+  const request = requestFor(name, apiKey)
   if (request === null) {
     throw new Error(
-      `no validation for provider ${JSON.stringify(provider)}; supported: ` +
+      `no validation for provider ${JSON.stringify(name)}; supported: ` +
         VALIDATABLE_PROVIDERS.join(', '),
     )
   }
   let response: ProviderResponse
   try {
-    response = await providerFetch(request.url, {
+    response = await fetch(request.url, {
       headers: request.headers,
       signal: AbortSignal.timeout(VALIDATION_TIMEOUT_MS),
     })
   } catch (error) {
     throw new Error(
-      `could not reach ${provider} to validate the key: ` +
+      `could not reach ${name} to validate the key: ` +
         (error instanceof Error ? error.message : 'the request failed'),
       { cause: error },
     )
   }
   if (!response.ok) {
     throw new Error(
-      `${provider} answered ${response.status} for the validating request; ` +
-        'the key was rejected',
+      `${name} answered ${response.status} for the validating request; the key was rejected`,
     )
   }
   // The body is drained so the connection can be reused; nothing in it is read or stored.
   await response.text()
+}
+
+/**
+ * One chat request to the first deployment an Azure credential names, proving its key.
+ *
+ * The request is deliberately tiny — one token of output, no streaming — and it goes through
+ * `safeFetch` under {@link SAVE_TIME_LIMITS}: ten seconds, at most a megabyte, and the address
+ * checks that refuse a loopback, private or metadata endpoint. That last part is the point: an
+ * endpoint that resolves inside the network is refused **here**, on save, so it can never be
+ * stored and later reached from the model path.
+ */
+async function validateAzureCredential(
+  name: string,
+  body: Extract<PutProviderCredentialRequest, { type: 'azure_openai' }>,
+  safeFetch: AzureValidatorFetch,
+): Promise<void> {
+  const deployment = body.deployments[0] as string
+  const url =
+    `${azureBaseUrl(body.endpoint)}/v1/chat/completions?api-version=` +
+    encodeURIComponent(AZURE_API_VERSION)
+  let response: Response
+  try {
+    response = await safeFetch(
+      url,
+      {
+        method: 'POST',
+        headers: { 'api-key': body.api_key, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: 'ping' }],
+          max_completion_tokens: 1,
+          stream: false,
+        }),
+      },
+      SAVE_TIME_LIMITS,
+    )
+  } catch (error) {
+    throw new Error(
+      `could not reach ${name} to validate the credential: ` +
+        (error instanceof Error ? error.message : 'the request failed'),
+      { cause: error },
+    )
+  }
+  if (!response.ok) {
+    throw new Error(
+      `the deployment ${deployment} on ${hostOf(body.endpoint)} answered ` +
+        `${response.status} for the validating request; the credential was rejected`,
+    )
+  }
+  // The body is drained so the connection can be released; nothing in it is read or stored.
+  await response.text()
+}
+
+/** The api-version the validating call uses: Azure's current `v1` API, what the model path uses. */
+const AZURE_API_VERSION = 'v1'
+
+/** The host of an endpoint, for an error message that does not echo a whole URL. */
+function hostOf(endpoint: string): string {
+  try {
+    return new URL(endpoint).host
+  } catch {
+    return endpoint
+  }
 }
 
 /** The one cheap, authenticated read that proves a key: `GET <url>` with these headers. */

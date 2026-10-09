@@ -30,7 +30,10 @@ export interface ResolvedModel {
 }
 
 /** The placeholder credential the deterministic test model is handed. It ignores it. */
-export const MOCK_CREDENTIAL: ModelCredential = { type: 'api_key', apiKey: 'openharness-test-model' }
+export const MOCK_CREDENTIAL: ModelCredential = {
+  type: 'api_key',
+  apiKey: 'openharness-test-model',
+}
 
 /**
  * The credential resolver the mock model runs with.

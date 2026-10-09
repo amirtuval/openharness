@@ -22,11 +22,18 @@
  * The provider keys models.dev uses are not always ours. models.dev spells two of the eleven
  * by product name, and the shared list carries the mapping (`modelsDevKey`); the snapshot is
  * keyed by **our** ids so nothing downstream has to know models.dev's spelling.
+ *
+ * Azure OpenAI (#248) is snapshotted too, even though it is a *credential type* rather than a
+ * provider id: a deployment name the user typed may be one models.dev knows (`gpt-4o`,
+ * `o1`), and its context window is the only thing the catalogue can put on that model — Azure
+ * offers no endpoint that lists deployments. It is filed under its `modelsDevKey` (`azure`),
+ * which is the same key the catalogue looks it up by; a deployment the registry does not know
+ * gets no metadata at all, because guessing one would be worse than saying nothing.
  */
 
 import { writeFile } from 'node:fs/promises'
 
-import { PROVIDERS } from '@openharness/protocol'
+import { CREDENTIAL_TYPES, PROVIDERS } from '@openharness/protocol'
 
 /** Where the snapshot lives, and where it comes from. */
 const SNAPSHOT_URL = new URL('../src/catalog/models-dev.json', import.meta.url)
@@ -93,10 +100,18 @@ function reduceModel(model) {
   return reduced
 }
 
+/** Every snapshot entry, in the order the two lists name them: providers, then credential types. */
+const SOURCES = [
+  ...PROVIDERS.map(({ id, modelsDevKey }) => ({ id, modelsDevKey })),
+  // A credential type's entries are filed under its models.dev key — `azure`, not
+  // `azure_openai` — because the catalogue looks a deployment up by that same key.
+  ...CREDENTIAL_TYPES.map(({ modelsDevKey }) => ({ id: modelsDevKey, modelsDevKey })),
+]
+
 /** The whole snapshot: the date, the source, and one entry per provider, in the list's order. */
 function buildSnapshot(data) {
   const providers = {}
-  for (const { id, modelsDevKey } of PROVIDERS) {
+  for (const { id, modelsDevKey } of SOURCES) {
     const entry = data[modelsDevKey]
     if (entry === undefined || entry.models === undefined) {
       throw new Error(
