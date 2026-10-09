@@ -12,9 +12,11 @@ resolver answered — the session owner's own provider key, never one from the e
 is the state, which is what lets a crashed turn be resumed by another process — and why a brain
 that holds a partition lease writes under its fence.
 
-What a turn streams is the **session's** configuration: `session.model` is the id every request
-is built from and recorded on its span, and `session.system` is the system prompt the context
-strategy is handed (epic #92, #93/#94). The **reasoning effort** a request runs at is read from
+What a turn streams is the **session's** configuration: `session.model` is the id a request is
+built from and recorded on its span, and `session.system` is the system prompt the context
+strategy is handed (epic #92, #93/#94) — unless the session follows a **mode** (#245, M6),
+which the host resolves per request so the request runs the mode's model, effort and
+system-prompt addition instead. The **reasoning effort** a request runs at is read from
 the log at each request boundary — the newest `user.message` that carried one (#252) — and
 recorded on the span beside it, since nothing stores an effort on a session. Since #111/#116 the model is not frozen for a turn: a
 `user.message` carrying `model` switches it in the append transaction, and the loop re-reads
@@ -78,8 +80,9 @@ emits what that reaches.
 | export                                                                                                                                 | what it is                                                                                                                                                                                                                                                                                      |
 | -------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `runTurn(sessionId, options)`                                                                                                          | run one turn; resolves to a `TurnOutcome`                                                                                                                                                                                                                                                       |
-| `RunTurnOptions`                                                                                                                       | `{ store, model, resolveCredential, signal?, fence?, contextStrategy?, reasoningSupportFor?, retry? }`                                                                                                                                                                                          |
+| `RunTurnOptions`                                                                                                                       | `{ store, model, resolveCredential, signal?, fence?, contextStrategy?, reasoningSupportFor?, resolveMode?, retry? }`                                                                                                                                                                                          |
 | `TurnOutcome`, `TurnOutcomeKind`                                                                                                       | `{ outcome: 'idle' \| 'noop' \| 'interrupted' \| 'error' }`                                                                                                                                                                                                                                     |
+| `ResolvedMode`, `ModeResolver`                                                                                                         | a mode as the host resolved it — id, name, model, effort, prompt addition — and where a request's mode comes from (#245, M6)                                      |
 | `ContextStrategy`, `ContextStrategyOptions`                                                                                            | `(events, { model, system }) => ModelMessage[]`                                                                                                                                                                                                                                                 |
 | `createContextStrategy(config?)`, `ContextStrategyConfig`                                                                              | the default strategy: the conversation, trimmed to a token budget resolved per model                                                                                                                                                                                                            |
 | `DEFAULT_CONTEXT_STRATEGY`, `DEFAULT_CONTEXT_TOKEN_BUDGET`, `CHARS_PER_TOKEN`                                                          | its defaults                                                                                                                                                                                                                                                                                    |
@@ -115,7 +118,6 @@ emits what that reaches.
 | `PACKAGE_NAME`, `DEPENDENCIES`                                                                                                         | the package name, and the edges that must resolve through built output                                                                                                                                                                                                                          |
 | `log.ts`, `events.ts` and `validate.ts` are internal: they are how the loop is written, not what                                       |
 | a host talks to.                                                                                                                       |
-
 **An edited message is not history.** A `session.rewind` (#238) restarts the session from the
 `user.message` a reader edited, and everything it replaced is gone from the log the brain
 reads — `readLog` is the store's replay read, which skips what a recorded range covers — so
@@ -144,15 +146,18 @@ LOOP — once per model request
   1. the signal aborted, or a queued user.interrupt ....... INTERRUPT
   2. nothing left to answer ............................... session.status_idle, return idle
   3. re-read the session; its CURRENT model is this request's model (U3 — a user.message may
-     have switched it, even mid-stream of the previous request), and it chooses the
-     credential's provider. A session deleted meanwhile throws SessionNotFoundError and the
-     turn stops, writing nothing (U5)
+     have switched it, even mid-stream of the previous request), UNLESS the session follows a
+     mode (#245, M6): the host resolves it as it is now and the resolved model is this
+     request's. Either way it chooses the credential's provider. A session deleted meanwhile
+     throws SessionNotFoundError and the turn stops, writing nothing (U5)
   4. no credential for the model's provider ............... MISSING CREDENTIAL (below)
   4b. the id names a provider with no client here .......... UNSUPPORTED PROVIDER (below)
   5. ... span.model_request_start { consumes: the queued user.message ids,
                                     model: the provider/model of the request,
                                     reasoning_effort: what the newest effort-carrying
-                                    user.message asked for, and what was applied }
+                                    user.message asked for — else the mode's — and what was
+                                    applied,
+                                    mode: the mode the request ran under and its name then }
      (the append IS the claim: atomic, fenced, refused whole with ClaimConflictError)
   6. stream ............................................... stored event_start under a fresh
                                                              sevt_ id, then one stored
@@ -309,7 +314,8 @@ Notes on the corners:
 | how the log becomes messages         | `contextStrategy` on `runTurn`; the default trims to a token budget, per model                   |
 | how `provider/model` becomes a model | `model` on `runTurn` (required): a `ModelFactory`; the server passes `providerModelFactory`      |
 | where the key comes from             | `resolveCredential` on `runTurn`: the owner's credential per provider, resolved per request (A5) |
-| which models take a reasoning effort | `reasoningSupportFor` on `runTurn`: the levels a model takes, asked per request (#252)           |
+| which models take a reasoning effort | which models take a reasoning effort                                                             | `reasoningSupportFor` on `runTurn`: the levels a model takes, asked per request (#252) |
+| what a mode resolves to              | `resolveMode` on `runTurn`: the mode a chat follows, resolved per request (#245, M6)             |
 | how failures are retried             | `retry` on `runTurn`: attempts, base delay, ceiling, and the `sleep` itself                      |
 
 `ContextStrategy` is called once per model request, with the log as that request sees it and the
@@ -622,12 +628,43 @@ undefined` resolver, the same seam the context budget's `tokenBudgetFor` uses, b
   replay read for the newest `user.message` carrying one — the same "from this message on"
   reading as the model switch of #111, and the same boundary, so a message that arrived while the
   previous request was streaming belongs to the next one. Nothing is stored on the session, so a
-  log that never carried an effort answers `null` and its requests are built exactly as they were
-  before #252.
+  log that never carried an effort answers `undefined` and its requests are built exactly as they
+  were before #252. `undefined` (no message spoke) is kept apart from `null` (a message asked for
+  the provider's default) because a mode supplies its own effort when the reader said nothing
+  (#245, M6): an explicit message effort wins, and otherwise the mode's applies.
+
 - **Both facts land on the span.** `span.model_request_start.reasoning_effort` records
   `{ requested, applied }`: `applied` is `null` when the model took none, and the field is absent
   when nothing was asked for. That record is the only durable statement of what a request ran
   with — the session's own field is the message that asked.
+
+### Modes (#245, M6)
+
+A session may follow a **mode**: a per-user named preset of a model, a reasoning effort and a
+system-prompt addition. The mode lives in the host's database, not the log, and a chat follows
+it **live** — so the loop is handed a resolver, the same seam as `reasoningSupportFor`, and
+asks it once per request with the mode the session's projection names.
+
+- **The host resolves, the loop applies.** `RunTurnOptions.resolveMode` is a
+  `ModeResolver` — `(ownerId, modeId) => Promise<ResolvedMode | null>` — where the server owns
+  the modes, the user's preferences (a mode may be "my default model") and the credentials
+  that decide availability. The loop asks it at every request boundary, so an edit — the model,
+  the effort, the prompt addition — applies from the next request on, exactly as a model switch
+  does.
+- **What a resolved mode changes.** The request's model is the mode's resolved model rather
+  than the session's, so the credential is resolved for _that_ provider and the span records
+  _that_ model; the effort is the mode's unless a `user.message` asked for one explicitly
+  (#252); and the system prompt is the session's with the mode's addition appended after it —
+  never in place of it.
+- **The span says which mode.** `span.model_request_start.mode` is `{ id, name }`, recorded
+  per request beside the resolved `model` and `reasoning_effort`, so the log says what the
+  request ran under and what it resolved to, even after the mode is renamed or edited.
+- **A mode that is gone is not a failure here.** The resolver answers `null` for a mode it no
+  longer knows (a chat whose mode was deleted), and the request continues on the session's own
+  model — the model the chat last ran, which the delete left in place — with no `mode` on the
+  span. A host that injects no resolver behaves the same: a session on a mode runs its own
+  model. Refusing an _unavailable_ mode is the server's rule, checked where a chat starts or
+  continues, not the loop's.
 
 ## Chunks, ids and supersession (D9)
 
@@ -666,6 +703,13 @@ retries run on an injected `sleep`, the clock is a `TestClock` from
   branch no scripted model can reach); most scenarios also assert that a replay of the log
   holds no superseded chunk and that no span start exists without a model request behind it,
   and one asserts that the brain writes only through `appendEvents`.
+- `modes.test.ts` — modes at the loop's boundary (#245, M6): the mode's resolved model, effort
+  and prompt addition applied and recorded (`mode: { id, name }`, the resolved model and
+  effort), a mode edited between two requests followed live, an explicit message effort winning
+  over the mode's, an addition appended after the session's system prompt (and standing alone
+  when the session has none), a mode the resolver no longer knows falling back to the session's
+  own model with no mode on the span, no resolver injected behaving the same, and a chat without
+  a mode never asking.
 - `per-request-model.test.ts` — the per-request model (U3): a queued message that switched
   the session's model is what the first request runs (and its provider is whose credential is
   resolved), a steering message carrying a switch — across providers — is the model of the

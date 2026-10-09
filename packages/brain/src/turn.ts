@@ -1,10 +1,13 @@
 import { EVENT_TYPES, newEventId } from '@openharness/protocol'
 import type {
   EventId,
+  ModeId,
   ModelConfig,
+  ReasoningEffort,
   SessionId,
   StoredEvent,
   Supersedes,
+  UserId,
 } from '@openharness/protocol'
 import type { AppendableEvent, PartitionFence, SessionStore } from '@openharness/session'
 import { SessionNotFoundError } from '@openharness/session'
@@ -210,9 +213,50 @@ export interface RunTurnOptions {
    * (`apps/server/src/catalog/reasoning-support.ts`); see {@link ReasoningSupportFor}.
    */
   readonly reasoningSupportFor?: ReasoningSupportFor
+  /**
+   * Where a mode's current definition comes from, asked once per request with the mode the
+   * session follows (#245, M6) — the same injected-resolver seam as `reasoningSupportFor` and
+   * the context budget's `tokenBudgetFor`.
+   *
+   * It is a resolver rather than a value because a chat **follows its mode live**: the next
+   * request uses the mode as it is now, so an edit applies from the next request on exactly as
+   * a model switch does. The host (the server) owns the modes — they live in its database, not
+   * the log — so it answers with the resolved model, effort and prompt addition, or `null` for
+   * a mode it no longer knows (one that was deleted), which leaves the request on the session's
+   * own model. A host that injects none is the same as one that never knows a mode: a session
+   * on a mode runs its own model.
+   */
+  readonly resolveMode?: ModeResolver
   /** How model failures are retried; see {@link RetryPolicy}. */
   readonly retry?: RetryPolicy
 }
+
+/**
+ * A mode, as the host resolved it for one request (#245, M6): the id and name to record, and
+ * the model, effort and system-prompt addition the request is built with.
+ *
+ * The model is a `provider/model` id — a mode's "my default model" is resolved by the host,
+ * which holds the user's preferences, before it answers. The effort is the mode's own, and the
+ * addition is appended after the session's system prompt rather than in place of it.
+ */
+export interface ResolvedMode {
+  /** The `mode_` id the session follows, recorded on the request's span. */
+  readonly id: ModeId
+  /** The mode's name as it is now, recorded beside the id. */
+  readonly name: string
+  /** The `provider/model` this request runs. */
+  readonly model: string
+  /** The mode's reasoning effort, or `null` for the provider's default. */
+  readonly reasoningEffort: ReasoningEffort | null
+  /** Appended after the session's system prompt, or `null` for no addition. */
+  readonly systemPromptAddition: string | null
+}
+
+/**
+ * Where a mode's current definition comes from (#245, M6): the owner it belongs to and the id
+ * the session follows, answered with the mode as it is now — or `null` for one that is gone.
+ */
+export type ModeResolver = (ownerId: UserId, modeId: ModeId) => Promise<ResolvedMode | null>
 
 /** What the loop knows about a reply it has to finish storing. */
 interface PartialReply {
@@ -419,7 +463,17 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     if (current === null) {
       throw new SessionNotFoundError(sessionId)
     }
-    const requestModel: ModelConfig = current.model
+    // The mode this request follows, if the session is on one (#245, M6). The session holds
+    // the mode's id; the host resolves it as it is now, so an edit applies from this request on
+    // — the "live follow" a mode is for. A mode the host no longer knows (it was deleted)
+    // answers `null`, and the request falls back to the session's own model, which the delete
+    // left as the model the chat last ran. The resolved model is what this request runs and
+    // what its span records, not the session's stored one.
+    const mode =
+      current.mode === null
+        ? null
+        : ((await options.resolveMode?.(current.owner_id, current.mode)) ?? null)
+    const requestModel: ModelConfig = mode === null ? current.model : { id: mode.model }
     // The credential this request is made with, asked for before anything is claimed. A
     // request that cannot be made opens no span — every span start is a real model request,
     // and this one has none — and streams nothing, so there is no chunk range to supersede.
@@ -477,13 +531,23 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     // per-message field deliberately avoids (see the module note in `reasoning.ts`). The read is
     // the same replay read the context below is built from; it is the cost of asking the log
     // rather than a session field.
+    // The effort, in precedence order: an explicit effort the newest message carried wins (the
+    // reader asked for it on that message, #252), and otherwise the mode's own effort applies
+    // (#245, M6) — a mode bundles one, and that is what a chat on the mode runs unless a
+    // message overrides it. `undefined` is "no message carried one", which is what lets the
+    // mode's effort through; an explicit `null` is "the provider's default" and wins.
+    const loggedEffort = requestedReasoningEffort(await readLog(store, sessionId))
+    const requestedEffort =
+      loggedEffort === undefined ? (mode?.reasoningEffort ?? null) : loggedEffort
     const reasoning = planReasoning(
       requestModel.id,
       credential.type,
-      requestedReasoningEffort(await readLog(store, sessionId)),
+      requestedEffort,
       options.reasoningSupportFor,
     )
-    const [start] = await append([spanStart(claims, requestModel.id, reasoning.record)])
+    const [start] = await append([
+      spanStart(claims, requestModel.id, reasoning.record, mode === null ? undefined : mode),
+    ])
     if (start === undefined) {
       throw new Error('the store did not return the span it was asked to append')
     }
@@ -493,7 +557,10 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     // this request's span end, so all this request adds to it is its own usage.
     const read = await readLog(store, sessionId)
     const answered = contextView(read)
-    const messages = strategy(answered, { model: requestModel, system: current.system })
+    const messages = strategy(answered, {
+      model: requestModel,
+      system: withModePrompt(current.system, mode?.systemPromptAddition ?? null),
+    })
 
     // The reply's chunks are stored as they arrive, under one pre-minted id: the stored
     // `event_start` announces the id the `agent.message` will be stored under, and every
@@ -611,4 +678,22 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     await append([statusIdle()])
     return { outcome: 'idle' }
   }
+}
+
+/**
+ * The system prompt a request is built with: the session's own, with the mode's addition
+ * appended after it (#245, M6).
+ *
+ * Appended, never substituted: a mode tunes the session's prompt rather than replacing it. The
+ * two are joined by a blank line, and either side may be absent — an addition with no session
+ * prompt is the whole prompt, and a mode with no addition (or no mode) leaves the session's
+ * prompt exactly as it was, so a chat without a mode builds the same request it always did.
+ */
+function withModePrompt(system: string | null, addition: string | null): string | null {
+  const base = system !== null && system.length > 0 ? system : null
+  const extra = addition !== null && addition.length > 0 ? addition : null
+  if (extra === null) {
+    return base
+  }
+  return base === null ? extra : `${base}\n\n${extra}`
 }

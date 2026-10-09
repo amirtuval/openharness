@@ -292,9 +292,11 @@ describe('requestedReasoningEffort', () => {
   const cleared = makeUserMessage('go', { reasoning_effort: null })
   const silent = makeUserMessage('go')
 
-  it('answers null for a log that never named an effort', () => {
-    expect(requestedReasoningEffort([])).toBeNull()
-    expect(requestedReasoningEffort([silent, silent])).toBeNull()
+  it('answers undefined for a log that never named an effort', () => {
+    // `undefined` is "the log said nothing", which is what lets a mode's own effort through
+    // (#245, M6); `null` is "a message asked for the provider's default".
+    expect(requestedReasoningEffort([])).toBeUndefined()
+    expect(requestedReasoningEffort([silent, silent])).toBeUndefined()
   })
 
   it('answers the newest effort the log carries', () => {
