@@ -47,6 +47,7 @@ import {
   streamModelRequest,
   ZERO_MODEL_USAGE,
 } from './model'
+import { planReasoning, requestedReasoningEffort } from './reasoning'
 import { redactSecret } from './redact'
 import type { RetryPolicy } from './retry'
 import { backoffDelay, resolveRetryPolicy } from './retry'
@@ -451,7 +452,17 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       ])
       return { outcome: 'error' }
     }
-    const [start] = await append([spanStart(claims, requestModel.id)])
+    // What this request runs with (#252): the newest effort the log asks for, read at this
+    // request's boundary like the model. A message that set one applies from here on — one that
+    // arrived while the previous request was streaming was appended before this read, so it is
+    // this request's, and one that arrives after it belongs to the next — and the read is the
+    // replay read, so an effort an edit took back is already gone from it. The record rides the
+    // span below, which is the only place the log says what a request ran with.
+    const reasoning = planReasoning(
+      requestModel.id,
+      requestedReasoningEffort(await readLog(store, sessionId)),
+    )
+    const [start] = await append([spanStart(claims, requestModel.id, reasoning.record)])
     if (start === undefined) {
       throw new Error('the store did not return the span it was asked to append')
     }
@@ -476,6 +487,7 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     const result = await streamModelRequest({
       model: agentModel,
       messages,
+      providerOptions: reasoning.providerOptions,
       signal,
       onTextDelta: async (text) => {
         // One append per chunk, awaited: a chunk that could not be stored ends the request the

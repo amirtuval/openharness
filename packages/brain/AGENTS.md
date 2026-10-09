@@ -14,7 +14,9 @@ that holds a partition lease writes under its fence.
 
 What a turn streams is the **session's** configuration: `session.model` is the id every request
 is built from and recorded on its span, and `session.system` is the system prompt the context
-strategy is handed (epic #92, #93/#94). Since #111/#116 the model is not frozen for a turn: a
+strategy is handed (epic #92, #93/#94). The **reasoning effort** a request runs at is read from
+the log at each request boundary — the newest `user.message` that carried one (#252) — and
+recorded on the span beside it, since nothing stores an effort on a session. Since #111/#116 the model is not frozen for a turn: a
 `user.message` carrying `model` switches it in the append transaction, and the loop re-reads
 the session at **every request boundary**, so a switch applies from the next request on —
 across providers, since each request is built from the current id and credential alone (U3).
@@ -50,6 +52,7 @@ src/
   context.ts            ContextStrategy: the log as model messages, trimmed
   model.ts              ModelFactory, credentials, and streaming one request through the AI SDK
   azure-fetch.ts        the Azure endpoint's base URL, and the safeFetch guard a model call goes through
+  reasoning.ts          the reasoning effort: per provider, and what the log asks a request for
   redact.ts             redactSecret: scrubbing a provider key out of error text
   errors.ts             classifyModelError: retryable or terminal, and which session.error
   retry.ts              RetryPolicy, backoff, and the injectable sleep
@@ -86,6 +89,8 @@ emits what that reaches.
 | `missingCredentialMessage(provider)`                                          | the `session.error` sentence for a provider with no key                                                  |
 | `redactSecret(text, secret)`, `REDACTED_PLACEHOLDER`                          | the credential scrubbed out of provider error text                                                       |
 | `streamModelRequest(params)`, `ModelRequestParams`, `ModelRequestResult`      | one model request, as text, usage, error and abort                                                       |
+| `ProviderOptions`                                                             | the AI SDK's per-provider options for one call, read off `streamText`                                    |
+| `PROVIDER_REASONING`, `planReasoning`, `ReasoningPlan`, `requestedReasoningEffort` | `low \| medium \| high` in each provider's own option, and what the log asks a request for (#252)        |
 | `toModelUsage(usage)`, `ZERO_MODEL_USAGE`                                     | what a request reported → the protocol's four counters, always integers                                  |
 | `classifyModelError(error)`, `ModelErrorClassification`                       | retryable or not, and the `session.error` type that says so                                              |
 | `isRetryableModelError(error)`                                                | the same answer, when only the boolean is wanted                                                         |
@@ -133,7 +138,9 @@ LOOP — once per model request
   4. no credential for the model's provider ............... MISSING CREDENTIAL (below)
   4b. the id names a provider with no client here .......... UNSUPPORTED PROVIDER (below)
   5. ... span.model_request_start { consumes: the queued user.message ids,
-                                    model: the provider/model of the request }
+                                    model: the provider/model of the request,
+                                    reasoning_effort: what the newest effort-carrying
+                                    user.message asked for, and what was applied }
      (the append IS the claim: atomic, fenced, refused whole with ClaimConflictError)
   6. stream ............................................... stored event_start under a fresh
                                                              sevt_ id, then one stored
@@ -456,6 +463,41 @@ purpose and stays as `toModelUsage`'s regression test; no shipped provider is th
 Sessions whose turns ran before the fix keep the unreadable rows they were stored with; v1 is
 unreleased, so nothing migrates them — the fix is what stops new ones being written.
 
+### The reasoning effort
+
+How hard a request is asked to think is a property of the **request**, and `low | medium | high`
+is the vocabulary the protocol fixes (`@openharness/protocol`); this package is where a level
+becomes the thing a provider actually reads (`src/reasoning.ts`).
+
+- **One table, keyed by the provider list.** `PROVIDER_REASONING` is a
+  `Readonly<Record<ProviderId, …>>` — the same shared list #245 built — so a provider the server
+  can store a key for and this table has no effort for is a compile error. Each row says whether
+  a model of that provider takes an effort at all (`supports`) and, when it does, the
+  `providerOptions` its AI SDK client reads: Anthropic's `effort`, OpenAI's and xAI's and
+  Groq's and Cerebras' `reasoningEffort`, DeepSeek's, Mistral's, Fireworks' and Together's,
+  Gemini's `thinkingConfig.thinkingLevel`, OpenRouter's. Each option was checked against the
+  installed `@ai-sdk/*` version, which is where the effort families come from too — the models
+  every one of those clients passes an effort through for, and not the ones it would be handed
+  to a provider that answers 400.
+- **`supports` is the gate that keeps a request from failing.** Every provider above sends the
+  option straight through, and one it does not know is an error rather than an ignored
+  parameter. So an effort is sent only for a model whose family takes one; everything else keeps
+  the provider's default, which is exactly what `low`/`medium`/`high` absent means. A model
+  wrongly left out loses an optimization; one wrongly included loses the whole request, so the
+  rules are deliberately conservative, and a provider whose knob has fewer levels than ours is
+  mapped the way its own client maps it (DeepSeek has no `medium`, and runs it at `high`;
+  Mistral has only `none` and `high`).
+- **The loop reads the effort out of the log, per request.** `requestedReasoningEffort` walks the
+  replay read for the newest `user.message` carrying one — the same "from this message on"
+  reading as the model switch of #111, and the same boundary, so a message that arrived while the
+  previous request was streaming belongs to the next one. Nothing is stored on the session, so a
+  log that never carried an effort answers `null` and its requests are built exactly as they were
+  before #252.
+- **Both facts land on the span.** `span.model_request_start.reasoning_effort` records
+  `{ requested, applied }`: `applied` is `null` when the model took none, and the field is absent
+  when nothing was asked for. That record is the only durable statement of what a request ran
+  with — the session's own field is the message that asked.
+
 ## Chunks, ids and supersession (D9)
 
 A streamed reply is stored as it streams (issue #46). The brain mints the `sevt_` id the
@@ -498,6 +540,13 @@ retries run on an injected `sleep`, the clock is a `TestClock` from
   resolved), a steering message carrying a switch — across providers — is the model of the
   **next** request while the first keeps its own, the session's projection follows the log,
   and the newest switch among several queued messages wins.
+- `reasoning.test.ts` and `reasoning-effort.test.ts` — the effort: the mapping for every one of
+  the eleven providers (a family it takes an effort for, and a model of the same provider
+  that must keep its default), the levels a provider's own knob cannot spell, the newest
+  effort winning the walk over the log, and the loop's own half — the option reaching the
+  model call, the span recording what was asked for and applied (including `applied: null`
+  for a model that takes none), a switch that arrives mid-stream belonging to the next
+  request, and a session that never asked for one writing no field at all.
 - The credential paths live in `turn.test.ts` too: a turn that ends with
   `missing_provider_credential` (no span, the queued message claimed by the idle event, no
   model call), the same with `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` set to decoys and `fetch`

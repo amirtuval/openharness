@@ -2,6 +2,7 @@ import type {
   AgentMessageEvent,
   ModelRequestEndEvent,
   ModelRequestStartEvent,
+  ReasoningEffort,
   SessionId,
   StoredEvent,
   StoredEventDelta,
@@ -91,9 +92,19 @@ export async function newSession(
   return { store, sessionId: session.id, clock }
 }
 
-/** A message event as a client sends it. */
-export function message(text: string): UserEventInput {
-  return { type: 'user.message', content: [{ type: 'text', text }] }
+/**
+ * A message event as a client sends it.
+ *
+ * @param text the message body
+ * @param reasoningEffort the effort this message asks for (#252); omitted leaves the session's
+ *   effort alone, and `null` asks for the provider's default again
+ */
+export function message(text: string, reasoningEffort?: ReasoningEffort | null): UserEventInput {
+  return {
+    type: 'user.message',
+    content: [{ type: 'text', text }],
+    ...(reasoningEffort === undefined ? {} : { reasoning_effort: reasoningEffort }),
+  }
 }
 
 /** An interrupt event as a client sends it. */
