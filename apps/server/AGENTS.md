@@ -46,11 +46,16 @@ protocol's schemas, so the shapes are not repeated here — see
 | `GET`    | `/v1/me`                                  | —                                           | the signed-in `User`                                                                                                                                 |
 | `GET`    | `/v1/me/preferences`                      | —                                           | the caller's `UserPreferences`, unwrapped                                                                                                            |
 | `PUT`    | `/v1/me/preferences`                      | `PutPreferencesRequestSchema`               | the stored preferences; 400 for a malformed `default_model`                                                                                          |
+| `POST`   | `/v1/me/modes`                            | `CreateModeRequestSchema`                   | 201, the `Mode`; 409 for a duplicate name (per user) or the twentieth-plus-one mode (#245, M6)                                                       |
+| `GET`    | `/v1/me/modes`                            | —                                           | `{ data: Mode[] }`, the caller's own; no pagination (a user holds at most 20)                                                                        |
+| `GET`    | `/v1/me/modes/{mode_id}`                  | —                                           | the `Mode`, or 404 for another user's or an unknown id                                                                                               |
+| `POST`   | `/v1/me/modes/{mode_id}`                  | `UpdateModeRequestSchema`                   | the updated `Mode`, or 404; 409 for a rename onto a name the caller has                                                                              |
+| `DELETE` | `/v1/me/modes/{mode_id}`                  | —                                           | 204; lands the chats that followed the mode on the model they last ran; 404 for another user's                                                       |
 | `POST`   | `/v1/agents`                              | `CreateAgentRequestSchema`                  | 201, the `Agent`                                                                                                                                     |
 | `GET`    | `/v1/agents`                              | `ListAgentsQuerySchema`                     | `{ data, next_page }`                                                                                                                                |
 | `GET`    | `/v1/agents/{agent_id}`                   | —                                           | the `Agent`, or 404                                                                                                                                  |
 | `POST`   | `/v1/agents/{agent_id}`                   | `UpdateAgentRequestSchema`                  | the updated `Agent`, or 404                                                                                                                          |
-| `POST`   | `/v1/sessions`                            | `CreateSessionRequestSchema`                | 201, the `Session`; 404 for an unknown agent; 400 for neither an agent nor a model                                                                   |
+| `POST`   | `/v1/sessions`                            | `CreateSessionRequestSchema`                | 201, the `Session`; 404 for an unknown agent or mode; 400 for none of an agent, a model or a mode; 422 for a mode whose model cannot be used         |
 | `GET`    | `/v1/sessions`                            | `ListSessionsQuerySchema`                   | `{ data, next_page }`                                                                                                                                |
 | `GET`    | `/v1/sessions/{session_id}`               | —                                           | the `Session`, or 404                                                                                                                                |
 | `DELETE` | `/v1/sessions/{session_id}`               | —                                           | 204; hard delete (U5); 404 for another owner's or an unknown session                                                                                 |
@@ -486,6 +491,45 @@ more: it used to get the effort for every model on the promise that it maps or d
 not know, and follows the data now — that promise was a hand-maintained assumption about a third
 party, and models.dev carries OpenRouter's own per-model effort options.
 
+## Modes, per user (#245, M6)
+
+A **mode** is a user's own named preset — a model, a reasoning effort and a system-prompt
+addition behind a stable name such as `smart` — and a chat that follows one runs it _live_: the
+next request uses the mode as it is now. `modes.ts` is the server half, `routes/modes.ts` the
+CRUD, and the store's mode methods (`@openharness/session`) hold the rows.
+
+- **Per user, owner-scoped.** The routes live under `/v1/me/modes`, the owner is
+  `c.get('user').id` always, and another user's mode answers 404 like every other resource (A4)
+  — `isolation.test.ts` sweeps them. A name is unique among its owner's modes and a user holds
+  at most `MAX_MODES_PER_USER` (20); both are enforced by the store (a unique constraint and a
+  counted insert), so two concurrent creates cannot both take a name, and the route maps the
+  store's `DuplicateModeNameError`/`ModeLimitReachedError` to the protocol's 409
+  `conflict_error` in `app.ts`.
+- **What a mode resolves to** is `resolveMode`: the mode's own `provider/model` id, or — for
+  `MODE_DEFAULT_MODEL` ("my default model") — the owner's stored `default_model`, which is why
+  a chat on such a mode follows a changed default. The brain gets it through the same injected
+  resolver seam as the reasoning effort (`RunTurnOptions.resolveMode`, built in `main.ts` from
+  the store and the credential store), asked per request, so an edit applies from the next
+  request on.
+- **One availability check.** `requireUsableMode` refuses a chat that starts or continues on a
+  mode whose model cannot be used — no credential for its provider, or "my default model" with
+  no default set — with the protocol's 422 `mode_unavailable_error` and a message naming the
+  mode and what to do. It is called on `POST /v1/sessions` and on `POST …/events` (against the
+  mode the batch leaves the session on), **before** anything is stored: a mode's model is never
+  silently swapped for another. Every availability decision goes through one function,
+  `hasCredentialForProvider`, which maps the provider half of a model id to "does the caller
+  have a credential for it" — the named-credential work (#260) changes only that function,
+  because a named credential's `name` is the provider half.
+- **The mode a chat follows** is the session's `mode` column, projected from the log in the
+  append's transaction (a `user.message` sets it, `mode: null` or a plain `model` detaches),
+  and cleared by `deleteMode` — which lands the chats that followed the mode on the model they
+  last ran. The server passes the resolved model into `createSession` when a chat is created on
+  a mode, so a session's header always has a model to fall back to.
+- **The route-level shape check.** A mode's `model` is validated by the protocol's
+  `ModeModelSchema` (a `provider/model` id or the sentinel) at the mode routes; a mode id is a
+  `mode_` ULID, so a malformed one in a path is the 400 every bad id gets, and in a body it is
+  the protocol's own 400.
+
 ## Usage and cost (epic #245, A2; issue #247)
 
 `GET /v1/sessions/{session_id}/usage` and `GET /v1/me/usage` answer what was spent, and `usage.ts`
@@ -544,7 +588,9 @@ the status `API_ERROR_STATUS_BY_TYPE` gives that type — and every response car
 | a cookie-authenticated write from an untrusted origin       | `permission_error`            | 403    |
 | a provider key the provider refused on save (A5)            | `invalid_provider_credential` | 422    |
 | a `?refresh=true` inside the minute since the last one (C4) | `rate_limit_error`            | 429    |
-| an id that names no agent or session                        | `not_found_error`             | 404    |
+| a mode whose model cannot be used (#245, M6)                | `mode_unavailable_error`      | 422    |
+| a mode name already taken, or the twentieth mode (#245)     | `conflict_error`              | 409    |
+| an id that names no agent, session or mode                  | `not_found_error`             | 404    |
 | a route that does not exist                                 | `not_found_error`             | 404    |
 | anything else                                               | `api_error`                   | 500    |
 
@@ -1267,6 +1313,7 @@ src/
   key-provider.ts       the vault the configuration asks for: the env key or Cloud KMS (#150)
   default-model.ts      the automatic default: the recommendation table, and the picker (U4)
   model-id.ts           the provider/model shape check the routes share (U1/U3)
+  modes.ts              modes resolved for a request, and refused when unusable (#245, M6)
   model.ts              which model factory the process runs (the router, or the mock)
   mock-model.ts         the deterministic test model and its markers
   runner.ts             SessionRunner: one turn per session, re-run while there is work
@@ -1286,8 +1333,8 @@ src/
   http/
     errors.ts           HttpError and the protocol's error envelope
     request.ts          body/query/path reading, through the protocol's schemas
-  routes/               agents.ts, sessions.ts, events.ts, ai-sdk.ts, me.ts, models.ts, usage.ts,
-                        provider-credentials.ts, plus deps.ts (RouteDeps) and signals.ts
+  routes/               agents.ts, sessions.ts, events.ts, ai-sdk.ts, me.ts, modes.ts, models.ts,
+                        usage.ts, provider-credentials.ts, plus deps.ts (RouteDeps) and signals.ts
                         (what a stored user event tells the scheduler)
   test-support/         test-only: scripted model, SSE reader, the server harness, Postgres,
                         and the AWS event-stream frames a mocked Bedrock reply is made of
@@ -1355,6 +1402,14 @@ parallel with each other.
   malformed model id) and the 404 for another user's agent; `agent: null` round-tripping
   through GET and the list; and a turn on a model-first session, whose span names the session's
   model and whose request was built with the owner's credential for that model's provider.
+- `modes.test.ts` — the mode endpoints and a chat on one (#245, M6): create/read/list/update/
+  delete, the 409 a duplicate name and the 21st mode get, the 400s a bad body and a malformed id
+  get, another user's mode 404ing on every verb; and a chat — the mode's model and effort on the
+  span (with the mode's id and name), the mode edited mid-chat followed on the next request,
+  "my default model" following a changed default, the prompt addition appended after the
+  session's, the 422 for a chat on a mode whose key is gone (on create and on continue, with
+  nothing stored) and for "my default model" with no default, a plain model switch detaching,
+  a deleted mode leaving the chat on the last model, and a chat with no mode running its own.
 - `preferences.test.ts` — `GET`/`PUT /v1/me/preferences` (U1): the null default, the round
   trip, the free-text id allowance, the 400s for a malformed `default_model` and a body
   without one, and isolation between two users.

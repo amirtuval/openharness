@@ -6,8 +6,10 @@ import {
   type Agent,
   type GetMeResponse,
   type ListAgentsResponse,
+  type ListModesResponse,
   type ListProviderCredentialsResponse,
   type ListSessionsResponse,
+  type Mode,
   type Session,
 } from '@openharness/protocol'
 
@@ -38,7 +40,12 @@ import {
 interface Fixture {
   readonly test: TestContext
   /** User A: the bearer token, and the resources they made. */
-  readonly a: { readonly token: string; readonly agent: Agent; readonly session: Session }
+  readonly a: {
+    readonly token: string
+    readonly agent: Agent
+    readonly session: Session
+    readonly mode: Mode
+  }
   /** User B: the bearer token. */
   readonly b: { readonly token: string }
 }
@@ -56,8 +63,15 @@ async function twoUsers(): Promise<Fixture> {
   // A stored key, so B's credential routes have something of A's to be kept away from.
   const stored = await putCredential(test, a.token, { type: 'api_key', api_key: 'sk-a-secret-key' })
   expect(stored.status).toBe(200)
+  // A mode, so B's mode routes have something of A's to be kept away from (#245, M6).
+  const createdMode = await call(test, a.token, 'POST', `${API_VERSION_PREFIX}/me/modes`, {
+    name: 'deep',
+    model: 'anthropic/claude-sonnet-5',
+  })
+  expect(createdMode.status).toBe(201)
+  const mode = (await createdMode.json()) as Mode
 
-  return { test, a: { token: a.token, agent, session }, b: { token: b.token } }
+  return { test, a: { token: a.token, agent, session, mode }, b: { token: b.token } }
 }
 
 /** A request as one user, with a JSON body where there is one. */
@@ -114,6 +128,10 @@ describe('user isolation (A4)', () => {
           messages: [{ role: 'user', parts: [{ type: 'text', text: 'hello' }] }],
         },
       ],
+      // A mode is a per-user resource too (#245, M6): every verb answers the same 404.
+      ['GET', `${API_VERSION_PREFIX}/me/modes/${a.mode.id}`],
+      ['POST', `${API_VERSION_PREFIX}/me/modes/${a.mode.id}`, { name: 'renamed by B' }],
+      ['DELETE', `${API_VERSION_PREFIX}/me/modes/${a.mode.id}`],
     ]
 
     for (const [method, path, request] of routes) {
@@ -126,6 +144,12 @@ describe('user isolation (A4)', () => {
       expect(JSON.stringify(refusal)).not.toContain('A’s agent')
       expect(JSON.stringify(refusal)).not.toContain('a private thought')
     }
+
+    // A's mode is untouched by the attempted rename either.
+    const modeForA = (await (
+      await call(test, a.token, 'GET', `${API_VERSION_PREFIX}/me/modes/${a.mode.id}`)
+    ).json()) as Mode
+    expect(modeForA.name).toBe('deep')
 
     // A's agent is untouched by the attempted update, and its log has nothing new: the one
     // user message in it is A's, and B's was never stored.
@@ -164,14 +188,23 @@ describe('user isolation (A4)', () => {
       await call(test, b.token, 'GET', `${API_VERSION_PREFIX}/sessions`)
     ).json()) as ListSessionsResponse
 
+    const modesForB = (await (
+      await call(test, b.token, 'GET', `${API_VERSION_PREFIX}/me/modes`)
+    ).json()) as ListModesResponse
+
     expect(agentsForB.data.map((agent) => agent.id)).toEqual([bAgent.id])
     expect(sessionsForB.data.map((session) => session.id)).toEqual([bSession.id])
+    expect(modesForB.data).toEqual([])
 
     // And A still sees exactly their own.
     const agentsForA = (await (
       await call(test, a.token, 'GET', `${API_VERSION_PREFIX}/agents`)
     ).json()) as ListAgentsResponse
     expect(agentsForA.data.map((agent) => agent.id)).toEqual([a.agent.id])
+    const modesForA = (await (
+      await call(test, a.token, 'GET', `${API_VERSION_PREFIX}/me/modes`)
+    ).json()) as ListModesResponse
+    expect(modesForA.data.map((mode) => mode.id)).toEqual([a.mode.id])
   })
 
   it('keeps provider credentials apart, both the list and the writes', async () => {

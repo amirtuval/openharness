@@ -1,5 +1,6 @@
 import type {
   ContextStrategy,
+  ModeResolver,
   ModelFactory,
   ReasoningSupportFor,
   RetryPolicy,
@@ -141,6 +142,8 @@ export interface PostgresPartitionSchedulerOptions {
   readonly contextStrategy?: ContextStrategy
   /** Which reasoning efforts a model takes, passed to every turn (#252's follow-up). */
   readonly reasoningSupportFor?: ReasoningSupportFor
+  /** What a mode resolves to, passed to every turn (#245, M6). */
+  readonly resolveMode?: ModeResolver
   /**
    * Called when a pass rejects, and when a background tick fails. Never throws.
    *
@@ -263,6 +266,7 @@ export class PostgresPartitionScheduler implements SessionScheduler {
           ...(options.reasoningSupportFor === undefined
             ? {}
             : { reasoningSupportFor: options.reasoningSupportFor }),
+          ...(options.resolveMode === undefined ? {} : { resolveMode: options.resolveMode }),
         }),
       ...(options.maxConcurrentSessions === undefined
         ? {}

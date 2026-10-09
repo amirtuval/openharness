@@ -38,6 +38,7 @@ import {
 import { ModelCatalog } from '../catalog/catalog'
 import { createTokenBudgetResolver } from '../catalog/context-budget'
 import { createReasoningSupportResolver } from '../catalog/reasoning-support'
+import { createModeResolver } from '../modes'
 import { emptyRegistry, type ModelRegistry } from '../catalog/registry'
 import { DEFAULT_DELTA_RETENTION_MS } from '../compaction'
 import {
@@ -304,6 +305,9 @@ export function createTestApp(options: TestOptions = {}): TestContext {
     // does not build one gets `applied: null` for every request — the same as the brain's own
     // no-resolver default, and a test that wants an applied effort passes a registry.
     reasoningSupportFor: createReasoningSupportResolver(options.registry ?? emptyRegistry),
+    // And the production mode wiring (#245, M6): the modes and the caller's credentials, the
+    // same resolver `main.ts` builds, so a test drives modes through the real seam.
+    resolveMode: createModeResolver({ store, credentials }),
     ...(options.maxConcurrentSessions === undefined
       ? {}
       : { maxConcurrentSessions: options.maxConcurrentSessions }),

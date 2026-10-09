@@ -12,6 +12,7 @@ import type { AppEnv } from '../types'
 import { invalidRequest, notFoundError } from '../http/errors'
 import { parseBody, parseQuery, sessionIdParam } from '../http/request'
 import { isModelId } from '../model-id'
+import { requireUsableMode, type ModeDeps } from '../modes'
 import { nameSessionFromFirstMessage } from '../titles'
 import type { RouteDeps } from './deps'
 import { signalKinds } from './signals'
@@ -42,15 +43,28 @@ export function registerSessionRoutes(app: Hono<AppEnv>, deps: RouteDeps): void 
     // included: a `user.message` carrying one sets what the session runs (#111), so its id is
     // checked here the way `POST …/events` checks it.
     requireEventModelIds(body.initial_events ?? [])
+    const ownerId = c.get('user').id
+    // A mode stands in for a model (#245, M6): resolving it is what decides the session's
+    // header model, and an unusable one is refused here — before a session is created —
+    // rather than silently replaced (a 422 `mode_unavailable_error`).
+    const mode =
+      body.mode === undefined ? null : await requireUsableMode(modeDeps(deps), ownerId, body.mode)
     const options: CreateSessionOptions = {
       // Every session belongs to the caller (epic #65, A4), and the agent it snapshots has
       // to be theirs too: `createSession` answers `AgentNotFoundError` — a 404 — for an
       // agent somebody else owns.
-      ownerId: c.get('user').id,
+      ownerId,
       // The request's inline model and system: with an agent they override what the agent
       // contributes, and without one they are what the session runs (#93). Either way the
       // session stores the *effective* configuration, so the brain never reads the agent.
-      ...(body.model === undefined ? {} : { model: body.model }),
+      // A mode wins over an inline model: the chat follows the mode, and the model stored is
+      // what the mode resolves to now.
+      ...(mode === null
+        ? body.model === undefined
+          ? {}
+          : { model: body.model }
+        : { model: { id: mode.model } }),
+      ...(mode === null ? {} : { mode: mode.mode.id }),
       ...(body.system === undefined ? {} : { system: body.system }),
       ...(body.title === undefined ? {} : { title: body.title }),
       ...(body.metadata === undefined ? {} : { metadata: body.metadata }),
@@ -66,7 +80,7 @@ export function registerSessionRoutes(app: Hono<AppEnv>, deps: RouteDeps): void 
       deps.store,
       session.id,
       body.initial_events ?? [],
-      options.ownerId,
+      ownerId,
     )
     // `initial_events` are the session's first queued events — the protocol says they are
     // stored "before it starts running" — so a session created with a message runs it, and one
@@ -138,6 +152,14 @@ export function requireModelId(id: string): void {
       `model.id must be a "provider/model" id with non-empty parts, got ${JSON.stringify(id)}`,
     )
   }
+}
+
+/**
+ * What resolving and refusing a mode needs (#245, M6): the modes and preferences on the store,
+ * and the caller's own credentials — which is what decides whether a mode's model can be used.
+ */
+export function modeDeps(deps: RouteDeps): ModeDeps {
+  return { store: deps.store, credentials: deps.credentialRoutes.credentials }
 }
 
 /** Refuse a `model` on any `user.message` among these events; see {@link requireModelId}. */

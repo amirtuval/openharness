@@ -1,5 +1,12 @@
 import type { Context } from 'hono'
-import { type AgentId, AgentIdSchema, type SessionId, SessionIdSchema } from '@openharness/protocol'
+import {
+  type AgentId,
+  AgentIdSchema,
+  type ModeId,
+  ModeIdSchema,
+  type SessionId,
+  SessionIdSchema,
+} from '@openharness/protocol'
 
 import type { AppEnv } from '../types'
 import type { ValidationIssue } from './errors'
@@ -74,6 +81,11 @@ export function agentIdParam(c: Context<AppEnv>, name: string): AgentId {
 /** Validate a path parameter that has to be a `sesn_` id; see {@link agentIdParam}. */
 export function sessionIdParam(c: Context<AppEnv>, name: string): SessionId {
   return idParam(c.req.param(name), SessionIdSchema, name)
+}
+
+/** Validate a path parameter that has to be a `mode_` id; see {@link agentIdParam}. */
+export function modeIdParam(c: Context<AppEnv>, name: string): ModeId {
+  return idParam(c.req.param(name), ModeIdSchema, name)
 }
 
 /** A query parameter name as the array its `[]` spelling collects. */

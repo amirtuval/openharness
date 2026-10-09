@@ -1,5 +1,6 @@
 import {
   type ContextStrategy,
+  type ModeResolver,
   type ModelFactory,
   type ReasoningSupportFor,
   type RetryPolicy,
@@ -58,6 +59,12 @@ export interface SessionRunnerOptions {
    * default when omitted, which is "no model is known to take one".
    */
   readonly reasoningSupportFor?: ReasoningSupportFor
+  /**
+   * What a mode resolves to, asked per request (#245, M6); `runTurn`'s own default when omitted,
+   * which is "a session on a mode runs its own model". The server builds it from the mode store,
+   * the mode owner's preferences and their credentials — see `modes.ts`.
+   */
+  readonly resolveMode?: ModeResolver
 }
 
 /** What one call to {@link SessionRunner.run} adds to the runner's configuration. */
@@ -134,6 +141,8 @@ export class SessionRunner {
 
   readonly #reasoningSupportFor: ReasoningSupportFor | undefined
 
+  readonly #resolveMode: ModeResolver | undefined
+
   readonly #turns = new Map<SessionId, TurnHandle>()
 
   #stopped = false
@@ -145,6 +154,7 @@ export class SessionRunner {
     this.#retry = options.retry
     this.#contextStrategy = options.contextStrategy
     this.#reasoningSupportFor = options.reasoningSupportFor
+    this.#resolveMode = options.resolveMode
   }
 
   /** Whether the runner has been told to stop and no longer starts passes. */
@@ -355,6 +365,7 @@ export class SessionRunner {
             ...(this.#reasoningSupportFor === undefined
               ? {}
               : { reasoningSupportFor: this.#reasoningSupportFor }),
+            ...(this.#resolveMode === undefined ? {} : { resolveMode: this.#resolveMode }),
           })
         } catch (error) {
           if (error instanceof SessionNotFoundError) {

@@ -73,6 +73,19 @@ export function conflictError(message: string): HttpError {
 }
 
 /**
+ * A chat asked for — or continues on — a mode whose model cannot be used (#245, M6): 422
+ * `mode_unavailable_error`.
+ *
+ * Unprocessable rather than a conflict: the request is well-formed, but the mode's model has
+ * no credential behind it or is "my default model" with no default set. The server refuses
+ * rather than running something else — never a silent fallback — and the message says what the
+ * caller can do about it (edit the mode, or pick a model).
+ */
+export function modeUnavailableError(message: string): HttpError {
+  return new HttpError('mode_unavailable_error', message)
+}
+
+/**
  * The caller is over a rate limit — a `GET /v1/models?refresh=true` inside the once-a-minute
  * window (C4): 429 `rate_limit_error`.
  */
