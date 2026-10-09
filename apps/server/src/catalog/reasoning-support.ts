@@ -1,4 +1,10 @@
-import type { ReasoningEffort } from '@openharness/protocol'
+import type { ReasoningSupportFor } from '@openharness/brain'
+import {
+  credentialTypeInfo,
+  PROVIDER_IDS,
+  type ProviderCredentialType,
+  type ReasoningEffort,
+} from '@openharness/protocol'
 
 import type { ModelRegistry } from './registry'
 
@@ -53,20 +59,46 @@ const OUR_EFFORTS: readonly ReasoningEffort[] = ['low', 'medium', 'high']
  *
  * @param registry where the metadata comes from — the bundled models.dev snapshot in production
  */
-export function createReasoningSupportResolver(
-  registry: ModelRegistry,
-): (modelId: string) => readonly ReasoningEffort[] | undefined {
-  return (modelId) => {
+export function createReasoningSupportResolver(registry: ModelRegistry): ReasoningSupportFor {
+  return (modelId, credentialType) => {
     const separator = modelId.indexOf('/')
     if (separator <= 0 || separator === modelId.length - 1) {
       return undefined
     }
     const provider = modelId.slice(0, separator)
     const id = modelId.slice(separator + 1)
-    const model = registry.models(provider).find((entry) => entry.id === id)
+    const key = registryKeyFor(provider, credentialType)
+    if (key === undefined) {
+      return undefined
+    }
+    const model = registry.models(key).find((entry) => entry.id === id)
     if (model === undefined) {
       return undefined
     }
     return OUR_EFFORTS.filter((level) => model.efforts?.includes(level) ?? false)
   }
+}
+
+/**
+ * The snapshot key a `provider/model` id reads its model under.
+ *
+ * A fixed provider id is its own key — the snapshot is keyed by **our** ids. Anything else is a
+ * **named credential**, and its first half is the name the reader chose (`azure-eu`), which the
+ * snapshot has never heard of: its models are filed under the credential *type*'s models.dev key
+ * (`azure`, `amazon-bedrock`), which is the same mapping the catalogue borrows a deployment's
+ * window and price with (`credentialTypeInfo`, epic #245 A3a). A type with no models.dev key —
+ * the OpenAI-compatible custom URL, which is a host the reader typed — has no entry to read and
+ * answers nothing, as does an `api_key` credential under a name no provider carries.
+ *
+ * @param provider the id's first half: a provider id, or a named credential's name
+ * @param credentialType what the request is made with — the fact that says which key a name reads
+ */
+function registryKeyFor(
+  provider: string,
+  credentialType: ProviderCredentialType,
+): string | undefined {
+  if ((PROVIDER_IDS as readonly string[]).includes(provider)) {
+    return provider
+  }
+  return credentialTypeInfo(credentialType)?.modelsDevKey
 }

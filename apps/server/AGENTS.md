@@ -437,8 +437,8 @@ model.
 
 Which `low | medium | high` a model takes is data now, not the brain's hand-written patterns.
 `catalog/reasoning-support.ts` is the whole of it: `createReasoningSupportResolver(registry)`
-answers `(modelId) => levels | undefined` — the registry's model, split on its first slash, with
-its `efforts` narrowed to the three levels a request may ask for:
+answers `(modelId, credentialType) => levels | undefined` — the registry's model, split on its
+first slash, with its `efforts` narrowed to the three levels a request may ask for:
 
 ```
 efforts = { low, medium, high } ∩ models.dev's effort levels for the model
@@ -450,12 +450,23 @@ provider's own API takes — including ones our three never name (`minimal`, `no
 `max`). A `budget_tokens` or `toggle` knob is not an effort knob however reasoning-capable the
 model is, and carries no `efforts`: it takes none, like a plain chat model.
 
+**The id's first half may be a credential's name, so the resolver reads the credential's type
+too.** A fixed provider id is its own key in the snapshot; anything else is a **named
+credential** — `azure-eu`, a name the reader chose and the snapshot has never heard of — and its
+models are filed under the credential _type_'s models.dev key (`credentialTypeInfo('azure_openai')
+.modelsDevKey` → `azure`), the same mapping the catalogue borrows a deployment's window and price
+with (A3a). So `azure-eu/gpt-5.4` reads the snapshot's `azure` entry, and `undefined` — unknown,
+not sent — is what a deployment models.dev has no model for answers, and what an `api_key`
+credential under a name no provider carries answers, because `api_key` has no models.dev key of
+its own.
+
 `main.ts` builds one resolver from the same registry the catalogue, the automatic default (U4)
 and the context budget (above) use, and hands it to whichever scheduler the config asks for; the
 resolver reaches the brain as `RunTurnOptions.reasoningSupportFor` (the same injected-resolver
-seam as `tokenBudgetFor`), asked once per request. The brain keeps only _how_ a provider spells
-an effort and the clamp its own knob needs (`packages/brain/src/reasoning.ts`); a level the
-model does not take is clamped to the nearest one it does.
+seam as `tokenBudgetFor`), asked once per request — the brain supplies the credential type it
+resolved the request with. The brain keeps only _how_ a provider (or a credential type) spells an
+effort and the clamp its own knob needs (`packages/brain/src/reasoning.ts`); a level the model
+does not take is clamped to the nearest one it does.
 
 `undefined` is a real answer, like the budget's: an unknown provider, a model the snapshot
 predates, a free-text id a host accepts (C5). So is `[]`, the model the registry knows takes
@@ -1093,7 +1104,7 @@ before the instance stops serving it (#151).
 | `ModelCatalog`, `ModelCatalogOptions`, `CatalogRefreshLimitedError`                                                              | the model catalogue: provider lists, registry join, cache, fallback (#90)                                                                    |
 | `createBundledRegistry()`, `emptyRegistry`, `SNAPSHOT_DATE`, `ModelRegistry`, `RegistryModel`                                    | the registry join's seam, over the bundled models.dev snapshot                                                                               |
 | `contextTokenBudget`, `createTokenBudgetResolver`, `OUTPUT_RESERVE_RATIO`                                                        | the per-model context budget: `contextWindow − min(maxOutput, 25%)`, per request (#246)                                                      |
-| `createReasoningSupportResolver`                                                                                                 | the per-model reasoning gate: the `low \| medium \| high` a model takes, per request (#252) |
+| `createReasoningSupportResolver`                                                                                                 | the per-model reasoning gate: the `low \| medium \| high` a model takes, per request (#252)                                                  |
 | `createProviderFetch()`, `ProviderFetch`, `DEFAULT_PROVIDER_TIMEOUT_MS`                                                          | the provider HTTP client: egress-proxy aware, 5 s deadline                                                                                   |
 | `CatalogCache`, `RefreshLimiter`, `DEFAULT_CATALOG_TTL_MS`, `DEFAULT_REFRESH_INTERVAL_MS`                                        | the in-memory per-(user, provider) cache and the refresh rate limit (C4)                                                                     |
 | `adapterFor()`, `adaptedProviders()`, `isChatModel()`, `isNonChatFamily()`                                                       | the fixed endpoint table and the chat filter (C1/C2)                                                                                         |

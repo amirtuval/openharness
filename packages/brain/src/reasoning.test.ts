@@ -1,8 +1,9 @@
-import { PROVIDER_IDS, type ReasoningEffort } from '@openharness/protocol'
+import { CREDENTIAL_TYPES, PROVIDER_IDS, type ReasoningEffort } from '@openharness/protocol'
 import { makeUserInterrupt, makeUserMessage } from '@openharness/protocol/fixtures'
 import { describe, expect, it } from 'vitest'
 
 import {
+  CREDENTIAL_TYPE_REASONING,
   planReasoning,
   PROVIDER_REASONING,
   type ReasoningSupportFor,
@@ -30,7 +31,7 @@ function plan(
   modelId: string,
   levels: ReasoningSupportFor = EVERY_LEVEL,
 ): ReturnType<typeof planReasoning> {
-  return planReasoning(modelId, EFFORT, levels)
+  return planReasoning(modelId, 'api_key', EFFORT, levels)
 }
 
 /** A resolver that says every model takes exactly `levels` — the gate, stated per case. */
@@ -92,7 +93,7 @@ describe('PROVIDER_REASONING', () => {
     })
 
     it('runs `medium` at `high`: DeepSeek has no medium', () => {
-      const result = planReasoning('deepseek/deepseek-v4-pro', 'medium', EVERY_LEVEL)
+      const result = planReasoning('deepseek/deepseek-v4-pro', 'api_key', 'medium', EVERY_LEVEL)
       expect(result.providerOptions).toEqual({ deepseek: { reasoningEffort: 'high' } })
       expect(result.record).toEqual({ requested: 'medium', applied: 'high' })
     })
@@ -106,7 +107,7 @@ describe('PROVIDER_REASONING', () => {
     })
 
     it('runs every level at `high`: Mistral has only `none` and `high`', () => {
-      const result = planReasoning('mistral/magistral-medium-latest', 'low', EVERY_LEVEL)
+      const result = planReasoning('mistral/magistral-medium-latest', 'api_key', 'low', EVERY_LEVEL)
       expect(result.record).toEqual({ requested: 'low', applied: 'high' })
     })
   })
@@ -146,7 +147,7 @@ describe('PROVIDER_REASONING', () => {
 
 describe('planReasoning', () => {
   it('asks for nothing when the log asked for nothing', () => {
-    const result = planReasoning('openai/o4-mini', null, EVERY_LEVEL)
+    const result = planReasoning('openai/o4-mini', 'api_key', null, EVERY_LEVEL)
     expect(result).toEqual({
       requested: null,
       applied: null,
@@ -158,13 +159,13 @@ describe('planReasoning', () => {
   it('sends nothing for a model the resolver does not know', () => {
     // A custom URL, an Azure deployment, a model the snapshot predates: `undefined` is "unknown",
     // and the safe reading of unknown is the provider's default.
-    const result = planReasoning('openai/o4-mini', 'low', () => undefined)
+    const result = planReasoning('openai/o4-mini', 'api_key', 'low', () => undefined)
     expect(result.providerOptions).toBeUndefined()
     expect(result.record).toEqual({ requested: 'low', applied: null })
   })
 
   it('sends nothing for a model the resolver knows takes no effort', () => {
-    const result = planReasoning('openai/gpt-4o-mini', 'high', taking([]))
+    const result = planReasoning('openai/gpt-4o-mini', 'api_key', 'high', taking([]))
     expect(result.providerOptions).toBeUndefined()
     expect(result.record).toEqual({ requested: 'high', applied: null })
   })
@@ -172,13 +173,13 @@ describe('planReasoning', () => {
   it('sends nothing for a provider this build has no client for', () => {
     // The resolver may still describe the model, but there is nothing to send an effort to: the
     // request ends as an unsupported provider before it is made.
-    const result = planReasoning('someone-else/gpt-5', 'low', EVERY_LEVEL)
+    const result = planReasoning('someone-else/gpt-5', 'api_key', 'low', EVERY_LEVEL)
     expect(result.providerOptions).toBeUndefined()
     expect(result.record).toEqual({ requested: 'low', applied: null })
   })
 
   it('is unbothered by a model id that names an inherited property', () => {
-    expect(planReasoning('toString/x', 'low', EVERY_LEVEL).record).toEqual({
+    expect(planReasoning('toString/x', 'api_key', 'low', EVERY_LEVEL).record).toEqual({
       requested: 'low',
       applied: null,
     })
@@ -187,19 +188,56 @@ describe('planReasoning', () => {
   it('clamps a level the model does not take to the nearest one it does', () => {
     // A model that takes `low` and `high` has no `medium`: the request runs at `high`, the level
     // its own client would pick, and the level it is actually sent.
-    const result = planReasoning('openai/o4-mini', 'medium', taking(['low', 'high']))
+    const result = planReasoning('openai/o4-mini', 'api_key', 'medium', taking(['low', 'high']))
     expect(result.providerOptions).toEqual({ openai: { reasoningEffort: 'high' } })
     expect(result.record).toEqual({ requested: 'medium', applied: 'high' })
   })
 
   it('clamps down as well as up', () => {
-    const result = planReasoning('openai/o4-mini', 'high', taking(['low']))
+    const result = planReasoning('openai/o4-mini', 'api_key', 'high', taking(['low']))
     expect(result.record).toEqual({ requested: 'high', applied: 'low' })
   })
 
   it('keeps a level the model does take exactly as it is', () => {
-    const result = planReasoning('openai/o4-mini', 'medium', taking(['low', 'medium', 'high']))
+    const result = planReasoning(
+      'openai/o4-mini',
+      'api_key',
+      'medium',
+      taking(['low', 'medium', 'high']),
+    )
     expect(result.record).toEqual({ requested: 'medium', applied: 'medium' })
+  })
+})
+
+describe('CREDENTIAL_TYPE_REASONING', () => {
+  it('has a row for every named credential type', () => {
+    expect(Object.keys(CREDENTIAL_TYPE_REASONING).sort()).toEqual(
+      CREDENTIAL_TYPES.map((entry) => entry.type).sort(),
+    )
+  })
+
+  it('asks Azure OpenAI for an effort the way its client reads it: `openai`', () => {
+    // `@ai-sdk/azure`'s chat model is an `OpenAIChatLanguageModel` (`azure.chat`) under an Azure
+    // URL, and it reads `providerOptions.openai` — never `providerOptions.azure`, which it does
+    // not look at. So an Azure deployment gets the OpenAI option.
+    expect(CREDENTIAL_TYPE_REASONING.azure_openai.options('high')).toEqual({
+      openai: { reasoningEffort: 'high' },
+    })
+  })
+
+  it('plans a named credential by its type, not by the name in the model id', () => {
+    // `azure-eu` is a name, not a provider id: the provider table has no row for it. The
+    // credential's type is what says which options key its deployment is asked with.
+    const result = planReasoning('azure-eu/gpt-5.4', 'azure_openai', 'medium', EVERY_LEVEL)
+    expect(result.providerOptions).toEqual({ openai: { reasoningEffort: 'medium' } })
+    expect(result.record).toEqual({ requested: 'medium', applied: 'medium' })
+  })
+
+  it('sends nothing for an `api_key` under a name no provider carries', () => {
+    // Neither table has a row: the provider id is unknown and the type is the fixed providers'.
+    const result = planReasoning('my-gateway/gpt-5', 'api_key', 'high', EVERY_LEVEL)
+    expect(result.providerOptions).toBeUndefined()
+    expect(result.record).toEqual({ requested: 'high', applied: null })
   })
 })
 

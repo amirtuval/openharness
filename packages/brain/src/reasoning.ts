@@ -1,5 +1,7 @@
 import {
   EVENT_TYPES,
+  type NamedCredentialType,
+  type ProviderCredentialType,
   type ProviderId,
   type ReasoningEffort,
   type ReasoningEffortRun,
@@ -51,8 +53,14 @@ const EFFORT_ORDER: readonly ReasoningEffort[] = ['low', 'medium', 'high']
  * its provider's default. The server wires one (`createReasoningSupportResolver`).
  *
  * @param modelId the model id the request runs, `provider/model`
+ * @param credentialType the credential the request is made with — its type is what says which
+ *   models a named credential's deployment (`azure-eu/gpt-4o`) is looked up as, since the id's
+ *   first half is the credential's *name* and not a provider id
  */
-export type ReasoningSupportFor = (modelId: string) => readonly ReasoningEffort[] | undefined
+export type ReasoningSupportFor = (
+  modelId: string,
+  credentialType: ProviderCredentialType,
+) => readonly ReasoningEffort[] | undefined
 
 /**
  * One provider's reasoning: how the effort is spelled, and the clamp its own knob needs.
@@ -75,8 +83,9 @@ interface ProviderReasoning {
  * shared provider id (`@openharness/protocol`, epic #245).
  *
  * Typed as a `Record<ProviderId, …>` on purpose: a provider the server can store a key for and
- * this table has no effort for is a compile error, which is how the credential types landing
- * later (#248–#251, A3a–A3d) are forced to say what their own effort knob is.
+ * this table has no effort for is a compile error. The named credential types (#248 and later,
+ * A3a–A3d) are the other half of that, and are keyed by type in
+ * {@link CREDENTIAL_TYPE_REASONING}.
  *
  * Each option is the one that provider's installed AI SDK client reads — checked against
  * `@ai-sdk/anthropic@4.0.73`, `@ai-sdk/openai@4.0.85`, `@ai-sdk/google@4.0.89`,
@@ -136,6 +145,30 @@ export const PROVIDER_REASONING: Readonly<Record<ProviderId, ProviderReasoning>>
   },
 }
 
+/**
+ * The named credential types and the option each one's client reads, keyed by the credential
+ * **type** (epic #245, A3a).
+ *
+ * A named credential's model ids carry its *name* as the first half (`azure-eu/gpt-4o`), and a
+ * name is the user's — `azure`, `azure-eu`, whatever they typed — so {@link PROVIDER_REASONING}
+ * has no row for it. The type does: the request was built with a `ModelCredential`, its `type`
+ * is what the server's model factory resolves the request by, and it is therefore what
+ * says which client — and which options key — a named credential's model is asked with. Typed
+ * as a `Record<NamedCredentialType, …>` for the same reason the provider table is typed against
+ * `ProviderId`: a credential type the protocol grows without a row here is a compile error.
+ */
+export const CREDENTIAL_TYPE_REASONING: Readonly<Record<NamedCredentialType, ProviderReasoning>> = {
+  azure_openai: {
+    // `@ai-sdk/azure`'s chat model **is** `@ai-sdk/openai`'s under an Azure URL:
+    // `createAzure(...).chat(id)` returns an `OpenAIChatLanguageModel` whose provider string is
+    // `azure.chat`, and it reads its call options from `providerOptions.openai` — never
+    // `providerOptions.azure`, which that model does not look at (checked against
+    // `@ai-sdk/azure@4.0.97`). So an Azure deployment is asked for an effort exactly as an
+    // OpenAI model is, and the option its client actually reads is the OpenAI one.
+    options: (effort) => ({ openai: { reasoningEffort: effort } }),
+  },
+}
+
 /** What one model request does with the effort the log asked for. */
 export interface ReasoningPlan {
   /** What the log asked for, or `null` when it asked for nothing. */
@@ -171,23 +204,27 @@ const NO_REASONING: ReasoningPlan = {
  * model does not accept is never the level put on the wire.
  *
  * @param modelId the model id the request runs, `provider/model`
+ * @param credentialType the credential the request is made with. A fixed provider id's own row
+ *   is chosen by the id's first half; anything else is a named credential, whose row is its
+ *   *type*'s (`azure-eu` is an `azure_openai` credential, whatever the reader called it).
  * @param requested what the log asks for, or `null`
  * @param supportFor which levels the model takes, the host's answer — see
  *   {@link ReasoningSupportFor}; omitted means no model is known to take one
  */
 export function planReasoning(
   modelId: string,
+  credentialType: ProviderCredentialType,
   requested: ReasoningEffort | null,
   supportFor?: ReasoningSupportFor,
 ): ReasoningPlan {
   if (requested === null) {
     return NO_REASONING
   }
-  const reasoning = reasoningFor(providerOf(modelId))
+  const reasoning = reasoningFor(providerOf(modelId), credentialType)
   if (reasoning === undefined) {
     return unapplied(requested)
   }
-  const supported = supportFor?.(modelId)
+  const supported = supportFor?.(modelId, credentialType)
   if (supported === undefined || supported.length === 0) {
     return unapplied(requested)
   }
@@ -243,12 +280,24 @@ function unapplied(requested: ReasoningEffort): ReasoningPlan {
   }
 }
 
-/** The row for a provider id, or `undefined` for one this build has no effort for. */
-function reasoningFor(provider: string): ProviderReasoning | undefined {
+/**
+ * The row for a request's model, or `undefined` for one this build has no effort for.
+ *
+ * A fixed provider id is its own row. Anything else names a credential — `azure-eu`, not
+ * `azure_openai` — so the row is the credential's **type**'s, which is the fact a request is
+ * actually built with and the only one that can name a knob for a name the reader chose.
+ */
+function reasoningFor(
+  provider: string,
+  credentialType: ProviderCredentialType,
+): ProviderReasoning | undefined {
   // `Object.hasOwn`, not a bare index: a `provider/model` whose first half names an inherited
   // property (`toString`, `constructor`) is a provider with no row, not a row.
-  return Object.hasOwn(PROVIDER_REASONING, provider)
-    ? PROVIDER_REASONING[provider as ProviderId]
+  if (Object.hasOwn(PROVIDER_REASONING, provider)) {
+    return PROVIDER_REASONING[provider as ProviderId]
+  }
+  return Object.hasOwn(CREDENTIAL_TYPE_REASONING, credentialType)
+    ? CREDENTIAL_TYPE_REASONING[credentialType as NamedCredentialType]
     : undefined
 }
 

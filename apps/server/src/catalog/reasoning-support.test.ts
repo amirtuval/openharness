@@ -34,7 +34,7 @@ describe('createReasoningSupportResolver', () => {
       }),
     )
 
-    expect(supportFor('anthropic/claude-sonnet-5')).toEqual(['low', 'medium', 'high'])
+    expect(supportFor('anthropic/claude-sonnet-5', 'api_key')).toEqual(['low', 'medium', 'high'])
   })
 
   it('answers only the levels the model and we share, so the brain can clamp to them', () => {
@@ -44,7 +44,7 @@ describe('createReasoningSupportResolver', () => {
       registryOf({ openai: [{ id: 'o4-mini', reasoning: true, efforts: ['low', 'high'] }] }),
     )
 
-    expect(supportFor('openai/o4-mini')).toEqual(['low', 'high'])
+    expect(supportFor('openai/o4-mini', 'api_key')).toEqual(['low', 'high'])
   })
 
   it('answers an empty list for a model that takes no effort', () => {
@@ -59,9 +59,9 @@ describe('createReasoningSupportResolver', () => {
       }),
     )
 
-    expect(supportFor('openai/gpt-4o-mini')).toEqual([])
-    expect(supportFor('google/gemini-2.5-flash')).toEqual([])
-    expect(supportFor('mistral/odd-model')).toEqual([])
+    expect(supportFor('openai/gpt-4o-mini', 'api_key')).toEqual([])
+    expect(supportFor('google/gemini-2.5-flash', 'api_key')).toEqual([])
+    expect(supportFor('mistral/odd-model', 'api_key')).toEqual([])
   })
 
   it('answers nothing for a model the registry does not know', () => {
@@ -71,11 +71,11 @@ describe('createReasoningSupportResolver', () => {
 
     // A custom URL, an Azure deployment, a model the snapshot predates: unknown, and the brain
     // reads that as "takes none" — the safe default.
-    expect(supportFor('openai/gpt-9-does-not-exist')).toBeUndefined()
-    expect(supportFor('unknown-provider/model')).toBeUndefined()
-    expect(supportFor('not-a-provider-model')).toBeUndefined()
-    expect(supportFor('openai/')).toBeUndefined()
-    expect(supportFor('/o4-mini')).toBeUndefined()
+    expect(supportFor('openai/gpt-9-does-not-exist', 'api_key')).toBeUndefined()
+    expect(supportFor('unknown-provider/model', 'api_key')).toBeUndefined()
+    expect(supportFor('not-a-provider-model', 'api_key')).toBeUndefined()
+    expect(supportFor('openai/', 'api_key')).toBeUndefined()
+    expect(supportFor('/o4-mini', 'api_key')).toBeUndefined()
   })
 
   it('splits on the first slash, so a model id may carry one of its own', () => {
@@ -87,7 +87,42 @@ describe('createReasoningSupportResolver', () => {
       }),
     )
 
-    expect(supportFor('together/deepseek-ai/DeepSeek-V4-Pro')).toEqual(['low', 'high'])
+    expect(supportFor('together/deepseek-ai/DeepSeek-V4-Pro', 'api_key')).toEqual(['low', 'high'])
+  })
+
+  it("reads a named credential's deployment under its type's models.dev key", () => {
+    // `azure-eu` is a name no snapshot carries; the credential's *type* is what maps it to the
+    // registry's `azure` entries (`credentialTypeInfo('azure_openai').modelsDevKey`), the same
+    // mapping the catalogue borrows a deployment's window and price with (epic #245 A3a).
+    const supportFor = createReasoningSupportResolver(
+      registryOf({
+        azure: [
+          { id: 'gpt-5.4', reasoning: true, efforts: ['none', 'low', 'medium', 'high', 'xhigh'] },
+        ],
+      }),
+    )
+
+    expect(supportFor('azure-eu/gpt-5.4', 'azure_openai')).toEqual(['low', 'medium', 'high'])
+  })
+
+  it('answers nothing for a deployment models.dev does not know', () => {
+    const supportFor = createReasoningSupportResolver(
+      registryOf({ azure: [{ id: 'gpt-5.4', reasoning: true, efforts: ['low', 'high'] }] }),
+    )
+
+    // The deployment name has to match a models.dev model exactly: a name nobody measured is
+    // unknown, and the safe reading of unknown is the provider's default.
+    expect(supportFor('azure-eu/gpt-4o-mini', 'azure_openai')).toBeUndefined()
+  })
+
+  it('answers nothing for an `api_key` under a name no provider carries', () => {
+    const supportFor = createReasoningSupportResolver(
+      registryOf({ azure: [{ id: 'gpt-5.4', reasoning: true, efforts: ['low', 'high'] }] }),
+    )
+
+    // An `api_key` credential has no models.dev key of its own — only the eleven fixed ids are
+    // readable — so a name that is not one of them resolves to nothing.
+    expect(supportFor('azure-eu/gpt-5.4', 'api_key')).toBeUndefined()
   })
 
   it('reads the bundled registry, so a real reasoning model gets its real levels', () => {
@@ -95,8 +130,12 @@ describe('createReasoningSupportResolver', () => {
     // answer comes from — `o4-mini` takes all three, `gpt-4o-mini` none.
     const supportFor = createReasoningSupportResolver(createBundledRegistry())
 
-    expect(supportFor('openai/o4-mini')).toEqual(['low', 'medium', 'high'])
-    expect(supportFor('openai/gpt-4o-mini')).toEqual([])
-    expect(supportFor('nobody/nothing')).toBeUndefined()
+    expect(supportFor('openai/o4-mini', 'api_key')).toEqual(['low', 'medium', 'high'])
+    expect(supportFor('openai/gpt-4o-mini', 'api_key')).toEqual([])
+    expect(supportFor('nobody/nothing', 'api_key')).toBeUndefined()
+    // A named credential's deployment too: the snapshot files Azure OpenAI under `azure`, and
+    // the credential type is what reaches that entry from a deployment the reader typed.
+    expect(supportFor('azure/gpt-5.4', 'azure_openai')).toEqual(['low', 'medium', 'high'])
+    expect(supportFor('azure/gpt-4o', 'azure_openai')).toEqual([])
   })
 })

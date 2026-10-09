@@ -70,36 +70,36 @@ emits what that reaches.
 
 ### `@openharness/brain`
 
-| export                                                                        | what it is                                                                                               |
-| ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| `runTurn(sessionId, options)`                                                 | run one turn; resolves to a `TurnOutcome`                                                                |
-| `RunTurnOptions`                                                                                          | `{ store, model, resolveCredential, signal?, fence?, contextStrategy?, reasoningSupportFor?, retry? }`                              |
-| `TurnOutcome`, `TurnOutcomeKind`                                              | `{ outcome: 'idle' \| 'noop' \| 'interrupted' \| 'error' }`                                              |
-| `ContextStrategy`, `ContextStrategyOptions`                                   | `(events, { model, system }) => ModelMessage[]`                                                          |
-| `createContextStrategy(config?)`, `ContextStrategyConfig`                     | the default strategy: the conversation, trimmed to a token budget resolved per model                     |
-| `DEFAULT_CONTEXT_STRATEGY`, `DEFAULT_CONTEXT_TOKEN_BUDGET`, `CHARS_PER_TOKEN` | its defaults                                                                                             |
-| `estimateTokens(text)`                                                        | the chars/4 estimate the budget is measured in                                                           |
-| `ModelCredential`                                                             | `{ type: 'api_key', apiKey }` or `{ type: 'azure_openai', apiKey, endpoint }` — one request's credential |
-| `ResolveCredential`                                                           | `(name) => Promise<ModelCredential \| null>` — where it comes from                                       |
-| `ModelFactory`                                                                | `(modelId, credential) => LanguageModel` — how a `provider/model` becomes a model                        |
-| `providerModelFactory`, `createProviderModelFactory(options)`                 | the `ModelFactory` hosts normally pass: the official AI SDK providers, the key passed explicitly         |
-| `azureFetch`, `createAzureFetch(options)`, `azureBaseUrl(endpoint)`           | the Azure `fetch` (safeFetch under the streaming-safe limits) and the base URL it builds                 |
-| `providerOf(modelId)`                                                         | the provider of a `provider/model` id: the part before the first slash                                   |
-| `isUsableCredential(credential)`                                              | whether a resolved credential is a key at all (a blank one is not)                                       |
-| `missingCredentialMessage(provider)`                                          | the `session.error` sentence for a provider with no key                                                  |
-| `redactSecret(text, secret)`, `REDACTED_PLACEHOLDER`                          | the credential scrubbed out of provider error text                                                       |
-| `streamModelRequest(params)`, `ModelRequestParams`, `ModelRequestResult`      | one model request, as text, usage, error and abort                                                       |
-| `ProviderOptions`                                                             | the AI SDK's per-provider options for one call, read off `streamText`                                    |
-| `PROVIDER_REASONING`, `planReasoning`, `ReasoningPlan`, `ReasoningSupportFor`, `requestedReasoningEffort` | `low \| medium \| high` in each provider's own option — gated by the injected resolver — and what the log asks a request for (#252) |
-| `toModelUsage(usage)`, `ZERO_MODEL_USAGE`                                     | what a request reported → the protocol's four counters, always integers                                  |
-| `classifyModelError(error)`, `ModelErrorClassification`                       | retryable or not, and the `session.error` type that says so                                              |
-| `isRetryableModelError(error)`                                                | the same answer, when only the boolean is wanted                                                         |
-| `isClaimConflictError(error)`                                                 | whether the store refused a claim another owner had taken                                                |
-| `isOwnershipError(error)`                                                     | a fenced write or a claim conflict: the log is somebody else's (D9)                                      |
-| `RetryPolicy`, `ResolvedRetryPolicy`, `resolveRetryPolicy(policy?)`           | how failures are retried                                                                                 |
-| `backoffDelay(attempt, policy)`, `abortableSleep`, `Sleep`                    | the delay, and the sleep that honors an abort                                                            |
-| `DEFAULT_MAX_RETRIES`, `DEFAULT_BASE_DELAY_MS`, `DEFAULT_MAX_DELAY_MS`        | `3`, `500`, `8000`                                                                                       |
-| `PACKAGE_NAME`, `DEPENDENCIES`                                                | the package name, and the edges that must resolve through built output                                   |
+| export                                                                                                                                 | what it is                                                                                                                                                        |
+| -------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `runTurn(sessionId, options)`                                                                                                          | run one turn; resolves to a `TurnOutcome`                                                                                                                         |
+| `RunTurnOptions`                                                                                                                       | `{ store, model, resolveCredential, signal?, fence?, contextStrategy?, reasoningSupportFor?, retry? }`                                                            |
+| `TurnOutcome`, `TurnOutcomeKind`                                                                                                       | `{ outcome: 'idle' \| 'noop' \| 'interrupted' \| 'error' }`                                                                                                       |
+| `ContextStrategy`, `ContextStrategyOptions`                                                                                            | `(events, { model, system }) => ModelMessage[]`                                                                                                                   |
+| `createContextStrategy(config?)`, `ContextStrategyConfig`                                                                              | the default strategy: the conversation, trimmed to a token budget resolved per model                                                                              |
+| `DEFAULT_CONTEXT_STRATEGY`, `DEFAULT_CONTEXT_TOKEN_BUDGET`, `CHARS_PER_TOKEN`                                                          | its defaults                                                                                                                                                      |
+| `estimateTokens(text)`                                                                                                                 | the chars/4 estimate the budget is measured in                                                                                                                    |
+| `ModelCredential`                                                                                                                      | `{ type: 'api_key', apiKey }` or `{ type: 'azure_openai', apiKey, endpoint }` — one request's credential                                                          |
+| `ResolveCredential`                                                                                                                    | `(name) => Promise<ModelCredential \| null>` — where it comes from                                                                                                |
+| `ModelFactory`                                                                                                                         | `(modelId, credential) => LanguageModel` — how a `provider/model` becomes a model                                                                                 |
+| `providerModelFactory`, `createProviderModelFactory(options)`                                                                          | the `ModelFactory` hosts normally pass: the official AI SDK providers, the key passed explicitly                                                                  |
+| `azureFetch`, `createAzureFetch(options)`, `azureBaseUrl(endpoint)`                                                                    | the Azure `fetch` (safeFetch under the streaming-safe limits) and the base URL it builds                                                                          |
+| `providerOf(modelId)`                                                                                                                  | the provider of a `provider/model` id: the part before the first slash                                                                                            |
+| `isUsableCredential(credential)`                                                                                                       | whether a resolved credential is a key at all (a blank one is not)                                                                                                |
+| `missingCredentialMessage(provider)`                                                                                                   | the `session.error` sentence for a provider with no key                                                                                                           |
+| `redactSecret(text, secret)`, `REDACTED_PLACEHOLDER`                                                                                   | the credential scrubbed out of provider error text                                                                                                                |
+| `streamModelRequest(params)`, `ModelRequestParams`, `ModelRequestResult`                                                               | one model request, as text, usage, error and abort                                                                                                                |
+| `ProviderOptions`                                                                                                                      | the AI SDK's per-provider options for one call, read off `streamText`                                                                                             |
+| `PROVIDER_REASONING`, `CREDENTIAL_TYPE_REASONING`, `planReasoning`, `ReasoningPlan`, `ReasoningSupportFor`, `requestedReasoningEffort` | `low \| medium \| high` in each provider's — and named credential type's — own option, gated by the injected resolver, and what the log asks a request for (#252) |
+| `toModelUsage(usage)`, `ZERO_MODEL_USAGE`                                                                                              | what a request reported → the protocol's four counters, always integers                                                                                           |
+| `classifyModelError(error)`, `ModelErrorClassification`                                                                                | retryable or not, and the `session.error` type that says so                                                                                                       |
+| `isRetryableModelError(error)`                                                                                                         | the same answer, when only the boolean is wanted                                                                                                                  |
+| `isClaimConflictError(error)`                                                                                                          | whether the store refused a claim another owner had taken                                                                                                         |
+| `isOwnershipError(error)`                                                                                                              | a fenced write or a claim conflict: the log is somebody else's (D9)                                                                                               |
+| `RetryPolicy`, `ResolvedRetryPolicy`, `resolveRetryPolicy(policy?)`                                                                    | how failures are retried                                                                                                                                          |
+| `backoffDelay(attempt, policy)`, `abortableSleep`, `Sleep`                                                                             | the delay, and the sleep that honors an abort                                                                                                                     |
+| `DEFAULT_MAX_RETRIES`, `DEFAULT_BASE_DELAY_MS`, `DEFAULT_MAX_DELAY_MS`                                                                 | `3`, `500`, `8000`                                                                                                                                                |
+| `PACKAGE_NAME`, `DEPENDENCIES`                                                                                                         | the package name, and the edges that must resolve through built output                                                                                            |
 
 `log.ts`, `events.ts` and `validate.ts` are internal: they are how the loop is written, not what
 a host talks to.
@@ -479,16 +479,26 @@ becomes the thing a provider actually reads (`src/reasoning.ts`).
   `@ai-sdk/*` version — and the clamp its own knob needs (DeepSeek has no `medium` and runs it
   at `high`; Mistral has only `none` and `high`, and every level above the default runs at
   `high`; `applied`).
+- **A second table, keyed by credential type, for the named credentials.** A named credential's
+  model ids carry its _name_ as the first half (`azure-eu/gpt-4o`), and a name is the reader's,
+  so the provider table has no row for it. `CREDENTIAL_TYPE_REASONING` is the
+  `Readonly<Record<NamedCredentialType, …>>` that does: `azure_openai` asks Azure OpenAI for an
+  effort through the **`openai`** options key, which is what `@ai-sdk/azure`'s chat model reads
+  (it _is_ the OpenAI chat model under an Azure URL, `azure.chat`; `providerOptions.azure` would
+  never be looked at). A type the protocol grows without a row here is a compile error.
 - **Which models take an effort is the host's, through an injected resolver.** It used to be
   hand-written patterns per provider in this table, which rotted with every model release — a new
   reasoning model silently got no effort, a renamed one could be sent a level its API rejects
-  with a 400. `RunTurnOptions.reasoningSupportFor` is a `(modelId) => levels | undefined`
-  resolver, the same seam the context budget's `tokenBudgetFor` uses, built by the host from the
-  registry it already holds (the server's models.dev snapshot); the row above supplies only the
-  option and the clamp. A host that injects none — and a model the resolver does not know (a
-  custom URL, an Azure deployment, a model a snapshot predates) — is the **safe default**: no
-  model is known to take an effort, so nothing is sent and the request keeps the provider's
-  default. `undefined` (unknown) and `[]` (known to take none) are kept apart for that reason.
+  with a 400. `RunTurnOptions.reasoningSupportFor` is a `(modelId, credentialType) => levels |
+undefined` resolver, the same seam the context budget's `tokenBudgetFor` uses, built by the
+  host from the registry it already holds (the server's models.dev snapshot); the rows above
+  supply only the option and the clamp. The credential type travels with the id because the id's
+  first half may be a credential's name rather than a provider id, and the _type_ is what says
+  which registry entry a deployment reads (see the server's resolver). A host that injects none —
+  and a model the resolver does not know (a custom URL, an Azure deployment models.dev has no
+  entry for, a model a snapshot predates) — is the **safe default**: no model is known to take an
+  effort, so nothing is sent and the request keeps the provider's default. `undefined` (unknown)
+  and `[]` (known to take none) are kept apart for that reason.
 - **A level the model does not take is clamped to one it does.** When the resolver names the
   levels a model takes and the level the provider's knob produced is outside them, the nearest
   is sent — a `medium` asked of a model that takes `low` and `high` runs at `high` — so a level

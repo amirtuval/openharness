@@ -478,6 +478,7 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     // rather than a session field.
     const reasoning = planReasoning(
       requestModel.id,
+      credential.type,
       requestedReasoningEffort(await readLog(store, sessionId)),
       options.reasoningSupportFor,
     )

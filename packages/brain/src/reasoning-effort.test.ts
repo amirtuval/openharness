@@ -8,6 +8,7 @@ import {
 import type { InMemorySessionStore } from '@openharness/session'
 import { describe, expect, it } from 'vitest'
 
+import type { ResolveCredential } from './model'
 import { planReasoning, type ReasoningSupportFor } from './reasoning'
 import { logOf, message, newSession, spanStartOf } from './testing/harness'
 import { apiCallError, mockModel, resolveTestCredential } from './testing/mock-model'
@@ -222,8 +223,37 @@ describe('the reasoning effort of a request', () => {
   it('sends no option for a provider this build cannot ask one of', () => {
     // The resolver may describe the model, but there is nothing to send an effort to: the
     // request would end as an unsupported provider before it is made.
-    const unknown = planReasoning('someone-else/some-model', 'high', EVERY_LEVEL)
+    const unknown = planReasoning('someone-else/some-model', 'api_key', 'high', EVERY_LEVEL)
     expect(unknown.providerOptions).toBeUndefined()
     expect(unknown.record).toEqual({ requested: 'high', applied: null })
+  })
+
+  it('asks a named credential the way its type does, for a deployment', async () => {
+    // An Azure deployment: the model id's first half is the credential's *name* (`azure-eu`),
+    // not a provider id, so the row is the credential type's — and the options key is the one
+    // `@ai-sdk/azure`'s chat model reads (`openai`).
+    const { store, sessionId } = await newSession([
+      switchingEffortMessage('think hard', { id: 'azure-eu/gpt-5.4' }, 'medium'),
+    ])
+    const { factory, calls } = mockModel({ text: ['thought about it'] })
+    const azureCredential: ResolveCredential = () =>
+      Promise.resolve({
+        type: 'azure_openai',
+        apiKey: 'az-key',
+        endpoint: 'https://my-resource.openai.azure.com',
+      })
+
+    await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: azureCredential,
+      reasoningSupportFor: EVERY_LEVEL,
+    })
+
+    expect(calls[0]?.providerOptions).toEqual({ openai: { reasoningEffort: 'medium' } })
+    expect(await firstSpanStart(store, sessionId)).toMatchObject({
+      model: 'azure-eu/gpt-5.4',
+      reasoning_effort: { requested: 'medium', applied: 'medium' },
+    })
   })
 })
