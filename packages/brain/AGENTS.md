@@ -489,6 +489,33 @@ is `<name>/<bedrock model id>`, and the client is `createAmazonBedrock(…)(mode
   with all of them — a rejected request echoed back can quote any of the three. `last4` is drawn
   from the **access key ID**, the one half a reader recognises and the only one safe to show.
 
+**Bedrock is the other named type, and it is signed rather than guarded.** A `bedrock` model id
+is `<name>/<bedrock model id>`, and the client is `createAmazonBedrock(…)(modelId)`:
+
+- **The address is derived from the region, so there is no URL to guard.** `bedrock.ts` builds
+  `https://bedrock-runtime.<region>.amazonaws.com`, and the region came from the protocol's list
+  — validated on save, because it is spliced into the host. That is why this type, alone among
+  the three, needs no `safeFetch`: nothing here is a user-supplied address.
+- **Every setting is passed explicitly, and one of them looks like a no-op.** `region`,
+  `accessKeyId`, `secretAccessKey`, `sessionToken` and `baseURL` are all constructor arguments,
+  so `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` and
+  `AWS_ENDPOINT_URL_BEDROCK_RUNTIME` are never read. `apiKey: ''` is the subtle one: a
+  non-blank `apiKey` — or the `AWS_BEARER_TOKEN_BEDROCK` variable — flips the provider to bearer
+  auth and skips SigV4, so an explicit empty string *seals* that variable and keeps the client on
+  the user's stored keys. A deployment with the variable set would otherwise authenticate every
+  request with a token nobody saved.
+- **The control plane is signed here, not by the provider package.** `@ai-sdk/amazon-bedrock`
+  has no control-plane surface, so the server's `ListFoundationModels` check and its catalogue
+  read use `signBedrockRequest` — `aws4fetch`, the same signer the provider uses internally, so
+  both paths sign identically. The two AWS hosts are signed for the one `bedrock` service, and a
+  returned value rather than a `fetch` keeps the server's own egress-proxy-aware client in the
+  path. Nothing in this module reads an `AWS_*` variable or a shared credentials file; the decoy
+  test sets the lot and asserts none of them reaches a request.
+- **A credential's secrets are plural, and redaction knows it.** `credentialSecrets` lists the
+  access key ID, the secret and the session token, and `turn.ts` scrubs a provider's error text
+  with all of them — a rejected request echoed back can quote any of the three. `last4` is drawn
+  from the **access key ID**, the one half a reader recognises and the only one safe to show.
+
 ### Usage
 
 `ai@7` reads a model's `specificationVersion` and reshapes what it reports to match. Every

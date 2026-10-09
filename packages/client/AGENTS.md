@@ -549,6 +549,12 @@ from the `details` the server reports. It is a `Record<ProviderCredentialType, �
 table, so a new credential type is a compile error there until someone decides what its row
 says; `api_key` and `azure_openai` report none today.
 
+`credentialFacts(credential)` is the other half of telling rows apart: the non-secret per-type
+facts a list shows **beside** `last4` (epic #245, A3c) — a Bedrock credential's region, read
+from the `details` the server reports. It is a `Record<ProviderCredentialType, …>` like the form
+table, so a new credential type is a compile error there until someone decides what its row
+says; `api_key` and `azure_openai` report none today.
+
 The web app builds its first-run tiles, its Add-provider dialog and its Settings list from this
 (#209); `oh` will offer the same providers in the terminal (#210, X7).
 
