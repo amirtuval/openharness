@@ -27,8 +27,8 @@ import {
  * dependency on that package — and the sealed columns are opaque strings to the store. A
  * metadata read (`list`) does not even select them.
  *
- * The table's `unique (user_id, provider)` is what makes `upsert` an upsert rather than a
- * read-then-write: one statement, so two concurrent saves of the same provider cannot both
+ * The table's `unique (user_id, name)` is what makes `upsert` an upsert rather than a
+ * read-then-write: one statement, so two concurrent saves of the same name cannot both
  * create a row. The replacement keeps the stored row's `id` and `created_at` — only the
  * secret and the metadata around it move — and `on delete cascade` from `"user"` is the
  * user-delete cascade, in the schema rather than in code.
@@ -75,7 +75,7 @@ export class PostgresCredentialStore implements CredentialStore {
     const row: Insertable<ProviderCredentialsTable> = {
       id: newProviderCredentialId(now),
       user_id: input.userId,
-      provider: input.provider,
+      name: input.name,
       type: input.type,
       ciphertext: input.sealed.ciphertext,
       nonce: input.sealed.nonce,
@@ -96,7 +96,7 @@ export class PostgresCredentialStore implements CredentialStore {
       .insertInto('provider_credentials')
       .values(row)
       .onConflict((conflict) =>
-        conflict.columns(['user_id', 'provider']).doUpdateSet({
+        conflict.columns(['user_id', 'name']).doUpdateSet({
           type: row.type,
           ciphertext: row.ciphertext,
           nonce: row.nonce,
@@ -118,20 +118,20 @@ export class PostgresCredentialStore implements CredentialStore {
       .selectFrom('provider_credentials')
       .selectAll()
       .where('user_id', '=', key.userId)
-      .where('provider', '=', key.provider)
+      .where('name', '=', key.name)
       .executeTakeFirst()
     return row === undefined ? null : credentialFromRow(row)
   }
 
   async list(options: ListCredentialsOptions): Promise<ProviderCredential[]> {
     // The metadata columns only: a list never reads a sealed cell, which is as true of the
-    // SQL as of what it returns. `provider` is `collate "C"`, so this order is the byte order
+    // SQL as of what it returns. `name` is `collate "C"`, so this order is the byte order
     // the in-memory store sorts by.
     const rows = await this.#db
       .selectFrom('provider_credentials')
-      .select(['id', 'type', 'provider', 'last4', 'created_at', 'updated_at', 'validated_at'])
+      .select(['id', 'type', 'name', 'last4', 'created_at', 'updated_at', 'validated_at'])
       .where('user_id', '=', options.userId)
-      .orderBy('provider', 'asc')
+      .orderBy('name', 'asc')
       .execute()
     return rows.map(credentialMetadataFromRow)
   }
@@ -140,7 +140,7 @@ export class PostgresCredentialStore implements CredentialStore {
     const deleted = await this.#db
       .deleteFrom('provider_credentials')
       .where('user_id', '=', key.userId)
-      .where('provider', '=', key.provider)
+      .where('name', '=', key.name)
       .executeTakeFirst()
     return Number(deleted.numDeletedRows) > 0
   }

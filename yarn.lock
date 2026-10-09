@@ -1316,6 +1316,7 @@ __metadata:
     tsdown: "npm:0.23.0"
     turbo: "npm:2.11.4"
     typescript: "npm:6.0.3"
+    undici: "npm:8.11.2"
     vite: "npm:8.3.1"
     vitest: "npm:5.0.2"
   languageName: unknown

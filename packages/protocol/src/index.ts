@@ -11,7 +11,8 @@
  * - **ids and constants** — id generation and parsing, page cursors, header names, and the
  *   session → partition hash (`./ids`, `./pagination`, `./constants`)
  * - **providers** — the model providers openharness knows, the one list every side references
- *   (`./providers`, epic #245)
+ *   (`./providers`, epic #245), and the credential types beyond its fixed ids
+ *   (`./credential-types`)
  *
  * Everything here is pure: schemas, types and a few helpers, with `zod` as the only runtime
  * dependency and no I/O anywhere.
@@ -25,6 +26,7 @@
 export const PACKAGE_NAME = '@openharness/protocol'
 
 export * from './common'
+export * from './credential-types'
 export * from './constants'
 export * from './content'
 export * from './cost'

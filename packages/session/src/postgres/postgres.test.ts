@@ -695,13 +695,13 @@ if (target === null) {
       // migration and the credential table declare — and the events went with the session.
       expect(await store.getAgent(agent.id, { ownerId: OWNER_A })).toBeNull()
       expect(await store.getSession(session.id, { ownerId: OWNER_A })).toBeNull()
-      expect(await credentials.get({ userId: OWNER_A, provider: 'anthropic' })).toBeNull()
+      expect(await credentials.get({ userId: OWNER_A, name: 'anthropic' })).toBeNull()
       expect(await credentials.list({ userId: OWNER_A })).toEqual([])
       expect(await eventRows(session.id)).toEqual(new Map())
       // The other user is untouched, down to their own credential for the same provider.
       expect(await store.getAgent(theirAgent.id, { ownerId: OWNER_B })).not.toBeNull()
       expect(await store.getSession(theirSession.id, { ownerId: OWNER_B })).not.toBeNull()
-      expect((await credentials.get({ userId: OWNER_B, provider: 'anthropic' }))?.last4).toBe(
+      expect((await credentials.get({ userId: OWNER_B, name: 'anthropic' }))?.last4).toBe(
         'bbbb',
       )
     })
@@ -819,7 +819,7 @@ function agentInput(name = 'Summarizer'): CreateAgentRequest {
 function credentialInput(userId: UserId = OWNER_A, tag = 'one'): UpsertCredentialInput {
   return {
     userId,
-    provider: 'anthropic',
+    name: 'anthropic',
     type: 'api_key',
     sealed: {
       ciphertext: `ciphertext:${tag}`,

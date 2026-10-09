@@ -21,10 +21,12 @@ import type {
  *
  * ## What every implementation must guarantee
  *
- * - **One credential per user and provider.** {@link CredentialStore.upsert} replaces the
- *   stored credential for its `(userId, provider)`: the id and `created_at` stay, everything
- *   else moves, and a second upsert for the same pair never creates a second row. Two users
- *   may each hold the same provider.
+ * - **One credential per user and name.** {@link CredentialStore.upsert} replaces the stored
+ *   credential for its `(userId, name)`: the id and `created_at` stay, everything else moves,
+ *   and a second upsert for the same pair never creates a second row. Two users may each hold
+ *   the same name. The **name** is the `provider` half of the model ids the credential serves
+ *   (epic #245, A3a): a fixed provider id for the eleven API-key providers, or a short name a
+ *   user chose for a named type (`azure`, `azure-eu`).
  * - **Owner-scoped.** Every method is keyed by `userId`; there is no way to read or delete a
  *   credential without naming its owner, and a credential of another user is simply not
  *   there (`null`, `false`, or missing from a list).
@@ -43,9 +45,9 @@ import type {
  */
 export interface CredentialStore {
   /**
-   * Add a credential, or replace the one the same user already has for the same provider.
+   * Add a credential, or replace the one the same user already has under the same name.
    *
-   * The write is keyed by `(userId, provider)`, not by id: a replacement keeps the stored
+   * The write is keyed by `(userId, name)`, not by id: a replacement keeps the stored
    * credential's `id` and `created_at`, takes the new sealed blob, `type`, `last4` and
    * `validatedAt`, and moves `updated_at` to the clock's current instant. The answer is the
    * metadata as stored — never the secret, not even the sealed form that was just written.
@@ -58,27 +60,27 @@ export interface CredentialStore {
   upsert(input: UpsertCredentialInput): Promise<ProviderCredential>
 
   /**
-   * Read one credential **including its sealed form**, or `null` when the user has none for
-   * that provider.
+   * Read one credential **including its sealed form**, or `null` when the user has none under
+   * that name.
    *
    * This is the one read that hands the sealed blob back. It is for the server's model-call
-   * path, which opens it with the vault (and the `userId|provider` associated data it was
-   * sealed with) for one request; nothing else has any business calling it, and nothing may
-   * log what it returns.
+   * path, which opens it with the vault (and the `userId|name` associated data it was sealed
+   * with) for one request; nothing else has any business calling it, and nothing may log what
+   * it returns.
    */
   get(key: CredentialKey): Promise<SealedProviderCredential | null>
 
   /**
-   * List one user's credential metadata, ordered by `provider` ascending (byte order).
+   * List one user's credential metadata, ordered by `name` ascending (byte order).
    *
-   * Metadata only — `id`, `type`, `provider`, `last4`, the timestamps — with no sealed field
-   * in any shape. This is what the settings screen and `GET /v1/provider-credentials` show.
+   * Metadata only — `id`, `type`, `name`, `last4`, the timestamps — with no sealed field in
+   * any shape. This is what the settings screen and `GET /v1/provider-credentials` show.
    * Empty, never absent, for a user who has none.
    */
   list(options: ListCredentialsOptions): Promise<ProviderCredential[]>
 
   /**
-   * Delete the user's credential for one provider.
+   * Delete the user's credential under one name.
    *
    * @returns `true` when one was deleted, `false` when the user had none — deleting a
    *   credential that is not there is not an error
@@ -119,13 +121,16 @@ export interface SealedSecret {
 export interface CredentialKey {
   /** The owner: the `user.id` Better Auth minted. */
   readonly userId: UserId
-  /** The provider id the key authenticates, e.g. `anthropic`, `openai`. */
-  readonly provider: string
+  /**
+   * The credential's name: the `provider` half of the model ids it serves, e.g. `anthropic`
+   * or `azure-eu`. Unique per user (epic #245, A3a).
+   */
+  readonly name: string
 }
 
 /** What {@link CredentialStore.upsert} writes. */
 export interface UpsertCredentialInput extends CredentialKey {
-  /** The credential's form; `api_key` is the only one today. */
+  /** The credential's form; `api_key` and `azure_openai` today. */
   readonly type: ProviderCredentialType
   /** The sealed secret, as `@openharness/vault` produced it. Stored as given, never opened. */
   readonly sealed: SealedSecret
