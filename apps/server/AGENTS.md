@@ -750,10 +750,13 @@ behavioural difference is confined to one branch of a credential delete, below.
   `RECOMMENDED_DEFAULT_MODELS[provider]` (the curated table in `default-model.ts`, a
   capable-but-affordable everyday tier — **update it when better everyday models ship**)
   that the catalog lists, provider-by-provider, the saved provider first; otherwise the
-  registry fallback: the newest model (`newestModelId`, by the version numbers in the id —
-  the registry carries no dates) that `isEverydayModel` accepts, i.e. a chat model per the
-  catalogue's own filter that is neither expensive nor reasoning-only by name. No pick at all
-  leaves the default `null`.
+  **catalogue fallback**: the newest model (`newestModelId`, by the version numbers in the id
+  — the registry carries no dates) **among the entries the live catalog lists** that
+  `isEverydayModel` accepts, i.e. a chat model per the catalogue's own filter that is neither
+  expensive nor reasoning-only by name. Both halves read the catalog, so a pick is always a
+  model the credential can run: a named credential serves its own deployments, and the
+  registry's list for the provider id is a catalogue the credential does not have (#269, epic
+  #245 D1). No pick at all leaves the default `null`.
 - **On credential `DELETE`**: a default whose provider (its id's part before the first slash)
   still has a key is left alone. One whose provider is gone is **re-picked** from the
   providers that remain (or cleared when none does) **if it was automatic**, and **cleared**

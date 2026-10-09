@@ -20,8 +20,9 @@ import { createTestApp, type TestContext } from './test-support'
  * The automatic default model (epic #116, U4): a saved credential sets one when the user has
  * none, the user's own choice is never overridden while its provider has a key, and deleting
  * a credential re-picks (an automatic default) or clears (an explicit one) a default whose
- * provider is gone. The fallback half picks the newest non-expensive, non-reasoning registry
- * model when no curated recommendation is in the live catalog.
+ * provider is gone. The fallback half picks the newest non-expensive, non-reasoning model the
+ * **live catalog** lists when no curated recommendation is in it — never a registry model the
+ * credential cannot run (#269).
  */
 
 // ---------------------------------------------------------------- the fakes
@@ -219,12 +220,15 @@ describe('the automatic default picker (U4)', () => {
     expect(await store.getPreferences('user_a')).toEqual({ default_model: null, theme: 'system' })
   })
 
-  it('falls back to the registry’s newest everyday model when no recommendation is listed', async () => {
-    const catalog = fakeCatalog([])
-    const registry = registryOf({
-      openai: ['gpt-4o-mini', 'gpt-4.1-mini', 'gpt-5-pro', 'o3-mini', 'text-embedding-3-large'],
-    })
-    const { picker: choose, store } = picker(catalog, registry)
+  it('falls back to the newest everyday model the catalog lists when no recommendation is listed', async () => {
+    const catalog = fakeCatalog([
+      'openai/gpt-4o-mini',
+      'openai/gpt-4.1-mini',
+      'openai/gpt-5-pro',
+      'openai/o3-mini',
+      'openai/text-embedding-3-large',
+    ])
+    const { picker: choose, store } = picker(catalog)
 
     await choose.onCredentialAdded('user_a', 'openai')
 
@@ -233,6 +237,51 @@ describe('the automatic default picker (U4)', () => {
       default_model: 'openai/gpt-4.1-mini',
       theme: 'system',
     })
+  })
+
+  it('falls back to a model the user can run, never the registry’s list for a named credential (#269)', async () => {
+    // An Azure credential named `azure` serves one deployment, `gpt-4o` — while the registry
+    // files models.dev's *entire* Azure catalogue under the credential's own name. Ranking the
+    // registry would pick `azure/mistral-medium-2505`, a deployment the resource does not have.
+    const catalog = fakeCatalog(['azure/gpt-4o'])
+    const registry = registryOf({
+      azure: ['gpt-4o', 'mistral-medium-2505', 'gpt-4o-mini'],
+    })
+    const { picker: choose, store } = picker(catalog, registry)
+
+    await choose.onCredentialAdded('user_a', 'azure')
+
+    expect(await store.getPreferences('user_a')).toEqual({
+      default_model: 'azure/gpt-4o',
+      theme: 'system',
+    })
+  })
+
+  it('picks from the catalog for every named credential type, not just Azure (#269)', async () => {
+    // A custom endpoint's own `/models` is the only thing it can run; the registry knows
+    // nothing under the reader's name, and must not supply a model from anywhere else.
+    const catalog = fakeCatalog(['custom/llama3.3'])
+    const registry = registryOf({ custom: ['gpt-5-mini'], bedrock: ['amazon.nova-pro-v1:0'] })
+    const { picker: choose, store } = picker(catalog, registry)
+
+    await choose.onCredentialAdded('user_a', 'custom')
+
+    expect(await store.getPreferences('user_a')).toEqual({
+      default_model: 'custom/llama3.3',
+      theme: 'system',
+    })
+  })
+
+  it('leaves no default when the credential’s catalog lists nothing it can run (#269)', async () => {
+    // A named credential whose deployments are all non-chat (or whose listing failed) has no
+    // pick; the registry's entries under its name are not its own.
+    const catalog = fakeCatalog([])
+    const registry = registryOf({ azure: ['mistral-medium-2505'] })
+    const { picker: choose, store } = picker(catalog, registry)
+
+    await choose.onCredentialAdded('user_a', 'azure')
+
+    expect(await store.getPreferences('user_a')).toEqual({ default_model: null, theme: 'system' })
   })
 
   it('has a recommendation table with everyday entries for the main providers', () => {

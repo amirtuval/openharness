@@ -15,9 +15,13 @@ import type { Logger } from './types'
  *
  * 1. **The curated recommendation table** below: the first entry for one of the user's
  *    providers that their live catalog (`GET /v1/models` logic) actually lists;
- * 2. **the registry fallback**: the newest chat model the bundled registry knows for the
- *    user's providers that is neither expensive nor reasoning-only (paid for by name, since
- *    the installed registry carries no price or capability flags — see `catalog/registry.ts`).
+ * 2. **the catalogue fallback**: the newest chat model the user's live catalog lists that is
+ *    neither expensive nor reasoning-only (paid for by name, since the installed registry
+ *    carries no price or capability flags — see `catalog/registry.ts`).
+ *
+ * Both steps read the live catalog, so the pick is always a model the credential can run: a
+ * named credential serves its own deployments, and the registry's list for the provider id
+ * is a catalogue the credential does not have (epic #245, D1).
  *
  * When a saved credential is deleted, the default it carried is handled the same way:
  * re-picked from the providers that remain, or cleared when none do.
@@ -127,7 +131,10 @@ export interface DefaultModelPickerOptions {
   readonly store: Pick<SessionStore, 'getPreferences' | 'putPreferences'>
   /** The user's live catalog: which providers have keys, and which models they list (C1–C5). */
   readonly catalog: Pick<ModelCatalog, 'list'>
-  /** The registry fallback's model ids (C2); `emptyRegistry` when a host has none. */
+  /**
+   * How the fallback classifies a catalogue id as chat where the snapshot knows it (C2);
+   * `emptyRegistry` when a host has none, and the name filter decides as it does elsewhere.
+   */
   readonly registry: ModelRegistry
   /** Where a pick that could not be made is reported. Never thrown. */
   readonly logger?: Logger
@@ -230,8 +237,8 @@ export class DefaultModelPicker {
 
   /**
    * Pick a default for a user: the recommendation table against their live catalog first,
-   * the registry fallback second (U4). `preferred` is tried before the other providers —
-   * the provider a credential was just saved for.
+   * the newest everyday model the catalog lists second (U4). `preferred` is tried before the
+   * other providers — the provider a credential was just saved for.
    */
   async #pick(userId: UserId, preferred?: string): Promise<string | null> {
     const listed = await this.#catalog.list(userId)
@@ -248,12 +255,26 @@ export class DefaultModelPicker {
         }
       }
     }
+    // The fallback ranks what the user's **catalogue** lists, never the registry's own list for
+    // the provider id. A named credential's models are the deployments (or models) it serves —
+    // `azure/gpt-4o` — while the registry files models.dev's catalogue for the *type* under the
+    // credential's default name (`azure`), so ranking that list would offer a model the
+    // credential cannot run (epic #245, D1). The registry still classifies an id as chat where
+    // it knows, exactly as the catalogue's own join does.
+    const registryChat = new Map<string, boolean | undefined>()
+    for (const provider of order) {
+      for (const model of this.#registry.models(provider)) {
+        registryChat.set(`${provider}/${model.id}`, model.chat)
+      }
+    }
     return newestModelId(
       order.flatMap((provider) =>
-        this.#registry
-          .models(provider)
-          .filter((model) => isEverydayModel(model.id, model.chat))
-          .map((model) => `${provider}/${model.id}`),
+        listed.data
+          .filter((entry) => entry.provider === provider)
+          .filter((entry) =>
+            isEverydayModel(entry.id.slice(provider.length + 1), registryChat.get(entry.id)),
+          )
+          .map((entry) => entry.id),
       ),
     )
   }
