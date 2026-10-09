@@ -292,7 +292,9 @@ export function ProviderKeyForm({
           />
           <p className="text-xs text-muted-foreground">
             {nameError ??
-              `What this credential is called. Its models are named after it — ${name}/<deployment>.`}
+              `What this credential is called. Its models are named after it — ${
+                typedName === '' ? target.name : typedName
+              }/<deployment>.`}
           </p>
         </div>
       ) : null}

@@ -85,9 +85,12 @@ describe('nameErrorMessage', () => {
     expect(nameErrorMessage('', [])).toBeNull()
   })
 
-  it('refuses a name that is not a credential name, and one already taken', () => {
+  it('refuses a name that is not a credential name, a fixed provider id, and one already taken', () => {
     expect(nameErrorMessage('Azure', [])).toMatch(/short and lowercase/)
     expect(nameErrorMessage('azure_eu', [])).toMatch(/short and lowercase/)
+    // The rule the server enforces and the flow must say first: `openai` is the OpenAI
+    // provider's, and a second credential called that would make `openai/gpt-5` ambiguous.
+    expect(nameErrorMessage('openai', [])).toMatch(/built-in provider id/)
     expect(nameErrorMessage('azure', ['azure'])).toMatch(/already taken/)
   })
 })

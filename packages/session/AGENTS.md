@@ -476,12 +476,12 @@ wrapped the data key (`local` or `gcp-kms`, #150) and is **optional**: a blob st
 the field existed simply does not have it, and the vault is what reads an absent provider as
 `local`. The store writes and reads it faithfully either way — it knows no provider names.
 
-| method                         | what it does                                                                                                                                |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `upsert(input)`                | writes `{ userId, name, type, sealed, last4, validatedAt }` and answers the metadata; replaces in place for the same `(user, name)`        |
-| `get({ userId, name })`        | the record **including the sealed form**, or `null` — the one read the server's model path uses, and the only one that hands a blob back    |
-| `list({ userId })`             | metadata only, ordered by `name`; the sealed columns are not even selected                                                                  |
-| `delete({ userId, name })`     | `true` when one was deleted, `false` when there was none                                                                                    |
+| method                     | what it does                                                                                                                             |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `upsert(input)`            | writes `{ userId, name, type, sealed, last4, validatedAt }` and answers the metadata; replaces in place for the same `(user, name)`      |
+| `get({ userId, name })`    | the record **including the sealed form**, or `null` — the one read the server's model path uses, and the only one that hands a blob back |
+| `list({ userId })`         | metadata only, ordered by `name`; the sealed columns are not even selected                                                               |
+| `delete({ userId, name })` | `true` when one was deleted, `false` when there was none                                                                                 |
 
 The answers are the protocol's `ProviderCredential` metadata (`pcred_` id, `type`, `name`,
 `last4`, `created_at`, `updated_at`, `validated_at`); `get` adds `sealed`, as a

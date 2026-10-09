@@ -504,7 +504,7 @@ the way `NEW_CHAT_GREETING` is, and the ✨ sits outside the gradient span.
   that type is already stored** — the first takes the type's default, `azure` — and the three
   rules the server enforces (short and lowercase; not a fixed provider id; not already taken) are
   shown next to the field, with the save held until they pass. A row's Replace reopens the form
-  prefilled with the name it replaces, which is how a second Azure credential's row edits *it*.
+  prefilled with the name it replaces, which is how a second Azure credential's row edits _it_.
 - **Errors are inline**, in the three classes the credentials API has: a refused key
   (`invalid_provider_credential`, titled "Hmm, <provider> didn't accept that key" since #227
   while the server's own 422 message stays the body — warm, never vague), a stale session (401,

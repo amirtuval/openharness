@@ -31,17 +31,17 @@ repo.
 
 ## Public API
 
-| export                                                                                                                       | what it is                                                                          |
-| ---------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| `safeFetch(url, init?, options?)`                                                                                            | fetch a user-supplied URL, refusing everything below                               |
-| `SafeFetchError`, `isSafeFetchError()`, `SafeFetchErrorCode`                                                                 | the refusal, with a stable `code`                                                   |
-| `AddressResolver`, `SafeFetchTransport`, `SafeFetchRequest`                                                                  | the two seams: how a host resolves, and how the request is made                     |
-| `SafeFetchOptions`                                                                                                           | `allowPrivate`, `maxBytes`, `timeoutMs`, `idleTimeoutMs`, `maxRedirects`, the seams |
-| `SAVE_TIME_LIMITS`, `STREAMING_LIMITS`, `STREAMING_IDLE_TIMEOUT_MS`                                                          | the two presets: a tight check, and a streaming-safe model call                     |
-| `DEFAULT_MAX_BYTES`, `DEFAULT_TIMEOUT_MS`, `DEFAULT_MAX_REDIRECTS`                                                           | `1 MiB`, `30 s`, `5` — what a call with no options gets                             |
-| `isBlockedAddress()`, `isPublicAddress()`, `isMetadataHostname()`, `parseIpAddress()`, `parseIPv4()`, `parseIPv6()`, `ParsedAddress` | the address rules, exported so a caller can reason about one on its own      |
-| `PACKAGE_NAME`                                                                                                               | `'@openharness/hands'`                                                              |
-| `PROTOCOL_DEPENDENCY`                                                                                                        | `@openharness/protocol`'s `PACKAGE_NAME`; proves the built-output edge              |
+| export                                                                                                                               | what it is                                                                          |
+| ------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| `safeFetch(url, init?, options?)`                                                                                                    | fetch a user-supplied URL, refusing everything below                                |
+| `SafeFetchError`, `isSafeFetchError()`, `SafeFetchErrorCode`                                                                         | the refusal, with a stable `code`                                                   |
+| `AddressResolver`, `SafeFetchTransport`, `SafeFetchRequest`                                                                          | the two seams: how a host resolves, and how the request is made                     |
+| `SafeFetchOptions`                                                                                                                   | `allowPrivate`, `maxBytes`, `timeoutMs`, `idleTimeoutMs`, `maxRedirects`, the seams |
+| `SAVE_TIME_LIMITS`, `STREAMING_LIMITS`, `STREAMING_IDLE_TIMEOUT_MS`                                                                  | the two presets: a tight check, and a streaming-safe model call                     |
+| `DEFAULT_MAX_BYTES`, `DEFAULT_TIMEOUT_MS`, `DEFAULT_MAX_REDIRECTS`                                                                   | `1 MiB`, `30 s`, `5` — what a call with no options gets                             |
+| `isBlockedAddress()`, `isPublicAddress()`, `isMetadataHostname()`, `parseIpAddress()`, `parseIPv4()`, `parseIPv6()`, `ParsedAddress` | the address rules, exported so a caller can reason about one on its own             |
+| `PACKAGE_NAME`                                                                                                                       | `'@openharness/hands'`                                                              |
+| `PROTOCOL_DEPENDENCY`                                                                                                                | `@openharness/protocol`'s `PACKAGE_NAME`; proves the built-output edge              |
 
 ### What `safeFetch` refuses, and how
 

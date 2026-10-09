@@ -197,7 +197,5 @@ export function credentialTargetFor(credential: {
   if (providerInfo(credential.name) !== undefined) {
     return CREDENTIAL_TARGETS.find((target) => target.name === credential.name)
   }
-  return CREDENTIAL_TARGETS.find(
-    (target) => target.named && target.credential === credential.type,
-  )
+  return CREDENTIAL_TARGETS.find((target) => target.named && target.credential === credential.type)
 }

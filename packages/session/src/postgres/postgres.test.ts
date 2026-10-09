@@ -701,9 +701,7 @@ if (target === null) {
       // The other user is untouched, down to their own credential for the same provider.
       expect(await store.getAgent(theirAgent.id, { ownerId: OWNER_B })).not.toBeNull()
       expect(await store.getSession(theirSession.id, { ownerId: OWNER_B })).not.toBeNull()
-      expect((await credentials.get({ userId: OWNER_B, name: 'anthropic' }))?.last4).toBe(
-        'bbbb',
-      )
+      expect((await credentials.get({ userId: OWNER_B, name: 'anthropic' }))?.last4).toBe('bbbb')
     })
   })
 

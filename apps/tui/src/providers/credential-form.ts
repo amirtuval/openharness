@@ -1,4 +1,5 @@
 import {
+  isReservedCredentialName,
   isValidCredentialName,
   type ProviderCredentialType,
   type PutProviderCredentialRequest,
@@ -92,10 +93,11 @@ export function formForCredential(credential: ProviderCredentialType | undefined
 /**
  * Why a typed credential name cannot be saved, or `null` when it can.
  *
- * The server enforces exactly these rules (the format, and that no fixed provider id is taken),
- * so this is the flow saying what the route would say — before a round trip. A name already in
- * use is refused here too: the flow asks for a name precisely to keep two credentials of a type
- * apart, and one that is already stored would be replaced instead.
+ * The server enforces exactly these three rules — the format, that no fixed provider id is
+ * taken, and that the name is free — so this is the flow saying what the route would say,
+ * before a round trip and before the rest of the fields are asked for. A name already in use is
+ * refused here too: the flow asks for a name precisely to keep two credentials of a type apart,
+ * and one that is already stored would be replaced instead.
  */
 export function nameErrorMessage(name: string, storedNames: readonly string[]): string | null {
   if (name === '') {
@@ -103,6 +105,9 @@ export function nameErrorMessage(name: string, storedNames: readonly string[]): 
   }
   if (!isValidCredentialName(name)) {
     return 'A name is short and lowercase: letters, digits and dashes, e.g. `azure-eu`.'
+  }
+  if (isReservedCredentialName(name)) {
+    return `\`${name}\` is a built-in provider id. Pick another name.`
   }
   if (storedNames.includes(name)) {
     return `\`${name}\` is already taken. Pick another name.`

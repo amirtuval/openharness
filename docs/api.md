@@ -495,7 +495,7 @@ curl -X DELETE localhost:3000/v1/provider-credentials/azure-eu \
 - **The eleven fixed providers keep their ids as names**, one each: an `api_key` credential may
   only be stored under `anthropic`, `openai`, … A **named credential type** — `azure_openai`
   today — may be stored under any short, lowercase name (`[a-z0-9-]`, at most 32 characters)
-  that is not one of those ids, which is how a user keeps `azure` *and* `azure-eu`. Only the
+  that is not one of those ids, which is how a user keeps `azure` _and_ `azure-eu`. Only the
   first credential of a type defaults to the type's name (`azure`); the frontends ask for a
   name for a second one. Anything else is a `400 invalid_request_error`.
 - `type` is a discriminated union: `api_key` (`api_key`) and `azure_openai` (`endpoint`, an

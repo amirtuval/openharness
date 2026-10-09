@@ -354,7 +354,11 @@ describe('provider credentials (A5)', () => {
     ])
     // The deployment models.dev knows carries its context window; the one it does not gets
     // `null` rather than a guessed number.
-    expect(catalog.data[0]).toMatchObject({ provider: 'azure', name: 'GPT-4o', context_window: 128000 })
+    expect(catalog.data[0]).toMatchObject({
+      provider: 'azure',
+      name: 'GPT-4o',
+      context_window: 128000,
+    })
     expect(catalog.data[1]).toMatchObject({ context_window: null, max_output_tokens: null })
     expect(catalog.providers).toEqual([
       expect.objectContaining({ provider: 'azure', status: 'ok', message: null }),
