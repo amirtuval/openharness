@@ -282,7 +282,7 @@ describe('ModelPicker with modes (#245, M6)', () => {
     expect(within(listbox).getByText(/No modes or models match/)).toBeInTheDocument()
   })
 
-  it('names the mode the chat follows in the compact trigger', async () => {
+  it('names the mode the chat follows in the compact trigger', () => {
     renderPicker({ modes: [MODE], selectedModeId: MODE.id, variant: 'compact' })
     expect(screen.getByRole('button', { name: 'Model: deep' })).toBeInTheDocument()
   })
