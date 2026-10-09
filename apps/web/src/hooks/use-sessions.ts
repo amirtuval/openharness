@@ -1,5 +1,5 @@
 import type { Client } from '@openharness/client'
-import type { Session } from '@openharness/protocol'
+import type { ModeId, Session } from '@openharness/protocol'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { describeError } from '../lib/errors'
@@ -23,8 +23,8 @@ export interface SessionsView {
   readonly truncated: boolean
   /** A failed list or create, as shown inline. */
   readonly error: string | null
-  /** Create a model-first session on `modelId`, refresh the list, and return it (`null` on failure). */
-  readonly create: (modelId: string) => Promise<Session | null>
+  /** Create a model-first (or mode-first) session, refresh the list, and return it (`null` on failure). */
+  readonly create: (options: CreateChatOptions) => Promise<CreateChatResult>
   /**
    * Delete a session and everything in it (epic #116, U5), removing its row.
    *
@@ -110,18 +110,24 @@ export function useSessions(client: Client): SessionsView {
   }, [])
 
   const create = useCallback(
-    async (modelId: string): Promise<Session | null> => {
+    async (options: CreateChatOptions): Promise<CreateChatResult> => {
       try {
-        // Model-first (epic #92, #93): a session is created from a model, with no agent.
-        const session = await client.sessions.create({ model: { id: modelId } })
+        // Model-first (epic #92, #93): a session is created from a model — or, since #245 (M6),
+        // from a mode, which the server resolves to the session's header model.
+        const session = await client.sessions.create({
+          ...(options.model === undefined ? {} : { model: { id: options.model } }),
+          ...(options.mode === undefined ? {} : { mode: options.mode }),
+        })
         setSessions((current) => [session, ...current])
         setError(null)
-        return session
+        return { ok: true, session }
       } catch (caught) {
-        if (!noteAuthenticationError(client, caught)) {
-          setError(describeError(caught, { serverUrl }))
+        if (noteAuthenticationError(client, caught)) {
+          return { ok: false, message: 'Your session ended. Sign in again to continue.' }
         }
-        return null
+        const message = describeError(caught, { serverUrl })
+        setError(message)
+        return { ok: false, message }
       }
     },
     [client, serverUrl],
@@ -149,4 +155,17 @@ export function useSessions(client: Client): SessionsView {
   }, [])
 
   return { sessions, loading, truncated, error, create, remove, forget, refresh }
+}
+
+/** The outcome of creating a chat: the session, or why it could not be created. */
+export type CreateChatResult =
+  | { readonly ok: true; readonly session: Session }
+  | { readonly ok: false; readonly message: string }
+
+/** What a new chat is created from (#245, M6): a model id, or one of the reader's modes. */
+export interface CreateChatOptions {
+  /** The `provider/model` a model-first session runs. */
+  readonly model?: string
+  /** The mode the session follows, instead of a model. The server resolves its model. */
+  readonly mode?: ModeId
 }

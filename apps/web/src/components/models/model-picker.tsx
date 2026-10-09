@@ -1,10 +1,11 @@
-import type { ModelEntry, ProviderCatalogStatus } from '@openharness/protocol'
+import type { Mode, ModelEntry, ProviderCatalogStatus } from '@openharness/protocol'
 import { ChevronsUpDown } from 'lucide-react'
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 
 import type { RefreshOutcome } from '../../hooks/use-models'
 import { formatContextWindow } from '../../lib/format'
 import { groupModelsByProvider } from '../../lib/models'
+import { modeLabel } from '../../lib/modes'
 import { cn } from '../../lib/utils'
 import { Button } from '../ui/button'
 import { Input } from '../ui/input'
@@ -30,14 +31,31 @@ import { Label } from '../ui/label'
  * surface that offers the catalog can rebuild it where the list is.
  */
 
-/** One navigable row: a catalog model, or the escape hatch at the end of the list. */
+/** One navigable row: a mode, a catalog model, or the escape hatch at the end of the list. */
 type PickerOption =
-  { readonly kind: 'model'; readonly entry: ModelEntry } | { readonly kind: 'other' }
+  | { readonly kind: 'mode'; readonly mode: Mode }
+  | { readonly kind: 'model'; readonly entry: ModelEntry }
+  | { readonly kind: 'other' }
+
+/** The heading the modes group carries, above the providers (epic #245, M6). */
+const MODES_GROUP_LABEL = 'Modes'
 
 /** What the picker takes. */
 export interface ModelPickerProps {
   /** The catalog's models, sorted by provider then name. */
   models: readonly ModelEntry[]
+  /**
+   * The reader's modes (epic #245, M6), offered as a group above the providers.
+   *
+   * Omitted by surfaces a mode does not belong in — Settings' Default model, which is a model
+   * preference, not a mode — and given by the two that pick what a chat runs: New chat and the
+   * composer's switch.
+   */
+  modes?: readonly Mode[]
+  /** A mode was chosen; the caller switches the chat to it rather than to a model. */
+  onSelectMode?: ((mode: Mode) => void) | undefined
+  /** The mode the chat currently follows, marked in the list and named by the compact trigger. */
+  selectedModeId?: string | null | undefined
   /** One catalog status per provider, for the fallback note. */
   providers: readonly ProviderCatalogStatus[]
   /** The selected model id, or `null` before anything was chosen. */
@@ -70,6 +88,9 @@ export interface ModelPickerProps {
 export function ModelPicker({
   models,
   providers,
+  modes = [],
+  onSelectMode,
+  selectedModeId = null,
   value,
   onChange,
   variant = 'full',
@@ -96,9 +117,20 @@ export function ModelPicker({
   const optionIdPrefix = useId()
 
   const selected = models.find((entry) => entry.id === value) ?? null
+  const selectedMode = modes.find((mode) => mode.id === selectedModeId) ?? null
   const groups = useMemo(() => groupModelsByProvider(models, providers), [models, providers])
+  const needle = query.trim().toLowerCase()
+  const visibleModes = useMemo(
+    () =>
+      modes.filter(
+        (mode) =>
+          needle === '' ||
+          mode.name.toLowerCase().includes(needle) ||
+          mode.model.toLowerCase().includes(needle),
+      ),
+    [modes, needle],
+  )
   const filtered = useMemo(() => {
-    const needle = query.trim().toLowerCase()
     if (needle === '') {
       return groups
     }
@@ -111,17 +143,19 @@ export function ModelPicker({
         ),
       }))
       .filter((group) => group.models.length > 0)
-  }, [groups, query])
+  }, [groups, needle])
 
-  // The flat navigation order the arrows walk: every filtered model, then "Other model ID…".
+  // The flat navigation order the arrows walk: every filtered mode, then every filtered model,
+  // then "Other model ID…". The modes come first, above the providers, as the issue asks.
   const options = useMemo<readonly PickerOption[]>(
     () => [
+      ...visibleModes.map((mode): PickerOption => ({ kind: 'mode', mode })),
       ...filtered.flatMap((group) =>
         group.models.map((entry): PickerOption => ({ kind: 'model', entry })),
       ),
       { kind: 'other' },
     ],
-    [filtered],
+    [visibleModes, filtered],
   )
   const active = Math.min(activeIndex, options.length - 1)
 
@@ -133,7 +167,8 @@ export function ModelPicker({
   }
 
   const openPicker = (): void => {
-    const selectedIndex = models.findIndex((entry) => entry.id === value)
+    const selectedIndex =
+      selectedMode === null ? models.findIndex((entry) => entry.id === value) : -1
     setQuery('')
     setMode('list')
     setRefreshNote(null)
@@ -157,6 +192,11 @@ export function ModelPicker({
   }
 
   const choose = (option: PickerOption): void => {
+    if (option.kind === 'mode') {
+      onSelectMode?.(option.mode)
+      close()
+      return
+    }
     if (option.kind === 'model') {
       onChange(option.entry.id)
       close()
@@ -246,7 +286,7 @@ export function ModelPicker({
       openPicker()
     }
   }
-  const compactLabel = selected?.name ?? value ?? 'Choose a model'
+  const compactLabel = selectedMode?.name ?? selected?.name ?? value ?? 'Choose a model'
 
   return (
     <div ref={wrapperRef} className="relative">
@@ -329,11 +369,46 @@ export function ModelPicker({
                 aria-label="Models"
                 className="mt-2 max-h-72 overflow-y-auto"
               >
-                {filtered.length === 0 && query.trim() !== '' ? (
+                {filtered.length === 0 && visibleModes.length === 0 && query.trim() !== '' ? (
                   <p className="px-2 py-1.5 text-xs text-muted-foreground">
-                    No models match “{query.trim()}”.
+                    No modes or models match “{query.trim()}”.
                   </p>
                 ) : null}
+                {visibleModes.length === 0 ? null : (
+                  <div role="group" aria-label={MODES_GROUP_LABEL}>
+                    <p
+                      aria-hidden="true"
+                      className="px-2 pt-2 pb-1 text-xs font-medium text-muted-foreground"
+                    >
+                      {MODES_GROUP_LABEL}
+                    </p>
+                    {visibleModes.map((mode) => {
+                      const index = options.findIndex(
+                        (option) => option.kind === 'mode' && option.mode.id === mode.id,
+                      )
+                      return (
+                        <div
+                          key={mode.id}
+                          id={`${optionIdPrefix}-${index}`}
+                          role="option"
+                          aria-selected={mode.id === selectedModeId}
+                          data-active={index === active ? 'true' : undefined}
+                          onMouseEnter={() => setActiveIndex(index)}
+                          onClick={() => choose({ kind: 'mode', mode })}
+                          className={cn(
+                            'flex cursor-pointer flex-col gap-0.5 rounded-sm px-2 py-1.5',
+                            index === active && 'bg-accent text-accent-foreground',
+                          )}
+                        >
+                          <span className="truncate text-sm">{mode.name}</span>
+                          <span className="truncate text-xs text-muted-foreground">
+                            {modeLabel(mode)}
+                          </span>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
                 {filtered.map((group) => (
                   <div key={group.provider} role="group" aria-label={group.provider}>
                     <p

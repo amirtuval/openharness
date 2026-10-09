@@ -1,4 +1,5 @@
 import type { ModelEntry } from '@openharness/protocol'
+import { makeMode } from '@openharness/protocol/fixtures'
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
@@ -235,5 +236,54 @@ describe('ModelPicker on a catalog with one entry', () => {
 
     expect(group('anthropic').textContent).toContain('Claude Haiku 4.5')
     expect(screen.getByRole('option', { name: /Other model ID/ })).toBeInTheDocument()
+  })
+})
+
+describe('ModelPicker with modes (#245, M6)', () => {
+  const MODE = makeMode({ name: 'deep', model: 'anthropic/claude-sonnet-5' })
+
+  it('offers the modes as a group above the providers, and picks one', async () => {
+    const user = userEvent.setup({ delay: null })
+    const onSelectMode = vi.fn()
+    renderPicker({ modes: [MODE], onSelectMode })
+
+    await user.click(trigger())
+
+    const modes = within(screen.getByRole('listbox', { name: 'Models' })).getByRole('group', {
+      name: 'Modes',
+    })
+    expect(within(modes).getByText('deep')).toBeInTheDocument()
+    // The row says what the mode resolves to.
+    expect(within(modes).getByText(/anthropic\/claude-sonnet-5 · high/)).toBeInTheDocument()
+
+    // The group is above every provider group in the list.
+    const listbox = screen.getByRole('listbox', { name: 'Models' })
+    const groups = [...listbox.querySelectorAll('[role="group"]')].map((element) =>
+      element.getAttribute('aria-label'),
+    )
+    expect(groups).toEqual(['Modes', 'anthropic', 'openai'])
+
+    await user.click(within(modes).getByRole('option', { name: /deep/ }))
+    expect(onSelectMode).toHaveBeenCalledWith(MODE)
+  })
+
+  it('filters the modes as the query is typed', async () => {
+    const user = userEvent.setup({ delay: null })
+    renderPicker({ modes: [makeMode({ name: 'deep' }), makeMode({ name: 'fast' })] })
+    await user.click(trigger())
+    const search = screen.getByRole('combobox')
+    await user.type(search, 'dee')
+    const listbox = screen.getByRole('listbox', { name: 'Models' })
+    expect(within(listbox).getByText('deep')).toBeInTheDocument()
+    expect(within(listbox).queryByText('fast')).not.toBeInTheDocument()
+    // Nothing matches: the empty line names modes as well as models.
+    await user.clear(search)
+    await user.type(search, 'zzz')
+    expect(within(listbox).getByText(/No modes or models match/)).toBeInTheDocument()
+  })
+
+  it('names the mode the chat follows in the compact trigger', async () => {
+    renderPicker({ modes: [MODE], selectedModeId: MODE.id, variant: 'compact' })
+    expect(screen.getByRole('button', { name: 'Model: deep' })).toBeInTheDocument()
   })
 })

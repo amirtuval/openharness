@@ -147,7 +147,7 @@ describe('New chat', () => {
     expect(creates).toEqual([])
     expect(window.location.hash).toBe('#/new')
     expect(input).toHaveValue('hello?')
-    expect(screen.getByText(/Pick a model to start/)).toBeInTheDocument()
+    expect(screen.getByText(/Pick a model or a mode to start/)).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'set a default in Settings' })).toHaveAttribute(
       'href',
       '#/settings',
@@ -220,7 +220,7 @@ describe('New chat', () => {
     // The error, not the no-keys claim: the models are unknown, not absent.
     expect(screen.queryByText('Add a provider key to start')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Model: Choose a model' })).toBeInTheDocument()
-    expect(screen.getByText(/Pick a model to start/)).toBeInTheDocument()
+    expect(screen.getByText(/Pick a model or a mode to start/)).toBeInTheDocument()
   })
 
   it('keeps the message and shows why when the session could not be created', async () => {
@@ -232,10 +232,12 @@ describe('New chat', () => {
     await user.type(await screen.findByLabelText('Message'), 'hello?')
     await user.click(screen.getByRole('button', { name: 'Send message' }))
 
-    // Two things went wrong at once — the create failed, and the sidebar's list error shows
-    // it too — so this asserts the composer's own banner, by its words.
-    const banner = await screen.findByText('The chat could not be created.')
-    expect(banner.closest('[role="alert"]')).toBeInTheDocument()
+    // The composer's banner carries the server's own sentence — the fix for a create the
+    // server refused (a mode whose model cannot be used, say) is usually in it.
+    // It shows in two places at once — the composer's banner, and the sidebar's list error —
+    // so this asserts there is at least one, and that the composer's box kept the text.
+    const banners = await screen.findAllByText('The model id is not valid.')
+    expect(banners[0]?.closest('[role="alert"]')).toBeInTheDocument()
     // Still on New chat, with the text: the retry is one more click.
     expect(window.location.hash).toBe('#/new')
     expect(screen.getByLabelText('Message')).toHaveValue('hello?')

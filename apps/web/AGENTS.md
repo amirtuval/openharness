@@ -97,6 +97,9 @@ src/
     settings/
       providers.tsx            Settings -> Providers: the list, Replace, Delete, Add provider
       default-model.tsx        Settings -> Default model: the picker, saved to preferences
+      modes.tsx                Settings -> Modes (#245, M6): the list, empty state, Create mode
+      mode-form-dialog.tsx     the create/edit form: name, model (or "my default model"), effort,
+                               prompt addition
       appearance.tsx           Settings -> Appearance: the four-way theme picker (#203)
       usage.tsx                Settings -> Usage: this month by model and by day (#247)
     providers/
@@ -153,8 +156,8 @@ src/
                                required, a preselected sole model, a loading skeleton, the
                                catalog's error, or the "add a provider key" state when there
                                are no providers and no models
-    settings-screen.tsx        Providers, Default model, Appearance, and Advanced — the
-                               server URL, collapsed (#209)
+    settings-screen.tsx        Providers, Default model, Modes, Appearance, Usage, and Advanced
+                               — the server URL, collapsed (#209, #245)
     sign-in-screen.tsx         one button per provider, the dev form when offered
     device-screen.tsx          the device-approval page `oh login` opens
   hooks/
@@ -163,6 +166,8 @@ src/
     use-session-refresh.ts     the re-read after a first message, shared by both of those
     use-models.ts              the catalog (GET /v1/models), once for the whole shell; reload()
                                after a credential change, refresh() to bypass the cache
+    use-modes.ts               the reader's modes (#245, M6), once for the whole shell: the
+                               list plus create/update/remove, updating it in place
     use-preferences.ts         GET/PUT /v1/me/preferences: the default model
     use-usage.ts               GET /v1/me/usage: this month, in the reader's own zone (#247)
     use-theme.ts               the theme store's React binding (#203)
@@ -197,6 +202,8 @@ src/
                                and send nothing (#211)
     models.ts                  helpers over the catalog: grouping, name lookup, price lookup,
                                providerOf (#247)
+    modes.ts                   helpers over the modes: what a mode resolves to, the name a chat
+                               follows (#245, M6)
     usage.ts                   the reader's local days: the zone, the month so far, a day's label
     errors.ts, format.ts, utils.ts    and `formatElapsed` for the working row's clock
   test-support/render-app.tsx  render the app against a fake client; DOM readers
@@ -566,9 +573,10 @@ After a save the dialog closes, the shell says so (`showNotice`), and the caller
 catalog — so the provider just connected is in the picker immediately, with no reload and no
 Settings trip.
 
-### Settings, in the order a reader needs it (#209, X5)
+### Settings, in the order a reader needs it (#209, X5; Modes: #245, M6)
 
-**Providers**, **Default model**, **Appearance**, then **Advanced** — the server URL, collapsed.
+**Providers**, **Default model**, **Modes**, **Appearance**, **Usage**, then **Advanced** — the
+server URL, collapsed.
 The screen used to open on a Connection card only a self-hoster has a use for, with the thing
 everyone needs below the fold. The Providers card is the **list**: it shows each key by display
 name, its last four (or `no key` for a keyless custom credential, #249) and, under them, the
@@ -601,6 +609,31 @@ Settings link. A failed create keeps the text in the box; a failed send keeps th
 already created and retries into that, not a second empty chat. The first message is what
 names the session (#35), so a successful send asks `lib/session-refresh` for its one re-read
 itself — the sidebar row was added by the create, before the name existed.
+
+### Modes (#245, M6)
+
+A **mode** is a reader's own named preset — a model, a reasoning effort and a system-prompt
+addition — that a chat can follow instead of a raw model. The list is loaded once in the shell
+(`useModes`, beside the catalog) and threaded down the same way, so Settings, both pickers and
+the chat header read the same copy and a write updates it in place.
+
+- **Settings → Modes** (`components/settings/modes.tsx`) is the list with an empty state,
+  "Create mode", Edit and an in-page Delete; `mode-form-dialog.tsx` is the one form for create
+  and edit — a name, the model (a picker, or "My default model" which follows `default_model`),
+  the effort, and the prompt addition. The server's refusals — a name already taken, the
+  twenty-first mode — land inline in the dialog (409 `conflict_error`).
+- **The pickers** (`ModelPicker`) offer the modes as a **Modes** group above the providers when
+  they are given (`modes`, `onSelectMode`, `selectedModeId`). The Default-model picker does not:
+  a mode is not a model preference. New chat and the composer's switch do, and picking a mode
+  clears a pending model — a chat follows a mode or a model, never both.
+- **The chat follows a mode live.** Picking one holds it until the next message, exactly as the
+  model switch does (`SendMessageOptions.mode`); the shell's own memory (the transcript tracks
+  models, not modes) keeps the header right until the session re-read. The header's subtitle
+  shows the mode's name and what it resolved to — the model the log last ran
+  (`data-slot="session-mode"` is the test handle). The model a mode resolves to is the server's
+  answer, stored on the session's header, so a mode whose model has no key is refused with the
+  server's own sentence (422 `mode_unavailable_error`), shown in the composer's banner rather
+  than silently running something else.
 
 ### Usage and cost (#247)
 
@@ -884,6 +917,8 @@ outside `@openharness/client` — is stubbed at `fetch` where a test needs it.
 | `src/components/providers/add-provider-dialog.test.tsx`                                        | the dialog (#209): opened from the picker without leaving the chat, a save that closes it and re-reads the catalog, the preselected provider from a row's Replace, and Escape returning focus to what opened it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `src/components/providers/bedrock-form.test.tsx`                                               | the Bedrock form (#245, A3c): the region as a `<select>` over the protocol's list starting at `us-east-1`, a save with a picked region and a typed session token (and no secret anywhere in the page), a save with the token **skipped** — the field is optional and the body omits it — and a second credential with its own name and region, with both rows showing theirs                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `src/components/providers/vertex-form.test.tsx`                                                | the Vertex form (#245, A3d): the three fields and the key-file upload, the project defaulting from the document the reader pasted, a document that is not a service-account key refused inline with Save held, the pasted document collapsing to a summary with **Replace** clearing it back to the empty field — and no part of the private key on the page — a save whose listing shows the key id's tail and the email/project/location, and a second credential asked for a name                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `src/components/settings/modes.test.tsx`                | the Modes card (#245, M6): the empty state, create (name + a picked model, and the "my default model" checkbox), a duplicate name and the twenty-first mode refused inline, edit, and an in-page delete with cancel; and that the Default-model picker offers no Modes group                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `src/screens/modes-chat.test.tsx`                       | modes in the chat (#245, M6): the New chat picker offering the Modes group above the providers and creating the chat on the picked mode, the refusal of a mode whose model has no key (with the server's sentence), the composer's switch following a mode on the next message, and a chat opened on a mode showing it in the header                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `src/components/settings/providers.test.tsx`                                                   | the Providers card: metadata-only rows with display names, Add provider opening the dialog, Replace through it with the list following, the in-page delete (confirm, cancel, failure), the stale-session prompt and the failed-list banner                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `src/components/providers/openai-compatible-form.test.tsx`                                     | the custom OpenAI-compatible form (#249): the tile with a base URL and an optional key and no key page, a **keyless** save enabled with an empty key (the list showing `no key` and the host), a keyed save showing `…last4`, a second credential asking for a name, and the inline name refusals                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `src/screens/sign-in-screen.test.tsx`                                                          | the 401 landing, provider buttons per auth-config, the card's own padding above the first button and below the last one (#187), the dev form gating and sign-in, returning to the route, sign-out, a later 401                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
@@ -906,7 +941,6 @@ outside `@openharness/client` — is stubbed at `fetch` where a test needs it.
 | still produces the whole turn at `delayMs: 0`, and nothing can arrive while an assertion runs. |
 | The one test that needs a turn genuinely in flight (Stop) gives the scripted reply a slow,     |
 | explicit `delayMs` and interrupts well inside it.                                              |
-
 Interactions have to wait for the screen to be ready for them (#123): a click on a control the
 screen is still disabling is a silent no-op (`user.click` dispatches nothing on a disabled
 button), and a `getBy*` right after a `waitFor` on the hash can beat the render the hash

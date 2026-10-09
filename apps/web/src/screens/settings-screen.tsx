@@ -3,6 +3,7 @@ import { useState } from 'react'
 
 import { AppearanceCard } from '../components/settings/appearance'
 import { DefaultModelCard } from '../components/settings/default-model'
+import { ModesCard } from '../components/settings/modes'
 import { ProvidersCard } from '../components/settings/providers'
 import { UsageCard } from '../components/settings/usage'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
@@ -10,6 +11,7 @@ import { Button } from '../components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '../components/ui/collapsible'
 import { Input } from '../components/ui/input'
 import { Label } from '../components/ui/label'
+import type { ModesView } from '../hooks/use-modes'
 import type { ModelsView } from '../hooks/use-models'
 import { useSettings } from '../hooks/use-settings'
 import { SETTINGS_STORAGE_KEY, saveSettings } from '../lib/settings'
@@ -32,7 +34,7 @@ import { SETTINGS_STORAGE_KEY, saveSettings } from '../lib/settings'
  * ({@link AppearanceCard}) are server state too, and the model picker reads the shell's one
  * catalog rather than fetching its own.
  */
-export function SettingsScreen({ catalog }: { catalog: ModelsView }) {
+export function SettingsScreen({ catalog, modes }: { catalog: ModelsView; modes: ModesView }) {
   const settings = useSettings()
   const [serverUrl, setServerUrl] = useState(settings.serverUrl)
   const [saved, setSaved] = useState(false)
@@ -45,6 +47,8 @@ export function SettingsScreen({ catalog }: { catalog: ModelsView }) {
         <ProvidersCard />
 
         <DefaultModelCard catalog={catalog} />
+
+        <ModesCard modes={modes} catalog={catalog} />
 
         <AppearanceCard />
 

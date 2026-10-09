@@ -23,6 +23,7 @@ const SESSION: Session = SessionSchema.parse({
   metadata: {},
   model: { id: 'anthropic/claude-sonnet-5' },
   system: null,
+  mode: null,
   agent: null,
   created_at: '2026-10-04T10:00:00.000Z',
   updated_at: '2026-10-04T10:00:00.000Z',
