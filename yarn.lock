@@ -24,6 +24,20 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@ai-sdk/azure@npm:4.0.97":
+  version: 4.0.97
+  resolution: "@ai-sdk/azure@npm:4.0.97"
+  dependencies:
+    "@ai-sdk/deepseek": "npm:3.0.62"
+    "@ai-sdk/openai": "npm:4.0.89"
+    "@ai-sdk/provider": "npm:4.0.25"
+    "@ai-sdk/provider-utils": "npm:5.0.57"
+  peerDependencies:
+    zod: ^3.25.76 || ^4.1.8
+  checksum: 10c0/f349ac04677d5216d825b4e3599c4bad064531467d49dbdf4ee8ac2c37e5ed9fb0bc606b37886d8ee9c866d40aaed081a8441f1be848fafb5f0d7c8cb46f87c0
+  languageName: node
+  linkType: hard
+
 "@ai-sdk/cerebras@npm:3.0.64":
   version: 3.0.64
   resolution: "@ai-sdk/cerebras@npm:3.0.64"
@@ -46,6 +60,18 @@ __metadata:
   peerDependencies:
     zod: ^3.25.76 || ^4.1.8
   checksum: 10c0/4b8dc5c2e77dd33403f2b882dfe9f985411a4641e83820f5e0390c1461366f4a52eac1ed1016f93d308ffe386c271f5305bcf21631958fb5cf1dcb4d98a4dfcd
+  languageName: node
+  linkType: hard
+
+"@ai-sdk/deepseek@npm:3.0.62":
+  version: 3.0.62
+  resolution: "@ai-sdk/deepseek@npm:3.0.62"
+  dependencies:
+    "@ai-sdk/provider": "npm:4.0.25"
+    "@ai-sdk/provider-utils": "npm:5.0.57"
+  peerDependencies:
+    zod: ^3.25.76 || ^4.1.8
+  checksum: 10c0/572e809a66c5e947afcaf6b46b0479c92d7f590d2257061ce6133e178e05dfb1d676d76333ff5bee15b35109fa47ff58dcdf847538eff6da8eacb00de30f87f6
   languageName: node
   linkType: hard
 
@@ -135,6 +161,18 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@ai-sdk/openai@npm:4.0.89":
+  version: 4.0.89
+  resolution: "@ai-sdk/openai@npm:4.0.89"
+  dependencies:
+    "@ai-sdk/provider": "npm:4.0.25"
+    "@ai-sdk/provider-utils": "npm:5.0.57"
+  peerDependencies:
+    zod: ^3.25.76 || ^4.1.8
+  checksum: 10c0/d70d809b6da5ba292b7920b9eb948bfe538d0d3b0f229f6508bea388979d40e8ab0dc7dabf33fa98185b8914ac00d9c6870287ced5167d656570f0f650cfc001
+  languageName: node
+  linkType: hard
+
 "@ai-sdk/provider-utils@npm:5.0.49":
   version: 5.0.49
   resolution: "@ai-sdk/provider-utils@npm:5.0.49"
@@ -165,6 +203,21 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@ai-sdk/provider-utils@npm:5.0.57":
+  version: 5.0.57
+  resolution: "@ai-sdk/provider-utils@npm:5.0.57"
+  dependencies:
+    "@ai-sdk/provider": "npm:4.0.25"
+    "@standard-schema/spec": "npm:^1.1.0"
+    "@workflow/serde": "npm:4.1.0"
+    eventsource-parser: "npm:^3.0.8"
+    undici: "npm:^7.29.0"
+  peerDependencies:
+    zod: ^3.25.76 || ^4.1.8
+  checksum: 10c0/e45ad8f442b7649f8dec704aabd603251e2b38fed62e38de84ae6b55af1ca2083fc62964b439f103ddffe53a035beb9607ca83c955fa1b984f8c5fc088be3682
+  languageName: node
+  linkType: hard
+
 "@ai-sdk/provider@npm:4.0.18":
   version: 4.0.18
   resolution: "@ai-sdk/provider@npm:4.0.18"
@@ -180,6 +233,15 @@ __metadata:
   dependencies:
     json-schema: "npm:^0.4.0"
   checksum: 10c0/fc6d435f1771b3a1165957e684cdd2b55eddbd8d4a8332011c07fc2f4b7bade3bdc72de4002975ccb9d809204683183e7cf197cdf5ddcc228cac1fcd73afbcfb
+  languageName: node
+  linkType: hard
+
+"@ai-sdk/provider@npm:4.0.25":
+  version: 4.0.25
+  resolution: "@ai-sdk/provider@npm:4.0.25"
+  dependencies:
+    json-schema: "npm:^0.4.0"
+  checksum: 10c0/b8cef07fd6e7c49efb4aa5fc7886ac9df3fccbcc088ed3cebcac1d7b24c4c6ad412faec918aa84644073da3db6befdf56911b585b4627cf97771b515cc1d45a6
   languageName: node
   linkType: hard
 
@@ -1211,6 +1273,7 @@ __metadata:
   resolution: "@openharness/brain@workspace:packages/brain"
   dependencies:
     "@ai-sdk/anthropic": "npm:4.0.73"
+    "@ai-sdk/azure": "npm:4.0.97"
     "@ai-sdk/cerebras": "npm:3.0.64"
     "@ai-sdk/deepseek": "npm:3.0.60"
     "@ai-sdk/fireworks": "npm:3.0.67"

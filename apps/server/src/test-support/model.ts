@@ -58,7 +58,7 @@ export interface ScriptedModel {
 const TEXT_ID = 'scripted-text-1'
 
 /** The credential a scripted request is made with. The scripted model ignores it. */
-export const TEST_CREDENTIAL: ModelCredential = { apiKey: 'oh-server-test-key' }
+export const TEST_CREDENTIAL: ModelCredential = { type: 'api_key', apiKey: 'oh-server-test-key' }
 
 /**
  * The credential resolver a runner with a scripted model is given.

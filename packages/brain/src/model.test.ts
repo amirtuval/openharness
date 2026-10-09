@@ -285,12 +285,12 @@ describe('isUsableCredential', () => {
     // given" and falls back to its own environment variable, so it must never be treated as
     // a credential.
     expect(isUsableCredential(null)).toBe(false)
-    expect(isUsableCredential({ apiKey: '' })).toBe(false)
-    expect(isUsableCredential({ apiKey: '   ' })).toBe(false)
+    expect(isUsableCredential({ type: 'api_key', apiKey: '' })).toBe(false)
+    expect(isUsableCredential({ type: 'api_key', apiKey: '   ' })).toBe(false)
   })
 
   it('answers yes for a key with anything in it', () => {
-    expect(isUsableCredential({ apiKey: 'sk-live-abc123' })).toBe(true)
+    expect(isUsableCredential({ type: 'api_key', apiKey: 'sk-live-abc123' })).toBe(true)
   })
 })
 
