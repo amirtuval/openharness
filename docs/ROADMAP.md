@@ -148,8 +148,10 @@ fullscreen TUI, and session rename, archive and fork.
   - Bedrock (AWS access keys or an assumed role);
   - Vertex (a GCP service account or workload identity);
   - Azure OpenAI (endpoint, key and deployment);
-  - custom OpenAI-compatible base URLs, which need SSRF protection first;
-  - possibly signing in with a provider subscription, if the terms allow it.
+  - custom OpenAI-compatible base URLs, which need SSRF protection first.
+
+  Signing in with a provider subscription is **not** planned: the terms of the subscription
+  providers do not allow it, so it is off the table rather than deferred.
 
   The credential store keeps a type plus an encrypted payload, so these are new types rather
   than a new design;
@@ -165,11 +167,14 @@ fullscreen TUI, and session rename, archive and fork.
 
   What remains in this phase is below;
 
-- **modes** (an idea from Amp): a named preset that bundles a model, a reasoning effort, a
-  system prompt addition and a tool set behind a stable name such as `smart`, `fast` or
-  `deep`. Users and agents pick a mode instead of a raw `provider/model` id, and an operator can
-  change what a mode maps to without touching every agent. A raw model id stays available for
-  those who want it;
+- **modes** (an idea from Amp) — done ([epic #245](https://github.com/amirtuval/openharness/issues/245)):
+  a named preset that bundles a model, a reasoning effort and a system prompt addition behind a
+  stable name such as `smart`, `fast` or `deep`, so a user picks a mode instead of a raw
+  `provider/model` id. **Modes are per user, stored in the database, and optional** — there is
+  no operator-level mode, and a raw model id stays available for those who want it. A chat
+  follows its mode live, and every request records the mode it ran under beside the model,
+  effort and prompt addition it resolved to, so the log stays accurate when a mode's mapping
+  changes later. A tool set is the part still to come: it arrives with phase 6;
 - **switching the model mid-session** (sessions already carry their own model after #92), and modes;
 - usage and cost per user, from the token counts the spans already store, and
   possibly budgets that stop a session at a limit, with usage events so clients can show

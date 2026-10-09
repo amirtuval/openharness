@@ -180,8 +180,13 @@ not know yet — and offers to save the answer as the default. Add a key in the 
 from a saved agent preset (`oh agents` lists them).
 
 Inside a chat, `/model` opens the same picker: the choice rides the next message, and the
-status line shows the model the session runs. Type to filter the picker by model name, id or
-provider; Esc clears the search. `oh sessions` lists sessions, `oh sessions
+status line shows what the session runs. Since #245 the picker also offers your **modes** as a
+group above the providers: a mode is a named preset — a model, a reasoning effort and a
+system-prompt addition — that a chat follows live, so retuning one changes every chat that
+runs it. `oh --mode <name>` starts a chat on one, `oh modes` lists them with what each resolves
+to, and the status line names the mode followed by the model it resolved to. Type to filter the
+picker by mode name, model name, id or provider; Esc clears the search. `oh sessions` lists
+sessions, `oh sessions
 delete <id>` deletes one (it asks first; `--yes` skips the question), `oh -c` continues the
 most recent one, and `oh -s <id>` resumes a particular one — a chat deleted elsewhere says
 so and exits. `apps/tui/AGENTS.md` documents the keys and the exit codes.
