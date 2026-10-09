@@ -6,6 +6,7 @@ import {
 } from '@openharness/protocol'
 import type {
   EventSeq,
+  ModeId,
   ModelConfig,
   ReasoningEffort,
   User,
@@ -18,6 +19,7 @@ import type { DebugHook, FetchLike, ResponseSchema } from './http'
 import { createTransport } from './http'
 import { createAgentsResource, type AgentsResource } from './resources/agents'
 import { createAuthResource, type AuthResource } from './resources/auth'
+import { createModesResource, type ModesResource } from './resources/modes'
 import { createModelsResource, type ModelsResource } from './resources/models'
 import { createPreferencesResource, type PreferencesResource } from './resources/preferences'
 import {
@@ -83,6 +85,21 @@ export interface SendMessageOptions extends RequestOptions {
    * an effort asked for and not applied.
    */
   reasoningEffort?: ReasoningEffort | null | undefined
+  /**
+   * The mode the session should follow from this message on (#245, M6), or `null` to detach it
+   * from any mode.
+   *
+   * It rides the `user.message` like `model` does: the log records the choice, and every
+   * request from then on resolves the mode as it is now — its model, its effort and its
+   * system-prompt addition. A chat follows a mode **or** a plain model, never both: passing a
+   * `model` with no `mode` detaches the session from any mode, and a message that carries
+   * neither leaves the mode as it is.
+   *
+   * The server refuses a message continuing on a mode whose model cannot be used (422
+   * `mode_unavailable_error`), and it resolves the mode's model for the turn, so `model` and
+   * `mode` are not both needed — pass `mode` alone to switch to a mode.
+   */
+  mode?: ModeId | null | undefined
   /**
    * The `seq` of a message already in the session to restart the conversation from (#238):
    * "edit and resend".
@@ -159,6 +176,15 @@ export interface Client {
    * one-hour cache and re-fetches, rate-limited to once a minute per user.
    */
   readonly models: ModelsResource
+
+  /**
+   * The caller's own modes (#245, M6): named presets a chat can follow.
+   *
+   * `modes.create/get/list/update/delete` are `/v1/me/modes`. A mode is per user — another
+   * user's is a 404 — and a chat started or continued on one follows it live; a chat whose
+   * mode's model cannot be used is refused (422 `mode_unavailable_error`).
+   */
+  readonly modes: ModesResource
 
   /** Signing in (the CLI's device flow) and signing out (epic #65, A6). */
   readonly auth: AuthResource
@@ -241,6 +267,7 @@ export function createClient(options: ClientOptions): Client {
     sessions: createSessionsResource(transport),
     providerCredentials: createProviderCredentialsResource(transport),
     models: createModelsResource(transport),
+    modes: createModesResource(transport),
     auth: createAuthResource(transport),
     preferences: createPreferencesResource(transport),
     usage: createUsageResource(transport),
@@ -269,6 +296,7 @@ export function createClient(options: ClientOptions): Client {
               type: EVENT_TYPES.userMessage,
               content: [{ type: 'text', text }],
               ...(messageOptions?.model === undefined ? {} : { model: messageOptions.model }),
+              ...(messageOptions?.mode === undefined ? {} : { mode: messageOptions.mode }),
               ...(messageOptions?.reasoningEffort === undefined
                 ? {}
                 : { reasoning_effort: messageOptions.reasoningEffort }),

@@ -61,9 +61,18 @@ describe('ApiError', () => {
   })
 
   it('maps every documented status back to its error type', () => {
+    // A status may carry more than one type (422 is `invalid_provider_credential` and
+    // `mode_unavailable_error`), and the inverse answers the first declared — a fallback for a
+    // body that is not the envelope, never a guess at one that is.
+    const seen = new Set<number>()
     for (const [type, status] of Object.entries(API_ERROR_STATUS_BY_TYPE)) {
+      if (seen.has(status)) {
+        continue
+      }
+      seen.add(status)
       expect(errorTypeForStatus(status)).toBe(type)
     }
+    expect(errorTypeForStatus(422)).toBe('invalid_provider_credential')
     expect(errorTypeForStatus(418)).toBe('api_error')
   })
 

@@ -62,6 +62,7 @@ src/
   resources/agents.ts   agents.create/get/list/update
   resources/auth.ts     auth.startDeviceLogin/pollDeviceLogin/signOut, DeviceLoginError
   resources/models.ts   models.list: the model catalog (epic #92)
+  resources/modes.ts    modes.create/get/list/update/delete: the caller's modes (#245, M6)
   resources/preferences.ts  preferences.get/put: the caller's default model (#111)
   resources/provider-credentials.ts  providerCredentials.list/put/delete
   resources/sessions.ts sessions.create/get/list/delete + sessions.events.send/list/iterate/stream
@@ -88,6 +89,7 @@ src/
 | `AgentsResource`, `SessionsResource`, `SessionEventsResource`                                   | the resource interfaces                                                                                                                                                          |
 | `ProviderCredentialsResource`                                                                   | `providerCredentials.list/put/delete`                                                                                                                                            |
 | `ModelsResource`                                                                                | `models.list`: the chat models the caller's keys can use (epic #92)                                                                                                              |
+| `ModesResource`                                                                                | `modes.create/get/list/update/delete`: the caller's named presets (#245, M6)                                                                                 |
 | `PreferencesResource`                                                                           | `preferences.get/put`: the caller's stored default model (#111)                                                                                                                  |
 | `UsageResource`                                                                                 | `usage.session(id)` and `usage.me(range)`: what was spent, priced on the server (#247)                                                                                           |
 | `AuthResource`                                                                                  | `auth.startDeviceLogin/pollDeviceLogin/signOut`                                                                                                                                  |
@@ -107,7 +109,6 @@ src/
 | `CREDENTIAL_TARGETS`, `CredentialTarget`                                                        | every provider _and_ named credential type a form or a tile offers (#245 A3a)                                                                                                    |
 | `credentialDisplayName()`, `credentialTargetFor()`, `credentialFacts()`                         | what to call a stored credential, which tile its row reopens, and the non-secret facts its row shows (a Bedrock credential's region, a Vertex one's email, project and location) |
 | `PACKAGE_NAME`                                                                                  | the package name; a dependent's cheap proof that the import resolved                                                                                                             |
-
 ### `@openharness/client/testing`
 
 | export                                                                      | what it is                                                                                 |
@@ -168,6 +169,11 @@ for await (const event of client.sessions.events.stream(session.id, { deltas: tr
 | `usage.session(id, options?)`                    | `GET /v1/sessions/{id}/usage`                                                                       | `{ session_id, totals, cost, by_model }`                     |
 | `usage.me(params?, options?)`                    | `GET /v1/me/usage` (`from`, `to`, `tz`)                                                             | `{ from, to, totals, cost, by_model, by_day }`               |
 | `preferences.put(preferences, options?)`         | `PUT /v1/me/preferences`                                                                            | `{ default_model }` (the stored value)                       |
+| `modes.create(body, options?)`                   | `POST /v1/me/modes`                                                                                 | `Mode`; 409 for a duplicate name or the 21st mode            |
+| `modes.get(id, options?)`                        | `GET /v1/me/modes/{id}`                                                                             | `Mode`, or a 404 for another user's                          |
+| `modes.list(options?)`                           | `GET /v1/me/modes`                                                                                  | `{ data: Mode[] }` (no pagination: at most 20)               |
+| `modes.update(id, body, options?)`               | `POST /v1/me/modes/{id}`                                                                            | `Mode`; 409 for a rename onto a taken name                   |
+| `modes.delete(id, options?)`                     | `DELETE /v1/me/modes/{id}`                                                                          | `void` (the wire answers `204`)                              |
 | `auth.startDeviceLogin(options?)`                | `POST /api/auth/device/code`                                                                        | `DeviceLoginStart`                                           |
 | `auth.pollDeviceLogin(code, options?)`           | `POST /api/auth/device/token`, polled                                                               | the session token (`string`)                                 |
 | `auth.signOut(options?)`                         | `POST /api/auth/sign-out`                                                                           | `void`                                                       |
@@ -198,6 +204,12 @@ Notes worth knowing before reading the code:
   the level onto whichever knob the model's provider has; a model that takes none runs the
   provider's default, and the request's `span.model_request_start` records what was asked for
   beside what was applied.
+- **`sendMessage(id, text, { mode })`** rides a `mode` the same way (#245, M6): the id of one
+  of the caller's modes, which the session follows from that message on — every request
+  resolves the mode as it is now (its model, effort and prompt addition). `null` detaches, and
+  a plain `model` with no `mode` detaches too: a chat follows a mode or a model, never both.
+  An unusable mode is refused (422 `mode_unavailable_error`), never silently swapped. A caller
+  that builds the event itself passes the same `mode` to `sessions.events.send`.
 - **`sendMessage(id, text, { rewindTo })`** is "edit and resend" (#238): the rewind travels
   with the message in one request and one append — `[session.rewind, user.message]` — so the
   session is never rewound without the edit, and the rewrite is atomic in the log too. The
@@ -297,6 +309,21 @@ there is no partial update, and `default_model: null` clears the stored choice. 
 is the `provider/model` a new chat starts with, validated for shape only (a free-text id the
 catalog has not caught up with is allowed); it is `null`, never a 404, for an account that has
 never saved one. Both routes are owner-only, like `GET /v1/me`.
+
+### Modes (#245, M6)
+
+`client.modes` is the caller's named presets: a model, a reasoning effort and a system-prompt
+addition behind a unique name. The routes are `/v1/me/modes` and per-user (another user's mode
+is a 404); a name is unique among the caller's modes and a user holds at most `MAX_MODES_PER_USER`
+of them, both answered as the protocol's 409 `conflict_error`; and the list has no pagination,
+because a picker can show all of them at once. A mode's `model` is a `provider/model` id or
+`MODE_DEFAULT_MODEL` ("my default model"), which follows the caller's `default_model`.
+
+A chat started or continued on a mode follows it live — the server resolves it per request —
+and `SendMessageOptions.mode` is how a switch rides the next message. A mode whose model cannot
+be used (no credential for its provider, or "my default model" with no default) is refused
+with the protocol's 422 `mode_unavailable_error`, never silently replaced; deleting a mode lands
+the chats that followed it on the model they last ran.
 
 `client.sessions.delete(id)` removes a session and its whole log (`DELETE /v1/sessions/{id}`,
 answered `204`, so it resolves `void`). It is owner-scoped: another user's session is answered
@@ -679,6 +706,17 @@ service-account key, so there is no such spelling for it).
 The preferences routes are an in-memory value too: `{ default_model: null }` unless
 `createFakeClient({ preferences })` seeds it, `put` replaces it whole, and both answer 401
 while signed out like every `/v1` route.
+
+The modes are an in-memory map behind the same routes, seeded with
+`createFakeClient({ modes })`, with the server's rules: a name unique among the caller's, at
+most `MAX_MODES_PER_USER`, the 409 `conflict_error` and 404 `not_found_error` the routes give,
+and the 400 a body the protocol refuses gets. A chat created on a mode — or continued on one —
+resolves it the way `apps/server/src/modes.ts` does (the mode's own model, or the caller's
+`default_model` for `MODE_DEFAULT_MODEL`), refuses an unusable one with the 422
+`mode_unavailable_error` before storing anything, and a delete lands the chats that followed
+the mode on the model they last ran. The one difference from the server: the fake resolves the
+mode when it is picked rather than per request, so an edit to a mode a chat already follows is
+not picked up by the fake's next turn.
 
 The credentials are configurable too: `createFakeClient({ credentials })` seeds the store with
 metadata-only rows, which is what a screen that behaves differently for an account **with** a key
