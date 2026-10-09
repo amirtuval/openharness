@@ -40,6 +40,7 @@ import {
   type SafeFetchOptions,
 } from '@openharness/hands'
 import {
+  BEDROCK_FOUNDATION_MODELS_PATH,
   azureBaseUrl,
   bedrockControlPlaneUrl,
   openAICompatibleBaseUrl,
@@ -308,7 +309,7 @@ async function validateBedrockCredential(
       ...(body.session_token === undefined ? {} : { sessionToken: body.session_token }),
       region: body.region,
     },
-    bedrockControlPlaneUrl(body.region, FOUNDATION_MODELS_PATH),
+    bedrockControlPlaneUrl(body.region, BEDROCK_FOUNDATION_MODELS_PATH),
   )
   let response: ProviderResponse
   try {
@@ -336,9 +337,6 @@ async function validateBedrockCredential(
   // catalogue's to read, not this call's.
   await response.text()
 }
-
-/** What the validating read asks for: on-demand, text-output models — the catalogue's filter. */
-const FOUNDATION_MODELS_PATH = '/foundation-models?byOutputModality=TEXT&byInferenceType=ON_DEMAND'
 
 /** How much of AWS's own message an error carries. */
 const AWS_REASON_LIMIT = 200

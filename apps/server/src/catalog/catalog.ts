@@ -31,6 +31,7 @@ import {
 import type { CredentialStore } from '@openharness/session'
 import type { Vault } from '@openharness/vault'
 import {
+  BEDROCK_FOUNDATION_MODELS_PATH,
   bedrockControlPlaneUrl,
   openAICompatibleBaseUrl,
   redactSecret,
@@ -458,7 +459,7 @@ export class ModelCatalog {
         ...(body.session_token === undefined ? {} : { sessionToken: body.session_token }),
         region: body.region,
       },
-      bedrockControlPlaneUrl(body.region, FOUNDATION_MODELS_PATH),
+      bedrockControlPlaneUrl(body.region, BEDROCK_FOUNDATION_MODELS_PATH),
     )
     const response = await this.fetch(signed.url, {
       headers: signed.headers,
@@ -724,12 +725,6 @@ function statusOf(provider: string, catalog: CachedProviderCatalog): ProviderCat
 }
 
 // ------------------------------------------------------------------ bedrock
-
-/**
- * What the validating read and this module's list both ask AWS for: on-demand, text-output
- * models. The query parameters are AWS's own filters, so the control plane does the first cut.
- */
-const FOUNDATION_MODELS_PATH = '/foundation-models?byOutputModality=TEXT&byInferenceType=ON_DEMAND'
 
 /** One model summary from `ListFoundationModels`, as far as the catalogue reads it. */
 interface FoundationModelSummary {

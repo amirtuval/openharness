@@ -21,9 +21,9 @@ import type { BedrockModelCredential } from './model'
  *   is given every setting explicitly — region, keys, session token, base URL — so nothing it
  *   needs is read from the environment (`AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_ENDPOINT_URL_*`
  *   in particular), which is the A5 rule this package follows for every provider.
- * - **The control-plane path** is the server's save-time check, and it is signed here, by
- *   {@link createBedrockSignedFetch}, because this package is where "how a Bedrock request is
- *   authenticated" lives. The AI SDK provider has no control-plane surface at all, so the
+ * - **The control-plane path** is the server's save-time check and its catalogue read, and it
+ *   is signed here, by {@link signBedrockRequest}, because this package is where "how a Bedrock
+ *   request is authenticated" lives. The AI SDK provider has no control-plane surface at all, so the
  *   server cannot borrow its signer; `aws4fetch` is the same signer the provider uses
  *   internally, so the two paths sign identically.
  *
@@ -43,6 +43,19 @@ export const BEDROCK_SERVICE = 'bedrock'
 
 /** The host prefix of the runtime endpoint: where a model request goes. */
 const RUNTIME_HOST_PREFIX = 'bedrock-runtime'
+
+/**
+ * The control-plane read the server makes twice — once to validate a credential on save, once to
+ * list a region's models — as the path {@link bedrockControlPlaneUrl} is given.
+ *
+ * It lives here rather than in either caller because it has to be **one** string: the two reads
+ * answer the same question ("which models can these keys use in this region"), and a query one
+ * side narrowed without the other would let a credential save against a list the picker does not
+ * show. AWS's `byOutputModality` and `byInferenceType` filters are its own, so what comes back
+ * is already text-output and on-demand models.
+ */
+export const BEDROCK_FOUNDATION_MODELS_PATH =
+  '/foundation-models?byOutputModality=TEXT&byInferenceType=ON_DEMAND'
 
 /**
  * The base URL `@ai-sdk/amazon-bedrock` talks to for one region.
