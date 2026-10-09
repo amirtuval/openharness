@@ -129,11 +129,7 @@ export function ProviderSetup({
 
   const nameField: CredentialField = {
     name: CREDENTIAL_NAME_FIELD,
-    // The second half of the model id depends on the type: an Azure credential's ids are
-    // `<name>/<deployment>`, a custom endpoint's are `<name>/<model>` (#249).
-    label: `Name (its models will be ${target?.name ?? ''}/${
-      target?.credential === 'azure_openai' ? '<deployment>' : '<model>'
-    })`,
+    label: `Name (its models will be ${target?.name ?? ''}/<${target?.modelIdHint ?? 'model'}>)`,
     secret: false,
   }
   const steps: readonly CredentialField[] =

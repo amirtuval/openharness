@@ -279,6 +279,7 @@ export function ProviderKeyForm({
   const asksForName =
     target.named && (storedNames.includes(target.name) || initialName !== undefined)
 
+  const modelIdHint = target.modelIdHint
   const [values, setValues] = useState<Record<string, string>>(() => ({
     ...emptyValues(form),
     ...(asksForName ? { [NAME_FIELD]: initialName ?? '' } : {}),
@@ -414,7 +415,7 @@ export function ProviderKeyForm({
             {nameError ??
               `What this credential is called. Its models are named after it — ${
                 typedName === '' ? target.name : typedName
-              }/${target.credential === 'azure_openai' ? '<deployment>' : '<model>'}.`}
+              }/${target.modelIdHint}.`}
           </p>
         </div>
       ) : null}

@@ -139,6 +139,13 @@ export interface CredentialTarget {
   readonly freeTier?: string
   /** The key-format hint for an input's placeholder, where the provider has a distinctive one. */
   readonly keyHint?: string
+  /**
+   * What the second half of this target's model ids is — `deployment` for Azure OpenAI,
+   * `model id` for Bedrock, `model` for a fixed provider — for the sentence a form puts under
+   * its name field. It comes from the credential type's own definition, so the two frontends
+   * cannot describe one type differently.
+   */
+  readonly modelIdHint: string
 }
 
 /**
@@ -156,6 +163,8 @@ export const CREDENTIAL_TARGETS: readonly CredentialTarget[] = [
     credential: provider.credential,
     keyUrl: provider.keyUrl,
     named: false,
+    // A fixed provider's models are `anthropic/claude-sonnet-5`: the second half is a model.
+    modelIdHint: 'model',
     ...(provider.freeTier === undefined ? {} : { freeTier: provider.freeTier }),
     ...(provider.keyHint === undefined ? {} : { keyHint: provider.keyHint }),
   })),
@@ -167,6 +176,7 @@ export const CREDENTIAL_TARGETS: readonly CredentialTarget[] = [
     // A type with no single console — a custom endpoint is the user's own — carries no
     // `keyUrl`, and the form simply offers no link (#249).
     ...(entry.keyUrl === undefined ? {} : { keyUrl: entry.keyUrl }),
+    modelIdHint: entry.modelIdHint,
   })),
 ]
 

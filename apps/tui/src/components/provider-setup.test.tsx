@@ -458,7 +458,7 @@ describe('ProviderSetup — the bedrock form (#245, A3c)', () => {
   it('asks for a name for a second credential, and lists each one’s region', async () => {
     const setup = renderSetup({ provider: 'bedrock', stored: ['bedrock'] })
 
-    await waitForScreen(setup, 'Name (its models will be bedrock/<model>)')
+    await waitForScreen(setup, 'Name (its models will be bedrock/<model id>)')
     typeText(setup, 'bedrock-us')
     pressKey(setup, 'enter')
     await waitForScreen(setup, 'Region')
