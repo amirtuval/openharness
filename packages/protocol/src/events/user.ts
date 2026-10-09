@@ -4,6 +4,7 @@ import { ContentBlocksSchema } from '../content'
 import { EventIdSchema } from '../ids'
 import type { DeepReadonly } from '../readonly'
 import { ModelConfigSchema } from '../resources/agent'
+import { ReasoningEffortSchema } from '../reasoning'
 import { EVENT_TYPES, EventSeqSchema, QueuedProcessedAtSchema } from './common'
 
 /**
@@ -41,6 +42,20 @@ export const UserMessageEventSchema = z.object({
    * agent's, fixed when the session is created.
    */
   model: ModelConfigSchema.optional(),
+  /**
+   * // extension: run this message's turn at a reasoning effort, and the turns after it (#252).
+   *
+   * The effort a request runs with is the newest one the log carries: appending a message with
+   * one sets it for the turn the message starts and for every turn after it, exactly as a
+   * `model` switches the model (#111). `null` asks for the provider's default again, and a
+   * message that leaves the field out changes nothing — so a log that never carried an effort
+   * replays exactly as it always did.
+   *
+   * Whether a request *runs* at the effort is the model's business: a model that takes none
+   * runs the provider's default, and the request's `span.model_request_start` records what was
+   * asked for beside what was applied (see `ReasoningEffortRunSchema`).
+   */
+  reasoning_effort: ReasoningEffortSchema.nullable().optional(),
 })
 
 /** A stored `user.message`, deep-readonly (D9, issue #46). */
@@ -91,6 +106,8 @@ export const UserMessageEventInputSchema = z.object({
   content: ContentBlocksSchema,
   /** Switch the session's model for this message and the ones after it (#111). */
   model: ModelConfigSchema.optional(),
+  /** Run at a reasoning effort from this message on; `null` returns to the provider's default (#252). */
+  reasoning_effort: ReasoningEffortSchema.nullable().optional(),
 })
 
 export type UserMessageEventInput = z.infer<typeof UserMessageEventInputSchema>

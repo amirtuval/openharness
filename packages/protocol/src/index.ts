@@ -13,6 +13,7 @@
  * - **providers** — the model providers openharness knows, the one list every side references
  *   (`./providers`, epic #245), and the credential types beyond its fixed ids
  *   (`./credential-types`)
+ * - **reasoning** — how much a model is asked to think, mapped per provider (`./reasoning`)
  *
  * Everything here is pure: schemas, types and a few helpers, with `zod` as the only runtime
  * dependency and no I/O anywhere.
@@ -36,4 +37,5 @@ export * from './ids'
 export * from './pagination'
 export * from './providers'
 export * from './readonly'
+export * from './reasoning'
 export * from './resources'
