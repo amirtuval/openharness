@@ -29,11 +29,17 @@ import {
 } from '@openharness/protocol'
 import type { CredentialStore } from '@openharness/session'
 import type { Vault } from '@openharness/vault'
-import { redactSecret } from '@openharness/brain'
+import { openAICompatibleBaseUrl, redactSecret } from '@openharness/brain'
+import { SAVE_TIME_LIMITS, safeFetch as defaultSafeFetch } from '@openharness/hands'
 
 import { openCredential } from '../credentials'
 import type { Logger } from '../types'
-import { adapterFor, type ProviderAdapter, type ProviderModel } from './adapters'
+import {
+  adapterFor,
+  parseOpenAICompatibleModelList,
+  type ProviderAdapter,
+  type ProviderModel,
+} from './adapters'
 import { CatalogCache, RefreshLimiter, type CachedProviderCatalog } from './cache'
 import { isChatModel } from './filter'
 import type { ModelRegistry, RegistryModel } from './registry'
@@ -64,6 +70,18 @@ export interface ModelCatalogOptions {
   readonly registry: ModelRegistry
   /** How a provider is reached; the production one is `createProviderFetch()`. */
   readonly fetch: ProviderFetch
+  /**
+   * The SSRF guard every **user-supplied** base URL goes through — a custom OpenAI-compatible
+   * credential (#249, A3b). Defaults to `@openharness/hands`' `safeFetch`; a test injects a
+   * stub so nothing reaches a network.
+   */
+  readonly safeFetch?: typeof defaultSafeFetch
+  /**
+   * `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS`: whether a custom OpenAI-compatible credential
+   * may list models at a private address (epic #245, M4). Off by default, and read only for
+   * that credential type — Azure's own listing dials nothing.
+   */
+  readonly allowPrivateProviderUrls?: boolean
   /** The per-(user, provider) cache; a fresh one per process by default. */
   readonly cache?: CatalogCache
   /** The `?refresh=true` rate limit; a fresh limiter per process by default. */
@@ -96,6 +114,10 @@ export class ModelCatalog {
 
   private readonly fetch: ProviderFetch
 
+  private readonly safeFetch: typeof defaultSafeFetch
+
+  private readonly allowPrivateProviderUrls: boolean
+
   private readonly cache: CatalogCache
 
   private readonly refreshLimiter: RefreshLimiter
@@ -111,6 +133,8 @@ export class ModelCatalog {
     this.vault = options.vault
     this.registry = options.registry
     this.fetch = options.fetch
+    this.safeFetch = options.safeFetch ?? defaultSafeFetch
+    this.allowPrivateProviderUrls = options.allowPrivateProviderUrls === true
     this.cache = options.cache ?? new CatalogCache()
     this.refreshLimiter = options.refreshLimiter ?? new RefreshLimiter()
     this.timeoutMs = options.timeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS
@@ -186,7 +210,9 @@ export class ModelCatalog {
     const catalog =
       input.credential.type === 'azure_openai'
         ? await this.azureCatalog(input.userId, input.credential.name)
-        : await this.fetchProvider(input.userId, input.credential.name)
+        : input.credential.type === 'openai_compatible'
+          ? await this.openAICompatibleCatalog(input.userId, input.credential.name)
+          : await this.fetchProvider(input.userId, input.credential.name)
     this.cache.set(key, catalog, input.now)
     return catalog
   }
@@ -241,6 +267,122 @@ export class ModelCatalog {
   }
 
   /**
+   * A custom OpenAI-compatible credential's models: the endpoint's own `GET {base_url}/models`,
+   * through the guard (epic #245, A3b).
+   *
+   * The base URL is a URL the user chose, so the call goes through `safeFetch` under
+   * {@link SAVE_TIME_LIMITS} and the per-provider deadline — the same guard the save-time check
+   * used, so a private address is refused here exactly as it was there (unless the server's
+   * self-host flag allows it). What comes back is filtered to chat models the way every
+   * provider's list is, and joined with the registry only where the raw id matches **exactly
+   * one** provider's entry: a custom URL names no provider, so an ambiguous id borrows nothing
+   * rather than guessing whose price and window it is.
+   *
+   * A credential whose endpoint cannot be listed falls back to no models — there is nothing to
+   * invent for a URL nobody else knows — reported as `fallback` with the reason.
+   */
+  private async openAICompatibleCatalog(
+    userId: string,
+    name: string,
+  ): Promise<CachedProviderCatalog> {
+    const stored = await this.credentials.get({ userId, name })
+    if (stored === null) {
+      return this.registryFallbackFor(name, `the stored ${name} credential could not be read`)
+    }
+    const body = await openCredential(this.vault, { userId, name, sealed: stored.sealed })
+    if (body === null || body.type !== 'openai_compatible') {
+      return this.registryFallbackFor(name, `the stored ${name} credential could not be opened`)
+    }
+    const apiKey = body.api_key ?? ''
+    try {
+      const listed = await this.fetchOpenAICompatibleList(
+        openAICompatibleBaseUrl(body.base_url),
+        body.api_key,
+      )
+      return {
+        status: 'ok',
+        fetchedAt: this.now().toISOString(),
+        message: null,
+        models: this.joinOpenAICompatibleList(name, listed),
+      }
+    } catch (error) {
+      const message = redactSecret(describeFailure(name, error, this.timeoutMs), apiKey)
+      this.logger?.warn(`serving no models for the ${name} credential: ${message}`)
+      return this.registryFallbackFor(name, message)
+    }
+  }
+
+  /** One page of a custom endpoint's list, through the guard, inside the catalogue deadline. */
+  private async fetchOpenAICompatibleList(
+    baseUrl: string,
+    apiKey: string | undefined,
+  ): Promise<readonly ProviderModel[]> {
+    const headers: Record<string, string> =
+      apiKey === undefined ? {} : { authorization: `Bearer ${apiKey}` }
+    const response = await this.safeFetch(
+      `${baseUrl}/models`,
+      { method: 'GET', headers },
+      {
+        ...SAVE_TIME_LIMITS,
+        timeoutMs: this.timeoutMs,
+        allowPrivate: this.allowPrivateProviderUrls,
+      },
+    )
+    if (!response.ok) {
+      throw new CatalogProviderError(
+        `the custom model list answered ${response.status}` + (await errorSnippet(response)),
+      )
+    }
+    let body: unknown
+    try {
+      body = await response.json()
+    } catch {
+      throw new CatalogProviderError('the custom model list was not JSON')
+    }
+    try {
+      return parseOpenAICompatibleModelList(body)
+    } catch (error) {
+      throw new CatalogProviderError(
+        'the custom model list was not the expected shape: ' +
+          (error instanceof Error ? error.message : 'unreadable'),
+      )
+    }
+  }
+
+  /**
+   * A custom endpoint's list, joined with the registry and filtered to chat models.
+   *
+   * Membership is the provider's own verdict when it gives one; otherwise the name filter
+   * decides. A registry entry is borrowed only on an exact, unambiguous id match
+   * ({@link exactRegistryModel}), so an unknown custom model gets no window, no price and no
+   * invented name.
+   */
+  private joinOpenAICompatibleList(name: string, listed: readonly ProviderModel[]): ModelEntry[] {
+    return dedupe(
+      listed.flatMap((raw) => {
+        const registry = this.exactRegistryModel(raw.id)
+        if (!isChatModel({ rawId: raw.id, providerChat: raw.chat, registryChat: registry?.chat })) {
+          return []
+        }
+        return [entryOf(name, raw, registry, 'provider', raw.id)]
+      }),
+    )
+  }
+
+  /**
+   * The one registry model filed under `id`, or `undefined` when none is or more than one is.
+   *
+   * `undefined` for the ambiguous case is the point: `gpt-4o` is filed under both `openai` and
+   * `azure`, and borrowing either one's price for a custom endpoint serving *a* `gpt-4o` would
+   * be a guess. A registry that cannot answer the cross-provider question (`exact` absent)
+   * lends nothing.
+   */
+  private exactRegistryModel(id: string): RegistryModel | undefined {
+    const matches = this.registry.exact?.(id) ?? []
+    return matches.length === 1 ? matches[0] : undefined
+  }
+
+  /**
    * One provider's catalogue, from the provider or the registry.
    *
    * The credential is read and opened here and only here: the plaintext lives for the one
@@ -262,7 +404,10 @@ export class ModelCatalog {
       name: provider,
       sealed: stored.sealed,
     })
-    if (body === null) {
+    // A fixed provider id may only carry an `api_key` credential (the route refuses anything
+    // else under it), so a row that is some other type is as unreadable as one that would not
+    // open — the provider has no way to authenticate.
+    if (body === null || body.type !== 'api_key') {
       return this.registryFallback(
         provider,
         `the stored ${provider} credential could not be opened`,
@@ -378,17 +523,26 @@ export class ModelCatalog {
 
 // ------------------------------------------------------------------ building entries
 
-/** One entry: the provider's own facts, the registry's where the provider had none. */
+/**
+ * One entry: the provider's own facts, the registry's where the provider had none.
+ *
+ * `fallbackName` is the display name when neither the provider's payload nor the registry
+ * names the model. The default is the whole model id (`provider/model`), which is what a fixed
+ * provider's unregistered model shows; a **named** credential passes the raw id instead, so a
+ * custom model reads as `gpt-4o` rather than `custom/gpt-4o` — the same bare name the Azure
+ * path gives a deployment models.dev does not know (#245 A3b).
+ */
 function entryOf(
   provider: string,
   raw: ProviderModel,
   registry: RegistryModel | undefined,
   source: ModelEntry['source'],
+  fallbackName: string = `${provider}/${raw.id}`,
 ): ModelEntry {
   return {
     id: `${provider}/${raw.id}`,
     provider,
-    name: firstNonEmpty(raw.name, registry?.name, `${provider}/${raw.id}`),
+    name: firstNonEmpty(raw.name, registry?.name, fallbackName),
     context_window: raw.contextWindow ?? registry?.contextWindow ?? null,
     max_output_tokens: raw.maxOutput ?? registry?.maxOutput ?? null,
     // Prices are the registry's alone (epic #245, A2): no provider's list-models payload

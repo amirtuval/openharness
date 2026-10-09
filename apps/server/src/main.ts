@@ -37,7 +37,10 @@ import { createSessionCredentialResolver, type ResolveSessionCredential } from '
 import { createConfigVault } from './key-provider'
 import { resolveMockCredential, resolveModelFactory } from './model'
 import { PostgresPartitionScheduler } from './partition-scheduler'
-import { validateProviderCredential, type ProviderCredentialValidator } from './provider-validation'
+import {
+  createProviderCredentialValidator,
+  type ProviderCredentialValidator,
+} from './provider-validation'
 import { LocalScheduler, type SessionScheduler } from './scheduler'
 
 /**
@@ -254,6 +257,10 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
       vault,
       registry,
       fetch: createProviderFetch(),
+      // A custom OpenAI-compatible credential's base URL is the user's, so its listing goes
+      // through safeFetch — and honours the self-host setting (#249, M4). The other providers
+      // use the egress-proxy fetch above, whose URLs are constants.
+      allowPrivateProviderUrls: config.allowPrivateProviderUrls,
       logger,
     })
 
@@ -270,7 +277,14 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     credentialRoutes: {
       credentials,
       vault,
-      validate: options.validateProviderCredential ?? validateProviderCredential,
+      validate:
+        options.validateProviderCredential ??
+        createProviderCredentialValidator({
+          // The save-time check is the same guard the model call and the listing use, so a
+          // private endpoint is refused before it is stored — unless the self-host setting is
+          // on, which is read here for a custom credential only (#249, M4).
+          allowPrivateProviderUrls: config.allowPrivateProviderUrls,
+        }),
     },
     catalog,
     registry,

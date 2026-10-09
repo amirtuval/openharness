@@ -1,5 +1,5 @@
 import type { ModelCredential, ModelFactory } from '@openharness/brain'
-import { providerModelFactory } from '@openharness/brain'
+import { createOpenAICompatibleFetch, createProviderModelFactory } from '@openharness/brain'
 
 import { ENV_VARS, type ServerConfig } from './config'
 import type { ResolveSessionCredential } from './credentials'
@@ -59,7 +59,17 @@ export const resolveMockCredential: ResolveSessionCredential = () =>
  */
 export function resolveModelFactory(config: ServerConfig): ResolvedModel {
   if (config.testModel === undefined) {
-    return { factory: providerModelFactory, kind: 'provider' }
+    return {
+      // The provider factory is built here, once, so the one place a custom OpenAI-compatible
+      // credential's requests are guarded can be told about the self-host setting (#249, M4).
+      // Azure's guard is never told: that type reads no flag.
+      factory: createProviderModelFactory({
+        openAICompatibleFetch: createOpenAICompatibleFetch({
+          allowPrivate: config.allowPrivateProviderUrls,
+        }),
+      }),
+      kind: 'provider',
+    }
   }
   if (config.testModel !== MOCK_MODEL_ENV_VALUE) {
     throw new Error(

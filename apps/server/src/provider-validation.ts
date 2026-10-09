@@ -10,6 +10,9 @@
  * - `azure_openai`: one chat request to the first deployment the user typed, sent through the
  *   SSRF guard (`@openharness/hands`' `safeFetch`), because the endpoint is a URL the user
  *   typed and Azure offers no endpoint that lists deployments.
+ * - `openai_compatible`: one `GET {base_url}/models`, the same call the catalogue makes, sent
+ *   through `safeFetch` — the base URL is the user's, and the answer both proves the endpoint
+ *   (and key) and is exactly the list the credential will contribute.
  *
  * The check is a real request to the provider, which is exactly why it is a seam
  * (`ProviderCredentialValidator`) the server's tests inject a fake into: no test should reach
@@ -30,7 +33,7 @@ import {
   safeFetch as defaultSafeFetch,
   type SafeFetchOptions,
 } from '@openharness/hands'
-import { azureBaseUrl } from '@openharness/brain'
+import { azureBaseUrl, openAICompatibleBaseUrl } from '@openharness/brain'
 import {
   PROVIDER_IDS,
   type ProviderId,
@@ -77,19 +80,30 @@ export type ProviderCredentialValidator = (
 /** How long the validating call may take before it counts as a failure. */
 const VALIDATION_TIMEOUT_MS = 10_000
 
-/** The `safeFetch` shape the Azure check uses. Injectable so a route test can drive a stub. */
-export type AzureValidatorFetch = (
+/**
+ * The `safeFetch` shape the URL-typed checks use — an Azure endpoint, or a custom
+ * OpenAI-compatible base URL. Injectable so a route test can drive a stub.
+ */
+export type ProviderValidatorFetch = (
   url: string,
   init?: RequestInit,
   options?: SafeFetchOptions,
 ) => Promise<Response>
 
-/** What a validator needs: the two outbound paths. */
+/** What a validator needs: the two outbound paths, and the self-host address flag. */
 export interface ProviderCredentialValidatorOptions {
   /** The provider HTTP client the `api_key` read goes through. Defaults to the egress-proxy one. */
   readonly providerFetch?: ProviderFetch
-  /** The guard an Azure check goes through. Defaults to `@openharness/hands`' `safeFetch`. */
-  readonly safeFetch?: AzureValidatorFetch
+  /** The guard an Azure or custom check goes through. Defaults to `@openharness/hands`' `safeFetch`. */
+  readonly safeFetch?: ProviderValidatorFetch
+  /**
+   * `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS`: whether a **custom OpenAI-compatible** endpoint
+   * may reach a private address (epic #245, M4). Off by default. It is read here, on save,
+   * exactly as it is on the model call and the `/models` listing — every path into a
+   * user-supplied URL checks the address, so a private endpoint is refused before it can be
+   * stored and again on every request after. It never applies to an Azure endpoint.
+   */
+  readonly allowPrivateProviderUrls?: boolean
 }
 
 /**
@@ -104,9 +118,13 @@ export function createProviderCredentialValidator(
 ): ProviderCredentialValidator {
   const fetch = options.providerFetch ?? providerFetch
   const guard = options.safeFetch ?? defaultSafeFetch
+  const allowPrivate = options.allowPrivateProviderUrls === true
   return async (name, body) => {
     if (body.type === 'azure_openai') {
       return validateAzureCredential(name, body, guard)
+    }
+    if (body.type === 'openai_compatible') {
+      return validateOpenAICompatibleCredential(name, body, guard, allowPrivate)
     }
     return validateApiKey(name, body.api_key, fetch)
   }
@@ -159,7 +177,7 @@ async function validateApiKey(name: string, apiKey: string, fetch: ProviderFetch
 async function validateAzureCredential(
   name: string,
   body: Extract<PutProviderCredentialRequest, { type: 'azure_openai' }>,
-  safeFetch: AzureValidatorFetch,
+  safeFetch: ProviderValidatorFetch,
 ): Promise<void> {
   const deployment = body.deployments[0] as string
   const url =
@@ -191,6 +209,51 @@ async function validateAzureCredential(
     throw new Error(
       `the deployment ${deployment} on ${hostOf(body.endpoint)} answered ` +
         `${response.status} for the validating request; the credential was rejected`,
+    )
+  }
+  // The body is drained so the connection can be released; nothing in it is read or stored.
+  await response.text()
+}
+
+/**
+ * One `GET {base}/models` at a custom OpenAI-compatible endpoint, proving its key — or, for a
+ * keyless endpoint, that it answers at all (epic #245, A3b).
+ *
+ * The check is the same call the model catalogue makes, and it is the whole save-time contract
+ * for this type: a non-2xx answer, a transport failure or a timeout all refuse the credential.
+ * It goes through `safeFetch` under {@link SAVE_TIME_LIMITS}, so a loopback, private or
+ * metadata endpoint is refused **here**, before the credential can be stored — unless the
+ * server's self-host setting (`allowPrivate`) turned that refusal off, which is the only
+ * difference from Azure's check. The key, when there is one, is sent as a bearer token exactly
+ * as the model call sends it; a keyless endpoint is asked with no `Authorization` header.
+ */
+async function validateOpenAICompatibleCredential(
+  name: string,
+  body: Extract<PutProviderCredentialRequest, { type: 'openai_compatible' }>,
+  safeFetch: ProviderValidatorFetch,
+  allowPrivate: boolean,
+): Promise<void> {
+  const url = `${openAICompatibleBaseUrl(body.base_url)}/models`
+  const headers: Record<string, string> =
+    body.api_key === undefined ? {} : { authorization: `Bearer ${body.api_key}` }
+  let response: Response
+  try {
+    response = await safeFetch(
+      url,
+      { method: 'GET', headers },
+      { ...SAVE_TIME_LIMITS, allowPrivate },
+    )
+  } catch (error) {
+    throw new Error(
+      `could not reach ${name} to validate the credential: ` +
+        (error instanceof Error ? error.message : 'the request failed'),
+      { cause: error },
+    )
+  }
+  if (!response.ok) {
+    throw new Error(
+      `the endpoint ${hostOf(body.base_url)} answered ${response.status} for the validating ` +
+        'request; the credential was rejected',
     )
   }
   // The body is drained so the connection can be released; nothing in it is read or stored.

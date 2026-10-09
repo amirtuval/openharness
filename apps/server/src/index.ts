@@ -147,6 +147,7 @@ export {
 export {
   adapterFor,
   adaptedProviders,
+  parseOpenAICompatibleModelList,
   type ProviderAdapter,
   type ProviderModel,
 } from './catalog/adapters'
@@ -229,7 +230,7 @@ export {
   VALIDATABLE_PROVIDERS,
   createProviderCredentialValidator,
   validateProviderCredential,
-  type AzureValidatorFetch,
+  type ProviderValidatorFetch,
   type ProviderCredentialValidator,
   type ProviderCredentialValidatorOptions,
   type ValidatableProvider,
