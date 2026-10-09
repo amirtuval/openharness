@@ -84,7 +84,8 @@ migrations/             the SQL the Postgres stores need, applied by `migrate()`
                         0019 the theme on the per-user preferences (#203),
                         0020 what a supersession range covers — chunks or a rewind (#238),
                         0021 the index behind the per-user usage read (#247),
-                        0022 the credential's name — unique per user per name (#248)
+                        0022 the credential's name — unique per user per name (#248),
+                        0023 a credential's public, per-type details (#249)
 docs/postgres.md        the Postgres stores: schema, migrations, delivery, local setup
 ```
 
@@ -484,7 +485,8 @@ the field existed simply does not have it, and the vault is what reads an absent
 | `delete({ userId, name })` | `true` when one was deleted, `false` when there was none                                                                                 |
 
 The answers are the protocol's `ProviderCredential` metadata (`pcred_` id, `type`, `name`,
-`last4`, `created_at`, `updated_at`, `validated_at`); `get` adds `sealed`, as a
+`last4`, the optional `details` a type publishes — #249 — and `created_at`, `updated_at`,
+`validated_at`); `get` adds `sealed`, as a
 `SealedProviderCredential`. Every method is keyed by `userId` — there is no unscoped read of a
 credential — and implementations deep-freeze what they return, because a sealed blob is a
 value. One credential per `(user, name)`, and two users may each hold the same name: the upsert
@@ -530,8 +532,9 @@ key, `by_seq`, and `check`s that the range is well-formed and lies before the ev
 carries it), `partition_leases` (`partition`, `owner`, `epoch`, `expires_at`),
 `scheduler_instances` (one row per live scheduler instance: `instance_id` primary key and the
 `last_seen` of its last heartbeat; see `0017`), `provider_credentials` (a sealed credential per
-`(user_id, name)`, with the key provider that wrapped its data key — NULL meaning `local`;
-see `0013` and `0018`) and
+`(user_id, name)`, with the key provider that wrapped its data key — NULL meaning `local` — and
+the public `details jsonb` its type publishes — NULL meaning none; see `0013`, `0018` and
+`0023`) and
 `user_preferences` (one row per user: the stored `default_model`, or NULL, and the `theme`,
 `system` by default; `on delete cascade` from `"user"`; see `0016` and `0019`). Five are
 **Better Auth's**, created by the same migrations and read and written by Better Auth itself
@@ -690,6 +693,19 @@ The named credentials of epic #245 (A3a) added one:
   for a pre-existing row is the same string it sealed with before. `alter table … rename` has no
   `if exists`, so each rename is guarded by a catalogue check (the runner re-runs every file on
   every `migrate()`).
+
+The custom OpenAI-compatible credential (epic #245, A3b) added one:
+
+- **`0023_credential_details.sql` — a credential's public, per-type details** (#249): one
+  `add column if not exists details jsonb` on `provider_credentials`. It holds the facts a
+  credential's type chooses to publish — today a custom endpoint's base URL **host** — which a
+  settings list can show without opening the sealed payload (a metadata read must not). It is
+  **not** a secret and never may be. NULL is legitimate and means "this type has no such
+  facts": every `api_key` and `azure_openai` row takes it, and every row written before the
+  column existed, so their metadata is unchanged and there is nothing to backfill. The column
+  round-trips through `upsert`/`get`/`list` exactly as given (`UpsertCredentialInput.details`,
+  `ProviderCredential.details`), and the conformance suite pins that a credential with details
+  gets them back while one without carries no `details` key at all.
 
 The vault's key provider (issue #150, deployment epic #148 decision D6) added one before it:
 

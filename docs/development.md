@@ -20,6 +20,14 @@ multi-instance scheduler. `BETTER_AUTH_SECRET` and `OPENHARNESS_SECRETS_KEY` wan
 `openssl rand -base64 32`; a variable that is set but empty counts as unset. For a local run
 with the dev login, see [the README](../README.md#running-it-from-source).
 
+One variable is a **self-hosting** switch, not a development one:
+`OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS=1` lets a **custom OpenAI-compatible** credential (a
+base URL a user typed) reach a private, loopback or link-local address — a local Ollama or
+vLLM, say — which the SSRF guard refuses by default. It applies to that credential type alone,
+never to Azure OpenAI, and staging and production leave it off; see
+[DEPLOYMENT.md](./DEPLOYMENT.md#private-addresses-for-custom-provider-urls-and-why-they-stay-off).
+`docker-compose.yml` does not set it.
+
 ## Repository layout
 
 `apps/` (server, web, tui) and `packages/` (config, protocol, vault, session, hands, brain,

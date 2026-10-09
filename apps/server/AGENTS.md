@@ -101,40 +101,41 @@ a `user.interrupt` signals `interrupt` — exactly what the same events would do
 
 ## Environment variables
 
-| variable                              | default                          | what it does                                                                                      |
-| ------------------------------------- | -------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `DATABASE_URL`                        | —                                | run on Postgres, migrating on boot; unset means in-memory                                         |
-| `SCHEDULER`                           | `local`                          | `local`, or `postgres` for the multi-instance scheduler                                           |
-| `BETTER_AUTH_SECRET`                  | — (**required**)                 | signs sessions and cookies                                                                        |
-| `BETTER_AUTH_URL`                     | — (**required**)                 | the public URL: Better Auth's base, the one trusted origin (CSRF)                                 |
-| `OPENHARNESS_SECRETS_KEY`             | — (**required** under `local`)   | base64 32-byte master key the vault seals credentials with; not needed under `gcp-kms`            |
-| `OPENHARNESS_KEY_PROVIDER`            | `local`                          | `local` (the environment key) or `gcp-kms` (Cloud KMS): who wraps the vault's data keys (#150)    |
-| `OPENHARNESS_KMS_KEY`                 | — (**required** under `gcp-kms`) | the Cloud KMS `projects/…/cryptoKeys/…` key; unused under `local`                                 |
-| `OPENHARNESS_KEY_CACHE_TTL_MS`        | `300000`                         | how long unwrapped data keys stay cached in memory; `0` disables the cache                        |
-| `OPENHARNESS_DEV_LOGIN`               | off                              | `1` enables the local dev login; localhost URLs only (A7); the way in when no provider is set     |
-| `GOOGLE_CLIENT_ID`/`_SECRET`          | —                                | enable Google sign-in (both, or neither; one provider or the dev login is required)               |
-| `GITHUB_CLIENT_ID`/`_SECRET`          | —                                | enable GitHub sign-in                                                                             |
-| `MICROSOFT_CLIENT_ID`/`_SECRET`       | —                                | enable Microsoft sign-in                                                                          |
-| `MICROSOFT_TENANT_ID`                 | `common`                         | the Entra tenant the Microsoft provider authenticates against                                     |
-| `PORT`                                | `3000`                           | the port to listen on                                                                             |
-| `OPENHARNESS_TEST_MODEL`              | —                                | `mock` swaps in the deterministic test model                                                      |
-| `OPENHARNESS_WEB_DIR`                 | —                                | a built web app to serve at `/`                                                                   |
-| `OPENHARNESS_TRUSTED_PROXY_HOPS`      | `0`                              | how many proxies append to `x-forwarded-for`; `0` trusts no forwarding header (#151, see below)   |
-| `OPENHARNESS_CORS_ORIGINS`            | —                                | comma-separated origins to allow; unset means no CORS headers                                     |
-| `OPENHARNESS_MAX_CONCURRENT_SESSIONS` | `4`                              | how many sessions may be running at once                                                          |
-| `OPENHARNESS_DRAIN_TIMEOUT_MS`        | `5000`                           | how long shutdown waits for a turn in flight                                                      |
-| `OPENHARNESS_INSTANCE_ID`             | hostname + pid + random suffix   | this instance's id in the lease table                                                             |
-| `OPENHARNESS_PARTITIONS`              | `64` (the protocol's)            | how many partitions the session space has                                                         |
-| `OPENHARNESS_LEASE_TTL_MS`            | `30000`                          | how long a partition lease lasts before it must be renewed                                        |
-| `OPENHARNESS_HEARTBEAT_MS`            | `10000`                          | how often leases are renewed and free partitions taken                                            |
-| `OPENHARNESS_SWEEP_MS`                | `60000`                          | how often owned partitions are re-scanned for missed work                                         |
-| `OPENHARNESS_DELTA_RETENTION_MS`      | `3600000`                        | how long superseded chunks are kept before compaction deletes them                                |
-| `OPENHARNESS_COMPACT_INTERVAL_MS`     | `300000`                         | how often the compaction job runs; `0` disables it                                                |
-| `OPENHARNESS_LOG_FORMAT`              | `text`                           | `text` (readable) or `json` (Cloud Logging): what stdout carries (#158)                           |
-| `OPENHARNESS_TRACING`                 | `off`                            | `off`, or `cloud-trace` to export spans to Cloud Trace (#158)                                     |
-| `OPENHARNESS_TRACE_SAMPLE_RATE`       | `0.1`                            | the fraction of root traces kept when tracing is on; `0` keeps none, `1` keeps all (#158)         |
-| `GOOGLE_CLOUD_PROJECT`                | —                                | the project a JSON log line's trace id is qualified with; Cloud Logging resolves a bare id (#158) |
-| `<NAME>_FILE`                         | —                                | for any secret above: read the value from this path instead of `<NAME>` (#154, see below)         |
+| variable                                  | default                          | what it does                                                                                                                                          |
+| ----------------------------------------- | -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DATABASE_URL`                            | —                                | run on Postgres, migrating on boot; unset means in-memory                                                                                             |
+| `SCHEDULER`                               | `local`                          | `local`, or `postgres` for the multi-instance scheduler                                                                                               |
+| `BETTER_AUTH_SECRET`                      | — (**required**)                 | signs sessions and cookies                                                                                                                            |
+| `BETTER_AUTH_URL`                         | — (**required**)                 | the public URL: Better Auth's base, the one trusted origin (CSRF)                                                                                     |
+| `OPENHARNESS_SECRETS_KEY`                 | — (**required** under `local`)   | base64 32-byte master key the vault seals credentials with; not needed under `gcp-kms`                                                                |
+| `OPENHARNESS_KEY_PROVIDER`                | `local`                          | `local` (the environment key) or `gcp-kms` (Cloud KMS): who wraps the vault's data keys (#150)                                                        |
+| `OPENHARNESS_KMS_KEY`                     | — (**required** under `gcp-kms`) | the Cloud KMS `projects/…/cryptoKeys/…` key; unused under `local`                                                                                     |
+| `OPENHARNESS_KEY_CACHE_TTL_MS`            | `300000`                         | how long unwrapped data keys stay cached in memory; `0` disables the cache                                                                            |
+| `OPENHARNESS_DEV_LOGIN`                   | off                              | `1` enables the local dev login; localhost URLs only (A7); the way in when no provider is set                                                         |
+| `GOOGLE_CLIENT_ID`/`_SECRET`              | —                                | enable Google sign-in (both, or neither; one provider or the dev login is required)                                                                   |
+| `GITHUB_CLIENT_ID`/`_SECRET`              | —                                | enable GitHub sign-in                                                                                                                                 |
+| `MICROSOFT_CLIENT_ID`/`_SECRET`           | —                                | enable Microsoft sign-in                                                                                                                              |
+| `MICROSOFT_TENANT_ID`                     | `common`                         | the Entra tenant the Microsoft provider authenticates against                                                                                         |
+| `PORT`                                    | `3000`                           | the port to listen on                                                                                                                                 |
+| `OPENHARNESS_TEST_MODEL`                  | —                                | `mock` swaps in the deterministic test model                                                                                                          |
+| `OPENHARNESS_WEB_DIR`                     | —                                | a built web app to serve at `/`                                                                                                                       |
+| `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS` | off                              | `1` lets a **custom OpenAI-compatible** credential reach a private/loopback address (epic #245, M4; #249); never Azure; off in staging and production |
+| `OPENHARNESS_TRUSTED_PROXY_HOPS`          | `0`                              | how many proxies append to `x-forwarded-for`; `0` trusts no forwarding header (#151, see below)                                                       |
+| `OPENHARNESS_CORS_ORIGINS`                | —                                | comma-separated origins to allow; unset means no CORS headers                                                                                         |
+| `OPENHARNESS_MAX_CONCURRENT_SESSIONS`     | `4`                              | how many sessions may be running at once                                                                                                              |
+| `OPENHARNESS_DRAIN_TIMEOUT_MS`            | `5000`                           | how long shutdown waits for a turn in flight                                                                                                          |
+| `OPENHARNESS_INSTANCE_ID`                 | hostname + pid + random suffix   | this instance's id in the lease table                                                                                                                 |
+| `OPENHARNESS_PARTITIONS`                  | `64` (the protocol's)            | how many partitions the session space has                                                                                                             |
+| `OPENHARNESS_LEASE_TTL_MS`                | `30000`                          | how long a partition lease lasts before it must be renewed                                                                                            |
+| `OPENHARNESS_HEARTBEAT_MS`                | `10000`                          | how often leases are renewed and free partitions taken                                                                                                |
+| `OPENHARNESS_SWEEP_MS`                    | `60000`                          | how often owned partitions are re-scanned for missed work                                                                                             |
+| `OPENHARNESS_DELTA_RETENTION_MS`          | `3600000`                        | how long superseded chunks are kept before compaction deletes them                                                                                    |
+| `OPENHARNESS_COMPACT_INTERVAL_MS`         | `300000`                         | how often the compaction job runs; `0` disables it                                                                                                    |
+| `OPENHARNESS_LOG_FORMAT`                  | `text`                           | `text` (readable) or `json` (Cloud Logging): what stdout carries (#158)                                                                               |
+| `OPENHARNESS_TRACING`                     | `off`                            | `off`, or `cloud-trace` to export spans to Cloud Trace (#158)                                                                                         |
+| `OPENHARNESS_TRACE_SAMPLE_RATE`           | `0.1`                            | the fraction of root traces kept when tracing is on; `0` keeps none, `1` keeps all (#158)                                                             |
+| `GOOGLE_CLOUD_PROJECT`                    | —                                | the project a JSON log line's trace id is qualified with; Cloud Logging resolves a bare id (#158)                                                     |
+| `<NAME>_FILE`                             | —                                | for any secret above: read the value from this path instead of `<NAME>` (#154, see below)                                                             |
 
 Every **secret** in that table — `DATABASE_URL`, `BETTER_AUTH_SECRET`,
 `OPENHARNESS_SECRETS_KEY`, and each provider's `*_CLIENT_SECRET` — can be delivered as a file
@@ -301,11 +302,14 @@ parses the query and maps the one error it can raise.
   the `x-goog-api-key` header, never the URL), OpenRouter `GET /api/v1/models`, and the
   OpenAI-compatible family (`GET <base>/models`, bearer) for Groq, DeepSeek, Fireworks,
   Mistral, Together, xAI and Cerebras. Every URL is a constant of that module: **no request
-  ever supplies a URL**, so there is no SSRF surface. Each call has a 5-second deadline
-  (`AbortSignal.timeout`), shared by all pages of one provider. The catalogue asks for a page
-  size of 1000 and follows Anthropic's `has_more`/`last_id` and Gemini's `nextPageToken`;
-  OpenRouter and the OpenAI-compatible family answer in one page. A provider that pages
-  forever stops at `MAX_PAGES`.
+  ever supplies a URL**, so there is no SSRF surface. (The one exception is a custom
+  OpenAI-compatible credential's `base_url`, which is the user's; it never goes through this
+  table — `openAICompatibleCatalog` calls it through `safeFetch`, the guard built for exactly
+  that case, and only through it.) Each call has a 5-second deadline (`AbortSignal.timeout`),
+  shared by all pages of one provider. The catalogue asks for a page size of 1000 and follows
+  Anthropic's `has_more`/`last_id` and Gemini's `nextPageToken`; OpenRouter and the
+  OpenAI-compatible family answer in one page. A provider that pages forever stops at
+  `MAX_PAGES`.
 - **C2 — the registry join and the filter.** `catalog/registry.ts` reads
   `apps/server/src/catalog/models-dev.json`, a snapshot of models.dev committed to this
   package and bundled into `dist/index.js` — never read from the network, and never from a
@@ -747,7 +751,7 @@ most `OPENHARNESS_MAX_CONCURRENT_SESSIONS` sessions run at once; the rest wait t
 `stop()` accepts nothing more, aborts the turns in flight and gives them the drain timeout to
 write their last events.
 
-#### Named credentials, and Azure OpenAI (epic #245, A3a)
+#### Named credentials, Azure OpenAI and custom OpenAI-compatible endpoints (epic #245, A3a/A3b)
 
 A credential is keyed by its **name**, which is the `provider` half of the model ids it serves —
 and that is what the route's path parameter has always been, so its shape did not change:
@@ -777,9 +781,42 @@ second Azure OpenAI credential.
   otherwise rather than a guessed number. The status is `ok` with the time the credential was
   read (nothing was fetched, and the deployment list is the answer rather than a stand-in).
   The registry snapshot gained that `azure` entry by the same refresh script
-  (`scripts/refresh-models-dev.mjs` now walks `CREDENTIAL_TYPES` as well as `PROVIDERS`).
+  (`scripts/refresh-models-dev.mjs` now walks `CREDENTIAL_TYPES` as well as `PROVIDERS`; a type
+  with no `modelsDevKey` — a custom endpoint — contributes no entry).
 - **A model id resolves by name, then by type**: the brain's `providerModelFactory` takes the
   first half as a credential name, and builds an Azure model when the credential says so.
+
+##### A custom OpenAI-compatible endpoint (epic #245, A3b)
+
+The second named type is a server that speaks the OpenAI chat-completions API at a **base URL
+the user types** — a local Ollama or vLLM, a gateway. It is the one credential type whose URL
+is not a constant, so it is the one that goes through the guard on every path:
+
+- **The save-time check is `GET {base_url}/models`** (`provider-validation.ts`), through
+  `safeFetch` under `SAVE_TIME_LIMITS` — the same call the catalogue makes, which both proves
+  the endpoint (and key) and is exactly the list the credential will contribute. The key, when
+  there is one, travels as `Authorization: Bearer`; a **keyless** endpoint is asked with no
+  such header (the protocol's `api_key` is optional for this type, and `last4` is stored empty).
+  `payload` and `endpoint` are joined onto `openAICompatibleBaseUrl` (the brain's helper: the
+  base URL is used as given, a trailing slash normalized away, query and fragment dropped).
+- **The self-host flag is read here and nowhere else.** `createProviderCredentialValidator`'s
+  `allowPrivateProviderUrls` (from `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS`, off by default)
+  is spread into the guard's options **only** for this type. Azure's check never passes it, so
+  the flag cannot loosen Azure's guard. The same flag reaches the model call
+  (`resolveModelFactory` → `createOpenAICompatibleFetch({ allowPrivate })`) and the catalogue
+  listing, so the address is judged identically on save and on every request after.
+- **The catalogue contributes the endpoint's own `/models`.** `catalog.ts` reads and opens the
+  credential, calls `GET {base_url}/models` through the guard with the same
+  `SAVE_TIME_LIMITS`-shaped options and the catalogue's own 5 s deadline, parses the
+  OpenAI-compatible payload (the family's one parser, `parseOpenAICompatibleModelList`, is
+  shared with the fixed adapters), filters it to chat models and joins the registry **only on
+  an exact, unambiguous id match** (`ModelRegistry.exact` — `gpt-4o` is filed under two
+  providers and borrows nothing). An endpoint that cannot be listed falls back to **no models**
+  with the reason, never to invented ones.
+- **The public `details` come from `credentialDetails`** (the protocol's helper, shared with
+  the frontends' fakes): the base URL's **host**, never the URL and never a key. It is stored
+  in the row's `details jsonb` (migration `0023`) so a metadata read can show it without
+  opening the sealed payload.
 
 ### `PostgresPartitionScheduler`
 
@@ -1100,7 +1137,9 @@ before the instance stops serving it (#151).
 | `createSessionRevocations(options)`                                                                                              | the registry of open responses a revocation closes, subscribed to the store (#76)                                                            |
 | `startSessionRecheck(options)`, `DEFAULT_SESSION_RECHECK_MS`                                                                     | the periodic session re-check of a long-lived response (#76)                                                                                 |
 | `SESSION_INVALID_MESSAGE`, `SSE_SESSION_INVALID`                                                                                 | what a stream says when its session is revoked or expires (#76)                                                                              |
-| `createProviderCredentialValidator`, `validateProviderCredential`, `VALIDATABLE_PROVIDERS`                                       | the one cheap call a saved credential is checked with — a provider list for `api_key`, a guarded Azure request for `azure_openai` (#245 A3a) |
+| `createProviderCredentialValidator`, `validateProviderCredential`, `VALIDATABLE_PROVIDERS`                                       | the one cheap call a saved credential is checked with — a provider list for `api_key`, a guarded Azure request for `azure_openai`, a guarded `GET {base_url}/models` for `openai_compatible` (#245 A3a/A3b) |
+| `ProviderValidatorFetch`                                                                                                         | the `safeFetch` shape the URL-typed checks (Azure, custom) take, injectable for a test                                                                                                                      |
+| `parseOpenAICompatibleModelList`                                                                                                 | the OpenAI-compatible `/models` parser, shared by the fixed adapters and a custom credential's catalogue (#249)                                                                                             |
 | `ModelCatalog`, `ModelCatalogOptions`, `CatalogRefreshLimitedError`                                                              | the model catalogue: provider lists, registry join, cache, fallback (#90)                                                                    |
 | `createBundledRegistry()`, `emptyRegistry`, `SNAPSHOT_DATE`, `ModelRegistry`, `RegistryModel`                                    | the registry join's seam, over the bundled models.dev snapshot                                                                               |
 | `contextTokenBudget`, `createTokenBudgetResolver`, `OUTPUT_RESERVE_RATIO`                                                        | the per-model context budget: `contextWindow − min(maxOutput, 25%)`, per request (#246)                                                      |
@@ -1326,6 +1365,14 @@ parallel with each other.
   validator), the catalogue's one-model-per-deployment answer with the registry's window on a
   known deployment and `null` on an unknown one, and a turn that reaches the endpoint through
   the real guard with an injected transport standing in for Azure.
+- `openai-compatible-credentials.test.ts` (#245, A3b) — a custom OpenAI-compatible endpoint end
+  to end: the route storing a keyed and a **keyless** credential with its public `details` (the
+  base URL host only), the second-name and name/URL rules, the 422 a refused check gets, the
+  save-time `GET {base}/models` through an injected guard (the key as a bearer token, and none
+  when keyless), the self-host flag carried to that guard **only** for this type (Azure's call
+  never sees it) and the real guard's private/loopback/metadata refusals, the catalogue listing
+  the endpoint's models with metadata borrowed only on an exact match, and a turn that streams
+  through the guard with an injected transport standing in for the endpoint.
 - `credentials.test.ts` — the write-only round trip, the 422 a refused key gets, the fresh
   session rule, the vault's AAD binding, "never in a response or a log", and the env-key test:
   with `OPENAI_API_KEY` set and no stored credential, a turn ends with

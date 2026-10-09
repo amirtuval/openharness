@@ -528,15 +528,16 @@ list, so there is nothing left for `e2e`'s removed `provider-metadata.test.ts` t
 credentials API takes any router provider, so a reader who typed an id this list does not carry
 sees what they typed, never a blank.
 
-**`CREDENTIAL_TARGETS` is what an Add-provider surface offers** (epic #245, A3a): the eleven
+**`CREDENTIAL_TARGETS` is what an Add-provider surface offers** (epic #245, A3a/A3b): the eleven
 providers, then the named credential types. A `CredentialTarget` carries the _name_ a first save
-uses (a provider id, or the type's default — `azure`), the display name, the credential type
-that selects the form (X6), the key URL, and `named` — whether the reader may keep more than
-one, each under a name they choose. `credentialTargetFor(credential)` answers the target a
-_stored_ credential's Replace reopens, and `credentialDisplayName(credential)` is what a list
-row is called: the provider's name, the type's display name where the name is its default, and
-the reader's own label otherwise — so `azure-eu` is called `azure-eu` and two Azure rows are
-told apart.
+uses (a provider id, or the type's default — `azure`, `custom`), the display name, the credential
+type that selects the form (X6), the key URL, and `named` — whether the reader may keep more than
+one, each under a name they choose. The key URL is **optional**: a custom OpenAI-compatible
+endpoint (#249) has no console to link to, so its target omits `keyUrl` and the form offers no
+link. `credentialTargetFor(credential)` answers the target a _stored_ credential's Replace
+reopens, and `credentialDisplayName(credential)` is what a list row is called: the provider's
+name, the type's display name where the name is its default, and the reader's own label
+otherwise — so `azure-eu` is called `azure-eu` and two Azure rows are told apart.
 
 The web app builds its first-run tiles, its Add-provider dialog and its Settings list from this
 (#209); `oh` will offer the same providers in the terminal (#210, X7).
@@ -665,10 +666,14 @@ The credentials are configurable too: `createFakeClient({ credentials })` seeds 
 metadata-only rows, which is what a screen that behaves differently for an account **with** a key
 needs — the first-run check is the one that made this an option (#209) — because `put` cannot run
 before a synchronous render. The store itself follows the server: `put` replaces one provider's
-row, `delete` is idempotent, an empty key is answered 422 `invalid_provider_credential`, and the
-**first** save with no default stored picks one the way U4 does — the saved provider's first
-catalog model, else the catalog's first, and never over a default that is already there. The
-recommendation table the server keeps is the one thing the fake does not restate.
+row, `delete` is idempotent, an empty key is answered 422 `invalid_provider_credential` — unless
+the type is `openai_compatible`, whose key is optional (#249), so a keyless one is accepted with
+an empty `last4` — and the **first** save with no default stored picks one the way U4 does — the
+saved provider's first catalog model, else the catalog's first, and never over a default that is
+already there. The public `details` it stores come from the protocol's `credentialDetails`, the
+same helper the server's `credentialUpsert` calls, so a faked custom credential's metadata
+matches the real route's (a base URL's host). The recommendation table the server keeps is the
+one thing the fake does not restate.
 
 The usage reads are answered from the fake's own logs (#247), the way the server answers them
 from a real one: `fakeRequestsOf` pairs a session's spans (through the replay read, so a rewound

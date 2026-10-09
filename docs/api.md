@@ -497,6 +497,14 @@ curl -X PUT localhost:3000/v1/provider-credentials/azure-eu \
        "api_key":"…","deployments":["gpt-4o","gpt-4o-mini"]}'
 # → 200 {"id":"pcred_01J…","type":"azure_openai","name":"azure-eu","last4":"…4242", …}
 
+# Any server that speaks the OpenAI chat-completions API, at a URL the user chooses. The key
+# is optional (a local endpoint may take none); only the base URL's host comes back.
+curl -X PUT localhost:3000/v1/provider-credentials/custom \
+  -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"type":"openai_compatible","base_url":"http://127.0.0.1:11434/v1","api_key":"…"}'
+# → 200 {"id":"pcred_01J…","type":"openai_compatible","name":"custom","last4":"…4242",
+#        "details":{"base_url_host":"127.0.0.1:11434"}, …}
+
 curl localhost:3000/v1/provider-credentials -H "Authorization: Bearer $TOKEN"
 # → {"data":[ …the metadata of both… ]}
 
@@ -506,24 +514,33 @@ curl -X DELETE localhost:3000/v1/provider-credentials/azure-eu \
 ```
 
 - **Write-only.** The secret is accepted on the `PUT` and never returned, logged, put in an
-  event or repeated in an error. `last4` exists so a settings screen can tell two apart.
+  event or repeated in an error. `last4` exists so a settings screen can tell two apart, and
+  an empty `last4` is a credential that carries **no key at all** (a custom endpoint that takes
+  none).
 - **Validated on save** with one cheap call. An `api_key` is checked against the provider's own
   model list; an `azure_openai` credential is checked with one chat request to its **first
-  deployment**, sent through the SSRF guard — so an endpoint that resolves inside the network
-  (loopback, private, link-local, the cloud metadata service) is refused before it can be
-  stored. A credential the provider rejects is an `invalid_provider_credential` with status
-  `422`, and nothing is stored.
+  deployment**; an `openai_compatible` credential is checked with `GET {base_url}/models` — the
+  same call the catalogue makes. Each of the last two is sent through the SSRF guard, so an
+  endpoint that resolves inside the network (loopback, private, link-local, the cloud metadata
+  service) is refused before it can be stored. A credential the endpoint rejects is an
+  `invalid_provider_credential` with status `422`, and nothing is stored.
 - **A credential is keyed by its `name`**, which is the `provider` half of the model ids it
   serves — and that is also the path parameter, which is why the route's shape did not change
   when names arrived. `PUT` replaces the credential with that name; deletion is immediate.
 - **The eleven fixed providers keep their ids as names**, one each: an `api_key` credential may
   only be stored under `anthropic`, `openai`, … A **named credential type** — `azure_openai`
-  today — may be stored under any short, lowercase name (`[a-z0-9-]`, at most 32 characters)
-  that is not one of those ids, which is how a user keeps `azure` _and_ `azure-eu`. Only the
-  first credential of a type defaults to the type's name (`azure`); the frontends ask for a
-  name for a second one. Anything else is a `400 invalid_request_error`.
-- `type` is a discriminated union: `api_key` (`api_key`) and `azure_openai` (`endpoint`, an
-  `https` URL; `api_key`; `deployments`, at least one). Bedrock and Vertex come later.
+  and `openai_compatible` today — may be stored under any short, lowercase name (`[a-z0-9-]`,
+  at most 32 characters) that is not one of those ids, which is how a user keeps `azure` _and_
+  `azure-eu`, or `custom` _and_ `my-local`. Only the first credential of a type defaults to the
+  type's name (`azure`, `custom`); the frontends ask for a name for a second one. Anything else
+  is a `400 invalid_request_error`.
+- `type` is a discriminated union: `api_key` (`api_key`); `azure_openai` (`endpoint`, an
+  `https` URL; `api_key`; `deployments`, at least one); and `openai_compatible` (`base_url`, an
+  absolute `http`/`https` URL; an **optional** `api_key`). Bedrock and Vertex come later.
+- **The public facts a list shows.** Metadata is the same fields for every type, plus one
+  optional `details` object of safe, type-specific facts — today the base URL's **host** for an
+  `openai_compatible` credential, never the whole URL and never any part of a key. A type with
+  no such facts (an `api_key`, an `azure_openai`) carries no `details` at all.
 - A turn whose model's provider half names no stored credential fails with a `session.error`
   whose type is `missing_provider_credential` — non-retryable, the message names the provider.
   The server never falls back to provider keys from the environment.
@@ -581,19 +598,26 @@ is the usual one; the optional `refresh=true` query parameter bypasses the serve
   neither a key nor any part of one appears in a response, an error or a log. `data` is sorted
   by provider, then name; the form stays free text regardless — the router accepts
   `provider/model` ids the catalog does not know yet.
-- **A named credential contributes its deployments.** Azure OpenAI offers no endpoint that
+- **A named credential contributes its own models.** Azure OpenAI offers no endpoint that
   lists deployments, so an `azure_openai` credential contributes one model per name the user
   typed — `azure/gpt-4o`, `azure-eu/gpt-4o-mini` — with `source: "provider"` (the credential's
   own list is the deployment names), and its per-provider status is `ok` with the time the
   credential was read. A deployment whose name is one models.dev's `azure` entry knows carries
   that model's context window; one it does not know gets `null` for both limits rather than a
-  guessed number.
+  guessed number. An `openai_compatible` credential contributes the models its endpoint's
+  `/models` answers — `custom/llama3.3` — filtered to chat models the way a provider's list is;
+  a model id that matches exactly one models.dev entry borrows its metadata, and an id that
+  matches none or more than one (`gpt-4o` is filed under both `openai` and `azure`) gets `null`
+  for both limits, no name and no price rather than a guess.
 - **Where the list comes from.** Per provider, the server calls that provider's own
   list-models endpoint with the caller's credential (`GET /v1/models` for OpenAI and
   Anthropic, `GET /v1beta/models` for Gemini, `GET /api/v1/models` for OpenRouter,
-  `GET /models` for the OpenAI-compatible providers), from a fixed, known table — a
-  user-supplied URL is never called, so there is no SSRF surface. Each call has a 5-second
-  deadline; Gemini's key travels in the `x-goog-api-key` header, never in the URL.
+  `GET /models` for the OpenAI-compatible providers), from a fixed, known table. Each call has
+  a 5-second deadline; Gemini's key travels in the `x-goog-api-key` header, never in the URL.
+  The one **user-supplied** URL is a custom credential's `base_url`: its `/models` call goes
+  through the SSRF guard, so a private address is refused exactly as it is on save — unless the
+  server's self-host setting (`OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS`, off by default) allows
+  it, which applies to that credential type alone and never to Azure.
 - **The registry join, and how models are filtered.** What the provider's own payload carries
   is used first: Gemini's `displayName`/`inputTokenLimit`/`outputTokenLimit`, OpenRouter's
   `name`/`context_length`, Anthropic's `display_name`. The bundled models.dev snapshot —
