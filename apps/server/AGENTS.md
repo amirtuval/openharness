@@ -756,6 +756,8 @@ most `OPENHARNESS_MAX_CONCURRENT_SESSIONS` sessions run at once; the rest wait t
 `stop()` accepts nothing more, aborts the turns in flight and gives them the drain timeout to
 write their last events.
 
+#### Named credentials, Azure OpenAI and custom OpenAI-compatible endpoints (epic #245, A3a/A3b)
+
 A credential is keyed by its **name**, which is the `provider` half of the model ids it serves —
 and that is what the route's path parameter has always been, so its shape did not change:
 `PUT /v1/provider-credentials/anthropic` stores the Anthropic key, `PUT …/azure-eu` stores a
@@ -782,7 +784,8 @@ second Azure OpenAI credential.
   provider HTTP client, so it goes out through the same egress-proxy-aware path every other
   provider call does. **No SSRF guard is needed and none runs**: the host is derived from the
   region, and the region was validated against the protocol's list before this point, so there
-  is no user-supplied address to check. A refusal carries AWS's own reason — `answered 403 for
+  is no user-supplied address to check. A refusal carries AWS's own reason — `Bedrock in
+<region> answered 403 for ListFoundationModels: <reason>` — its message bounded to 200
   characters and scrubbed of all three secrets before it reaches the 422 body, because a
   provider that quotes a rejected request can quote a key.
 - **A credential reports its non-secret per-type facts as `details`.** `credentialUpsert` in
@@ -802,7 +805,6 @@ second Azure OpenAI credential.
   The registry snapshot gained that `azure` entry by the same refresh script
   (`scripts/refresh-models-dev.mjs` now walks `CREDENTIAL_TYPES` as well as `PROVIDERS`; a type
   with no `modelsDevKey` — a custom endpoint — contributes no entry).
-  (`scripts/refresh-models-dev.mjs` now walks `CREDENTIAL_TYPES` as well as `PROVIDERS`).
 - **A Bedrock credential lists the region's on-demand text models.** `bedrockCatalog` reads
   `ListFoundationModels` in the credential's region with the stored keys and enters each summary
   as `<name>/<bedrock model id>` with `source: 'provider'`; names, context windows and prices
@@ -823,6 +825,38 @@ second Azure OpenAI credential.
   `AWS_PROFILE`/`AWS_ENDPOINT_URL_BEDROCK_RUNTIME` in the server's or the user's environment
   changes nothing. That is the same rule as the provider keys: the environment is never a
   fallback (A5).
+
+##### A custom OpenAI-compatible endpoint (epic #245, A3b)
+
+The second named type is a server that speaks the OpenAI chat-completions API at a **base URL
+the user types** — a local Ollama or vLLM, a gateway. It is the one credential type whose URL
+is not a constant, so it is the one that goes through the guard on every path:
+
+- **The save-time check is `GET {base_url}/models`** (`provider-validation.ts`), through
+  `safeFetch` under `SAVE_TIME_LIMITS` — the same call the catalogue makes, which both proves
+  the endpoint (and key) and is exactly the list the credential will contribute. The key, when
+  there is one, travels as `Authorization: Bearer`; a **keyless** endpoint is asked with no
+  such header (the protocol's `api_key` is optional for this type, and `last4` is stored empty).
+  `base_url` is joined onto `openAICompatibleBaseUrl` (the brain's helper: the base URL is used
+  as given, a trailing slash normalized away, query and fragment dropped).
+- **The self-host flag is read here and nowhere else.** `createProviderCredentialValidator`'s
+  `allowPrivateProviderUrls` (from `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS`, off by default)
+  is spread into the guard's options **only** for this type. Azure's check never passes it, so
+  the flag cannot loosen Azure's guard. The same flag reaches the model call
+  (`resolveModelFactory` → `createOpenAICompatibleFetch({ allowPrivate })`) and the catalogue
+  listing, so the address is judged identically on save and on every request after.
+- **The catalogue contributes the endpoint's own `/models`.** `catalog.ts` reads and opens the
+  credential, calls `GET {base_url}/models` through the guard with the same
+  `SAVE_TIME_LIMITS`-shaped options and the catalogue's own 5 s deadline, parses the
+  OpenAI-compatible payload (the family's one parser, `parseOpenAICompatibleModelList`, is
+  shared with the fixed adapters), filters it to chat models and joins the registry **only on
+  an exact, unambiguous id match** (`ModelRegistry.exact` — `gpt-4o` is filed under two
+  providers and borrows nothing). An endpoint that cannot be listed falls back to **no models**
+  with the reason, never to invented ones.
+- **The public `details` come from `credentialDetails`** (the protocol's helper, shared with
+  the frontends' fakes): the base URL's **host**, never the URL and never a key. It is stored
+  in the row's `details jsonb` (migration `0023`) so a metadata read can show it without
+  opening the sealed payload.
 
 ### `PostgresPartitionScheduler`
 
@@ -1125,6 +1159,58 @@ before the instance stops serving it (#151).
 
 ## Public API
 
+| `@openharness/server`                                                                                                            | what it is                                                                                                                                                                                                                                                     |
+| -------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `createApp(options)`                                                                                                             | the Hono app: routes, auth, errors, static assets — against any store/scheduler/auth                                                                                                                                                                           |
+| `startServer(options)`                                                                                                           | store, migrations, model, scheduler, listener and a `shutdown()`                                                                                                                                                                                               |
+| `main(env, options)`                                                                                                             | `startServer` from the environment, plus the signal handlers                                                                                                                                                                                                   |
+| `DeltaCompactor`                                                                                                                 | the periodic compaction of superseded chunks (D9)                                                                                                                                                                                                              |
+| `DEFAULT_DELTA_RETENTION_MS`, `DEFAULT_COMPACT_INTERVAL_MS`                                                                      | `3600000`, `300000` — the compaction defaults                                                                                                                                                                                                                  |
+| `LocalScheduler`                                                                                                                 | the single-process `SessionScheduler`                                                                                                                                                                                                                          |
+| `PostgresPartitionScheduler`                                                                                                     | the multi-instance `SessionScheduler`: partition leases, epochs, recovery (#11)                                                                                                                                                                                |
+| `PassQueue`                                                                                                                      | the pass queue and concurrency limit both schedulers share                                                                                                                                                                                                     |
+| `SessionRunner`                                                                                                                  | the per-session turn loop, reusable: what both schedulers run passes with                                                                                                                                                                                      |
+| `createAuth(config, database, logger)`                                                                                           | Better Auth configured for this server (A1/A2/A3/A7), plus `Auth`, `AuthConfig`                                                                                                                                                                                |
+| `createSessionCredentialResolver(deps)`                                                                                          | the session owner's sealed key, opened per model request (A5)                                                                                                                                                                                                  |
+| `sealCredential` / `openCredential` / `credentialPayload` / `credentialAad` / `credentialUpsert` / `modelCredential`             | the credential sealing helpers, and the payload -> `ModelCredential` mapping (A5, #245 A3a)                                                                                                                                                                    |
+| `createAuthGuard(options)`                                                                                                       | the `/v1` session + CSRF middleware (A2)                                                                                                                                                                                                                       |
+| `createSessionRevocations(options)`                                                                                              | the registry of open responses a revocation closes, subscribed to the store (#76)                                                                                                                                                                              |
+| `startSessionRecheck(options)`, `DEFAULT_SESSION_RECHECK_MS`                                                                     | the periodic session re-check of a long-lived response (#76)                                                                                                                                                                                                   |
+| `SESSION_INVALID_MESSAGE`, `SSE_SESSION_INVALID`                                                                                 | what a stream says when its session is revoked or expires (#76)                                                                                                                                                                                                |
+| `createProviderCredentialValidator`, `validateProviderCredential`, `VALIDATABLE_PROVIDERS`                                       | the one cheap call a saved credential is checked with — a provider list for `api_key`, a guarded Azure request for `azure_openai`, a guarded `GET {base_url}/models` for `openai_compatible`, a signed `ListFoundationModels` for `bedrock` (#245 A3a/A3b/A3c) |
+| `ProviderValidatorFetch`                                                                                                         | the `safeFetch` shape the URL-typed checks (Azure, custom) take, injectable for a test                                                                                                                                                                         |
+| `parseOpenAICompatibleModelList`                                                                                                 | the OpenAI-compatible `/models` parser, shared by the fixed adapters and a custom credential's catalogue (#249)                                                                                                                                                |
+| `ModelCatalog`, `ModelCatalogOptions`, `CatalogRefreshLimitedError`                                                              | the model catalogue: provider lists, registry join, cache, fallback (#90)                                                                                                                                                                                      |
+| `createBundledRegistry()`, `emptyRegistry`, `SNAPSHOT_DATE`, `ModelRegistry`, `RegistryModel`                                    | the registry join's seam, over the bundled models.dev snapshot                                                                                                                                                                                                 |
+| `contextTokenBudget`, `createTokenBudgetResolver`, `OUTPUT_RESERVE_RATIO`                                                        | the per-model context budget: `contextWindow − min(maxOutput, 25%)`, per request (#246)                                                                                                                                                                        |
+| `createReasoningSupportResolver`                                                                                                 | the per-model reasoning gate: the `low \| medium \| high` a model takes, per request (#252)                                                                                                                                                                    |
+| `createProviderFetch()`, `ProviderFetch`, `DEFAULT_PROVIDER_TIMEOUT_MS`                                                          | the provider HTTP client: egress-proxy aware, 5 s deadline                                                                                                                                                                                                     |
+| `CatalogCache`, `RefreshLimiter`, `DEFAULT_CATALOG_TTL_MS`, `DEFAULT_REFRESH_INTERVAL_MS`                                        | the in-memory per-(user, provider) cache and the refresh rate limit (C4)                                                                                                                                                                                       |
+| `adapterFor()`, `adaptedProviders()`, `isChatModel()`, `isNonChatFamily()`                                                       | the fixed endpoint table and the chat filter (C1/C2)                                                                                                                                                                                                           |
+| `DefaultModelPicker`, `DefaultModelPickerOptions`, `RECOMMENDED_DEFAULT_MODELS`                                                  | the automatic default model: the picker, and the curated table it picks from (U4)                                                                                                                                                                              |
+| `isEverydayModel()`, `isExpensiveModel()`, `isReasoningModel()`, `newestModelId()`                                               | the registry fallback's rule: everyday chat models, newest first (U4)                                                                                                                                                                                          |
+| `DEV_LOGIN_EMAIL`, `DEV_LOGIN_PASSWORD`, `DEV_LOGIN_STORED_EMAIL`                                                                | the documented dev user (A7)                                                                                                                                                                                                                                   |
+| `OPENHARNESS_CLI_CLIENT_ID`, `DEVICE_CODE_EXPIRES_IN`                                                                            | the device flow's client id and code lifetime (A6)                                                                                                                                                                                                             |
+| `deviceVerificationUri`, `deviceVerificationUriComplete`                                                                         | the approval URL the device flow answers with: `#/device` and its `?user_code=` (A6)                                                                                                                                                                           |
+| `SOCIAL_PROVIDERS`, `providerOptions`, `microsoftEmailVerified`, `githubVerifiedPrimaryEmail`, `googleEmailVerified`             | the A3 identity rules                                                                                                                                                                                                                                          |
+| `affirmativeClaim`                                                                                                               | the boolean-shaped claim parser: `true`/`1`/`"true"`/`"1"`, and nothing else (A3)                                                                                                                                                                              |
+| `microsoftRefusalDetail`, `microsoftClaimType`, `xmsEdovLogValue`, `MICROSOFT_REFUSAL_LOG`, `MicrosoftRefusalDetail`             | what a refused Microsoft sign-in logs — names, types, and the `xms_edov` flag                                                                                                                                                                                  |
+| `createDevLoginUser`, `rewriteDevLoginRequest`, `refuseUnverifiedUser`                                                           | the dev-login seeding and shim, and the verified-email hook                                                                                                                                                                                                    |
+| `createMockModelFactory()`                                                                                                       | the deterministic test model, for a host that wires its own                                                                                                                                                                                                    |
+| `defaultInstanceId()`                                                                                                            | hostname + pid + random suffix: the id a server leases partitions under                                                                                                                                                                                        |
+| `readServerConfig(env)`, `ServerConfig`, `ENV_VARS`, `readSecret`, `secretFileVar`                                               | the environment, parsed; a secret from `<NAME>` or its `<NAME>_FILE` (#154)                                                                                                                                                                                    |
+| `createConfigVault(config)`, `KeyProviderKind`                                                                                   | the vault the config asks for: the env key or Cloud KMS (#150)                                                                                                                                                                                                 |
+| `HttpError`, `rateLimitError`, `PACKAGE_NAME`, `Logger`                                                                          | the error types, the package name and the logging seam                                                                                                                                                                                                         |
+| `resolveClientIp`, `withClientIpHeader`, `CLIENT_IP_HEADER`, `FORWARDED_FOR_HEADER`                                              | the client IP behind a proxy: one resolution, one header (#151)                                                                                                                                                                                                |
+| `Readiness`, `alwaysReady`                                                                                                       | what `GET /ready` asks, and the no-database answer (#151)                                                                                                                                                                                                      |
+| `checkDatabase`, `READINESS_QUERY_TIMEOUT_MS`                                                                                    | the Postgres side of `/ready`: `select 1` inside about 2 s (#151)                                                                                                                                                                                              |
+| `DEFAULT_TRUSTED_PROXY_HOPS`                                                                                                     | `0` — no forwarding header trusted (#151)                                                                                                                                                                                                                      |
+| `loggerFor`, `jsonLogger`, `redact`, `redactError`, `isSensitiveKey`, `detailFields`, `REDACTED`                                 | the Cloud Logging JSON logger and its redaction (#158)                                                                                                                                                                                                         |
+| `parseTraceContext`, `parseTraceparent`, `parseCloudTraceContext`, `activeTraceContext`, `runWithTraceContext`, `TraceContext`   | the request's trace, and the async context the logger reads (#158)                                                                                                                                                                                             |
+| `initTracing`, `noopTracer`, `Tracer`, `Span`, `StartSpanOptions`, `TracingMode`, `TracingOptions`, `AttributeValue`, `SpanKind` | the tracer seam, its no-op, and the lazy Cloud Trace implementation (#158)                                                                                                                                                                                     |
+| `SessionTraces`, `withSessionTraces`                                                                                             | the session log as turn and model-request spans, and the store proxy that feeds it (#158)                                                                                                                                                                      |
+| `DEFAULT_LOG_FORMAT`, `DEFAULT_TRACING`, `DEFAULT_TRACE_SAMPLE_RATE`, `LogFormat`                                                | `text`, `off`, `0.1` — the observability defaults (#158)                                                                                                                                                                                                       |
+
 `node dist/index.js` runs `main()`, which reads the environment and starts the server.
 
 ## Layout
@@ -1320,6 +1406,14 @@ parallel with each other.
   validator), the catalogue's one-model-per-deployment answer with the registry's window on a
   known deployment and `null` on an unknown one, and a turn that reaches the endpoint through
   the real guard with an injected transport standing in for Azure.
+- `openai-compatible-credentials.test.ts` (#245, A3b) — a custom OpenAI-compatible endpoint end
+  to end: the route storing a keyed and a **keyless** credential with its public `details` (the
+  base URL host only), the second-name and name/URL rules, the 422 a refused check gets, the
+  save-time `GET {base}/models` through an injected guard (the key as a bearer token, and none
+  when keyless), the self-host flag carried to that guard **only** for this type (Azure's call
+  never sees it) and the real guard's private/loopback/metadata refusals, the catalogue listing
+  the endpoint's models with metadata borrowed only on an exact match, and a turn that streams
+  through the guard with an injected transport standing in for the endpoint.
 - `bedrock-credentials.test.ts` (#245, A3c) — the Bedrock route end to end: the metadata a save
   returns (`last4` from the access key ID, `details.region`), a second credential in another
   region under `bedrock-us`, the 400s (a region AWS does not serve, a missing key, a name a
