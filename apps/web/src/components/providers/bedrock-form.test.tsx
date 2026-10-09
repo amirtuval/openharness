@@ -89,10 +89,12 @@ describe('the bedrock credential form', () => {
       last4: ACCESS_KEY_ID.slice(-4),
       details: { region: 'eu-west-1' },
     })
-    // The row names the credential, shows the last four of the access key ID and the region —
-    // and nothing else the credential carries.
+    // The row leads with the credential's own name, the type's display name beside it (#271),
+    // then the last four of the access key ID and the region — and nothing else the credential
+    // carries.
     const list = within(screen.getByRole('region', { name: 'Saved credentials' }))
-    expect(await list.findByText('Amazon Bedrock')).toBeInTheDocument()
+    expect(await list.findByText('bedrock')).toBeInTheDocument()
+    expect(list.getByText('(Amazon Bedrock)')).toBeInTheDocument()
     expect(list.getByText(`…${ACCESS_KEY_ID.slice(-4)}`)).toBeInTheDocument()
     expect(list.getByText('eu-west-1')).toBeInTheDocument()
     const page = document.body.textContent ?? ''
@@ -149,10 +151,12 @@ describe('the bedrock credential form', () => {
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     })
     const list = within(screen.getByRole('region', { name: 'Saved credentials' }))
-    // Two rows of one type, told apart by their names and their regions.
-    // The default name reads as the type's display name; the reader's own label stays theirs.
+    // Two rows of one type, told apart by their names and their regions: the default-named one
+    // leads with `bedrock` and the type beside it (#271), and the reader's own label stays
+    // theirs.
     expect(await list.findByText('bedrock-us')).toBeInTheDocument()
-    expect(list.getByText('Amazon Bedrock')).toBeInTheDocument()
+    expect(list.getByText('bedrock')).toBeInTheDocument()
+    expect(list.getByText('(Amazon Bedrock)')).toBeInTheDocument()
     expect(list.getByText('us-east-1')).toBeInTheDocument()
     expect(list.getByText('us-east-2')).toBeInTheDocument()
   })

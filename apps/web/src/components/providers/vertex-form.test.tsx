@@ -179,9 +179,11 @@ describe('the vertex credential form', () => {
       },
     })
 
-    // The list row is the three facts the type knows — not the key, and not its id.
+    // The row leads with the credential's own name and the type's display name beside it
+    // (#271), then the three facts the type knows — not the key, and not its id.
     const list = within(screen.getByRole('region', { name: 'Saved credentials' }))
-    expect(await list.findByText('Google Vertex')).toBeInTheDocument()
+    expect(await list.findByText('vertex')).toBeInTheDocument()
+    expect(list.getByText('(Google Vertex)')).toBeInTheDocument()
     expect(
       list.getByText(
         'vertex-runner@openharness-vertex.iam.gserviceaccount.com · openharness-vertex · europe-west4',

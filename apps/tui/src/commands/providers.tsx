@@ -1,4 +1,4 @@
-import { credentialDisplayName, credentialFacts, type Client } from '@openharness/client'
+import { credentialFacts, credentialRowLabel, type Client } from '@openharness/client'
 import type { ProviderCredential } from '@openharness/protocol'
 import { Box, render, Text, useApp } from 'ink'
 import { useCallback } from 'react'
@@ -266,18 +266,13 @@ export function formatCredentials(credentials: readonly ProviderCredential[]): r
 }
 
 /**
- * What a row is named: the string the reader types before the slash in a model id (#245, A3a).
+ * The name column's text: the row label both frontends share (#271) as one string.
  *
- * A fixed provider is named by its display name ("Anthropic"). A named credential's name is
- * the `provider` half of its model ids, and the credential type's display name would hide it:
- * a credential called `azure` whose row reads "Azure OpenAI" leaves the reader unable to tell
- * what `/model` expects, so the name leads and the type's display name follows it. A name the
- * reader chose (`azure-eu`) already reads as itself, and needs no second label.
+ * What leads a row, and when the type's display name belongs beside it, is
+ * `credentialRowLabel`'s (`@openharness/client`) — the rule lives there so the web row reads
+ * the same way, and only the joining is the terminal's: `azure (Azure OpenAI)`.
  */
 function credentialNameLabel(credential: ProviderCredential): string {
-  const displayName = credentialDisplayName(credential)
-  if (credential.type === 'api_key' || displayName === credential.name) {
-    return displayName
-  }
-  return `${credential.name} (${displayName})`
+  const { primary, secondary } = credentialRowLabel(credential)
+  return secondary === undefined ? primary : `${primary} (${secondary})`
 }

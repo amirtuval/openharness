@@ -181,12 +181,14 @@ export const CREDENTIAL_TARGETS: readonly CredentialTarget[] = [
 ]
 
 /**
- * What to call a **stored** credential in a list: the provider's display name where the name
- * is a provider id, the type's display name where the name is its default, and the reader's
- * own label otherwise.
+ * What to call a **stored** credential in a sentence: the provider's display name where the
+ * name is a provider id, the type's display name where the name is its default, and the
+ * reader's own label otherwise.
  *
  * A second Azure credential is stored as `azure-eu`, and that is what it is called — the label
- * is the reader's, and a row that hid it would leave two identical-looking rows.
+ * is the reader's, and a row that hid it would leave two identical-looking rows. A **list row**
+ * leads with something else for a default-named credential: {@link credentialRowLabel}, which
+ * keeps the model-id prefix visible (#271).
  */
 export function credentialDisplayName(credential: {
   readonly name: string
@@ -198,6 +200,52 @@ export function credentialDisplayName(credential: {
   }
   const entry = CREDENTIAL_TYPES.find((candidate) => candidate.type === credential.type)
   return entry !== undefined && entry.defaultName === credential.name ? entry.name : credential.name
+}
+
+/**
+ * How a list row names a stored credential (#271): what leads the row, and the credential
+ * type's display name beside it when the two differ.
+ *
+ * A row is what tells the reader what to type as the `provider` half of a model id (#245, A3a),
+ * so the two parts are kept apart rather than joined here: the terminal draws them as one
+ * string (`azure (Azure OpenAI)`), and the web draws the second as secondary text. The rule for
+ * *when* there is a second part is in one place — {@link credentialRowLabel} — so the two
+ * frontends cannot disagree about it.
+ */
+export interface CredentialRowLabel {
+  /**
+   * What leads the row: a fixed provider's display name (`Anthropic`), or a named credential's
+   * own name (`azure`), which is the `provider` half of the model ids it serves.
+   */
+  readonly primary: string
+  /**
+   * The credential type's display name, shown beside `primary` when it would otherwise hide the
+   * prefix: a credential called `azure` reads `azure (Azure OpenAI)`, not `Azure OpenAI`.
+   * Absent for a fixed provider and for a credential the reader named (`azure-eu`), which
+   * already reads as itself.
+   */
+  readonly secondary?: string
+}
+
+/**
+ * The label a list row leads with, and the credential type's display name beside it when that
+ * name would hide the model-id prefix (#271).
+ *
+ * `credentialDisplayName` answers what to *call* a credential, and it is right for a sentence
+ * ("Saved the Azure OpenAI credential"); it is not what a row may lead with, because for a
+ * default-named credential it answers the type's display name — and the reader typing `/model`
+ * never types `Azure OpenAI`. A fixed provider is unchanged, and a reader-named credential
+ * already reads as itself, so two Azure credentials keep the names they were saved under.
+ */
+export function credentialRowLabel(credential: {
+  readonly name: string
+  readonly type: ProviderCredentialType
+}): CredentialRowLabel {
+  const displayName = credentialDisplayName(credential)
+  if (credential.type === 'api_key' || displayName === credential.name) {
+    return { primary: displayName }
+  }
+  return { primary: credential.name, secondary: displayName }
 }
 
 /**

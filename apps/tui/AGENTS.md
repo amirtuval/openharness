@@ -305,7 +305,9 @@ row. That is the whole of what the API can say — it is **write-only** (epic #6
 column is what the reader types as the `provider` half of a model id: the provider's display
 name for one of the eleven, and the credential's own name for a named credential — with the
 type's display name beside it when that name would hide the prefix, so a credential called
-`azure` reads `azure (Azure OpenAI)` rather than just `Azure OpenAI` (#271). A
+`azure` reads `azure (Azure OpenAI)` rather than just `Azure OpenAI` (#271). The rule is
+`credentialRowLabel` (`@openharness/client`), so the web's Settings → Providers row draws the
+same one; only the parenthesizing is this command's. A
 reader-named credential already reads as itself (`azure-eu`), so two Azure credentials are told
 apart by the names they were saved under.
 `oh providers remove <name>` forgets a credential after a `[y/N]` question (`--yes` skips it); deleting one that is not
