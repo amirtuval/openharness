@@ -7,6 +7,7 @@ import {
 import type {
   EventSeq,
   ModelConfig,
+  ReasoningEffort,
   User,
   UserEvent,
   UserInterruptEvent,
@@ -72,6 +73,16 @@ export interface RequestOptions {
 export interface SendMessageOptions extends RequestOptions {
   /** The model the message's turn should run, e.g. `{ id: 'provider/model' }`. */
   model?: ModelConfig | undefined
+  /**
+   * The reasoning effort the message's turn should run at (#252) — `low`, `medium` or `high`;
+   * `null` returns the session to the provider's default from this message on.
+   *
+   * It rides the `user.message` like `model` does: the log records the choice, and every turn
+   * the message starts (and every one after it) runs at it. A model that takes no effort runs
+   * the provider's default instead, which the request's `span.model_request_start` records as
+   * an effort asked for and not applied.
+   */
+  reasoningEffort?: ReasoningEffort | null | undefined
   /**
    * The `seq` of a message already in the session to restart the conversation from (#238):
    * "edit and resend".
@@ -187,11 +198,11 @@ export interface Client {
    * until the brain folds it into a turn — which is what the transcript shows as pending.
    *
    * A `model` in the options rides the message (epic #116, U1): the turn the message starts
-   * runs it, and the log records the switch.
+   * runs it, and the log records the switch. A `reasoningEffort` rides it the same way (#252).
    *
    * @param sessionId the `sesn_` id
    * @param text the message body
-   * @param options request options (cancellation) and the model to run
+   * @param options request options (cancellation), the model to run, and the reasoning effort
    */
   sendMessage(
     sessionId: string,
@@ -258,6 +269,9 @@ export function createClient(options: ClientOptions): Client {
               type: EVENT_TYPES.userMessage,
               content: [{ type: 'text', text }],
               ...(messageOptions?.model === undefined ? {} : { model: messageOptions.model }),
+              ...(messageOptions?.reasoningEffort === undefined
+                ? {}
+                : { reasoning_effort: messageOptions.reasoningEffort }),
             },
           ],
         },
