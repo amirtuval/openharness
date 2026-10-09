@@ -501,7 +501,7 @@ is `<name>/<bedrock model id>`, and the client is `createAmazonBedrock(…)(mode
   so `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` and
   `AWS_ENDPOINT_URL_BEDROCK_RUNTIME` are never read. `apiKey: ''` is the subtle one: a
   non-blank `apiKey` — or the `AWS_BEARER_TOKEN_BEDROCK` variable — flips the provider to bearer
-  auth and skips SigV4, so an explicit empty string *seals* that variable and keeps the client on
+  auth and skips SigV4, so an explicit empty string _seals_ that variable and keeps the client on
   the user's stored keys. A deployment with the variable set would otherwise authenticate every
   request with a token nobody saved.
 - **The control plane is signed here, not by the provider package.** `@ai-sdk/amazon-bedrock`
