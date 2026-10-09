@@ -15,6 +15,7 @@ import {
   UserMessageEventInputSchema,
   UserPreferencesSchema,
   UserUsageSchema,
+  credentialDetails,
   encodeKeyCursor,
   newAgentId,
   newProviderCredentialId,
@@ -761,26 +762,33 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
         return unauthenticated()
       }
       // The body goes through the same schema the route parses it with, so an endpoint that is
-      // not https or a deployment list that is empty is the server's 400 (#245, A3a).
+      // not a URL, or a deployment list that is empty, is the server's 400 (#245, A3a/A3b).
       const parsed = PutProviderCredentialRequestSchema.safeParse(body)
       if (!parsed.success) {
         throw badRequestFor(parsed.error.issues)
       }
       // The server validates the credential with one cheap call and answers 422 when the
       // provider refuses it; a secret with no characters in it fails that call every time,
-      // which is the one rejection a test can spell without a provider.
-      if (parsed.data.api_key.trim() === '') {
+      // which is the one rejection a test can spell without a provider. A custom
+      // OpenAI-compatible credential's key is optional (#249), so an absent or empty one is
+      // **not** a rejection for it.
+      const apiKey = parsed.data.api_key ?? ''
+      if (parsed.data.type !== 'openai_compatible' && apiKey.trim() === '') {
         throw new ApiError(422, `The ${name} credential was rejected by the provider.`, {
           type: 'invalid_provider_credential',
         })
       }
       const existing = credentials.get(name)
       const timestamp = now().toISOString()
+      // The public details the server derives from the body — a custom base URL's host — come
+      // from the same protocol helper, so the fake's metadata matches the real route's.
+      const details = credentialDetails(parsed.data)
       const stored = ProviderCredentialSchema.parse({
         id: existing?.id ?? newProviderCredentialId(),
         type: parsed.data.type,
         name,
-        last4: parsed.data.api_key.slice(-4),
+        last4: apiKey.slice(-4),
+        ...(details === undefined ? {} : { details }),
         created_at: existing?.created_at ?? timestamp,
         updated_at: timestamp,
         validated_at: timestamp,

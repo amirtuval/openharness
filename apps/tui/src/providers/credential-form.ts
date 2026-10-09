@@ -33,6 +33,12 @@ export interface CredentialField {
    * a secret and is shown, because the reader has to check what they pasted.
    */
   readonly secret: boolean
+  /**
+   * Whether the field may be left empty. False for every secret but a custom endpoint's key,
+   * which is optional (#249): a local server may take none, and the prompt must accept an empty
+   * answer rather than asking again.
+   */
+  readonly optional?: boolean
 }
 
 /** One credential type's form: the fields, and how they become a request body. */
@@ -76,6 +82,22 @@ export const CREDENTIAL_FORMS: Record<ProviderCredentialType, CredentialForm> = 
       api_key: values['api_key'] ?? '',
       deployments: splitDeployments(values['deployments'] ?? ''),
     }),
+  },
+  openai_compatible: {
+    fields: [
+      { name: 'base_url', label: 'Base URL (http://localhost:11434/v1)', secret: false },
+      { name: 'api_key', label: 'API key (optional)', secret: true, optional: true },
+    ],
+    // The key is omitted when empty: the schema accepts a missing key but not an empty string,
+    // and an endpoint that takes none must send no Authorization header.
+    build: (values) => {
+      const apiKey = (values['api_key'] ?? '').trim()
+      return {
+        type: 'openai_compatible',
+        base_url: (values['base_url'] ?? '').trim(),
+        ...(apiKey === '' ? {} : { api_key: apiKey }),
+      }
+    },
   },
 }
 

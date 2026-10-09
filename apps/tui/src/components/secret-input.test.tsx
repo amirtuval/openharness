@@ -9,7 +9,11 @@ const KEY = 'sk-test-0000'
 
 /** Render the input and record what it was asked to submit or cancel. */
 function renderInput(
-  options: { readonly placeholder?: string; readonly onChar?: (c: string) => boolean } = {},
+  options: {
+    readonly placeholder?: string
+    readonly onChar?: (c: string) => boolean
+    readonly optional?: boolean
+  } = {},
 ) {
   const submitted: string[] = []
   let cancelled = 0
@@ -17,6 +21,7 @@ function renderInput(
     <SecretInput
       placeholder={options.placeholder}
       onChar={options.onChar}
+      optional={options.optional}
       onSubmit={(value) => {
         submitted.push(value)
       }}
@@ -68,6 +73,16 @@ describe('SecretInput', () => {
     pressKey(input, 'enter')
     await waitForFrame(input, '❯')
     expect(input.submitted).toEqual([KEY])
+  })
+
+  it('submits an empty value when the field is optional (#249)', async () => {
+    // A custom endpoint's key may be absent: Enter on the empty box is the answer "", not a
+    // prompt that ignores the keypress and looks stuck.
+    const input = renderInput({ optional: true })
+
+    pressKey(input, 'enter')
+    await waitFor(() => input.submitted.length === 1)
+    expect(input.submitted).toEqual([''])
   })
 
   it('trims the whitespace a copied key usually carries', () => {

@@ -119,9 +119,12 @@ export function ProvidersCard() {
                 <div className="min-w-0">
                   <p className="truncate text-sm">
                     <span className="font-medium">{credentialDisplayName(credential)}</span>{' '}
-                    <span className="font-mono text-muted-foreground">…{credential.last4}</span>
+                    <span className="font-mono text-muted-foreground">
+                      {credentialKeyLabel(credential)}
+                    </span>
                   </p>
                   <p className="truncate text-xs text-muted-foreground">
+                    {credentialEndpointLabel(credential)}
                     {validatedLabel(credential)}
                   </p>
                 </div>
@@ -220,4 +223,27 @@ function validatedLabel(credential: ProviderCredential): string {
     return `Saved ${relativeTime(credential.updated_at)} — not validated yet`
   }
   return `Validated ${relativeTime(credential.validated_at)}`
+}
+
+/**
+ * The last four of a credential's key, or "no key" when it has none.
+ *
+ * A custom OpenAI-compatible credential may carry no key at all (#249); its `last4` is empty,
+ * and an empty `…` would read as a key that failed to load rather than one a local endpoint
+ * does not need.
+ */
+function credentialKeyLabel(credential: ProviderCredential): string {
+  return credential.last4 === '' ? 'no key' : `…${credential.last4}`
+}
+
+/**
+ * The endpoint a credential points at, when its type publishes one, and a separator.
+ *
+ * A custom credential's public detail is its base URL's **host** (#249) — the one thing that
+ * tells two custom endpoints apart — so the row shows it; every other type has no such fact and
+ * gets an empty string.
+ */
+function credentialEndpointLabel(credential: ProviderCredential): string {
+  const host = credential.details?.base_url_host
+  return host === undefined ? '' : `${host} · `
 }

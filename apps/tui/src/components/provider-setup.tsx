@@ -124,7 +124,11 @@ export function ProviderSetup({
     target !== null && target.named && storedNames !== null && storedNames.includes(target.name)
   const nameField: CredentialField = {
     name: CREDENTIAL_NAME_FIELD,
-    label: `Name (its models will be ${target?.name ?? ''}/<deployment>)`,
+    // The second half of the model id depends on the type: an Azure credential's ids are
+    // `<name>/<deployment>`, a custom endpoint's are `<name>/<model>` (#249).
+    label: `Name (its models will be ${target?.name ?? ''}/${
+      target?.credential === 'azure_openai' ? '<deployment>' : '<model>'
+    })`,
     secret: false,
   }
   const steps: readonly CredentialField[] =
@@ -305,10 +309,12 @@ export function ProviderSetup({
   return (
     <Box flexDirection="column">
       <Text>{`Connect ${target.displayName}`}</Text>
-      <Text>
-        {`Get a key: ${target.keyUrl}`}
-        <Text dimColor> — press o to open it</Text>
-      </Text>
+      {target.keyUrl === undefined ? null : (
+        <Text>
+          {`Get a key: ${target.keyUrl}`}
+          <Text dimColor> — press o to open it</Text>
+        </Text>
+      )}
       {target.freeTier !== undefined && <Text dimColor>{target.freeTier}</Text>}
       {error !== null && <Text color="red">{error}</Text>}
       {note !== null && <Text dimColor>{note}</Text>}
@@ -320,9 +326,12 @@ export function ProviderSetup({
           key={`${target.name}:${current.name}:${step}`}
           placeholder={current.secret ? (target.keyHint ?? 'paste the key') : 'type it'}
           mask={current.secret}
+          optional={current.optional === true}
           busy={saving}
           onChar={(character) => {
-            if (character !== 'o') return false
+            // Only claim `o` when there is a page to open: a custom endpoint has none, and
+            // claiming the letter would silently drop it from the URL being typed (#249).
+            if (character !== 'o' || target.keyUrl === undefined) return false
             openKeyPage()
             return true
           }}

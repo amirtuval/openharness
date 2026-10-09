@@ -125,8 +125,12 @@ export interface CredentialTarget {
   readonly displayName: string
   /** Which form collects it — the key of the frontends' form table (#201, X6). */
   readonly credential: ProviderCredentialType
-  /** Where a reader creates the secret. Opened in a new tab. */
-  readonly keyUrl: string
+  /**
+   * Where a reader creates the secret. Opened in a new tab. Absent for a target with no single
+   * console — a custom OpenAI-compatible endpoint is the user's own, so its form offers no
+   * link rather than guessing one (#249).
+   */
+  readonly keyUrl?: string
   /** Whether the reader may keep more than one, each under a name they choose. */
   readonly named: boolean
   /** The free-tier hint, where the target has one (X8). */
@@ -157,8 +161,10 @@ export const CREDENTIAL_TARGETS: readonly CredentialTarget[] = [
     name: entry.defaultName,
     displayName: entry.name,
     credential: entry.type,
-    keyUrl: entry.keyUrl,
     named: true,
+    // A type with no single console — a custom endpoint is the user's own — carries no
+    // `keyUrl`, and the form simply offers no link (#249).
+    ...(entry.keyUrl === undefined ? {} : { keyUrl: entry.keyUrl }),
   })),
 ]
 
