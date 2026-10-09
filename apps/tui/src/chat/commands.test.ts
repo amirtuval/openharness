@@ -1,5 +1,5 @@
 import { createFakeClient } from '@openharness/client/testing'
-import { makeModelEntry } from '@openharness/protocol/fixtures'
+import { makeMode, makeModelEntry, makeProviderCredential } from '@openharness/protocol/fixtures'
 import { describe, expect, it } from 'vitest'
 
 import { waitFor } from '../test-support/input'
@@ -352,6 +352,35 @@ describe('currentModelOf', () => {
     session.setModel('openai/gpt-4.1-mini')
     await session.send('Hello.')
     await fake.waitForIdle()
+    await waitFor(() => currentModelOf(session) === 'openai/gpt-4.1-mini', {
+      describe: () => `still ${currentModelOf(session)}`,
+    })
+
+    session.dispose()
+  })
+
+  it('is the model a mode resolves to, after a mid-chat mode switch (#267)', async () => {
+    // The mode-carrying message names no model, so nothing but the reply's own span (`meta.model`)
+    // says which model the chat now runs — the session the chat was opened from is a snapshot,
+    // exactly as the CLI opens one.
+    const mode = makeMode({ name: 'qa-cli-fast', model: 'openai/gpt-4.1-mini' })
+    const fake = createFakeClient({
+      modes: [mode],
+      models: [makeModelEntry({ id: 'openai/gpt-4.1-mini' })],
+      credentials: [makeProviderCredential({ name: 'openai' })],
+    })
+    fake.respondWith('Following the mode.')
+    const opened = await fake.sessions.get(fake.session.id)
+    const session = createChatSession({ client: fake, session: opened })
+    await session.start()
+    expect(currentModelOf(session)).toBe(opened.model.id)
+
+    session.setMode(mode.id)
+    await session.send('Go fast.')
+    await fake.waitForIdle()
+    // The session snapshot still names the old model; only the log moved.
+    expect(session.session.model.id).toBe(opened.model.id)
+    expect(session.getState().transcript.model).toBeNull()
     await waitFor(() => currentModelOf(session) === 'openai/gpt-4.1-mini', {
       describe: () => `still ${currentModelOf(session)}`,
     })

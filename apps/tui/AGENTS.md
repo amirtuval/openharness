@@ -223,8 +223,11 @@ line (`(next message)` while the pick is pending).
 **pending** rather than applied: the status line names it with `(next message)` after it, and
 the next message carries it as `user.message.model` (`sendMessage(..., { model })`, U3). From
 then on the session runs that model — later messages send no model — and the status line shows
-the model the log last said the session runs (`transcript.model`, falling back to the
-session's own), by its catalog name when the catalog is known and its id otherwise (#208).
+the model the log last said the session runs (`transcript.model`), then the model the last
+request **ran** (the last reply's span, `meta.model`), then the session's own, by its catalog
+name when the catalog is known and its id otherwise (#208). The span fallback is what keeps a
+**mode** switch right (#267): a mode-carrying message names no model, so only the reply says
+which model the mode resolved to — the same rule the web header uses (#253).
 Switching provider mid-chat is supported; the history is rebuilt per request. Ctrl+C in the
 picker closes it and changes nothing — as does Esc, once the search line is empty (with a
 query in it, Esc clears that first).
