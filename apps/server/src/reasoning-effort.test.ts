@@ -8,6 +8,7 @@ import {
   type StoredEvent,
   type UserMessageEvent,
 } from '@openharness/protocol'
+import { createBundledRegistry, type ModelRegistry } from './catalog/registry'
 import { createTestApp, postJson, readHistory, waitForIdle } from './test-support'
 
 /**
@@ -17,10 +18,15 @@ import { createTestApp, postJson, readHistory, waitForIdle } from './test-suppor
  *
  * The effort is the message's field and nothing else — the same reading as the per-message
  * model of #111 — so the server's part is that the wire accepts it, the store keeps it exactly
- * as sent, and a turn reads it back out of the log.
+ * as sent, and a turn reads it back out of the log. Which models take an effort is the
+ * registry's answer (#252's follow-up), so these tests wire the bundled snapshot in — the
+ * production wiring — and the span's `applied` is read off the real data.
  */
 
 const SESSIONS = `${API_VERSION_PREFIX}/sessions`
+
+/** The production reasoning wiring: the resolver over the bundled models.dev snapshot. */
+const REGISTRY: ModelRegistry = createBundledRegistry()
 
 /** Create a session running `model` and return it. */
 async function createSession(test: ReturnType<typeof createTestApp>, model: string) {
@@ -36,7 +42,7 @@ function spanEffortOf(history: readonly StoredEvent[]): ReasoningEffortRun | und
 
 describe('a user.message carrying a reasoning effort', () => {
   it('is stored on the event, and the turn runs at it', async () => {
-    const test = createTestApp({ replies: [{ text: ['thinking'] }] })
+    const test = createTestApp({ replies: [{ text: ['thinking'] }], registry: REGISTRY })
     const session = await createSession(test, 'anthropic/claude-sonnet-5')
 
     const response = await postJson(test, `${SESSIONS}/${session.id}/events`, {
@@ -61,9 +67,9 @@ describe('a user.message carrying a reasoning effort', () => {
   })
 
   it('records an effort asked for and not applied when the model takes none', async () => {
-    const test = createTestApp({ replies: [{ text: ['briefly'] }] })
-    // `openai/gpt-4o-mini` is not a reasoning model: the effort is asked for, and the request
-    // keeps the provider's default.
+    const test = createTestApp({ replies: [{ text: ['briefly'] }], registry: REGISTRY })
+    // `openai/gpt-4o-mini` is not a reasoning model: the snapshot says so, the effort is asked
+    // for, and the request keeps the provider's default.
     const session = await createSession(test, 'openai/gpt-4o-mini')
 
     await postJson(test, `${SESSIONS}/${session.id}/events`, {
@@ -83,8 +89,35 @@ describe('a user.message carrying a reasoning effort', () => {
     })
   })
 
+  it('clamps an effort the model does not take to one it does', async () => {
+    // The registry says this model's own knob has `low` and `high` and no `medium`, so a request
+    // for `medium` is sent as `high` — the level it really runs, not one its API would reject.
+    const registry: ModelRegistry = {
+      models: (provider) =>
+        provider === 'openai' ? [{ id: 'o4-mini', reasoning: true, efforts: ['low', 'high'] }] : [],
+    }
+    const test = createTestApp({ replies: [{ text: ['thinking'] }], registry })
+    const session = await createSession(test, 'openai/o4-mini')
+
+    await postJson(test, `${SESSIONS}/${session.id}/events`, {
+      events: [
+        {
+          type: EVENT_TYPES.userMessage,
+          content: [{ type: 'text', text: 'think medium' }],
+          reasoning_effort: 'medium',
+        },
+      ],
+    })
+
+    await waitForIdle(test.store, session.id)
+    expect(spanEffortOf(await readHistory(test.store, session.id))).toEqual({
+      requested: 'medium',
+      applied: 'high',
+    })
+  })
+
   it('is accepted at session creation, on an initial event', async () => {
-    const test = createTestApp({ replies: [{ text: ['hello'] }] })
+    const test = createTestApp({ replies: [{ text: ['hello'] }], registry: REGISTRY })
 
     const response = await postJson(test, SESSIONS, {
       model: { id: 'anthropic/claude-sonnet-5' },
@@ -128,7 +161,7 @@ describe('a user.message carrying a reasoning effort', () => {
   })
 
   it('leaves a message without one, and the request that answers it, unchanged', async () => {
-    const test = createTestApp({ replies: [{ text: ['hi'] }] })
+    const test = createTestApp({ replies: [{ text: ['hi'] }], registry: REGISTRY })
     const session = await createSession(test, 'anthropic/claude-sonnet-5')
 
     await postJson(test, `${SESSIONS}/${session.id}/events`, {

@@ -2,22 +2,40 @@ import { PROVIDER_IDS, type ReasoningEffort } from '@openharness/protocol'
 import { makeUserInterrupt, makeUserMessage } from '@openharness/protocol/fixtures'
 import { describe, expect, it } from 'vitest'
 
-import { planReasoning, PROVIDER_REASONING, requestedReasoningEffort } from './reasoning'
+import {
+  planReasoning,
+  PROVIDER_REASONING,
+  type ReasoningSupportFor,
+  requestedReasoningEffort,
+} from './reasoning'
 
 /**
  * The reasoning-effort mapping, one case per provider.
  *
- * Every provider's row is asserted twice: a model of the family the provider takes an effort
- * for, and a model of one it does not. The second half is the one that matters — an option a
- * provider's API does not know is a failed request, not an ignored one — so each provider is
- * pinned against a model the catalogue really lists and that must keep its default.
+ * Which models take an effort is the injected resolver's answer now (#252's follow-up), so these
+ * tests hand every model one that takes all three levels and assert only what the table still
+ * owns: the spelling of the option each provider's AI SDK client reads and the clamp a knob with
+ * fewer levels needs. Which models *get* an effort at all is the resolver's question — the
+ * `planReasoning` cases below and, end to end, the server's `reasoning-support.test.ts`.
  */
 
+/** The levels every model takes in the per-provider cases. */
+const EVERY_LEVEL: ReasoningSupportFor = () => ['low', 'medium', 'high']
+
+/** The level the per-provider cases ask for. */
 const EFFORT: ReasoningEffort = 'high'
 
-/** What {@link planReasoning} sends and applies for `modelId` at {@link EFFORT}. */
-function plan(modelId: string): ReturnType<typeof planReasoning> {
-  return planReasoning(modelId, EFFORT)
+/** What {@link planReasoning} sends and applies for `modelId`, for a model that takes `levels`. */
+function plan(
+  modelId: string,
+  levels: ReasoningSupportFor = EVERY_LEVEL,
+): ReturnType<typeof planReasoning> {
+  return planReasoning(modelId, EFFORT, levels)
+}
+
+/** A resolver that says every model takes exactly `levels` — the gate, stated per case. */
+function taking(levels: readonly ReasoningEffort[]): ReasoningSupportFor {
+  return () => levels
 }
 
 describe('PROVIDER_REASONING', () => {
@@ -26,16 +44,11 @@ describe('PROVIDER_REASONING', () => {
   })
 
   describe('anthropic', () => {
-    it('asks for an effort with `effort`, for the adaptive-thinking models', () => {
+    it('asks for an effort with `effort`, for a model the resolver grants one', () => {
       const result = plan('anthropic/claude-opus-4-6')
       expect(result.providerOptions).toEqual({ anthropic: { effort: 'high' } })
       expect(result.applied).toBe('high')
       expect(result.record).toEqual({ requested: 'high', applied: 'high' })
-    })
-
-    it('leaves a model with no effort knob on the provider default', () => {
-      expect(plan('anthropic/claude-sonnet-4-5').providerOptions).toBeUndefined()
-      expect(plan('anthropic/claude-sonnet-4-5').applied).toBeNull()
     })
   })
 
@@ -45,32 +58,21 @@ describe('PROVIDER_REASONING', () => {
         openai: { reasoningEffort: 'high' },
       })
     })
-
-    it('leaves a non-reasoning model on the provider default', () => {
-      const result = plan('openai/gpt-4o-mini')
-      expect(result.providerOptions).toBeUndefined()
-      expect(result.record).toEqual({ requested: 'high', applied: null })
-    })
   })
 
   describe('google', () => {
-    it('asks for an effort with a Gemini 3 thinking level', () => {
+    it('asks for an effort with a Gemini thinking level', () => {
       expect(plan('google/gemini-3.5-flash').providerOptions).toEqual({
         google: { thinkingConfig: { thinkingLevel: 'high' } },
       })
     })
-
-    it('leaves a Gemini 2.5 model alone: its knob is a token budget, not a level', () => {
-      expect(plan('google/gemini-2.5-flash').providerOptions).toBeUndefined()
-    })
   })
 
   describe('openrouter', () => {
-    it('sends the effort for any model: the router maps or drops it', () => {
+    it('asks for an effort with `reasoningEffort` when the resolver grants the model one', () => {
       expect(plan('openrouter/anthropic/claude-opus-4.6').providerOptions).toEqual({
         openrouter: { reasoningEffort: 'high' },
       })
-      expect(plan('openrouter/sao10k/l3-lunaris-8b').applied).toBe('high')
     })
   })
 
@@ -79,10 +81,6 @@ describe('PROVIDER_REASONING', () => {
       expect(plan('groq/openai/gpt-oss-120b').providerOptions).toEqual({
         groq: { reasoningEffort: 'high' },
       })
-    })
-
-    it('leaves a model Groq rejects the parameter for on the provider default', () => {
-      expect(plan('groq/llama-3.3-70b-versatile').providerOptions).toBeUndefined()
     })
   })
 
@@ -94,13 +92,9 @@ describe('PROVIDER_REASONING', () => {
     })
 
     it('runs `medium` at `high`: DeepSeek has no medium', () => {
-      const result = planReasoning('deepseek/deepseek-v4-pro', 'medium')
+      const result = planReasoning('deepseek/deepseek-v4-pro', 'medium', EVERY_LEVEL)
       expect(result.providerOptions).toEqual({ deepseek: { reasoningEffort: 'high' } })
       expect(result.record).toEqual({ requested: 'medium', applied: 'high' })
-    })
-
-    it('leaves a non-reasoning model on the provider default', () => {
-      expect(plan('deepseek/deepseek-chat').providerOptions).toBeUndefined()
     })
   })
 
@@ -112,12 +106,8 @@ describe('PROVIDER_REASONING', () => {
     })
 
     it('runs every level at `high`: Mistral has only `none` and `high`', () => {
-      const result = planReasoning('mistral/magistral-medium-latest', 'low')
+      const result = planReasoning('mistral/magistral-medium-latest', 'low', EVERY_LEVEL)
       expect(result.record).toEqual({ requested: 'low', applied: 'high' })
-    })
-
-    it('leaves a model Mistral has no effort for on the provider default', () => {
-      expect(plan('mistral/mistral-large-latest').providerOptions).toBeUndefined()
     })
   })
 
@@ -127,12 +117,6 @@ describe('PROVIDER_REASONING', () => {
         fireworks: { reasoningEffort: 'high' },
       })
     })
-
-    it('leaves a model with no effort knob on the provider default', () => {
-      expect(
-        plan('fireworks/accounts/fireworks/models/llama-v3p3-70b-instruct').providerOptions,
-      ).toBeUndefined()
-    })
   })
 
   describe('together', () => {
@@ -140,12 +124,6 @@ describe('PROVIDER_REASONING', () => {
       expect(plan('together/deepseek-ai/DeepSeek-V4-Pro-0813').providerOptions).toEqual({
         togetherai: { reasoningEffort: 'high' },
       })
-    })
-
-    it('leaves a model with no effort knob on the provider default', () => {
-      expect(
-        plan('together/meta-llama/Llama-3.3-70B-Instruct-Turbo').providerOptions,
-      ).toBeUndefined()
     })
   })
 
@@ -155,10 +133,6 @@ describe('PROVIDER_REASONING', () => {
         xai: { reasoningEffort: 'high' },
       })
     })
-
-    it('leaves a model xAI has no effort for on the provider default', () => {
-      expect(plan('xai/grok-4.20-0309-reasoning').providerOptions).toBeUndefined()
-    })
   })
 
   describe('cerebras', () => {
@@ -167,16 +141,12 @@ describe('PROVIDER_REASONING', () => {
         cerebras: { reasoningEffort: 'high' },
       })
     })
-
-    it('leaves a model with no effort knob on the provider default', () => {
-      expect(plan('cerebras/llama3.1-8b').providerOptions).toBeUndefined()
-    })
   })
 })
 
 describe('planReasoning', () => {
   it('asks for nothing when the log asked for nothing', () => {
-    const result = planReasoning('openai/o4-mini', null)
+    const result = planReasoning('openai/o4-mini', null, EVERY_LEVEL)
     expect(result).toEqual({
       requested: null,
       applied: null,
@@ -185,14 +155,51 @@ describe('planReasoning', () => {
     })
   })
 
+  it('sends nothing for a model the resolver does not know', () => {
+    // A custom URL, an Azure deployment, a model the snapshot predates: `undefined` is "unknown",
+    // and the safe reading of unknown is the provider's default.
+    const result = planReasoning('openai/o4-mini', 'low', () => undefined)
+    expect(result.providerOptions).toBeUndefined()
+    expect(result.record).toEqual({ requested: 'low', applied: null })
+  })
+
+  it('sends nothing for a model the resolver knows takes no effort', () => {
+    const result = planReasoning('openai/gpt-4o-mini', 'high', taking([]))
+    expect(result.providerOptions).toBeUndefined()
+    expect(result.record).toEqual({ requested: 'high', applied: null })
+  })
+
   it('sends nothing for a provider this build has no client for', () => {
-    const result = planReasoning('someone-else/gpt-5', 'low')
+    // The resolver may still describe the model, but there is nothing to send an effort to: the
+    // request ends as an unsupported provider before it is made.
+    const result = planReasoning('someone-else/gpt-5', 'low', EVERY_LEVEL)
     expect(result.providerOptions).toBeUndefined()
     expect(result.record).toEqual({ requested: 'low', applied: null })
   })
 
   it('is unbothered by a model id that names an inherited property', () => {
-    expect(planReasoning('toString/x', 'low').record).toEqual({ requested: 'low', applied: null })
+    expect(planReasoning('toString/x', 'low', EVERY_LEVEL).record).toEqual({
+      requested: 'low',
+      applied: null,
+    })
+  })
+
+  it('clamps a level the model does not take to the nearest one it does', () => {
+    // A model that takes `low` and `high` has no `medium`: the request runs at `high`, the level
+    // its own client would pick, and the level it is actually sent.
+    const result = planReasoning('openai/o4-mini', 'medium', taking(['low', 'high']))
+    expect(result.providerOptions).toEqual({ openai: { reasoningEffort: 'high' } })
+    expect(result.record).toEqual({ requested: 'medium', applied: 'high' })
+  })
+
+  it('clamps down as well as up', () => {
+    const result = planReasoning('openai/o4-mini', 'high', taking(['low']))
+    expect(result.record).toEqual({ requested: 'high', applied: 'low' })
+  })
+
+  it('keeps a level the model does take exactly as it is', () => {
+    const result = planReasoning('openai/o4-mini', 'medium', taking(['low', 'medium', 'high']))
+    expect(result.record).toEqual({ requested: 'medium', applied: 'medium' })
   })
 })
 

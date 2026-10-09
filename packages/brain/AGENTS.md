@@ -52,7 +52,7 @@ src/
   context.ts            ContextStrategy: the log as model messages, trimmed
   model.ts              ModelFactory, credentials, and streaming one request through the AI SDK
   azure-fetch.ts        the Azure endpoint's base URL, and the safeFetch guard a model call goes through
-  reasoning.ts          the reasoning effort: per provider, and what the log asks a request for
+  reasoning.ts          the reasoning effort: per provider, gated by the injected resolver
   redact.ts             redactSecret: scrubbing a provider key out of error text
   errors.ts             classifyModelError: retryable or terminal, and which session.error
   retry.ts              RetryPolicy, backoff, and the injectable sleep
@@ -73,7 +73,7 @@ emits what that reaches.
 | export                                                                        | what it is                                                                                               |
 | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
 | `runTurn(sessionId, options)`                                                 | run one turn; resolves to a `TurnOutcome`                                                                |
-| `RunTurnOptions`                                                              | `{ store, model, resolveCredential, signal?, fence?, contextStrategy?, retry? }`                         |
+| `RunTurnOptions`                                                                                          | `{ store, model, resolveCredential, signal?, fence?, contextStrategy?, reasoningSupportFor?, retry? }`                              |
 | `TurnOutcome`, `TurnOutcomeKind`                                              | `{ outcome: 'idle' \| 'noop' \| 'interrupted' \| 'error' }`                                              |
 | `ContextStrategy`, `ContextStrategyOptions`                                   | `(events, { model, system }) => ModelMessage[]`                                                          |
 | `createContextStrategy(config?)`, `ContextStrategyConfig`                     | the default strategy: the conversation, trimmed to a token budget resolved per model                     |
@@ -90,7 +90,7 @@ emits what that reaches.
 | `redactSecret(text, secret)`, `REDACTED_PLACEHOLDER`                          | the credential scrubbed out of provider error text                                                       |
 | `streamModelRequest(params)`, `ModelRequestParams`, `ModelRequestResult`      | one model request, as text, usage, error and abort                                                       |
 | `ProviderOptions`                                                             | the AI SDK's per-provider options for one call, read off `streamText`                                    |
-| `PROVIDER_REASONING`, `planReasoning`, `ReasoningPlan`, `requestedReasoningEffort` | `low \| medium \| high` in each provider's own option, and what the log asks a request for (#252)        |
+| `PROVIDER_REASONING`, `planReasoning`, `ReasoningPlan`, `ReasoningSupportFor`, `requestedReasoningEffort` | `low \| medium \| high` in each provider's own option — gated by the injected resolver — and what the log asks a request for (#252) |
 | `toModelUsage(usage)`, `ZERO_MODEL_USAGE`                                     | what a request reported → the protocol's four counters, always integers                                  |
 | `classifyModelError(error)`, `ModelErrorClassification`                       | retryable or not, and the `session.error` type that says so                                              |
 | `isRetryableModelError(error)`                                                | the same answer, when only the boolean is wanted                                                         |
@@ -297,6 +297,7 @@ Notes on the corners:
 | how the log becomes messages         | `contextStrategy` on `runTurn`; the default trims to a token budget, per model                   |
 | how `provider/model` becomes a model | `model` on `runTurn` (required): a `ModelFactory`; the server passes `providerModelFactory`      |
 | where the key comes from             | `resolveCredential` on `runTurn`: the owner's credential per provider, resolved per request (A5) |
+| which models take a reasoning effort | `reasoningSupportFor` on `runTurn`: the levels a model takes, asked per request (#252)           |
 | how failures are retried             | `retry` on `runTurn`: attempts, base delay, ceiling, and the `sleep` itself                      |
 
 `ContextStrategy` is called once per model request, with the log as that request sees it and the
@@ -469,24 +470,29 @@ How hard a request is asked to think is a property of the **request**, and `low 
 is the vocabulary the protocol fixes (`@openharness/protocol`); this package is where a level
 becomes the thing a provider actually reads (`src/reasoning.ts`).
 
-- **One table, keyed by the provider list.** `PROVIDER_REASONING` is a
-  `Readonly<Record<ProviderId, …>>` — the same shared list #245 built — so a provider the server
-  can store a key for and this table has no effort for is a compile error. Each row says whether
-  a model of that provider takes an effort at all (`supports`) and, when it does, the
-  `providerOptions` its AI SDK client reads: Anthropic's `effort`, OpenAI's and xAI's and
-  Groq's and Cerebras' `reasoningEffort`, DeepSeek's, Mistral's, Fireworks' and Together's,
-  Gemini's `thinkingConfig.thinkingLevel`, OpenRouter's. Each option was checked against the
-  installed `@ai-sdk/*` version, which is where the effort families come from too — the models
-  every one of those clients passes an effort through for, and not the ones it would be handed
-  to a provider that answers 400.
-- **`supports` is the gate that keeps a request from failing.** Every provider above sends the
-  option straight through, and one it does not know is an error rather than an ignored
-  parameter. So an effort is sent only for a model whose family takes one; everything else keeps
-  the provider's default, which is exactly what `low`/`medium`/`high` absent means. A model
-  wrongly left out loses an optimization; one wrongly included loses the whole request, so the
-  rules are deliberately conservative, and a provider whose knob has fewer levels than ours is
-  mapped the way its own client maps it (DeepSeek has no `medium`, and runs it at `high`;
-  Mistral has only `none` and `high`).
+- **One table, keyed by the provider list, that keeps only the spelling.** `PROVIDER_REASONING`
+  is a `Readonly<Record<ProviderId, …>>` — the same shared list #245 built — so a provider the
+  server can store a key for and this table has no effort for is a compile error. Each row keeps
+  only the `providerOptions` its AI SDK client reads: Anthropic's `effort`, OpenAI's and xAI's
+  and Groq's and Cerebras' `reasoningEffort`, DeepSeek's, Mistral's, Fireworks' and Together's,
+  Gemini's `thinkingConfig.thinkingLevel`, OpenRouter's — each checked against the installed
+  `@ai-sdk/*` version — and the clamp its own knob needs (DeepSeek has no `medium` and runs it
+  at `high`; Mistral has only `none` and `high`, and every level above the default runs at
+  `high`; `applied`).
+- **Which models take an effort is the host's, through an injected resolver.** It used to be
+  hand-written patterns per provider in this table, which rotted with every model release — a new
+  reasoning model silently got no effort, a renamed one could be sent a level its API rejects
+  with a 400. `RunTurnOptions.reasoningSupportFor` is a `(modelId) => levels | undefined`
+  resolver, the same seam the context budget's `tokenBudgetFor` uses, built by the host from the
+  registry it already holds (the server's models.dev snapshot); the row above supplies only the
+  option and the clamp. A host that injects none — and a model the resolver does not know (a
+  custom URL, an Azure deployment, a model a snapshot predates) — is the **safe default**: no
+  model is known to take an effort, so nothing is sent and the request keeps the provider's
+  default. `undefined` (unknown) and `[]` (known to take none) are kept apart for that reason.
+- **A level the model does not take is clamped to one it does.** When the resolver names the
+  levels a model takes and the level the provider's knob produced is outside them, the nearest
+  is sent — a `medium` asked of a model that takes `low` and `high` runs at `high` — so a level
+  the model's API would reject is never put on the wire.
 - **The loop reads the effort out of the log, per request.** `requestedReasoningEffort` walks the
   replay read for the newest `user.message` carrying one — the same "from this message on"
   reading as the model switch of #111, and the same boundary, so a message that arrived while the
@@ -540,13 +546,15 @@ retries run on an injected `sleep`, the clock is a `TestClock` from
   resolved), a steering message carrying a switch — across providers — is the model of the
   **next** request while the first keeps its own, the session's projection follows the log,
   and the newest switch among several queued messages wins.
-- `reasoning.test.ts` and `reasoning-effort.test.ts` — the effort: the mapping for every one of
-  the eleven providers (a family it takes an effort for, and a model of the same provider
-  that must keep its default), the levels a provider's own knob cannot spell, the newest
+- `reasoning.test.ts` and `reasoning-effort.test.ts` — the effort: the option spelling for every
+  one of the eleven providers (with a resolver granting the model the levels), the levels a
+  provider's own knob cannot spell, the resolver's gate (`undefined` and `[]` both send nothing,
+  an unknown provider sends nothing), the clamp to the nearest level a model takes, the newest
   effort winning the walk over the log, and the loop's own half — the option reaching the
   model call, the span recording what was asked for and applied (including `applied: null`
-  for a model that takes none), a switch that arrives mid-stream belonging to the next
-  request, and a session that never asked for one writing no field at all.
+  for a model that takes none, the same when no resolver is injected), a switch that arrives
+  mid-stream belonging to the next request, and a session that never asked for one writing no
+  field at all.
 - The credential paths live in `turn.test.ts` too: a turn that ends with
   `missing_provider_credential` (no span, the queued message claimed by the idle event, no
   model call), the same with `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` set to decoys and `fetch`

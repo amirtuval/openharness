@@ -6,10 +6,10 @@ import { VALIDATABLE_PROVIDERS } from '../provider-validation'
 /**
  * The registry seam over this package's committed models.dev snapshot (C2; #234): the data is
  * a file in the package, bundled with the code, and nothing here reaches a network. These
- * tests pin what the snapshot carries — a display name, a context window and an output limit
- * per model, which the ids-only registry it replaced did not — and what it does not, because
- * the rest of the catalogue is written around exactly that: the join fills the limits the
- * provider's own list leaves `null`, and the name filter still classifies.
+ * tests pin what the snapshot carries — a display name, a context window, an output limit and
+ * the reasoning data per model, which the ids-only registry it replaced did not — and what it
+ * does not, because the rest of the catalogue is written around exactly that: the join fills the
+ * limits the provider's own list leaves `null`, and the name filter still classifies.
  */
 
 const registry = createBundledRegistry()
@@ -57,6 +57,27 @@ describe('createBundledRegistry', () => {
 
     expect(haiku?.contextWindow).toBe(200000)
     expect(gpt?.contextWindow).toBe(400000)
+  })
+
+  it('carries the reasoning data: an effort model, and a reasoning model without one', () => {
+    const sonnet = registry.models('anthropic').find((model) => model.id === 'claude-sonnet-5')
+    // The levels are models.dev's own vocabulary, reaching past our three; the reasoning
+    // resolver is what narrows them (`catalog/reasoning-support.ts`).
+    expect(sonnet).toMatchObject({
+      reasoning: true,
+      efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    })
+
+    // A plain chat model carries neither field.
+    const gpt4o = registry.models('openai').find((model) => model.id === 'gpt-4o-mini')
+    expect(gpt4o?.reasoning).toBeUndefined()
+    expect(gpt4o?.efforts).toBeUndefined()
+
+    // And a reasoning model whose knob is a token budget or a toggle is `reasoning: true` with
+    // no `efforts` — the shape that keeps it on the provider's default.
+    const gemini = registry.models('google').find((model) => model.id === 'gemini-2.5-flash')
+    expect(gemini?.reasoning).toBe(true)
+    expect(gemini?.efforts).toBeUndefined()
   })
 
   it('answers an empty list for a provider it does not know', () => {

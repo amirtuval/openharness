@@ -22,25 +22,45 @@ import { providerOf } from './model'
  * carried one, exactly like the per-message model switch of #111 — and the request's span
  * records what was asked for beside what was applied. Since no effort has ever been stored on a
  * session, that record is the only durable statement of what a request ran with.
+ *
+ * **Which models take an effort is the host's to say.** This module used to decide it with a
+ * hand-written pattern per provider, which rots with every model release — a new reasoning model
+ * silently got no effort and a renamed one could be sent a level its API rejects. The gate is
+ * now a resolver the host injects ({@link ReasoningSupportFor}), the same seam the context
+ * budget's `tokenBudgetFor` uses, built from the registry the host already holds — the server's
+ * models.dev snapshot (`apps/server/src/catalog/reasoning-support.ts`). What stays here is only
+ * *how* each provider spells an effort and the clamp its own knob needs.
  */
 
+/** The levels, weakest first: the order a clamp measures distance in. */
+const EFFORT_ORDER: readonly ReasoningEffort[] = ['low', 'medium', 'high']
+
 /**
- * One provider's reasoning: which of its models take an effort, and how the effort is spelled.
+ * Which of the three levels a model takes, or `undefined` when the resolver does not know the
+ * model at all — the host's answer for the model a request runs, asked once per request.
  *
- * `supports` is the gate that keeps a request from failing. Every provider in
- * {@link PROVIDER_REASONING} passes the option straight through to its API, which rejects a
- * `reasoning_effort` it does not know with a 400 rather than ignoring it — so the effort is sent
- * only for the model families each provider documents an effort knob for, and everything else
- * runs the provider's default. Being conservative is deliberate: a model wrongly left out loses
- * an optimization, while a model wrongly included loses the whole request.
+ * The two negative answers differ, and keeping them apart is deliberate: `[]` is a model the
+ * host knows takes no effort (a non-reasoning model, or one whose knob is a token budget rather
+ * than a level), while `undefined` is a model the host knows nothing about — a custom URL, an
+ * Azure deployment, a model a snapshot predates. Both leave the request on the provider's
+ * default, which is the safe reading: every provider below sends the option straight through, and
+ * one its API does not know is a **400** rather than an ignored parameter. A model wrongly left
+ * out loses an optimization; one wrongly included loses the whole request.
+ *
+ * A host that injects no resolver is the same as one that knows no model: every request keeps
+ * its provider's default. The server wires one (`createReasoningSupportResolver`).
+ *
+ * @param modelId the model id the request runs, `provider/model`
+ */
+export type ReasoningSupportFor = (modelId: string) => readonly ReasoningEffort[] | undefined
+
+/**
+ * One provider's reasoning: how the effort is spelled, and the clamp its own knob needs.
+ *
+ * There is no `supports` here any more — whether a model takes an effort is the injected
+ * resolver's answer, not this table's.
  */
 interface ProviderReasoning {
-  /**
-   * Whether this model takes an effort at all.
-   *
-   * @param modelId the model's own id — the `provider/model` with its provider half removed
-   */
-  readonly supports: (modelId: string) => boolean
   /** The provider's own options for an effort, keyed the way its AI SDK client reads them. */
   readonly options: (effort: ReasoningEffort) => ProviderOptions
   /**
@@ -51,46 +71,21 @@ interface ProviderReasoning {
 }
 
 /**
- * The model families each provider takes an effort for, as the id spells them.
- *
- * The families are the ones the models.dev registry marks as reasoning-capable **with an effort
- * option** (`reasoning: true`, `reasoning_options: [{ type: 'effort', … }]`, read 2026-10-08),
- * and each option below is the one that provider's installed AI SDK client reads — checked
- * against `@ai-sdk/anthropic@4.0.73`, `@ai-sdk/openai@4.0.85`, `@ai-sdk/google@4.0.89`,
- * `@ai-sdk/groq@4.0.56`, `@ai-sdk/deepseek@3.0.60`, `@ai-sdk/mistral@4.0.58`,
- * `@ai-sdk/xai@5.0.16`, `@ai-sdk/cerebras@3.0.64` and the `@ai-sdk/openai-compatible@3.0.64`
- * clients behind OpenRouter, Fireworks and Together.
- */
-const ANTHROPIC_EFFORT_MODEL = /^claude-(opus|fable)-(4-[5-9]|5)|^claude-(sonnet|haiku)-(4-[6-9]|5)/
-const OPENAI_EFFORT_MODEL = /^(o\d|gpt-[5-9]|gpt-daybreak)/
-const GOOGLE_EFFORT_MODEL = /^gemini-(3|flash-latest|flash-lite-latest)/
-const DEEPSEEK_EFFORT_MODEL = /^deepseek-(v4|flash|pro)/
-const MISTRAL_EFFORT_MODEL = /^(magistral|mistral-(medium|small)|glm-5-|zai-glm-5|labs-leanstral)/
-const XAI_EFFORT_MODEL = /^grok-4\.[3-9]/
-
-/**
- * Whether a model id carries one of these families anywhere in it — how the providers that host
- * third-party open models name them, with the family in the slug (`openai/gpt-oss-120b`,
- * `accounts/fireworks/models/glm-5p3`, `zai-org/GLM-5.3`) rather than at its front.
- */
-function ofFamily(families: readonly string[]): (modelId: string) => boolean {
-  return (modelId) => {
-    const id = modelId.toLowerCase()
-    return families.some((family) => id.includes(family))
-  }
-}
-
-/**
  * The providers a `provider/model` id may name and the option each one takes, keyed by the
  * shared provider id (`@openharness/protocol`, epic #245).
  *
  * Typed as a `Record<ProviderId, …>` on purpose: a provider the server can store a key for and
  * this table has no effort for is a compile error, which is how the credential types landing
  * later (#248–#251, A3a–A3d) are forced to say what their own effort knob is.
+ *
+ * Each option is the one that provider's installed AI SDK client reads — checked against
+ * `@ai-sdk/anthropic@4.0.73`, `@ai-sdk/openai@4.0.85`, `@ai-sdk/google@4.0.89`,
+ * `@ai-sdk/groq@4.0.56`, `@ai-sdk/deepseek@3.0.60`, `@ai-sdk/mistral@4.0.58`,
+ * `@ai-sdk/xai@5.0.16`, `@ai-sdk/cerebras@3.0.64` and the `@ai-sdk/openai-compatible@3.0.64`
+ * clients behind OpenRouter, Fireworks and Together.
  */
 export const PROVIDER_REASONING: Readonly<Record<ProviderId, ProviderReasoning>> = {
   anthropic: {
-    supports: (modelId) => ANTHROPIC_EFFORT_MODEL.test(modelId),
     // `effort` is Anthropic's own adaptive-thinking knob and is the closest thing to our three
     // levels (`xhigh`/`max` exist above them and are never asked for). The alternative,
     // `thinking: { type: 'enabled', budgetTokens }`, needs a token budget that only means
@@ -98,66 +93,45 @@ export const PROVIDER_REASONING: Readonly<Record<ProviderId, ProviderReasoning>>
     options: (effort) => ({ anthropic: { effort } }),
   },
   openai: {
-    supports: (modelId) => OPENAI_EFFORT_MODEL.test(modelId),
     options: (effort) => ({ openai: { reasoningEffort: effort } }),
   },
   google: {
-    supports: (modelId) => GOOGLE_EFFORT_MODEL.test(modelId),
-    // Gemini 3's thinking level is the effort knob; Gemini 2.5's is a token budget, and a model
-    // that takes neither is left to its default.
+    // Gemini 3's thinking level is the effort knob; Gemini 2.5's is a token budget, which the
+    // resolver's data leaves out, so such a model keeps its default.
     options: (effort) => ({ google: { thinkingConfig: { thinkingLevel: effort } } }),
   },
   openrouter: {
-    // OpenRouter is a router over hundreds of models and normalizes the parameter itself: an
-    // effort it cannot honour is mapped to the nearest level the model supports, and a model
-    // that cannot reason ignores it (OpenRouter's reasoning-tokens guide). There is no per-model
-    // rule for this side to apply, and a wrong guess here would cost an effort the router would
-    // have handled.
-    supports: () => true,
+    // OpenRouter is a router, and used to get the effort for every model on the promise that it
+    // maps or drops an unknown one. It follows the registry now like every other provider: that
+    // promise was a hand-maintained assumption about a third party — the rot this change exists
+    // to remove — and models.dev carries OpenRouter's own per-model effort options.
     options: (effort) => ({ openrouter: { reasoningEffort: effort } }),
   },
   groq: {
-    supports: ofFamily(['gpt-oss', 'qwen3.8']),
-    // No `none`: a model that takes no effort is not sent one at all.
     options: (effort) => ({ groq: { reasoningEffort: effort } }),
   },
   deepseek: {
-    supports: (modelId) => DEEPSEEK_EFFORT_MODEL.test(modelId),
     // DeepSeek's knob is `low | high | max` — there is no `medium`, and `medium` runs at `high`,
     // which is the mapping `@ai-sdk/deepseek` itself applies.
     options: (effort) => ({ deepseek: { reasoningEffort: effort === 'medium' ? 'high' : effort } }),
     applied: (effort) => (effort === 'medium' ? 'high' : effort),
   },
   fireworks: {
-    supports: ofFamily([
-      'gpt-oss',
-      'kimi',
-      'glm-',
-      'minimax',
-      'qwen3p8',
-      'deepseek-v4',
-      'deepseek-flash',
-      'ember',
-    ]),
     options: (effort) => ({ fireworks: { reasoningEffort: effort } }),
   },
   mistral: {
-    supports: (modelId) => MISTRAL_EFFORT_MODEL.test(modelId),
     // Mistral's knob is `none | high`: every level above the default runs at `high`, again the
     // mapping `@ai-sdk/mistral` applies.
     options: () => ({ mistral: { reasoningEffort: 'high' } }),
     applied: () => 'high',
   },
   together: {
-    supports: ofFamily(['gpt-oss', 'inkling', 'deepseek-v4', 'kimi-k3', 'glm-5.2', 'glm-5.3']),
     options: (effort) => ({ togetherai: { reasoningEffort: effort } }),
   },
   xai: {
-    supports: (modelId) => XAI_EFFORT_MODEL.test(modelId),
     options: (effort) => ({ xai: { reasoningEffort: effort } }),
   },
   cerebras: {
-    supports: ofFamily(['gpt-oss', 'qwen-3.8']),
     options: (effort) => ({ cerebras: { reasoningEffort: effort } }),
   },
 }
@@ -185,38 +159,78 @@ const NO_REASONING: ReasoningPlan = {
 /**
  * What a request does with the effort the log asks for.
  *
- * The effort is sent only when the model's provider takes one for that model; everything else
+ * The effort is sent only when the injected resolver says the model takes one; everything else
  * runs the provider's default and the plan says so (`applied: null`), which is what the span
  * records. A model id naming a provider this build has no client for is answered the same way:
  * the request will end as an unsupported provider before it is made, and there is nothing to
- * send an effort to.
+ * send an effort to. So is every model of a host that injected no resolver at all.
+ *
+ * When the resolver names the levels a model takes, the level the provider's own knob produced
+ * is **clamped to them** — a `medium` asked of a model that only takes `low` and `high` is sent
+ * as `high`, and a model that takes none of our levels at all is sent nothing — so an effort the
+ * model does not accept is never the level put on the wire.
  *
  * @param modelId the model id the request runs, `provider/model`
  * @param requested what the log asks for, or `null`
+ * @param supportFor which levels the model takes, the host's answer — see
+ *   {@link ReasoningSupportFor}; omitted means no model is known to take one
  */
-export function planReasoning(modelId: string, requested: ReasoningEffort | null): ReasoningPlan {
+export function planReasoning(
+  modelId: string,
+  requested: ReasoningEffort | null,
+  supportFor?: ReasoningSupportFor,
+): ReasoningPlan {
   if (requested === null) {
     return NO_REASONING
   }
-  const provider = providerOf(modelId)
-  const reasoning = reasoningFor(provider)
+  const reasoning = reasoningFor(providerOf(modelId))
   if (reasoning === undefined) {
     return unapplied(requested)
   }
-  // Everything after the first slash: the provider's own id for the model, which is what its
-  // effort families are written against (a Fireworks or OpenRouter id carries slashes of its
-  // own, so this is not `split('/')[1]`).
-  const id = modelId.slice(provider.length + 1)
-  if (!reasoning.supports(id)) {
+  const supported = supportFor?.(modelId)
+  if (supported === undefined || supported.length === 0) {
     return unapplied(requested)
   }
-  const applied = reasoning.applied?.(requested) ?? requested
+  // The provider's own knob first — DeepSeek runs `medium` at `high` — then never a level the
+  // model does not take: the two are one final level, which is what `applied` records and what
+  // the options are built from.
+  const applied = clampEffort(reasoning.applied?.(requested) ?? requested, supported)
   return {
     requested,
     applied,
-    providerOptions: reasoning.options(requested),
+    providerOptions: reasoning.options(applied),
     record: { requested, applied },
   }
+}
+
+/**
+ * The level to send: `requested` when the model takes it, otherwise the nearest level it does.
+ *
+ * Walked weakest-first over our own order, taking the later level on a tie, so a model that
+ * accepts `low` and `high` runs a requested `medium` at `high` — the same reading DeepSeek's own
+ * client gives the level it cannot spell. `supported` never reaches here empty (the caller treats
+ * an empty answer as "takes none"), and its levels are our three by construction, so there is
+ * always one to pick.
+ *
+ * @param requested the level the provider's knob mapped the request to
+ * @param supported the levels the model takes, in any order
+ */
+function clampEffort(
+  requested: ReasoningEffort,
+  supported: readonly ReasoningEffort[],
+): ReasoningEffort {
+  const target = EFFORT_ORDER.indexOf(requested)
+  const distance = (level: ReasoningEffort): number =>
+    Math.abs(EFFORT_ORDER.indexOf(level) - target)
+  let closest: ReasoningEffort | null = null
+  for (const level of EFFORT_ORDER) {
+    if (supported.includes(level) && (closest === null || distance(level) <= distance(closest))) {
+      closest = level
+    }
+  }
+  // Unreachable for a resolver that answers in our three levels, which its type promises; the
+  // requested level is the honest fallback for one that does not.
+  return closest ?? requested
 }
 
 /** A plan for an effort this model does not take: asked for, not applied, nothing sent. */

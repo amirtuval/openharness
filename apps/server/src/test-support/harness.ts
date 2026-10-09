@@ -37,6 +37,7 @@ import {
 } from '../auth'
 import { ModelCatalog } from '../catalog/catalog'
 import { createTokenBudgetResolver } from '../catalog/context-budget'
+import { createReasoningSupportResolver } from '../catalog/reasoning-support'
 import { emptyRegistry, type ModelRegistry } from '../catalog/registry'
 import { DEFAULT_DELTA_RETENTION_MS } from '../compaction'
 import {
@@ -206,10 +207,11 @@ export interface TestOptions {
    */
   readonly catalog?: Pick<ModelCatalog, 'list' | 'invalidate'>
   /**
-   * The registry the automatic default's fallback reads (epic #116, U4) and the context budget
-   * resolves each request's model against (#246). Defaults to the empty one: a test of either
-   * passes a stub, exactly as a catalogue test would, and an empty one leaves the context
-   * budget at the brain's 32,768-token fallback.
+   * The registry the automatic default's fallback reads (epic #116, U4), the context budget
+   * resolves each request's model against (#246), and the reasoning resolver answers which
+   * efforts a model takes from (#252's follow-up). Defaults to the empty one: a test of any of
+   * those passes a stub, exactly as a catalogue test would, and an empty one leaves the context
+   * budget at the brain's 32,768-token fallback and every request at `applied: null`.
    */
   readonly registry?: ModelRegistry
   /**
@@ -292,6 +294,11 @@ export function createTestApp(options: TestOptions = {}): TestContext {
     contextStrategy: createContextStrategy({
       tokenBudgetFor: createTokenBudgetResolver(options.registry ?? emptyRegistry),
     }),
+    // And the production reasoning wiring (#252's follow-up): which `low | medium | high` a model
+    // takes, from the same registry. The default empty registry knows no model, so a test that
+    // does not build one gets `applied: null` for every request — the same as the brain's own
+    // no-resolver default, and a test that wants an applied effort passes a registry.
+    reasoningSupportFor: createReasoningSupportResolver(options.registry ?? emptyRegistry),
     ...(options.maxConcurrentSessions === undefined
       ? {}
       : { maxConcurrentSessions: options.maxConcurrentSessions }),

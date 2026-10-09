@@ -8,7 +8,7 @@ import {
 import type { InMemorySessionStore } from '@openharness/session'
 import { describe, expect, it } from 'vitest'
 
-import { planReasoning } from './reasoning'
+import { planReasoning, type ReasoningSupportFor } from './reasoning'
 import { logOf, message, newSession, spanStartOf } from './testing/harness'
 import { apiCallError, mockModel, resolveTestCredential } from './testing/mock-model'
 import { runTurn } from './turn'
@@ -21,6 +21,9 @@ import { runTurn } from './turn'
  * The span is the loop's side of the contract: an effort rides the message rather than a session
  * field — the same reading as the per-message model of #111 — so the span is the durable
  * statement of what a request ran with, and a reader that asks "what did this run at" reads it.
+ *
+ * Which models take an effort is the injected resolver's answer (#252's follow-up), so the loop
+ * is handed one here; the server's own is tested over HTTP in `apps/server`.
  */
 
 /** A message that asks for an effort, the way a client sends one. */
@@ -61,6 +64,12 @@ async function firstSpanStart(store: InMemorySessionStore, sessionId: SessionId)
   return spanStartOf(event)
 }
 
+/** The resolver the loop tests hand `runTurn`: every model takes all three levels. */
+const EVERY_LEVEL: ReasoningSupportFor = () => ['low', 'medium', 'high']
+
+/** A resolver that knows one model takes no effort — the gate, read from the resolver. */
+const TAKES_NONE: ReasoningSupportFor = () => []
+
 describe('the reasoning effort of a request', () => {
   it('records the effort the log asked for, and asks the provider for it', async () => {
     // The fixture session runs `anthropic/claude-sonnet-5`, which takes an Anthropic `effort`.
@@ -71,6 +80,7 @@ describe('the reasoning effort of a request', () => {
       store,
       model: factory,
       resolveCredential: resolveTestCredential,
+      reasoningSupportFor: EVERY_LEVEL,
     })
 
     expect(outcome).toEqual({ outcome: 'idle' })
@@ -90,11 +100,30 @@ describe('the reasoning effort of a request', () => {
     ])
     const { factory, calls } = mockModel({ text: ['briefly'] })
 
-    await runTurn(sessionId, { store, model: factory, resolveCredential: resolveTestCredential })
+    await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+      reasoningSupportFor: TAKES_NONE,
+    })
 
     expect(await firstSpanStart(store, sessionId)).toMatchObject({
       model: 'openai/gpt-4o-mini',
       reasoning_effort: { requested: 'low', applied: null },
+    })
+    expect(calls[0]?.providerOptions).toBeUndefined()
+  })
+
+  it('sends nothing at all when no resolver is injected', async () => {
+    // The safe default: a host that wires no resolver knows no model takes an effort, so every
+    // request keeps its provider's default.
+    const { store, sessionId } = await newSession([effortMessage('think hard', 'high')])
+    const { factory, calls } = mockModel({ text: ['thought about it'] })
+
+    await runTurn(sessionId, { store, model: factory, resolveCredential: resolveTestCredential })
+
+    expect(await firstSpanStart(store, sessionId)).toMatchObject({
+      reasoning_effort: { requested: 'high', applied: null },
     })
     expect(calls[0]?.providerOptions).toBeUndefined()
   })
@@ -104,7 +133,12 @@ describe('the reasoning effort of a request', () => {
     const { store, sessionId } = await newSession([message('hello')])
     const { factory, calls } = mockModel({ text: ['hi'] })
 
-    await runTurn(sessionId, { store, model: factory, resolveCredential: resolveTestCredential })
+    await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+      reasoningSupportFor: EVERY_LEVEL,
+    })
 
     expect(await effortsOf(store, sessionId)).toEqual([undefined])
     expect(calls[0]?.providerOptions).toBeUndefined()
@@ -124,7 +158,12 @@ describe('the reasoning effort of a request', () => {
       { text: ['answering the second'] },
     )
 
-    await runTurn(sessionId, { store, model: factory, resolveCredential: resolveTestCredential })
+    await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+      reasoningSupportFor: EVERY_LEVEL,
+    })
 
     // The first request ran at what its own message asked for; the steering message is the
     // second request's, and the log keeps both.
@@ -148,7 +187,12 @@ describe('the reasoning effort of a request', () => {
       { text: ['answering the second'] },
     )
 
-    await runTurn(sessionId, { store, model: factory, resolveCredential: resolveTestCredential })
+    await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+      reasoningSupportFor: EVERY_LEVEL,
+    })
 
     expect(await effortsOf(store, sessionId)).toEqual([
       { requested: 'high', applied: 'high' },
@@ -164,6 +208,7 @@ describe('the reasoning effort of a request', () => {
       store,
       model: factory,
       resolveCredential: resolveTestCredential,
+      reasoningSupportFor: EVERY_LEVEL,
       retry: { baseDelayMs: 1, maxDelayMs: 1 },
     })
 
@@ -175,9 +220,9 @@ describe('the reasoning effort of a request', () => {
   })
 
   it('sends no option for a provider this build cannot ask one of', () => {
-    // `supports` is what keeps a request from failing: a provider handed an effort it does not
-    // know answers 400, so an unknown model keeps its default instead.
-    const unknown = planReasoning('someone-else/some-model', 'high')
+    // The resolver may describe the model, but there is nothing to send an effort to: the
+    // request would end as an unsupported provider before it is made.
+    const unknown = planReasoning('someone-else/some-model', 'high', EVERY_LEVEL)
     expect(unknown.providerOptions).toBeUndefined()
     expect(unknown.record).toEqual({ requested: 'high', applied: null })
   })

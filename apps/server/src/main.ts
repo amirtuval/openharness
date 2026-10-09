@@ -3,7 +3,7 @@ import { Kysely, PostgresDialect } from 'kysely'
 import { Pool } from 'pg'
 import type { Hono } from 'hono'
 import type { MemoryDB } from 'better-auth/adapters/memory'
-import type { ContextStrategy, ModelFactory } from '@openharness/brain'
+import type { ContextStrategy, ModelFactory, ReasoningSupportFor } from '@openharness/brain'
 import { createContextStrategy } from '@openharness/brain'
 import type { SessionId } from '@openharness/protocol'
 import {
@@ -29,6 +29,7 @@ import { createAuth, createDevLoginUser, type Auth, type AuthDatabase } from './
 import { ModelCatalog } from './catalog/catalog'
 import { createTokenBudgetResolver } from './catalog/context-budget'
 import { createProviderFetch } from './catalog/provider-fetch'
+import { createReasoningSupportResolver } from './catalog/reasoning-support'
 import { createBundledRegistry, type ModelRegistry } from './catalog/registry'
 import { DeltaCompactor } from './compaction'
 import { ENV_VARS, type ServerConfig, describeConfig, readServerConfig } from './config'
@@ -219,12 +220,18 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     tokenBudgetFor: createTokenBudgetResolver(registry),
   })
 
+  // The reasoning effort (#252's follow-up): which `low | medium | high` levels a model takes,
+  // read from the same registry, and asked per request. Before this the brain carried hand-written
+  // model patterns, which rotted with every release; the model's own data is what decides now.
+  const reasoningSupportFor = createReasoningSupportResolver(registry)
+
   const scheduler = createScheduler(
     config,
     store,
     model,
     resolveCredential,
     contextStrategy,
+    reasoningSupportFor,
     logger,
   )
   // Compaction is the store's, not a scheduler's: it deletes superseded chunks whoever ran the
@@ -389,8 +396,8 @@ function installSignalHandlers(logger: Logger): void {
  * `local` runs every turn in this process; `postgres` shares the sessions with the other
  * instances through partition leases, which is why it needs the store and why the config
  * refuses to boot without a `DATABASE_URL`. Both are handed the same model, credential
- * resolver, context strategy and concurrency and drain limits — what changes is who owns a
- * session, not how it is run.
+ * resolver, context strategy, reasoning resolver and concurrency and drain limits — what changes
+ * is who owns a session, not how it is run.
  */
 function createScheduler(
   config: ServerConfig,
@@ -398,6 +405,7 @@ function createScheduler(
   model: ModelFactory,
   resolveCredential: ResolveSessionCredential,
   contextStrategy: ContextStrategy,
+  reasoningSupportFor: ReasoningSupportFor,
   logger: Logger,
 ): SessionScheduler {
   const onError = (error: unknown, sessionId: SessionId | undefined): void => {
@@ -412,6 +420,7 @@ function createScheduler(
       model,
       resolveCredential,
       contextStrategy,
+      reasoningSupportFor,
       instanceId: config.instanceId,
       partitions: config.partitions,
       ttlMs: config.leaseTtlMs,
@@ -430,6 +439,7 @@ function createScheduler(
     model,
     resolveCredential,
     contextStrategy,
+    reasoningSupportFor,
     maxConcurrentSessions: config.maxConcurrentSessions,
     drainTimeoutMs: config.drainTimeoutMs,
     partitionCount: config.partitions,

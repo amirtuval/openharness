@@ -1,6 +1,7 @@
 import {
   type ContextStrategy,
   type ModelFactory,
+  type ReasoningSupportFor,
   type RetryPolicy,
   type TurnOutcome,
   runTurn,
@@ -52,6 +53,11 @@ export interface SessionRunnerOptions {
   readonly retry?: RetryPolicy
   /** How the log becomes model messages; `runTurn`'s own default when omitted. */
   readonly contextStrategy?: ContextStrategy
+  /**
+   * Which reasoning efforts a model takes, asked per request (#252's follow-up); `runTurn`'s own
+   * default when omitted, which is "no model is known to take one".
+   */
+  readonly reasoningSupportFor?: ReasoningSupportFor
 }
 
 /** What one call to {@link SessionRunner.run} adds to the runner's configuration. */
@@ -126,6 +132,8 @@ export class SessionRunner {
 
   readonly #contextStrategy: ContextStrategy | undefined
 
+  readonly #reasoningSupportFor: ReasoningSupportFor | undefined
+
   readonly #turns = new Map<SessionId, TurnHandle>()
 
   #stopped = false
@@ -136,6 +144,7 @@ export class SessionRunner {
     this.#resolveCredential = options.resolveCredential
     this.#retry = options.retry
     this.#contextStrategy = options.contextStrategy
+    this.#reasoningSupportFor = options.reasoningSupportFor
   }
 
   /** Whether the runner has been told to stop and no longer starts passes. */
@@ -343,6 +352,9 @@ export class SessionRunner {
             ...(this.#contextStrategy === undefined
               ? {}
               : { contextStrategy: this.#contextStrategy }),
+            ...(this.#reasoningSupportFor === undefined
+              ? {}
+              : { reasoningSupportFor: this.#reasoningSupportFor }),
           })
         } catch (error) {
           if (error instanceof SessionNotFoundError) {

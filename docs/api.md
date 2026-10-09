@@ -150,8 +150,9 @@ It may carry a `reasoning_effort` (`"low"`, `"medium"` or `"high"`) the same way
 the session runs at from that message on, until another message changes it or clears it with
 `null` — which is the provider's default, and what a message that leaves the field out keeps
 (#252). The brain maps the effort onto each provider's own knob, and a model that takes no
-effort runs the provider's default instead; either way the request's
-`span.model_request_start` records what it was asked for and what it ran with:
+effort — or one the server's model catalogue does not know takes one — runs the provider's
+default instead; a level a model does not take is sent as the nearest one it does. Either way
+the request's `span.model_request_start` records what it was asked for and what it ran with:
 
 ```json
 {
