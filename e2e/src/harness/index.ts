@@ -257,7 +257,11 @@ export function personFor(server: ServerProcess, signedIn: SignedIn): Person {
   return { signedIn, client: clientFor(server, signedIn) }
 }
 
-export { seedAzureCredential, seedProviderCredential } from './credentials'
+export {
+  seedAzureCredential,
+  seedOpenAICompatibleCredential,
+  seedProviderCredential,
+} from './credentials'
 export { createE2eDatabase, withDatabaseClient, type E2eDatabase } from './database'
 export { errorOf } from './errors'
 export {
@@ -280,6 +284,12 @@ export {
 } from './events'
 export type { StreamCollector } from './events'
 export { expectedSlowReply } from './mock'
+export {
+  startOpenAICompatibleStub,
+  type OpenAICompatibleStub,
+  type OpenAICompatibleStubOptions,
+  type OpenAICompatibleStubRequest,
+} from './openai-compatible-stub'
 export {
   startProviderStub,
   type ProviderStub,
