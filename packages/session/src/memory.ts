@@ -951,6 +951,9 @@ export class InMemoryCredentialStore implements CredentialStore {
       type: input.type,
       name: input.name,
       last4: input.last4,
+      // Absent, not `undefined`: a credential whose type publishes no public facts has no
+      // `details` key, matching the Postgres store's `null` column (#249, A3b).
+      ...(input.details === undefined ? {} : { details: input.details }),
       created_at: existing?.created_at ?? at,
       updated_at: at,
       validated_at: input.validatedAt,

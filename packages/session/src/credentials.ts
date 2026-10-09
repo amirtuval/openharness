@@ -1,5 +1,6 @@
 import type {
   ProviderCredential,
+  ProviderCredentialDetails,
   ProviderCredentialType,
   Timestamp,
   UserId,
@@ -48,8 +49,8 @@ export interface CredentialStore {
    * Add a credential, or replace the one the same user already has under the same name.
    *
    * The write is keyed by `(userId, name)`, not by id: a replacement keeps the stored
-   * credential's `id` and `created_at`, takes the new sealed blob, `type`, `last4` and
-   * `validatedAt`, and moves `updated_at` to the clock's current instant. The answer is the
+   * credential's `id` and `created_at`, takes the new sealed blob, `type`, `last4`, `details`
+   * and `validatedAt`, and moves `updated_at` to the clock's current instant. The answer is the
    * metadata as stored — never the secret, not even the sealed form that was just written.
    *
    * `sealed` is stored exactly as given; a store does not open it and cannot check it. The
@@ -136,6 +137,12 @@ export interface UpsertCredentialInput extends CredentialKey {
   readonly sealed: SealedSecret
   /** The last four characters of the plaintext secret, for recognition only. */
   readonly last4: string
+  /**
+   * The public, type-specific facts the credential's type publishes — today a custom
+   * OpenAI-compatible base URL's host (#249, A3b). Absent for a type with none. Never a secret
+   * and never the sealed payload; a `list` answer carries it as-is.
+   */
+  readonly details?: ProviderCredentialDetails
   /** When the server validated the credential against the provider, on save. */
   readonly validatedAt: Timestamp
 }

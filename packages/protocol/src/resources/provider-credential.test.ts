@@ -5,6 +5,8 @@ import {
   AzureOpenAICredentialSchema,
   ListProviderCredentialsResponseSchema,
   MAX_AZURE_DEPLOYMENTS,
+  OpenAICompatibleCredentialSchema,
+  ProviderCredentialDetailsSchema,
   ProviderCredentialSchema,
   ProviderCredentialTypeSchema,
   PutProviderCredentialRequestSchema,
@@ -77,17 +79,49 @@ describe('ProviderCredentialSchema', () => {
       false,
     )
   })
+
+  it('carries optional type-specific details, and omits the field when there are none', () => {
+    const detailed = { ...credential, details: { base_url_host: '127.0.0.1:11434' } }
+    expect(ProviderCredentialSchema.parse(detailed)).toEqual(detailed)
+    // Absent, not `{}`: a credential whose type has no public facts has no `details` key, so
+    // the api_key and azure metadata is byte-for-byte what it was before the field existed.
+    expect(ProviderCredentialSchema.parse(credential)).not.toHaveProperty('details')
+    expect(ProviderCredentialSchema.safeParse({ ...credential, details: 'nope' }).success).toBe(
+      false,
+    )
+  })
 })
 
 describe('ProviderCredentialTypeSchema', () => {
-  it('is api_key and azure_openai today and nothing else', () => {
+  it('is api_key, azure_openai and openai_compatible today and nothing else', () => {
     expect(ProviderCredentialTypeSchema.parse('api_key')).toBe('api_key')
     expect(ProviderCredentialTypeSchema.parse('azure_openai')).toBe('azure_openai')
+    expect(ProviderCredentialTypeSchema.parse('openai_compatible')).toBe('openai_compatible')
     // The later types — aws, gcp_service_account — are new members of this union, not new
     // designs, but until they land the schema stays closed.
-    for (const type of ['aws', 'gcp_service_account', 'azure', 'oauth']) {
+    for (const type of ['aws', 'gcp_service_account', 'azure', 'oauth', 'custom']) {
       expect(ProviderCredentialTypeSchema.safeParse(type).success, type).toBe(false)
     }
+  })
+})
+
+describe('ProviderCredentialDetailsSchema', () => {
+  it('carries a base-URL host, and only a string one', () => {
+    expect(ProviderCredentialDetailsSchema.parse({ base_url_host: 'api.example.com' })).toEqual({
+      base_url_host: 'api.example.com',
+    })
+    expect(ProviderCredentialDetailsSchema.safeParse({ base_url_host: '' }).success).toBe(false)
+    expect(ProviderCredentialDetailsSchema.safeParse({ base_url_host: 42 }).success).toBe(false)
+  })
+
+  it('strips a field it does not know — details is a closed, per-type shape', () => {
+    expect(
+      ProviderCredentialDetailsSchema.parse({ base_url_host: 'x', api_key: 'sk-secret' }),
+    ).toEqual({ base_url_host: 'x' })
+  })
+
+  it('parses an empty object, which is how a type with no facts is spelled', () => {
+    expect(ProviderCredentialDetailsSchema.parse({})).toEqual({})
   })
 })
 
@@ -176,6 +210,58 @@ describe('AzureOpenAICredentialSchema', () => {
     expect(AzureOpenAICredentialSchema.safeParse({ ...azure, api_key: '' }).success).toBe(false)
     const { type: _type, ...untyped } = azure
     expect(AzureOpenAICredentialSchema.safeParse(untyped).success).toBe(false)
+  })
+})
+
+describe('OpenAICompatibleCredentialSchema', () => {
+  const compatible = {
+    type: 'openai_compatible',
+    base_url: 'https://api.example.com/v1',
+    api_key: 'sk-custom-4242',
+  }
+
+  it('accepts an http or https base URL, with a key', () => {
+    expect(OpenAICompatibleCredentialSchema.parse(compatible)).toEqual(compatible)
+    // A self-hosted endpoint is the case this type exists for, so http is allowed — the SSRF
+    // guard, not the scheme, is what refuses a private address.
+    expect(
+      OpenAICompatibleCredentialSchema.parse({
+        type: 'openai_compatible',
+        base_url: 'http://127.0.0.1:11434/v1',
+        api_key: 'k',
+      }),
+    ).toMatchObject({ base_url: 'http://127.0.0.1:11434/v1' })
+  })
+
+  it('accepts a missing key — a local server may want none — but not an empty one', () => {
+    const { api_key: _key, ...keyless } = compatible
+    expect(OpenAICompatibleCredentialSchema.parse(keyless)).toEqual(keyless)
+    expect(OpenAICompatibleCredentialSchema.safeParse({ ...compatible, api_key: '' }).success).toBe(
+      false,
+    )
+    expect(OpenAICompatibleCredentialSchema.safeParse({ ...compatible, api_key: 42 }).success).toBe(
+      false,
+    )
+  })
+
+  it('refuses a base URL that is not an absolute http(s) URL', () => {
+    for (const base_url of [
+      'api.example.com/v1',
+      'ftp://api.example.com/v1',
+      'file:///etc/passwd',
+      'ws://api.example.com',
+      '',
+    ]) {
+      expect(
+        OpenAICompatibleCredentialSchema.safeParse({ ...compatible, base_url }).success,
+        base_url,
+      ).toBe(false)
+    }
+  })
+
+  it('requires the type discriminant', () => {
+    const { type: _type, ...untyped } = compatible
+    expect(OpenAICompatibleCredentialSchema.safeParse(untyped).success).toBe(false)
   })
 })
 

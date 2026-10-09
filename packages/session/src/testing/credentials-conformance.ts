@@ -96,6 +96,39 @@ export function runCredentialStoreConformance(
         expect(record?.sealed).not.toHaveProperty('keyProvider')
       })
 
+      it('round-trips the public details a type publishes, and omits them when there are none', async () => {
+        // #249 (A3b): a custom OpenAI-compatible credential publishes its base URL's host so
+        // the settings list can show it without opening the sealed payload. A type with no
+        // such facts has no `details` key at all — the metadata is unchanged for it.
+        const { store, clock } = await setup()
+        const detailed = await store.upsert({
+          userId: OWNER_A,
+          name: 'custom',
+          type: 'openai_compatible',
+          sealed: sealedSecret('custom'),
+          last4: '4242',
+          details: { base_url_host: '127.0.0.1:11434' },
+          validatedAt: timestampAt(clock.currentMs),
+        })
+        expect(detailed.details).toEqual({ base_url_host: '127.0.0.1:11434' })
+        expect((await store.list({ userId: OWNER_A }))[0]?.details).toEqual({
+          base_url_host: '127.0.0.1:11434',
+        })
+
+        const plain = await store.upsert({
+          userId: OWNER_A,
+          name: 'anthropic',
+          type: 'api_key',
+          sealed: sealedSecret('plain'),
+          last4: '0000',
+          validatedAt: timestampAt(clock.currentMs),
+        })
+        expect(plain).not.toHaveProperty('details')
+        expect(await store.get({ userId: OWNER_A, name: 'anthropic' })).not.toHaveProperty(
+          'details',
+        )
+      })
+
       it('replaces the credential for the same user and name, keeping its id and created_at', async () => {
         const { store, clock } = await setup()
         const first = await store.upsert({
