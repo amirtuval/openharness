@@ -73,7 +73,15 @@ const acceptAny = (): Promise<void> => Promise.resolve()
 const azureRegistry: ModelRegistry = {
   models: (provider) =>
     provider === 'azure'
-      ? [{ id: 'gpt-4o', name: 'GPT-4o', contextWindow: 128_000, maxOutput: 16_384 }]
+      ? [
+          {
+            id: 'gpt-4o',
+            name: 'GPT-4o',
+            contextWindow: 128_000,
+            maxOutput: 16_384,
+            cost: { input: 2.5, output: 10, cache_read: 1.25, cache_write: null },
+          },
+        ]
       : [],
 }
 
@@ -308,6 +316,9 @@ describe('the catalogue over azure credentials', () => {
       name: 'GPT-4o',
       context_window: 128_000,
       max_output_tokens: 16_384,
+      // The registry prices Azure the way it prices every provider (#247), so a deployment it
+      // knows carries a cost and a client can show what a turn spent.
+      cost: { input: 2.5, output: 10, cache_read: 1.25 },
     })
     // A deployment models.dev does not know gets no window rather than a guessed one.
     expect(body.data[1]).toMatchObject({
@@ -315,6 +326,9 @@ describe('the catalogue over azure credentials', () => {
       name: 'my-private-deployment',
       context_window: null,
       max_output_tokens: null,
+      // A deployment models.dev does not know has no rate either: `null` is "not priced",
+      // which a client shows as `—` rather than inventing a number.
+      cost: null,
     })
     // The status is `ok` — the credential was read — not a fallback.
     const [status] = body.providers

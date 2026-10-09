@@ -1,9 +1,5 @@
 import { CREDENTIAL_TARGETS, sessionCost } from '@openharness/client'
-import type {
-  CredentialTarget,
-  ModelPriceLookup,
-  TranscriptMessage,
-} from '@openharness/client'
+import type { CredentialTarget, ModelPriceLookup, TranscriptMessage } from '@openharness/client'
 import { Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 

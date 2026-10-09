@@ -190,7 +190,7 @@ export interface SchedulerInstancesTable {
  * none may ever be added (see `0013_provider_credentials.sql`). `unique (user_id, name)` is
  * what makes `upsert` an upsert and what `list` seeks by; `on delete cascade` from `"user"`
  * takes a user's credentials with the user. The `name` column (renamed from `provider` by
- * `0021_credential_name.sql`) is the `provider` half of the model ids the credential serves:
+ * `0022_credential_name.sql`) is the `provider` half of the model ids the credential serves:
  * a fixed provider id for the eleven API-key providers, or a short name a user chose for a
  * named type.
  */

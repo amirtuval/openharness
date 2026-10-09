@@ -223,6 +223,10 @@ export class ModelCatalog {
             name: registry?.name ?? deployment,
             context_window: registry?.contextWindow ?? null,
             max_output_tokens: registry?.maxOutput ?? null,
+            // The registry's list price where it knows the deployment, and nothing where it
+            // does not: Azure bills the resource, and a rate invented here would be a wrong
+            // number on the screen (A2, #247).
+            cost: registry?.cost ?? null,
             source: 'provider' as const,
           }
         }),

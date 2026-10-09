@@ -104,7 +104,7 @@ src/
 | `SessionUsage`, `SessionModelUsage`, `SessionUsageTotals`, `ModelPriceLookup`                   | the session's totals as the transcript keeps them, and how a frontend prices them (#247) |
 | `selectSessionUsage()`, `sessionUsageOf()`, `sessionCost()`, `replyCost()`                      | what a session and a reply cost, from the log's tokens and the catalog's rates (#247)    |
 | `PROVIDERS`, `providerInfo()`, `providerName()`, `ProviderInfo`                                 | the model providers a form or a tile needs (#209; built from the shared list, #245)      |
-| `CREDENTIAL_TARGETS`, `CredentialTarget`                                                        | every provider *and* named credential type a form or a tile offers (#245 A3a)            |
+| `CREDENTIAL_TARGETS`, `CredentialTarget`                                                        | every provider _and_ named credential type a form or a tile offers (#245 A3a)            |
 | `credentialDisplayName()`, `credentialTargetFor()`                                              | what to call a stored credential, and which tile its row reopens                         |
 | `PACKAGE_NAME`                                                                                  | the package name; a dependent's cheap proof that the import resolved                     |
 
@@ -524,11 +524,11 @@ credentials API takes any router provider, so a reader who typed an id this list
 sees what they typed, never a blank.
 
 **`CREDENTIAL_TARGETS` is what an Add-provider surface offers** (epic #245, A3a): the eleven
-providers, then the named credential types. A `CredentialTarget` carries the *name* a first save
+providers, then the named credential types. A `CredentialTarget` carries the _name_ a first save
 uses (a provider id, or the type's default — `azure`), the display name, the credential type
 that selects the form (X6), the key URL, and `named` — whether the reader may keep more than
 one, each under a name they choose. `credentialTargetFor(credential)` answers the target a
-*stored* credential's Replace reopens, and `credentialDisplayName(credential)` is what a list
+_stored_ credential's Replace reopens, and `credentialDisplayName(credential)` is what a list
 row is called: the provider's name, the type's display name where the name is its default, and
 the reader's own label otherwise — so `azure-eu` is called `azure-eu` and two Azure rows are
 told apart.

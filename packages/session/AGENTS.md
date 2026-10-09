@@ -603,7 +603,7 @@ and `0013_provider_credentials`:
 - **`0013_provider_credentials.sql` — the sealed credential table** (decision A5): id
   (`pcred_`), user, provider, type, the four sealed fields, `last4`, the timestamps and
   `validated_at`, unique on `(user_id, provider)` and `on delete cascade` from `"user"`. There
-  is no plaintext column, and none may ever be added. (`0021` renames `provider` to `name`.)
+  is no plaintext column, and none may ever be added. (`0022` renames `provider` to `name`.)
 - **`0014_auth_session_revocation.sql` — the revocation trigger** (A2; issue #76): an
   `after delete … for each row` trigger on `"session"` that `pg_notify`s the deleted session's
   **id** (never its token) on the `ohr_auth_session_revoked` channel
@@ -681,7 +681,7 @@ The web theme (issue #203, chat-UX epic #201 decision X3) added one more:
 
 The named credentials of epic #245 (A3a) added one:
 
-- **`0021_credential_name.sql` — the credential's `name`, and uniqueness per name** (#248): the
+- **`0022_credential_name.sql` — the credential's `name`, and uniqueness per name** (#248): the
   `provider` column is renamed to `name`, and the unique constraint becomes
   `unique (user_id, name)`. The rename is a no-op for every existing row — a credential stored
   before the change was keyed by its provider id, and that id is exactly the name such a

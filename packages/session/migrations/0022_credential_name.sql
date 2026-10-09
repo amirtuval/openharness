@@ -1,4 +1,4 @@
--- 0021_credential_name.sql — the credential's `name`, and uniqueness per name (#248).
+-- 0022_credential_name.sql — the credential's `name`, and uniqueness per name (#248).
 --
 -- Epic #245 (A3a) gives a credential a **name** rather than a fixed provider key. The name is
 -- the `provider` half of the model ids the credential serves: `anthropic` for the eleven
