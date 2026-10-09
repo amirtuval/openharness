@@ -301,10 +301,13 @@ credential's region, a Vertex one's service-account email, project and location,
 part of a private key — because `last4` alone cannot tell two credentials of one type apart when
 they are two accounts or two regions of one account. They are the last field of the line rather
 than a fixed column: an email address is wider than any column worth reserving on every key's
-row. That is the whole of what the API can say — it is **write-only** (epic #65, A5). The
-display name is the provider's, the credential type's where the name is that type's default
-(`azure`, `bedrock`, `vertex`), or the reader's own label otherwise — so two Azure credentials
-are told apart by the names they were saved under.
+row. That is the whole of what the API can say — it is **write-only** (epic #65, A5). The first
+column is what the reader types as the `provider` half of a model id: the provider's display
+name for one of the eleven, and the credential's own name for a named credential — with the
+type's display name beside it when that name would hide the prefix, so a credential called
+`azure` reads `azure (Azure OpenAI)` rather than just `Azure OpenAI` (#271). A
+reader-named credential already reads as itself (`azure-eu`), so two Azure credentials are told
+apart by the names they were saved under.
 `oh providers remove <name>` forgets a credential after a `[y/N]` question (`--yes` skips it); deleting one that is not
 there is not an error, because the route answers `204` either way.
 

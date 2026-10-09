@@ -27,8 +27,12 @@ import { pad } from './list'
  * secret itself is never read back, never written to this machine, and never printed.
  */
 
-/** How wide the credential-name column gets before it is cut; the other columns are short. */
-const NAME_WIDTH = 18
+/**
+ * How wide the credential-name column gets before it is cut; the other columns are short.
+ * Wide enough for a named credential's name and the type's display name together
+ * (`azure (Azure OpenAI)`).
+ */
+const NAME_WIDTH = 24
 const TYPE_WIDTH = 8
 const LAST4_WIDTH = 6
 
@@ -222,16 +226,19 @@ function isOutcome(result: unknown): result is ProvidersAddOutcome {
 }
 
 /**
- * One line per stored credential: display name, credential type, what else it reports, last
- * four, when it was added.
+ * One line per stored credential: the name it is typed under, credential type, what else it
+ * reports, last four, when it was added.
  *
- * The order is the server's (oldest first). The display name is the provider's, the credential
- * type's where the name is that type's default (`azure`, `bedrock`), or the reader's own label
- * otherwise — so two Azure credentials are told apart by the names they were saved under. The
- * facts at the end of the line are the per-type non-secret ones (#245, A3c/A3d) — a Bedrock
- * credential's region, a Vertex one's email, project and location — because `last4` alone
- * cannot tell two credentials of one type apart when they are two accounts or two regions of
- * one account.
+ * The order is the server's (oldest first). The first column is what the reader types as the
+ * `provider` half of a model id (#245, A3a): the provider's display name for one of the
+ * eleven, and the credential's **name** for a named credential — with the type's display name
+ * beside it when that name would hide the prefix (`azure (Azure OpenAI)` rather than just
+ * `Azure OpenAI`, which is not what a model id starts with). A reader-named credential already
+ * reads as itself (`azure-eu`), so two Azure credentials are still told apart by the names
+ * they were saved under. The facts at the end of the line are the per-type non-secret ones
+ * (#245, A3c/A3d) — a Bedrock credential's region, a Vertex one's email, project and location
+ * — because `last4` alone cannot tell two credentials of one type apart when they are two
+ * accounts or two regions of one account.
  */
 export function formatCredentials(credentials: readonly ProviderCredential[]): readonly string[] {
   if (credentials.length === 0) {
@@ -246,7 +253,7 @@ export function formatCredentials(credentials: readonly ProviderCredential[]): r
     // column: an email address is wider than any column worth reserving on every key's row.
     const facts = credentialFacts(credential).join(' · ')
     return [
-      pad(credentialDisplayName(credential), NAME_WIDTH),
+      pad(credentialNameLabel(credential), NAME_WIDTH),
       pad(credential.type, TYPE_WIDTH),
       // A custom OpenAI-compatible credential may carry no key at all (#249); its `last4` is
       // empty, and `…` alone would read as a key that failed to load rather than one a local
@@ -256,4 +263,21 @@ export function formatCredentials(credentials: readonly ProviderCredential[]): r
       ...(facts === '' ? [] : [facts]),
     ].join('  ')
   })
+}
+
+/**
+ * What a row is named: the string the reader types before the slash in a model id (#245, A3a).
+ *
+ * A fixed provider is named by its display name ("Anthropic"). A named credential's name is
+ * the `provider` half of its model ids, and the credential type's display name would hide it:
+ * a credential called `azure` whose row reads "Azure OpenAI" leaves the reader unable to tell
+ * what `/model` expects, so the name leads and the type's display name follows it. A name the
+ * reader chose (`azure-eu`) already reads as itself, and needs no second label.
+ */
+function credentialNameLabel(credential: ProviderCredential): string {
+  const displayName = credentialDisplayName(credential)
+  if (credential.type === 'api_key' || displayName === credential.name) {
+    return displayName
+  }
+  return `${credential.name} (${displayName})`
 }
