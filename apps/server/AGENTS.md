@@ -613,6 +613,15 @@ included — applies from the next message. `POST …/events` and the `initial_e
 `POST /v1/sessions` check that id's `provider/model` shape (`model-id.ts`) and answer 400
 otherwise; the check is shared with the session's inline model.
 
+A **`reasoning_effort`** rides the same message the same way (#252): `low`, `medium` or `high`,
+or `null` for the provider's default again. The server stores it exactly as sent — on
+`POST …/events` and on the `initial_events` of creation alike — and the brain reads the newest
+one out of the log at each request boundary and records what a request was asked for and what it
+ran with on its span. The field needs no route-level check the way a model id does: it is an
+enum, so the protocol's schema is what refuses a level it does not have, with the 400 the route
+gives every bad body. Which providers and models take an effort, and how each is asked, is the
+brain's (`packages/brain/src/reasoning.ts`).
+
 ## Preferences and the automatic default (U1/U4)
 
 `GET`/`PUT /v1/me/preferences` are `routes/me.ts` over the store's `getPreferences`/
@@ -1206,6 +1215,11 @@ parallel with each other.
   from a wide model to a narrow one carries the whole conversation into the wide model's
   request and only the newest message into the narrow one's (read off the prompts the scripted
   model recorded).
+- `reasoning-effort.test.ts` — #252 over HTTP: a `reasoning_effort` accepted on `POST …/events`
+  and on a creation's `initial_events`, stored on the event, and run by the turn the message
+  starts — the span recording `{ requested, applied }`, `applied: null` for a model that takes
+  no effort, a 400 for a level the protocol does not have with nothing appended, and a message
+  without one leaving both the event and the span exactly as they were.
 - `scheduler.test.ts` — one turn per session, steering, interrupts (running and idle), a
   message queued behind an interrupt, recovery on start, concurrency, stopping, and the fence
   reaching the store.
