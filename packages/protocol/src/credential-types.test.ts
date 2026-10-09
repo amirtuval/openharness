@@ -48,6 +48,7 @@ describe('CREDENTIAL_TYPES', () => {
       type: 'openai_compatible',
       name: 'Custom (OpenAI-compatible)',
       defaultName: 'custom',
+      modelIdHint: 'model',
     })
     expect(credentialTypeName('openai_compatible')).toBe('Custom (OpenAI-compatible)')
     expect(defaultCredentialName('openai_compatible')).toBe('custom')
@@ -80,7 +81,6 @@ describe('CREDENTIAL_TYPES', () => {
     }
   })
 
-  it('sends every reader that has a key page to an https one', () => {
   it('says what the second half of each type’s model ids is', () => {
     // The sentence a form puts under its name field: an Azure credential serves deployments,
     // a Bedrock one serves Bedrock model ids. One fact per type rather than one per frontend.

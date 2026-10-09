@@ -430,7 +430,7 @@ export function ProviderKeyForm({
             {nameError ??
               `What this credential is called. Its models are named after it — ${
                 typedName === '' ? target.name : typedName
-              }/${target.modelIdHint}.`}
+              }/${modelIdHint}.`}
           </p>
         </div>
       ) : null}
