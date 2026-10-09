@@ -57,6 +57,7 @@ src/
   openai-compatible-fetch.ts  a custom endpoint's base URL, and the safeFetch guard its model call goes through (#249)
   bedrock.ts            Bedrock's two AWS hosts, and the SigV4 signing the server borrows for a
                         control-plane read
+  vertex.ts             the Vertex model families: which client builds a `gemini-*` or `claude-*` id
   redact.ts             redactSecret: scrubbing a provider key out of error text
   errors.ts             classifyModelError: retryable or terminal, and which session.error
   retry.ts              RetryPolicy, backoff, and the injectable sleep
@@ -83,8 +84,9 @@ emits what that reaches.
 | `createContextStrategy(config?)`, `ContextStrategyConfig`                                                                              | the default strategy: the conversation, trimmed to a token budget resolved per model                                                                                                                                                   |
 | `DEFAULT_CONTEXT_STRATEGY`, `DEFAULT_CONTEXT_TOKEN_BUDGET`, `CHARS_PER_TOKEN`                                                          | its defaults                                                                                                                                                                                                                           |
 | `estimateTokens(text)`                                                                                                                 | the chars/4 estimate the budget is measured in                                                                                                                                                                                         |
-| `ModelCredential`                                                                                                                      | `{ type: 'api_key', apiKey }`, `{ type: 'azure_openai', apiKey, endpoint }`, `{ type: 'openai_compatible', apiKey, baseUrl }` or `{ type: 'bedrock', accessKeyId, secretAccessKey, sessionToken?, region }` — one request's credential |
-| `credentialSecrets(credential)`                                                                                                        | every secret a credential carries, for redaction — a Bedrock credential has three                                                                                                                                                      |
+| `ModelCredential`                                                                                                                      | `{ type: 'api_key', apiKey }`, `{ type: 'azure_openai', apiKey, endpoint }`, `{ type: 'openai_compatible', apiKey, baseUrl }`, `{ type: 'bedrock', accessKeyId, secretAccessKey, sessionToken?, region }` or `{ type: 'vertex', project, location, serviceAccount }` — one request's credential |
+| `VertexModelCredential`                                                                                                                | the Vertex shape on its own: the project, the location, and the service-account key document as text                                                                                                                                   |
+| `credentialSecrets(credential)`                                                                                                        | every secret a credential carries, for redaction — a Bedrock credential has three, a Vertex one its private key PEM                                                                                                                    |
 | `ResolveCredential`                                                                                                                    | `(name) => Promise<ModelCredential \| null>` — where it comes from                                                                                                                                                                     |
 | `ModelFactory`                                                                                                                         | `(modelId, credential) => LanguageModel` — how a `provider/model` becomes a model                                                                                                                                                      |
 | `providerModelFactory`, `createProviderModelFactory(options)`                                                                          | the `ModelFactory` hosts normally pass: the official AI SDK providers, the key passed explicitly                                                                                                                                       |
@@ -93,6 +95,7 @@ emits what that reaches.
 | `BEDROCK_SERVICE`, `bedrockRuntimeBaseUrl(region)`, `bedrockControlPlaneUrl(region, path)`                                             | the SigV4 service both Bedrock hosts are signed for, and the two AWS hosts a region derives                                                                                                                                            |
 | `signBedrockRequest(credential, url, input?)`, `SignedBedrockRequest`, `BedrockRequestInput`                                           | one SigV4-signed Bedrock request, returned rather than sent — what the server's save-time check and catalogue read use                                                                                                                 |
 | `openAICompatibleFetch`, `createOpenAICompatibleFetch(options)`, `openAICompatibleBaseUrl(baseUrl)`                                    | the custom endpoint's `fetch` (safeFetch under the streaming-safe limits, with the self-host `allowPrivate` option, #249) and the base URL it normalizes                                                                               |
+| `isVertexModelId(id)`, `isVertexAnthropicModel(id)`                                                                                     | which Vertex ids this build can serve, and which of them the Anthropic client builds — the same rule the server's catalogue filters with (#251)                                                                                         |
 | `SafeFetch`, `ProviderFetch`, `SafeProviderFetchOptions`, `createSafeProviderFetch(options)`                                           | the one guarded `fetch` the two URL-typed types are built from                                                                                                                                                                         |
 | `providerOf(modelId)`                                                                                                                  | the provider of a `provider/model` id: the part before the first slash                                                                                                                                                                 |
 | `isUsableCredential(credential)`                                                                                                       | whether a resolved credential is a key at all (a blank one is not)                                                                                                                                                                     |
@@ -110,7 +113,6 @@ emits what that reaches.
 | `backoffDelay(attempt, policy)`, `abortableSleep`, `Sleep`                                                                             | the delay, and the sleep that honors an abort                                                                                                                                                                                          |
 | `DEFAULT_MAX_RETRIES`, `DEFAULT_BASE_DELAY_MS`, `DEFAULT_MAX_DELAY_MS`                                                                 | `3`, `500`, `8000`                                                                                                                                                                                                                     |
 | `PACKAGE_NAME`, `DEPENDENCIES`                                                                                                         | the package name, and the edges that must resolve through built output                                                                                                                                                                 |
-
 `log.ts`, `events.ts` and `validate.ts` are internal: they are how the loop is written, not what
 a host talks to.
 
@@ -516,6 +518,34 @@ is `<name>/<bedrock model id>`, and the client is `createAmazonBedrock(…)(mode
   with all of them — a rejected request echoed back can quote any of the three. `last4` is drawn
   from the **access key ID**, the one half a reader recognises and the only one safe to show.
 
+### Google Vertex (epic #245, A3d)
+
+A `vertex` credential is a named one like Azure's, and its models are `<name>/<model>` —
+`vertex/gemini-2.5-pro`, `vertex/claude-sonnet-4-5@20250929`. Two things about it are
+load-bearing:
+
+- **The family decides the client, and the rule lives in `vertex.ts`.** `@ai-sdk/google-vertex`
+  builds Google's own models and `@ai-sdk/google-vertex/anthropic` the Anthropic models Vertex
+  serves; `isVertexAnthropicModel` is the `claude-*` prefix (Google's own naming for them) and
+  everything else goes to the Gemini client, so an id this build does not know is answered by
+  Google rather than refused here. `isVertexModelId` is the same rule the server's catalogue
+  filters the registry with — the two halves of one answer: what a request can run.
+- **No Application Default Credentials, ever.** This is the decision the whole type exists for.
+  The server itself runs on GCP, so a request that fell back to ADC would quietly run a user's
+  chat on openharness's own service account. The factory passes `googleAuthOptions.credentials`
+  (the parsed document), `project` and `location`, and `apiKey: ''` — deliberately **empty
+  rather than absent**, because a truthy one (or one left undefined, which lets the provider
+  read `GOOGLE_VERTEX_API_KEY`) switches the client into Vertex "express mode" and
+  authenticates the request with a key from the environment. `vertex-model.test.ts` holds all
+  of it with every decoy set: a decoy credentials file, `GOOGLE_CLOUD_PROJECT`, a decoy
+  `CLOUDSDK_CONFIG`, a `GCE_METADATA_HOST` stub that would hand out a working token, and the
+  express-mode variable — the request is still signed by the stored key, and a bad one fails
+  rather than becoming somebody else's.
+- **The endpoint is Google's, derived from the location** — `<location>-aiplatform.googleapis.com`
+  — which the protocol validates against Google's published list. There is no URL a user typed,
+  so unlike Azure's there is no `safeFetch` on this path. `createProviderModelFactory` takes an
+  optional `vertexFetch` seam for a test that wants to watch the request.
+
 ### Usage
 
 `ai@7` reads a model's `specificationVersion` and reshapes what it reports to match. Every
@@ -687,6 +717,19 @@ Bearer` with a decoy environment, **no** `Authorization` header for a keyless en
   streamed SSE reply end to end, the self-host `allowPrivate` option reaching the guard only when
   it is on (and the streaming preset in every case), and that the real `openAICompatibleFetch`
   refuses a loopback, metadata or `ftp:` endpoint before any request.
+- `vertex-model.test.ts` and `vertex-factory.test.ts` — the Vertex path (#251). The second
+  replaces the provider package to pin the **options** the factory passes — the project, the
+  location, the whole key document, the deliberately empty `apiKey`, and no `baseURL` — because
+  that is where the no-ADC guarantee is written. The first is the behavioural half, against the
+  real provider: the family rule, `isUsableCredential` and `credentialSecrets` for a Vertex
+  credential (its one secret being the document's private key PEM, and its public facts the
+  email, project and location), and the decoy suite (`GOOGLE_APPLICATION_CREDENTIALS` at a decoy
+  file, `GOOGLE_CLOUD_PROJECT`, `CLOUDSDK_CONFIG`, a `GCE_METADATA_HOST` stub that serves a
+  working token, `GOOGLE_VERTEX_API_KEY`/`_PROJECT`/`_LOCATION`) — a request signed with a
+  throwaway key reaches Google's token endpoint and is refused there
+  (`Invalid grant: account not found`), the metadata stub is never asked, no model request
+  leaves the process, and a key Google cannot verify fails locally rather than falling back to
+  anything.
 - `src/testing/harness.ts` builds the session and reads the log back; `src/testing/mock-model.ts`
   scripts what each model request answers with, records the prompts, and can act mid-stream
   (abort, append a steering message) between two chunks. Its `apiCallError` is the failure

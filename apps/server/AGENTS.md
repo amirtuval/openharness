@@ -756,7 +756,7 @@ most `OPENHARNESS_MAX_CONCURRENT_SESSIONS` sessions run at once; the rest wait t
 `stop()` accepts nothing more, aborts the turns in flight and gives them the drain timeout to
 write their last events.
 
-#### Named credentials, Azure OpenAI and custom OpenAI-compatible endpoints (epic #245, A3a/A3b)
+#### Named credentials, Azure OpenAI, custom endpoints, Amazon Bedrock and Google Vertex (epic #245, A3a/A3b/A3c/A3d)
 
 A credential is keyed by its **name**, which is the `provider` half of the model ids it serves —
 and that is what the route's path parameter has always been, so its shape did not change:
@@ -788,12 +788,25 @@ second Azure OpenAI credential.
 <region> answered 403 for ListFoundationModels: <reason>` — its message bounded to 200
   characters and scrubbed of all three secrets before it reaches the 422 body, because a
   provider that quotes a rejected request can quote a key.
+- **A `vertex` credential is checked with one authenticated publisher-models read.** An OAuth
+  token is signed **with the credential's own service-account key** (`vertex.ts`'s
+  `createVertexTokenProvider`, a `GoogleAuth` built with those credentials — never ADC, which
+  matters here more than anywhere, since this server runs on GCP), and one page of
+  `publishers/google/models` is read for the credential's project and location, through the same
+  egress-proxy client every other provider call uses. Google's own words reach the reader: a key
+  that cannot be signed fails with `invalid_grant: …`, a project without the Vertex AI API
+  enabled is a 403 whose body names it. The endpoint is Google's, derived from the validated
+  location, so there is no user-supplied URL and nothing for the SSRF guard to do.
 - **A credential reports its non-secret per-type facts as `details`.** `credentialUpsert` in
-  `credentials.ts` computes them from the payload — `{ region }` for a bedrock body, nothing for
-  the other two — and they ride in the one shared JSON column the store writes
-  (`0023_credential_details.sql`). `last4` is drawn from the **access key ID** for Bedrock: the
-  half a reader recognises, and the only one safe to show, since the secret access key and the
-  session token are never any part of a response.
+  `credentials.ts` derives them from the payload through the protocol's `credentialDetails` —
+  `{ region }` for a bedrock body, nothing for an `api_key` or an Azure one, and a `vertex`
+  body's service-account `email`, its `project` and its `location` — and they ride in the one
+  shared JSON column the store writes (`0023_credential_details.sql`). `last4` is drawn from the
+  **access key ID** for a Bedrock credential — the half a reader recognises, and the only one
+  safe to show, since the secret access key and the session token are never any part of a
+  response — and from the service account **key id** for a `vertex` one: an identifier Google
+  prints in the console, and never a piece of the private key, which no response, log line or
+  error carries.
 - **The vault's AAD is `userId|name`** — the same string it always was for the eleven, since
   their name _is_ their provider id, so a row stored before this change still opens.
 - **The catalogue gives an Azure credential one model per deployment name.** Azure offers no
@@ -816,13 +829,22 @@ second Azure OpenAI credential.
   registry's Bedrock models, acknowledged to their model ids. Because a Bedrock credential's
   registry key (`amazon-bedrock`) is not its name, `joinProviderList`/`registryFallback` take
   the key as an argument rather than assuming the provider — the one place the two differ.
+- **The catalogue answers a Vertex credential from the registry** (`catalog.ts`'s
+  `vertexCatalog`): models.dev's `google-vertex` entry carries every publisher model Vertex
+  serves, Anthropic's included, so the entries are `<name>/<model>` with the registry's prices
+  and context windows and the credential's status is `ok`. Two rules narrow it, each in its own
+  place: `@openharness/brain`'s `isVertexModelId` keeps the ids this build has a client for
+  (Gemini's and Anthropic's; the MaaS models Google resells have none), and the catalogue's own
+  chat filter drops the non-chat families — Gemini's image, speech and embedding models.
 - **A model id resolves by name, then by type**: the brain's `providerModelFactory` takes the
-  first half as a credential name, and builds an Azure or Bedrock model when the credential
-  says so.
-- **No `AWS_*` variable is ever read.** The Bedrock paths pass every setting explicitly — as
-  `provider-validation.ts` does when it signs, and as the brain does when it builds the client —
-  so a decoy `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`/`AWS_REGION`/
-  `AWS_PROFILE`/`AWS_ENDPOINT_URL_BEDROCK_RUNTIME` in the server's or the user's environment
+  first half as a credential name, and builds an Azure, a Bedrock or a Vertex model when the
+  credential says so.
+- **No `AWS_*` or `GOOGLE_*` variable is ever read.** The Bedrock and Vertex paths pass every
+  setting explicitly — as `provider-validation.ts` does when it signs or mints a token, and as
+  the brain does when it builds the client — so a decoy `AWS_ACCESS_KEY_ID`/
+  `AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`/`AWS_REGION`/`AWS_PROFILE`/
+  `AWS_ENDPOINT_URL_BEDROCK_RUNTIME`, or `GOOGLE_APPLICATION_CREDENTIALS`/`GOOGLE_CLOUD_PROJECT`/
+  `GOOGLE_VERTEX_API_KEY`/`_PROJECT`/`_LOCATION`, in the server's or the user's environment
   changes nothing. That is the same rule as the provider keys: the environment is never a
   fallback (A5).
 
@@ -1227,6 +1249,7 @@ src/
   session-watch.ts      revocation registry + periodic re-check for long-lived responses (#76)
   credentials.ts        sealing, opening and the session-bound credential resolver (A5)
   provider-validation.ts the one cheap provider call a saved key is checked with
+  vertex.ts             the Vertex check's two Google-side facts: the token, and the URL
   local-day.ts        local calendar days: the zone a request named, the day of an instant, and
                         the UTC window a range's days span (#247)
   usage.ts            what a session or a user spent: the log priced on read (#247)
@@ -1430,6 +1453,14 @@ parallel with each other.
   builds those frames: length-prefixed, CRC-32 preluded and trailered, exactly as the provider's
   decoder reads them, which is what makes a mocked happy path prove something rather than
   nothing.
+- `vertex-credentials.test.ts` (#245, A3d) — the Vertex route end to end: the metadata a save
+  returns (the key id's tail, and `details` carrying the email, project and location, with no
+  part of the private key anywhere), a second credential under `vertex-eu`, the 400s the schema
+  gives a document that is not a service-account key or a location Google does not serve, the
+  422 Google's refusal becomes, "never in a response or a log line", the save-time check's own
+  unit tests (the URL and bearer the credential's project and location produce, `global`'s apex
+  host, Google's reason on a 403 and on a key that cannot be signed), and the catalogue's
+  registry answer with its two filters.
 - `credentials.test.ts` — the write-only round trip, the 422 a refused key gets, the fresh
   session rule, the vault's AAD binding, "never in a response or a log", and the env-key test:
   with `OPENAI_API_KEY` set and no stored credential, a turn ends with

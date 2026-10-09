@@ -45,6 +45,7 @@ const NON_CHAT_FAMILIES: readonly RegExp[] = [
   /gpt[-_]?image/i, // gpt-image-1, chatgpt-image-latest
   /(^|[-_./])image([-_./]|$)/i, // gemini-…-image, flux-image, image-generation
   /imagen/i, // imagen-3.0-generate-002
+  /(^|[-_./])nano[-_]?banana([-_./]|$)/i, // gemini-nano-banana-2.1 (an image model, despite the id)
   /moderation/i, // omni-moderation-latest
   /realtime/i, // gpt-realtime, gpt-realtime-mini
   /(^|[-_./])audio([-_./]|$)/i, // gpt-audio, gpt-4o-audio-preview

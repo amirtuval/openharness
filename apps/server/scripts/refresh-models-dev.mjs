@@ -28,12 +28,15 @@
  * by product name, and the shared list carries the mapping (`modelsDevKey`); the snapshot is
  * keyed by **our** ids so nothing downstream has to know models.dev's spelling.
  *
- * Azure OpenAI (#248) is snapshotted too, even though it is a *credential type* rather than a
- * provider id: a deployment name the user typed may be one models.dev knows (`gpt-4o`,
- * `o1`), and its context window is the only thing the catalogue can put on that model — Azure
- * offers no endpoint that lists deployments. It is filed under its `modelsDevKey` (`azure`),
- * which is the same key the catalogue looks it up by; a deployment the registry does not know
- * gets no metadata at all, because guessing one would be worse than saying nothing.
+ * The **credential types** are snapshotted too, even though they are not provider ids: Azure
+ * OpenAI (#248) and Google Vertex (#251). A deployment name an Azure user typed may be one
+ * models.dev knows (`gpt-4o`, `o1`), and its context window is the only thing the catalogue
+ * can put on that model — Azure offers no endpoint that lists deployments. Vertex's models are
+ * the whole publisher catalogue, which models.dev files under `google-vertex` — Anthropic's
+ * models served there included — and are what a Vertex credential's catalogue is built from.
+ * Each type is filed under its `modelsDevKey` (`azure`, `google-vertex`), which is the same key
+ * its catalogue branch looks it up by; a model the registry does not know gets no metadata at
+ * all, because guessing one would be worse than saying nothing.
  */
 
 import { writeFile } from 'node:fs/promises'

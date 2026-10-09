@@ -1,6 +1,7 @@
 import {
   PutProviderCredentialRequestSchema,
   credentialDetails,
+  parseServiceAccountKey,
   type ProviderCredential,
   type PutProviderCredentialRequest,
   type SessionId,
@@ -81,7 +82,8 @@ export function credentialUpsert(
 }
 
 /**
- * The secret a payload carries — what `last4` is the last four characters of (epic #245, A3c).
+ * The secret a payload carries — what `last4` is the last four characters of (epic #245,
+ * A3b/A3c/A3d).
  *
  * An `api_key` credential has one secret and a Bedrock credential has three, of which the
  * access key ID is the one a reader recognises ("which of my keys is this?") and the only one
@@ -89,9 +91,24 @@ export function credentialUpsert(
  * characters of a secret. A session token is never the identifying half of anything. A custom
  * OpenAI-compatible credential's key is optional (#249, A3b), so a keyless one stores an empty
  * `last4`: the settings list tells "no key" from a key by exactly that.
+ *
+ * A `vertex` credential's `last4` is **not** any part of its secret either (#251): it is the
+ * service account key's **id**, which Google prints beside the account in the console and
+ * which identifies the key without being part of it. Nothing of the private key is ever
+ * echoed, not even four characters — `GET /v1/provider-credentials` carries the key id's tail
+ * and the document's public facts, and nothing else.
  */
 function secretOf(body: PutProviderCredentialRequest): string {
-  return body.type === 'bedrock' ? body.access_key_id : (body.api_key ?? '')
+  if (body.type === 'bedrock') {
+    return body.access_key_id
+  }
+  if (body.type === 'vertex') {
+    // The schema guaranteed a service-account document before this ran; `?? ''` keeps the
+    // function total for a body that somehow reached here without one, and an empty tail is
+    // not a secret either.
+    return parseServiceAccountKey(body.service_account)?.private_key_id ?? ''
+  }
+  return body.api_key ?? ''
 }
 
 /**
@@ -149,6 +166,14 @@ export function modelCredential(body: PutProviderCredentialRequest): ModelCreden
       // explicit `undefined` is what tells the provider package not to look for one.
       ...(body.session_token === undefined ? {} : { sessionToken: body.session_token }),
       region: body.region,
+    }
+  }
+  if (body.type === 'vertex') {
+    return {
+      type: 'vertex',
+      project: body.project,
+      location: body.location,
+      serviceAccount: body.service_account,
     }
   }
   return { type: 'api_key', apiKey: body.api_key }

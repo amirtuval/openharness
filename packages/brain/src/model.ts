@@ -12,6 +12,10 @@ import { createCerebras } from '@ai-sdk/cerebras'
 import { createDeepSeek } from '@ai-sdk/deepseek'
 import { createFireworks } from '@ai-sdk/fireworks'
 import { createGoogleGenerativeAI } from '@ai-sdk/google'
+import { createVertex } from '@ai-sdk/google-vertex'
+import { createVertexAnthropic } from '@ai-sdk/google-vertex/anthropic'
+import { createVertex } from '@ai-sdk/google-vertex'
+import { createVertexAnthropic } from '@ai-sdk/google-vertex/anthropic'
 import { createGroq } from '@ai-sdk/groq'
 import { createMistral } from '@ai-sdk/mistral'
 import { createOpenAI } from '@ai-sdk/openai'
@@ -26,6 +30,7 @@ import { bedrockRuntimeBaseUrl } from './bedrock'
 import { isOwnershipError } from './errors'
 import { openAICompatibleBaseUrl, openAICompatibleFetch } from './openai-compatible-fetch'
 import type { ProviderFetch } from './provider-fetch'
+import { isVertexAnthropicModel } from './vertex'
 
 /**
  * Making a model request, and the seam that keeps the brain testable.
@@ -53,6 +58,7 @@ export type ModelCredential =
   | AzureOpenAIModelCredential
   | OpenAICompatibleModelCredential
   | BedrockModelCredential
+  | VertexModelCredential
 
 /** An `api_key` credential: a single secret, passed to one of the eleven provider clients. */
 export interface ApiKeyModelCredential {
@@ -128,9 +134,11 @@ export interface BedrockModelCredential {
  * `redactSecret` takes one secret, and a credential stopped being a single string when Bedrock
  * arrived: an AWS credential is an access key ID **and** a secret access key, plus a session
  * token when the principal has one, and a provider that echoes a rejected request back can echo
- * any of them. Which strings are secret is a property of the credential type, so it is stated
- * here, beside the types, and every path that scrubs (the turn's error text) asks this rather
- * than reaching for a field that only one type has.
+ * any of them. A Vertex credential is one document whose sensitive half is the PEM inside it
+ * (#251) — the rest of the document is metadata a reader may see. Which strings are secret is a
+ * property of the credential type, so it is stated here, beside the types, and every path that
+ * scrubs (the turn's error text) asks this rather than reaching for a field that only one type
+ * has.
  *
  * An Azure credential's endpoint is deliberately not in the list: it is a URL the user typed,
  * it rides on the credential's `details` in an API response, and it is not a secret.
@@ -143,7 +151,34 @@ export function credentialSecrets(credential: ModelCredential): readonly string[
       ...(credential.sessionToken === undefined ? [] : [credential.sessionToken]),
     ]
   }
+  if (credential.type === 'vertex') {
+    const secret = vertexPrivateKey(credential.serviceAccount)
+    return secret === '' ? [] : [secret]
+  }
   return [credential.apiKey]
+}
+
+/**
+ * A `vertex` credential: a Google Cloud service-account key, and the project and location it
+ * runs in (epic #245, A3d).
+ *
+ * The model is not here — it is the model id's second half (`vertex/gemini-2.5-pro`) — and
+ * neither is the endpoint: the host is derived from the location, which the protocol validates
+ * against Google's published list.
+ *
+ * `serviceAccount` is the key document **as text**, the whole thing a user downloaded from the
+ * console. It is parsed once, here, and handed to the client library as the credentials it
+ * signs an OAuth token with — so this credential type carries the private key, and everything
+ * that reads one of these must treat it as a secret (never logged, never echoed in an error).
+ */
+export interface VertexModelCredential {
+  readonly type: 'vertex'
+  /** The Google Cloud project the models run in. */
+  readonly project: string
+  /** The Vertex AI location, e.g. `us-central1`; the host is derived from it. */
+  readonly location: string
+  /** The service-account key document, as Google's console issued it. Never read from disk. */
+  readonly serviceAccount: string
 }
 
 /**
@@ -338,6 +373,12 @@ export interface ProviderModelFactoryOptions {
    * {@link createOpenAICompatibleFetch} when that setting is on.
    */
   readonly openAICompatibleFetch?: ProviderFetch
+  /**
+   * The `fetch` a Google Vertex request goes through, when a caller wants its own. Defaults to
+   * the provider's (the global `fetch`): unlike Azure's, the endpoint is Google's own, derived
+   * from the stored location rather than typed by a user, so there is nothing to guard.
+   */
+  readonly vertexFetch?: ProviderFetch
 }
 
 /**
@@ -357,9 +398,10 @@ export interface ProviderModelFactoryOptions {
  * (`xai.responses(id)`). Every other provider is a chat-completions client.
  *
  * A first half that is **not** one of the eleven provider ids names a *named credential*
- * instead (epic #245, A3a/A3b/A3c): an `azure` credential's model ids are `azure/<deployment>`,
- * a `custom` one's are `custom/<model>` and a `bedrock` one's are `bedrock/<bedrock model id>`,
- * and the credential's type decides the client. The credential's type is the discriminant, so a
+ * instead (epic #245, A3a/A3b/A3c/A3d): an `azure` credential's model ids are
+ * `azure/<deployment>`, a `custom` one's are `custom/<model>`, a `bedrock` one's are
+ * `bedrock/<bedrock model id>` and a `vertex` one's are `vertex/<model>`, and the credential's
+ * type decides the client. The credential's type is the discriminant, so a
  * name nothing stores a credential for is still an `UnsupportedProviderError` — the same ending
  * as before, and the turn writes no span for it.
  *
@@ -376,6 +418,7 @@ export function createProviderModelFactory(
 ): ModelFactory {
   const azureGuard = options.azureFetch ?? azureFetch
   const customGuard = options.openAICompatibleFetch ?? openAICompatibleFetch
+  const vertexFetch = options.vertexFetch
   return (modelId, credential) => {
     const provider = providerOf(modelId)
     // Everything after the first slash: the provider's own id for the model. A fireworks,
@@ -449,12 +492,108 @@ export function createProviderModelFactory(
         baseURL: bedrockRuntimeBaseUrl(credential.region),
       })(id)
     }
+
+    if (credential.type === 'vertex') {
+      return vertexModel(id, credential, vertexFetch)
+    }
     throw new UnsupportedProviderError(provider)
   }
 }
 
+/**
+ * The model client for one Vertex model id (epic #245, A3d).
+ *
+ * The project, the location and **the service-account key** are all constructor arguments, and
+ * that is the whole of "no fallback, and no Application Default Credentials" — the reason this
+ * type exists and the reason it is critical here: the server itself runs on GCP, so a request
+ * that quietly fell back to the environment would run a user's chat on openharness's own
+ * service account.
+ *
+ * Three of the provider's settings are passed for exactly that reason:
+ *
+ * - `googleAuthOptions.credentials` is the parsed key document. `google-auth-library` builds its
+ *   JWT client from it and never looks for ADC — no `GOOGLE_APPLICATION_CREDENTIALS`, no
+ *   well-known file, no gcloud config, no metadata server. `vertex-model.test.ts` holds that
+ *   with every one of those decoys present.
+ * - `project` and `location` are the stored ones. Left undefined, each falls back to its
+ *   `GOOGLE_VERTEX_PROJECT` / `GOOGLE_VERTEX_LOCATION` variable, which would move a request —
+ *   and the key it authenticates with — to a project nobody chose.
+ * - `apiKey: ''`, deliberately empty rather than absent: a truthy `apiKey` (or one left
+ *   undefined, which lets the provider read `GOOGLE_VERTEX_API_KEY`) switches the whole client
+ *   into Vertex "express mode", where the requests are authenticated by that key instead. An
+ *   empty string is a value the provider sees and rejects as falsy, so the service-account path
+ *   is the only one left.
+ *
+ * The model's family decides the client (see `vertex.ts`); an id belonging to neither — a
+ * free-text id a host typed, since the catalogue offers only the two families — goes to the
+ * Gemini client, and Google answers with its own error rather than this build refusing on the
+ * user's behalf.
+ */
+function vertexModel(
+  id: string,
+  credential: VertexModelCredential,
+  fetch: ProviderFetch | undefined,
+): LanguageModel {
+  const settings = {
+    project: credential.project,
+    location: credential.location,
+    apiKey: '',
+    googleAuthOptions: { credentials: googleCredentials(credential.serviceAccount) },
+    ...(fetch === undefined ? {} : { fetch }),
+  }
+  if (isVertexAnthropicModel(id)) {
+    return createVertexAnthropic(settings).languageModel(id)
+  }
+  return createVertex(settings).languageModel(id)
+}
+
+/**
+ * The service-account document as `google-auth-library` takes it, or an error that names the
+ * problem and no part of the key.
+ *
+ * A credential that reached here already passed the protocol's check on save, so this is the
+ * belt to that schema's braces: a row edited by hand, or one written before the check existed,
+ * must fail with a sentence a reader can act on rather than a stack trace from the auth library.
+ */
+function googleCredentials(serviceAccount: string): Record<string, unknown> {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(serviceAccount)
+  } catch {
+    throw new Error('the stored Vertex service account is not JSON; save the credential again')
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('the stored Vertex service account is not a key document; save it again')
+  }
+  return parsed as Record<string, unknown>
+}
+
 /** The factory a host runs unless it has a reason to inject one. */
 export const providerModelFactory: ModelFactory = createProviderModelFactory()
+
+/**
+ * The service account's **private key** — the PEM inside the stored document, which is what a
+ * request signs its OAuth token with — or the empty string when the document carries none.
+ *
+ * This is the one piece of a Vertex credential that must never appear in text: the rest of the
+ * document (the project, the client email, the key id) is metadata a reader may see, and it is
+ * exactly what the credential's `details` publishes. `credentialSecrets` reads this, so a
+ * provider that echoes a rejected request back cannot leak the key into the log.
+ */
+function vertexPrivateKey(serviceAccount: string): string {
+  try {
+    const parsed: unknown = JSON.parse(serviceAccount)
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+      const key: unknown = (parsed as Record<string, unknown>).private_key
+      if (typeof key === 'string') {
+        return key
+      }
+    }
+  } catch {
+    // Not JSON at all: there is no private key to find, and so no secret to scrub.
+  }
+  return ''
+}
 
 /**
  * The provider of a `provider/model` id: the part before the first slash.
@@ -487,6 +626,21 @@ export function isUsableCredential(
   credential: ModelCredential | null,
 ): credential is ModelCredential {
   if (credential === null) {
+    return false
+  }
+  // A Vertex credential has no key field: what authenticates the request is the service-account
+  // document, so "is it usable" is whether that document, and the two settings the endpoint is
+  // built from, are there. It is checked here rather than at the factory for the same reason
+  // the Azure endpoint is: the turn then ends with `missing_provider_credential` — the ending
+  // that says "save one" — instead of a span that fails on a malformed document.
+  if (credential.type === 'vertex') {
+    return (
+      credential.serviceAccount.trim().length > 0 &&
+      credential.project.trim().length > 0 &&
+      credential.location.trim().length > 0
+    )
+  }
+  if (credential.apiKey.trim().length === 0) {
     return false
   }
   // A custom OpenAI-compatible endpoint may take no key at all, so for it the **base URL**, not
