@@ -376,6 +376,10 @@ function sessionAgentFromRow(row: SessionRow): Session['agent'] {
  * SQL and not only of the mapping.
  */
 export function credentialMetadataFromRow(row: ProviderCredentialMetadataRow): ProviderCredential {
+  // The row's columns are the union's fields, and which variant it is is the stored `type`
+  // column — `text` in the table, and `details` is `jsonb`, so its shape is the writer's. The
+  // two casts are the unchecked part: the id column is a plain string, and the type column is
+  // the discriminant the metadata's own schema is the only spelling of.
   return deepFreeze({
     id: row.id as ProviderCredential['id'],
     type: row.type as ProviderCredential['type'],

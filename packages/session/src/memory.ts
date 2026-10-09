@@ -946,6 +946,9 @@ export class InMemoryCredentialStore implements CredentialStore {
     const existing = stored.get(input.name)
     // A replacement keeps the id and `created_at` it is replacing — one credential per
     // `(user, name)`, so a second save is the same credential with a new secret.
+    // The metadata is a discriminated union on `type`, and the store's caller decides which
+    // variant it is: a `type` and its own `details` are consistent by construction here (the
+    // contract's `UpsertCredentialInput`), which is what the annotation says.
     const record: StoredCredential = {
       id: existing?.id ?? newProviderCredentialId(now),
       type: input.type,

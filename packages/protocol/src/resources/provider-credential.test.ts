@@ -5,8 +5,8 @@ import {
   AzureOpenAICredentialSchema,
   ListProviderCredentialsResponseSchema,
   MAX_AZURE_DEPLOYMENTS,
+  OpenAICompatibleCredentialDetailsSchema,
   OpenAICompatibleCredentialSchema,
-  ProviderCredentialDetailsSchema,
   ProviderCredentialSchema,
   ProviderCredentialTypeSchema,
   PutProviderCredentialRequestSchema,
@@ -80,15 +80,29 @@ describe('ProviderCredentialSchema', () => {
     )
   })
 
-  it('carries optional type-specific details, and omits the field when there are none', () => {
-    const detailed = { ...credential, details: { base_url_host: '127.0.0.1:11434' } }
-    expect(ProviderCredentialSchema.parse(detailed)).toEqual(detailed)
-    // Absent, not `{}`: a credential whose type has no public facts has no `details` key, so
-    // the api_key and azure metadata is byte-for-byte what it was before the field existed.
+  it('keys details by type: only a type that publishes them carries the field', () => {
+    const custom = {
+      ...credential,
+      type: 'openai_compatible',
+      name: 'custom',
+      details: { base_url_host: '127.0.0.1:11434' },
+    }
+    expect(ProviderCredentialSchema.parse(custom)).toEqual(custom)
+    // The type that has a `details` is where its own shape is enforced ...
+    expect(
+      ProviderCredentialSchema.safeParse({ ...custom, details: { base_url_host: 42 } }).success,
+    ).toBe(false)
+    expect(ProviderCredentialSchema.safeParse({ ...custom, details: 'nope' }).success).toBe(false)
+    // ... and a type with none has no `details` key: one smuggled onto an api_key or azure
+    // credential is stripped like any unknown field, so their metadata is byte-for-byte what it
+    // was before the field existed (and both variants keep the json they always had).
     expect(ProviderCredentialSchema.parse(credential)).not.toHaveProperty('details')
-    expect(ProviderCredentialSchema.safeParse({ ...credential, details: 'nope' }).success).toBe(
-      false,
-    )
+    expect(
+      ProviderCredentialSchema.parse({
+        ...credential,
+        details: { base_url_host: 'api.example.com' },
+      }),
+    ).not.toHaveProperty('details')
   })
 })
 
@@ -105,23 +119,26 @@ describe('ProviderCredentialTypeSchema', () => {
   })
 })
 
-describe('ProviderCredentialDetailsSchema', () => {
-  it('carries a base-URL host, and only a string one', () => {
-    expect(ProviderCredentialDetailsSchema.parse({ base_url_host: 'api.example.com' })).toEqual({
-      base_url_host: 'api.example.com',
-    })
-    expect(ProviderCredentialDetailsSchema.safeParse({ base_url_host: '' }).success).toBe(false)
-    expect(ProviderCredentialDetailsSchema.safeParse({ base_url_host: 42 }).success).toBe(false)
+describe('OpenAICompatibleCredentialDetailsSchema', () => {
+  it('carries a base-URL host, and only a non-empty string one', () => {
+    expect(
+      OpenAICompatibleCredentialDetailsSchema.parse({ base_url_host: 'api.example.com' }),
+    ).toEqual({ base_url_host: 'api.example.com' })
+    // The host is the point of the object, so an absent one is not a shape: a type with no
+    // facts has no `details` at all, rather than an empty object.
+    expect(OpenAICompatibleCredentialDetailsSchema.safeParse({}).success).toBe(false)
+    expect(OpenAICompatibleCredentialDetailsSchema.safeParse({ base_url_host: '' }).success).toBe(
+      false,
+    )
+    expect(OpenAICompatibleCredentialDetailsSchema.safeParse({ base_url_host: 42 }).success).toBe(
+      false,
+    )
   })
 
   it('strips a field it does not know — details is a closed, per-type shape', () => {
     expect(
-      ProviderCredentialDetailsSchema.parse({ base_url_host: 'x', api_key: 'sk-secret' }),
+      OpenAICompatibleCredentialDetailsSchema.parse({ base_url_host: 'x', api_key: 'sk-secret' }),
     ).toEqual({ base_url_host: 'x' })
-  })
-
-  it('parses an empty object, which is how a type with no facts is spelled', () => {
-    expect(ProviderCredentialDetailsSchema.parse({})).toEqual({})
   })
 })
 

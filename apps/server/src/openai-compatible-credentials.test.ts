@@ -148,7 +148,10 @@ describe('the openai_compatible credential API', () => {
 
     const response = await put(test, 'custom', CUSTOM_BODY)
     expect(response.status, await response.clone().text()).toBe(200)
-    const created = (await response.json()) as ProviderCredential
+    const created = (await response.json()) as Extract<
+      ProviderCredential,
+      { type: 'openai_compatible' }
+    >
     expect(created.type).toBe('openai_compatible')
     expect(created.name).toBe('custom')
     expect(created.last4).toBe(SECRET.slice(-4))
@@ -167,7 +170,10 @@ describe('the openai_compatible credential API', () => {
       base_url: 'http://127.0.0.1:11434/v1',
     })
     expect(response.status, await response.clone().text()).toBe(200)
-    const created = (await response.json()) as ProviderCredential
+    const created = (await response.json()) as Extract<
+      ProviderCredential,
+      { type: 'openai_compatible' }
+    >
     expect(created.last4).toBe('')
     expect(created.details).toEqual({ base_url_host: '127.0.0.1:11434' })
     expect(JSON.stringify(created)).not.toContain('11434/v1')

@@ -244,6 +244,8 @@ function credentialKeyLabel(credential: ProviderCredential): string {
  * gets an empty string.
  */
 function credentialEndpointLabel(credential: ProviderCredential): string {
-  const host = credential.details?.base_url_host
+  // `details` is keyed by type, so only the type that publishes it has the field.
+  const host =
+    credential.type === 'openai_compatible' ? credential.details?.base_url_host : undefined
   return host === undefined ? '' : `${host} · `
 }

@@ -161,7 +161,7 @@ export interface ListCredentialsOptions {
  * to open the credential for one request, and its `sealed` field is what must never be logged
  * or serialized outward.
  */
-export interface SealedProviderCredential extends ProviderCredential {
+export type SealedProviderCredential = ProviderCredential & {
   /** The sealed secret, exactly as {@link CredentialStore.upsert} was given it. */
   readonly sealed: SealedSecret
 }

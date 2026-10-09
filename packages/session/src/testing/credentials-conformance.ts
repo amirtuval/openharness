@@ -110,9 +110,15 @@ export function runCredentialStoreConformance(
           details: { base_url_host: '127.0.0.1:11434' },
           validatedAt: timestampAt(clock.currentMs),
         })
-        expect(detailed.details).toEqual({ base_url_host: '127.0.0.1:11434' })
-        expect((await store.list({ userId: OWNER_A }))[0]?.details).toEqual({
-          base_url_host: '127.0.0.1:11434',
+        // `details` is keyed by type: the field exists on the variant that publishes it, and
+        // the metadata the type answers with is that type's own shape.
+        expect(detailed).toMatchObject({
+          type: 'openai_compatible',
+          details: { base_url_host: '127.0.0.1:11434' },
+        })
+        expect((await store.list({ userId: OWNER_A }))[0]).toMatchObject({
+          type: 'openai_compatible',
+          details: { base_url_host: '127.0.0.1:11434' },
         })
 
         const plain = await store.upsert({

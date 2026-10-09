@@ -11,6 +11,7 @@ import type {
   ModelUsage,
   ProviderCatalogStatus,
   ProviderCredential,
+  ProviderCredentialMetadata,
   Session,
   SessionAgent,
   SessionDeletedEvent,
@@ -164,9 +165,9 @@ export function makeUserPreferences(overrides: Partial<UserPreferences> = {}): U
  * @param overrides fields to replace on the default credential
  */
 export function makeProviderCredential(
-  overrides: Partial<ProviderCredential> = {},
+  overrides: Partial<ProviderCredentialMetadata> = {},
 ): ProviderCredential {
-  const credential: ProviderCredential = {
+  const credential: ProviderCredentialMetadata = {
     id: newProviderCredentialId(),
     type: 'api_key',
     name: 'anthropic',
@@ -175,6 +176,9 @@ export function makeProviderCredential(
     updated_at: fixtureTimestamp(),
     validated_at: fixtureTimestamp(),
   }
+  // `ProviderCredential` is a discriminated union, and the fixture's caller decides which
+  // variant it means: a `type` and its own `details` are consistent by construction, so the
+  // spread is the union's own shape (the wide `ProviderCredentialMetadata`) narrowed by `type`.
   return { ...credential, ...overrides }
 }
 
