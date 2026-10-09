@@ -276,6 +276,10 @@ const CREDENTIAL_FORMS: Record<ProviderCredentialType, CredentialForm> = {
       {
         name: 'project',
         label: 'Project ID',
+        // Shown as typed: a project id is not a secret, and the reader has to be able to check
+        // what the document defaulted it to (and edit it) — the default for every field is a
+        // masked one, so the ones that are not secrets say so.
+        kind: 'text',
         placeholder: 'my-project-123456',
         // The document carries a project already, and `derive` fills this in from it — a
         // service account with access to several projects may name another.
@@ -599,9 +603,7 @@ export function ProviderKeyForm({
                     which is never empty — offers an unselected row so the reader must choose
                     rather than silently saving the first option. */}
                 {field.defaultValue === undefined ? (
-                  <option value="">
-                    {field.placeholder === '' ? 'Choose…' : `Choose ${field.placeholder}…`}
-                  </option>
+                  <option value="">{`Choose ${field.label.toLowerCase()}…`}</option>
                 ) : null}
                 {(field.options ?? []).map((option) => (
                   <option key={option} value={option}>
