@@ -797,7 +797,7 @@ if (target === null) {
     // preferences cannot leak into the next (#111), and `scheduler_instances` so one test's
     // memberships cannot (#122).
     await sql`truncate table
-      events, event_claims, event_supersessions, sessions, agents, partition_leases,
+      events, event_claims, event_supersessions, sessions, agents, modes, partition_leases,
       scheduler_instances, provider_credentials, user_preferences`.execute(db)
   }
 }

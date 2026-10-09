@@ -23,8 +23,11 @@
  * - **{@link Clock}** and {@link timestampAt} (`./clock`) — the injectable time source every
  *   store takes, so tests can move time instead of waiting for it.
  * - **{@link FencedError}**, {@link SessionNotFoundError}, {@link AgentNotFoundError},
- *   {@link DuplicateEventIdError}, {@link ClaimConflictError} (`./errors`) — the typed failures
- *   a store raises.
+ *   {@link DuplicateEventIdError}, {@link ClaimConflictError}, {@link DuplicateModeNameError},
+ *   {@link ModeLimitReachedError} (`./errors`) — the typed failures a store raises.
+ *
+ * Since #245 (M6) the contract also carries a user's **modes** — the named presets a chat can
+ * follow — in `./store`: `createMode`, `getMode`, `listModes`, `updateMode` and `deleteMode`.
  *
  * `@openharness/session/testing` holds what tests need: the conformance suites every
  * implementation must pass (`runSessionStoreConformance`, `runCredentialStoreConformance`), a

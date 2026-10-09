@@ -1,7 +1,7 @@
 import { z } from 'zod'
 
 import { ContentBlocksSchema } from '../content'
-import { EventIdSchema } from '../ids'
+import { EventIdSchema, ModeIdSchema } from '../ids'
 import type { DeepReadonly } from '../readonly'
 import { ModelConfigSchema } from '../resources/agent'
 import { ReasoningEffortSchema } from '../reasoning'
@@ -42,6 +42,20 @@ export const UserMessageEventSchema = z.object({
    * agent's, fixed when the session is created.
    */
   model: ModelConfigSchema.optional(),
+  /**
+   * // extension: switch the session's mode for this message and the ones after it (#245, M6).
+   *
+   * A `mode` is the id of one of the user's modes: appending it sets the session's mode to it
+   * in the same append, exactly as a `model` switches the model (#111), and every request from
+   * then on resolves the mode as it is now — its model, effort and prompt addition. `null`
+   * detaches the session from any mode, and a message that carries a `model` but no `mode`
+   * detaches too: a chat follows either a mode or a plain model, never both. A message that
+   * carries neither leaves the session's mode alone.
+   *
+   * The server resolves and validates the mode on the append path, so a mode the user does
+   * not own — or one whose model cannot be used — is refused before anything is stored.
+   */
+  mode: ModeIdSchema.nullable().optional(),
   /**
    * // extension: run this message's turn at a reasoning effort, and the turns after it (#252).
    *
@@ -106,6 +120,11 @@ export const UserMessageEventInputSchema = z.object({
   content: ContentBlocksSchema,
   /** Switch the session's model for this message and the ones after it (#111). */
   model: ModelConfigSchema.optional(),
+  /**
+   * Switch the session's mode from this message on, or detach it with `null` (#245, M6). A
+   * `model` without a `mode` detaches; see {@link UserMessageEventSchema}.
+   */
+  mode: ModeIdSchema.nullable().optional(),
   /** Run at a reasoning effort from this message on; `null` returns to the provider's default (#252). */
   reasoning_effort: ReasoningEffortSchema.nullable().optional(),
 })

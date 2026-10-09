@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   AgentSchema,
   ListModelsResponseSchema,
+  ModeSchema,
   ModelEntrySchema,
   ModelRequestEndEventSchema,
   ModelRequestStartEventSchema,
@@ -26,6 +27,7 @@ import {
   makeAgentMessage,
   makeContentDelta,
   makeListModelsResponse,
+  makeMode,
   makeModelEntry,
   makeModelRequestEnd,
   makeModelRequestStart,
@@ -43,6 +45,7 @@ import {
   makeUserInterrupt,
   makeUserMessage,
   sampleAgent,
+  sampleMode,
   sampleSession,
   sampleSessionHistory,
 } from './index'
@@ -103,6 +106,15 @@ describe('fixture builders', () => {
       ProviderCredentialSchema.safeParse(makeProviderCredential({ validated_at: undefined }))
         .success,
     ).toBe(true)
+  })
+
+  it('builds a mode that parses, with the overrides applied (#245, M6)', () => {
+    expect(ModeSchema.safeParse(makeMode()).success).toBe(true)
+    expect(ModeSchema.safeParse(sampleMode).success).toBe(true)
+    expect(makeMode({ name: 'fast', model: 'openai/gpt-4.1-mini' })).toMatchObject({
+      name: 'fast',
+      model: 'openai/gpt-4.1-mini',
+    })
   })
 
   it('builds model catalog fixtures that parse, with the overrides applied', () => {

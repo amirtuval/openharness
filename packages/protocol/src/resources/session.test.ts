@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { newAgentId, newSessionId } from '../ids'
+import { newAgentId, newModeId, newSessionId } from '../ids'
 import { encodeKeyCursor } from '../pagination'
 import {
   CreateSessionRequestSchema,
@@ -20,6 +20,7 @@ const session = {
   metadata: { source: 'test' },
   model: { id: 'anthropic/claude-sonnet-5' },
   system: 'Be concise.',
+  mode: null,
   agent: {
     id: newAgentId(),
     name: 'Summarizer',
@@ -141,10 +142,16 @@ describe('CreateSessionRequestSchema', () => {
     ).toMatchObject({ system: null })
   })
 
-  it('rejects a request that names neither an agent nor a model, with a clear message', () => {
+  it('rejects a request that names none of an agent, a model or a mode, with a clear message', () => {
     const result = CreateSessionRequestSchema.safeParse({ title: 'A chat' })
     expect(result.success).toBe(false)
-    expect(result.error?.issues[0]?.message).toMatch(/agent or a model/)
+    expect(result.error?.issues[0]?.message).toMatch(/agent, a model or a mode/)
+  })
+
+  it('accepts a mode in place of a model (#245, M6)', () => {
+    const mode = newModeId()
+    expect(CreateSessionRequestSchema.parse({ mode })).toEqual({ mode })
+    expect(CreateSessionRequestSchema.safeParse({ mode: 'not-a-mode' }).success).toBe(false)
   })
 
   it('rejects a model that is not a provider/model id', () => {

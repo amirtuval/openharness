@@ -2,7 +2,7 @@ import { z } from 'zod'
 
 import { MetadataSchema, PageLimitSchema, TimestampSchema } from '../common'
 import { UserEventInputSchema } from '../events/user'
-import { AgentIdSchema, SessionIdSchema } from '../ids'
+import { AgentIdSchema, ModeIdSchema, SessionIdSchema } from '../ids'
 import { NextPageSchema, PageCursorStringSchema } from '../pagination'
 import { AGENT_NAME_MAX_LENGTH, ModelConfigSchema } from './agent'
 import { UserIdSchema } from './user'
@@ -19,7 +19,8 @@ import { UserIdSchema } from './user'
  * Its `status` mirrors the last status event in the log, and its `model` and `system` are the
  * configuration it runs, always set — frozen at creation time, along with the `agent` preset
  * it was created from, when there was one. The one exception to "frozen": a `user.message`
- * carrying a `model` switches what the session runs from that message on (#111).
+ * carrying a `model` switches what the session runs from that message on (#111), and a
+ * `user.message` carrying a `mode` switches — or detaches — the mode a chat follows (#245, M6).
  *
  * `DELETE` answers `204` and removes the session and its whole log (epic #116, U5) — an
  * owner-scoped operation, so another user's session answers `404`. It is the explicit
@@ -107,6 +108,17 @@ export const SessionSchema = z.object({
    */
   system: z.string().nullable(),
   /**
+   * // extension: the mode this chat follows (#245, M6), or `null` for a chat without one.
+   *
+   * A chat started from a mode follows it live: the next request resolves the mode as it is
+   * now, and runs its model, effort and prompt addition — even after the mode was edited. It
+   * is set by the message or create request that picked the mode, and cleared by a message
+   * that picks a plain `model` or by deleting the mode, which lands the chat on the model it
+   * last ran. `model` above stays the resolved model the session last ran, so a chat whose
+   * mode is gone still has a model to continue on.
+   */
+  mode: ModeIdSchema.nullable(),
+  /**
    * The preset the session was created from, snapshotted — or `null` for a model-first
    * session. `model` and `system` above are what the session runs; this is where it came from.
    */
@@ -130,6 +142,9 @@ export type Session = z.infer<typeof SessionSchema>
  * - **From a model.** Without an `agent`, `model` is required and `system` defaults to
  *   `null`: this is model-first chat, where the user picks a model and the agent is an
  *   optional preset (epic #92).
+ * - **From a mode** (#245, M6). `mode` is a `mode_` id: the session is created on the user's
+ *   mode, which the server resolves to a model for the session's header. A `mode` this way
+ *   stands in for `model`, and the session follows the mode live from then on.
  *
  * Anthropic additionally accepts an inline agent reference with a `version`, or one with
  * per-session model overrides; openharness has neither agent versioning nor overrides in that
@@ -143,6 +158,11 @@ export const CreateSessionRequestSchema = z
     model: ModelConfigSchema.optional(),
     /** The system prompt the session runs with. Overrides the agent's; `null` without one. */
     system: z.string().nullable().optional(),
+    /**
+     * // extension: the id of the user's mode the session is created on (#245, M6). The
+     * server resolves it to the session's header model; the chat then follows the mode live.
+     */
+    mode: ModeIdSchema.optional(),
     title: z.string().max(SESSION_TITLE_MAX_LENGTH).nullable().optional(),
     metadata: MetadataSchema.optional(),
     /**
@@ -151,10 +171,15 @@ export const CreateSessionRequestSchema = z
      */
     initial_events: z.array(UserEventInputSchema).max(MAX_INITIAL_EVENTS).optional(),
   })
-  .refine((request) => request.agent !== undefined || request.model !== undefined, {
-    message:
-      'a session needs an agent or a model: pass "agent", or "model" for a model-first session',
-  })
+  .refine(
+    (request) =>
+      request.agent !== undefined || request.model !== undefined || request.mode !== undefined,
+    {
+      message:
+        'a session needs an agent, a model or a mode: pass "agent", "model" for a model-first ' +
+        'session, or "mode" for one on a mode',
+    },
+  )
 
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequestSchema>
 

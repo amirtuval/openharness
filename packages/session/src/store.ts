@@ -2,12 +2,15 @@ import type {
   Agent,
   AgentId,
   CreateAgentRequest,
+  CreateModeRequest,
   EventId,
   ListAgentsResponse,
   ListEventsResponse,
   ListOrder,
   ListSessionsResponse,
   Metadata,
+  Mode,
+  ModeId,
   ModelConfig,
   ModelRequestStartEvent,
   ModelUsage,
@@ -19,11 +22,12 @@ import type {
   StoredEventType,
   StreamEvent,
   Timestamp,
+  UpdateAgentRequest,
+  UpdateModeRequest,
   UserEvent,
   UserEventInput,
   UserId,
   UserPreferences,
-  UpdateAgentRequest,
 } from '@openharness/protocol'
 
 /**
@@ -35,6 +39,17 @@ import type {
  * implementation of this contract — or a caller of it — can name the type beside the method.
  */
 export type { UserPreferences } from '@openharness/protocol'
+
+/**
+ * A user's mode (epic #245, M6): a named preset of a model, a reasoning effort and a
+ * system-prompt addition.
+ *
+ * The protocol defines it; it is re-exported here because it is the vocabulary of the mode
+ * methods below ({@link SessionStore.createMode}, `getMode`, `listModes`, `updateMode`,
+ * `deleteMode`), so an implementation of this contract — or a caller of it — can name the
+ * type beside the method.
+ */
+export type { Mode } from '@openharness/protocol'
 
 /**
  * The storage and signaling contract the brain and the server code against.
@@ -179,6 +194,76 @@ export interface SessionStore {
    * writes it.
    */
   updateAgent(agentId: AgentId, update: UpdateAgentRequest): Promise<Agent | null>
+
+  // ------------------------------------------------------------------- modes
+
+  /**
+   * Create a mode owned by `ownerId`, with `created_at` and `updated_at` set to the clock's
+   * current instant (epic #245, M6).
+   *
+   * A mode is a user's own named preset — a model, a reasoning effort and a system-prompt
+   * addition behind a stable name — so it is created like the other per-user resources: the
+   * owner comes from the caller (the server passes the authenticated user), never from the
+   * request, and it is stored as the mode's `owner_id`, which never changes.
+   *
+   * A name is unique among its owner's modes and a user may hold at most
+   * `MAX_MODES_PER_USER` of them; both are enforced here rather than only checked by the
+   * caller, so two concurrent creates cannot both take the same name and a create cannot slip
+   * past the limit.
+   *
+   * @param input the mode's fields, as `POST /v1/me/modes` receives them
+   * @param ownerId the `user.id` the mode belongs to
+   * @throws DuplicateModeNameError when the owner already has a mode with that name
+   * @throws ModeLimitReachedError when the owner already holds `MAX_MODES_PER_USER` modes
+   */
+  createMode(input: CreateModeRequest, ownerId: UserId): Promise<Mode>
+
+  /**
+   * Read one mode, or `null` when no mode has that id.
+   *
+   * **Owner-scoped, and the owner is required** (epic #65, A4): a mode that belongs to
+   * somebody else answers `null`, exactly as one that does not exist, so a user-facing route
+   * turns both into the same 404.
+   */
+  getMode(modeId: ModeId, options: OwnerScope): Promise<Mode | null>
+
+  /**
+   * List one owner's modes, oldest first, ordered by `(created_at, id)`.
+   *
+   * **Owner-scoped, and the owner is required** (epic #65, A4): only that owner's modes come
+   * back, `[]` for a user with none. No pagination: a user holds at most `MAX_MODES_PER_USER`
+   * of them, so the list is bounded and a picker can show them all at once.
+   */
+  listModes(options: OwnerScope): Promise<Mode[]>
+
+  /**
+   * Apply a partial update to a mode and return it, or `null` when the owner has no mode with
+   * that id.
+   *
+   * An omitted field keeps its stored value; `null` clears a nullable one
+   * (`reasoning_effort`, `system_prompt_addition`); `updated_at` is set from the clock. A chat
+   * that follows the mode picks the change up on its next request — this is what makes a mode
+   * live rather than a snapshot.
+   *
+   * **Owner-scoped**, unlike {@link SessionStore.updateAgent}: the scope is what makes another
+   * user's mode answer `null` rather than be edited, in the same call.
+   *
+   * @throws DuplicateModeNameError when a rename collides with another of the owner's modes
+   */
+  updateMode(modeId: ModeId, update: UpdateModeRequest, options: OwnerScope): Promise<Mode | null>
+
+  /**
+   * Delete a mode, returning whether one was deleted.
+   *
+   * **Owner-scoped** (epic #65, A4): `true` when the mode existed and belonged to
+   * `options.ownerId`, `false` otherwise — the same answer either way, so nothing leaks.
+   *
+   * Deleting a mode lands the chats that followed it on the model each last ran: in the same
+   * transaction, every session of the owner whose `mode` is this id has it cleared, so a chat
+   * that ran the mode is afterwards an ordinary chat with no mode, still running the model its
+   * `model` projection holds. A chat is never deleted with a mode.
+   */
+  deleteMode(modeId: ModeId, options: OwnerScope): Promise<boolean>
 
   // ---------------------------------------------------------------- sessions
 
@@ -337,14 +422,25 @@ export interface SessionStore {
    * transaction, its `updated_at` advances, and subscribers are notified after the append is
    * committed.
    *
-   * ## The model projection (#111)
+   * ## The model and mode projections (#111, #245)
    *
    * A `user.message` carrying a `model` also sets the session's `model` to it, in the same
-   * transaction as the append — the one projection of the event log onto the session's
-   * header, like `status`, so the log stays the source of truth for what the session runs.
-   * The session keeps that model until another message changes it: within one batch the later
-   * message wins, and a message without a `model` leaves the session's model alone. A
-   * message's `model` is stored on the event either way.
+   * transaction as the append — a projection of the event log onto the session's header, like
+   * `status`, so the log stays the source of truth for what the session runs. The session
+   * keeps that model until another message changes it: within one batch the later message
+   * wins, and a message without a `model` leaves the session's model alone. A message's
+   * `model` is stored on the event either way.
+   *
+   * The same walk projects the **mode** a chat follows (#245, M6): a message carrying a
+   * `mode` sets the session's `mode` to it, `null` clears it, and — because a chat follows
+   * either a mode or a plain model, never both — a message that carries a `model` but no
+   * `mode` clears it too. A message that carries neither leaves the mode alone.
+   *
+   * A `span.model_request_start` carrying a `model` also updates the session's `model` to it:
+   * that field is the model the request **actually ran**, which for a chat on a mode is the
+   * mode's resolved model rather than the session's stored one. Projecting it is what keeps
+   * `model` meaning "the model this chat last ran", so a chat whose mode is deleted afterwards
+   * continues on the model it last ran.
    *
    *
    * The input carries only the fields the caller owns — an `AppendableEvent` is a `StoredEvent`
@@ -826,6 +922,16 @@ export interface CreateSessionOptions {
    * Omitted, the agent's `system` is copied — or `null` when the session has no agent.
    */
   readonly system?: string | null
+  /**
+   * The mode the session follows (#245, M6), or `null`/omitted for a chat with none.
+   *
+   * A session created on a mode stores it as its `mode`, and the chat follows it live: the
+   * server resolves the mode for every request. The caller passes the mode's **resolved**
+   * model as `options.model` too, because a mode's "my default model" is a per-request lookup
+   * this store does not make — `model` is the model the session last ran, and the fallback a
+   * chat lands on if the mode is later deleted.
+   */
+  readonly mode?: ModeId | null
   /** The session title, or `null` for none. */
   readonly title?: string | null
   /** Caller metadata, stored with the session. */

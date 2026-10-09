@@ -182,6 +182,8 @@ databases while applying to new ones. Add a new file instead.
 | `0017_scheduler_instances.sql`     | `scheduler_instances`, one row per live scheduler instance: `instance_id`, `last_seen` (#122)                         |
 | `0018_credential_key_provider.sql` | `key_provider` on `provider_credentials`: which provider wrapped a credential's data key (#150)                       |
 | `0021_model_request_end_usage.sql` | the partial index behind `listModelRequests`: `(session_id, processed_at)` where the type is a request end (#247)     |
+| `0022_credential_name.sql`         | `provider_credentials.provider` renamed to `name`, unique per `(user_id, name)` (#248)                                |
+| `0023_modes.sql`                   | `modes`, a user's named presets, and `sessions.mode`, the mode a chat follows (#245, M6)                              |
 
 To run them outside an application:
 

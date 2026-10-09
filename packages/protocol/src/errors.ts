@@ -36,6 +36,10 @@ export const API_ERROR_TYPES = [
   // extension: Anthropic has no provider credentials to reject, and this is the one type
   // here that does not end in `_error` (epic #65, A5).
   'invalid_provider_credential',
+  // extension: a chat asked for a mode whose model cannot be used — no credential for its
+  // provider, or "my default model" with no default set (epic #245, M6). Anthropic has no
+  // modes and so nothing to refuse.
+  'mode_unavailable_error',
   'rate_limit_error',
   'api_error',
   'timeout_error',
@@ -76,6 +80,13 @@ export const API_ERROR_STATUS_BY_TYPE: Record<ApiErrorType, number> = {
   request_too_large: 413,
   /** 422 — a provider credential failed validation against its provider on save. */
   invalid_provider_credential: 422,
+  /**
+   * 422 — a chat asked for — or continues on — a mode whose model cannot be used: no
+   * credential for its provider, or "my default model" with no default set. Unprocessable
+   * rather than a conflict: the request is well-formed, but the mode's model is not usable
+   * right now (epic #245, M6).
+   */
+  mode_unavailable_error: 422,
   /** 429 — rate limited, or a spend limit was reached. */
   rate_limit_error: 429,
   /** 500 — an unexpected internal error. */

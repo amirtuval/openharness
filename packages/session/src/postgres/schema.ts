@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import type {
   Agent,
   Metadata,
+  Mode,
   ModelConfig,
   ModelUsage,
   ProviderCredential,
@@ -47,6 +48,24 @@ export interface AgentsTable {
   updated_at: Date
 }
 
+/**
+ * `modes`: a user's own named presets (epic #245, M6) — a model, a reasoning effort and a
+ * system-prompt addition behind a name a chat can follow.
+ */
+export interface ModesTable {
+  id: string
+  /** The `user.id` the mode belongs to; written once, never updated. */
+  owner_id: string
+  name: string
+  /** A `provider/model` id, or the `my-default-model` sentinel (`MODE_DEFAULT_MODEL`). */
+  model: string
+  /** `low`/`medium`/`high`, or `null` for the provider's default. */
+  reasoning_effort: string | null
+  system_prompt_addition: string | null
+  created_at: Date
+  updated_at: Date
+}
+
 /** `sessions`: the header of a log, with the configuration it runs and the agent it snapshotted. */
 export interface SessionsTable {
   id: string
@@ -63,6 +82,11 @@ export interface SessionsTable {
   model: ModelConfig
   /** The effective system prompt (issue #93): the agent's, the request's, or `null`. */
   system: string | null
+  /**
+   * The mode the chat follows (#245, M6), or `null` for a chat without one. Nulled when the
+   * mode is deleted, so a chat then continues on the `model` above — the model it last ran.
+   */
+  mode: string | null
   /**
    * The agent preset the session was created from, or `null` for a model-first session. Null
    * in the snapshot columns too, which are written together — the model and system the session
@@ -254,6 +278,7 @@ export interface UserPreferencesTable {
 /** The database as this package sees it. */
 export interface PostgresSchema {
   agents: AgentsTable
+  modes: ModesTable
   sessions: SessionsTable
   events: EventsTable
   event_claims: EventClaimsTable
@@ -266,6 +291,9 @@ export interface PostgresSchema {
 
 /** One row of `agents`. */
 export type AgentRow = AgentsTable
+
+/** One row of `modes`. */
+export type ModeRow = ModesTable
 
 /** One row of `sessions`. */
 export type SessionRow = SessionsTable
@@ -328,6 +356,21 @@ export function agentFromRow(row: AgentRow): Agent {
   }
 }
 
+/** The `mode` resource a row carries (epic #245, M6). */
+export function modeFromRow(row: ModeRow): Mode {
+  return {
+    id: row.id as Mode['id'],
+    type: 'mode',
+    owner_id: row.owner_id,
+    name: row.name,
+    model: row.model,
+    reasoning_effort: row.reasoning_effort as Mode['reasoning_effort'],
+    system_prompt_addition: row.system_prompt_addition,
+    created_at: timestampOf(row.created_at),
+    updated_at: timestampOf(row.updated_at),
+  }
+}
+
 /**
  * The `session` resource a row carries: the configuration it runs (`model`, `system`) and the
  * agent it snapshotted, when there was one (issue #93).
@@ -342,6 +385,7 @@ export function sessionFromRow(row: SessionRow): Session {
     metadata: row.metadata,
     model: row.model,
     system: row.system,
+    mode: row.mode as Session['mode'],
     agent: sessionAgentFromRow(row),
     created_at: timestampOf(row.created_at),
     updated_at: timestampOf(row.updated_at),
