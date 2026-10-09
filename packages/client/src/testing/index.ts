@@ -747,7 +747,11 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       if (!authenticated) {
         return unauthenticated()
       }
-      const all = [...credentials.values()].sort(byCreatedAtThenId)
+      // By name, which is what the server's store orders by: the fake answers a list the way
+      // `GET /v1/provider-credentials` does, not in the insertion order a `Map` happens to hold.
+      const all = [...credentials.values()].sort((left, right) =>
+        left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
+      )
       return Promise.resolve({ data: all })
     },
 
