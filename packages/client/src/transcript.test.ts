@@ -1,6 +1,8 @@
 import { EVENT_TYPES, isStoredEvent, newEventId } from '@openharness/protocol'
 import {
   makeAgentMessage,
+  makeContextSummary,
+  makeContextSummaryProgress,
   makeStoredEventDelta,
   makeStoredEventStart,
   makeModelRequestEnd,
@@ -26,11 +28,16 @@ import {
   initialTranscriptState,
   reduceTranscript,
   reduceTranscriptAll,
+  selectContext,
   selectIsRunning,
   selectLastMessage,
   selectMessages,
   selectSessionUsage,
   selectStreamingMessage,
+  selectSummaries,
+  selectSummarizing,
+  selectTranscriptEntries,
+  selectTruncation,
   replyCost,
   sessionCost,
   sessionUsageOf,
@@ -107,6 +114,10 @@ describe('reduceTranscript', () => {
       model: null,
       pendingRequests: [],
       usage: null,
+      summaries: [],
+      summarizing: null,
+      context: null,
+      truncation: null,
     })
   })
 
@@ -1633,5 +1644,344 @@ describe('the session’s usage (#247)', () => {
       totals: { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 },
       models: [],
     })
+  })
+})
+
+/**
+ * The context visibility of epic #277 (#280): the summary dividers, the progress line, the
+ * context meter's baseline and the truncation notice.
+ *
+ * Every event here carries an explicit `seq`, because that is what the rules are about: a
+ * divider draws at the `seq` a summary covers, a rewind is tested against the `seq` an event
+ * sits at, and the meter is the size the last real request reported.
+ */
+describe('context summaries (#277, K10; #280)', () => {
+  /** The three input-side counters of a request's usage, which is the meter's measure. */
+  const measured = (
+    input: number,
+    cacheCreation = 0,
+    cacheRead = 0,
+    output = 0,
+  ): {
+    input_tokens: number
+    output_tokens: number
+    cache_creation_input_tokens: number
+    cache_read_input_tokens: number
+  } => ({
+    input_tokens: input,
+    output_tokens: output,
+    cache_creation_input_tokens: cacheCreation,
+    cache_read_input_tokens: cacheRead,
+  })
+
+  it('marks where the older history was summarized, and keeps it on screen', () => {
+    const user = makeUserMessage('hello', { seq: 1, processed_at: fixtureTimestamp() })
+    const reply = makeAgentMessage('hi there', { seq: 2 })
+    const summary = makeContextSummary({
+      seq: 3,
+      summary: 'They said hello and were answered.',
+      covers: { to_seq: 2 },
+      reason: 'threshold',
+      summary_model: 'anthropic/claude-sonnet-5',
+      passes: 3,
+      tokens_before: 51_200,
+    })
+
+    const state = reduceEvents([user, reply, summary])
+
+    // The history the summary covers is still the transcript's: a summary supersedes nothing.
+    expect(asPairs(state)).toEqual(['user:hello', 'agent:hi there'])
+    expect(selectSummaries(state)).toEqual([
+      {
+        id: summary.id,
+        summary: 'They said hello and were answered.',
+        reason: 'threshold',
+        model: 'anthropic/claude-sonnet-5',
+        passes: 3,
+        tokensBefore: 51_200,
+        // Where the model stops reading verbatim, not where the summary event sits.
+        position: 2,
+        seq: 3,
+      },
+    ])
+  })
+
+  it('records why a summary happened and what wrote it', () => {
+    const manual = makeContextSummary({
+      seq: 1,
+      reason: 'manual',
+      summary_model: 'openai/gpt-4o-mini',
+      passes: 1,
+      fallback_reason: 'no credential for the chosen summary model',
+    })
+
+    const state = reduceEvents([manual])
+
+    expect(selectSummaries(state)[0]).toMatchObject({
+      reason: 'manual',
+      model: 'openai/gpt-4o-mini',
+      passes: 1,
+      fallbackReason: 'no credential for the chosen summary model',
+    })
+  })
+
+  it('hides a summary a rewind took back, and the history under it', () => {
+    const user = makeUserMessage('hello', { seq: 1, processed_at: fixtureTimestamp() })
+    const reply = makeAgentMessage('hi there', { seq: 2 })
+    const summary = makeContextSummary({ seq: 3, covers: { to_seq: 2 } })
+    const rewind = makeSessionRewind({ seq: 4, supersedes: { from_seq: 1, to_seq: 3 } })
+    const edited = makeUserMessage('hello again', { seq: 5, processed_at: fixtureTimestamp() })
+
+    const state = reduceEvents([user, reply, summary, rewind, edited])
+
+    // The rewind's range reaches to the end of the log as it stood, which is where the summary
+    // event sits — so the summary goes with the branch it was written on.
+    expect(selectSummaries(state)).toEqual([])
+    expect(asPairs(state)).toEqual(['user:hello again'])
+  })
+
+  it('keeps a summary the rewind did not reach', () => {
+    const user = makeUserMessage('hello', { seq: 1, processed_at: fixtureTimestamp() })
+    const summary = makeContextSummary({ seq: 2, covers: { to_seq: 1 } })
+    const later = makeUserMessage('and again', { seq: 3, processed_at: fixtureTimestamp() })
+    // The edit is past the summary: only what follows it is taken back.
+    const rewind = makeSessionRewind({ seq: 4, supersedes: { from_seq: 3, to_seq: 3 } })
+
+    const state = reduceEvents([user, summary, later, rewind])
+
+    expect(selectSummaries(state)).toHaveLength(1)
+  })
+
+  it('reports the pass a summary is on, and stops when the summary lands', () => {
+    const progress = makeContextSummaryProgress({ seq: 1, pass: 3, passes: 7 })
+    const summary = makeContextSummary({ seq: 2, covers: { to_seq: 0 } })
+
+    const during = reduceEvents([progress])
+    expect(selectSummarizing(during)).toEqual({ pass: 3, passes: 7, seq: 1 })
+
+    const after = reduceEvents([progress, summary])
+    expect(selectSummarizing(after)).toBeNull()
+    expect(selectSummaries(after)).toHaveLength(1)
+  })
+
+  it('stops reporting a pass on a failure and on a turn end', () => {
+    const progress = makeContextSummaryProgress({ seq: 1, pass: 1, passes: 2 })
+
+    expect(selectSummarizing(reduceEvents([progress, makeSessionError({ seq: 2 })]))).toBeNull()
+    expect(selectSummarizing(reduceEvents([progress, makeStatusIdle({ seq: 2 })]))).toBeNull()
+  })
+
+  it('stops reporting a pass when the chat makes its own request', () => {
+    // A compaction that failed writes no summary and no error: the engine's passes are over and
+    // the chat's request follows, which is the log's only way of saying so (K11).
+    const progress = makeContextSummaryProgress({ seq: 1, pass: 1, passes: 2 })
+    const start = makeModelRequestStart({ seq: 2, model: 'anthropic/claude-sonnet-5' })
+
+    expect(selectSummarizing(reduceEvents([progress, start]))).toBeNull()
+  })
+
+  it('measures the context from the last real request it saw', () => {
+    const user = makeUserMessage('hello', { seq: 1, processed_at: fixtureTimestamp() })
+    const start = makeModelRequestStart({ seq: 2, model: 'anthropic/claude-sonnet-5' })
+    const end = makeModelRequestEnd(start, {
+      seq: 3,
+      model_usage: measured(100, 20, 5, 7),
+    })
+
+    const state = reduceEvents([user, start, end])
+
+    // The three input-side counters summed: cached tokens were really sent, so they are part of
+    // how full the context is.
+    expect(selectContext(state)).toEqual({ tokens: 125, estimated: false })
+  })
+
+  it('leaves the meter alone for a request that reported no tokens', () => {
+    const first = makeModelRequestStart({ seq: 1 })
+    const measuredEnd = makeModelRequestEnd(first, { seq: 2, model_usage: measured(400) })
+    // A failed attempt closes its span with a zero usage: that is not a measurement.
+    const second = makeModelRequestStart({ seq: 3 })
+    const failed = makeModelRequestEnd(second, { seq: 4, model_usage: measured(0) })
+
+    const state = reduceEvents([first, measuredEnd, second, failed])
+
+    expect(selectContext(state)).toEqual({ tokens: 400, estimated: false })
+  })
+
+  it('never lets a summary request be a reply’s model or the meter’s baseline', () => {
+    const user = makeUserMessage('hello', { seq: 1, processed_at: fixtureTimestamp() })
+    const summaryStart = makeModelRequestStart({
+      seq: 2,
+      model: 'openai/gpt-4o-mini',
+      purpose: 'summary',
+    })
+    const summaryEnd = makeModelRequestEnd(summaryStart, {
+      seq: 3,
+      model_usage: measured(9_000),
+    })
+    const summary = makeContextSummary({
+      seq: 4,
+      covers: { to_seq: 1 },
+      summary_model: 'openai/gpt-4o-mini',
+    })
+    const chatStart = makeModelRequestStart({
+      seq: 5,
+      model: 'anthropic/claude-sonnet-5',
+      consumes: [user.id],
+    })
+    const reply = makeAgentMessage('hi there', { seq: 6, id: idA })
+    const chatEnd = makeModelRequestEnd(chatStart, { seq: 7, model_usage: measured(500, 0, 0, 7) })
+
+    const state = reduceEvents([user, summaryStart, summaryEnd, summary, chatStart, reply, chatEnd])
+
+    // The reply ran on the chat's model and took only the chat's tokens: a summary request
+    // answers nothing, so it is neither the model a reply ran on nor what it cost.
+    expect(messageById(state, reply.id).meta).toMatchObject({
+      model: 'anthropic/claude-sonnet-5',
+      usage: { input: 500, output: 7, cacheCreation: 0, cacheRead: 0, total: 507 },
+    })
+    // And the meter measures the chat's prompt, not the summarizer's 9,000.
+    expect(selectContext(state)).toEqual({ tokens: 500, estimated: false })
+  })
+
+  it('estimates the context a summary leaves until the next real request', () => {
+    const user = makeUserMessage('x'.repeat(400), { seq: 1, processed_at: fixtureTimestamp() })
+    const reply = makeAgentMessage('y'.repeat(400), { seq: 2, id: idB })
+    const start = makeModelRequestStart({ seq: 3, model: 'anthropic/claude-sonnet-5' })
+    const end = makeModelRequestEnd(start, { seq: 4, model_usage: measured(1_000) })
+    // 800 characters of conversation (the newline between the two messages too) replaced by
+    // five: 201 tokens became 2, so the measured 1,000 drops by 199.
+    const summary = makeContextSummary({
+      seq: 5,
+      summary: 'short',
+      covers: { to_seq: 2 },
+      tokens_before: 1_000,
+    })
+
+    const after = reduceEvents([user, reply, start, end, summary])
+    expect(selectContext(after)).toEqual({ tokens: 801, estimated: true })
+
+    // The next real request is what the meter reports from then on.
+    const nextStart = makeModelRequestStart({ seq: 6 })
+    const nextEnd = makeModelRequestEnd(nextStart, { seq: 7, model_usage: measured(120) })
+    const measuredAgain = reduceEvents([user, reply, start, end, summary, nextStart, nextEnd])
+    expect(selectContext(measuredAgain)).toEqual({ tokens: 120, estimated: false })
+  })
+
+  it('falls back to the size the summary recorded when no request measured one', () => {
+    const user = makeUserMessage('x'.repeat(400), { seq: 1, processed_at: fixtureTimestamp() })
+    const summary = makeContextSummary({
+      seq: 2,
+      summary: 'short',
+      covers: { to_seq: 1 },
+      tokens_before: 5_000,
+    })
+
+    // Nothing has measured a prompt, so the summary's own reading of the context is the
+    // baseline: its 100 tokens of covered history became 2, and the result is still an estimate
+    // of what the model will be told next.
+    expect(selectContext(reduceEvents([user, summary]))).toEqual({ tokens: 4_902, estimated: true })
+  })
+
+  it('says the newest item was shortened, and clears it on the next real request', () => {
+    const long = makeUserMessage('x'.repeat(400), { seq: 1, processed_at: fixtureTimestamp() })
+    const capped = makeModelRequestStart({
+      seq: 2,
+      model: 'anthropic/claude-sonnet-5',
+      consumes: [long.id],
+      truncated: { seq: 1, tokens_before: 100, tokens_after: 40 },
+    })
+
+    const state = reduceEvents([long, capped])
+    expect(selectTruncation(state)).toEqual({
+      seq: 1,
+      tokensBefore: 100,
+      tokensAfter: 40,
+      recordedAt: 2,
+    })
+
+    // A later request that capped nothing is the answer to "is the newest item too long?".
+    const next = makeModelRequestStart({ seq: 3, model: 'anthropic/claude-sonnet-5' })
+    expect(selectTruncation(reduceEvents([long, capped, next]))).toBeNull()
+  })
+
+  it('takes the truncation notice back with the message a rewind replaced', () => {
+    const long = makeUserMessage('x'.repeat(400), { seq: 1, processed_at: fixtureTimestamp() })
+    const capped = makeModelRequestStart({
+      seq: 2,
+      truncated: { seq: 1, tokens_before: 100, tokens_after: 40 },
+    })
+    const rewind = makeSessionRewind({ seq: 3, supersedes: { from_seq: 1, to_seq: 2 } })
+
+    expect(selectTruncation(reduceEvents([long, capped, rewind]))).toBeNull()
+  })
+
+  it('drops the meter, the progress and the notice a rewind took back', () => {
+    const user = makeUserMessage('hello', { seq: 1, processed_at: fixtureTimestamp() })
+    const progress = makeContextSummaryProgress({ seq: 2, pass: 1, passes: 2 })
+    const start = makeModelRequestStart({ seq: 3, model: 'anthropic/claude-sonnet-5' })
+    const end = makeModelRequestEnd(start, { seq: 4, model_usage: measured(900) })
+    // The edit comes after the measurement: everything before it is taken back.
+    const rewind = makeSessionRewind({ seq: 5, supersedes: { from_seq: 1, to_seq: 4 } })
+
+    const state = reduceEvents([user, progress, start, end, rewind])
+
+    expect(selectContext(state)).toBeNull()
+    expect(selectSummarizing(state)).toBeNull()
+    expect(selectMessages(state)).toEqual([])
+  })
+
+  it('folds a replayed summary twice into one divider', () => {
+    const summary = makeContextSummary({ seq: 1, covers: { to_seq: 0 } })
+
+    expect(selectSummaries(reduceEvents([summary, summary]))).toHaveLength(1)
+  })
+
+  it('ignores a progress event it has already seen', () => {
+    const progress = makeContextSummaryProgress({ seq: 2, pass: 2, passes: 3 })
+    const older = makeContextSummaryProgress({ seq: 1, pass: 1, passes: 3 })
+
+    // The dedupe is the `seq` rule every event takes: a replay cannot move the line backwards.
+    expect(selectSummarizing(reduceEvents([progress, older]))).toEqual({
+      pass: 2,
+      passes: 3,
+      seq: 2,
+    })
+  })
+})
+
+/** The one ordered list both frontends render (#280), so a divider lands in the same place. */
+describe('selectTranscriptEntries (#280)', () => {
+  it('draws a divider after the message whose history it covers', () => {
+    const user = makeUserMessage('hello', { seq: 1, processed_at: fixtureTimestamp() })
+    const reply = makeAgentMessage('hi there', { seq: 2 })
+    // Covers exactly the user message: the divider belongs between it and the reply.
+    const summary = makeContextSummary({ seq: 3, covers: { to_seq: 1 } })
+    const later = makeUserMessage('again', { seq: 4, processed_at: fixtureTimestamp() })
+
+    const state = reduceEvents([user, reply, summary, later])
+
+    expect(
+      selectTranscriptEntries(state).map((entry) =>
+        entry.kind === 'summary' ? 'summary' : `${entry.message.role}:${entry.message.text}`,
+      ),
+    ).toEqual(['user:hello', 'summary', 'agent:hi there', 'user:again'])
+  })
+
+  it('keeps a divider at the end when it covers the whole conversation', () => {
+    const user = makeUserMessage('hello', { seq: 1, processed_at: fixtureTimestamp() })
+    const summary = makeContextSummary({ seq: 2, covers: { to_seq: 1 } })
+
+    const state = reduceEvents([user, summary])
+
+    expect(selectTranscriptEntries(state).map((entry) => entry.kind)).toEqual([
+      'message',
+      'summary',
+    ])
+  })
+
+  it('is the messages alone for a conversation with no summary', () => {
+    const state = reduceEvents([makeUserMessage('hello', { seq: 1 })])
+
+    expect(selectTranscriptEntries(state).every((entry) => entry.kind === 'message')).toBe(true)
   })
 })

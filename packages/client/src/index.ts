@@ -54,9 +54,6 @@ export {
 } from './providers'
 export type { CredentialRowLabel, CredentialTarget, ProviderInfo } from './providers'
 
-export { modelContextBudget, summaryModelFallback } from './compaction'
-export type { SummaryModelFallback } from './compaction'
-
 export { DeviceLoginError, OPENHARNESS_CLI_CLIENT_ID } from './resources/auth'
 export type { AuthResource, DeviceLoginStart, PollDeviceLoginOptions } from './resources/auth'
 
@@ -74,14 +71,20 @@ export {
   initialTranscriptState,
   reduceTranscript,
   reduceTranscriptAll,
+  selectContext,
   selectIsRunning,
   selectLastMessage,
   selectMessages,
   selectSessionUsage,
   selectStreamingMessage,
+  selectSummaries,
+  selectSummarizing,
+  selectTranscriptEntries,
+  selectTruncation,
   replyCost,
   sessionCost,
   sessionUsageOf,
+  transcriptEntries,
 } from './transcript'
 export type {
   MessagePart,
@@ -92,12 +95,33 @@ export type {
   SessionUsageTotals,
   TextPart,
   Transcript,
+  TranscriptContext,
+  TranscriptEntry,
   TranscriptError,
   TranscriptMessage,
   TranscriptMessageMeta,
   TranscriptSeed,
   TranscriptState,
+  TranscriptSummarizing,
+  TranscriptSummary,
+  TranscriptTruncation,
   TranscriptUsage,
 } from './transcript'
+
+export {
+  CHARS_PER_TOKEN,
+  DEFAULT_COMPACTION_THRESHOLD,
+  DEFAULT_CONTEXT_TOKEN_BUDGET,
+  OUTPUT_RESERVE_RATIO,
+  compactionThreshold,
+  contextAfterSummary,
+  contextMeter,
+  contextTokenBudget,
+  estimateTokens,
+  modelContextBudget,
+  summaryDescription,
+  summaryModelFallback,
+} from './compaction'
+export type { ContextMeter, SummaryModelFallback } from './compaction'
 
 export type { StreamOptions } from './events/stream'

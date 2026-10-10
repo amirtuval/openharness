@@ -1,6 +1,8 @@
 import { EVENT_TYPES, totalCost, usageCost } from '@openharness/protocol'
 import type {
   AgentMessageEvent,
+  ContextSummaryEvent,
+  ContextSummaryReason,
   ModelCost,
   ModelRequestEndEvent,
   ModelRequestStartEvent,
@@ -15,6 +17,8 @@ import type {
   SessionStatus,
   TotalCost,
 } from '@openharness/protocol'
+
+import { contextAfterSummary } from './compaction'
 
 /**
  * The transcript: session events in, UI state out.
@@ -42,6 +46,11 @@ import type {
  *
  * The state is plain data — arrays, strings, numbers — so a framework can hold it in a store,
  * snapshot it, or send it to a devtool. Nothing here knows about React.
+ *
+ * Since epic #277's visibility work (#280) it also carries what the compaction is doing and how
+ * full the context is: the `session.context_summary` dividers, the in-flight progress, the last
+ * real request's prompt size, and the newest-item truncation notice. `./compaction` turns those
+ * facts into the meter both frontends draw.
  */
 
 /**
@@ -257,6 +266,121 @@ export interface PendingModelRequest {
   readonly usage?: TranscriptUsage
   /** The reply the request has been attributed to, once one has been stored. */
   readonly messageId?: string
+  /**
+   * Whether the compaction engine made the request to write a summary (epic #277, C2; #280).
+   *
+   * A summary request answers nothing and measures the summarizer's prompt rather than the
+   * chat's, so it is kept out of a reply's metadata and out of the context meter — it is tracked
+   * only so its span end can be recognised and dropped rather than folded into the next reply.
+   */
+  readonly summary?: boolean
+}
+
+/**
+ * A summary the transcript draws a divider for (epic #277, K10; #280).
+ *
+ * One per `session.context_summary` that is still in the conversation. A summary supersedes
+ * **nothing** — the history above it stays on screen — so the divider sits where the model stops
+ * reading verbatim, at the last `seq` the summary covers, and the summary text is what the
+ * divider expands to. Only a `session.rewind` takes one back, exactly as it takes back the
+ * messages it replaced.
+ */
+export interface TranscriptSummary {
+  /** The `sevt_` id of the summary event. */
+  readonly id: string
+  /** The summary text: what the model was told instead of the history it covers. */
+  readonly summary: string
+  /** Why it was made: `threshold` (drawn as "automatic"), `overflow` or `manual`. */
+  readonly reason: ContextSummaryReason
+  /** The `provider/model` that wrote it. */
+  readonly model: string
+  /** How many passes the summary took. */
+  readonly passes: number
+  /** The context size when it was made, in tokens, before it replaced anything. */
+  readonly tokensBefore: number
+  /** Why the chat's own model wrote it rather than the chosen summary model, when that happened. */
+  readonly fallbackReason?: string
+  /** Where the divider draws: the `seq` of the last event the summary replaced for the model. */
+  readonly position: number
+  /**
+   * The `seq` of the summary event itself.
+   *
+   * The event, not `position`: the divider is *at* the range it covers, but whether a rewind
+   * took the summary back is a question about where the event is — the range a rewind records
+   * reaches to the end of the log as it stood, which is where a summary written before it sits.
+   */
+  readonly seq: number
+}
+
+/**
+ * A summary being written, as its progress events report it (epic #277, C2/K10; #280).
+ *
+ * The newest `session.context_summary_progress` between the compaction engine's request and the
+ * summary it produces — what "Summarizing… 3 of 7" is drawn from. It is cleared by the summary
+ * landing, by the chat's own request starting (the engine runs to completion or failure before
+ * that request is built), by a `session.error` and by the turn ending, so it cannot outlive the
+ * compaction it describes.
+ */
+export interface TranscriptSummarizing {
+  /** Which pass is running, counting from 1. */
+  readonly pass: number
+  /** How many passes the plan holds. */
+  readonly passes: number
+  /** The `seq` of the progress event — the rewind test, as {@link TranscriptSummary.seq}. */
+  readonly seq: number
+}
+
+/**
+ * How full the context was at the last **real** model request (epic #277, K2/K10; #280).
+ *
+ * `tokens` is that request's real prompt size: the three input-side counters of its
+ * `span.model_request_end.model_usage` summed, which is `promptTokensOf` in the brain. A request
+ * the compaction engine made (`purpose: 'summary'`) measures the summarizer's prompt, so it is
+ * never the baseline; a request that reported no prompt tokens at all (a failed attempt, which
+ * closes its span with a zero usage) measured nothing either.
+ *
+ * `estimated` is the after-summary case: a summary landed, so the history it replaced is no
+ * longer in the prompt, and until the next real request measures itself the transcript answers
+ * the estimate `contextAfterSummary` builds from the summary and the messages it covers. The
+ * first real request that reports a size replaces it.
+ */
+export interface TranscriptContext {
+  /** The prompt size in tokens, or the estimate of one right after a summary. */
+  readonly tokens: number
+  /** Whether that number is an estimate rather than a measurement. */
+  readonly estimated: boolean
+}
+
+/**
+ * One entry of the transcript as a frontend draws it: a message, or a summary divider
+ * (epic #277, K10; #280).
+ *
+ * Both frontends render the conversation and the dividers from one ordered list
+ * ({@link selectTranscriptEntries}), so a divider lands in the same place on the web and in the
+ * terminal — which is the whole reason the order is decided here rather than in each renderer.
+ */
+export type TranscriptEntry =
+  | { readonly kind: 'message'; readonly message: TranscriptMessage }
+  | { readonly kind: 'summary'; readonly summary: TranscriptSummary }
+
+/**
+ * The newest item a request had to shorten to fit the model (epic #277, K6/K10; #280).
+ *
+ * The newest message alone was over the chat model's budget, so the request carried it capped to
+ * a head and a tail around an omission marker, and the span said so — "your message was too long
+ * for this model and was shortened". It reflects the newest real request: one that capped
+ * nothing clears it, so the notice cannot outlive the turn it was about, and a rewind that takes
+ * the message back takes the notice with it.
+ */
+export interface TranscriptTruncation {
+  /** The `seq` of the event whose text was shortened. */
+  readonly seq: number
+  /** What the item cost before it was cut, in tokens. */
+  readonly tokensBefore: number
+  /** What the truncated item costs, in tokens. */
+  readonly tokensAfter: number
+  /** The `seq` of the span that recorded it — the rewind test. */
+  readonly recordedAt: number
 }
 
 /** Everything a UI needs to render a session. */
@@ -314,6 +438,27 @@ export interface TranscriptState {
    * derives the same totals from the transcript's replies when it is not, so the two agree.
    */
   readonly usage: SessionUsage | null
+
+  /**
+   * The summaries the conversation still holds, in the order they were written (epic #277, K10;
+   * #280).
+   *
+   * One per `session.context_summary` a `session.rewind` has not taken back. Each carries where
+   * its divider draws ({@link TranscriptSummary.position}) and everything the divider says, so a
+   * transcript that renders messages by position can interleave the two from this one list. The
+   * newest summary is the one the model is reading from; the older ones are the marks of where it
+   * used to start.
+   */
+  readonly summaries: readonly TranscriptSummary[]
+
+  /** The summary being written right now, or `null` (epic #277, C2; #280). */
+  readonly summarizing: TranscriptSummarizing | null
+
+  /** How full the context was at the last real model request, or `null` (epic #277, #280). */
+  readonly context: TranscriptContext | null
+
+  /** The newest item a request had to shorten, or `null` (epic #277, K6; #280). */
+  readonly truncation: TranscriptTruncation | null
 }
 
 /**
@@ -352,6 +497,10 @@ export function initialTranscriptState(seed: TranscriptSeed = {}): TranscriptSta
     model: seed.model ?? null,
     pendingRequests: [],
     usage: null,
+    summaries: [],
+    summarizing: null,
+    context: null,
+    truncation: null,
   }
 }
 
@@ -425,6 +574,22 @@ export function initialTranscriptState(seed: TranscriptSeed = {}): TranscriptSta
  *   — and a reply the brain retried takes the request that failed too, so its tokens add up.
  *   Nothing the log does not say is invented: an absent field is `undefined`, never `0`, and
  *   a turn that ends (`session.status_idle`) drops the requests no reply claimed.
+ * - **A summary is a mark, not a cut** (epic #277, K1/K10; #280). A `session.context_summary`
+ *   supersedes nothing: the messages stay exactly as they were, the divider is added at the last
+ *   `seq` the summary covers, and only a `session.rewind` takes one back — the same rule the
+ *   messages it replaced get. A `session.context_summary_progress` sets the summary-in-flight the
+ *   transcript shows as "Summarizing… N of M", and the summary landing, the chat's own request
+ *   starting, a `session.error` and a turn ending all clear it, so a compaction is never
+ *   reported after it is over. The summary also moves the **context meter**: it replaces the
+ *   history it covers, so from there until the next real request reports its own prompt size the
+ *   meter is an estimate ({@link TranscriptContext.estimated}). A request the compaction engine
+ *   made (`purpose: 'summary'`) measures the summarizer's prompt, so it names no reply's model,
+ *   adds no tokens to one, and never becomes the meter's baseline.
+ * - **A request that had to shorten its newest item says so.** Its
+ *   `span.model_request_start.truncated` becomes {@link TranscriptState.truncation} — "your
+ *   message was too long for this model and was shortened" — and the newest real request
+ *   replaces it, so a request that capped nothing clears the notice rather than leaving it on
+ *   screen for the life of the session.
  *
  * @param state the transcript so far
  * @param event the next event, from `iterate`, `stream`, or anywhere else
@@ -528,6 +693,9 @@ function reduceStoredEvent(state: TranscriptState, event: StoredEvent): Transcri
           status: 'idle',
           messages: withoutPreviews(state.messages),
           pendingRequests: [],
+          // A compaction cannot outlive the turn it ran in (epic #277, K10): whatever happened to
+          // it — the summary landed, a pass failed, the write was refused — the turn is over.
+          summarizing: null,
         },
         event.consumes,
       )
@@ -550,28 +718,67 @@ function reduceStoredEvent(state: TranscriptState, event: StoredEvent): Transcri
           message: event.error.message,
           retryStatus: event.error.retry_status.type,
         },
+        // An error ends whatever the turn was doing — including a compaction whose passes were
+        // still going (epic #277, K10).
+        summarizing: null,
+      }
+
+    case EVENT_TYPES.sessionContextSummary:
+      return fromContextSummary(state, event)
+
+    case EVENT_TYPES.sessionContextSummaryProgress:
+      return {
+        ...state,
+        summarizing: { pass: event.pass, passes: event.passes, seq: event.seq },
       }
 
     case EVENT_TYPES.modelRequestStart:
-      // The brain folds every queued user message into the request it is about to make, and
-      // since D9 the request says which ones: its `consumes` list. That is where "queued"
-      // becomes "delivered" — a message sent while the turn was running stays pending until
-      // the request that claims it. A span start with no list at all is a log from before
-      // the claims existed (or one written before P4, whose writer claimed out of band), and
-      // keeps the older reading: everything pending when a request starts has just been
-      // picked up.
+      // A request the compaction engine made to write a summary is not the chat's own (epic
+      // #277, C2): it answers nothing, claims nothing, and its usage measures the summarizer's
+      // prompt. It is tracked as a summary request — so its span end can be dropped rather than
+      // folded into the next reply — and nothing else here applies to it.
+      //
+      // Every other request is the chat's: the brain folds every queued user message into the
+      // request it is about to make, and since D9 the request says which ones — its `consumes`
+      // list. That is where "queued" becomes "delivered", and a message sent while the turn was
+      // running stays pending until the request that claims it. A span start with no list at all
+      // is a log from before the claims existed (or one written before P4, whose writer claimed
+      // out of band), and keeps the older reading: everything pending when a request starts has
+      // just been picked up.
       //
       // The request itself is tracked for the reply's metadata (epic #201, U1): it names the
       // model that serves the reply and, through its `processed_at`, when the reply began. The
       // model it names is also the log's word on what the session is running (#268), and it is
       // taken as the state's — so a log a client replays (a resumed chat, whose session
       // resource only carries the model it is on *now*) settles on the same baseline the model
-      // switches were recorded against, and the markers it draws match a live view's.
+      // switches were recorded against, and the markers it draws match a live view's. Its
+      // `truncated` record, when it carries one, is what the transcript's notice says (epic #277,
+      // K6): the newest item was too long for the model and was shortened, and a request that
+      // capped nothing clears the notice the last one may have left.
+      if (event.purpose === 'summary') {
+        return {
+          ...state,
+          pendingRequests: [...state.pendingRequests, { ...openedRequest(event), summary: true }],
+        }
+      }
       return clearClaimedPending(
         {
           ...state,
           ...(event.model === undefined ? {} : { model: event.model }),
           pendingRequests: [...state.pendingRequests, openedRequest(event)],
+          // The chat's own request follows the engine's passes, whether or not they wrote a
+          // summary — so its start is where a progress line that outlived a failed compaction
+          // goes (epic #277, C2/K10).
+          summarizing: null,
+          truncation:
+            event.truncated === undefined
+              ? null
+              : {
+                  seq: event.truncated.seq,
+                  tokensBefore: event.truncated.tokens_before,
+                  tokensAfter: event.truncated.tokens_after,
+                  recordedAt: event.seq,
+                },
         },
         event.consumes,
         { absentMeansAll: true },
@@ -615,26 +822,54 @@ function reduceStoredEvent(state: TranscriptState, event: StoredEvent): Transcri
  * where it was.
  */
 function dropRewound(state: TranscriptState, event: SessionRewindEvent): TranscriptState {
+  const { from_seq, to_seq } = event.supersedes
   // The range, not "everything from `from_seq` on": the message that *follows* the rewind in
   // the log — the edit itself — sits past `to_seq`, and a client that already showed it (its
   // own send applies the stored message before the stream echoes the rewind) must keep it.
+  const inRange = (seq: number): boolean => seq >= from_seq && seq <= to_seq
   const messages = state.messages.filter(
-    (message) =>
-      message.position < event.supersedes.from_seq || message.position > event.supersedes.to_seq,
+    (message) => message.position < from_seq || message.position > to_seq,
   )
+  // A summary the edit took back goes with the branch (epic #277, K10; #280): its range covers
+  // the log from the edited message on, so a summary written before the rewind is inside it, and
+  // the model is no longer told what it said — which is exactly the rule `dropRewound` already
+  // applies to the messages. The test is the summary *event's* `seq`, not the position its
+  // divider draws at: the range reaches to the end of the log as it stood, which is where the
+  // event sits, while its divider sits back at the history it covered.
+  const summaries = state.summaries.filter((summary) => !inRange(summary.seq))
+  const progress = state.summarizing
+  const summarizing = progress !== null && inRange(progress.seq) ? null : progress
+  const notice = state.truncation
+  const truncation = notice !== null && inRange(notice.recordedAt) ? null : notice
   if (
     messages.length === state.messages.length &&
+    summaries.length === state.summaries.length &&
+    summarizing === state.summarizing &&
+    truncation === state.truncation &&
     state.lastError === null &&
     state.pendingRequests.length === 0 &&
-    state.usage === null
+    state.usage === null &&
+    state.context === null
   ) {
     return state
   }
   // The running totals go with the branch (#247): the newest `session.usage` the state holds
   // counted the requests the edit took back, so it is stale by definition — and the derivation
   // from the replies that survived is the right answer until the next request writes a fresh
-  // one.
-  return { ...state, messages, lastError: null, pendingRequests: [], usage: null }
+  // one. The context measurement goes the same way (epic #277, #280): it is the prompt size of a
+  // request inside the range, and a meter drawn from a branch nobody is on would be a lie. The
+  // next request measures itself, and until then the meter is simply absent.
+  return {
+    ...state,
+    messages,
+    summaries,
+    summarizing,
+    truncation,
+    lastError: null,
+    pendingRequests: [],
+    usage: null,
+    context: null,
+  }
 }
 
 /**
@@ -722,7 +957,12 @@ function fromUserMessage(state: TranscriptState, event: UserMessageEvent): Trans
  * tokens and their duration to: the span end of a reply arrives *after* the reply itself.
  */
 function fromAgentMessage(state: TranscriptState, event: AgentMessageEvent): TranscriptState {
-  const claimed = state.pendingRequests.filter((request) => request.messageId === undefined)
+  // A summary request answers nothing, so it is never what the reply ran on (epic #277, C2):
+  // the reply takes the chat's own requests, and the summarizer's model and tokens stay out of
+  // its metadata. The request stays tracked until the turn ends, like one no reply claimed.
+  const claimed = state.pendingRequests.filter(
+    (request) => request.messageId === undefined && request.summary !== true,
+  )
   const message = messageFromAgentEvent(
     event,
     agentMessagePosition(state, event),
@@ -734,6 +974,67 @@ function fromAgentMessage(state: TranscriptState, event: AgentMessageEvent): Tra
     ...claimed.map((request) => ({ ...request, messageId: event.id })),
   ]
   return { ...upsertMessage(state, message), lastError: null, pendingRequests }
+}
+
+/**
+ * Fold a stored `session.context_summary` in: the divider, and the reduced context it leaves
+ * behind (epic #277, K10; #280).
+ *
+ * The summary supersedes nothing, so the messages stay exactly as they were — the divider is a
+ * mark *in* the conversation, at the last `seq` the summary covers, and the history above it
+ * stays on screen. What changes is what the meter measures: from here until the next real
+ * request reports its own size, the context is an estimate (`contextAfterSummary`) built from
+ * the summary and the messages it replaced.
+ *
+ * The progress line goes with it: the compaction this event is the end of is over.
+ */
+function fromContextSummary(state: TranscriptState, event: ContextSummaryEvent): TranscriptState {
+  const summary: TranscriptSummary = {
+    id: event.id,
+    summary: event.summary,
+    reason: event.reason,
+    model: event.summary_model,
+    passes: event.passes,
+    tokensBefore: event.tokens_before,
+    ...(event.fallback_reason === undefined ? {} : { fallbackReason: event.fallback_reason }),
+    position: event.covers.to_seq,
+    seq: event.seq,
+  }
+  return {
+    ...state,
+    summaries: [...state.summaries.filter((each) => each.seq !== event.seq), summary],
+    summarizing: null,
+    context: contextAfterSummaryEvent(state, event),
+  }
+}
+
+/**
+ * The context size a summary leaves: the last measured prompt less what the summary replaced,
+ * plus the summary's own text (epic #277, K10; #280).
+ *
+ * The baseline is the last real request's measurement when the transcript has one — it is a
+ * measurement of the same conversation, which is what makes subtracting from it meaningful — and
+ * the summary's own `tokens_before` when it does not (a session whose first request is the one
+ * the summary was made for). The covered text comes from the messages the transcript holds, at
+ * the same estimate; the framing the real prompt paid for is not in it, so the estimate errs
+ * high rather than low.
+ */
+function contextAfterSummaryEvent(
+  state: TranscriptState,
+  event: ContextSummaryEvent,
+): TranscriptContext {
+  const coveredText = state.messages
+    .filter((message) => message.position <= event.covers.to_seq)
+    .map((message) => message.text)
+    .join('\n')
+  return {
+    tokens: contextAfterSummary({
+      baseline: state.context?.tokens ?? event.tokens_before,
+      summary: event.summary,
+      coveredText,
+    }),
+    estimated: true,
+  }
 }
 
 /** The transcript message for a stored `agent.message`, reconciled with any preview of it. */
@@ -801,22 +1102,47 @@ function closeRequest(state: TranscriptState, event: ModelRequestEndEvent): Tran
     ...(endedAt === undefined ? {} : { endedAt }),
     usage: usageFrom(event.model_usage),
   }
+  // The chat's own request just measured its prompt (epic #277, K2; #280): the three input-side
+  // counters summed is the real prompt size, and it is what the context meter draws. Two
+  // requests do not measure the chat's context, so neither moves the meter: a summary request,
+  // whose usage is the summarizer's prompt, and a request that reported no input tokens at all —
+  // which is how a failed attempt closes its span (a zero usage), and measuring the chat as empty
+  // would be worse than not measuring it. A span end whose start the client never saw (it joined
+  // mid-compaction) cannot be told apart from the chat's, and is read as one.
+  const measured = existing?.summary === true ? null : promptTokens(closed.usage)
+  const measured_ =
+    measured === null ? state : { ...state, context: { tokens: measured, estimated: false } }
   const requests =
     existing === undefined
       ? [...state.pendingRequests, closed]
       : state.pendingRequests.map((request) => (request.id === closed.id ? closed : request))
   const messageId = closed.messageId
   if (messageId === undefined) {
-    return { ...state, pendingRequests: requests }
+    return { ...measured_, pendingRequests: requests }
   }
   // The reply takes the tokens of every request attributed to it — this one included, which is
   // why the metadata is read before the request is dropped.
   const attributed = requests.filter((request) => request.messageId === messageId)
   return withMeta(
-    { ...state, pendingRequests: requests.filter((request) => request.id !== closed.id) },
+    { ...measured_, pendingRequests: requests.filter((request) => request.id !== closed.id) },
     messageId,
     metaFrom(attributed),
   )
+}
+
+/**
+ * The real prompt size a request reported, or `null` when it reported none.
+ *
+ * The three input-side counters summed — the same measure the brain's `promptTokensOf` takes
+ * (epic #277, K2), because the four counters are disjoint. A sum of zero is not a measurement:
+ * a prompt is never empty, so a zero is a failed attempt's placeholder.
+ */
+function promptTokens(usage: TranscriptUsage | undefined): number | null {
+  if (usage === undefined) {
+    return null
+  }
+  const tokens = usage.input + usage.cacheCreation + usage.cacheRead
+  return tokens > 0 ? tokens : null
 }
 
 /** Write `meta` onto the reply `id`, when it is a message the transcript holds. */
@@ -1108,6 +1434,81 @@ export function selectLastMessage(state: TranscriptState): TranscriptMessage | n
 /** The `agent.message` being previewed right now, or `null`. */
 export function selectStreamingMessage(state: TranscriptState): TranscriptMessage | null {
   return state.messages.find((message) => message.streaming) ?? null
+}
+
+/**
+ * The summaries the conversation still holds, in the order they were written (epic #277, K10;
+ * #280).
+ *
+ * Each one's {@link TranscriptSummary.position} is where its divider belongs among the messages,
+ * so a transcript that renders both can interleave them from this list alone.
+ */
+export function selectSummaries(state: TranscriptState): readonly TranscriptSummary[] {
+  return state.summaries
+}
+
+/**
+ * The conversation and its summary dividers as one ordered list (epic #277, K10; #280).
+ *
+ * The order is by position, and a divider draws **after** the message it covers — a summary
+ * marks where the model stops reading verbatim, which is past the event at `covers.to_seq`, not
+ * before it. `messages` and `summaries` are both kept in ascending position by the reducer, so
+ * this is one merge walk.
+ *
+ * A frontend renders this through a lookup on `kind` (the shape `PART_RENDERERS` has), so a
+ * transcript cannot end up drawing its dividers in a different place from the other frontend's.
+ */
+export function selectTranscriptEntries(state: TranscriptState): readonly TranscriptEntry[] {
+  return transcriptEntries(state.messages, state.summaries)
+}
+
+/**
+ * The same merge, for a caller that holds the two lists without a transcript around them.
+ *
+ * @param messages the conversation, in position order
+ * @param summaries the dividers, in position order
+ */
+export function transcriptEntries(
+  messages: readonly TranscriptMessage[],
+  summaries: readonly TranscriptSummary[],
+): readonly TranscriptEntry[] {
+  const entries: TranscriptEntry[] = []
+  let messageIndex = 0
+  let summaryIndex = 0
+  while (messageIndex < messages.length || summaryIndex < summaries.length) {
+    const message = messages[messageIndex]
+    const summary = summaries[summaryIndex]
+    if (summary !== undefined && (message === undefined || summary.position < message.position)) {
+      entries.push({ kind: 'summary', summary })
+      summaryIndex += 1
+      continue
+    }
+    if (message !== undefined) {
+      entries.push({ kind: 'message', message })
+      messageIndex += 1
+    }
+  }
+  return entries
+}
+
+/** The summary being written right now, or `null` (epic #277, C2/K10; #280). */
+export function selectSummarizing(state: TranscriptState): TranscriptSummarizing | null {
+  return state.summarizing
+}
+
+/**
+ * How full the context was at the last real model request, or `null` (epic #277, K2/K10; #280).
+ *
+ * What {@link contextMeter} turns into the number a frontend draws, together with the current
+ * model's budget and the caller's threshold.
+ */
+export function selectContext(state: TranscriptState): TranscriptContext | null {
+  return state.context
+}
+
+/** The newest item a request had to shorten to fit, or `null` (epic #277, K6/K10; #280). */
+export function selectTruncation(state: TranscriptState): TranscriptTruncation | null {
+  return state.truncation
 }
 
 /**

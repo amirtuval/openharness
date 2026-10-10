@@ -1,7 +1,219 @@
 import { makeModelEntry } from '@openharness/protocol/fixtures'
 import { describe, expect, it } from 'vitest'
 
-import { modelContextBudget, summaryModelFallback } from './compaction'
+import {
+  CHARS_PER_TOKEN,
+  DEFAULT_COMPACTION_THRESHOLD,
+  DEFAULT_CONTEXT_TOKEN_BUDGET,
+  OUTPUT_RESERVE_RATIO,
+  compactionThreshold,
+  contextAfterSummary,
+  contextMeter,
+  contextTokenBudget,
+  estimateTokens,
+  modelContextBudget,
+  summaryModelFallback,
+  summaryDescription,
+} from './compaction'
+import type { TranscriptSummary } from './transcript'
+
+/**
+ * The meter's arithmetic (#280): the per-model budget, the share compaction fires at, the words
+ * both frontends draw, and the estimate a summary leaves behind.
+ *
+ * The budget rule is the server's (#246, `apps/server/src/catalog/context-budget.ts`) restated
+ * for the frontends, so the cases here are the ones that pin the restatement: a declared output
+ * ceiling under the reserve, none at all, and a declared one that would take more than the
+ * reserve (which it may not).
+ */
+describe('contextTokenBudget (#246, #280)', () => {
+  it('takes the model’s own output ceiling when it is under the reserve', () => {
+    expect(contextTokenBudget({ contextWindow: 200_000, maxOutput: 4_096 })).toBe(195_904)
+  })
+
+  it('reserves a quarter of the window when the model declares no ceiling', () => {
+    const window = 200_000
+    expect(contextTokenBudget({ contextWindow: window })).toBe(
+      window - Math.floor(window * OUTPUT_RESERVE_RATIO),
+    )
+  })
+
+  it('never reserves more than the quarter, however large the declared ceiling is', () => {
+    expect(contextTokenBudget({ contextWindow: 100_000, maxOutput: 90_000 })).toBe(75_000)
+  })
+
+  it('measures a model with no window like any other unknown model', () => {
+    expect(modelContextBudget(null)).toBe(DEFAULT_CONTEXT_TOKEN_BUDGET)
+    expect(modelContextBudget(undefined)).toBe(DEFAULT_CONTEXT_TOKEN_BUDGET)
+    expect(modelContextBudget({ context_window: null, max_output_tokens: null })).toBe(
+      DEFAULT_CONTEXT_TOKEN_BUDGET,
+    )
+  })
+
+  it('measures a catalog entry by its limits', () => {
+    expect(modelContextBudget({ context_window: 128_000, max_output_tokens: 4_096 })).toBe(123_904)
+    expect(modelContextBudget({ context_window: 128_000, max_output_tokens: null })).toBe(96_000)
+  })
+})
+
+describe('compactionThreshold (#277, C3; #280)', () => {
+  it('is 0.7 when the server sends nothing', () => {
+    expect(compactionThreshold(null)).toBe(DEFAULT_COMPACTION_THRESHOLD)
+    expect(compactionThreshold(undefined)).toBe(DEFAULT_COMPACTION_THRESHOLD)
+    expect(compactionThreshold({})).toBe(DEFAULT_COMPACTION_THRESHOLD)
+  })
+
+  it('reads the caller’s stored share when there is one', () => {
+    expect(compactionThreshold({ compaction_threshold: 0.5 })).toBe(0.5)
+    expect(compactionThreshold({ compaction_threshold: 1 })).toBe(1)
+  })
+
+  it('ignores a stored value that could not be a share', () => {
+    for (const stored of [0, -1, 1.5, '0.5', null, Number.NaN]) {
+      expect(compactionThreshold({ compaction_threshold: stored })).toBe(
+        DEFAULT_COMPACTION_THRESHOLD,
+      )
+    }
+  })
+})
+
+describe('contextMeter (#280)', () => {
+  const model = { context_window: 100_000, max_output_tokens: 20_000 }
+
+  it('is absent until something has measured a prompt', () => {
+    expect(contextMeter(null, { model })).toBeNull()
+  })
+
+  it('says how full the context is, against the model’s budget', () => {
+    // 100,000 − min(20,000, 25,000) = 80,000, so 49,600 is 62%.
+    const meter = contextMeter({ tokens: 49_600, estimated: false }, { model })
+
+    expect(meter).toMatchObject({
+      budget: 80_000,
+      ratio: 0.62,
+      percent: 62,
+      nearThreshold: false,
+      estimated: false,
+      label: '62% of context used',
+      shortLabel: '62%',
+    })
+  })
+
+  it('marks the context the chat compacts at', () => {
+    const under = contextMeter({ tokens: 55_000, estimated: false }, { model })
+    const at = contextMeter({ tokens: 56_000, estimated: false }, { model })
+    const over = contextMeter({ tokens: 80_000, estimated: false }, { model })
+
+    expect(under?.nearThreshold).toBe(false)
+    // 56,000 / 80,000 is exactly 0.7, the default threshold.
+    expect(at?.nearThreshold).toBe(true)
+    expect(over?.nearThreshold).toBe(true)
+    // Over the budget is a real state, not a capped one: the meter says 100%.
+    expect(over?.percent).toBe(100)
+  })
+
+  it('takes the caller’s threshold when there is one', () => {
+    const strict = contextMeter({ tokens: 24_000, estimated: false }, { model, threshold: 0.25 })
+
+    expect(strict?.nearThreshold).toBe(true)
+    expect(strict?.threshold).toBe(0.25)
+  })
+
+  it('says when the number is an estimate', () => {
+    const meter = contextMeter({ tokens: 49_600, estimated: true }, { model })
+
+    expect(meter).toMatchObject({
+      estimated: true,
+      label: '~62% of context used',
+      shortLabel: '~62%',
+    })
+  })
+
+  it('measures against the default budget for a model the catalog does not carry', () => {
+    const meter = contextMeter({ tokens: 16_384, estimated: false }, {})
+
+    expect(meter).toMatchObject({
+      budget: DEFAULT_CONTEXT_TOKEN_BUDGET,
+      percent: 50,
+      label: '50% of context used',
+    })
+  })
+
+  it('measures against the model it is handed, so a switch moves the meter', () => {
+    const wide = contextMeter({ tokens: 49_600, estimated: false }, { model })
+    const narrow = contextMeter(
+      { tokens: 49_600, estimated: false },
+      { model: { context_window: 64_000, max_output_tokens: 8_192 } },
+    )
+
+    expect(wide?.percent).toBe(62)
+    // 64,000 − 8,192 = 55,808: the same context is 89% of a narrower model.
+    expect(narrow?.percent).toBe(89)
+    expect(narrow?.nearThreshold).toBe(true)
+  })
+})
+
+describe('estimateTokens (#280)', () => {
+  it('estimates at the same characters-per-token the budget is measured in', () => {
+    expect(CHARS_PER_TOKEN).toBe(4)
+    expect(estimateTokens('')).toBe(0)
+    expect(estimateTokens('abcd')).toBe(1)
+    expect(estimateTokens('abcde')).toBe(2)
+  })
+})
+
+describe('contextAfterSummary (#280)', () => {
+  it('takes the covered history out of the baseline and puts the summary back', () => {
+    // 800 characters covered (200 tokens) replaced by five (2): the baseline drops by 198.
+    expect(
+      contextAfterSummary({ baseline: 1_000, summary: 'short', coveredText: 'x'.repeat(800) }),
+    ).toBe(802)
+  })
+
+  it('is never smaller than the summary the model is told', () => {
+    // The estimate would go below the summary itself — the covered text may over-count against
+    // the provider's own tokenizer — and the floor is what the prompt at least holds.
+    const tokens = contextAfterSummary({
+      baseline: 10,
+      summary: 'y'.repeat(400),
+      coveredText: 'x'.repeat(4_000),
+    })
+
+    expect(tokens).toBe(100)
+  })
+
+  it('adds the summary when the covered conversation is not in the transcript', () => {
+    // A client that joined after the history it covers sees nothing to subtract: the estimate
+    // errs high, which is the safe direction for a meter whose job is to warn early.
+    expect(contextAfterSummary({ baseline: 5_000, summary: 'short', coveredText: '' })).toBe(5_002)
+  })
+})
+
+describe('summaryDescription (#280)', () => {
+  const summary = (overrides: Partial<TranscriptSummary> = {}): TranscriptSummary => ({
+    id: 'sevt_1',
+    summary: 'text',
+    reason: 'threshold',
+    model: 'anthropic/claude-sonnet-5',
+    passes: 1,
+    tokensBefore: 1_000,
+    position: 4,
+    seq: 5,
+    ...overrides,
+  })
+
+  it('calls the automatic reason what a reader calls it', () => {
+    expect(summaryDescription(summary())).toBe('automatic · anthropic/claude-sonnet-5 · 1 pass')
+    expect(summaryDescription(summary({ passes: 3 }))).toBe(
+      'automatic · anthropic/claude-sonnet-5 · 3 passes',
+    )
+  })
+
+  it('names the two reasons a reader asked for', () => {
+    expect(summaryDescription(summary({ reason: 'overflow' }))).toContain('overflow')
+    expect(summaryDescription(summary({ reason: 'manual' }))).toContain('manual')
+  })
+})
 
 /**
  * The pass math behind the Settings → Context warning (epic #277, C3; #282).
@@ -10,27 +222,8 @@ import { modelContextBudget, summaryModelFallback } from './compaction'
  * the mirror happens to compute: a 200k chat model with an 8k ceiling has a 192k budget, and a
  * 8k summarizer with a 2k ceiling folds 3k tokens a pass.
  */
-
-describe('modelContextBudget (#246)', () => {
-  it('subtracts the model’s own output ceiling when it is under a quarter of the window', () => {
-    expect(modelContextBudget(model(200_000, 8_000))).toBe(192_000)
-  })
-
-  it('subtracts a quarter of the window when the ceiling is larger, or when there is none', () => {
-    // 25% of 200k is 50k, so a 100k ceiling reserves the quarter and not itself, and a model
-    // that declares no ceiling reserves exactly the same quarter.
-    expect(modelContextBudget(model(200_000, 100_000))).toBe(150_000)
-    expect(modelContextBudget(model(200_000, null))).toBe(150_000)
-  })
-
-  it('answers null for a model the catalog gives no window', () => {
-    expect(modelContextBudget(model(null, 8_000))).toBeNull()
-    expect(modelContextBudget(model(0, 8_000))).toBeNull()
-  })
-})
-
 describe('summaryModelFallback (epic #277, K5; #282)', () => {
-  /** A 200k chat model and an 80k summarizer, with the default limit of three passes. */
+  /** A 200k chat model with an 8k ceiling — the budget the example folds. */
   const chat = model(200_000, 8_000)
 
   it('flags a summarizer that cannot fold the chat budget in the allowed passes', () => {
@@ -60,11 +253,16 @@ describe('summaryModelFallback (epic #277, K5; #282)', () => {
     expect(summaryModelFallback({ chat, summary, maxPasses: 64 })).toBeNull()
   })
 
-  it('says nothing when either model’s window is unknown, because the math cannot', () => {
-    expect(summaryModelFallback({ chat, summary: model(null, 2_000), maxPasses: 1 })).toBeNull()
-    expect(
-      summaryModelFallback({ chat: model(null, null), summary: chat, maxPasses: 1 }),
-    ).toBeNull()
+  it('sizes a model the catalog cannot window against the brain’s own fallback budget', () => {
+    // A model with no window is what the server hands the brain as no budget at all, so both
+    // sides fall back to DEFAULT_CONTEXT_TOKEN_BUDGET — the warning measures that number rather
+    // than going silent, because it is the number the engine will really compact against.
+    expect(summaryModelFallback({ chat, summary: model(null, 2_000), maxPasses: 1 })).toEqual({
+      chatBudget: 192_000,
+      summaryBudget: DEFAULT_CONTEXT_TOKEN_BUDGET,
+      passesNeeded: Math.ceil(192_000 / Math.floor(DEFAULT_CONTEXT_TOKEN_BUDGET * 0.5)),
+      maxPasses: 1,
+    })
   })
 })
 
