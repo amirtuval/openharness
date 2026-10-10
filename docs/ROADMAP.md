@@ -187,12 +187,23 @@ Vertex are covered by automated tests and stub servers only; no real account has
   its mode live; an unusable mode is refused rather than silently replaced; every request
   records the mode and what it resolved to. A tool set joins modes in phase 6.
 
+**Done since (2026-10-10):**
+
+- Vertex lists the models the project can use, live from Model Garden, and hides Claude models
+  not enabled for the project ([#273](https://github.com/amirtuval/openharness/issues/273),
+  PR #275). The same PR fixed the save-time check: it called a Vertex route that does not
+  exist, so every Vertex credential was refused. Stub servers had answered that route as if
+  it existed, so the stubs now refuse paths they don't know.
+- Bedrock offers inference-profile models such as `us.anthropic.claude-…`, which many
+  regions require for recent models ([#274](https://github.com/amirtuval/openharness/issues/274),
+  PR #286).
+
 **Follow-ups:**
 
 - Assume-role for Bedrock and workload identity federation for Vertex.
 - Usage budgets and limits, and an operator-wide usage view.
-- Vertex lists the snapshot's models rather than the project's
-  ([#273](https://github.com/amirtuval/openharness/issues/273)).
+- Bedrock profile models take the underlying model's price; prefer models.dev's profile-scoped
+  price where it exists ([#290](https://github.com/amirtuval/openharness/issues/290)).
 - Model requests to the fixed providers ignore `HTTPS_PROXY`
   ([#270](https://github.com/amirtuval/openharness/issues/270)).
 
