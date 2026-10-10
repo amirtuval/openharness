@@ -1,0 +1,19 @@
+C6 follow-up — the meter's arithmetic, machine-checked.
+
+For each session: the latest non-summary `span.model_request_end`'s prompt size (input_tokens
++ cache_creation_input_tokens + cache_read_input_tokens), the chat model's `context_budget`
+from `GET /v1/models` (the caller's own catalog), and the percentage the meter must show.
+
+  session                        model           tokens  budget   pct   what the frontends drew
+  …C67805 (20,000-char message)  stub/demo-chat    5080   32768   16%   web+oh: 16% of context used
+  …XAH3PR (100,000-char message) stub/demo-chat   25008   32768   76%   web+oh: 76% of context used (near)
+  …VFF44S (160,000-char message) stub/demo-chat   32776   32768  100%   web+oh: 100% of context used
+                                                       truncated: {seq:1, tokens_before:40000,
+                                                                  tokens_after:32768}
+
+  the web header's title for …XAH3PR: "25008 of 32768 tokens · compacts at 70%"
+  (data-state="near"; the same session in `oh` is the red `76% of context used`)
+
+5080/32768 = 15.50% → 16%; 25008/32768 = 76.32% → 76%; 32776/32768 = 100.02% → 100%.
+The web and `oh` read one derivation (`contextMeter` in @openharness/client) over the same two
+facts, so their agreement is the check: the web's own words and the terminal's status line.

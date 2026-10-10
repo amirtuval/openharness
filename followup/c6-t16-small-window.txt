@@ -1,0 +1,71 @@
+C6 follow-up — T16's small-window warning, against a real catalog.
+
+The warning rule is `summaryModelFallback` in `@openharness/client`: a pass folds at most half
+the summary model's budget, so `maxPasses` passes fold `maxPasses × budget / 2`, and when that
+is under the chat model's own budget the engine hands the summary back to the chat model. Both
+frontends read it from the catalog the server answers, so it needs two catalog entries with
+real windows.
+
+How the catalog was made (why not a custom endpoint): a custom `openai_compatible` credential
+joins the registry only for a model name, and the server's `context_budget` for one is always
+the brain's 32,768 fallback — `createTokenBudgetResolver` keys the registry by the model id's
+provider half, which for a named credential is a name the registry has never heard of. A
+custom endpoint therefore cannot carry a real budget, and the warning reads the budget, not the
+window. So the models were served under a **fixed provider id** (`openai`), which is the only
+path whose entries get the registry's own budgets: `/etc/hosts` maps `api.openai.com` to
+loopback, a local HTTPS server answers `GET /v1/models` for that name (the exact call
+`provider-validation.ts` and `catalog/adapters.ts` make), and the server trusts its certificate
+through `NODE_EXTRA_CA_CERTS`. The server's real catalog fetch, registry join and budget
+resolver all ran unchanged; the stand-in only chose which ids to list.
+
+GET /v1/models for that caller (the ids are ones the bundled models.dev snapshot already knows):
+
+  id             context_window  max_output_tokens  context_budget
+  openai/gpt-4          8192              8192              6144      (8192 − min(8192, 2048))
+  openai/gpt-5.5     1050000            128000            922000
+  openai/gpt-5.6     1050000            128000            922000
+
+The reader's default model was `openai/gpt-5.6` (budget 922000).
+
+  summary model     budget    slice = budget/2   passes = ceil(922000/slice)   warning (limit 3)
+  openai/gpt-4        6144          3072                     301                    YES
+  openai/gpt-5.5    922000        461000                       2                     no
+
+`oh settings` (apps/tui/dist, the real command), small summary model:
+
+  $ oh settings
+  Summarize at 70% of the context.
+  Summary model: openai/gpt-4.
+  Summary pass limit: 3.
+  Note: openai/gpt-4 would need about 301 passes to fold openai/gpt-5.6's context, over the
+  limit of 3, so the chat model will write the summary instead.
+
+and the same for a summary model large enough — no note at all:
+
+  $ oh settings
+  Summarize at 70% of the context.
+  Summary model: openai/gpt-5.5.
+  Summary pass limit: 3.
+
+`oh settings --summary-model openai/gpt-4` also prints the note after saving, and the numbers
+are the engine's own arithmetic (301 = ceil(922000 / floor(6144/2))) — the same the web card
+draws.
+
+Web (Settings → Context), Playwright on the built app at 1280x800 and 390x844, Light / Dim /
+Dark — the warning paragraph carries `role="status"` and reads:
+
+  This model's window is much smaller than openai/gpt-5.6's: folding your chat's context would
+  take about 301 passes, over your limit of 3, so the chat model will write the summary
+  instead.
+
+  t16-warning-light-desktop.png   t16-warning-light-narrow.png
+  t16-warning-dim-desktop.png     t16-warning-dim-narrow.png
+  t16-warning-dark-desktop.png    t16-warning-dark-narrow.png
+
+with `openai/gpt-5.5` chosen instead the paragraph is absent (the card goes straight from the
+picker to the pass limit):
+
+  t16-ok-dark-desktop.png         t16-ok-dark-narrow.png
+
+The two frontends agree with the shared arithmetic, and the warning is not drawn when the
+summary model can fold the chat's budget within the limit.

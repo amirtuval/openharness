@@ -1,0 +1,35 @@
+C6 follow-up — T4's progress in `oh`: "Summarizing… N of M" during a multi-pass compaction.
+
+Same stack as c6-t8-t14-oh-live.txt. Session on `stub/demo-chat` (context_budget 32768) with
+the summary model `stub/demo-slow` — the same stub, pointed at a slow pace (2.5 s before the
+first token, then 0.4 s a chunk) so each pass lasts long enough to read in the live area.
+The compaction trigger is the stored `compaction_threshold`; it was raised to 0.85 for this
+session so that the old history is large enough to need two passes at the summary model's
+budget (the engine folds at most half the summary model's budget per pass: 32768 / 2 = 16384
+tokens, and a 0.70 trigger leaves only about 14746 tokens of old history, which is one pass).
+
+The status field during the compaction, one frame a pass, captured with
+`tmux capture-pane -p -e` and reduced to the status line (escape sequences below are literal ESC bytes):
+
+  pass 1 of 2
+    [2mdemo-chat · sesn_…WV67VT · $0.00 + 12 unpriced · [0m[31m92% of context used[2m[39m · [0m[33m⠋ Summarizing… 1 of 2[39m
+    ❯ [7m [0m
+
+  pass 2 of 2
+    [2mdemo-chat · sesn_…WV67VT · $0.00 + 13 unpriced · [0m[31m92% of context used[2m[39m · [0m[33m⠸ Summarizing… 2 of 2[39m
+    ❯ [7m [0m
+
+The spinner turns in front of the word (`⠋` … `⠸`) and the field is drawn in the busy tone
+(`^[[33m`) — the same `Summarizing… N of M` the web's working row draws, from the client's
+one derivation.
+
+The session log for the same compaction (GET /v1/sessions/{id}/events):
+
+  seq 28  session.context_summary_progress  { pass: 1, passes: 2 }
+  seq 32  session.context_summary_progress  { pass: 2, passes: 2 }
+  seq 36  session.context_summary           { reason: "threshold", passes: 2,
+                                             summary_model: "stub/demo-slow",
+                                             covers: { to_seq: ... } }
+
+so the passes the terminal showed are the passes the engine recorded — two summary model
+requests, each a `purpose: "summary"` span, both answered by the stub.

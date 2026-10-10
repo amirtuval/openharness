@@ -1,0 +1,78 @@
+C6 follow-up — the `oh` (terminal) live area for T8 and T14, and T4's progress in `oh`.
+Captured on the top of the stack (`compaction/c6-qa-281`), local server, in tmux panes.
+(Ink's live area is the bottom of the pane; `tmux capture-pane -p -e` shows it. The previous
+pass captured only the `<Static>` scrollback; `-e` plus reading the whole pane is what was
+missing. Long rules below are squashed to `────── (rule, full width) ──────`.)
+
+Setup (all local, nothing left the machine):
+  server:  node apps/server/dist/index.js, OPENHARNESS_DEV_LOGIN=1, in-memory store,
+           OPENHARNESS_WEB_DIR=apps/web/dist, OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS=1
+  chat:    a local OpenAI-compatible stub (qa/chat-stub.mjs) registered as an
+           `openai_compatible` credential named `stub`; it reports the prompt it was really
+           sent at the brain's own chars/4 estimate, so the meter is a real measurement.
+           GET /v1/models answers `stub/demo-chat` and `stub/demo-slow`, context_budget 32768.
+  client:  `oh` built from this branch (apps/tui/dist), XDG_CONFIG_HOME isolated,
+           attached with `oh -s <id>` to sessions driven through the API so the states are live.
+
+1. The meter, normal — session on stub/demo-chat, one reply measured.
+   Session log: span.model_request_end usage { input_tokens: 5080, cache_creation: 0,
+   cache_read: 0 } = 5080 tokens; catalog entry context_budget = 32768 →
+   5080 / 32768 = 15.50% → the meter must read 16%.
+
+  ### pane: norm
+  [2m126ms · 5.1k tokens · —[0m
+  [2m[90m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+  [2mdemo-chat · sesn_…C67805 · — · 16% of context used · idle[0m
+  ❯ [7m [0m
+
+   The same session before that reply read `0% of context used` — the meter updates after a
+   reply (it is the last real request's measurement, not a stored counter).
+
+2. The meter at the threshold — one 100,000-character message (25,008 tokens of a 32,768
+   budget = 76.3%), the stored threshold 0.70. The meter is drawn in the alarm colour: the
+   `^[[31m` (red) opens before `76% of context used` and `^[[39m` closes it, against the dim
+   `^[[2m` chrome of the rest of the line.
+
+  ### pane: big
+  [2m[90m──────────────────────────────────────────────────[0m
+  [2m[90m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+  [2mdemo-chat · sesn_…XAH3PR · — · [0m[31m76% of context used[2m[39m · idle[0m
+  ❯ [7m [0m
+
+3. The meter in a narrow pane. `oh` started in a 50-column pane (not resized mid-run):
+   the full `76% of context used` does not fit, so the line falls back to the compact `76%`
+   in `@openharness/client`'s `ContextMeter.shortLabel`.
+
+  ### pane: big50
+  [2m156ms · 25k tokens · —[0m
+  [2m[90m─────────────────────────────────────────────────[0m
+  [2mdemo-chat · sesn_…XAH3PR · — · [0m[31m76%[2m[39m · idle[0m
+  ❯ [7m [0m
+
+   At 40 columns the session segment is dropped and the meter survives — the line's drop
+   order is the banner, then the session, then the model; the meter is what is left.
+
+  ### pane: big40
+  [2m156ms · 25k tokens · —[0m
+  [2m[90m───────────────────────────────────────[0m
+  [2mdemo-chat · — · [0m[31m76%[2m[39m · idle[0m
+  ❯ [7m [0m
+
+4. The truncation notice (T8). One 160,000-character message = 40,000 tokens, over the
+   32,768-token budget: the span records `truncated: { seq: 1, tokens_before: 40000,
+   tokens_after: 32768 }`, the request reports 32,776 tokens (100% of the budget), and the
+   notice under the transcript names what was left out — 40000 − 32768 = 7232.
+
+  ### pane: trunc
+  [33myour message was too long for this model and was shortened (about 7232 tokens left out)[39m
+  [2m[90m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+  [2mdemo-chat · sesn_…VFF44S · — · [0m[31m100% of context used[2m[39m · idle[0m
+  ❯ [7m [0m
+
+Note — `oh` and terminal resize. The meter narrows correctly in a pane that is narrow when `oh`
+starts (see §3, 50 and 40 columns). A terminal *resized while `oh` is running* does not reflow
+the frame in this sandbox — the status line keeps the width it was last drawn at. That is not a
+compaction-visibility regression and not `oh`'s code: a minimal Ink 7.1.1 app behaves the same
+here (it renders `stdout.columns` once and never re-renders on resize, while Node's own
+`process.stdout` 'resize' event fires and `process.stdout.columns` does update), so it is an
+Ink/TTY interaction in this environment. The case as specified — a narrow pane — passes.
