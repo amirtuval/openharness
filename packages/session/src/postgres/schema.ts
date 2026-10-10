@@ -2,6 +2,11 @@ import { createHash } from 'node:crypto'
 
 import type {
   Agent,
+  McpAuthType,
+  McpServer,
+  McpServerId,
+  McpServerStatus,
+  McpToolSummary,
   Metadata,
   Mode,
   ModelConfig,
@@ -18,7 +23,7 @@ import type {
 import type { ColumnType, Selectable } from 'kysely'
 
 import { timestampAt } from '../clock'
-import type { SealedProviderCredential } from '../credentials'
+import type { SealedProviderCredential, SealedSecret } from '../credentials'
 import { isUserEventType } from '../events'
 import { deepFreeze } from '../freeze'
 import type { AppendableEvent, ModelRequestUsage, PartitionSignal } from '../store'
@@ -287,6 +292,79 @@ export interface UserPreferencesTable {
   updated_at: Date
 }
 
+/**
+ * `mcp_servers`: a user's remote MCP servers (epic #303, X10).
+ *
+ * One row per server: the URL, how requests authenticate, whether the server is on by default,
+ * the health the last check left it in, the tool summaries that check listed (with the token
+ * cost of their definitions, X6), and the **sealed** secrets — the header map, the OAuth tokens
+ * and the registered OAuth client — as one JSON column each. Nothing here is a plaintext: a
+ * sealed blob is the vault's output (`ciphertext`, `nonce`, `wrappedKey`, `kekVersion`,
+ * `keyProvider?`), opaque to this package. `name` is unique per user — it is a tool-name prefix
+ * a model sees once tools land (#312) — and `on delete cascade` from `"user"` takes a user's
+ * servers with the user. A `list` selects every column but the three sealed ones, which is what
+ * makes "a listing never reads a secret" a property of the SQL.
+ */
+export interface McpServersTable {
+  /** An `mcps_` id. */
+  id: string
+  owner_id: string
+  /** The name, unique per owner. `C`-collated, so the unique constraint is byte equality. */
+  name: string
+  url: string
+  /** `none`, `headers` or `oauth`, as the protocol's `McpAuthTypeSchema` spells them. */
+  auth: string
+  enabled: boolean
+  /** `connected`, `needs_reconnect` or `error`. */
+  status: string
+  /** Why the last check or request failed, or `null`. Bounded by the server, never a secret. */
+  last_error: string | null
+  /**
+   * The header names a `headers` server sends; the values are sealed. `[]` for other auth types.
+   *
+   * `ColumnType` because `jsonb` reads back **parsed** and must be written **serialized**: an
+   * object parameter is stringified by `pg` on its way in, but a JavaScript array is not — it is
+   * sent as a Postgres array literal, which is not what a `jsonb` column holds. So the insert
+   * and update spellings are the JSON text and the select spelling is the value.
+   */
+  header_names: ColumnType<string[], string, string>
+  /** The tools the last check listed, as `McpToolSummary[]`; `[]` before one has run. */
+  tools: ColumnType<McpToolSummary[], string, string>
+  /** The estimated token cost of `tools` (X6). */
+  definition_tokens: number
+  last_tested_at: Date | null
+  /** The sealed header map, or `null`. Written as its JSON text, read back parsed. */
+  sealed_headers: ColumnType<SealedSecret | null, string | null, string | null>
+  /** The sealed OAuth tokens, or `null`. */
+  sealed_tokens: ColumnType<SealedSecret | null, string | null, string | null>
+  /** The sealed OAuth client registration, or `null`. */
+  sealed_oauth_client: ColumnType<SealedSecret | null, string | null, string | null>
+  created_at: Date
+  updated_at: Date
+}
+
+/**
+ * `mcp_oauth_states`: the pending OAuth authorizations of a user's MCP servers (epic #303, X10).
+ *
+ * One row per in-flight `connect`: the opaque `state`, the source verifier of the PKCE
+ * challenge, and when the state stops being usable. It is keyed by `state` — the value the
+ * authorization server echoes back — and consumed in one transaction that deletes it, so a
+ * callback replay finds nothing. `code_verifier` is stored in the clear on purpose: it is a
+ * nonce for one round trip, not a durable credential, and it is useless once the code it is
+ * bound to has been redeemed. Both foreign keys cascade — a deleted server takes its pending
+ * states, and so does a deleted user.
+ */
+export interface McpOAuthStatesTable {
+  /** The opaque `state`; the primary key. */
+  state: string
+  user_id: string
+  server_id: string
+  /** The PKCE code verifier the challenge was derived from. */
+  code_verifier: string
+  created_at: Date
+  expires_at: Date
+}
+
 /** The database as this package sees it. */
 export interface PostgresSchema {
   agents: AgentsTable
@@ -299,6 +377,8 @@ export interface PostgresSchema {
   scheduler_instances: SchedulerInstancesTable
   provider_credentials: ProviderCredentialsTable
   user_preferences: UserPreferencesTable
+  mcp_servers: McpServersTable
+  mcp_oauth_states: McpOAuthStatesTable
 }
 
 /** One row of `agents`. */
@@ -327,6 +407,37 @@ export type ProviderCredentialRow = ProviderCredentialsTable
 
 /** One row of `user_preferences`. */
 export type UserPreferencesRow = UserPreferencesTable
+
+/**
+ * One row of `mcp_servers`, as a read returns it.
+ *
+ * `Selectable` because the three JSON columns are `ColumnType`s — their select spelling is the
+ * parsed value, not the JSON text the insert side takes — so the read type is the table's own
+ * only where every column's select and insert types agree.
+ */
+export type McpServerRow = Selectable<McpServersTable>
+
+/** One row of `mcp_oauth_states`. */
+export type McpOAuthStateRow = McpOAuthStatesTable
+
+/** The columns a metadata read selects: every `mcp_servers` column but the three sealed blobs. */
+export type McpServerMetadataRow = Pick<
+  McpServerRow,
+  | 'id'
+  | 'owner_id'
+  | 'name'
+  | 'url'
+  | 'auth'
+  | 'enabled'
+  | 'status'
+  | 'last_error'
+  | 'header_names'
+  | 'tools'
+  | 'definition_tokens'
+  | 'last_tested_at'
+  | 'created_at'
+  | 'updated_at'
+>
 
 /** The columns a metadata read selects: every `provider_credentials` column but the sealed blob. */
 export type ProviderCredentialMetadataRow = Pick<
@@ -694,4 +805,51 @@ function parseJson(text: string): unknown {
 /** A parsed JSON value seen as an object, or `null` when it is not one. */
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : null
+}
+
+/**
+ * The `mcp_server` resource a metadata row carries: the protocol's `McpServer`, and never a
+ * sealed column.
+ *
+ * The store deep-freezes what it hands out, so this is the one place a row becomes a value; a
+ * query that only lists metadata does not even select the sealed columns.
+ */
+export function mcpServerFromMetadataRow(row: McpServerMetadataRow): McpServer {
+  return deepFreeze({
+    id: row.id as McpServerId,
+    type: 'mcp_server',
+    owner_id: row.owner_id,
+    name: row.name,
+    url: row.url,
+    auth: row.auth as McpAuthType,
+    enabled: row.enabled,
+    status: row.status as McpServerStatus,
+    last_error: row.last_error,
+    header_names: [...row.header_names],
+    tools: row.tools.map((tool) => ({ ...tool })),
+    definition_tokens: row.definition_tokens,
+    last_tested_at: row.last_tested_at === null ? null : timestampOf(row.last_tested_at),
+    created_at: timestampOf(row.created_at),
+    updated_at: timestampOf(row.updated_at),
+  })
+}
+
+/**
+ * The stored server a full row carries: the metadata above plus the sealed blobs, deep-frozen.
+ *
+ * A `null` sealed column is an absent secret, not an empty one — the record simply has no
+ * `headers`/`tokens`/`oauthClient` key — so the server's code that opens them can tell "never
+ * stored" from "stored".
+ */
+export function mcpServerFromRow(row: McpServerRow): McpServer & {
+  readonly headers?: SealedSecret
+  readonly tokens?: SealedSecret
+  readonly oauthClient?: SealedSecret
+} {
+  return deepFreeze({
+    ...mcpServerFromMetadataRow(row),
+    ...(row.sealed_headers === null ? {} : { headers: { ...row.sealed_headers } }),
+    ...(row.sealed_tokens === null ? {} : { tokens: { ...row.sealed_tokens } }),
+    ...(row.sealed_oauth_client === null ? {} : { oauthClient: { ...row.sealed_oauth_client } }),
+  })
 }

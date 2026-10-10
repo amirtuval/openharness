@@ -23,7 +23,13 @@ import { Pool } from 'pg'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 
 import type { UpsertCredentialInput } from '../credentials'
-import { DuplicateEventIdError, FencedError, isFencedError } from '../errors'
+import type { CreateMcpServerInput } from '../mcp-servers'
+import {
+  DuplicateEventIdError,
+  DuplicateMcpServerNameError,
+  FencedError,
+  isFencedError,
+} from '../errors'
 import type { AppendableEvent } from '../store'
 import { timestampAt } from '../clock'
 import { createTestClock, type TestClock } from '../testing/clock'
@@ -34,8 +40,10 @@ import {
   type MakeSessionStore,
 } from '../testing/conformance'
 import { runCredentialStoreConformance } from '../testing/credentials-conformance'
+import { runMcpServerStoreConformance } from '../testing/mcp-servers-conformance'
 import {
   createPostgresCredentialStore,
+  createPostgresMcpServerStore,
   createPostgresSessionStore,
   migrate,
   type PostgresSchema,
@@ -116,6 +124,9 @@ if (target === null) {
   /** Every credential store a test made, closed again afterwards. */
   const credentialStores: ReturnType<typeof createPostgresCredentialStore>[] = []
 
+  /** Every MCP server store a test made, closed again afterwards. */
+  const mcpStores: ReturnType<typeof createPostgresMcpServerStore>[] = []
+
   beforeAll(async () => {
     let connectionString = DATABASE_URL
     if (connectionString === '') {
@@ -130,6 +141,7 @@ if (target === null) {
   afterEach(async () => {
     await Promise.all(stores.splice(0).map((store) => store.close()))
     await Promise.all(credentialStores.splice(0).map((store) => store.close()))
+    await Promise.all(mcpStores.splice(0).map((store) => store.close()))
   })
 
   afterAll(async () => {
@@ -161,6 +173,15 @@ if (target === null) {
       return trackCredentials(createPostgresCredentialStore({ pool }, { now: clock.now }))
     },
     { name: 'PostgresCredentialStore', ensureUsers },
+  )
+
+  /** The MCP server store's conformance suite, on the same tables and users (#303, X10). */
+  runMcpServerStoreConformance(
+    async (clock) => {
+      await truncateAll()
+      return trackMcpServers(createPostgresMcpServerStore({ pool }, { now: clock.now }))
+    },
+    { name: 'PostgresMcpServerStore', ensureUsers },
   )
 
   // -------------------------------------------------------------- extra tests
@@ -718,6 +739,49 @@ if (target === null) {
     })
   })
 
+  // ----------------------------------------- the MCP server store's extra tests
+
+  describe('PostgresMcpServerStore: more than the contract asks', () => {
+    it('keeps one row per (user, name) when two stores create at once', async () => {
+      await truncateAll()
+      await ensureUsers([OWNER_A])
+      const first = trackMcpServers(createPostgresMcpServerStore({ pool }, { now: () => START_MS }))
+      const second = trackMcpServers(
+        createPostgresMcpServerStore({ pool }, { now: () => START_MS }),
+      )
+      // Two uncoordinated creates of the same name: the unique constraint decides, one wins and
+      // the other is refused — never two rows.
+      const results = await Promise.allSettled([
+        first.create(mcpServerInput()),
+        second.create(mcpServerInput()),
+      ])
+      expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
+      const refused = results.find((result) => result.status === 'rejected')
+      if (refused?.status !== 'rejected') {
+        throw new Error('expected one of the two creates to be refused')
+      }
+      expect(refused.reason).toBeInstanceOf(DuplicateMcpServerNameError)
+      expect(await first.list({ ownerId: OWNER_A })).toHaveLength(1)
+    })
+
+    it('deletes a server and its pending OAuth states with the user', async () => {
+      await truncateAll()
+      await ensureUsers([OWNER_A])
+      const store = trackMcpServers(createPostgresMcpServerStore({ pool }, { now: () => START_MS }))
+      const server = await store.create(mcpServerInput({ auth: 'oauth' }))
+      await store.createOAuthState({
+        state: 'state-1',
+        userId: OWNER_A,
+        serverId: server.id,
+        codeVerifier: 'v1',
+        expiresAt: timestampAt(START_MS + 60_000),
+      })
+      // A server delete cascades to its pending states, so a callback can no longer complete.
+      expect(await store.delete(server.id, { ownerId: OWNER_A })).toBe(true)
+      expect(await store.consumeOAuthState('state-1')).toBeNull()
+    })
+  })
+
   /** The store a test works with: a clock it can move, and one seeded session. */
   async function seeded(clock: TestClock = createTestClock(START_MS)): Promise<{
     store: ReturnType<typeof createPostgresSessionStore>
@@ -741,6 +805,12 @@ if (target === null) {
   /** Remember a credential store so `afterEach` closes it. */
   function trackCredentials(store: ReturnType<typeof createPostgresCredentialStore>) {
     credentialStores.push(store)
+    return store
+  }
+
+  /** Remember an MCP server store so `afterEach` closes it. */
+  function trackMcpServers(store: ReturnType<typeof createPostgresMcpServerStore>) {
+    mcpStores.push(store)
     return store
   }
 
@@ -811,7 +881,26 @@ if (target === null) {
     // memberships cannot (#122).
     await sql`truncate table
       events, event_claims, event_supersessions, sessions, agents, modes, partition_leases,
-      scheduler_instances, provider_credentials, user_preferences`.execute(db)
+      scheduler_instances, provider_credentials, user_preferences, mcp_oauth_states,
+      mcp_servers`.execute(db)
+  }
+}
+
+/** A create body for a Postgres MCP server test. */
+function mcpServerInput(overrides: Partial<CreateMcpServerInput> = {}): CreateMcpServerInput {
+  return {
+    ownerId: OWNER_A,
+    name: 'notes',
+    url: 'https://mcp.example.com/mcp',
+    auth: 'none',
+    enabled: true,
+    status: 'connected',
+    lastError: null,
+    headerNames: [],
+    tools: [],
+    definitionTokens: 0,
+    lastTestedAt: null,
+    ...overrides,
   }
 }
 
