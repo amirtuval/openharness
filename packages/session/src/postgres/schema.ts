@@ -256,14 +256,17 @@ export interface ProviderCredentialsTable {
 
 /**
  * `user_preferences`: the settings a user keeps across sessions (#111, epic #116 U1; theme:
- * #203, epic #201 X3).
+ * #203, epic #201 X3; compaction: epic #277, C3, #282).
  *
  * One row per user — `user_id` is the primary key — holding the `provider/model` a new chat
- * starts with, or `null` when the user has no default, and the web app's `theme` (`system`,
- * `light`, `dim` or `dark`; `system` follows the operating system). `putPreferences` replaces
- * the row whole (the store upserts it), so this is a value rather than a log, and `updated_at`
- * is when that value last changed, from the injected clock. `on delete cascade` from `"user"`
- * takes a user's preferences with the user.
+ * starts with, or `null` when the user has no default, the web app's `theme` (`system`,
+ * `light`, `dim` or `dark`; `system` follows the operating system), and the three compaction
+ * controls: the share of the chat model's budget at which history is summarized (`null` for
+ * the server's own, `0025`), the model that writes summaries (`same-as-chat` or a
+ * `provider/model` id) and how many passes it may take (`null` for the engine's own).
+ * `putPreferences` replaces the row whole (the store upserts it), so this is a value rather
+ * than a log, and `updated_at` is when that value last changed, from the injected clock.
+ * `on delete cascade` from `"user"` takes a user's preferences with the user.
  */
 export interface UserPreferencesTable {
   /** The `user.id` the preferences belong to (Better Auth's opaque text). */
@@ -272,6 +275,15 @@ export interface UserPreferencesTable {
   default_model: string | null
   /** The web theme name; `system` unless the user chose one (`0019_user_preferences_theme.sql`). */
   theme: string
+  /**
+   * The share of the chat model's budget at which compaction fires, or `null` for the server's
+   * own (`0025_user_preferences_compaction.sql`; epic #277, C3; #282).
+   */
+  compaction_threshold: number | null
+  /** The model that writes summaries: `same-as-chat`, or a `provider/model` id. */
+  summary_model: string
+  /** How many passes a summary model may take, or `null` for the engine's own. */
+  summary_max_passes: number | null
   updated_at: Date
 }
 

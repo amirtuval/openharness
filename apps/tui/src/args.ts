@@ -1,5 +1,13 @@
 import { parseArgs as parseNodeArgs, type ParseArgsConfig } from 'node:util'
 
+import {
+  COMPACTION_THRESHOLD_MAX,
+  COMPACTION_THRESHOLD_MIN,
+  SUMMARY_MAX_PASSES_MAX,
+  SUMMARY_MAX_PASSES_MIN,
+  SUMMARY_MODEL_SAME_AS_CHAT,
+} from '@openharness/protocol'
+
 import { HELP_TEXT } from './help'
 
 /** Flags every command takes: where the server is, and how to talk to it. */
@@ -22,6 +30,22 @@ export interface ChatOptions extends GlobalOptions {
   readonly model?: string | undefined
   /** `--mode <name>`: a mode a new chat follows, instead of a model (#245, M6). */
   readonly mode?: string | undefined
+}
+
+/**
+ * The compaction settings `oh settings` writes (epic #277, C3; #282).
+ *
+ * A field is a key **only when its flag was given**, because the server merges: an absent flag
+ * leaves the stored choice alone, and `default` on a nullable control is how it is cleared back
+ * to the server's own value.
+ */
+export interface SettingsPatch {
+  /** The share of the budget that triggers a summary, 0.3–0.95, or `null` for the default. */
+  readonly threshold?: number | null
+  /** The model that writes summaries: `same-as-chat`, or a `provider/model` id. */
+  readonly summaryModel?: string
+  /** How many passes the summary model may take, 1–10, or `null` for the engine's default. */
+  readonly summaryPasses?: number | null
 }
 
 /** Flags `oh login` takes on top of the global ones. */
@@ -65,6 +89,12 @@ export type CliCommand =
       readonly model?: string | undefined
       readonly options: GlobalOptions
     }
+  | {
+      readonly kind: 'settings'
+      /** The compaction fields the flags asked to change; empty for a plain read (#282). */
+      readonly patch: SettingsPatch
+      readonly options: GlobalOptions
+    }
   | { readonly kind: 'login'; readonly options: LoginOptions }
   | { readonly kind: 'logout'; readonly options: GlobalOptions }
   | { readonly kind: 'whoami'; readonly options: GlobalOptions }
@@ -89,6 +119,7 @@ const SUBCOMMANDS = [
   'modes',
   'providers',
   'default-model',
+  'settings',
   'login',
   'logout',
   'whoami',
@@ -104,6 +135,7 @@ const SUBCOMMAND_BLURBS: Record<Subcommand, string> = {
   modes: 'it lists your modes and what each resolves to',
   providers: 'it lists the model-provider keys, or manages them with `add` and `remove <provider>`',
   'default-model': 'it gets or sets the default model',
+  settings: 'it prints the context settings, and sets them with its flags',
   login: 'it signs you in through the browser',
   logout: 'it ends the session and forgets the token',
   whoami: 'it prints the signed-in user',
@@ -122,6 +154,11 @@ const OPTIONS = {
   yes: { type: 'boolean' },
   'no-browser': { type: 'boolean' },
   debug: { type: 'boolean' },
+  // `oh settings` (#282). `--summary-model` is spelled out rather than sharing `--model`,
+  // which is the chat's own flag: a chat's model and the summary's are different settings.
+  threshold: { type: 'string' },
+  'summary-model': { type: 'string' },
+  'summary-passes': { type: 'string' },
 } as const satisfies ParseArgsConfig['options']
 
 /**
@@ -179,6 +216,10 @@ export function parseArgs(argv: readonly string[]): ParseOutcome {
       return parseDefaultModel(extra, values, global)
     }
 
+    if (subcommand === 'settings') {
+      return parseSettings(extra, values, global)
+    }
+
     if (extra.length > 0) {
       return {
         ok: false,
@@ -205,6 +246,11 @@ export function parseArgs(argv: readonly string[]): ParseOutcome {
     }
 
     return { ok: true, command: { kind: subcommand, options: global } }
+  }
+
+  const settingsFlag = settingsFlagIn(values)
+  if (settingsFlag !== undefined) {
+    return { ok: false, error: `${settingsFlag} only makes sense with \`oh settings\`.` }
   }
 
   if (values['no-browser'] === true) {
@@ -464,6 +510,112 @@ function parseDefaultModel(
 }
 
 /**
+ * `oh settings [--threshold <share>] [--summary-model <id|same-as-chat>]
+ * [--summary-passes <n|default>]` (epic #277, C3; #282).
+ *
+ * With no flags it prints the context settings; each flag sets one, and the flags may be
+ * combined. The values are validated here rather than left to the server because a typo like
+ * `--threshold 5` (meaning 50%) is worth catching before a request, and the messages can name
+ * the flag and the range. `default` clears a nullable control back to the server's own value.
+ */
+function parseSettings(
+  extra: readonly string[],
+  values: ReturnType<typeof parseOptions>['values'],
+  global: GlobalOptions,
+): ParseOutcome {
+  if (extra.length > 0) {
+    return {
+      ok: false,
+      error: `\`oh settings\` takes no arguments, got '${extra.join(' ')}'. Set a value with a flag, like --threshold 0.5.`,
+    }
+  }
+
+  const conflicting = wrongFlagFor('settings', values)
+  if (conflicting !== undefined) {
+    return {
+      ok: false,
+      error: `\`oh settings\` does not take ${conflicting}; ${SUBCOMMAND_BLURBS.settings}.`,
+    }
+  }
+
+  const patch: {
+    threshold?: number | null
+    summaryModel?: string
+    summaryPasses?: number | null
+  } = {}
+
+  if (values.threshold !== undefined) {
+    const raw = values.threshold.trim()
+    if (raw === '') {
+      return { ok: false, error: '--threshold needs a share, like --threshold 0.5.' }
+    }
+    if (raw === CLEAR_WORD) {
+      patch.threshold = null
+    } else {
+      const value = Number(raw)
+      if (
+        !Number.isFinite(value) ||
+        value < COMPACTION_THRESHOLD_MIN ||
+        value > COMPACTION_THRESHOLD_MAX
+      ) {
+        return {
+          ok: false,
+          error: `--threshold needs a share between ${COMPACTION_THRESHOLD_MIN} and ${COMPACTION_THRESHOLD_MAX} (0.7 is 70%), or 'default'.`,
+        }
+      }
+      patch.threshold = value
+    }
+  }
+
+  if (values['summary-model'] !== undefined) {
+    const model = values['summary-model'].trim()
+    if (model === '') {
+      return {
+        ok: false,
+        error: `--summary-model needs a model id, or '${SUMMARY_MODEL_SAME_AS_CHAT}'.`,
+      }
+    }
+    patch.summaryModel = model
+  }
+
+  if (values['summary-passes'] !== undefined) {
+    const raw = values['summary-passes'].trim()
+    if (raw === '') {
+      return { ok: false, error: '--summary-passes needs a number, like --summary-passes 5.' }
+    }
+    if (raw === CLEAR_WORD) {
+      patch.summaryPasses = null
+    } else {
+      const value = Number(raw)
+      if (
+        !Number.isInteger(value) ||
+        value < SUMMARY_MAX_PASSES_MIN ||
+        value > SUMMARY_MAX_PASSES_MAX
+      ) {
+        return {
+          ok: false,
+          error: `--summary-passes needs a whole number between ${SUMMARY_MAX_PASSES_MIN} and ${SUMMARY_MAX_PASSES_MAX}, or 'default'.`,
+        }
+      }
+      patch.summaryPasses = value
+    }
+  }
+
+  return { ok: true, command: { kind: 'settings', patch, options: global } }
+}
+
+/** The word a nullable setting takes to mean "follow the default" (K2/K5). */
+const CLEAR_WORD = 'default'
+
+/** The setting flags, in the order their messages name them. */
+function settingsFlagIn(values: ReturnType<typeof parseOptions>['values']): string | undefined {
+  if (values.threshold !== undefined) return '--threshold <share>'
+  if (values['summary-model'] !== undefined) return '--summary-model <id>'
+  if (values['summary-passes'] !== undefined) return '--summary-passes <n>'
+  return undefined
+}
+
+/**
  * `parseArgs` in strict mode, over this CLI's flag table. A named function so the inferred
  * value types survive: an annotated `ReturnType<...>` would widen the string flags back into
  * `string | boolean`.
@@ -487,6 +639,12 @@ function wrongFlagFor(
   if (values.agent !== undefined) return `--agent <id|name>`
   if (values.model !== undefined) return `--model <provider/model>`
   if (values.mode !== undefined) return `--mode <name>`
+  // The `oh settings` flags, which every other command rejects — the chat path checks them
+  // itself, before this is ever called.
+  if (subcommand !== 'settings') {
+    const setting = settingsFlagIn(values)
+    if (setting !== undefined) return setting
+  }
   if (
     values.yes === true &&
     subcommand !== 'sessions' &&

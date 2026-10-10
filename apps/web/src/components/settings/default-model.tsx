@@ -32,7 +32,7 @@ export function DefaultModelCard({ catalog }: { catalog: ModelsView }) {
     }
     setNotice(null)
     setFailure(null)
-    const result = await save(modelId)
+    const result = await save({ default_model: modelId })
     if (result.ok) {
       setNotice('Saved the default model.')
     } else {

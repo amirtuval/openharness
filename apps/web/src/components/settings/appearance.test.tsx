@@ -1,4 +1,5 @@
 import type { GetPreferencesResponse } from '@openharness/protocol'
+import { makeGetPreferencesResponse } from '@openharness/protocol/fixtures'
 import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
@@ -47,7 +48,8 @@ describe('the Appearance card', () => {
     expect(option('Dark')).toBeChecked()
     // ...and written to the server, which is what a later `oh` or another browser reads.
     await waitFor(async () => {
-      expect(await fake.preferences.get()).toEqual({ default_model: null, theme: 'dark' })
+      // The stored choice, beside the compaction controls the response carries (#282).
+      expect(await fake.preferences.get()).toMatchObject({ default_model: null, theme: 'dark' })
     })
 
     // The cache is refreshed too, so the next first paint is already dark.
@@ -77,7 +79,7 @@ describe('the Appearance card', () => {
     })
 
     for (const answer of held) {
-      answer({ default_model: null, theme: 'light' })
+      answer(makeGetPreferencesResponse({ default_model: null, theme: 'light' }))
     }
 
     // The account's value wins once it has been read, and takes the cache with it.

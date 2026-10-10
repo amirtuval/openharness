@@ -72,7 +72,7 @@ export function FirstRunScreen({
 
   const choose = async (modelId: string): Promise<void> => {
     setChangeError(null)
-    const result = await save(modelId)
+    const result = await save({ default_model: modelId })
     if (!result.ok) {
       setChangeError(result.message)
     }

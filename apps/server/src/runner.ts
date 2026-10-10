@@ -1,5 +1,5 @@
 import {
-  type ContextCompactionConfig,
+  type ContextCompactionOption,
   type ContextStrategy,
   type ModeResolver,
   type ModelFactory,
@@ -56,11 +56,12 @@ export interface SessionRunnerOptions {
   /** How the log becomes model messages; `runTurn`'s own default when omitted. */
   readonly contextStrategy?: ContextStrategy
   /**
-   * Context compaction (epic #277, C2; #279), passed to every turn; omitted means off, as in
-   * `runTurn`. `main.ts` wires it from `OPENHARNESS_COMPACTION_THRESHOLD` and the same registry
-   * the context budget comes from.
+   * Context compaction (epic #277, C2; #279; per-user controls: C3, #282), passed to every turn;
+   * omitted means off, as in `runTurn`. `main.ts` wires it as the resolver
+   * `createContextCompactionResolver` builds — each owner's preferences over
+   * `OPENHARNESS_COMPACTION_THRESHOLD` and the same registry the context budget comes from.
    */
-  readonly compaction?: ContextCompactionConfig
+  readonly compaction?: ContextCompactionOption
   /**
    * Which reasoning efforts a model takes, asked per request (#252's follow-up); `runTurn`'s own
    * default when omitted, which is "no model is known to take one".
@@ -146,7 +147,7 @@ export class SessionRunner {
 
   readonly #contextStrategy: ContextStrategy | undefined
 
-  readonly #compaction: ContextCompactionConfig | undefined
+  readonly #compaction: ContextCompactionOption | undefined
 
   readonly #reasoningSupportFor: ReasoningSupportFor | undefined
 

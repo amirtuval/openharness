@@ -97,6 +97,8 @@ src/
     settings/
       providers.tsx            Settings -> Providers: the list, Replace, Delete, Add provider
       default-model.tsx        Settings -> Default model: the picker, saved to preferences
+      context.tsx              Settings -> Context: the three compaction controls (#277 C3, #282),
+                               and the pass-math warning when the summary model is too small
       modes.tsx                Settings -> Modes (#245, M6): the list, empty state, Create mode
       mode-form-dialog.tsx     the create/edit form: name, model (or "my default model"), effort,
                                prompt addition
@@ -156,7 +158,7 @@ src/
                                required, a preselected sole model, a loading skeleton, the
                                catalog's error, or the "add a provider key" state when there
                                are no providers and no models
-    settings-screen.tsx        Providers, Default model, Modes, Appearance, Usage, and Advanced
+    settings-screen.tsx        Providers, Default model, Modes, Context, Appearance, Usage, Advanced
                                — the server URL, collapsed (#209, #245)
     sign-in-screen.tsx         one button per provider, the dev form when offered
     device-screen.tsx          the device-approval page `oh login` opens
@@ -168,7 +170,7 @@ src/
                                after a credential change, refresh() to bypass the cache
     use-modes.ts               the reader's modes (#245, M6), once for the whole shell: the
                                list plus create/update/remove, updating it in place
-    use-preferences.ts         GET/PUT /v1/me/preferences: the default model
+    use-preferences.ts         GET/PUT /v1/me/preferences: every stored setting, saved as a patch
     use-usage.ts               GET /v1/me/usage: this month, in the reader's own zone (#247)
     use-theme.ts               the theme store's React binding (#203)
     use-auth.ts                the auth store's React binding
@@ -473,7 +475,10 @@ small note ("from the built-in list; the provider couldn't be reached"). The las
 router accepts models the catalog may not know yet. Refresh lives in the panel's foot, so
 every surface that offers the catalog can rebuild it where the list is. It has two sizes:
 `full` (Settings) and `compact` — the composer's quiet "gpt-4.1-mini ▾" control, whose panel
-opens upward.
+opens upward. Two optional props serve the second picker Settings has: `leading` pins choices
+above the modes and the providers (Settings → Context's "Same as the chat", #282) and `label`
+names the trigger, so the Default-model and summary-model listboxes are told apart by a screen
+reader as well as by a test.
 
 ### Onboarding: one flow, from sign-in to a first chat (#209, epic #201 X5/X6/X8; #227)
 
@@ -688,6 +693,25 @@ so a resumed chat draws the same markers a live one did.
 including a default the **server picked by itself** when the first provider key was saved (U4),
 and saves a pick immediately (`preferences.put`), with the failure shown inline while the
 stored value stays in effect.
+
+### Context in Settings (epic #277, C3; #282)
+
+`ContextCard` (Settings → Context) is the three compaction controls — the trigger share as a
+range (30%–95%, with the server's own named under it and a "Use the server default" action that
+clears the choice back to `null`), the summary model as the same picker with "Same as the chat"
+pinned first, and the pass limit as a number field (1–10, the engine's default named) — over the
+same `usePreferences`, one `PUT` per control, whose merge is what keeps them from clearing each
+other. The hook's `save` takes a **patch** (`PutPreferencesRequest`) for that reason: four cards
+write one value.
+
+When the chosen summary model is much smaller than the model the reader's chats run, the engine
+would need more passes than the limit allows and hands the summary back to the chat model (K5),
+so the card says so — with the numbers the engine's own arithmetic produces, from
+`summaryModelFallback` in `@openharness/client` (shared with `oh settings`), not a ratio someone
+picked: a pass folds at most half the summary model's budget, so `maxPasses` passes fold
+`maxPasses × budget / 2`, and when that is under the chat model's own budget the fallback is
+certain. The warning needs both models' context windows, so it appears only when the catalog
+knows them.
 
 ### Edit and resend rewinds the session (#238)
 

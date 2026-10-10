@@ -40,6 +40,13 @@ export interface RouteDeps {
    * log through this, and it holds the model catalog's prices.
    */
   readonly usage: UsageReader
+  /**
+   * What a preference of `null` falls back to, for `GET`/`PUT /v1/me/preferences` to report as
+   * its `defaults` (epic #277, C3; #282): the deployment's compaction trigger share, and the
+   * engine's own summary pass limit. The stored row holds `null` for "follow the default", so
+   * a client cannot know either value on its own.
+   */
+  readonly preferenceDefaults: PreferenceDefaults
   /** The SSE keepalive interval; tests shorten it. */
   readonly sseKeepaliveMs?: number
   /** The re-check interval of the long-lived routes (A2/#76); tests shorten it. */
@@ -52,6 +59,17 @@ export interface RouteDeps {
    * Auth in `app.ts`.
    */
   readonly revalidateSession: (headers: Headers) => Promise<boolean>
+}
+
+/**
+ * The defaults the preferences routes report (epic #277, C3; #282): camelCase here, mapped to
+ * the protocol's `defaults` object at the route.
+ */
+export interface PreferenceDefaults {
+  /** The server's own trigger share (`OPENHARNESS_COMPACTION_THRESHOLD`). */
+  readonly compactionThreshold: number
+  /** The engine's own summary pass limit. */
+  readonly summaryMaxPasses: number
 }
 
 /** The auth surface the routes read (the guard in `app.ts` gets the Better Auth instance). */

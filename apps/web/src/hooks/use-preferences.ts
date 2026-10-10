@@ -1,5 +1,5 @@
 import type { Client } from '@openharness/client'
-import type { GetPreferencesResponse } from '@openharness/protocol'
+import type { GetPreferencesResponse, PutPreferencesRequest } from '@openharness/protocol'
 import { useCallback, useEffect, useState } from 'react'
 
 import { noteAuthenticationError } from '../lib/auth-store'
@@ -21,12 +21,18 @@ export interface PreferencesView {
   /** A `put` is in flight. */
   readonly saving: boolean
   /**
-   * Write the default model, whole: a `provider/model` id, or `null` to clear it.
+   * Write the fields given, over what is stored (the server merges): a `provider/model` id, a
+   * theme, or any of the compaction controls — `compaction_threshold` and `summary_max_passes`
+   * as `null` to follow the default, `summary_model` as `same-as-chat` or an id.
+   *
+   * Every call is one `PUT`, so a control that saves on its own never disturbs another: the
+   * settings screen has four cards writing the same value, and the merge is what keeps them
+   * from clearing each other (epic #201, X3; #282).
    *
    * On success the stored answer replaces what the view holds, so a picker reading this view
    * shows what the server accepted — including a default the server chose itself.
    */
-  readonly save: (defaultModel: string | null) => Promise<SavePreferencesResult>
+  readonly save: (patch: PutPreferencesRequest) => Promise<SavePreferencesResult>
   /**
    * Read the stored preferences again.
    *
@@ -91,10 +97,10 @@ export function usePreferences(client: Client): PreferencesView {
   }, [load])
 
   const save = useCallback(
-    async (defaultModel: string | null): Promise<SavePreferencesResult> => {
+    async (patch: PutPreferencesRequest): Promise<SavePreferencesResult> => {
       setSaving(true)
       try {
-        const saved = await client.preferences.put({ default_model: defaultModel })
+        const saved = await client.preferences.put(patch)
         setPreferences(saved)
         setError(null)
         return { ok: true }

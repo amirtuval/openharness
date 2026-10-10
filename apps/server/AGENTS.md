@@ -44,8 +44,8 @@ protocol's schemas, so the shapes are not repeated here — see
 | `GET`    | `/ready`                                  | —                                           | readiness (#151): `{ status: 'ok' }`, or 503 while draining or when the store does not answer; never needs a session                                 |
 | `GET`    | `/v1/auth-config`                         | —                                           | `{ providers, dev_login }`; never needs a session                                                                                                    |
 | `GET`    | `/v1/me`                                  | —                                           | the signed-in `User`                                                                                                                                 |
-| `GET`    | `/v1/me/preferences`                      | —                                           | the caller's `UserPreferences`, unwrapped                                                                                                            |
-| `PUT`    | `/v1/me/preferences`                      | `PutPreferencesRequestSchema`               | the stored preferences; 400 for a malformed `default_model`                                                                                          |
+| `GET`    | `/v1/me/preferences`                      | —                                           | the caller's `UserPreferences` plus the `defaults` its `null`s mean (#282), unwrapped                                                                |
+| `PUT`    | `/v1/me/preferences`                      | `PutPreferencesRequestSchema`               | the stored preferences, merged; 400 for a malformed id or an out-of-range number                                                                     |
 | `POST`   | `/v1/me/modes`                            | `CreateModeRequestSchema`                   | 201, the `Mode`; 409 for a duplicate name (per user) or the twentieth-plus-one mode (#245, M6)                                                       |
 | `GET`    | `/v1/me/modes`                            | —                                           | `{ data: Mode[] }`, the caller's own; no pagination (a user holds at most 20)                                                                        |
 | `GET`    | `/v1/me/modes/{mode_id}`                  | —                                           | the `Mode`, or 404 for another user's or an unknown id                                                                                               |
@@ -106,42 +106,42 @@ a `user.interrupt` signals `interrupt` — exactly what the same events would do
 
 ## Environment variables
 
-| variable                                  | default                          | what it does                                                                                                                                          |
-| ----------------------------------------- | -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `DATABASE_URL`                            | —                                | run on Postgres, migrating on boot; unset means in-memory                                                                                             |
-| `SCHEDULER`                               | `local`                          | `local`, or `postgres` for the multi-instance scheduler                                                                                               |
-| `BETTER_AUTH_SECRET`                      | — (**required**)                 | signs sessions and cookies                                                                                                                            |
-| `BETTER_AUTH_URL`                         | — (**required**)                 | the public URL: Better Auth's base, the one trusted origin (CSRF)                                                                                     |
-| `OPENHARNESS_SECRETS_KEY`                 | — (**required** under `local`)   | base64 32-byte master key the vault seals credentials with; not needed under `gcp-kms`                                                                |
-| `OPENHARNESS_KEY_PROVIDER`                | `local`                          | `local` (the environment key) or `gcp-kms` (Cloud KMS): who wraps the vault's data keys (#150)                                                        |
-| `OPENHARNESS_KMS_KEY`                     | — (**required** under `gcp-kms`) | the Cloud KMS `projects/…/cryptoKeys/…` key; unused under `local`                                                                                     |
-| `OPENHARNESS_KEY_CACHE_TTL_MS`            | `300000`                         | how long unwrapped data keys stay cached in memory; `0` disables the cache                                                                            |
-| `OPENHARNESS_DEV_LOGIN`                   | off                              | `1` enables the local dev login; localhost URLs only (A7); the way in when no provider is set                                                         |
-| `GOOGLE_CLIENT_ID`/`_SECRET`              | —                                | enable Google sign-in (both, or neither; one provider or the dev login is required)                                                                   |
-| `GITHUB_CLIENT_ID`/`_SECRET`              | —                                | enable GitHub sign-in                                                                                                                                 |
-| `MICROSOFT_CLIENT_ID`/`_SECRET`           | —                                | enable Microsoft sign-in                                                                                                                              |
-| `MICROSOFT_TENANT_ID`                     | `common`                         | the Entra tenant the Microsoft provider authenticates against                                                                                         |
-| `PORT`                                    | `3000`                           | the port to listen on                                                                                                                                 |
-| `OPENHARNESS_TEST_MODEL`                  | —                                | `mock` swaps in the deterministic test model                                                                                                          |
-| `OPENHARNESS_WEB_DIR`                     | —                                | a built web app to serve at `/`                                                                                                                       |
-| `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS` | off                              | `1` lets a **custom OpenAI-compatible** credential reach a private/loopback address (epic #245, M4; #249); never Azure; off in staging and production |
-| `OPENHARNESS_TRUSTED_PROXY_HOPS`          | `0`                              | how many proxies append to `x-forwarded-for`; `0` trusts no forwarding header (#151, see below)                                                       |
-| `OPENHARNESS_CORS_ORIGINS`                | —                                | comma-separated origins to allow; unset means no CORS headers                                                                                         |
-| `OPENHARNESS_MAX_CONCURRENT_SESSIONS`     | `4`                              | how many sessions may be running at once                                                                                                              |
-| `OPENHARNESS_DRAIN_TIMEOUT_MS`            | `5000`                           | how long shutdown waits for a turn in flight                                                                                                          |
-| `OPENHARNESS_INSTANCE_ID`                 | hostname + pid + random suffix   | this instance's id in the lease table                                                                                                                 |
-| `OPENHARNESS_PARTITIONS`                  | `64` (the protocol's)            | how many partitions the session space has                                                                                                             |
-| `OPENHARNESS_LEASE_TTL_MS`                | `30000`                          | how long a partition lease lasts before it must be renewed                                                                                            |
-| `OPENHARNESS_HEARTBEAT_MS`                | `10000`                          | how often leases are renewed and free partitions taken                                                                                                |
-| `OPENHARNESS_SWEEP_MS`                    | `60000`                          | how often owned partitions are re-scanned for missed work                                                                                             |
-| `OPENHARNESS_DELTA_RETENTION_MS`          | `3600000`                        | how long superseded chunks are kept before compaction deletes them                                                                                    |
-| `OPENHARNESS_COMPACT_INTERVAL_MS`         | `300000`                         | how often the compaction job runs; `0` disables it                                                                                                    |
-| `OPENHARNESS_COMPACTION_THRESHOLD`        | `0.7`                            | the share of the chat model's context budget at which older history is summarized (epic #277, K2; #279); a fraction in `0..1`                         |
-| `OPENHARNESS_LOG_FORMAT`                  | `text`                           | `text` (readable) or `json` (Cloud Logging): what stdout carries (#158)                                                                               |
-| `OPENHARNESS_TRACING`                     | `off`                            | `off`, or `cloud-trace` to export spans to Cloud Trace (#158)                                                                                         |
-| `OPENHARNESS_TRACE_SAMPLE_RATE`           | `0.1`                            | the fraction of root traces kept when tracing is on; `0` keeps none, `1` keeps all (#158)                                                             |
-| `GOOGLE_CLOUD_PROJECT`                    | —                                | the project a JSON log line's trace id is qualified with; Cloud Logging resolves a bare id (#158)                                                     |
-| `<NAME>_FILE`                             | —                                | for any secret above: read the value from this path instead of `<NAME>` (#154, see below)                                                             |
+| variable                                  | default                          | what it does                                                                                                                                                                                    |
+| ----------------------------------------- | -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DATABASE_URL`                            | —                                | run on Postgres, migrating on boot; unset means in-memory                                                                                                                                       |
+| `SCHEDULER`                               | `local`                          | `local`, or `postgres` for the multi-instance scheduler                                                                                                                                         |
+| `BETTER_AUTH_SECRET`                      | — (**required**)                 | signs sessions and cookies                                                                                                                                                                      |
+| `BETTER_AUTH_URL`                         | — (**required**)                 | the public URL: Better Auth's base, the one trusted origin (CSRF)                                                                                                                               |
+| `OPENHARNESS_SECRETS_KEY`                 | — (**required** under `local`)   | base64 32-byte master key the vault seals credentials with; not needed under `gcp-kms`                                                                                                          |
+| `OPENHARNESS_KEY_PROVIDER`                | `local`                          | `local` (the environment key) or `gcp-kms` (Cloud KMS): who wraps the vault's data keys (#150)                                                                                                  |
+| `OPENHARNESS_KMS_KEY`                     | — (**required** under `gcp-kms`) | the Cloud KMS `projects/…/cryptoKeys/…` key; unused under `local`                                                                                                                               |
+| `OPENHARNESS_KEY_CACHE_TTL_MS`            | `300000`                         | how long unwrapped data keys stay cached in memory; `0` disables the cache                                                                                                                      |
+| `OPENHARNESS_DEV_LOGIN`                   | off                              | `1` enables the local dev login; localhost URLs only (A7); the way in when no provider is set                                                                                                   |
+| `GOOGLE_CLIENT_ID`/`_SECRET`              | —                                | enable Google sign-in (both, or neither; one provider or the dev login is required)                                                                                                             |
+| `GITHUB_CLIENT_ID`/`_SECRET`              | —                                | enable GitHub sign-in                                                                                                                                                                           |
+| `MICROSOFT_CLIENT_ID`/`_SECRET`           | —                                | enable Microsoft sign-in                                                                                                                                                                        |
+| `MICROSOFT_TENANT_ID`                     | `common`                         | the Entra tenant the Microsoft provider authenticates against                                                                                                                                   |
+| `PORT`                                    | `3000`                           | the port to listen on                                                                                                                                                                           |
+| `OPENHARNESS_TEST_MODEL`                  | —                                | `mock` swaps in the deterministic test model                                                                                                                                                    |
+| `OPENHARNESS_WEB_DIR`                     | —                                | a built web app to serve at `/`                                                                                                                                                                 |
+| `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS` | off                              | `1` lets a **custom OpenAI-compatible** credential reach a private/loopback address (epic #245, M4; #249); never Azure; off in staging and production                                           |
+| `OPENHARNESS_TRUSTED_PROXY_HOPS`          | `0`                              | how many proxies append to `x-forwarded-for`; `0` trusts no forwarding header (#151, see below)                                                                                                 |
+| `OPENHARNESS_CORS_ORIGINS`                | —                                | comma-separated origins to allow; unset means no CORS headers                                                                                                                                   |
+| `OPENHARNESS_MAX_CONCURRENT_SESSIONS`     | `4`                              | how many sessions may be running at once                                                                                                                                                        |
+| `OPENHARNESS_DRAIN_TIMEOUT_MS`            | `5000`                           | how long shutdown waits for a turn in flight                                                                                                                                                    |
+| `OPENHARNESS_INSTANCE_ID`                 | hostname + pid + random suffix   | this instance's id in the lease table                                                                                                                                                           |
+| `OPENHARNESS_PARTITIONS`                  | `64` (the protocol's)            | how many partitions the session space has                                                                                                                                                       |
+| `OPENHARNESS_LEASE_TTL_MS`                | `30000`                          | how long a partition lease lasts before it must be renewed                                                                                                                                      |
+| `OPENHARNESS_HEARTBEAT_MS`                | `10000`                          | how often leases are renewed and free partitions taken                                                                                                                                          |
+| `OPENHARNESS_SWEEP_MS`                    | `60000`                          | how often owned partitions are re-scanned for missed work                                                                                                                                       |
+| `OPENHARNESS_DELTA_RETENTION_MS`          | `3600000`                        | how long superseded chunks are kept before compaction deletes them                                                                                                                              |
+| `OPENHARNESS_COMPACT_INTERVAL_MS`         | `300000`                         | how often the compaction job runs; `0` disables it                                                                                                                                              |
+| `OPENHARNESS_COMPACTION_THRESHOLD`        | `0.7`                            | the share of the chat model's context budget at which older history is summarized (epic #277, K2; #279), and the default a user who has not chosen one follows (C3, #282); a fraction in `0..1` |
+| `OPENHARNESS_LOG_FORMAT`                  | `text`                           | `text` (readable) or `json` (Cloud Logging): what stdout carries (#158)                                                                                                                         |
+| `OPENHARNESS_TRACING`                     | `off`                            | `off`, or `cloud-trace` to export spans to Cloud Trace (#158)                                                                                                                                   |
+| `OPENHARNESS_TRACE_SAMPLE_RATE`           | `0.1`                            | the fraction of root traces kept when tracing is on; `0` keeps none, `1` keeps all (#158)                                                                                                       |
+| `GOOGLE_CLOUD_PROJECT`                    | —                                | the project a JSON log line's trace id is qualified with; Cloud Logging resolves a bare id (#158)                                                                                               |
+| `<NAME>_FILE`                             | —                                | for any secret above: read the value from this path instead of `<NAME>` (#154, see below)                                                                                                       |
 
 Every **secret** in that table — `DATABASE_URL`, `BETTER_AUTH_SECRET`,
 `OPENHARNESS_SECRETS_KEY`, and each provider's `*_CLIENT_SECRET` — can be delivered as a file
@@ -436,19 +436,24 @@ predates, a free-text id a host accepts (C5), or a model with no window — and 
 `DEFAULT_CONTEXT_TOKEN_BUDGET` is what such a model gets; the fallback lives in one place rather
 than being repeated here.
 
-**Context compaction is the other half of the same wiring** (epic #277, C2; #279). The same
-registry-derived resolver is what `main.ts` hands the brain as `tokenBudgetFor` and, through
-`createMaxOutputResolver`, as `maxOutputFor`: the trigger compares the measured context against
-`config.compactionThreshold` × the **chat** model's budget, and the engine's passes are sized to
-the summary model's. `OPENHARNESS_COMPACTION_THRESHOLD` (default `0.7`) is where the trigger
-lives, and it is validated at boot: a fraction in `0..1`, anything else a failure naming the
-variable. The summary model is the chat's until a per-user preference exists (C3), so a
-deployment needs nothing else configured; a test at the route level is
-`context-compaction.test.ts` — the trigger firing on a small registry window, the summary event
-and its progress event in the log, the summary request's span marked `purpose: 'summary'`, and
-the chat still running the model it ran. The compaction the _store_ runs — `DeltaCompactor`, the
-periodic deletion of superseded chunks — is unrelated and unchanged: this one summarizes history
-for the model, that one deletes what replay already skips.
+**Context compaction is the other half of the same wiring** (epic #277, C2; #279; the per-user
+controls: C3, #282). The same registry-derived resolver is what `main.ts` hands the brain as
+`tokenBudgetFor` and, through `createMaxOutputResolver`, as `maxOutputFor`: the trigger compares
+the measured context against the **chosen** share of the **chat** model's budget, and the
+engine's passes are sized to the summary model's. `context-compaction.ts` builds the resolver
+`runTurn` is given — `createContextCompactionResolver` — which reads the session owner's stored
+preferences per request and fills in the server's `OPENHARNESS_COMPACTION_THRESHOLD` (default
+`0.7`) for a share nobody chose, the engine's own pass limit for one nobody set, and the chat
+model for a `same-as-chat` summary model. The threshold is validated at boot: a fraction in
+`0..1`, anything else a failure naming the variable. A deployment therefore needs nothing else
+configured, and a chat whose owner has chosen nothing compacts exactly as it did before C3; a
+test at the route level is `context-compaction.test.ts` — the trigger firing on a small registry
+window, the summary event and its progress event in the log, the summary request's span marked
+`purpose: 'summary'`, the chat still running the model it ran, and the per-user half: one
+owner's threshold and summary model reaching the engine while a second user's chat, whose
+preferences were never written, keeps the deployment's defaults. The compaction the _store_
+runs — `DeltaCompactor`, the periodic deletion of superseded chunks — is unrelated and unchanged:
+this one summarizes history for the model, that one deletes what replay already skips.
 
 `main.ts` builds one resolver from the same registry the catalogue and the automatic default
 (U4) use, and hands the strategy to whichever scheduler the config asks for. The brain re-reads
@@ -752,10 +757,19 @@ model".
 ## Preferences and the automatic default (U1/U4)
 
 `GET`/`PUT /v1/me/preferences` are `routes/me.ts` over the store's `getPreferences`/
-`putPreferences`: the caller's `{ default_model }`, read and written whole, owner-only by
-construction (the resource is the caller — there is no id in the path), with a malformed
-`default_model` refused as the protocol's 400. A `PUT` is always the user's own choice, and
-`DefaultModelPicker.markExplicit` is what tells the automatic default so.
+`putPreferences`: the caller's stored settings, read and written whole, owner-only by
+construction (the resource is the caller — there is no id in the path), with a malformed model
+id, theme name or out-of-range compaction number refused as the protocol's 400. A `PUT` is
+always the user's own choice, and `DefaultModelPicker.markExplicit` is what tells the automatic
+default so.
+
+Besides `{ default_model }` and `theme`, the route carries the three compaction controls (epic
+#277 C3, #282) and answers both verbs with a `defaults` object saying what a `null` control
+means: the **server's** own trigger share (`app.ts` passes `OPENHARNESS_COMPACTION_THRESHOLD`
+into `createApp`, and the `DEFAULT_MAX_SUMMARY_PASSES` the engine defaults to), which a client
+cannot know on its own. The stored row keeps `null` for both, so a later change to a
+deployment's threshold moves every user who never chose one — and the resolver
+`context-compaction.ts` builds is what reads them, per request, per session owner.
 
 `default-model.ts` is the whole of the automatic default (U4), and one instance lives per
 `createApp` — its record of which users the _server_ picked for is in-process, the same
@@ -1336,6 +1350,7 @@ before the instance stops serving it (#151).
 | `ModelCatalog`, `ModelCatalogOptions`, `CatalogRefreshLimitedError`                                                                                                                                                                                                               | the model catalogue: provider lists, registry join, cache, fallback (#90)                                                                                                                                                                                                                                                                   |
 | `createBundledRegistry()`, `emptyRegistry`, `SNAPSHOT_DATE`, `ModelRegistry`, `RegistryModel`                                                                                                                                                                                     | the registry join's seam, over the bundled models.dev snapshot                                                                                                                                                                                                                                                                              |
 | `contextTokenBudget`, `createTokenBudgetResolver`, `OUTPUT_RESERVE_RATIO`                                                                                                                                                                                                         | the per-model context budget: `contextWindow − min(maxOutput, 25%)`, per request (#246)                                                                                                                                                                                                                                                     |
+| `createContextCompactionResolver`, `ContextCompactionDeps`                                                                                                                                                                                                                        | the per-owner compaction resolver (epic #277 C3; #282): the session owner's stored threshold, summary model and pass limit, resolved per request over `OPENHARNESS_COMPACTION_THRESHOLD` and the registry's budgets                                                                                                                         |
 | `createReasoningSupportResolver`                                                                                                                                                                                                                                                  | the per-model reasoning gate: the `low \| medium \| high` a model takes, per request (#252)                                                                                                                                                                                                                                                 |
 | `createProviderFetch()`, `ProviderFetch`, `DEFAULT_PROVIDER_TIMEOUT_MS`                                                                                                                                                                                                           | the provider HTTP client: egress-proxy aware, 5 s deadline (catalogue + credential checks)                                                                                                                                                                                                                                                  |
 | `createProviderModelFetch()`, `ModelFetch`                                                                                                                                                                                                                                        | the model-request half of the same client (#270): the AI SDK `FetchFunction`, egress-proxy aware, and with no deadline, injected into the fixed providers' factory                                                                                                                                                                          |
@@ -1400,6 +1415,8 @@ src/
   key-provider.ts       the vault the configuration asks for: the env key or Cloud KMS (#150)
   default-model.ts      the automatic default: the recommendation table, and the picker (U4)
   model-id.ts           the provider/model shape check the routes share (U1/U3)
+  context-compaction.ts the per-owner compaction resolver: each session owner's preferences
+                         over the server's threshold and the registry's budgets (#277 C3; #282)
   modes.ts              modes resolved for a request, and refused when unusable (#245, M6)
   model.ts              which model factory the process runs (the router, or the mock)
   mock-model.ts         the deterministic test model and its markers

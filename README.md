@@ -178,7 +178,10 @@ fresh `npm i -g @openh/cli` works with nothing to configure. Point it elsewhere 
 `--server`, with `OPENHARNESS_URL`, or in `~/.config/openharness/config.json`; from a checkout,
 `yarn oh` builds it and points it at the local server. A new chat opens **your
 default model** immediately, with no picker: `oh default-model` prints it, `oh
-default-model provider/model` sets it (`--model` overrides it for one run). Without a
+default-model provider/model` sets it (`--model` overrides it for one run). `oh settings`
+prints the context settings — when a long chat is summarized, which model writes the summary
+and how many passes it gets — and its flags set them, the same values as the web app's
+Settings → Context. Without a
 default, `oh` asks once — from the models **your own provider keys** can use, grouped by
 provider, with context windows, and an "Other model id…" entry for anything the catalog does
 not know yet — and offers to save the answer as the default. Add a key in the web app under

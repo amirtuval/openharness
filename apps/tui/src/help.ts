@@ -26,6 +26,7 @@ Usage:
   oh providers add [provider]  connect a provider by pasting its key (hidden input)
   oh providers remove <p>      forget a provider's key (asks; --yes skips)
   oh default-model [id]        print or set the default model for new chats
+  oh settings [flags]          show or set the context (compaction) settings
   oh login                     sign in through the browser (the device flow)
   oh logout                    end the session and forget the token
   oh whoami                    print the signed-in user
@@ -39,6 +40,12 @@ Options:
       --agent <id|name>        start from a saved agent instead of the default model
       --model <provider/model> the model to run, skipping the picker
       --mode <name>            a mode to run, instead of a model
+      --threshold <share>      with \`oh settings\`: summarize at this share of the
+                               context window (0.3–0.95), or 'default'
+      --summary-model <id>     with \`oh settings\`: the model that writes summaries
+                               (a provider/model id, or same-as-chat)
+      --summary-passes <n>     with \`oh settings\`: passes before the chat model
+                               summarizes instead (1–10), or 'default'
       --yes                    with \`oh sessions delete\` / \`oh providers remove\`:
                                do not ask to confirm
       --server <url>           server root (default https://app.oharness.dev)
@@ -78,6 +85,13 @@ New chats:
   oh starts on your default model (oh default-model sets it). Without one it asks,
   from the models your own provider keys can use, and offers to save the answer.
   --model names one directly; --agent starts from a saved agent preset instead.
+
+Context settings:
+  A long chat is summarized when it fills the model's context window, so it can go
+  on. oh settings prints when that happens (the share of the window that triggers
+  it), which model writes the summary, and how many passes it may take before the
+  chat model takes over; its flags set them, and the same values live in the web
+  app's Settings -> Context.
 
 Model providers:
   A chat runs on a model from a provider you have a key for. Add one without

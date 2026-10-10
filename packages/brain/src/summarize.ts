@@ -1,5 +1,10 @@
 import { EVENT_TYPES } from '@openharness/protocol'
-import type { ContextSummaryReason, SessionModelUsage, StoredEvent } from '@openharness/protocol'
+import type {
+  ContextSummaryReason,
+  SessionModelUsage,
+  StoredEvent,
+  UserId,
+} from '@openharness/protocol'
 import type { AppendableEvent } from '@openharness/session'
 import type { LanguageModel, ModelMessage } from 'ai'
 
@@ -254,6 +259,25 @@ export interface ContextCompactionConfig {
    */
   readonly cutRule?: ContextCutRule
 }
+
+/**
+ * How a session owner's compaction is configured, resolved per request (epic #277, C3; #282).
+ *
+ * The three controls — the trigger's share, the summary model and the pass limit — are per-user
+ * preferences, so a host that stores them cannot answer once for the whole deployment: the loop
+ * asks this at each request boundary with the owner id it just read, exactly as it asks
+ * `resolveMode` (#245, M6). What it answers is resolved by {@link resolveContextCompaction} like
+ * any other config, so a resolver may leave a field out and take the default.
+ */
+export type ContextCompactionResolver = (
+  ownerId: UserId,
+) => ContextCompactionConfig | Promise<ContextCompactionConfig>
+
+/**
+ * The `compaction` option of one turn: one configuration for every owner, or a resolver that
+ * answers one per session owner (epic #277, C3; #282).
+ */
+export type ContextCompactionOption = ContextCompactionConfig | ContextCompactionResolver
 
 /** {@link ContextCompactionConfig} with every default resolved. */
 export interface ResolvedContextCompaction {

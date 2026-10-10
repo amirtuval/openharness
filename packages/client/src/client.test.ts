@@ -14,7 +14,7 @@ import {
   makeSession,
   makeUser,
   makeUserMessage,
-  makeUserPreferences,
+  makeGetPreferencesResponse,
 } from '@openharness/protocol/fixtures'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -514,28 +514,41 @@ describe('secrets in failures', () => {
 })
 
 describe('preferences (#111)', () => {
-  it('reads GET /v1/me/preferences and parses the value', async () => {
-    const preferences = makeUserPreferences({ default_model: 'anthropic/claude-sonnet-5' })
+  it('reads GET /v1/me/preferences and parses the value, defaults included', async () => {
+    const preferences = makeGetPreferencesResponse({
+      default_model: 'anthropic/claude-sonnet-5',
+    })
     const { client, mock } = clientWith(() => jsonResponse(preferences))
 
     const response = await client.preferences.get()
 
     expect(response).toEqual(preferences)
+    expect(response.defaults).toEqual({ compaction_threshold: 0.7, summary_max_passes: 3 })
     expect(mock.requests[0]?.init?.method).toBe('GET')
     expect(mock.urlOf(0)).toBe(`${BASE_URL}/v1/me/preferences`)
   })
 
   it('reads the absence of a default model as null, not a 404', async () => {
-    const { client } = clientWith(() => jsonResponse({ default_model: null, theme: 'system' }))
+    const { client } = clientWith(() =>
+      jsonResponse(makeGetPreferencesResponse({ default_model: null })),
+    )
 
-    await expect(client.preferences.get()).resolves.toEqual({
+    await expect(client.preferences.get()).resolves.toMatchObject({
       default_model: null,
       theme: 'system',
+      compaction_threshold: null,
+      summary_model: 'same-as-chat',
+      summary_max_passes: null,
     })
   })
 
-  it('puts the whole value to PUT /v1/me/preferences and reads back the stored one', async () => {
-    const stored = makeUserPreferences({ default_model: 'openai/gpt-4.1-mini' })
+  it('puts the value to PUT /v1/me/preferences and reads back the stored one', async () => {
+    const stored = makeGetPreferencesResponse({
+      default_model: 'openai/gpt-4.1-mini',
+      compaction_threshold: 0.6,
+      summary_model: 'anthropic/claude-haiku-4-5',
+      summary_max_passes: 5,
+    })
     const { client, mock } = clientWith(() => jsonResponse(stored))
 
     const response = await client.preferences.put({ default_model: 'openai/gpt-4.1-mini' })
@@ -548,10 +561,20 @@ describe('preferences (#111)', () => {
     expect(PutPreferencesRequestSchema.safeParse(body).success).toBe(true)
   })
 
+  it('sends the compaction controls, each on its own, as the schema spells them', async () => {
+    const { client, mock } = clientWith(() => jsonResponse(makeGetPreferencesResponse()))
+
+    await client.preferences.put({ compaction_threshold: 0.5 })
+    await client.preferences.put({ summary_model: 'same-as-chat' })
+    await client.preferences.put({ summary_max_passes: null })
+
+    expect(bodyOf(mock.requests[0]?.init)).toEqual({ compaction_threshold: 0.5 })
+    expect(bodyOf(mock.requests[1]?.init)).toEqual({ summary_model: 'same-as-chat' })
+    expect(bodyOf(mock.requests[2]?.init)).toEqual({ summary_max_passes: null })
+  })
+
   it('clears the default with null, which is a value the request schema accepts', async () => {
-    const { client, mock } = clientWith(() =>
-      jsonResponse({ default_model: null, theme: 'system' }),
-    )
+    const { client, mock } = clientWith(() => jsonResponse(makeGetPreferencesResponse()))
 
     await client.preferences.put({ default_model: null })
 

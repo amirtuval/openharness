@@ -12,6 +12,7 @@ import { runAgents, runSessionDelete, runSessions } from './commands/list'
 import { runModes } from './commands/modes'
 import { runDefaultModel } from './commands/preferences'
 import { mountProvidersAdd, runProvidersList, runProvidersRemove } from './commands/providers'
+import { runSettings } from './commands/settings'
 import { createNpmPort, runUpdate } from './commands/update'
 import { modelLabel } from './components/status-line'
 import { resolveConfig, type ResolvedConfig } from './config'
@@ -198,6 +199,12 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
           connected.client,
           { stdout: out, stderr: err, context },
           command.model,
+        )
+      case 'settings':
+        return await runSettings(
+          connected.client,
+          { stdout: out, stderr: err, context },
+          command.patch,
         )
       case 'chat':
         return await runChat(connected, config, command.options, context, credentials.store, {

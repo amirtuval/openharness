@@ -12,7 +12,12 @@ import {
   newAgentId,
   newModeId,
 } from '@openharness/protocol'
-import type { StoredEvent, StreamEvent, UserEventInput } from '@openharness/protocol'
+import type {
+  GetPreferencesResponse,
+  StoredEvent,
+  StreamEvent,
+  UserEventInput,
+} from '@openharness/protocol'
 import {
   fixtureTimestamp,
   makeMode,
@@ -1073,36 +1078,88 @@ describe('the fake deletes a session (#111)', () => {
 })
 
 describe('the fake preferences (#111)', () => {
+  /** The whole response the fake answers: the stored value plus the defaults it reports. */
+  function prefs(over: Partial<GetPreferencesResponse> = {}) {
+    return {
+      default_model: null,
+      theme: 'system',
+      compaction_threshold: null,
+      summary_model: 'same-as-chat',
+      summary_max_passes: null,
+      defaults: { compaction_threshold: 0.7, summary_max_passes: 3 },
+      ...over,
+    }
+  }
+
   it('starts at the protocol defaults and merges what a put carries', async () => {
     const fake = createFakeClient()
 
-    await expect(fake.preferences.get()).resolves.toEqual({ default_model: null, theme: 'system' })
+    await expect(fake.preferences.get()).resolves.toEqual(prefs())
 
     const stored = await fake.preferences.put({ default_model: 'openai/gpt-4.1-mini' })
-    // The default model alone: the theme it did not carry keeps its stored value.
-    expect(stored).toEqual({ default_model: 'openai/gpt-4.1-mini', theme: 'system' })
-    await expect(fake.preferences.get()).resolves.toEqual({
-      default_model: 'openai/gpt-4.1-mini',
-      theme: 'system',
-    })
+    // The default model alone: everything it did not carry keeps its stored value.
+    expect(stored).toEqual(prefs({ default_model: 'openai/gpt-4.1-mini' }))
+    await expect(fake.preferences.get()).resolves.toEqual(
+      prefs({ default_model: 'openai/gpt-4.1-mini' }),
+    )
 
     // A theme alone likewise leaves the default model alone (#203) — the two never clear
     // each other.
-    await expect(fake.preferences.put({ theme: 'dim' })).resolves.toEqual({
-      default_model: 'openai/gpt-4.1-mini',
-      theme: 'dim',
-    })
-    await expect(fake.preferences.get()).resolves.toEqual({
-      default_model: 'openai/gpt-4.1-mini',
-      theme: 'dim',
-    })
+    await expect(fake.preferences.put({ theme: 'dim' })).resolves.toEqual(
+      prefs({ default_model: 'openai/gpt-4.1-mini', theme: 'dim' }),
+    )
+    await expect(fake.preferences.get()).resolves.toEqual(
+      prefs({ default_model: 'openai/gpt-4.1-mini', theme: 'dim' }),
+    )
+
+    // The compaction controls merge the same way, and null clears each of them (#282).
+    await expect(
+      fake.preferences.put({ compaction_threshold: 0.5, summary_max_passes: 5 }),
+    ).resolves.toEqual(
+      prefs({
+        default_model: 'openai/gpt-4.1-mini',
+        theme: 'dim',
+        compaction_threshold: 0.5,
+        summary_max_passes: 5,
+      }),
+    )
+    await expect(
+      fake.preferences.put({ summary_model: 'anthropic/claude-haiku-4-5' }),
+    ).resolves.toEqual(
+      prefs({
+        default_model: 'openai/gpt-4.1-mini',
+        theme: 'dim',
+        compaction_threshold: 0.5,
+        summary_model: 'anthropic/claude-haiku-4-5',
+        summary_max_passes: 5,
+      }),
+    )
 
     // null clears the choice, like the server's PUT.
-    await expect(fake.preferences.put({ default_model: null })).resolves.toEqual({
-      default_model: null,
-      theme: 'dim',
-    })
-    await expect(fake.preferences.get()).resolves.toEqual({ default_model: null, theme: 'dim' })
+    await expect(fake.preferences.put({ default_model: null })).resolves.toEqual(
+      prefs({
+        theme: 'dim',
+        compaction_threshold: 0.5,
+        summary_model: 'anthropic/claude-haiku-4-5',
+        summary_max_passes: 5,
+      }),
+    )
+    await expect(fake.preferences.get()).resolves.toEqual(
+      prefs({
+        theme: 'dim',
+        compaction_threshold: 0.5,
+        summary_model: 'anthropic/claude-haiku-4-5',
+        summary_max_passes: 5,
+      }),
+    )
+  })
+
+  it('reports the defaults the deployment configured, over the engine’s own', async () => {
+    const fake = createFakeClient({ preferenceDefaults: { compaction_threshold: 0.4 } })
+
+    await expect(fake.preferences.get()).resolves.toEqual(
+      prefs({ defaults: { compaction_threshold: 0.4, summary_max_passes: 3 } }),
+    )
   })
 
   it('seeds the value from createFakeClient', async () => {
@@ -1110,10 +1167,9 @@ describe('the fake preferences (#111)', () => {
       preferences: makeUserPreferences({ default_model: 'anthropic/claude-sonnet-5' }),
     })
 
-    await expect(fake.preferences.get()).resolves.toEqual({
-      default_model: 'anthropic/claude-sonnet-5',
-      theme: 'system',
-    })
+    await expect(fake.preferences.get()).resolves.toEqual(
+      prefs({ default_model: 'anthropic/claude-sonnet-5' }),
+    )
   })
 })
 

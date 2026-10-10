@@ -31,14 +31,28 @@ import { Label } from '../ui/label'
  * surface that offers the catalog can rebuild it where the list is.
  */
 
-/** One navigable row: a mode, a catalog model, or the escape hatch at the end of the list. */
+/** A pinned choice above everything else — "Same as the chat" for the summary model (#282). */
+export interface LeadingOption {
+  /** The value `onChange` is called with when it is picked. */
+  readonly value: string
+  /** The row's label, and the trigger's when it is selected. */
+  readonly label: string
+  /** A short line under the label, saying what the choice means. */
+  readonly hint?: string
+}
+
+/** One navigable row: a pinned choice, a mode, a catalog model, or the escape hatch. */
 type PickerOption =
+  | { readonly kind: 'leading'; readonly option: LeadingOption }
   | { readonly kind: 'mode'; readonly mode: Mode }
   | { readonly kind: 'model'; readonly entry: ModelEntry }
   | { readonly kind: 'other' }
 
 /** The heading the modes group carries, above the providers (epic #245, M6). */
 const MODES_GROUP_LABEL = 'Modes'
+
+/** The heading the pinned choices carry, above the modes (#282). */
+const LEADING_GROUP_LABEL = 'Default'
 
 /** What the picker takes. */
 export interface ModelPickerProps {
@@ -83,6 +97,23 @@ export interface ModelPickerProps {
    * popover left open under it is a trap for the focus it just took.
    */
   onAddProvider?: (() => void) | undefined
+  /**
+   * Choices pinned above the modes and the providers — the "Same as the chat" a summary-model
+   * picker puts first (epic #277, K3; #282).
+   *
+   * Each carries its own `value`, so a caller whose `value` is one of them (the `same-as-chat`
+   * sentinel) sees it selected and named on the trigger. Omitted by the pickers that choose
+   * what a chat runs, where there is nothing above the models.
+   */
+  leading?: readonly LeadingOption[]
+  /**
+   * The control's accessible name, `Model` by default.
+   *
+   * A screen with two pickers — Default model and the summary model (#282) — has to be able to
+   * tell them apart, and so does a screen reader: the name is the only thing that says which
+   * one asks for what.
+   */
+  label?: string
 }
 
 export function ModelPicker({
@@ -98,6 +129,8 @@ export function ModelPicker({
   refreshing = false,
   onRefresh,
   onAddProvider,
+  leading = [],
+  label = 'Model',
 }: ModelPickerProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
@@ -117,9 +150,20 @@ export function ModelPicker({
   const optionIdPrefix = useId()
 
   const selected = models.find((entry) => entry.id === value) ?? null
+  const selectedLeading = leading.find((option) => option.value === value) ?? null
   const selectedMode = modes.find((mode) => mode.id === selectedModeId) ?? null
   const groups = useMemo(() => groupModelsByProvider(models, providers), [models, providers])
   const needle = query.trim().toLowerCase()
+  const visibleLeading = useMemo(
+    () =>
+      leading.filter(
+        (option) =>
+          needle === '' ||
+          option.label.toLowerCase().includes(needle) ||
+          option.value.toLowerCase().includes(needle),
+      ),
+    [leading, needle],
+  )
   const visibleModes = useMemo(
     () =>
       modes.filter(
@@ -145,17 +189,19 @@ export function ModelPicker({
       .filter((group) => group.models.length > 0)
   }, [groups, needle])
 
-  // The flat navigation order the arrows walk: every filtered mode, then every filtered model,
-  // then "Other model ID…". The modes come first, above the providers, as the issue asks.
+  // The flat navigation order the arrows walk: every pinned choice, then every filtered mode,
+  // then every filtered model, then "Other model ID…". A pinned choice comes first, above the
+  // modes and the providers, which is where the issue puts it.
   const options = useMemo<readonly PickerOption[]>(
     () => [
+      ...visibleLeading.map((option): PickerOption => ({ kind: 'leading', option })),
       ...visibleModes.map((mode): PickerOption => ({ kind: 'mode', mode })),
       ...filtered.flatMap((group) =>
         group.models.map((entry): PickerOption => ({ kind: 'model', entry })),
       ),
       { kind: 'other' },
     ],
-    [visibleModes, filtered],
+    [visibleLeading, visibleModes, filtered],
   )
   const active = Math.min(activeIndex, options.length - 1)
 
@@ -167,8 +213,19 @@ export function ModelPicker({
   }
 
   const openPicker = (): void => {
-    const selectedIndex =
-      selectedMode === null ? models.findIndex((entry) => entry.id === value) : -1
+    // Where the selected row lands in the unfiltered order the panel opens on: a pinned choice,
+    // then a mode, then a model — the same order `options` walks. `0` for nothing selected.
+    const selectedIndex = (() => {
+      const leadingIndex = leading.findIndex((option) => option.value === value)
+      if (leadingIndex !== -1) {
+        return leadingIndex
+      }
+      if (selectedMode !== null) {
+        return leading.length + modes.findIndex((mode) => mode.id === selectedModeId)
+      }
+      const modelIndex = models.findIndex((entry) => entry.id === value)
+      return modelIndex === -1 ? 0 : leading.length + modes.length + modelIndex
+    })()
     setQuery('')
     setMode('list')
     setRefreshNote(null)
@@ -192,6 +249,11 @@ export function ModelPicker({
   }
 
   const choose = (option: PickerOption): void => {
+    if (option.kind === 'leading') {
+      onChange(option.option.value)
+      close()
+      return
+    }
     if (option.kind === 'mode') {
       onSelectMode?.(option.mode)
       close()
@@ -286,7 +348,8 @@ export function ModelPicker({
       openPicker()
     }
   }
-  const compactLabel = selectedMode?.name ?? selected?.name ?? value ?? 'Choose a model'
+  const compactLabel =
+    selectedLeading?.label ?? selectedMode?.name ?? selected?.name ?? value ?? 'Choose a model'
 
   return (
     <div ref={wrapperRef} className="relative">
@@ -296,7 +359,7 @@ export function ModelPicker({
           type="button"
           variant="ghost"
           size="sm"
-          aria-label={`Model: ${compactLabel}`}
+          aria-label={`${label}: ${compactLabel}`}
           aria-haspopup="listbox"
           aria-expanded={open}
           aria-controls={open ? listId : undefined}
@@ -317,9 +380,18 @@ export function ModelPicker({
           onClick={toggle}
           className="h-auto min-h-9 w-full justify-between py-2 text-left font-normal"
         >
-          <span className="sr-only">Model</span>
+          <span className="sr-only">{label}</span>
           <span className="flex min-w-0 flex-col items-start gap-0.5">
-            {selected === null ? (
+            {selectedLeading !== null ? (
+              <>
+                <span className="truncate">{selectedLeading.label}</span>
+                {selectedLeading.hint === undefined ? null : (
+                  <span className="truncate text-xs text-muted-foreground">
+                    {selectedLeading.hint}
+                  </span>
+                )}
+              </>
+            ) : selected === null ? (
               <span className={cn('truncate', value === null && 'text-muted-foreground')}>
                 {value ?? 'Choose a model'}
               </span>
@@ -369,11 +441,46 @@ export function ModelPicker({
                 aria-label="Models"
                 className="mt-2 max-h-72 overflow-y-auto"
               >
-                {filtered.length === 0 && visibleModes.length === 0 && query.trim() !== '' ? (
+                {filtered.length === 0 &&
+                visibleModes.length === 0 &&
+                visibleLeading.length === 0 &&
+                query.trim() !== '' ? (
                   <p className="px-2 py-1.5 text-xs text-muted-foreground">
                     No modes or models match “{query.trim()}”.
                   </p>
                 ) : null}
+                {visibleLeading.length === 0 ? null : (
+                  <div role="group" aria-label={LEADING_GROUP_LABEL}>
+                    {visibleLeading.map((option) => {
+                      const index = options.findIndex(
+                        (candidate) =>
+                          candidate.kind === 'leading' && candidate.option.value === option.value,
+                      )
+                      return (
+                        <div
+                          key={option.value}
+                          id={`${optionIdPrefix}-${index}`}
+                          role="option"
+                          aria-selected={option.value === value}
+                          data-active={index === active ? 'true' : undefined}
+                          onMouseEnter={() => setActiveIndex(index)}
+                          onClick={() => choose({ kind: 'leading', option })}
+                          className={cn(
+                            'flex cursor-pointer flex-col gap-0.5 rounded-sm px-2 py-1.5',
+                            index === active && 'bg-accent text-accent-foreground',
+                          )}
+                        >
+                          <span className="truncate text-sm">{option.label}</span>
+                          {option.hint === undefined ? null : (
+                            <span className="truncate text-xs text-muted-foreground">
+                              {option.hint}
+                            </span>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
                 {visibleModes.length === 0 ? null : (
                   <div role="group" aria-label={MODES_GROUP_LABEL}>
                     <p

@@ -13,6 +13,7 @@ import {
   isStoredEvent,
   newEventId,
   partitionOf,
+  SUMMARY_MODEL_SAME_AS_CHAT,
   type Agent,
   type AgentId,
   type CreateAgentRequest,
@@ -27,6 +28,7 @@ import {
   type StoredEvent,
   type StreamEvent,
   type UserId,
+  type UserPreferences,
 } from '@openharness/protocol'
 import { describe, expect, it } from 'vitest'
 
@@ -820,58 +822,79 @@ export function runSessionStoreConformance(
     // ------------------------------------------------------------- preferences
 
     describe('preferences (#111, epic #116 U1)', () => {
+      /** The protocol's defaults: no choice stored, in the one shape a settings screen reads. */
+      const defaults: UserPreferences = {
+        default_model: null,
+        theme: 'system',
+        compaction_threshold: null,
+        summary_model: SUMMARY_MODEL_SAME_AS_CHAT,
+        summary_max_passes: null,
+      }
+
       it('reads the protocol defaults for a user who has saved none', async () => {
         const { store } = await setup()
         // No row is the absence of a choice, not an error: one shape for a settings screen.
-        expect(await store.getPreferences(OWNER_A)).toEqual({
-          default_model: null,
-          theme: 'system',
-        })
-        expect(await store.getPreferences(OWNER_B)).toEqual({
-          default_model: null,
-          theme: 'system',
-        })
+        expect(await store.getPreferences(OWNER_A)).toEqual(defaults)
+        expect(await store.getPreferences(OWNER_B)).toEqual(defaults)
       })
 
       it('round-trips a put through the read, as written', async () => {
         const { store } = await setup()
-        const stored = await store.putPreferences(OWNER_A, {
+        const value: UserPreferences = {
           default_model: 'anthropic/claude-sonnet-5',
           theme: 'dim',
-        })
-        expect(stored).toEqual({ default_model: 'anthropic/claude-sonnet-5', theme: 'dim' })
+          compaction_threshold: 0.5,
+          summary_model: 'openai/gpt-5-mini',
+          summary_max_passes: 5,
+        }
+        const stored = await store.putPreferences(OWNER_A, value)
+        expect(stored).toEqual(value)
         expect(await store.getPreferences(OWNER_A)).toEqual(stored)
       })
 
-      it('replaces the stored value in place on a second put, both fields together', async () => {
+      it('replaces the stored value in place on a second put, every field together', async () => {
         const { store } = await setup()
         await store.putPreferences(OWNER_A, {
+          ...defaults,
           default_model: 'anthropic/claude-sonnet-5',
           theme: 'dim',
+          compaction_threshold: 0.5,
         })
         const replaced = await store.putPreferences(OWNER_A, {
           default_model: 'openai/gpt-5-mini',
           theme: 'dark',
+          compaction_threshold: null,
+          summary_model: 'anthropic/claude-haiku-4-5',
+          summary_max_passes: 2,
         })
         // One value per user, so the second put is the same preferences with new choices —
-        // and writing one field never leaves the other at a previous put's value.
-        expect(replaced).toEqual({ default_model: 'openai/gpt-5-mini', theme: 'dark' })
+        // and writing one field never leaves another at a previous put's value.
+        expect(replaced).toEqual({
+          default_model: 'openai/gpt-5-mini',
+          theme: 'dark',
+          compaction_threshold: null,
+          summary_model: 'anthropic/claude-haiku-4-5',
+          summary_max_passes: 2,
+        })
         expect(await store.getPreferences(OWNER_A)).toEqual(replaced)
       })
 
-      it('clears the stored default when put null, keeping the theme', async () => {
+      it('clears the stored default when put null, keeping the rest', async () => {
         const { store } = await setup()
         await store.putPreferences(OWNER_A, {
+          ...defaults,
           default_model: 'anthropic/claude-sonnet-5',
           theme: 'dark',
+          compaction_threshold: 0.8,
+          summary_model: 'openai/gpt-5-mini',
+          summary_max_passes: 4,
         })
-        expect(await store.putPreferences(OWNER_A, { default_model: null, theme: 'dark' })).toEqual(
-          {
-            default_model: null,
-            theme: 'dark',
-          },
-        )
-        expect(await store.getPreferences(OWNER_A)).toEqual({ default_model: null, theme: 'dark' })
+        expect(await store.putPreferences(OWNER_A, { ...defaults, theme: 'dark' })).toEqual({
+          ...defaults,
+          theme: 'dark',
+        })
+        // A null compaction control is a choice too: "follow the default", not a value.
+        expect(await store.getPreferences(OWNER_A)).toEqual({ ...defaults, theme: 'dark' })
       })
 
       it('keeps two users’ preferences apart', async () => {
@@ -879,28 +902,36 @@ export function runSessionStoreConformance(
         await store.putPreferences(OWNER_A, {
           default_model: 'anthropic/claude-sonnet-5',
           theme: 'light',
+          compaction_threshold: 0.35,
+          summary_model: SUMMARY_MODEL_SAME_AS_CHAT,
+          summary_max_passes: null,
         })
         // B has saved nothing while A has — and neither read ever sees the other's value.
-        expect(await store.getPreferences(OWNER_B)).toEqual({
-          default_model: null,
-          theme: 'system',
+        expect(await store.getPreferences(OWNER_B)).toEqual(defaults)
+        await store.putPreferences(OWNER_B, {
+          ...defaults,
+          default_model: 'openai/gpt-5-mini',
+          summary_model: 'openai/gpt-5-mini',
         })
-        await store.putPreferences(OWNER_B, { default_model: 'openai/gpt-5-mini', theme: 'dim' })
         expect(await store.getPreferences(OWNER_A)).toEqual({
           default_model: 'anthropic/claude-sonnet-5',
           theme: 'light',
+          compaction_threshold: 0.35,
+          summary_model: SUMMARY_MODEL_SAME_AS_CHAT,
+          summary_max_passes: null,
         })
         expect(await store.getPreferences(OWNER_B)).toEqual({
+          ...defaults,
           default_model: 'openai/gpt-5-mini',
-          theme: 'dim',
+          summary_model: 'openai/gpt-5-mini',
         })
       })
 
       it('hands out deep-frozen values, so writing to one throws', async () => {
         const { store } = await setup()
         const stored = await store.putPreferences(OWNER_A, {
+          ...defaults,
           default_model: 'anthropic/claude-sonnet-5',
-          theme: 'system',
         })
         const read = await store.getPreferences(OWNER_A)
         expect(Object.isFrozen(stored)).toBe(true)
@@ -908,8 +939,8 @@ export function runSessionStoreConformance(
         expect(() => Object.assign(read, { default_model: 'openai/gpt-5-mini' })).toThrow(TypeError)
         // None of it reached the store.
         expect(await store.getPreferences(OWNER_A)).toEqual({
+          ...defaults,
           default_model: 'anthropic/claude-sonnet-5',
-          theme: 'system',
         })
       })
     })

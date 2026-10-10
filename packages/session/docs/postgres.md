@@ -56,7 +56,7 @@ Fourteen tables, in `migrations/`. Nine are this package's:
 | `partition_leases`     | who holds a partition, at which epoch, until when                                                                                          |
 | `scheduler_instances`  | one row per live scheduler instance: `instance_id` (primary key), `last_seen` (#122)                                                       |
 | `provider_credentials` | a user's sealed model-provider key, one per `(user_id, provider)`: the sealed blob, `last4`, timestamps                                    |
-| `user_preferences`     | a user's settings across sessions — today the default `model` a new chat starts with — one row per user (#111)                             |
+| `user_preferences`     | a user's settings across sessions — the default `model`, the web theme and the compaction controls — one row per user (#111, #201, #282)   |
 
 and five are **Better Auth's**, created by the same migrations and read and written by Better
 Auth itself (epic #65, decision A1): `user`, `session`, `account`, `verification` and
@@ -160,31 +160,32 @@ consequence is that **a migration file must never be edited once it has been app
 anywhere** — the runner will not re-run it, so an edit is silently ignored on existing
 databases while applying to new ones. Add a new file instead.
 
-| file                               | what it creates                                                                                                       |
-| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `0001_agents.sql`                  | `agents`, and the `(created_at, id)` index the agent list pages through                                               |
-| `0002_sessions.sql`                | `sessions`, plus the indexes for the three ways sessions are queried                                                  |
-| `0003_events.sql`                  | `events`, its uniqueness constraint and its two secondary indexes                                                     |
-| `0004_partition_leases.sql`        | `partition_leases`                                                                                                    |
-| `0005_events_id_unique.sql`        | the `unique` index that states the id guarantee (`events_id_key`) by name                                             |
-| `0006_session_previews.sql`        | a previews table, dropped again by `0010` before release                                                              |
-| `0007_event_claims.sql`            | `event_claims`, the insert-only record of which events a turn claimed (D9)                                            |
-| `0008_event_claims_backfill.sql`   | the one-time copy of the pre-D9 `processed_at` values into claim rows (D9)                                            |
-| `0009_event_supersessions.sql`     | `event_supersessions`, the insert-only record of the ranges events replace                                            |
-| `0020_rewind_supersessions.sql`    | `event_supersessions.kind` (`chunks` / `rewind`, #238) and its check                                                  |
-| `0010_drop_session_previews.sql`   | drops `session_previews`; the chunks of a reply are rows of `events` since D9                                         |
-| `0011_better_auth.sql`             | Better Auth's tables: `user`, `session`, `account`, `verification`, `deviceCode` (epic #65, A1)                       |
-| `0012_ownership.sql`               | deletes the v1 data once, then `owner_id` on `agents` and `sessions` and the per-owner indexes (A4)                   |
-| `0013_provider_credentials.sql`    | `provider_credentials`, the sealed-blob table (epic #65, A5)                                                          |
-| `0014_auth_session_revocation.sql` | the `after delete` trigger on `"session"` that announces revoked sessions (#76)                                       |
-| `0015_session_model.sql`           | the effective `model`/`system` on `sessions`, backfilled from the agent snapshot; the snapshot becomes nullable (#93) |
-| `0016_user_preferences.sql`        | `user_preferences`, one row per user: the stored `default_model`, or NULL (#111)                                      |
-| `0017_scheduler_instances.sql`     | `scheduler_instances`, one row per live scheduler instance: `instance_id`, `last_seen` (#122)                         |
-| `0018_credential_key_provider.sql` | `key_provider` on `provider_credentials`: which provider wrapped a credential's data key (#150)                       |
-| `0021_model_request_end_usage.sql` | the partial index behind `listModelRequests`: `(session_id, processed_at)` where the type is a request end (#247)     |
-| `0022_credential_name.sql`         | `provider_credentials.provider` renamed to `name`, unique per `(user_id, name)` (#248)                                |
-| `0023_credential_details.sql`      | `details jsonb` on `provider_credentials`: the non-secret facts a credential's type publishes (#249, #250, #251)      |
-| `0024_modes.sql`                   | `modes`, a user's named presets, and `sessions.mode`, the mode a chat follows (#245, M6)                              |
+| file                                   | what it creates                                                                                                       |
+| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `0001_agents.sql`                      | `agents`, and the `(created_at, id)` index the agent list pages through                                               |
+| `0002_sessions.sql`                    | `sessions`, plus the indexes for the three ways sessions are queried                                                  |
+| `0003_events.sql`                      | `events`, its uniqueness constraint and its two secondary indexes                                                     |
+| `0004_partition_leases.sql`            | `partition_leases`                                                                                                    |
+| `0005_events_id_unique.sql`            | the `unique` index that states the id guarantee (`events_id_key`) by name                                             |
+| `0006_session_previews.sql`            | a previews table, dropped again by `0010` before release                                                              |
+| `0007_event_claims.sql`                | `event_claims`, the insert-only record of which events a turn claimed (D9)                                            |
+| `0008_event_claims_backfill.sql`       | the one-time copy of the pre-D9 `processed_at` values into claim rows (D9)                                            |
+| `0009_event_supersessions.sql`         | `event_supersessions`, the insert-only record of the ranges events replace                                            |
+| `0020_rewind_supersessions.sql`        | `event_supersessions.kind` (`chunks` / `rewind`, #238) and its check                                                  |
+| `0010_drop_session_previews.sql`       | drops `session_previews`; the chunks of a reply are rows of `events` since D9                                         |
+| `0011_better_auth.sql`                 | Better Auth's tables: `user`, `session`, `account`, `verification`, `deviceCode` (epic #65, A1)                       |
+| `0012_ownership.sql`                   | deletes the v1 data once, then `owner_id` on `agents` and `sessions` and the per-owner indexes (A4)                   |
+| `0013_provider_credentials.sql`        | `provider_credentials`, the sealed-blob table (epic #65, A5)                                                          |
+| `0014_auth_session_revocation.sql`     | the `after delete` trigger on `"session"` that announces revoked sessions (#76)                                       |
+| `0015_session_model.sql`               | the effective `model`/`system` on `sessions`, backfilled from the agent snapshot; the snapshot becomes nullable (#93) |
+| `0016_user_preferences.sql`            | `user_preferences`, one row per user: the stored `default_model`, or NULL (#111)                                      |
+| `0017_scheduler_instances.sql`         | `scheduler_instances`, one row per live scheduler instance: `instance_id`, `last_seen` (#122)                         |
+| `0018_credential_key_provider.sql`     | `key_provider` on `provider_credentials`: which provider wrapped a credential's data key (#150)                       |
+| `0021_model_request_end_usage.sql`     | the partial index behind `listModelRequests`: `(session_id, processed_at)` where the type is a request end (#247)     |
+| `0022_credential_name.sql`             | `provider_credentials.provider` renamed to `name`, unique per `(user_id, name)` (#248)                                |
+| `0023_credential_details.sql`          | `details jsonb` on `provider_credentials`: the non-secret facts a credential's type publishes (#249, #250, #251)      |
+| `0025_user_preferences_compaction.sql` | the compaction controls on `user_preferences`: `compaction_threshold`, `summary_model`, `summary_max_passes` (#282)   |
+| `0024_modes.sql`                       | `modes`, a user's named presets, and `sessions.mode`, the mode a chat follows (#245, M6)                              |
 
 To run them outside an application:
 
@@ -269,9 +270,12 @@ the session back to prove exactly that.
 user — `user_id` primary key, `on delete cascade` from `"user"` — with `default_model text`
 (NULL for no default) and `updated_at timestamptz not null`. It is a single
 `create table if not exists`, and there is nothing to backfill: a user with no row reads the
-protocol's default, `{ default_model: null }`. `postgres.test.ts` re-runs the migrations and
-then reads and writes preferences through the store, so the re-run is proved to leave the
-table working.
+protocol's default, `{ default_model: null, theme: 'system', … }`. `postgres.test.ts` re-runs
+the migrations and then reads and writes preferences through the store, so the re-run is proved
+to leave the table working. `0019_user_preferences_theme.sql` added the theme, and
+`0025_user_preferences_compaction.sql` (epic #277 C3, #282) the compaction controls —
+`compaction_threshold double precision` and `summary_max_passes integer`, each **NULL for
+"follow the default"**, and `summary_model text not null default 'same-as-chat'`.
 
 ### The key provider on a credential (#150)
 

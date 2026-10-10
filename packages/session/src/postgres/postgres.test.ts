@@ -505,28 +505,41 @@ if (target === null) {
       const files = await migrate(db)
       expect(files.length).toBeGreaterThan(0)
       // `0016_user_preferences.sql` and `0017_scheduler_instances.sql` are each one
-      // `create table if not exists` (#111, #122), and `0018_credential_key_provider.sql`
-      // and `0019_user_preferences_theme.sql` one `add column if not exists` (#150, #203):
-      // a re-run has to leave the tables and the columns working, which the store calls
-      // below prove.
+      // `create table if not exists` (#111, #122), and `0018_credential_key_provider.sql`,
+      // `0019_user_preferences_theme.sql` and `0025_user_preferences_compaction.sql` one or
+      // more `add column if not exists` (#150, #203, #282): a re-run has to leave the tables
+      // and the columns working, which the store calls below prove.
       expect(files).toContain('0016_user_preferences.sql')
       expect(files).toContain('0017_scheduler_instances.sql')
       expect(files).toContain('0018_credential_key_provider.sql')
       expect(files).toContain('0019_user_preferences_theme.sql')
       expect(files).toContain('0020_rewind_supersessions.sql')
+      expect(files).toContain('0025_user_preferences_compaction.sql')
       expect(await migrate(db)).toEqual(files)
 
       const { store, session } = await seeded()
       expect(await store.getSession(session.id, { ownerId: OWNER_A })).toEqual(session)
       expect(
-        await store.putPreferences(OWNER_A, { default_model: 'openai/gpt-5-mini', theme: 'dim' }),
+        await store.putPreferences(OWNER_A, {
+          default_model: 'openai/gpt-5-mini',
+          theme: 'dim',
+          compaction_threshold: 0.6,
+          summary_model: 'anthropic/claude-haiku-4-5',
+          summary_max_passes: 4,
+        }),
       ).toEqual({
         default_model: 'openai/gpt-5-mini',
         theme: 'dim',
+        compaction_threshold: 0.6,
+        summary_model: 'anthropic/claude-haiku-4-5',
+        summary_max_passes: 4,
       })
       expect(await store.getPreferences(OWNER_A)).toEqual({
         default_model: 'openai/gpt-5-mini',
         theme: 'dim',
+        compaction_threshold: 0.6,
+        summary_model: 'anthropic/claude-haiku-4-5',
+        summary_max_passes: 4,
       })
       await store.heartbeatInstance('after-a-re-run')
       expect(await store.listLiveInstances(30_000)).toEqual(['after-a-re-run'])

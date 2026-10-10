@@ -8,7 +8,14 @@ import { describe, expect, it } from 'vitest'
 
 import { createTokenBudgetResolver } from './catalog/context-budget'
 import type { ModelRegistry } from './catalog/registry'
-import { createTestApp, httpSendMessage, postJson, waitForIdle } from './test-support'
+import {
+  asUser,
+  createTestApp,
+  httpSendMessage,
+  postJson,
+  postJsonAs,
+  waitForIdle,
+} from './test-support'
 
 /**
  * Context compaction over HTTP (epic #277, C2; issue #279).
@@ -114,5 +121,106 @@ describe('context compaction over HTTP', () => {
     expect(types).not.toContain('session.context_summary_progress')
     // The request is the one #278 built: the session's system prompt, then the message.
     expect(test.model.histories[0]?.map((message) => message.role)).toEqual(['user'])
+  })
+})
+
+/**
+ * The per-user controls over HTTP (epic #277, C3; issue #282): the threshold, the summary model
+ * and the pass limit come from the **session owner's** stored preferences, resolved per request
+ * through the production resolver (`resolveCompaction`), so one user's choices reach their chat
+ * and never another's.
+ */
+describe('the per-user compaction controls over HTTP', () => {
+  const PREFERENCES = `${API_VERSION_PREFIX}/me/preferences`
+
+  /**
+   * Two small models, one per provider: the chat's (`tiny/model`) and a dedicated summarizer
+   * (`small/sum`), each with the same 3000-token budget so the cut is available.
+   */
+  const twoModels: ModelRegistry = {
+    models: (provider) => {
+      if (provider === 'tiny') {
+        return [{ id: 'model', contextWindow: 4_000, maxOutput: 1_000 }]
+      }
+      if (provider === 'small') {
+        return [{ id: 'sum', contextWindow: 4_000, maxOutput: 1_000 }]
+      }
+      return []
+    },
+  }
+
+  /** Three messages of ~500 tokens: ~1500 of context — over a 0.3 share of 3000, under 0.7. */
+  const batch = Array.from({ length: 3 }, () => ({
+    type: EVENT_TYPES.userMessage,
+    content: [{ type: 'text', text: LONG }],
+  }))
+
+  /** Create a session on `tiny/model` as one caller, and send it the batch. */
+  async function run(
+    test: ReturnType<typeof createTestApp>,
+    token?: string,
+  ): Promise<{ id: string; events: StoredEvent[] }> {
+    const created =
+      token === undefined
+        ? await postJson(test, SESSIONS, { model: { id: 'tiny/model' } })
+        : await postJsonAs(test, token, SESSIONS, { model: { id: 'tiny/model' } })
+    const session = (await created.json()) as Session
+    const sent =
+      token === undefined
+        ? await postJson(test, `${SESSIONS}/${session.id}/events`, { events: batch })
+        : await postJsonAs(test, token, `${SESSIONS}/${session.id}/events`, { events: batch })
+    expect(sent.status).toBe(200)
+    await waitForIdle(test.store, session.id)
+    const response =
+      token === undefined
+        ? await test.request(`${SESSIONS}/${session.id}/events`)
+        : await test.request(`${SESSIONS}/${session.id}/events`, { headers: asUser(token) })
+    const read = (await response.json()) as { data: StoredEvent[] }
+    return { id: session.id, events: read.data }
+  }
+
+  it('compacts at the owner’s share and with the owner’s summary model', async () => {
+    const test = createTestApp({
+      registry: twoModels,
+      replies: [{ text: ['## Goal\nfolded'] }, { text: ['ok'] }],
+      resolveCompaction: true,
+    })
+
+    // The caller asks for a lower trigger share and a dedicated summarizer.
+    const written = await test.request(PREFERENCES, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ compaction_threshold: 0.3, summary_model: 'small/sum' }),
+    })
+    expect(written.status).toBe(200)
+
+    const { events } = await run(test)
+    const summary = events.find((event) => event.type === 'session.context_summary')
+    // The owner's share fired (1500 > 0.3 × 3000) and the owner's model wrote it.
+    expect(summary).toMatchObject({ reason: 'threshold', summary_model: 'small/sum', passes: 1 })
+    expect(summary?.type === 'session.context_summary' ? summary.tokens_before : 0).toBeGreaterThan(
+      900,
+    )
+  })
+
+  it('does not reach another user’s chat, whose defaults stand', async () => {
+    const test = createTestApp({
+      registry: twoModels,
+      replies: [{ text: ['## Goal\nfolded'] }, { text: ['ok'] }],
+      resolveCompaction: true,
+    })
+    // One user writes preferences; the other saves nothing and keeps the server's 0.7 share.
+    await test.request(PREFERENCES, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ compaction_threshold: 0.3, summary_model: 'small/sum' }),
+    })
+    const other = await test.signIn('compaction-other@example.com')
+
+    const { events } = await run(test, other.token)
+    // 1500 of context is under 0.7 × 3000, so the second user's chat writes no summary — the
+    // first user's preference did not travel with the model.
+    expect(events.map((event) => event.type)).not.toContain('session.context_summary')
+    expect(events.map((event) => event.type)).not.toContain('session.context_summary_progress')
   })
 })

@@ -145,7 +145,9 @@ describe('the automatic default model (U4)', () => {
     expect(await listedProviders(client)).toEqual([FIRST_PROVIDER, SECOND_PROVIDER])
 
     // The user's own choice, written through the settings route.
-    await expect(client.preferences.put({ default_model: EXPLICIT_DEFAULT })).resolves.toEqual({
+    await expect(
+      client.preferences.put({ default_model: EXPLICIT_DEFAULT }),
+    ).resolves.toMatchObject({
       default_model: EXPLICIT_DEFAULT,
       theme: 'system',
     })
@@ -153,7 +155,7 @@ describe('the automatic default model (U4)', () => {
     // Deleting a *different* provider's key does not touch it: the model can still run, so
     // there is nothing to re-pick or clear.
     await expect(client.providerCredentials.delete(SECOND_PROVIDER)).resolves.toBeUndefined()
-    await expect(client.preferences.get()).resolves.toEqual({
+    await expect(client.preferences.get()).resolves.toMatchObject({
       default_model: EXPLICIT_DEFAULT,
       theme: 'system',
     })
@@ -165,7 +167,7 @@ describe('the automatic default model (U4)', () => {
     // substituted (that is the user's to make), and a default that cannot run is worse than
     // none — the client shows "add a key" instead of failing the first message.
     await expect(client.providerCredentials.delete(FIRST_PROVIDER)).resolves.toBeUndefined()
-    await expect(client.preferences.get()).resolves.toEqual({
+    await expect(client.preferences.get()).resolves.toMatchObject({
       default_model: null,
       theme: 'system',
     })
@@ -191,11 +193,11 @@ describe('the automatic default model (U4)', () => {
     // The delete is scoped to the caller: B's key and B's default survive A's delete of the
     // same provider, and the catalogue is per person too.
     await a.client.providerCredentials.delete(FIRST_PROVIDER)
-    await expect(a.client.preferences.get()).resolves.toEqual({
+    await expect(a.client.preferences.get()).resolves.toMatchObject({
       default_model: null,
       theme: 'system',
     })
-    await expect(b.client.preferences.get()).resolves.toEqual({
+    await expect(b.client.preferences.get()).resolves.toMatchObject({
       default_model: `${SECOND_PROVIDER}/b-model`,
       theme: 'system',
     })
@@ -219,7 +221,7 @@ describe('the automatic default model (U4)', () => {
     // provider whose key is still there, so the rule that clears a default that cannot run has
     // nothing to do.
     await expect(client.providerCredentials.delete(SECOND_PROVIDER)).resolves.toBeUndefined()
-    await expect(client.preferences.get()).resolves.toEqual({
+    await expect(client.preferences.get()).resolves.toMatchObject({
       default_model: EXPLICIT_DEFAULT,
       theme: 'system',
     })
@@ -242,7 +244,7 @@ describe('the automatic default model (U4)', () => {
     await client.preferences.put({ default_model: `${SECOND_PROVIDER}/never-saved` })
 
     await expect(client.providerCredentials.delete(SECOND_PROVIDER)).resolves.toBeUndefined()
-    await expect(client.preferences.get()).resolves.toEqual({
+    await expect(client.preferences.get()).resolves.toMatchObject({
       default_model: `${SECOND_PROVIDER}/never-saved`,
       theme: 'system',
     })
@@ -259,7 +261,7 @@ describe('the automatic default model (U4)', () => {
       const me = await person(server, 'first-key')
 
       // Nobody has a default before a key exists.
-      await expect(me.client.preferences.get()).resolves.toEqual({
+      await expect(me.client.preferences.get()).resolves.toMatchObject({
         default_model: null,
         theme: 'system',
       })
@@ -274,7 +276,7 @@ describe('the automatic default model (U4)', () => {
 
       // The pick: `<provider>/<recommended>` — the table's first entry, which the live
       // catalog lists because the stub is the provider.
-      await expect(me.client.preferences.get()).resolves.toEqual({
+      await expect(me.client.preferences.get()).resolves.toMatchObject({
         default_model: `anthropic/${recommended}`,
         theme: 'system',
       })
@@ -315,7 +317,7 @@ describe('the automatic default model (U4)', () => {
 
       // `together` has no recommendation-table entry, so the pick is the registry rule: the
       // newest chat model that is neither expensive nor reasoning-only.
-      await expect(me.client.preferences.get()).resolves.toEqual({
+      await expect(me.client.preferences.get()).resolves.toMatchObject({
         default_model: registryFallbackFor('together'),
         theme: 'system',
       })
@@ -350,7 +352,7 @@ describe('the automatic default model (U4)', () => {
 
       // And reading the preferences does **not** backfill a choice the user never made: the
       // fix is in the clients (#146), not a server that substitutes one.
-      await expect(me.client.preferences.get()).resolves.toEqual({
+      await expect(me.client.preferences.get()).resolves.toMatchObject({
         default_model: null,
         theme: 'system',
       })
@@ -374,7 +376,7 @@ describe('the automatic default model (U4)', () => {
         api_key: FAKE_KEY,
       })
       const picked = `anthropic/${recommendedModelFor('anthropic')}`
-      await expect(twoKeys.client.preferences.get()).resolves.toEqual({
+      await expect(twoKeys.client.preferences.get()).resolves.toMatchObject({
         default_model: picked,
         theme: 'system',
       })
@@ -383,7 +385,7 @@ describe('the automatic default model (U4)', () => {
         type: 'api_key',
         api_key: FAKE_KEY,
       })
-      await expect(twoKeys.client.preferences.get()).resolves.toEqual({
+      await expect(twoKeys.client.preferences.get()).resolves.toMatchObject({
         default_model: picked,
         theme: 'system',
       })
@@ -399,7 +401,7 @@ describe('the automatic default model (U4)', () => {
         type: 'api_key',
         api_key: FAKE_KEY,
       })
-      await expect(explicit.client.preferences.get()).resolves.toEqual({
+      await expect(explicit.client.preferences.get()).resolves.toMatchObject({
         default_model: chosen,
         theme: 'system',
       })

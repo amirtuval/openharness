@@ -272,6 +272,60 @@ describe('parseArgs', () => {
     expect(errorOf(['default-model', '--model', 'a/b'])).toContain('--model <provider/model>')
   })
 
+  it('reads `oh settings` and each of its flags (#282)', () => {
+    // No flags is a read: the patch is empty, and nothing is written.
+    expect(commandOf(['settings'])).toEqual({
+      kind: 'settings',
+      patch: {},
+      options: { debug: false, server: undefined },
+    })
+    expect(commandOf(['settings', '--threshold', '0.5'])).toMatchObject({
+      kind: 'settings',
+      patch: { threshold: 0.5 },
+    })
+    expect(commandOf(['settings', '--summary-model', 'same-as-chat'])).toMatchObject({
+      patch: { summaryModel: 'same-as-chat' },
+    })
+    expect(commandOf(['settings', '--summary-passes', '5'])).toMatchObject({
+      patch: { summaryPasses: 5 },
+    })
+    // All three at once, and `default` is how a nullable control is cleared.
+    expect(
+      commandOf([
+        'settings',
+        '--threshold',
+        'default',
+        '--summary-model',
+        'openai/gpt-5-mini',
+        '--summary-passes',
+        'default',
+      ]),
+    ).toMatchObject({
+      kind: 'settings',
+      patch: { threshold: null, summaryModel: 'openai/gpt-5-mini', summaryPasses: null },
+    })
+  })
+
+  it('rejects a `settings` line it cannot read (#282)', () => {
+    expect(errorOf(['settings', '0.5'])).toContain('takes no arguments')
+    expect(errorOf(['settings', '--threshold', '5'])).toContain('between 0.3 and 0.95')
+    expect(errorOf(['settings', '--threshold', ' '])).toContain('needs a share')
+    expect(errorOf(['settings', '--summary-model', ' '])).toContain('needs a model id')
+    expect(errorOf(['settings', '--summary-passes', '0'])).toContain('between 1 and 10')
+    expect(errorOf(['settings', '--summary-passes', '2.5'])).toContain('whole number')
+    expect(errorOf(['settings', '--model', 'openai/gpt-5-mini'])).toContain(
+      '--model <provider/model>',
+    )
+  })
+
+  it('rejects the settings flags everywhere but `oh settings` (#282)', () => {
+    expect(errorOf(['--threshold', '0.5'])).toContain('only makes sense with `oh settings`')
+    expect(errorOf(['sessions', '--summary-model', 'same-as-chat'])).toContain(
+      '--summary-model <id>',
+    )
+    expect(errorOf(['default-model', '--summary-passes', '3'])).toContain('--summary-passes <n>')
+  })
+
   it('rejects --session with --continue', () => {
     expect(errorOf(['--session', 'sesn_1', '--continue'])).toContain(
       'either --session <id> or --continue',

@@ -188,12 +188,10 @@ export class DefaultModelPicker {
       if (picked === null) {
         return
       }
-      // The theme is carried through: the store writes preferences whole, and the server's
-      // own pick must not clear a choice the user made (epic #201, X3).
-      await this.#store.putPreferences(userId, {
-        default_model: picked,
-        theme: preferences.theme,
-      })
+      // Every other field is carried through: the store writes preferences whole, and the
+      // server's own pick must not clear a choice the user made — the theme (epic #201, X3),
+      // or any of the compaction controls (epic #277, C3; #282).
+      await this.#store.putPreferences(userId, { ...preferences, default_model: picked })
       this.#automatic.add(userId)
     })
   }
@@ -216,11 +214,11 @@ export class DefaultModelPicker {
       if (!automatic) {
         // The user's own choice: without its provider's key the model cannot run, and
         // substituting another one for it would be overriding the choice that was made.
-        await this.#store.putPreferences(userId, { default_model: null, theme: preferences.theme })
+        await this.#store.putPreferences(userId, { ...preferences, default_model: null })
         return
       }
       const picked = await this.#pick(userId)
-      await this.#store.putPreferences(userId, { default_model: picked, theme: preferences.theme })
+      await this.#store.putPreferences(userId, { ...preferences, default_model: picked })
       if (picked !== null) {
         this.#automatic.add(userId)
       }

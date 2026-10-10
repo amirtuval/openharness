@@ -86,7 +86,8 @@ migrations/             the SQL the Postgres stores need, applied by `migrate()`
                         0021 the index behind the per-user usage read (#247),
                         0022 the credential's name — unique per user per name (#248),
                         0023 a credential's public, per-type details (#249, #250, #251),
-                        0024 the per-user modes, and the mode a session follows (#245, M6)
+                        0024 the per-user modes, and the mode a session follows (#245, M6),
+                        0025 the compaction controls on the per-user preferences (#282)
 docs/postgres.md        the Postgres stores: schema, migrations, delivery, local setup
 ```
 
@@ -97,7 +98,7 @@ docs/postgres.md        the Postgres stores: schema, migrations, delivery, local
 | export                                                                                                                                                                                                             | what it is                                                                                                                                                                                                                                                                                                                                |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `SessionStore`                                                                                                                                                                                                     | the storage and signaling contract; every method is async, and documented below. Since #111 it also carries `getPreferences`/`putPreferences` (the per-user settings beside the log) and `deleteSession` (the owner-scoped hard delete); since #122 the scheduler membership (`heartbeatInstance`, `listLiveInstances`, `removeInstance`) |
-| `UserPreferences`                                                                                                                                                                                                  | a user's stored preferences, `{ default_model: string \| null, theme: 'system' \| 'light' \| 'dim' \| 'dark' }` (#111, epic #116 U1; theme: #203, epic #201 X3) — the vocabulary of `getPreferences`/`putPreferences`                                                                                                                     |
+| `UserPreferences`                                                                                                                                                                                                  | a user's stored preferences, `{ default_model: string \| null, theme, compaction_threshold: number \| null, summary_model, summary_max_passes: number \| null }` (#111, epic #116 U1; theme: #203; compaction: epic #277 C3, #282) — the vocabulary of `getPreferences`/`putPreferences`                                                  |
 | `AppendableEvent`, `AppendableStoredEvent`, `AppendableRewind`                                                                                                                                                     | an event a caller appends: a `StoredEvent` minus `seq` and `processed_at` (plus an optional `id` the caller supplies), or a `session.rewind` input that names the message the session restarts from (#238)                                                                                                                                |
 | `CreateSessionOptions`, `ListAgentsOptions`, `ListSessionsOptions`, `ListEventsOptions`                                                                                                                            | the options objects of the list and create methods (`CreateSessionOptions` carries the effective `model`/`system`, #93)                                                                                                                                                                                                                   |
 | `OwnerScope`                                                                                                                                                                                                       | `{ ownerId }`: how a read is scoped to one owner (A4) — required, so forgetting it is a compile error; see [the contract](#the-contract)                                                                                                                                                                                                  |
@@ -444,11 +445,16 @@ close the open streams of a session revoked elsewhere. Like a signal, a missed n
 recoverable rather than fatal: the server re-validates the session periodically.
 
 **Preferences.** `getPreferences(userId)` and `putPreferences(userId, preferences)` are the
-per-user settings beside the log (#111, epic #116 U1; the theme: #203, epic #201 X3), keyed by
-`userId` like the `CredentialStore` is. `UserPreferences` is one value,
-`{ default_model: string | null, theme: UserTheme }` — the `provider/model` a new chat starts
-with, or `null` for no choice, and the web app's colour scheme — and a user who has never
-saved one reads `{ default_model: null, theme: 'system' }`: there is no null answer and no
+per-user settings beside the log (#111, epic #116 U1; the theme: #203, epic #201 X3; the
+compaction controls: epic #277 C3, #282), keyed by `userId` like the `CredentialStore` is.
+`UserPreferences` is one value, `{ default_model, theme, compaction_threshold, summary_model,
+summary_max_passes }` — the `provider/model` a new chat starts with, or `null` for no choice,
+the web app's colour scheme, the share of the chat model's budget at which older history is
+summarized, the model that writes the summary, and how many passes it may take — and a user who
+has never saved one reads `{ default_model: null, theme: 'system', compaction_threshold: null,
+summary_model: 'same-as-chat', summary_max_passes: null }`: the `null`s are "follow the
+default", which is what keeps a deployment's own trigger share and the engine's pass limit out
+of the row. There is no null answer and no
 throw, so a settings
 screen always has a value. `putPreferences` writes the value whole (one row per user, replaced
 in place; `{ default_model: null }` clears it), stamps `updated_at` from the injected clock,
@@ -570,8 +576,10 @@ carries it), `partition_leases` (`partition`, `owner`, `epoch`, `expires_at`),
 `(user_id, name)`, with the key provider that wrapped its data key — NULL meaning `local` — and
 the public `details jsonb` its type publishes — NULL meaning none; see `0013`, `0018` and
 `0023`) and
-`user_preferences` (one row per user: the stored `default_model`, or NULL, and the `theme`,
-`system` by default; `on delete cascade` from `"user"`; see `0016` and `0019`). Five are
+`user_preferences` (one row per user: the stored `default_model`, or NULL, the `theme`,
+`system` by default, and the three compaction controls — `compaction_threshold` NULL meaning
+the server's own, `summary_model` `same-as-chat` by default, `summary_max_passes` NULL meaning
+the engine's own; `on delete cascade` from `"user"`; see `0016`, `0019` and `0025`). Five are
 **Better Auth's**, created by the same migrations and read and written by Better Auth itself
 (decision A1): `user`, `session`, `account`, `verification` and `deviceCode`.
 
@@ -747,6 +755,21 @@ The per-type credential details (epic #245, A3b/A3c/A3d) added one:
   that a credential with details gets them back while one without carries no `details` key at
   all. A nullable JSON column rather than a column per type: the fields differ by type and
   nothing shares them, so each new credential type would otherwise be a schema change of its own.
+
+The compaction controls (epic #277, C3; issue #282) added the newest one:
+
+- **`0025_user_preferences_compaction.sql` — the compaction controls on the per-user
+  preferences** (#282): three `add column if not exists` statements on `user_preferences`.
+  `compaction_threshold double precision` and `summary_max_passes integer` are **NULL for
+  "follow the default"** — the rule `0018_credential_key_provider.sql` uses — because their
+  defaults are a deployment's trigger share and the engine's pass limit, and a stored `0.7` or
+  `3` could not be told from a deliberate choice of the same value. `summary_model text not null
+default 'same-as-chat'` is a real column default instead, the rule `0019` uses: a write always
+  supplies it, so an absent value would be a bug rather than an older shape. **Every existing
+  row takes NULL / NULL / `same-as-chat`**, which is not a guess — it is what those chats were
+  already doing (the server's threshold, the chat model summarizing, the engine's pass limit).
+  The reader is total anyway: a row a hand edit left outside the protocol's shapes reads back as
+  the default, so a preferences read cannot break.
 
 The vault's key provider (issue #150, deployment epic #148 decision D6) added one before it:
 

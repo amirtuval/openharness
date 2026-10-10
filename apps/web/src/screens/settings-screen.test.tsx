@@ -35,6 +35,7 @@ describe('SettingsScreen', () => {
       'Providers',
       'Default model',
       'Modes',
+      'Context',
       'Appearance',
       'Usage',
       'Advanced',
@@ -174,7 +175,7 @@ describe('SettingsScreen', () => {
 
     // The automatic pick of U4 is a value like any other: the card reads it, it does not
     // decide it, so what is in effect is what is shown.
-    const picker = await screen.findByRole('button', { name: /Model/ })
+    const picker = await screen.findByRole('button', { name: /^Model/ })
     expect(picker).toHaveTextContent('Claude Sonnet 5')
 
     await user.click(picker)
@@ -195,7 +196,7 @@ describe('SettingsScreen', () => {
     renderApp(fake, { hash: '#/settings' })
 
     // Free-text ids are allowed (U1): a default may be a model the catalog has never heard of.
-    expect(await screen.findByRole('button', { name: /Model/ })).toHaveTextContent(
+    expect(await screen.findByRole('button', { name: /^Model/ })).toHaveTextContent(
       'deepseek/deepseek-chat',
     )
   })
@@ -209,13 +210,13 @@ describe('SettingsScreen', () => {
     fake.preferences.put = () => Promise.reject(new ApiError(500, 'The preferences store is down.'))
     renderApp(fake, { hash: '#/settings' })
 
-    await user.click(await screen.findByRole('button', { name: /Model/ }))
+    await user.click(await screen.findByRole('button', { name: /^Model/ }))
     await user.click(screen.getByRole('option', { name: /GPT-4.1 mini/ }))
 
     const title = await screen.findByText('Could not save the default model')
     expect(title.closest('[role="alert"]')).toHaveTextContent('The preferences store is down.')
     // The write never landed, so the server's default is still the one on screen.
-    expect(screen.getByRole('button', { name: /Model/ })).toHaveTextContent('Claude Sonnet 5')
+    expect(screen.getByRole('button', { name: /^Model/ })).toHaveTextContent('Claude Sonnet 5')
   })
 
   it('shows a failed load, and the picker still lets a default be chosen', async () => {
@@ -225,19 +226,25 @@ describe('SettingsScreen', () => {
 
     const title = await screen.findByText('Could not load your default model')
     expect(title.closest('[role="alert"]')).toHaveTextContent('The preferences store is down.')
-    expect(screen.getByRole('button', { name: /Model/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Model/ })).toBeInTheDocument()
   })
 
-  it('keeps the default-model picker out of the collapsed Advanced section', async () => {
+  it('keeps the pickers out of the collapsed Advanced section', async () => {
+    const user = userEvent.setup({ delay: null })
     const fake = makeFake(TWO_PROVIDERS)
     renderApp(fake, { hash: '#/settings' })
 
-    // The two controls that look alike — the Default model picker and the picker inside the
-    // first-run confirmation — are different components on different screens; here there is
-    // exactly one, and it is the card's.
+    // The Default model picker and the Context card's summary-model picker are the screen's
+    // two listboxes; they are named apart (`Model` and `Summary model`, #282), and neither is
+    // inside the collapsed Advanced section — a collapsed section must hold no field.
     const pickers = await screen.findAllByRole('button', { name: /^Model/ })
     expect(pickers).toHaveLength(1)
     expect(within(pickers[0] as HTMLElement).getByText('Choose a model')).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /^Summary model/ })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /Advanced/ }))
+    expect(screen.queryByLabelText('Server URL')).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: /Model|Summary model/ })).toHaveLength(2)
   })
 })
 

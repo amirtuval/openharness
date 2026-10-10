@@ -9,6 +9,7 @@ import {
   ulid,
 } from '@openharness/protocol'
 import { cors } from 'hono/cors'
+import { DEFAULT_COMPACTION_THRESHOLD, DEFAULT_MAX_SUMMARY_PASSES } from '@openharness/brain'
 import {
   AgentNotFoundError,
   DuplicateModeNameError,
@@ -148,6 +149,13 @@ export interface AppOptions {
    * defaults to {@link DEFAULT_SESSION_RECHECK_MS}. Tests shorten it.
    */
   readonly sessionRecheckMs?: number
+  /**
+   * `OPENHARNESS_COMPACTION_THRESHOLD`: the server's own compaction trigger share (epic #277,
+   * C2; #279). It is what a user who has not chosen one gets (C3, #282), so
+   * `GET /v1/me/preferences` reports it in `defaults` for a settings screen to show. Defaults
+   * to the engine's 0.7.
+   */
+  readonly compactionThreshold?: number
   /**
    * Where spans go (issue #158): {@link initTracing}'s Cloud Trace tracer in a deployment,
    * {@link noopTracer} (the default) everywhere else. The app opens one server span per
@@ -387,6 +395,12 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
       logger,
     }),
     usage: createUsageReader({ store: options.store, prices: registryPrices(registry) }),
+    // What a preference of `null` falls back to, reported by the preferences routes (C3, #282):
+    // the deployment's trigger share, and the engine's own pass limit.
+    preferenceDefaults: {
+      compactionThreshold: options.compactionThreshold ?? DEFAULT_COMPACTION_THRESHOLD,
+      summaryMaxPasses: DEFAULT_MAX_SUMMARY_PASSES,
+    },
     revocations,
     revalidateSession,
     ...(options.sseKeepaliveMs === undefined ? {} : { sseKeepaliveMs: options.sseKeepaliveMs }),

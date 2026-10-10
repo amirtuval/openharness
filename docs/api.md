@@ -89,8 +89,8 @@ the only way an event is ever removed together with its session.
 | `GET`    | `/ready`                                  | readiness — `{ status: 'ok' }`, or `503` while draining or when the store does not answer; open |
 | `GET`    | `/v1/auth-config`                         | unauthenticated: which providers are on, and whether dev login is                               |
 | `GET`    | `/v1/me`                                  | the signed-in user                                                                              |
-| `GET`    | `/v1/me/preferences`                      | the caller's preferences — the default model and the web theme                                  |
-| `PUT`    | `/v1/me/preferences`                      | merge fields in; `default_model` is `provider/model` or `null`, `theme` one of four names       |
+| `GET`    | `/v1/me/preferences`                      | the caller's preferences — the default model, the web theme and the context settings            |
+| `PUT`    | `/v1/me/preferences`                      | merge fields in; model ids, four theme names, the compaction share and pass limit               |
 | `POST`   | `/v1/me/modes`                            | create a mode; `409` for a duplicate name or the twenty-first mode                              |
 | `GET`    | `/v1/me/modes`                            | list the caller's modes, oldest first (no cursor: at most 20)                                   |
 | `GET`    | `/v1/me/modes/{mode_id}`                  | read one mode                                                                                   |
@@ -256,9 +256,19 @@ previous request's real prompt size plus an estimate of what is new, and compare
 it, the older history is summarized with the recent quarter of the budget kept verbatim, cut at a
 `user.message` boundary so no turn is split. A provider that still refuses a request as too long
 gets one more attempt after a tighter compaction; if that fails too the turn ends with
-`session.error { retry_status: "exhausted" }` rather than looping. A summarizer that fails ends
+`session.error { retry_status: "exhausted" }` rather than looping — and the message says which
+of the three things happened, so an error never claims a compaction that the engine, finding
+nowhere to cut or failing, did not make. A summarizer that fails ends
 nothing: the failure is recorded on its own span and the request goes out with the usual trimming
 as the safety net.
+
+**The share, the model and the pass limit are the session owner's**
+([`/v1/me/preferences`](#preferences), issue #282): the server resolves them per request from
+the owner's stored preferences, over the deployment's `OPENHARNESS_COMPACTION_THRESHOLD` and
+the engine's own defaults, so a change in Settings applies from the next request on and one
+user's choices never reach another's chat. A chosen summary model many times smaller than the
+chat model's needs more passes than the limit allows and the chat model summarizes instead —
+the settings surfaces say so in advance, from the same arithmetic the engine plans with.
 
 **The summary is written in passes, and each one is a model request.** A long history is folded
 in slices sized to the summary model's budget, each pass updating the one before, and every pass
@@ -555,10 +565,23 @@ and it is the same user.
 
 #### Preferences
 
-`GET /v1/me/preferences` answers the caller's stored preferences, unwrapped —
-`{ "default_model": "anthropic/claude-sonnet-5", "theme": "system" }` — and
-`{ "default_model": null, "theme": "system" }` for a caller who has never saved any (the
-absence of a choice, not a 404).
+`GET /v1/me/preferences` answers the caller's stored preferences, unwrapped, plus the defaults
+their `null`s mean:
+
+```json
+{
+  "default_model": "anthropic/claude-sonnet-5",
+  "theme": "system",
+  "compaction_threshold": null,
+  "summary_model": "same-as-chat",
+  "summary_max_passes": null,
+  "defaults": { "compaction_threshold": 0.7, "summary_max_passes": 3 }
+}
+```
+
+A caller who has never saved any gets every choice at its default (the absence of a choice, not
+a 404). `PUT` answers the same shape, so a client that has just written one preference reads the
+effective defaults back in one round trip.
 
 `default_model` is a router id of `provider/model` shape, checked for shape only — it does not
 have to be in the caller's catalog — and it is what a new chat starts with (epic #116, U1).
@@ -567,12 +590,34 @@ have to be in the caller's catalog — and it is what a new chat starts with (ep
 user is not rewritten to `light` or `dark` when their OS changes, because the following
 happens in the browser.
 
-`PUT` **merges**: each field the body carries is stored, a field it leaves out keeps its
-stored value, and `default_model: null` clears the stored default. An empty body is a no-op
-that answers what is stored. So the two settings cannot clear each other — `{"theme": "dim"}`
-from Settings leaves the default model alone, and `{"default_model": "openai/gpt-5-mini"}`
-from `oh default-model` leaves the theme alone. Both routes are owner-only like the rest of
-`/v1/me`.
+The three compaction controls (epic #277 decisions K2/K3/K5; issue #282) are what a long chat
+does when it fills the model's context window: older history is summarized so the conversation
+can continue.
+
+- **`compaction_threshold`** is the share of the chat model's budget at which that happens, a
+  number from `0.3` to `0.95`, or `null` to follow the **server's** own
+  (`OPENHARNESS_COMPACTION_THRESHOLD`, default `0.7`). Lower means smaller requests and more
+  summarization; higher means more of the chat stays verbatim.
+- **`summary_model`** is the model that writes the summary: the sentinel `same-as-chat` (the
+  default — the model the chat runs summarizes) or a `provider/model` id, shape-checked like
+  `default_model`. A chosen model with no usable credential, or one that would need more passes
+  than the limit allows, hands the work back to the chat model and the summary event records
+  why.
+- **`summary_max_passes`** is how many passes that model may take before the chat model takes
+  over, a whole number from `1` to `10`, or `null` for the engine's own default (`3`).
+
+`defaults` says what the two nullable controls mean here — the deployment's trigger share and
+the engine's pass limit — because neither is a value a client could know, and a settings screen
+shows `0.7 (server default)` from it.
+
+`PUT` **merges**: each field the body carries is stored, a field it leaves out keeps its stored
+value, and `null` clears a nullable one (`default_model`, `compaction_threshold`,
+`summary_max_passes`) back to the absence of a choice. An empty body is a no-op that answers
+what is stored. So the settings cannot clear each other — `{"theme": "dim"}` from Settings
+leaves the default model alone, `{"default_model": "openai/gpt-5-mini"}` from
+`oh default-model` leaves the theme alone, and one compaction control never disturbs another.
+Both routes are owner-only like the rest of `/v1/me`, and a value outside a range above is the
+`400 invalid_request_error` any bad body is.
 
 **The automatic default** (epic #116, U4). Saving a provider key when `default_model` is
 `null` sets one, so the first key makes "New chat" usable with no dialog: the server picks the
