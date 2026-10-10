@@ -1002,8 +1002,10 @@ describe('the bottom of the screen (issue #233)', () => {
       expect.stringMatching(/^\d+(?:\.\d+)?(?:ms|s) · 544 tokens · \$0\.\d+$/),
       '', // the input section's blank line (#233)
       RULE, // …and the rule that opens it, one column short of the terminal
-      // the status line: the session, what it has spent, and what it is doing (#247)
-      expect.stringMatching(/· sesn_…[0-9A-Z]{6} · \$0\.\d+ · idle$/),
+      // the status line: the session, what it has spent, how full the context is (#247, #280 —
+      // the request reported 512 uncached input tokens against the catalog model's 150k budget)
+      // and what it is doing
+      expect.stringMatching(/· sesn_…[0-9A-Z]{6} · \$0\.\d+ · 0% of context used · idle$/),
       '❯', // the prompt
     ])
   })

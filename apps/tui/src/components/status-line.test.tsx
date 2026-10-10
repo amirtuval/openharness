@@ -67,6 +67,7 @@ function spansOf(
     runningSince: line.runningSince ?? null,
     lastTextAt: line.lastTextAt ?? null,
     retrying: line.retrying,
+    summarizing: line.summarizing ?? null,
     interrupted: line.interrupted ?? false,
     now: options.now ?? 0,
   })
@@ -289,6 +290,38 @@ describe('statusField', () => {
     })
   })
 
+  it('says which pass a summary is on, and outranks a retry (#280)', () => {
+    const summarizing = field({
+      status: 'running',
+      runningSince: 1000,
+      summarizing: { pass: 3, passes: 7 },
+      now: 2000,
+    })
+    expect(summarizing).toEqual({ text: 'Summarizing… 3 of 7', spinner: true, tone: 'busy' })
+
+    // The compaction is the newer statement about the same wait — and a summarizer's own
+    // failure ends it without a `session.error` at all, so a retry from before it is stale.
+    expect(
+      field({
+        status: 'running',
+        runningSince: 1000,
+        retrying: 'the model is overloaded',
+        summarizing: { pass: 1, passes: 2 },
+        now: 2000,
+      }).text,
+    ).toBe('Summarizing… 1 of 2')
+  })
+
+  it('says nothing about a summary while the session is not running (#280)', () => {
+    // The transcript clears the progress on an idle; this is the backstop, so a stale one can
+    // never be the only thing on the line.
+    expect(field({ status: 'idle', summarizing: { pass: 1, passes: 2 } })).toEqual({
+      text: 'idle',
+      spinner: false,
+      tone: 'plain',
+    })
+  })
+
   it('says a turn the user cut short, whatever came after it', () => {
     expect(
       field({
@@ -456,5 +489,64 @@ describe('colours (#201, X4)', () => {
     )
     expect(spans.every((span) => span.color === undefined)).toBe(true)
     expect(textOf(spans)).toContain('Working… 0s')
+  })
+})
+
+/**
+ * How full the context is, on the one line the console has (epic #277, K10; #280).
+ *
+ * The arithmetic is the client's (`contextMeter`), and the screen passes the two spellings in;
+ * what is this line's business is where the meter sits, that the compact one is tried before the
+ * part is dropped, and that a context at its threshold is the one thing on the line drawn as a
+ * warning.
+ */
+describe('the context meter (#280)', () => {
+  it('sits between what the session has spent and what it is doing', () => {
+    expect(
+      textOf(
+        spansOf({ cost: '$0.0013', context: '62% of context used' }, { columns: 200, now: 0 }),
+      ),
+    ).toContain('$0.0013 · 62% of context used · idle')
+  })
+
+  it('is chrome until the context reaches the threshold, and then a warning', () => {
+    const normal = spansOf({ context: '62% of context used', contextNearThreshold: false })
+    expect(normal.find((span) => span.text === '62% of context used')).toMatchObject({
+      dim: true,
+    })
+
+    const near = spansOf({ context: '78% of context used', contextNearThreshold: true })
+    expect(near.find((span) => span.text === '78% of context used')).toMatchObject({
+      color: 'red',
+      dim: false,
+    })
+  })
+
+  it('drops the colour under NO_COLOR, and keeps the words', () => {
+    const spans = spansOf(
+      { context: '78% of context used', contextNearThreshold: true },
+      { theme: PLAIN },
+    )
+    expect(spans.every((span) => span.color === undefined)).toBe(true)
+    expect(textOf(spans)).toContain('78% of context used')
+  })
+
+  it('shortens the meter before letting it go', () => {
+    // 60 columns cannot hold the sentence beside the model, the session, the cost and the
+    // status — but `62%` fits, and a fact that can be said in four columns is not dropped.
+    const spans = spansOf(
+      { cost: '$1.23 + 4 unpriced', context: '62% of context used', contextCompact: '62%' },
+      {
+        columns: 60,
+      },
+    )
+    expect(textOf(spans)).not.toContain('of context used')
+    expect(textOf(spans)).toContain('62%')
+  })
+
+  it('is not drawn at all when nothing has measured a prompt', () => {
+    // `undefined` is a chat that has not answered: it has nothing to say about its context, and
+    // a meter would be a claim about a prompt nobody measured.
+    expect(textOf(spansOf())).not.toMatch(/% of context/u)
   })
 })

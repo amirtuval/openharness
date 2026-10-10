@@ -1,9 +1,16 @@
-import type { ModelPriceLookup, TranscriptMessage } from '@openharness/client'
+import { transcriptEntries } from '@openharness/client'
+import type {
+  ModelPriceLookup,
+  TranscriptEntry,
+  TranscriptMessage,
+  TranscriptSummary,
+} from '@openharness/client'
 import { Static, Text } from 'ink'
 import { Fragment } from 'react'
 
 import { draws, MessageView } from './message-view'
 import { replyMetaLines } from './reply-meta'
+import { SummaryDivider } from './summary-divider'
 
 /**
  * The conversation: what is settled goes through Ink's `<Static>`, what is still moving
@@ -52,6 +59,7 @@ import { replyMetaLines } from './reply-meta'
  */
 export function TranscriptView({
   messages,
+  summaries = [],
   width,
   currentModel,
   costOf,
@@ -59,6 +67,8 @@ export function TranscriptView({
   holdAll,
 }: {
   readonly messages: readonly TranscriptMessage[]
+  /** The summary dividers still in the conversation, in order (epic #277, K10; #280). */
+  readonly summaries?: readonly TranscriptSummary[] | undefined
   /** How wide the terminal is; the tests draw at a width they can read (see `MessageView`). */
   readonly width?: number | undefined
   /** The model the session runs, for the per-reply metadata lines (issue #208). */
@@ -80,32 +90,46 @@ export function TranscriptView({
 }) {
   // Only the messages that draw something are laid out as blocks. A reply that has been
   // announced but has not produced a token yet draws nothing at all (`message-view.tsx`), so
-  // it is not one — and the blank lines the transcript draws *between* messages, and the one
+  // it is not one — and the blank lines the transcript draws *between* blocks, and the one
   // the input section owes the last of them (issue #233), are about the blocks, not about the
   // lines the log happens to hold.
-  const blocks = messages.filter(draws)
-  const firstLive = holdAll === true ? 0 : blocks.findIndex((message) => isLive(message, holdLive))
+  //
+  // The summary dividers are blocks too (epic #277, K10; #280), ordered among the messages by
+  // the client's `transcriptEntries` — the same function the web app orders its transcript
+  // with, so a divider lands in the same place in both. A divider is *not* filtered by `draws`:
+  // it always has something to say, whether or not the history under it draws.
+  const blocks: readonly TranscriptEntry[] = transcriptEntries(messages.filter(draws), summaries)
+  const firstLive =
+    holdAll === true
+      ? 0
+      : blocks.findIndex((entry) => entry.kind === 'message' && isLive(entry.message, holdLive))
   const settled = firstLive === -1 ? blocks : blocks.slice(0, firstLive)
   const live = firstLive === -1 ? [] : blocks.slice(firstLive)
   const metaLines = replyMetaLines(messages, currentModel, costOf)
 
-  /** The message at `index`, framed by the blank line the transcript owes it, if any. */
-  const draw = (message: TranscriptMessage, index: number) => (
-    <Fragment key={message.id}>
-      {separates(blocks[index - 1], message) && <Text> </Text>}
-      <MessageView
-        message={message}
-        width={width}
-        metaLine={metaLines.get(message.id)}
-        blankAbove={blankAbove(blocks[index - 1])}
-      />
-    </Fragment>
-  )
+  /** The block at `index`, framed by the blank line the transcript owes it, if any. */
+  const draw = (entry: TranscriptEntry, index: number) =>
+    entry.kind === 'summary' ? (
+      <Fragment key={entry.summary.id}>
+        {setsOffDivider(blocks[index - 1]) && <Text> </Text>}
+        <SummaryDivider summary={entry.summary} width={width} />
+      </Fragment>
+    ) : (
+      <Fragment key={entry.message.id}>
+        {separates(blocks[index - 1], entry) && <Text> </Text>}
+        <MessageView
+          message={entry.message}
+          width={width}
+          metaLine={metaLines.get(entry.message.id)}
+          blankAbove={blankAbove(blocks[index - 1])}
+        />
+      </Fragment>
+    )
 
   return (
     <>
       <Static items={[...settled]}>{draw}</Static>
-      {live.map((message, index) => draw(message, firstLive + index))}
+      {live.map((entry, index) => draw(entry, firstLive + index))}
     </>
   )
 }
@@ -127,25 +151,53 @@ function isLive(message: TranscriptMessage, holdLive: string | undefined): boole
 }
 
 /**
- * Whether the transcript draws a separator between two messages.
+ * Whether the transcript draws an explicit separator line before `entry`.
  *
  * Only between two messages that are not user messages: a user's message brings the blank line
  * around its band itself (see `message-view.tsx`), and a separator as well would be two blank
- * lines where there has always been one. The first message of a conversation has none either —
- * `previous` is `undefined` there.
+ * lines where there has always been one. The first block of a conversation has none either —
+ * `previous` is `undefined` there — and a divider brings its own line above, so `entry` being
+ * one is never this function's business.
+ *
+ * A message **below** a divider does owe it one: a divider ends in the summary's last line, not
+ * in a blank one. That is the case `previous.kind === 'summary'` covers, and a user's message
+ * there is excluded because it draws the line itself (see {@link blankAbove}).
  */
-function separates(previous: TranscriptMessage | undefined, message: TranscriptMessage): boolean {
-  return previous !== undefined && previous.role !== 'user' && message.role !== 'user'
+function separates(previous: TranscriptEntry | undefined, entry: TranscriptEntry): boolean {
+  if (previous === undefined || entry.kind === 'summary') {
+    return false
+  }
+  if (previous.kind === 'summary') {
+    return entry.message.role !== 'user'
+  }
+  return previous.message.role !== 'user' && entry.message.role !== 'user'
 }
 
 /**
- * Whether the message after `previous` is the one that draws the blank line above itself.
+ * Whether the block after `previous` is the one that draws the blank line above itself.
  *
- * A message with nothing above it is not a message that needs setting off; a message whose
- * predecessor was a user's message already has the blank line that band ended in. Everything
- * else — an agent's reply above it, or the transcript's own separator — is a case the message
+ * A block with nothing above it is not one that needs setting off; one whose predecessor was a
+ * user's message already has the blank line that band ended in. Everything else — an agent's
+ * reply above it, a divider above it, or the transcript's own separator — is a case the message
  * has to cover itself, and only a user's message ever does.
  */
-function blankAbove(previous: TranscriptMessage | undefined): boolean {
-  return previous !== undefined && previous.role !== 'user'
+function blankAbove(previous: TranscriptEntry | undefined): boolean {
+  if (previous === undefined) {
+    return false
+  }
+  return previous.kind === 'summary' || previous.message.role !== 'user'
+}
+
+/**
+ * Whether a divider is the block that draws the blank line above itself.
+ *
+ * Always, except as the first block — a divider is drawn as structure rather than as a banded
+ * message, so nothing above it brings a line of its own. A user's message above it is the
+ * exception: that band already ends in a blank line.
+ */
+function setsOffDivider(previous: TranscriptEntry | undefined): boolean {
+  if (previous === undefined) {
+    return false
+  }
+  return previous.kind === 'summary' || previous.message.role !== 'user'
 }
