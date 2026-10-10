@@ -274,9 +274,12 @@ the rest of the epic's 11 sub-issues.
    headers or **OAuth 2.1** (discovery, dynamic client registration, PKCE); secrets sealed with
    `@openharness/vault`. MCP tools ask by default, and a broken server never blocks the chat.
 
-**Configuration:** per-user settings turn built-in tools and MCP servers on or off and give each
-tool a policy (`allow | ask | deny`); a mode may override which built-in tools and MCP servers
-are on. Agents stay deferred (#96).
+**Configuration** ([#307](https://github.com/amirtuval/openharness/issues/307)): per-user
+settings turn built-in tools and MCP servers on or off and give each tool a policy
+(`allow | ask | deny`); a mode may override which built-in tools and MCP servers are on. Built:
+`/v1/me/tools` and the mode override, with the brain reading the effective set per request;
+the MCP halves arrive with #311/#312, and the approval `ask` waits on is #309. Agents stay
+deferred (#96).
 
 **Context management for tools** ([#276](https://github.com/amirtuval/openharness/issues/276)):
 a tool call and its result are never split by a cut, results are capped, old results are

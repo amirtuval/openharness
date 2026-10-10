@@ -91,6 +91,8 @@ the only way an event is ever removed together with its session.
 | `GET`    | `/v1/me`                                  | the signed-in user                                                                              |
 | `GET`    | `/v1/me/preferences`                      | the caller's preferences — the default model, the web theme and the context settings            |
 | `PUT`    | `/v1/me/preferences`                      | merge fields in; model ids, four theme names, the compaction share and pass limit               |
+| `GET`    | `/v1/me/tools`                            | the caller's tools: on/off and permission per tool, effective for a mode named by `mode_id`     |
+| `PUT`    | `/v1/me/tools`                            | merge per tool; `allow`, `ask` or `deny`, and whether a tool is offered at all                  |
 | `POST`   | `/v1/me/modes`                            | create a mode; `409` for a duplicate name or the twenty-first mode                              |
 | `GET`    | `/v1/me/modes`                            | list the caller's modes, oldest first (no cursor: at most 20)                                   |
 | `GET`    | `/v1/me/modes/{mode_id}`                  | read one mode                                                                                   |
@@ -204,9 +206,11 @@ what came back:
   saying why it did not run or did not finish (`Permission to use … has been denied.`,
   `Tool … timed out`, `Interrupted by the user.`, or `execution lost` for a call a crashed turn
   never ran).
-- **`evaluated_permission` is what the policy said about that call** — `allow`, `ask` or
-  `deny`, the same vocabulary Anthropic uses. `deny` refuses the call without running it;
-  `ask` is the pausing half, which arrives with #309, so nothing produces it yet.
+- **`evaluated_permission` is what the settings said about that call** — `allow`, `ask` or
+  `deny`, the same vocabulary Anthropic uses. `deny` refuses the call without running it. `ask`
+  is the pausing half, which arrives with #309: a user may store it now, and until then the
+  call is refused with a sentence saying the approval does not exist yet, rather than being run
+  or reported as a denial the user never made.
 - **The tools a request offered are recorded on its span.** `span.model_request_start.tools`
   is a `{ name, source }` per offered tool — `builtin` today, `mcp` with #312 — so the log says
   what the model could have called, not only what it did. A request with no tools writes none.
@@ -219,6 +223,47 @@ what came back:
 - **A model that cannot call tools is offered none.** `GET /v1/models` reports each model's
   `tool_call`, and a model whose registry entry says `false` chats exactly as it did before
   tools existed.
+
+#### Per-user tool settings (epic #303, X4; issue #307)
+
+Which tools a chat may use is a **per-user choice**, stored beside the log and managed at
+`/v1/me/tools`:
+
+```json
+// GET /v1/me/tools            (optionally ?mode_id=<the mode the chat follows>)
+{ "data": [
+  { "name": "web_search", "source": "builtin", "enabled": true, "policy": "allow",
+    "default_policy": "allow", "available": true },
+  { "name": "todo_write", "source": "builtin", "enabled": false, "policy": "ask",
+    "default_policy": "allow", "available": true },
+  { "name": "web_fetch",  "source": "builtin", "enabled": true, "policy": "deny",
+    "default_policy": null, "available": false }
+] }
+
+// PUT /v1/me/tools            — merges per tool; a tool the body does not name keeps its setting
+{ "builtin": { "web_search": { "enabled": false, "policy": "ask" } } }
+```
+
+- **`enabled` is whether the tool is offered at all**, and `policy` is what a call to it is
+  evaluated under. A tool that is off is not in the request's offer — the model cannot see it —
+  so a user who turns every tool off gets the same request a deployment with no tools builds. A
+  tool that is on with `policy: "deny"` is offered, and every call to it is refused.
+- **A tool a user has never configured follows its own declared default**
+  (`default_policy`), which for every built-in tool is `allow` and for every MCP tool will be
+  `ask`. The settings are therefore a record of **choices**, not a complete list.
+- **A tool this deployment does not register is listed as `available: false`** — a
+  `web_search` whose key is missing, say — rather than hidden, and `default_policy` is `null`
+  for it: nothing here declares it. It is never offered, whatever `enabled` says. So the
+  `data` list is the deployment's tools plus any tool the caller has a setting for.
+- **A mode may override which built-in tools are on** (a `tools` field on the mode,
+  `{ "builtin": { "web_search": true } }` — a patch, so a tool it does not name follows the
+  user). It may **not** change a permission: a permission is the user's, because "always
+  allow" (#309) is remembered per tool. `GET /v1/me/tools?mode_id=…` answers as a chat on that
+  mode would see things, which is what a composer shows; a mode the caller does not own is the
+  same 404 every other mode read gives.
+- **A chat reads the settings from the next request on**, so flipping a switch, or the mode a
+  message switches to, applies to the next request the turn makes — the record of what a
+  request offered is its own `span.model_request_start.tools`.
 
 `session.usage` is the session's **running** totals, written by the brain in the same append as
 the `span.model_request_end` that closes a request which reported usage — so a client watching
@@ -726,7 +771,7 @@ caller holds at most `MAX_MODES_PER_USER` (20) of them; both refusals are the pr
 `my-default-model`, which resolves to the caller's stored `default_model` at request time — so
 a mode on it follows a changed default, and one with no default set is unavailable. `PUT`-style
 merging is a `POST /v1/me/modes/{mode_id}` update: omitted fields keep their stored value and
-`null` clears a nullable one (`reasoning_effort`, `system_prompt_addition`).
+`null` clears a nullable one (`reasoning_effort`, `system_prompt_addition`, `tools`).
 
 **A chat follows a mode or a plain model.** `Session.mode` is the mode a chat follows, or
 `null`; `POST /v1/sessions` takes a `mode` (the server stores the model it resolves to on the
@@ -740,6 +785,12 @@ no credential for its provider, or `my-default-model` with no default set — st
 it (`POST /v1/sessions`) or continuing one (`POST …/events`) is the `422`
 `mode_unavailable_error`, with a message naming the mode and what to do about it, and nothing is
 stored. A mode is stored even when its model is not usable yet: the key may come later.
+
+**A mode may also carry a tool override.** `Mode.tools` is `{ "builtin": { "<tool>": true } }`
+or `null`: a per-tool on/off patch applied over the user's own `/v1/me/tools` choices, so a
+`deep` mode can insist on `web_search` and do without `todo_write` for every chat that follows
+it. It decides **which** tools a chat has, never what a call to one may do — permissions are the
+user's (see [Per-user tool settings](#per-user-tool-settings-epic-303-x4-issue-307)).
 
 **Every request records what it ran under.** `span.model_request_start.mode` is `{ id, name }`
 — the mode the request ran under and the name it had then — beside the `model` and

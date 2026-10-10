@@ -125,7 +125,10 @@ its name is not `@openharness/cli`; the other workspaces are private to the repo
 
 `@openharness/hands` holds the tool registry behind `execute(name, input)` today — a tool's
 name, description, input schema, default permission and timeout, and one place to run it
-([#304](https://github.com/amirtuval/openharness/issues/304)). The built-in tools arrive with
+([#304](https://github.com/amirtuval/openharness/issues/304)). Which of them a chat may use is
+the user's own choice, stored beside the log and read per request — on or off and a permission
+per tool, with a mode able to override the on/off part
+([#307](https://github.com/amirtuval/openharness/issues/307)). The built-in tools arrive with
 [#305](https://github.com/amirtuval/openharness/issues/305) and the MCP client with
 [#312](https://github.com/amirtuval/openharness/issues/312); the loop they run in is the brain's,
 and what they may reach is [`docs/threat-model.md`](./threat-model.md).
