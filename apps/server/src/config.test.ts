@@ -4,12 +4,13 @@ import { join } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
-import { DEFAULT_COMPACTION_THRESHOLD } from '@openharness/brain'
+import { DEFAULT_COMPACTION_THRESHOLD, DEFAULT_MAX_TOOL_STEPS } from '@openharness/brain'
 import { DEFAULT_PARTITION_COUNT } from '@openharness/protocol'
 import { DEFAULT_KEY_CACHE_TTL_MS } from '@openharness/vault'
 
 import { DEFAULT_COMPACT_INTERVAL_MS, DEFAULT_DELTA_RETENTION_MS } from './compaction'
 import { DEFAULT_HEARTBEAT_MS, DEFAULT_LEASE_TTL_MS, DEFAULT_SWEEP_MS } from './partition-scheduler'
+
 import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
 import { DEFAULT_DRAIN_TIMEOUT_MS } from './runner'
 import {
@@ -78,6 +79,7 @@ describe('readServerConfig', () => {
       trustedProxyHops: DEFAULT_TRUSTED_PROXY_HOPS,
       corsOrigins: [],
       maxConcurrentSessions: DEFAULT_MAX_CONCURRENT_SESSIONS,
+      maxToolSteps: DEFAULT_MAX_TOOL_STEPS,
       drainTimeoutMs: DEFAULT_DRAIN_TIMEOUT_MS,
       instanceId: config.instanceId,
       partitions: DEFAULT_PARTITION_COUNT,
@@ -120,6 +122,7 @@ describe('readServerConfig', () => {
         OPENHARNESS_TRUSTED_PROXY_HOPS: '2',
         OPENHARNESS_CORS_ORIGINS: 'http://a.test, http://b.test',
         OPENHARNESS_MAX_CONCURRENT_SESSIONS: '12',
+        OPENHARNESS_MAX_TOOL_STEPS: '7',
         OPENHARNESS_DRAIN_TIMEOUT_MS: '250',
         SCHEDULER: 'postgres',
         OPENHARNESS_INSTANCE_ID: 'instance-a',
@@ -158,6 +161,7 @@ describe('readServerConfig', () => {
       trustedProxyHops: 2,
       corsOrigins: ['http://a.test', 'http://b.test'],
       maxConcurrentSessions: 12,
+      maxToolSteps: 7,
       drainTimeoutMs: 250,
       instanceId: 'instance-a',
       partitions: 8,
@@ -313,6 +317,15 @@ describe('readServerConfig', () => {
     expect(() => readServerConfig(env({ PORT: 'http' }))).toThrow(/PORT/)
     expect(() => readServerConfig(env({ PORT: '70000' }))).toThrow(/PORT/)
     expect(() => readServerConfig(env({ PORT: '-1' }))).toThrow(/PORT/)
+  })
+
+  it('refuses a tool-step budget below one (epic #303)', () => {
+    expect(() => readServerConfig(env({ OPENHARNESS_MAX_TOOL_STEPS: '0' }))).toThrow(
+      /OPENHARNESS_MAX_TOOL_STEPS/,
+    )
+    expect(() => readServerConfig(env({ OPENHARNESS_MAX_TOOL_STEPS: 'many' }))).toThrow(
+      /OPENHARNESS_MAX_TOOL_STEPS/,
+    )
   })
 
   it('refuses a concurrency limit below one', () => {

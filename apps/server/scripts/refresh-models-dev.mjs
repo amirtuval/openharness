@@ -122,6 +122,10 @@ function reduceEfforts(reasoningOptions) {
  * model, or the registry says nothing" — the two the resolver reads alike. It is informational;
  * the effort gate is `efforts`, which a reasoning model whose knob is a token budget does not get.
  *
+ * `toolCall` is written only when models.dev says `false` (epic #303, X2), so absence means
+ * "callable, or the snapshot says nothing" — the same reading `reasoning` gets, and the one that
+ * keeps the ~825 models models.dev marks callable from each costing a line of JSON.
+ *
  * **No chat verdict.** models.dev carries no chat flag, and the fields it does carry are not
  * one: `modalities.output` is `["text"]` even for `text-embedding-3-small`, and `family` is a
  * name family, which is what the catalogue's own filter already reads. So the catalogue's
@@ -138,6 +142,13 @@ function reduceModel(model) {
   }
   if (model.reasoning === true) {
     reduced.reasoning = true
+  }
+  // models.dev marks every model it knows with `tool_call`, and only some are false (the
+  // embeddings, the image and speech families). Only the `false` is kept: absence means
+  // "callable, or the registry says nothing", which is what keeps an unfamiliar model offered
+  // tools rather than quietly denied them (epic #303, X2).
+  if (model.tool_call === false) {
+    reduced.toolCall = false
   }
   const efforts = reduceEfforts(model.reasoning_options)
   if (efforts !== undefined) {

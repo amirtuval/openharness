@@ -166,6 +166,7 @@ export {
   type ProviderResponse,
 } from './catalog/provider-fetch'
 export { createReasoningSupportResolver } from './catalog/reasoning-support'
+export { createToolSupportResolver } from './catalog/tool-support'
 export {
   createBundledRegistry,
   emptyRegistry,
@@ -221,6 +222,14 @@ export {
   type StopSchedulerOptions,
   type StopSessionOptions,
 } from './scheduler'
+export {
+  createTestToolRegistry,
+  createTurnTools,
+  TEST_TOOL_DESCRIPTION,
+  TEST_TOOL_NAME,
+  testEchoTool,
+  type TurnToolOptions,
+} from './tools'
 export {
   DefaultModelPicker,
   RECOMMENDED_DEFAULT_MODELS,
