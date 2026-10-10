@@ -4,6 +4,7 @@ import type {
   Agent,
   AgentMessageEvent,
   ContentDelta,
+  ContextSummaryEvent,
   ListModelsResponse,
   Mode,
   ModelEntry,
@@ -498,6 +499,36 @@ export function makeSessionUsage(
       usage: { ...entry.usage },
       requests: entry.requests,
     })),
+  }
+  return { ...event, ...overrides }
+}
+
+// --------------------------------------------------- context summary (epic #277)
+
+/**
+ * A stored `session.context_summary`: older history replaced for the model by a summary.
+ *
+ * The default covers `1..8` — a conversation whose first four turns were summarized — and names
+ * the chat's own model as the summary model, `threshold` as the reason and one pass. Override
+ * anything a test cares about; the schema is what rejects a shape the protocol would not store.
+ *
+ * @param overrides fields to replace on the event
+ */
+export function makeContextSummary(
+  overrides: Partial<ContextSummaryEvent> = {},
+): ContextSummaryEvent {
+  const event: ContextSummaryEvent = {
+    id: newEventId(),
+    type: 'session.context_summary',
+    seq: takeSeq(),
+    processed_at: fixtureTimestamp(),
+    summary: 'The user asked for a README summary; the answer is that it is Managed Agents.',
+    covers: { to_seq: 8 },
+    reason: 'threshold',
+    tokens_before: 51_200,
+    summary_model: 'anthropic/claude-sonnet-5',
+    prompt_version: 'compact-v1',
+    passes: 1,
   }
   return { ...event, ...overrides }
 }

@@ -25,6 +25,8 @@ import { anthropicSse, openAiResponsesSse } from './testing/provider-streams'
 
 describe('toModelUsage', () => {
   it('maps the AI SDK report onto the protocol counters', () => {
+    // `inputTokens` is the SDK's *total*; the protocol's counter is the uncached half of it
+    // (`noCacheTokens`), so the four protocol counters stay disjoint (epic #277, K2).
     expect(
       toModelUsage({
         inputTokens: 11,
@@ -38,7 +40,7 @@ describe('toModelUsage', () => {
         outputTokenDetails: { textTokens: 5, reasoningTokens: 0 },
       }),
     ).toEqual({
-      input_tokens: 11,
+      input_tokens: 6,
       output_tokens: 5,
       cache_read_input_tokens: 2,
       cache_creation_input_tokens: 3,
@@ -78,7 +80,7 @@ describe('toModelUsage', () => {
         totalTokens: '0[object Object][object Object]',
       }),
     ).toEqual({
-      input_tokens: 11,
+      input_tokens: 6,
       output_tokens: 5,
       cache_read_input_tokens: 2,
       cache_creation_input_tokens: 3,
@@ -86,6 +88,8 @@ describe('toModelUsage', () => {
   })
 
   it('reads through the second layer a spec-compatibility layer wraps around it', () => {
+    // The breakdown is gone here, so the uncached half is derived: the total minus both cache
+    // halves — 7 − 1 − 2.
     expect(
       toModelUsage({
         inputTokens: { total: { total: 7, cacheRead: 1, cacheWrite: 2 }, noCache: undefined },
@@ -93,10 +97,50 @@ describe('toModelUsage', () => {
         outputTokens: { total: { total: 4 } },
       }),
     ).toEqual({
-      input_tokens: 7,
+      input_tokens: 4,
       output_tokens: 4,
       cache_read_input_tokens: 1,
       cache_creation_input_tokens: 2,
+    })
+  })
+
+  it('normalises each provider family to the uncached input (epic #277, K2)', () => {
+    // Anthropic reports the uncached input itself and the cache halves beside it; the SDK's
+    // total is their sum, and the protocol's `input_tokens` is the half the wire carried.
+    expect(
+      toModelUsage({
+        inputTokens: 11,
+        outputTokens: 5,
+        inputTokenDetails: { noCacheTokens: 11, cacheReadTokens: 3, cacheWriteTokens: 2 },
+      }),
+    ).toEqual({
+      input_tokens: 11,
+      output_tokens: 5,
+      cache_read_input_tokens: 3,
+      cache_creation_input_tokens: 2,
+    })
+    // Bedrock's Claude models and Vertex's Anthropic models are the same shape: their own
+    // `input_tokens` leaves cached tokens out, and the SDK's uncached half is that number.
+    expect(
+      toModelUsage({
+        inputTokens: 16,
+        outputTokens: 5,
+        inputTokenDetails: { noCacheTokens: 11, cacheReadTokens: 3, cacheWriteTokens: 2 },
+      }).input_tokens,
+    ).toBe(11)
+    // OpenAI and the OpenAI-compatible family report a cache-inclusive `prompt_tokens`; the
+    // uncached half is it minus the cached ones — 11 − 2 — not the raw 11.
+    expect(
+      toModelUsage({
+        inputTokens: 11,
+        outputTokens: 5,
+        inputTokenDetails: { noCacheTokens: 9, cacheReadTokens: 2, cacheWriteTokens: 0 },
+      }),
+    ).toEqual({
+      input_tokens: 9,
+      output_tokens: 5,
+      cache_read_input_tokens: 2,
+      cache_creation_input_tokens: 0,
     })
   })
 
@@ -168,7 +212,9 @@ describe('streamModelRequest', () => {
     })
 
     expect(result.usage).toEqual({
-      input_tokens: 9,
+      // The mock's `input_tokens` scripts an OpenAI-shaped total of 9, 2 of them cached, so the
+      // protocol's uncached counter is 7 (epic #277, K2).
+      input_tokens: 7,
       output_tokens: 3,
       cache_read_input_tokens: 2,
       cache_creation_input_tokens: 0,
@@ -589,8 +635,10 @@ describe('providerModelFactory', () => {
 
     expect(result.error).toBeUndefined()
     expect(result.text).toBe('Hi there')
+    // OpenAI's `input_tokens` already includes the cached ones (11 with 2 cached), so the
+    // uncached counter is 9 — the real prompt size is 9 + 2 (epic #277, K2).
     expect(result.usage).toEqual({
-      input_tokens: 11,
+      input_tokens: 9,
       output_tokens: 5,
       cache_read_input_tokens: 2,
       cache_creation_input_tokens: 0,
@@ -602,11 +650,11 @@ describe('providerModelFactory', () => {
 
     expect(result.error).toBeUndefined()
     expect(result.text).toBe('Hi there')
-    // Anthropic's `input_tokens` is the *uncached* input, so the provider's total is that plus
-    // both cache halves — 11 + 2 written + 3 read. The four protocol counters are the ones the
-    // wire carried, which is what the old router could not get right (issue #39).
+    // Anthropic's `input_tokens` is the *uncached* input, so the protocol's counter is the wire's
+    // 11 — and the real prompt size is 11 + 2 written + 3 read. The four counters are the ones
+    // the wire carried, which is what the old router could not get right (issue #39).
     expect(result.usage).toEqual({
-      input_tokens: 16,
+      input_tokens: 11,
       output_tokens: 5,
       cache_read_input_tokens: 3,
       cache_creation_input_tokens: 2,

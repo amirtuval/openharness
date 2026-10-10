@@ -8,6 +8,7 @@ import type {
   SessionModelUsage,
   SpanError,
   Supersedes,
+  Truncation,
 } from '@openharness/protocol'
 import { EVENT_TYPES } from '@openharness/protocol'
 
@@ -84,25 +85,48 @@ export function sessionError(error: SessionError): AppendableEvent {
  * `model`/`reasoning_effort` above — so the two fields beside it say what the mode resolved to,
  * and a later rename or edit does not rewrite what this request ran.
  *
+ * `truncated` records what the context strategy had to cap to fit the model's budget (epic
+ * #277, K6), written only when the newest message alone was over it. The strategy answers the
+ * record and the loop writes it, because the store is the loop's: see {@link SpanStartOptions}.
+ *
  * @param consumes the ids of the pending user events this request answers; `[]` claims nothing
  * @param model the model id (`provider/model`) the request is made with
- * @param reasoningEffort the effort asked for and applied, or `undefined` when nothing was asked
- * @param mode the mode this request ran under — its id and current name — or `undefined` for a
- *   request that ran without one
+ * @param options what else the request ran with, each absent when it does not apply
  */
 export function spanStart(
   consumes: readonly EventId[],
   model: string,
-  reasoningEffort?: ReasoningEffortRun,
-  mode?: ModeReference,
+  options: SpanStartOptions = {},
 ): AppendableEvent {
+  const { reasoningEffort, mode, truncated } = options
   return {
     type: EVENT_TYPES.modelRequestStart,
     consumes: [...consumes],
     model,
     ...(reasoningEffort === undefined ? {} : { reasoning_effort: reasoningEffort }),
     ...(mode === undefined ? {} : { mode: { id: mode.id, name: mode.name } }),
+    ...(truncated === undefined ? {} : { truncated }),
   }
+}
+
+/** What {@link spanStart} carries beyond the messages the request claims. */
+export interface SpanStartOptions {
+  /**
+   * The effort the log asked this request for and what it ran with (#252), or `undefined` when
+   * nothing was asked — which is every request of a session that never set one.
+   */
+  readonly reasoningEffort?: ReasoningEffortRun
+  /**
+   * The mode this request ran under — its id and current name (#245, M6), or `undefined` for a
+   * request that ran without one.
+   */
+  readonly mode?: ModeReference
+  /**
+   * What the context strategy had to cap to fit the model's budget (epic #277, K6), or
+   * `undefined` when the newest message fit. The strategy answers it; the loop is the one that
+   * can write it, which is why it travels here rather than being written by the strategy.
+   */
+  readonly truncated?: Truncation
 }
 
 /** What {@link spanEnd} carries beyond the request it closes. */

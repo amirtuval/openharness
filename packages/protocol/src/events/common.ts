@@ -39,6 +39,15 @@ export const EVENT_TYPES = {
    * left out — see {@link SessionUsageEventSchema} for what it carries and why.
    */
   sessionUsage: 'session.usage',
+  /**
+   * // extension: the older history was summarized for the model (epic #277, K1; #278).
+   *
+   * The brain writes it when a chat's context fills: `summary` is the text, `covers.to_seq` the
+   * last event it replaces for the model, and the request a client makes of it is the context
+   * strategy's — nothing is deleted or superseded. See {@link ContextSummaryEventSchema} for
+   * what it carries and why.
+   */
+  sessionContextSummary: 'session.context_summary',
   /** A previewed event started generating. A stored chunk since D9; stream-only before it. */
   eventStart: 'event_start',
   /** Incremental content for a previewed event. A stored chunk since D9; stream-only before it. */
@@ -89,6 +98,7 @@ export const STORED_EVENT_TYPES = [
   EVENT_TYPES.modelRequestStart,
   EVENT_TYPES.modelRequestEnd,
   EVENT_TYPES.sessionUsage,
+  EVENT_TYPES.sessionContextSummary,
   EVENT_TYPES.eventStart,
   EVENT_TYPES.eventDelta,
   EVENT_TYPES.sessionRewind,
