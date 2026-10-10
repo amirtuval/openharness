@@ -126,9 +126,10 @@ describe('POST /v1/sessions/{id}/compact', () => {
     const system = summaryPrompt?.find((message) => message.role === 'system')?.text ?? ''
     expect(system).toContain('keep the API decisions in detail')
     expect(system).toContain('The user asked for this summary')
-    // The base prompt is unchanged, so its version is not bumped (K7).
+    // The base prompt is the one the engine ships — guidance never bumps its version (K7) —
+    // and #306 bumped that base prompt for the tool-work section, so this is v2.
     expect(summary?.type === 'session.context_summary' && summary.prompt_version).toBe(
-      'context-summary-v1',
+      'context-summary-v2',
     )
   })
 
