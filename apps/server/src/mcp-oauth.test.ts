@@ -21,6 +21,12 @@ import { TEST_PUBLIC_URL, TEST_SECRETS_KEY, createTestApp, type TestContext } fr
  * callback, token refresh before expiry and on a 401, a failed refresh, and the refusals a
  * misused or expired `state` gets.
  *
+ * The callback is a **browser page**, not an API call (#311): `oh` starts the flow by opening
+ * the authorization URL in the system browser, which may never have signed in here, so the
+ * callback is authenticated by the `state` alone — it completes the flow for the state's user,
+ * refuses a session that belongs to somebody else, and answers a page (the app is redirected to
+ * its settings screen, the CLI is shown a page it can close). The tests below walk that too.
+ *
  * Both ends are real HTTP servers on loopback: the MCP server is built from the official SDK,
  * and the authorization server answers discovery, registration and PKCE the way a real one
  * does, so what is proved is the whole exchange rather than a fixture.
@@ -86,27 +92,49 @@ async function createOAuthServer(scenario: Scenario, name = 'notes'): Promise<Mc
   return (await response.json()) as McpServer
 }
 
-/** `POST` an empty body to a path as the default caller. */
-async function post(test: TestContext, path: string): Promise<Response> {
-  return test.request(path, { method: 'POST' })
+/** `POST` to a path as the default caller; `client` becomes the connect body when given. */
+async function post(test: TestContext, path: string, client?: 'web' | 'cli'): Promise<Response> {
+  return test.request(path, {
+    method: 'POST',
+    ...(client === undefined
+      ? {}
+      : { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client }) }),
+  })
+}
+
+/** The callback URL for one `code`/`state` pair, as the provider's redirect spells it. */
+function callbackUrl(code: string, state: string): string {
+  return `${BASE}/oauth/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`
 }
 
 /**
  * Run the whole browser round trip: start the flow, visit the authorization URL, and answer
  * the callback with the code the provider sent.
+ *
+ * `anonymous` fires the callback with no session at all — what `oh`'s system browser does — and
+ * `client` says where the flow was started.
  */
 async function completeFlow(
   scenario: Scenario,
   serverId: string,
+  options: { readonly client?: 'web' | 'cli'; readonly anonymous?: boolean } = {},
 ): Promise<{ response: Response; code: string; state: string }> {
-  const started = await post(scenario.test, `${BASE}/${serverId}/connect`)
+  const started = await post(scenario.test, `${BASE}/${serverId}/connect`, options.client)
   expect(started.status).toBe(200)
   const { authorization_url } = (await started.json()) as { authorization_url: string }
   const { code, state } = await simulateAuthorization(authorization_url)
-  const response = await scenario.test.request(
-    `${BASE}/oauth/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`,
-  )
+  const response =
+    options.anonymous === true
+      ? await scenario.test.anonymous(callbackUrl(code, state))
+      : await scenario.test.request(callbackUrl(code, state))
   return { response, code, state }
+}
+
+/** The HTML body of a callback page, as a string, asserting it is one. */
+async function pageBody(response: Response): Promise<string> {
+  expect(response.headers.get('content-type')).toContain('text/html')
+  expect(response.headers.get('cache-control')).toBe('no-store')
+  return response.text()
 }
 
 describe('MCP OAuth: the authorization code flow', () => {
@@ -130,9 +158,7 @@ describe('MCP OAuth: the authorization code flow', () => {
     expect(scenario.authorization.registrations).toBe(1)
 
     const { code, state } = await simulateAuthorization(authorization_url)
-    const callback = await scenario.test.request(
-      `${BASE}/oauth/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`,
-    )
+    const callback = await scenario.test.request(callbackUrl(code, state))
     expect(callback.status).toBe(302)
     // Back to the app, naming the server that was connected.
     const location = callback.headers.get('location') ?? ''
@@ -152,48 +178,112 @@ describe('MCP OAuth: the authorization code flow', () => {
     expect(JSON.stringify(stored?.tokens)).not.toContain('access-1')
   })
 
-  it('refuses a used, unknown or another user’s state', async () => {
+  it('completes the flow for a browser with no session at all', async () => {
+    const scenario = await makeScenario()
+    const created = await createOAuthServer(scenario)
+
+    // No cookie, no bearer token: exactly what the system browser `oh` opens has. The state is
+    // the authentication, and the flow is completed for the user it was minted for (#311).
+    const { response } = await completeFlow(scenario, created.id, { anonymous: true })
+    expect(response.status).toBe(302)
+    const after = await scenario.test.request(`${BASE}/${created.id}`)
+    expect((await after.json()) as McpServer).toMatchObject({ status: 'connected' })
+  })
+
+  it('answers a CLI-started flow with a page rather than a redirect', async () => {
+    const scenario = await makeScenario()
+    const created = await createOAuthServer(scenario)
+
+    const { response } = await completeFlow(scenario, created.id, {
+      client: 'cli',
+      anonymous: true,
+    })
+    expect(response.status).toBe(200)
+    const body = await pageBody(response)
+    // The CLI is waiting on its own terminal, so the browser is told it may close the tab.
+    expect(body).toContain('Connected notes.')
+    expect(body).toContain('You can close this tab and return to openharness.')
+  })
+
+  it('refuses a state presented by another user’s session', async () => {
+    const scenario = await makeScenario()
+    const second = await createOAuthServer(scenario, 'second')
+    const started = await post(scenario.test, `${BASE}/${second.id}/connect`)
+    const { authorization_url } = (await started.json()) as { authorization_url: string }
+    const other = await simulateAuthorization(authorization_url)
+
+    // The state belongs to the default user; the browser presents somebody else's session — a
+    // confused flow. It is refused rather than completed for the wrong person, and the tokens
+    // are not sealed anywhere.
+    const otherUser = await scenario.test.signIn('mcp-oauth-other@example.com')
+    const misuse = await scenario.test.anonymous(callbackUrl(other.code, other.state), {
+      headers: { authorization: `Bearer ${otherUser.token}` },
+    })
+    expect(misuse.status).toBe(400)
+    expect(await pageBody(misuse)).toContain('started by another user')
+    const after = await scenario.test.request(`${BASE}/${second.id}`)
+    expect((await after.json()) as McpServer).toMatchObject({ status: 'needs_reconnect' })
+  })
+
+  it('refuses a used, unknown or expired state with a readable page', async () => {
     const scenario = await makeScenario()
     const created = await createOAuthServer(scenario)
     const { response, code, state } = await completeFlow(scenario, created.id)
     expect(response.status).toBe(302)
 
     // Replaying the same callback finds the state already consumed.
-    const replay = await scenario.test.request(
-      `${BASE}/oauth/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`,
-    )
+    const replay = await scenario.test.request(callbackUrl(code, state))
     expect(replay.status).toBe(400)
+    expect(await pageBody(replay)).toContain('unknown, expired or already used')
 
-    const unknown = await scenario.test.request(
-      `${BASE}/oauth/callback?code=${encodeURIComponent(code)}&state=not-a-real-state`,
-    )
+    const unknown = await scenario.test.request(callbackUrl(code, 'not-a-real-state'))
     expect(unknown.status).toBe(400)
+    expect(await pageBody(unknown)).toContain('unknown, expired or already used')
 
-    // A state started by one user, presented by another, is refused rather than completed.
-    const second = await createOAuthServer(scenario, 'second')
-    const started = await post(scenario.test, `${BASE}/${second.id}/connect`)
-    const { authorization_url } = (await started.json()) as { authorization_url: string }
-    const other = await simulateAuthorization(authorization_url)
-    const otherUser = await scenario.test.signIn('mcp-oauth-other@example.com')
-    const misuse = await scenario.test.anonymous(
-      `${BASE}/oauth/callback?code=${encodeURIComponent(other.code)}&state=${encodeURIComponent(other.state)}`,
-      { headers: { authorization: `Bearer ${otherUser.token}` } },
-    )
-    expect(misuse.status).toBe(400)
-  })
-
-  it('refuses an expired state', async () => {
-    const scenario = await makeScenario()
-    const created = await createOAuthServer(scenario)
     const started = await post(scenario.test, `${BASE}/${created.id}/connect`)
     const { authorization_url } = (await started.json()) as { authorization_url: string }
-    const { code, state } = await simulateAuthorization(authorization_url)
+    const fresh = await simulateAuthorization(authorization_url)
     // Ten minutes is the state's life; a minute more and it is gone.
     scenario.clock.advance(11 * 60_000)
-    const callback = await scenario.test.request(
-      `${BASE}/oauth/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`,
+    const expired = await scenario.test.request(callbackUrl(fresh.code, fresh.state))
+    expect(expired.status).toBe(400)
+    expect(await pageBody(expired)).toContain('unknown, expired or already used')
+  })
+
+  it('renders the authorization server’s refusal as an escaped page', async () => {
+    const scenario = await makeScenario()
+    // Everything echoed into the page is escaped: an `error_description` is the authorization
+    // server's text, and a page is a page (#311).
+    const refused = await scenario.test.anonymous(
+      `${BASE}/oauth/callback?error=access_denied` +
+        `&error_description=${encodeURIComponent('<script>alert(1)</script> denied')}`,
     )
-    expect(callback.status).toBe(400)
+    expect(refused.status).toBe(400)
+    const body = await pageBody(refused)
+    expect(body).toContain('access_denied')
+    expect(body).toContain('&lt;script&gt;alert(1)&lt;/script&gt; denied')
+    expect(body).not.toContain('<script>')
+  })
+
+  it('keeps the exemption to the callback’s own GET', async () => {
+    const scenario = await makeScenario()
+    // The auth guard is skipped for exactly one method and path, so anything else on that path
+    // is still refused a session like every other route.
+    expect(
+      (await scenario.test.anonymous(`${BASE}/oauth/callback`, { method: 'POST' })).status,
+    ).toBe(401)
+    expect((await scenario.test.anonymous(BASE)).status).toBe(401)
+  })
+
+  it('refuses a connect body that names a client it does not have', async () => {
+    const scenario = await makeScenario()
+    const created = await createOAuthServer(scenario)
+    const response = await scenario.test.request(`${BASE}/${created.id}/connect`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ client: 'mobile' }),
+    })
+    expect(response.status).toBe(400)
   })
 
   it('answers 422 when the authorization server offers no dynamic registration', async () => {

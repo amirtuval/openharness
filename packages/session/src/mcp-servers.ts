@@ -1,5 +1,6 @@
 import type {
   McpAuthType,
+  McpOAuthClient,
   McpServer,
   McpServerId,
   McpServerStatus,
@@ -44,7 +45,9 @@ import type { OwnerScope } from './store'
  * - **The OAuth state is single use and short-lived.** {@link McpServerStore.consumeOAuthState}
  *   removes the row and answers it only while it has not expired, so a callback replay finds
  *   nothing. Creating a state replaces any earlier one for the same `(user, server)`, which
- *   bounds how many an abandoned flow can leave behind.
+ *   bounds how many an abandoned flow can leave behind. The state carries the user the flow
+ *   belongs to and where it was started: the callback is answered without a session — the
+ *   browser the CLI opens may never have signed in — so those two facts are what it acts on.
  * - **Cascade.** A server belongs to its user record: deleting a `user` (Better Auth's `"user"`
  *   table) takes the user's servers, and a deleted server takes its pending OAuth states.
  *   In-memory stores have no users to delete, so those are the Postgres schema's foreign keys.
@@ -146,24 +149,39 @@ export interface UpdateMcpServerInput {
 export interface McpOAuthStateInput {
   /** The opaque `state` the authorization server will echo back. */
   readonly state: string
-  /** The user the flow belongs to; the callback must be the same user. */
+  /**
+   * The user the flow belongs to.
+   *
+   * The state — not a session — authenticates the callback: the browser that lands on it may
+   * never have signed in (the CLI opens the authorization URL in the system browser), so the
+   * flow is completed for this user, and for this user only (#311).
+   */
   readonly userId: UserId
   /** The server being connected. */
   readonly serverId: McpServerId
   /** The PKCE code verifier. */
   readonly codeVerifier: string
+  /**
+   * Where the flow was started: the web app, or the CLI (#311).
+   *
+   * The callback's answer depends on it — the app is redirected to its settings screen, the CLI
+   * is shown a page to close — and the `state` is the only thing the callback arrives with.
+   */
+  readonly client: McpOAuthClient
   /** When the state stops being usable. */
   readonly expiresAt: Timestamp
 }
 
 /** A state {@link McpServerStore.consumeOAuthState} hands back: the fields the callback needs. */
 export interface ConsumedMcpOAuthState {
-  /** The user the flow was started by. */
+  /** The user the flow was started by; the callback completes it for this user alone (#311). */
   readonly userId: UserId
   /** The server being connected. */
   readonly serverId: McpServerId
   /** The PKCE verifier to send with the code exchange. */
   readonly codeVerifier: string
+  /** Where the flow was started, so the callback knows how to answer (#311). */
+  readonly client: McpOAuthClient
 }
 
 /** The storage contract for a user's remote MCP servers and their pending OAuth states. */

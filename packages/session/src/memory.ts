@@ -1626,6 +1626,7 @@ export class InMemoryMcpServerStore implements McpServerStore {
       userId: pending.userId,
       serverId: pending.serverId,
       codeVerifier: pending.codeVerifier,
+      client: pending.client,
     })
   }
 }

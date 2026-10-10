@@ -401,6 +401,39 @@ export const ListMcpServersResponseSchema = z.object({
 export type ListMcpServersResponse = z.infer<typeof ListMcpServersResponseSchema>
 
 /**
+ * Where an OAuth flow was started (epic #303, X10; #311).
+ *
+ * The browser that lands on the callback is **not** necessarily signed in to this server: `oh`
+ * starts the flow by opening the authorization URL in the system browser, and `oh` itself
+ * authenticates with a bearer token from the device flow, so its browser may never have a
+ * session here. The callback is therefore authenticated by the `state` alone, and the two
+ * callers want different endings — so the flow records which one started it. The web app is
+ * sent back to its settings screen; the CLI is shown a plain page to close.
+ *
+ * // extension: Anthropic has no per-user MCP server resource and no OAuth client flow, so
+ * there is no equivalent of a flow's origin to record.
+ */
+export const McpOAuthClientSchema = z.enum(['web', 'cli'])
+
+export type McpOAuthClient = z.infer<typeof McpOAuthClientSchema>
+
+/**
+ * Body of `POST /v1/me/mcp_servers/{mcp_server_id}/connect`.
+ *
+ * Every field is optional — the route accepts a request with no body at all — and `client`
+ * defaults to `web`, which is what the app sends and what every caller meant before #311.
+ */
+export const ConnectMcpServerRequestSchema = z.object({
+  /**
+   * Where the flow was started, recorded on the pending `state` so the callback knows how to
+   * answer. `web` when omitted.
+   */
+  client: McpOAuthClientSchema.default('web'),
+})
+
+export type ConnectMcpServerRequest = z.infer<typeof ConnectMcpServerRequestSchema>
+
+/**
  * Response of `POST /v1/me/mcp_servers/{mcp_server_id}/connect`: where to send the user to
  * authorize the server.
  *

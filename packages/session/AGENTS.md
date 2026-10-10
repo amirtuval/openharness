@@ -94,7 +94,8 @@ migrations/             the SQL the Postgres stores need, applied by `migrate()`
                         0024 the per-user modes, and the mode a session follows (#245, M6),
                         0025 the compaction controls on the per-user preferences (#282),
                         0026 a user's remote MCP servers and their pending OAuth states
-                          (#303, X10)
+                          (#303, X10),
+                        0027 where a pending OAuth flow was started — `web` or `cli` (#311)
 docs/postgres.md        the Postgres stores: schema, migrations, delivery, local setup
 ```
 
@@ -572,7 +573,7 @@ it writes down as one JSON column each — so this package has no vault dependen
 | `update(serverId, { ownerId }, patch)` | a patch: an omitted field keeps its value, and a `secrets` key that is omitted keeps its blob, a value replaces it and `null` clears it           |
 | `delete(serverId, { ownerId })`        | removes the server and its pending OAuth states (the Postgres cascade)                                                                            |
 | `createOAuthState(state)`              | records a pending flow, replacing any earlier one for the same `(user, server)`                                                                   |
-| `consumeOAuthState(state)`             | redeems it single-use and hands back `{ userId, serverId, codeVerifier }`, or `null` when unknown, expired or already used                        |
+| `consumeOAuthState(state)`             | redeems it single-use and hands back `{ userId, serverId, codeVerifier, client }`, or `null` when unknown, expired or already used                |
 
 - **A name is unique per user and a user holds at most `MAX_MCP_SERVERS_PER_USER`** (20), both
   enforced by the store — the Postgres create takes a per-owner `pg_advisory_xact_lock` before
@@ -580,15 +581,19 @@ it writes down as one JSON column each — so this package has no vault dependen
   the last slot.
 - **The OAuth state is single use and short-lived.** It is consumed in the same statement that
   deletes it, its expiry is checked against the injected clock, and creating one replaces any
-  earlier state for the pair. `code_verifier` is stored **in the clear** deliberately: it is a
-  nonce for one round trip, not a durable credential, and it is useless once the code it is
-  bound to has been redeemed. The **tokens** that come out of the flow are what get sealed.
+  earlier state for the pair. It carries the user the flow belongs to and where it was started
+  (`client`: `web` or `cli`, #311) beside the verifier, because the callback authenticates by the
+  state alone — the browser the CLI opens may never have signed in — and completes the flow for
+  that user, answering a redirect for the app and a page for the CLI. `code_verifier` is stored
+  **in the clear** deliberately: it is a nonce for one round trip, not a durable credential, and
+  it is useless once the code it is bound to has been redeemed. The **tokens** that come out of
+  the flow are what get sealed.
 - **Owner-scoped and deep-frozen**, like the credential store: another user's server is `null`
   on a read and `false` on a delete, and what a store returns is a value.
 
 Both implementations pass `runMcpServerStoreConformance`: `InMemoryMcpServerStore` (in
 `memory.ts`) and `PostgresMcpServerStore` (`@openharness/session/postgres`, on the `mcp_servers`
-and `mcp_oauth_states` tables, `0026`).
+and `mcp_oauth_states` tables, `0026`/`0027`).
 
 ## The Postgres store
 
@@ -622,8 +627,8 @@ the public `details jsonb` its type publishes — NULL meaning none; see `0013`,
 `0023`), `mcp_servers` (a user's remote MCP servers, each with the sealed `sealed_headers`,
 `sealed_tokens` and `sealed_oauth_client` JSON columns, the public `header_names`/`tools` and
 the connection status; unique `(owner_id, name)`; #303, X10), `mcp_oauth_states` (one pending
-OAuth authorization per row, keyed by `state` and cascading from `mcp_servers`;
-see `0026`) and
+OAuth authorization per row, keyed by `state`, carrying the user the flow belongs to and where
+it was started (`client`), and cascading from `mcp_servers`; see `0026`/`0027`) and
 `user_preferences` (one row per user: the stored `default_model`, or NULL, the `theme`,
 `system` by default, and the three compaction controls — `compaction_threshold` NULL meaning
 the server's own, `summary_model` `same-as-chat` by default, `summary_max_passes` NULL meaning

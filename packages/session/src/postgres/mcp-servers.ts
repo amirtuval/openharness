@@ -1,6 +1,7 @@
 import {
   MAX_MCP_SERVERS_PER_USER,
   newMcpServerId,
+  type McpOAuthClient,
   type McpServer,
   type McpServerId,
 } from '@openharness/protocol'
@@ -244,6 +245,7 @@ export class PostgresMcpServerStore implements McpServerStore {
           user_id: input.userId,
           server_id: input.serverId,
           code_verifier: input.codeVerifier,
+          client: input.client,
           created_at: at,
           expires_at: instant(Date.parse(input.expiresAt)),
         })
@@ -266,6 +268,9 @@ export class PostgresMcpServerStore implements McpServerStore {
       userId: row.user_id,
       serverId: row.server_id as McpServerId,
       codeVerifier: row.code_verifier,
+      // The column is checked against the protocol's vocabulary, so a hand-edited row cannot
+      // read back as a value no reader accepts — the cast mirrors `server_id`'s.
+      client: row.client as McpOAuthClient,
     }
   }
 

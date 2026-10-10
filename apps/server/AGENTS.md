@@ -76,13 +76,17 @@ protocol's schemas, so the shapes are not repeated here — see
 | `POST`   | `/v1/me/mcp_servers/{mcp_server_id}`            | `UpdateMcpServerRequestSchema`              | the updated `McpServer`, or 404; `headers` replaces the sealed map, omitted keeps it                                                                                          |
 | `DELETE` | `/v1/me/mcp_servers/{mcp_server_id}`            | —                                           | 204; deletes the server and its pending OAuth states                                                                                                                          |
 | `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/test`       | —                                           | the refreshed `McpServer` after the connection check; 400 for a refused URL, 404 for another owner's                                                                          |
-| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/connect`    | —                                           | `{ authorization_url }`; 422 `mcp_connection_error` for a discovery/registration failure, 400 for a non-OAuth server                                                          |
+| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/connect`    | `ConnectMcpServerRequestSchema` (`client`)  | `{ authorization_url }`; 422 `mcp_connection_error` for a discovery/registration failure, 400 for a non-OAuth server                                                          |
 | `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/disconnect` | —                                           | the `McpServer` with its tokens dropped, on `needs_reconnect`                                                                                                                 |
-| `GET`    | `/v1/me/mcp_servers/oauth/callback`             | `code`, `state`                             | the provider's redirect back; 302 to the app naming the connected server, 400 for a bad, expired or misused state                                                             |
+| `GET`    | `/v1/me/mcp_servers/oauth/callback`             | `code`, `state`                             | the provider's redirect back — **no session**; 302 to the app (web) or an HTML page (CLI), 400 with a page for a bad, expired or misused state                                |
 
-Every `/v1` route except `auth-config` requires a session (see "Authentication"), and every
-resource is scoped to its owner. `/api/auth/*` is Better Auth's own surface: sign-in, sign-out,
-the device flow, `/api/auth/error`. Anything else answers 404 in the protocol's error envelope.
+Every `/v1` route except `auth-config` and the MCP OAuth callback requires a session (see
+"Authentication" and "Remote MCP servers"), and every resource is scoped to its owner. The two
+exceptions are registered ahead of the guard, in `app.ts`, and are the exact method and path:
+`GET /v1/auth-config` is read before sign-in (#62), and `GET /v1/me/mcp_servers/oauth/callback`
+is a browser navigation that authenticates by its `state` (#311). `/api/auth/*` is Better Auth's
+own surface: sign-in, sign-out, the device flow, `/api/auth/error`. Anything else answers 404 in
+the protocol's error envelope.
 
 `POST …/events` is the only way user input enters the system, and it does two things in a
 fixed order: it **stores** the events (`processed_at: null`, which is what makes them queued)
@@ -628,13 +632,41 @@ and the guarded `fetch`.
   its metadata (RFC 8414, the OIDC discovery document as a fallback), registers this server
   dynamically (RFC 7591 — no `registration_endpoint` is a clear 422; pre-registered clients are
   a follow-up), mints a PKCE pair and a `state`, stores the registration sealed and answers the
-  authorization URL. The provider redirects the browser back to
-  `GET /v1/me/mcp_servers/oauth/callback`, which consumes the `state` single-use
-  (`consumeOAuthState`, ten-minute life, checked against the store's clock), refuses one that
-  belongs to another user, exchanges the code with the verifier (PKCE is proved by the stub in
-  the tests) and seals the tokens. The state is bound to the user **and** the server: the
-  callback requires the signed-in user to be the one who started it, and a used, expired,
-  unknown or another user's state is a 400.
+  authorization URL. Its optional body (`ConnectMcpServerRequestSchema`) carries a `client`
+  field, `web` or `cli` and `web` by default, saying where the flow was started; that rides on
+  the pending state. The provider redirects the browser back to
+  `GET /v1/me/mcp_servers/oauth/callback`.
+- **The callback is authenticated by the `state`, not by a session** (#311).
+  `registerMcpOAuthCallbackRoute` is registered **ahead of the `/v1` guard** in `app.ts` — the
+  one other route besides `/v1/auth-config`, and by the same mechanism, registration order — and
+  it is that exact `GET` and nothing else: every other `/v1/me/mcp_servers` route stays behind
+  the guard and owner-scoped. It has to be that way: decision X10 has `oh` start the flow by
+  opening the authorization URL in the **system browser**, and that browser may never have
+  signed in here (`oh` authenticates with a bearer token from the device flow). So
+  `completeCallback({ code, state }, { sessionUserId? })` looks the pending authorization up by
+  `state` alone (`consumeOAuthState`: single use, ten-minute life checked against the store's
+  clock, bound to the user and the server) and completes it **for that user and server**,
+  exchanges the code with the verifier (PKCE is proved by the stub in the tests) and seals the
+  tokens. A used, expired or unknown state is a 400 and the flow must be started again; the
+  state is consumed either way, so a refused callback cannot be retried. A session present in
+  the browser is used for exactly one thing — `sessionUserId` belonging to a **different** user
+  than the state's refuses the callback rather than completing it for the wrong person (a
+  confused flow) — and `app.ts` wires the lookup as `RouteDeps.sessionUser` (`auth.api.getSession`,
+  the same call `revalidateSession` makes).
+- **The callback answers a page, not the protocol's envelope.** It is a browser navigation, so
+  `routes/mcp-servers.ts` renders a small self-contained HTML page (`callbackPage`) instead of
+  JSON: a success started from the **web** is a 302 to the app's settings screen naming the
+  connected server (as before), one started from the **cli** is a page reading "Connected
+  `<name>`. You can close this tab and return to openharness." because the CLI is waiting on its
+  own terminal. A refusal this route can explain — the authorization server's own
+  `error`/`error_description`, a bad, expired or misused state, a token exchange the provider
+  refused — is the same page with a 4xx (`HttpError`'s status, 422 for an `McpOAuthError`); an
+  unexpected error is rethrown, so `app.onError` logs it and answers the protocol's envelope
+  exactly as it does for any other route, and never a stack trace. Every page carries
+  `Cache-Control: no-store`, and everything
+  echoed into one (a server name, an error description, both input) goes through `escapeHtml` —
+  a callback must not be an XSS vector. The trust boundary this rests on is written out in
+  [`docs/threat-model.md`](../../docs/threat-model.md).
 - **Tokens are refreshed before expiry and once on a 401** (`#requestHeaders`, `#refreshTokens`):
   a token within a minute of its `expires_at` is refreshed, and a check that gets a 401 from the
   MCP server refreshes once and retries. A refresh that fails — no refresh token, a revoked one,
@@ -1442,7 +1474,7 @@ before the instance stops serving it (#151).
 | `startSessionRecheck(options)`, `DEFAULT_SESSION_RECHECK_MS`                                                                                                                                                                                                                                                                                                   | the periodic session re-check of a long-lived response (#76)                                                                                                                                                                                                                                                                                |
 | `SESSION_INVALID_MESSAGE`, `SSE_SESSION_INVALID`                                                                                                                                                                                                                                                                                                               | what a stream says when its session is revoked or expires (#76)                                                                                                                                                                                                                                                                             |
 | `createProviderCredentialValidator`, `validateProviderCredential`, `VALIDATABLE_PROVIDERS`                                                                                                                                                                                                                                                                     | the one cheap call a saved credential is checked with — a provider list for `api_key`, a guarded Azure request for `azure_openai`, a guarded `GET {base_url}/models` for `openai_compatible`, a signed `ListFoundationModels` for `bedrock`, an authenticated `projects.locations.endpoints` read for `vertex` (#245 A3a/A3b/A3c/A3d; #251) |
-| `createMcpServerService(options)`, `McpServerService`, `McpServerServiceOptions`, `ResolvedMcpServer`, `DEFAULT_MCP_CHECK_TIMEOUT_MS`, `MCP_OAUTH_STATE_TTL_MS`                                                                                                                                                                                                | the remote-MCP-server resource (epic #303, X10): CRUD with sealed secrets, the connection check, the OAuth 2.1 flow, and `resolve` — the URL and ready-to-use auth headers the tool loop (#312) consumes                                                                                                                                    |
+| `createMcpServerService(options)`, `McpServerService`, `McpServerServiceOptions`, `ResolvedMcpServer`, `CompletedMcpOAuth`, `DEFAULT_MCP_CHECK_TIMEOUT_MS`, `MCP_OAUTH_STATE_TTL_MS`                                                                                                                                                                           | the remote-MCP-server resource (epic #303, X10): CRUD with sealed secrets, the connection check, the OAuth 2.1 flow, and `resolve` — the URL and ready-to-use auth headers the tool loop (#312) consumes                                                                                                                                    |
 | `createMcpFetch(options)`, `McpFetchOptions`, `DEFAULT_MCP_FETCH_TIMEOUT_MS`, `MCP_IDLE_TIMEOUT_MS`                                                                                                                                                                                                                                                            | the guarded fetch every MCP and OAuth request goes through: `safeFetch` with the streaming limits, a deadline, and the self-host setting (#303, X10)                                                                                                                                                                                        |
 | `McpOAuthError`, `discoverResource`, `discoverAuthorizationServer`, `registerClient`, `createPkce`, `authorizationUrl`, `exchangeAuthorizationCode`, `refreshAccessToken`, `protectedResourceMetadataUrl`, `authorizationServerMetadataUrls`, `ProtectedResourceMetadata`, `AuthorizationServerMetadata`, `OAuthClientRegistration`, `OAuthTokens`, `PkcePair` | the OAuth 2.1 client (RFC 9728/8414/7591, PKCE): discovery, registration, the authorization URL, the code exchange and refresh (#303, X10)                                                                                                                                                                                                  |
 | `mcpSecretAad`, `sealMcpSecret`, `openMcpSecret`, `sealMcpJson`, `openMcpJson`, `McpSecretBinding`, `McpSecretPurpose`                                                                                                                                                                                                                                         | sealing a user's MCP secrets with `@openharness/vault` under AAD `mcp:{userId}\|{serverId}\|{purpose}` (#303, X10)                                                                                                                                                                                                                          |
@@ -1812,13 +1844,17 @@ parallel with each other.
   malformed path id refused), the connection check (a down server stored in `status: error` and
   reported on demand, an authenticated one whose token is refused), and `resolve`/`listEnabled`
   for the tool loop.
-- `mcp-oauth.test.ts` (#303, X10) — the OAuth 2.1 client end to end against a stub
+- `mcp-oauth.test.ts` (#303, X10; #311) — the OAuth 2.1 client end to end against a stub
   authorization server and MCP server on loopback: RFC 9728 then RFC 8414 discovery, RFC 7591
   registration, the authorization URL's PKCE parameters, the callback completing the flow and
-  sealing the tokens, a 422 when the server offers no dynamic registration, the refusals a used,
-  expired, unknown or another user's `state` gets, a refresh before expiry, a refresh once on a
-  401, a failed refresh landing the server on `needs_reconnect`, and a disconnect dropping the
-  tokens. `test-support/mcp.ts` is the two stubs.
+  sealing the tokens, a 422 when the server offers no dynamic registration, a refresh before
+  expiry, a refresh once on a 401, a failed refresh landing the server on `needs_reconnect`, and
+  a disconnect dropping the tokens. Since #311 the callback itself: it completes with **no
+  session at all** (what `oh`'s system browser has), a **`cli`**-started flow renders the HTML
+  page while a **web**-started one still redirects, a state presented with **another user's**
+  session is refused (and left `needs_reconnect`), a used, unknown or expired state is a 400
+  with a readable page, and the authorization server's own `error`/`error_description` is
+  rendered **escaped** (`<script>` cannot survive it). `test-support/mcp.ts` is the two stubs.
 - `model-catalog.test.ts` — `GET /v1/models` (issue #90) over a **scripted fetch** and a
   registry stub: only the caller's providers are listed and only their URLs called, OpenAI's
   list filtered of embeddings/tts/whisper/dall-e/moderation, Gemini filtered by

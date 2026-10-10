@@ -283,12 +283,16 @@ export function runMcpServerStoreConformance(
           userId: OWNER_A,
           serverId: server.id,
           codeVerifier: 'verifier-1',
+          client: 'cli',
           expiresAt: timestampAt(clock.currentMs + 10 * SECOND),
         })
+        // The client the flow was started from comes back with the rest: the callback is
+        // reached without a session and answers the state's user, server and origin (#311).
         expect(await store.consumeOAuthState('state-1')).toEqual({
           userId: OWNER_A,
           serverId: server.id,
           codeVerifier: 'verifier-1',
+          client: 'cli',
         })
         // Single use: the row is gone whatever the expiry.
         expect(await store.consumeOAuthState('state-1')).toBeNull()
@@ -302,6 +306,7 @@ export function runMcpServerStoreConformance(
           userId: OWNER_A,
           serverId: server.id,
           codeVerifier: 'verifier-1',
+          client: 'web',
           expiresAt: timestampAt(clock.currentMs + SECOND),
         })
         clock.advance(SECOND)
@@ -317,6 +322,7 @@ export function runMcpServerStoreConformance(
           userId: OWNER_A,
           serverId: server.id,
           codeVerifier: 'v1',
+          client: 'web',
           expiresAt: timestampAt(clock.currentMs + 10 * SECOND),
         })
         await store.createOAuthState({
@@ -324,6 +330,7 @@ export function runMcpServerStoreConformance(
           userId: OWNER_A,
           serverId: server.id,
           codeVerifier: 'v2',
+          client: 'web',
           expiresAt: timestampAt(clock.currentMs + 10 * SECOND),
         })
         expect(await store.consumeOAuthState('first')).toBeNull()

@@ -774,6 +774,7 @@ if (target === null) {
         userId: OWNER_A,
         serverId: server.id,
         codeVerifier: 'v1',
+        client: 'web',
         expiresAt: timestampAt(START_MS + 60_000),
       })
       // A server delete cascades to its pending states, so a callback can no longer complete.

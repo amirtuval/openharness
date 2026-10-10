@@ -1,5 +1,6 @@
 import type { SessionStore } from '@openharness/session'
 
+import type { AuthUser } from '../auth'
 import type { SocialProviderName } from '../auth-profile'
 import type { ModelCatalog } from '../catalog/catalog'
 import type { UsageReader } from '../usage'
@@ -66,6 +67,17 @@ export interface RouteDeps {
    * Auth in `app.ts`.
    */
   readonly revalidateSession: (headers: Headers) => Promise<boolean>
+  /**
+   * The signed-in caller behind a request's headers, or `null` when there is none (A2). Wired
+   * to Better Auth in `app.ts`.
+   *
+   * The OAuth callback is the one route that asks. It is registered ahead of the `/v1` auth
+   * guard — the browser `oh` opens may never have signed in to this server — and it uses a
+   * session only to refuse a flow presented by a user other than the one the `state` is bound
+   * to (#311). Every route behind the guard reads `c.get('user')` instead, which is always
+   * there.
+   */
+  readonly sessionUser: (headers: Headers) => Promise<AuthUser | null>
 }
 
 /**

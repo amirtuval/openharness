@@ -134,6 +134,7 @@ export {
   MCP_OAUTH_STATE_TTL_MS,
   DEFAULT_MCP_CHECK_TIMEOUT_MS,
   createMcpServerService,
+  type CompletedMcpOAuth,
   type McpServerService,
   type McpServerServiceOptions,
   type ResolvedMcpServer,

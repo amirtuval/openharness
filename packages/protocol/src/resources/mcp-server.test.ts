@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { newMcpServerId } from '../ids'
 import {
+  ConnectMcpServerRequestSchema,
   ConnectMcpServerResponseSchema,
   CreateMcpServerRequestSchema,
   ListMcpServersResponseSchema,
@@ -220,5 +221,12 @@ describe('MCP server resource', () => {
       ConnectMcpServerResponseSchema.parse({ authorization_url: 'https://as.example.com/auth' })
         .authorization_url,
     ).toBe('https://as.example.com/auth')
+  })
+
+  it('defaults a connect body to the web and accepts the CLI', () => {
+    // The whole body is optional (#311): a request with nothing in it means the web app.
+    expect(ConnectMcpServerRequestSchema.parse({}).client).toBe('web')
+    expect(ConnectMcpServerRequestSchema.parse({ client: 'cli' }).client).toBe('cli')
+    expect(ConnectMcpServerRequestSchema.safeParse({ client: 'mobile' }).success).toBe(false)
   })
 })

@@ -351,8 +351,10 @@ export interface McpServersTable {
  * authorization server echoes back — and consumed in one transaction that deletes it, so a
  * callback replay finds nothing. `code_verifier` is stored in the clear on purpose: it is a
  * nonce for one round trip, not a durable credential, and it is useless once the code it is
- * bound to has been redeemed. Both foreign keys cascade — a deleted server takes its pending
- * states, and so does a deleted user.
+ * bound to has been redeemed. The row also carries the user the flow was started by and where
+ * it was started (`client`), because the callback is reached without a session and the `state`
+ * is the only thing it arrives with (#311). Both foreign keys cascade — a deleted server takes
+ * its pending states, and so does a deleted user.
  */
 export interface McpOAuthStatesTable {
   /** The opaque `state`; the primary key. */
@@ -361,6 +363,8 @@ export interface McpOAuthStatesTable {
   server_id: string
   /** The PKCE code verifier the challenge was derived from. */
   code_verifier: string
+  /** Where the flow was started — `web` or `cli` — so the callback knows how to answer (#311). */
+  client: string
   created_at: Date
   expires_at: Date
 }

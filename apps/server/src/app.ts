@@ -24,7 +24,7 @@ import {
 
 import { consoleLogger, type AppEnv, type Logger } from './types'
 import { createAuthGuard } from './auth-guard'
-import { rewriteDevLoginRequest, type BetterAuthInstance } from './auth'
+import { rewriteDevLoginRequest, type AuthUser, type BetterAuthInstance } from './auth'
 import { FORWARDED_FOR_HEADER, resolveClientIp, withClientIpHeader } from './client-ip'
 import { emptyRegistry, type ModelRegistry } from './catalog/registry'
 import { DefaultModelPicker } from './default-model'
@@ -40,7 +40,7 @@ import type { AuthDeps, RouteDeps } from './routes/deps'
 import { registerEventRoutes } from './routes/events'
 import { createMcpFetch } from './mcp/fetch'
 import { createMcpServerService, type McpServerServiceOptions } from './mcp/service'
-import { registerMcpServerRoutes } from './routes/mcp-servers'
+import { registerMcpOAuthCallbackRoute, registerMcpServerRoutes } from './routes/mcp-servers'
 import { registerMeRoutes } from './routes/me'
 import { registerModeRoutes } from './routes/modes'
 import { registerModelRoutes } from './routes/models'
@@ -418,6 +418,10 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
   const registry = options.registry ?? emptyRegistry
   const revalidateSession = async (headers: Headers): Promise<boolean> =>
     (await options.auth.instance.api.getSession({ headers })) !== null
+  // The caller behind a request, when there is one. The OAuth callback is the route that asks
+  // (#311): it runs ahead of the guard, and a session is optional there.
+  const sessionUser = async (headers: Headers): Promise<AuthUser | null> =>
+    (await options.auth.instance.api.getSession({ headers }))?.user ?? null
 
   const deps: RouteDeps = {
     store: options.store,
@@ -457,6 +461,7 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
     },
     revocations,
     revalidateSession,
+    sessionUser,
     ...(options.sseKeepaliveMs === undefined ? {} : { sseKeepaliveMs: options.sseKeepaliveMs }),
     ...(options.sessionRecheckMs === undefined
       ? {}
@@ -469,6 +474,18 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
   app.get(`${API_VERSION_PREFIX}/auth-config`, (c) =>
     c.json({ providers: deps.auth.enabledProviders, dev_login: deps.auth.devLogin }),
   )
+
+  // The OAuth callback is the second `/v1` route registered ahead of the guard, and for the
+  // same reason: registration order is dispatch order, so the guard below never runs for it. It
+  // has to be — the epic's decision X10 has `oh` start the flow by opening the authorization URL
+  // in the system browser, and that browser may never have signed in here (`oh` authenticates
+  // with a bearer token from the device flow). The route authenticates itself by the `state`
+  // alone: high-entropy, single use, ten minutes old and bound to the user and the server it was
+  // minted for, so it completes the flow for that user — and a session that is present and
+  // belongs to somebody else refuses it (epic #303, X10; #311). It is this exact `GET` and
+  // nothing else: every other `/v1/me/mcp_servers` route is registered below, behind the guard
+  // and owner-scoped like the rest of the API.
+  registerMcpOAuthCallbackRoute(app, deps)
 
   // A2: everything else under /v1 — the SSE stream and the AI SDK adapter included — needs a
   // session, and a cookie-authenticated write needs a trusted Origin.

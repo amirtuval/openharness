@@ -118,9 +118,9 @@ the only way an event is ever removed together with its session.
 | `POST`   | `/v1/me/mcp_servers/{mcp_server_id}`            | update one; omitted fields keep their value, and `headers` replaces the sealed map              |
 | `DELETE` | `/v1/me/mcp_servers/{mcp_server_id}`            | delete one and its pending OAuth states; `204`                                                  |
 | `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/test`       | run the connection check now: initialize, list tools, price their definitions                   |
-| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/connect`    | start OAuth 2.1; answers the authorization URL to open in a browser                             |
+| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/connect`    | start OAuth 2.1; optional `client` (`web`/`cli`); answers the authorization URL                 |
 | `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/disconnect` | drop the OAuth tokens; the server lands on `needs_reconnect`                                    |
-| `GET`    | `/v1/me/mcp_servers/oauth/callback`             | the provider's redirect back; completes the flow and returns to the app                         |
+| `GET`    | `/v1/me/mcp_servers/oauth/callback`             | the provider's redirect back; completes the flow and answers a browser page — **no session**    |
 | `GET`    | `/v1/models`                                    | the chat models the caller's own keys can use, with per-provider status                         |
 | `GET`    | `/v1/sessions/{session_id}/usage`               | what one session spent: totals, cost, and the per-model breakdown                               |
 | `GET`    | `/v1/me/usage`                                  | what the caller spent between two local days (`from`, `to`, `tz`): by model and by day          |
@@ -875,9 +875,27 @@ curl -X POST localhost:3000/v1/me/mcp_servers/mcps_01J…/connect \
   and authorization code + PKCE. `POST …/{id}/connect` answers the authorization URL; the user
   opens it, the provider redirects back to this server's own callback
   (`GET /v1/me/mcp_servers/oauth/callback`), which exchanges the code and stores the tokens
-  sealed. The `state` is bound to the user and the server, is single use and lives ten minutes;
-  a used, expired or another user's state is a `400`. Tokens are refreshed before they expire
-  and once on a `401`, and a failed refresh marks the server `needs_reconnect`.
+  sealed. Tokens are refreshed before they expire and once on a `401`, and a failed refresh
+  marks the server `needs_reconnect`.
+- **The callback is authenticated by the `state`, not by a session.** It is a browser
+  navigation, not an API call, and it is the one `/v1` route outside the auth guard besides
+  `/v1/auth-config`: `oh` starts the flow by opening the authorization URL in the **system
+  browser**, and that browser may never have signed in here (`oh` itself uses a bearer token
+  from the device flow). So the `state` — 32 random bytes, single use, ten minutes old and bound
+  in `mcp_oauth_states` to the user **and** the server it was minted for — is what completes the
+  flow: it is consumed atomically and answered for that user and server. A used, expired or
+  unknown state is a `400`; so is a state presented with a session belonging to a **different**
+  user, which is refused rather than completed (a confused flow). The state is consumed either
+  way, so a refused callback cannot be retried.
+- **The callback answers a page.** A success started from the web app is a `302` back to its
+  settings screen; one started from the CLI is a small self-contained HTML page ("Connected
+  `<server>`. You can close this tab and return to openharness."), because the CLI is waiting on
+  its own terminal. Failures — the authorization server's own `error`/`error_description`
+  included — are a readable HTML page with a `4xx` status. Every page carries
+  `Cache-Control: no-store`, and everything echoed into one (a server name, an error
+  description) is HTML-escaped. `POST …/{id}/connect` takes an optional `client` field, `"web"`
+  or `"cli"` — `web` when omitted, which is what the app sends — recording where the flow
+  started.
 - **A cap of twenty** `MAX_MCP_SERVERS_PER_USER`: every enabled server contributes its whole
   tool list to every request once tools land (#312), so the cap is a context budget as much as
   a row count. A duplicate name and the twenty-first server are the `409` a mode's are.

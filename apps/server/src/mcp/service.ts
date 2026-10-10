@@ -6,6 +6,7 @@ import {
   MCP_LAST_ERROR_MAX_LENGTH,
   newMcpServerId,
   type CreateMcpServerRequest,
+  type McpOAuthClient,
   type McpServer,
   type McpServerId,
   type McpToolDefinition,
@@ -85,6 +86,21 @@ export interface ResolvedMcpServer {
   readonly headers: Readonly<Record<string, string>>
 }
 
+/**
+ * A completed OAuth callback: the server that was connected, and where the flow was started.
+ *
+ * The route answers a browser, not an API caller, and the two origins want different endings —
+ * the app is redirected to its settings screen, the CLI (which opened the authorization URL in
+ * the system browser and is waiting on its own terminal) is shown a page to close — so the
+ * origin the `state` recorded travels back with the server (#311).
+ */
+export interface CompletedMcpOAuth {
+  /** The server the flow connected, with the tools its check just listed. */
+  readonly server: McpServer
+  /** Where the flow was started: the web app, or the CLI. */
+  readonly client: McpOAuthClient
+}
+
 /** How {@link createMcpServerService} is wired. */
 export interface McpServerServiceOptions {
   /** Where the servers and their sealed secrets live. */
@@ -123,13 +139,32 @@ export interface McpServerService {
   delete(userId: UserId, serverId: McpServerId): Promise<boolean>
   /** Run the connection check now and return the refreshed server; `null` for another owner's. */
   test(userId: UserId, serverId: McpServerId): Promise<McpServer | null>
-  /** Start the OAuth flow: discover, register, and answer the authorization URL. */
-  connect(userId: UserId, serverId: McpServerId): Promise<{ authorization_url: string } | null>
-  /** Complete the OAuth flow from the provider's callback. */
-  completeCallback(
+  /**
+   * Start the OAuth flow: discover, register, and answer the authorization URL.
+   *
+   * `client` records where the flow was started — the web app or the CLI — on the pending
+   * `state`, because the callback is reached by a browser that may have no session here and the
+   * state is the only thing it arrives with (#311).
+   */
+  connect(
     userId: UserId,
+    serverId: McpServerId,
+    client: McpOAuthClient,
+  ): Promise<{ authorization_url: string } | null>
+  /**
+   * Complete the OAuth flow from the provider's callback (epic #303, X10; #311).
+   *
+   * The `state` is the authentication: it is high-entropy, single use, short-lived and bound to
+   * the user and the server it was minted for, so the flow is completed for **that** user — the
+   * callback needs no session (the browser `oh` opened may never have signed in). A session that
+   * is present is only a defence against a confused flow: `sessionUserId` belonging to somebody
+   * other than the state's user refuses the callback rather than completing it for the wrong
+   * person. The state is consumed either way, so a refused callback cannot be retried.
+   */
+  completeCallback(
     params: { readonly code: string; readonly state: string },
-  ): Promise<McpServer>
+    options?: { readonly sessionUserId?: UserId },
+  ): Promise<CompletedMcpOAuth>
   /** Drop a server's OAuth tokens, leaving it `needs_reconnect`. */
   disconnect(userId: UserId, serverId: McpServerId): Promise<McpServer | null>
   /**
@@ -377,6 +412,7 @@ class McpServerServiceImpl implements McpServerService {
   async connect(
     userId: UserId,
     serverId: McpServerId,
+    client: McpOAuthClient,
   ): Promise<{ authorization_url: string } | null> {
     const stored = await this.#store.get(serverId, { ownerId: userId })
     if (stored === null) {
@@ -431,6 +467,7 @@ class McpServerServiceImpl implements McpServerService {
       userId,
       serverId,
       codeVerifier: pkce.verifier,
+      client,
       expiresAt: new Date(this.#now().getTime() + MCP_OAUTH_STATE_TTL_MS).toISOString(),
     })
     return {
@@ -446,20 +483,25 @@ class McpServerServiceImpl implements McpServerService {
   }
 
   async completeCallback(
-    userId: UserId,
     params: { readonly code: string; readonly state: string },
-  ): Promise<McpServer> {
+    options: { readonly sessionUserId?: UserId } = {},
+  ): Promise<CompletedMcpOAuth> {
     const pending = await this.#store.consumeOAuthState(params.state)
     if (pending === null) {
       throw invalidRequest(
         'this authorization is unknown, expired or already used; start the connection again',
       )
     }
-    if (pending.userId !== userId) {
-      // The state is bound to the user who started it: a different signed-in user presenting it
-      // is a misuse, and completing it would hand them the tokens.
-      throw invalidRequest('this authorization belongs to another user')
+    // The state authenticates the callback. A session is not required — the browser `oh` opened
+    // may never have signed in here — but one that is present and belongs to somebody else is a
+    // confused flow: the state is bound to the user who started it, and completing it would
+    // hand this session the tokens. Consuming the state above means the refused flow is over.
+    if (options.sessionUserId !== undefined && options.sessionUserId !== pending.userId) {
+      throw invalidRequest(
+        'this authorization was started by another user; start the connection again',
+      )
     }
+    const userId = pending.userId
     const stored = await this.#store.get(pending.serverId, { ownerId: userId })
     if (stored === null) {
       throw invalidRequest('the server this authorization was for no longer exists')
@@ -500,7 +542,10 @@ class McpServerServiceImpl implements McpServerService {
     if (refreshed === null) {
       throw invalidRequest('the server this authorization was for no longer exists')
     }
-    return this.#runAndStoreCheck(userId, refreshed, false)
+    return {
+      server: await this.#runAndStoreCheck(userId, refreshed, false),
+      client: pending.client,
+    }
   }
 
   async disconnect(userId: UserId, serverId: McpServerId): Promise<McpServer | null> {
