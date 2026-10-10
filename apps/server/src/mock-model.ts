@@ -238,8 +238,14 @@ function streamOf(plan: ModelPlan): ReadableStream<LanguageModelV4StreamPart> {
         finishReason: { unified: 'stop', raw: undefined },
         usage: {
           inputTokens: {
+            // `MOCK_MODEL_USAGE.input_tokens` is the cache-inclusive total, the way an
+            // OpenAI-shaped report reads, so the uncached half is it minus both cache counters
+            // (epic #277, K2). The fixed counts carry no cache, so the two are equal today.
             total: MOCK_MODEL_USAGE.input_tokens,
-            noCache: MOCK_MODEL_USAGE.input_tokens - MOCK_MODEL_USAGE.cache_read_input_tokens,
+            noCache:
+              MOCK_MODEL_USAGE.input_tokens -
+              MOCK_MODEL_USAGE.cache_read_input_tokens -
+              MOCK_MODEL_USAGE.cache_creation_input_tokens,
             cacheRead: MOCK_MODEL_USAGE.cache_read_input_tokens,
             cacheWrite: MOCK_MODEL_USAGE.cache_creation_input_tokens,
           },

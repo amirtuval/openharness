@@ -547,7 +547,10 @@ prices each request with the registry's rates, and assembles the totals and the 
   `unpriced_requests`, #247 decided 2026-10-09): one such request no longer turns a whole total
   into `—`, the unknown part is named rather than guessed, and `cost` is `null` only when nothing
   in the total could be priced. A request whose span start named no model (a log from before the
-  field existed) is in the totals and in no breakdown, and counts among the unpriced ones.
+  field existed) is in the totals and in no breakdown, and counts among the unpriced ones. The
+  `input_tokens` these totals carry is the **uncached** input — the counters are disjoint, which
+  is what makes the per-counter pricing correct — because the brain normalizes each provider
+  family into them at the model seam (epic #277, K2; `packages/brain/src/model.ts`).
 - **The per-session route** is owner-scoped (another user's session is the store's
   `SessionNotFoundError`, which `app.onError` maps to the 404) and reads that session's whole
   log. **The per-user route** has no id in its path — it is always the caller — and is **one
