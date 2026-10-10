@@ -1,0 +1,40 @@
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Claude Sonnet 4.5 (US) · sesn_…M02KS4 · idle
+Which model?
+Search: type to filter
+  bedrock
+❯ 1. Claude 3.5 Haiku
+  2. Claude Opus 4.7 (Global) · 1M context
+  3. Claude Sonnet 4.5 (US) · 200k context
+  4. Other model id…
+↑/↓ or a number to choose, Enter to start, Ctrl+C to quit
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

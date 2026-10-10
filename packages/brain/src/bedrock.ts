@@ -58,6 +58,18 @@ export const BEDROCK_FOUNDATION_MODELS_PATH =
   '/foundation-models?byOutputModality=TEXT&byInferenceType=ON_DEMAND'
 
 /**
+ * The other control-plane read the catalogue makes: the region's inference profiles (issue
+ * #274).
+ *
+ * A model whose only access is a cross-region inference profile is not in the on-demand
+ * foundation-model list — and in many regions that is where the newest Claude and Nova models
+ * are — so `ListInferenceProfiles` is what names them. It is a plain `GET` with no required
+ * query (the catalogue adds `maxResults`/`nextToken` for paging), signed for the same `bedrock`
+ * service as {@link BEDROCK_FOUNDATION_MODELS_PATH}, against the same control-plane host.
+ */
+export const BEDROCK_INFERENCE_PROFILES_PATH = '/inference-profiles'
+
+/**
  * The base URL `@ai-sdk/amazon-bedrock` talks to for one region.
  *
  * Passed as the provider's `baseURL` **explicitly** rather than left to its default: the

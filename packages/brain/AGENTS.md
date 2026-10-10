@@ -96,6 +96,7 @@ emits what that reaches.
 | `azureFetch`, `createAzureFetch(options)`, `azureBaseUrl(endpoint)`                                                                    | the Azure `fetch` (safeFetch under the streaming-safe limits) and the base URL it builds                                                                                                                                                                                                        |
 | `redactSecrets(text, secrets)`                                                                                                         | `redactSecret` for a credential that carries more than one secret                                                                                                                                                                                                                               |
 | `BEDROCK_SERVICE`, `bedrockRuntimeBaseUrl(region)`, `bedrockControlPlaneUrl(region, path)`                                             | the SigV4 service both Bedrock hosts are signed for, and the two AWS hosts a region derives                                                                                                                                                                                                     |
+| `BEDROCK_FOUNDATION_MODELS_PATH`, `BEDROCK_INFERENCE_PROFILES_PATH`                                                                    | the two control-plane paths the server's save-time check and catalogue read (models, and inference profiles, #274)                                                                                                                                                                              |
 | `signBedrockRequest(credential, url, input?)`, `SignedBedrockRequest`, `BedrockRequestInput`                                           | one SigV4-signed Bedrock request, returned rather than sent — what the server's save-time check and catalogue read use                                                                                                                                                                          |
 | `openAICompatibleFetch`, `createOpenAICompatibleFetch(options)`, `openAICompatibleBaseUrl(baseUrl)`                                    | the custom endpoint's `fetch` (safeFetch under the streaming-safe limits, with the self-host `allowPrivate` option, #249) and the base URL it normalizes                                                                                                                                        |
 | `isVertexModelId(id)`, `isVertexAnthropicModel(id)`                                                                                    | which Vertex ids this build can serve, and which of them the Anthropic client builds — the same rule the server's catalogue filters with (#251)                                                                                                                                                 |
@@ -496,8 +497,9 @@ is `<name>/<bedrock model id>`, and the client is `createAmazonBedrock(…)(mode
   the user's stored keys. A deployment with the variable set would otherwise authenticate every
   request with a token nobody saved.
 - **The control plane is signed here, not by the provider package.** `@ai-sdk/amazon-bedrock`
-  has no control-plane surface, so the server's `ListFoundationModels` check and its catalogue
-  read use `signBedrockRequest` — `aws4fetch`, the same signer the provider uses internally, so
+  has no control-plane surface, so the server's `ListFoundationModels` check and its two
+  catalogue reads — `ListFoundationModels` and `ListInferenceProfiles`, #274 — use
+  `signBedrockRequest` — `aws4fetch`, the same signer the provider uses internally, so
   both paths sign identically. The two AWS hosts are signed for the one `bedrock` service, and a
   returned value rather than a `fetch` keeps the server's own egress-proxy-aware client in the
   path. Nothing in this module reads an `AWS_*` variable or a shared credentials file; the decoy
@@ -523,8 +525,9 @@ is `<name>/<bedrock model id>`, and the client is `createAmazonBedrock(…)(mode
   the user's stored keys. A deployment with the variable set would otherwise authenticate every
   request with a token nobody saved.
 - **The control plane is signed here, not by the provider package.** `@ai-sdk/amazon-bedrock`
-  has no control-plane surface, so the server's `ListFoundationModels` check and its catalogue
-  read use `signBedrockRequest` — `aws4fetch`, the same signer the provider uses internally, so
+  has no control-plane surface, so the server's `ListFoundationModels` check and its two
+  catalogue reads — `ListFoundationModels` and `ListInferenceProfiles`, #274 — use
+  `signBedrockRequest` — `aws4fetch`, the same signer the provider uses internally, so
   both paths sign identically. The two AWS hosts are signed for the one `bedrock` service, and a
   returned value rather than a `fetch` keeps the server's own egress-proxy-aware client in the
   path. Nothing in this module reads an `AWS_*` variable or a shared credentials file; the decoy

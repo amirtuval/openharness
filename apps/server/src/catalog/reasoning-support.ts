@@ -6,7 +6,8 @@ import {
   type ReasoningEffort,
 } from '@openharness/protocol'
 
-import type { ModelRegistry } from './registry'
+import { bedrockUnderlyingModelId } from './bedrock-profiles'
+import type { ModelRegistry, RegistryModel } from './registry'
 
 /**
  * Which reasoning efforts a model takes, per model (#252's follow-up).
@@ -49,7 +50,10 @@ const OUR_EFFORTS: readonly ReasoningEffort[] = ['low', 'medium', 'high']
  * `RunTurnOptions.reasoningSupportFor`.
  *
  * A `provider/model` id is split on its first slash (the split a `provider/model` id has — see
- * `providerOf`), and the model is looked up in the registry's list for that provider.
+ * `providerOf`), and the model is looked up in the registry's list for that provider. A Bedrock
+ * **cross-region inference profile** id that the registry has not itself filed is looked up by
+ * the foundation model it wraps ({@link findModel}); its reasoning knob is that model's (issue
+ * #274).
  *
  * `undefined` is a real answer, not a failure: the registry knows nothing about this id — an
  * unknown provider, a model the snapshot predates, or a free-text id a host accepts (C5) — and
@@ -71,12 +75,38 @@ export function createReasoningSupportResolver(registry: ModelRegistry): Reasoni
     if (key === undefined) {
       return undefined
     }
-    const model = registry.models(key).find((entry) => entry.id === id)
+    const model = findModel(registry, key, id, credentialType)
     if (model === undefined) {
       return undefined
     }
     return OUR_EFFORTS.filter((level) => model.efforts?.includes(level) ?? false)
   }
+}
+
+/**
+ * The registry's entry for a model id, with one fallback: a **Bedrock cross-region inference
+ * profile** is looked up by the foundation model it wraps when its own id is not filed.
+ *
+ * A profile's model id (`us.anthropic.claude-sonnet-4-5-20250929-v1:0`) is geography-scoped —
+ * and an application profile's is account-scoped — so models.dev may not have that exact id
+ * even though it files the model underneath it. The profile's reasoning knob is the wrapped
+ * model's, and `bedrockUnderlyingModelId` is the one place that turns the first into the
+ * second. The fallback is guarded to the `bedrock` credential type for that reason: stripping a
+ * geography prefix off some other provider's id would be turning one model into another.
+ */
+function findModel(
+  registry: ModelRegistry,
+  key: string,
+  id: string,
+  credentialType: ProviderCredentialType,
+): RegistryModel | undefined {
+  const models = registry.models(key)
+  const exact = models.find((entry) => entry.id === id)
+  if (exact !== undefined || credentialType !== 'bedrock') {
+    return exact
+  }
+  const underlying = bedrockUnderlyingModelId(id)
+  return underlying === undefined ? undefined : models.find((entry) => entry.id === underlying)
 }
 
 /**

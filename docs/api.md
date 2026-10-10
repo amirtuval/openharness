@@ -680,15 +680,26 @@ is the usual one; the optional `refresh=true` query parameter bypasses the serve
   credential was read. A deployment whose name is one models.dev's `azure` entry knows carries
   that model's context window; one it does not know gets `null` for both limits rather than a
   guessed number.
-- **A Bedrock credential contributes the region's on-demand text models.** The server reads
-  `ListFoundationModels` in the credential's region, filtered to text output and `ON_DEMAND`
-  inference, and lists each as `<name>/<bedrock model id>` — `bedrock/anthropic.claude-…-v1:0`
-  — with `source: "provider"`. Names, context windows and prices come from models.dev's Amazon
-  Bedrock entry where it has them. A model that can only be called through a **cross-region
-  inference profile** is not listed: its profile id differs per account and region, so the bare
-  model id would be an entry that fails on the first message. A region whose list cannot be read
-  is the usual visible `fallback` (the registry's Bedrock models, acknowledged to their model
-  ids).
+- **A Bedrock credential contributes the region's on-demand text models and its inference
+  profiles.** Two signed reads are made in the credential's region, both listed with
+  `source: "provider"` and both joined against models.dev's Amazon Bedrock entry:
+  - `ListFoundationModels`, filtered to text output and `ON_DEMAND` inference, lists each
+    on-demand model as `<name>/<bedrock model id>` — `bedrock/anthropic.claude-…-v1:0`.
+  - `ListInferenceProfiles` lists each ACTIVE inference profile as
+    `<name>/<inferenceProfileId>` — `bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0`,
+    `…/global.…` — which is the id a Bedrock request names, so models whose only access is a
+    cross-region profile (a large share of the newest Claude and Nova models) are now offered
+    too. A profile's name, window, max output and price come from the **foundation model it
+    wraps** (`models[].modelArn`); its display name is that model's name plus the profile's
+    geography scope — `Claude Sonnet 4.5 (US)`, `… (Global)` — so a reader can tell the profile
+    from the on-demand entry beside it. A model offered both ways is listed both ways.
+
+  A model that cannot be mapped to a foundation model, is not text-capable, or is not ACTIVE is
+  not listed. A region whose **foundation-model** list cannot be read is the usual visible
+  `fallback` (the registry's Bedrock models, acknowledged to their model ids); a region whose
+  **inference-profile** list cannot be read (for example a key without
+  `bedrock:ListInferenceProfiles`) keeps the on-demand models, still `ok`, and logs a warning.
+
 - An `openai_compatible` credential contributes the models its endpoint's `/models` answers —
   `custom/llama3.3` — filtered to chat models the way a provider's list is; a model id that
   matches exactly one models.dev entry borrows its metadata, and an id that matches none or more
