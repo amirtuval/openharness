@@ -46,6 +46,7 @@ repo.
 | `oh providers add [name]`               | connect a provider or a named credential — answer its fields, secrets hidden |
 | `oh providers remove <provider>`        | forget a key (asks; `--yes` skips the question)                              |
 | `oh default-model [provider/model]`     | print or set the model a new chat starts on                                  |
+| `oh settings [flags]`                   | print or set the context (compaction) settings (#282)                        |
 | `oh login`                              | sign in through the browser (the device flow)                                |
 | `oh logout`                             | revoke the session on the server, forget the token                           |
 | `oh whoami`                             | print the signed-in email and server                                         |
@@ -201,6 +202,25 @@ chats? [y/N]` — and a `y` writes it with `preferences.put`; the chat opens eit
 a new chat will ask); `oh default-model <provider/model>` stores it and prints what the
 server kept. The value is the one the web app's Settings show — it lives on the server
 (`GET`/`PUT /v1/me/preferences`), so both frontends start a chat the same way.
+
+### The context settings (#277 C3, #282)
+
+`oh settings` prints the three controls a long chat compacts with, and its flags set them —
+`--threshold <share>` (0.3–0.95, or `default`), `--summary-model <id|same-as-chat>` and
+`--summary-passes <n|default>` (1–10) — any combination of them at once. They are the same
+values the web app's Settings → Context shows, on the same stored row, and the write carries
+only the flags that were given: the server merges, so one control never clears another, nor the
+default model or the theme. A `null` control prints with the default it follows, which the
+response reports (`Summarize at 70% of the context (the server default).`) because the share is
+the **deployment's** setting and the pass limit the engine's — neither is a number this command
+could know. The flags are validated here before any request, so `--threshold 5` (meaning 50%) is
+refused with the range named rather than sent.
+
+As in the web card, a summary model much smaller than the default model's needs more passes than
+the limit allows and the chat model summarizes instead (K5); `oh settings` says so, from the same
+shared arithmetic (`summaryModelFallback`). That needs both models' context windows, so the
+catalog is read for them — **best effort**: a catalog that cannot be reached leaves the stored
+lines as the answer rather than failing the command.
 
 `--session` and `--continue` win over everything: they name the session to resume, whatever
 default, agents or models exist.
@@ -704,6 +724,7 @@ src/
   commands/modes.ts      `oh modes` (#245, M6)
   commands/providers.tsx `oh providers` / `add` / `remove` (#210)
   commands/preferences.ts  `oh default-model`
+  commands/settings.ts   `oh settings` — the context settings, printed and set (#282)
   commands/io.ts         what a print-and-stop command writes, how it fails, and the
                          read-line / y-or-n pair the commands that ask share
   commands/auth.ts       `oh login` / `oh logout` / `oh whoami`, and offerSignIn — the

@@ -280,6 +280,41 @@ describe('run: default-model (#114)', () => {
   })
 })
 
+describe('run: settings (#282)', () => {
+  const fakeEnv = FAKE_ENV
+
+  it('prints the stored context settings', async () => {
+    const { code, out, err } = await runCaptured(['settings'], fakeEnv)
+
+    expect(code).toBe(0)
+    expect(err).toBe('')
+    // The fake seeds a default model and nothing else, so each control follows its default.
+    expect(out).toContain('Summarize at 70% of the context (the server default).')
+    expect(out).toContain('Summary model: same as the chat.')
+    expect(out).toContain('Summary pass limit: 3 (default).')
+  })
+
+  it('sets a control from the flags', async () => {
+    const { code, out, err } = await runCaptured(
+      ['settings', '--threshold', '0.5', '--summary-passes', '5'],
+      fakeEnv,
+    )
+
+    expect(code).toBe(0)
+    expect(err).toBe('')
+    expect(out).toContain('Saved.')
+    expect(out).toContain('Summarize at 50% of the context.')
+    expect(out).toContain('Summary pass limit: 5.')
+  })
+
+  it('exits 2 on a share out of range', async () => {
+    const { code, err } = await runCaptured(['settings', '--threshold', '1.5'], fakeEnv)
+
+    expect(code).toBe(2)
+    expect(err).toContain('between 0.3 and 0.95')
+  })
+})
+
 describe('run: sessions delete (#114)', () => {
   const fakeEnv = FAKE_ENV
 

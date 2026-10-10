@@ -384,29 +384,34 @@ export interface SessionStore {
   // ------------------------------------------------------------- preferences
 
   /**
-   * Read a user's stored preferences (#111, epic #116 U1; theme: #203, epic #201 X3), or the
-   * protocol's defaults when there are none.
+   * Read a user's stored preferences (#111, epic #116 U1; theme: #203, epic #201 X3;
+   * compaction: epic #277 C3, #282), or the protocol's defaults when there are none.
    *
-   * Preferences are per user, not per session: the settings a user applies to new sessions —
-   * the `provider/model` a new chat starts with, and the web theme. A user who has never
-   * saved any has no stored value, and that reads as `{ default_model: null, theme: 'system'
-   * }`: the absence of a choice, never `null` and never a throw, so a settings screen always
-   * has a value to render. The answer is deep-frozen, like a credential — a caller owns it,
-   * and writing to it throws.
+   * Preferences are per user, not per session: the settings a user applies to their chats —
+   * the `provider/model` a new chat starts with, the web theme, and the three compaction
+   * controls (the share of the budget that triggers a summary, the model that writes it, and
+   * the passes it may take). A user who has never saved any has no stored value, and that
+   * reads as `{ default_model: null, theme: 'system', compaction_threshold: null,
+   * summary_model: 'same-as-chat', summary_max_passes: null }`: the absence of a choice, never
+   * `null` and never a throw, so a settings screen always has a value to render. The two
+   * `null` numbers mean "follow the default" — the deployment's trigger share and the engine's
+   * pass limit, neither of which is this package's to know. The answer is deep-frozen, like a
+   * credential — a caller owns it, and writing to it throws.
    */
   getPreferences(userId: UserId): Promise<UserPreferences>
 
   /**
    * Write a user's preferences whole, replacing what was stored, and answer what was stored
-   * (#111, epic #116 U1).
+   * (#111, epic #116 U1; compaction: epic #277 C3, #282).
    *
    * One value per user, so a second put replaces the first in place rather than accumulating.
-   * There is no partial update: a caller always writes the complete value it wants, and a
-   * `default_model` of `null` is how it clears the stored default. That is what keeps the two
-   * settings from clearing each other — a caller changing one reads the stored value first and
-   * writes both back, rather than writing a half-value this store would have to guess at.
-   * `updated_at` moves to the injected clock's instant; the answer is the preferences as
-   * written, deep-frozen.
+   * There is no partial update at this layer: a caller always writes the complete value it
+   * wants, and a `null` field (`default_model`, `compaction_threshold`, `summary_max_passes`)
+   * is how it clears that choice back to the default. The merge a `PUT /v1/me/preferences`
+   * performs is the **route's** (`apps/server/src/routes/me.ts`), which reads the stored value
+   * and writes both — that is what keeps one setting from clearing another, rather than a
+   * half-value this store would have to guess at. `updated_at` moves to the injected clock's
+   * instant; the answer is the preferences as written, deep-frozen.
    */
   putPreferences(userId: UserId, preferences: UserPreferences): Promise<UserPreferences>
 

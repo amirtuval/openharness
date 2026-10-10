@@ -50,6 +50,9 @@ export {
 } from './providers'
 export type { CredentialRowLabel, CredentialTarget, ProviderInfo } from './providers'
 
+export { modelContextBudget, summaryModelFallback } from './compaction'
+export type { SummaryModelFallback } from './compaction'
+
 export { DeviceLoginError, OPENHARNESS_CLI_CLIENT_ID } from './resources/auth'
 export type { AuthResource, DeviceLoginStart, PollDeviceLoginOptions } from './resources/auth'
 

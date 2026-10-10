@@ -124,6 +124,18 @@ export async function createDevFakeClient(): Promise<Client | null> {
         cost: { input: 0.4, output: 1.6, cache_read: 0.1, cache_write: null },
         source: 'registry',
       },
+      // A deliberately narrow one, so Settings → Context's warning is reachable in fake mode
+      // (#282): chosen as a summary model it cannot fold the chat's broader budget within the
+      // pass limit, and the card says so with the engine's own arithmetic.
+      {
+        id: 'openai/gpt-5.1-nano',
+        provider: 'openai',
+        name: 'GPT-5.1 nano',
+        context_window: 8_000,
+        max_output_tokens: 2_000,
+        cost: { input: 0.1, output: 0.4, cache_read: null, cache_write: null },
+        source: 'registry',
+      },
     ],
     providers: [
       {

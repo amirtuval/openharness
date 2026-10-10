@@ -11,6 +11,8 @@ import {
   newModeId,
   newSessionId,
   partitionOf,
+  SUMMARY_MODEL_SAME_AS_CHAT,
+  SummaryModelSchema,
   type Agent,
   type AgentId,
   type CreateAgentRequest,
@@ -29,6 +31,7 @@ import {
   type SessionStatus,
   type StoredEvent,
   type StreamEvent,
+  type SummaryModel,
   type UpdateAgentRequest,
   type UpdateModeRequest,
   type UserEvent,
@@ -562,14 +565,23 @@ export class PostgresSessionStore implements SessionStore {
   async getPreferences(userId: UserId): Promise<UserPreferences> {
     const row = await this.#db
       .selectFrom('user_preferences')
-      .select(['default_model', 'theme'])
+      .select([
+        'default_model',
+        'theme',
+        'compaction_threshold',
+        'summary_model',
+        'summary_max_passes',
+      ])
       .where('user_id', '=', userId)
       .executeTakeFirst()
     // No row is "no choice stored", not an error and not a null: the protocol's one shape,
-    // with the default theme a user who never chose one gets.
+    // with the defaults a user who never chose anything gets.
     return deepFreeze({
       default_model: row?.default_model ?? null,
       theme: parseTheme(row?.theme),
+      compaction_threshold: row?.compaction_threshold ?? null,
+      summary_model: parseSummaryModel(row?.summary_model),
+      summary_max_passes: row?.summary_max_passes ?? null,
     })
   }
 
@@ -579,6 +591,9 @@ export class PostgresSessionStore implements SessionStore {
       user_id: userId,
       default_model: preferences.default_model,
       theme: preferences.theme,
+      compaction_threshold: preferences.compaction_threshold,
+      summary_model: preferences.summary_model,
+      summary_max_passes: preferences.summary_max_passes,
       updated_at: at,
     }
     // One statement, like the credential upsert: `user_id` is the primary key, so a second
@@ -591,11 +606,20 @@ export class PostgresSessionStore implements SessionStore {
         conflict.column('user_id').doUpdateSet({
           default_model: value.default_model,
           theme: value.theme,
+          compaction_threshold: value.compaction_threshold,
+          summary_model: value.summary_model,
+          summary_max_passes: value.summary_max_passes,
           updated_at: value.updated_at,
         }),
       )
       .execute()
-    return deepFreeze({ default_model: preferences.default_model, theme: preferences.theme })
+    return deepFreeze({
+      default_model: preferences.default_model,
+      theme: preferences.theme,
+      compaction_threshold: preferences.compaction_threshold,
+      summary_model: preferences.summary_model,
+      summary_max_passes: preferences.summary_max_passes,
+    })
   }
 
   async listSessions(options: ListSessionsOptions): Promise<ListSessionsResponse> {
@@ -2045,4 +2069,19 @@ function deliverTo<T>(
 function parseTheme(stored: string | undefined): UserTheme {
   const parsed = UserThemeSchema.safeParse(stored)
   return parsed.success ? parsed.data : DEFAULT_USER_THEME
+}
+
+/**
+ * The `summary_model` the protocol names, from what the column holds.
+ *
+ * The column is text and the validity rules are two (`same-as-chat`, or a `provider/model`
+ * id), so a hand-edited row can hold neither — and a row cannot hold "absent" past the
+ * migration's default. Anything the protocol would not accept reads as
+ * {@link SUMMARY_MODEL_SAME_AS_CHAT}, the same way an unknown theme reads as the default: the
+ * worst case is that compaction uses the chat model, which it does anyway when the choice is
+ * unusable.
+ */
+function parseSummaryModel(stored: string | undefined): SummaryModel {
+  const parsed = SummaryModelSchema.safeParse(stored)
+  return parsed.success ? parsed.data : SUMMARY_MODEL_SAME_AS_CHAT
 }

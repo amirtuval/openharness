@@ -55,7 +55,7 @@ import { planReasoning, type ReasoningSupportFor, requestedReasoningEffort } fro
 import { redactSecrets } from './redact'
 import type { RetryPolicy } from './retry'
 import { backoffDelay, resolveRetryPolicy } from './retry'
-import type { ContextCompactionConfig } from './summarize'
+import type { ContextCompactionOption } from './summarize'
 import { resolveContextCompaction, summarizeContext } from './summarize'
 
 /**
@@ -232,15 +232,19 @@ export interface RunTurnOptions {
   /** How model failures are retried; see {@link RetryPolicy}. */
   readonly retry?: RetryPolicy
   /**
-   * Context compaction (epic #277, C2; issue #279): summarize older history when its context
-   * fills, instead of letting the strategy trim it away.
+   * Context compaction (epic #277, C2; issue #279; per-user controls: C3, #282): summarize
+   * older history when its context fills, instead of letting the strategy trim it away.
    *
    * **Absent means off** — a host that wires none gets exactly the behaviour of #278, and the
-   * brain's own tests run no model calls they did not script. The server always passes one
-   * (`main.ts`, from `OPENHARNESS_COMPACTION_THRESHOLD` and the registry's limits), which is
-   * where the epic's 70% default applies. See {@link ContextCompactionConfig}.
+   * brain's own tests run no model calls they did not script. Either one configuration for
+   * every owner, or a {@link ContextCompactionResolver} the loop asks once per request with the
+   * session's owner, so a host that stores the threshold, the summary model and the pass limit
+   * per user (C3) can answer for the one whose chat this is. The server always passes the
+   * resolver (`main.ts`, from `OPENHARNESS_COMPACTION_THRESHOLD`, the owner's preferences and
+   * the registry's limits), which is where the epic's 70% default applies. See
+   * {@link ContextCompactionConfig}.
    */
-  readonly compaction?: ContextCompactionConfig
+  readonly compaction?: ContextCompactionOption
 }
 
 /**
@@ -446,8 +450,10 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
   // with a clear error rather than looping. Once **per turn**, not per request, is what bounds
   // it however many requests the turn makes.
   let overflowRetried = false
-  const compaction =
-    options.compaction === undefined ? null : resolveContextCompaction(options.compaction)
+  // What the host wired, resolved below once per request: the one configuration for every
+  // owner, or the resolver the per-user controls (C3, #282) live behind. Held unresolved here
+  // because a resolver has to be asked with the owner, which the request boundary reads.
+  const compactionOption = options.compaction
   for (;;) {
     // An interrupt that arrived before this request started — a queued user.interrupt covers
     // the one the user sent while no brain was running to abort.
@@ -482,6 +488,19 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     if (current === null) {
       throw new SessionNotFoundError(sessionId)
     }
+    // The compaction this request runs with (epic #277, C2/C3; #279/#282): the trigger's share,
+    // the summary model and the pass limit are the **owner's** preferences, so a resolver is
+    // asked here, at the request boundary, exactly as the mode resolver is — an edit to the
+    // settings applies from the next request on, and another user's choice never reaches this
+    // chat. Absent means off, as before: no trigger and no overflow handling.
+    const compaction =
+      compactionOption === undefined
+        ? null
+        : resolveContextCompaction(
+            typeof compactionOption === 'function'
+              ? await compactionOption(current.owner_id)
+              : compactionOption,
+          )
     // The mode this request follows, if the session is on one (#245, M6). The session holds
     // the mode's id; the host resolves it as it is now, so an edit applies from this request on
     // — the "live follow" a mode is for. A mode the host no longer knows (it was deleted)

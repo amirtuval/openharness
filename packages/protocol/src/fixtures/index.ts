@@ -1,5 +1,6 @@
 import type { EventId } from '../ids'
 import { newAgentId, newEventId, newModeId, newProviderCredentialId, newSessionId } from '../ids'
+import { SUMMARY_MODEL_SAME_AS_CHAT } from '../index'
 import type {
   Agent,
   AgentMessageEvent,
@@ -33,6 +34,8 @@ import type {
   UserInterruptEvent,
   UserMessageEvent,
   UserPreferences,
+  GetPreferencesResponse,
+  PreferencesDefaults,
 } from '../index'
 
 /**
@@ -149,8 +152,9 @@ export function makeUser(overrides: Partial<User> = {}): User {
 }
 
 /**
- * A user's preferences, as `GET /v1/me/preferences` returns them: a default model and the
- * default theme, unless the overrides replace either.
+ * A user's stored preferences, as the store holds them: a default model, the default theme and
+ * the compaction controls unset (each `null` meaning "follow the default"), unless the overrides
+ * replace any of them.
  *
  * @param overrides fields to replace on the default preferences
  */
@@ -158,8 +162,43 @@ export function makeUserPreferences(overrides: Partial<UserPreferences> = {}): U
   const preferences: UserPreferences = {
     default_model: 'anthropic/claude-sonnet-5',
     theme: 'system',
+    compaction_threshold: null,
+    summary_model: SUMMARY_MODEL_SAME_AS_CHAT,
+    summary_max_passes: null,
   }
   return { ...preferences, ...overrides }
+}
+
+/**
+ * The defaults a preference of `null` falls back to, as `GET /v1/me/preferences` reports them
+ * (epic #277, C3; #282): the engine's own share and pass limit.
+ *
+ * @param overrides fields to replace on the default values
+ */
+export function makePreferencesDefaults(
+  overrides: Partial<PreferencesDefaults> = {},
+): PreferencesDefaults {
+  const defaults: PreferencesDefaults = {
+    // The engine's own defaults, `0.7` and `3` — written as literals because they are the
+    // brain's and the server's to choose, not this package's (see `PreferencesDefaultsSchema`).
+    compaction_threshold: 0.7,
+    summary_max_passes: 3,
+  }
+  return { ...defaults, ...overrides }
+}
+
+/**
+ * A preferences response, as `GET`/`PUT /v1/me/preferences` answers: {@link makeUserPreferences}
+ * plus the defaults its `null`s mean.
+ *
+ * @param overrides fields to replace on the default preferences
+ * @param defaults fields to replace on the default values
+ */
+export function makeGetPreferencesResponse(
+  overrides: Partial<UserPreferences> = {},
+  defaults: Partial<PreferencesDefaults> = {},
+): GetPreferencesResponse {
+  return { ...makeUserPreferences(overrides), defaults: makePreferencesDefaults(defaults) }
 }
 
 /**

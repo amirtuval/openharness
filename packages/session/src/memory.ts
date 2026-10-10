@@ -7,6 +7,7 @@ import {
   encodeKeyCursor,
   encodeSeqCursor,
   MAX_MODES_PER_USER,
+  SUMMARY_MODEL_SAME_AS_CHAT,
   newAgentId,
   newEventId,
   newModeId,
@@ -32,6 +33,7 @@ import {
   type SessionId,
   type StoredEvent,
   type Supersedes,
+  type SummaryModel,
   type Timestamp,
   type UpdateAgentRequest,
   type UpdateModeRequest,
@@ -474,6 +476,9 @@ export class InMemorySessionStore implements SessionStore {
       deepFreeze({
         default_model: stored?.defaultModel ?? null,
         theme: stored?.theme ?? DEFAULT_USER_THEME,
+        compaction_threshold: stored?.compactionThreshold ?? null,
+        summary_model: stored?.summaryModel ?? SUMMARY_MODEL_SAME_AS_CHAT,
+        summary_max_passes: stored?.summaryMaxPasses ?? null,
       }),
     )
   }
@@ -484,10 +489,19 @@ export class InMemorySessionStore implements SessionStore {
     this.#preferences.set(userId, {
       defaultModel: preferences.default_model,
       theme: preferences.theme,
+      compactionThreshold: preferences.compaction_threshold,
+      summaryModel: preferences.summary_model,
+      summaryMaxPasses: preferences.summary_max_passes,
       updatedAtMs: this.#clock(),
     })
     return resolved(
-      deepFreeze({ default_model: preferences.default_model, theme: preferences.theme }),
+      deepFreeze({
+        default_model: preferences.default_model,
+        theme: preferences.theme,
+        compaction_threshold: preferences.compaction_threshold,
+        summary_model: preferences.summary_model,
+        summary_max_passes: preferences.summary_max_passes,
+      }),
     )
   }
 
@@ -1226,6 +1240,12 @@ interface PreferencesRecord {
   readonly defaultModel: string | null
   /** The web theme name (#203); the column's default until a user chooses one. */
   readonly theme: UserTheme
+  /** The compaction share (epic #277, C3), or `null` for the server's own (#282). */
+  readonly compactionThreshold: number | null
+  /** Which model writes summaries (epic #277, K3); `same-as-chat` until a user picks one. */
+  readonly summaryModel: SummaryModel
+  /** The summary pass limit (epic #277, K5), or `null` for the engine's own. */
+  readonly summaryMaxPasses: number | null
   /** When `putPreferences` last wrote it, as the injected clock read it. */
   readonly updatedAtMs: number
 }

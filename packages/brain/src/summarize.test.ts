@@ -16,6 +16,7 @@ import {
   newSession,
   summaryRequestsOf,
   TEST_MODEL_ID,
+  TEST_OWNER_ID,
   TEST_SYSTEM,
   textOf,
 } from './testing/harness'
@@ -667,6 +668,87 @@ describe('runTurn — a request the provider refused as too long (K2)', () => {
     expect(errors.at(-1)?.error.retry_status).toEqual({ type: 'exhausted' })
     expect(errors.at(-1)?.error.message).toContain('summarizing the history failed')
     expect(errors.at(-1)?.error.message).not.toContain('was compacted')
+  })
+})
+
+describe('runTurn — the per-owner compaction controls (C3, #282)', () => {
+  it('asks the resolver with the session’s owner and applies what it answers', async () => {
+    // 30 messages of 2000 tokens = 60000: over a 0.1 share of the 200k budget, and old enough
+    // (past the 50k tail) to cut. The resolver answers with the chat model summarizing, so the
+    // event records the chat's own id — the field that travelled through the resolver.
+    const session = await newSession(messages(30, 2_000))
+    const scripts = scriptedModels([{ text: ['the reply'] }])
+    const owners: string[] = []
+    const tokenBudgetFor = (modelId: string) => (modelId === SUMMARY_MODEL ? 8_000 : 200_000)
+
+    const outcome = await runTurn(session.sessionId, {
+      store: session.store,
+      model: scripts.factory,
+      resolveCredential: () => Promise.resolve(TEST_CREDENTIAL),
+      contextStrategy: createContextStrategy({ tokenBudgetFor }),
+      compaction: (ownerId) => {
+        owners.push(ownerId)
+        return { threshold: 0.1, summaryModel: null, tokenBudgetFor }
+      },
+    })
+
+    expect(outcome.outcome).toBe('idle')
+    expect(owners).toEqual([TEST_OWNER_ID])
+    const summary = contextSummaryOf(await logOf(session.store, session.sessionId))!
+    expect(summary.summary_model).toBe(CHAT_MODEL)
+    expect(summary.passes).toBe(1)
+  })
+
+  it('asks it again at the next request boundary, so a changed answer applies from there', async () => {
+    // The first call answers a threshold nothing crosses; the second answers one the history is
+    // over. Only the second request compacts, which is what "per request" buys: a settings
+    // change mid-turn applies to the request after it.
+    const session = await newSession(messages(30, 2_000))
+    let steeringId: string | undefined
+    const scripts = scriptedModels([
+      {
+        text: ['first'],
+        // The real size of the first prompt, so the second request's estimate has a usable
+        // baseline — the trigger measures what the request will be, not only what is new.
+        usage: { input_tokens: 60_000 },
+        onChunk: async (_chunk, index) => {
+          if (index !== 0) return
+          const [steering] = await session.store.appendEvents(session.sessionId, [
+            { type: 'user.message', content: [{ type: 'text', text: 'steering' }] },
+          ])
+          steeringId = steering?.id
+        },
+      },
+      { text: ['second'] },
+    ])
+    const owners: string[] = []
+    const tokenBudgetFor = (modelId: string) => (modelId === SUMMARY_MODEL ? 8_000 : 200_000)
+
+    const outcome = await runTurn(session.sessionId, {
+      store: session.store,
+      model: scripts.factory,
+      resolveCredential: () => Promise.resolve(TEST_CREDENTIAL),
+      contextStrategy: createContextStrategy({ tokenBudgetFor }),
+      compaction: (ownerId) => {
+        owners.push(ownerId)
+        return {
+          threshold: owners.length === 1 ? 0.99 : 0.1,
+          summaryModel: SUMMARY_MODEL,
+          tokenBudgetFor,
+        }
+      },
+    })
+
+    expect(outcome.outcome).toBe('idle')
+    expect(steeringId).toBeDefined()
+    expect(owners).toEqual([TEST_OWNER_ID, TEST_OWNER_ID])
+    // Exactly one summary — the second request's — and it was written before the second chat
+    // request, which is the one built from it.
+    const events = await logOf(session.store, session.sessionId)
+    expect(contextSummariesOf(events)).toHaveLength(1)
+    expect(scripts.chat.calls).toHaveLength(2)
+    const second = readPrompt(scripts.chat.calls[1]!)
+    expect(second[1]?.text).toContain('Earlier messages in this conversation were summarized')
   })
 })
 

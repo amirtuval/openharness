@@ -1,6 +1,6 @@
 import type { Hono } from 'hono'
 import {
-  type ContextCompactionConfig,
+  type ContextCompactionOption,
   createContextStrategy,
   DEFAULT_COMPACTION_THRESHOLD,
   type ModelFactory,
@@ -40,8 +40,9 @@ import {
   type BetterAuthInstance,
 } from '../auth'
 import { ModelCatalog } from '../catalog/catalog'
-import { createTokenBudgetResolver } from '../catalog/context-budget'
+import { createMaxOutputResolver, createTokenBudgetResolver } from '../catalog/context-budget'
 import { createReasoningSupportResolver } from '../catalog/reasoning-support'
+import { createContextCompactionResolver } from '../context-compaction'
 import { createModeResolver } from '../modes'
 import { emptyRegistry, type ModelRegistry } from '../catalog/registry'
 import { DEFAULT_DELTA_RETENTION_MS } from '../compaction'
@@ -225,15 +226,25 @@ export interface TestOptions {
    */
   readonly registry?: ModelRegistry
   /**
-   * Context compaction (epic #277, C2; #279), passed to `runTurn` as-is. Omitted — the default —
-   * means off, so a test that does not want a summary is never surprised by one.
+   * Context compaction (epic #277, C2; #279), passed to `runTurn` as-is — one configuration, or
+   * the per-owner resolver C3 (#282) builds. Omitted — the default — means off, so a test that
+   * does not want a summary is never surprised by one.
    */
-  readonly compaction?: ContextCompactionConfig
+  readonly compaction?: ContextCompactionOption
   /**
-   * `OPENHARNESS_COMPACTION_THRESHOLD` for {@link testConfig} — the trigger a test boots the
-   * whole server with. The default is the production one; the in-process harness leaves
-   * compaction off regardless (see {@link TestOptions.compaction}), so this only matters to a
-   * test that boots `startServer`.
+   * Wire the **production** compaction path (epic #277, C3; #282) instead of
+   * {@link TestOptions.compaction}: every turn's compaction comes from the session owner's
+   * stored preferences, resolved per request by `createContextCompactionResolver` against the
+   * harness's own store and registry. This is the seam a test of "one user's preference reaches
+   * the engine and another's does not" drives.
+   */
+  readonly resolveCompaction?: boolean
+  /**
+   * `OPENHARNESS_COMPACTION_THRESHOLD` for {@link testConfig} and for the resolver
+   * {@link TestOptions.resolveCompaction} builds — the trigger a test boots the whole server
+   * with. The default is the production one; the in-process harness leaves compaction off
+   * otherwise, so this only matters to a test that asks for the resolver or boots
+   * `startServer`.
    */
   readonly compactionThreshold?: number
   /**
@@ -305,6 +316,9 @@ export function createTestApp(options: TestOptions = {}): TestContext {
   const credentials = options.credentials ?? new InMemoryCredentialStore()
   const vault = options.vault ?? createVault(envKeyProvider(TEST_SECRETS_KEY))
   const model = createScriptedModel(...(options.replies ?? []))
+  const registry = options.registry ?? emptyRegistry
+  const tokenBudgetFor = createTokenBudgetResolver(registry)
+  const compactionThreshold = options.compactionThreshold ?? DEFAULT_COMPACTION_THRESHOLD
   const scheduler = new LocalScheduler({
     store,
     model: options.model ?? model.factory,
@@ -313,19 +327,29 @@ export function createTestApp(options: TestOptions = {}): TestContext {
     // the model the request runs. The default registry is the empty one, so a test that does
     // not build a catalogue gets the brain's own 32,768-token fallback, exactly as it did
     // before the budget was per model.
-    contextStrategy: createContextStrategy({
-      tokenBudgetFor: createTokenBudgetResolver(options.registry ?? emptyRegistry),
-    }),
+    contextStrategy: createContextStrategy({ tokenBudgetFor }),
     // And the production reasoning wiring (#252's follow-up): which `low | medium | high` a model
     // takes, from the same registry. The default empty registry knows no model, so a test that
     // does not build one gets `applied: null` for every request — the same as the brain's own
     // no-resolver default, and a test that wants an applied effort passes a registry.
-    reasoningSupportFor: createReasoningSupportResolver(options.registry ?? emptyRegistry),
+    reasoningSupportFor: createReasoningSupportResolver(registry),
     // Context compaction (epic #277, C2; #279) only when a test asks for it: the harness keeps
     // it off by default so every existing test sees exactly the prompt it saw before, and a
     // test that wants a summary passes `compaction` (the production wiring is `main.ts`'s —
-    // the threshold from the config, the registry's budgets and output ceilings).
+    // the threshold from the config, the registry's budgets and output ceilings). A test of the
+    // per-user controls (C3, #282) asks for `resolveCompaction`, which builds that same resolver
+    // against this harness's store and registry.
     ...(options.compaction === undefined ? {} : { compaction: options.compaction }),
+    ...(options.resolveCompaction === true
+      ? {
+          compaction: createContextCompactionResolver({
+            store,
+            threshold: compactionThreshold,
+            tokenBudgetFor,
+            maxOutputFor: createMaxOutputResolver(registry),
+          }),
+        }
+      : {}),
     // And the production mode wiring (#245, M6): the modes and the caller's credentials, the
     // same resolver `main.ts` builds, so a test drives modes through the real seam.
     resolveMode: createModeResolver({ store, credentials }),
@@ -354,6 +378,8 @@ export function createTestApp(options: TestOptions = {}): TestContext {
       validate: options.validateProviderCredential ?? acceptAnyCredential,
     },
     catalog,
+    // What `GET /v1/me/preferences` reports as the default trigger share (C3, #282).
+    compactionThreshold,
     ...(options.registry === undefined ? {} : { registry: options.registry }),
     ...(options.webDir === undefined ? {} : { webDir: options.webDir }),
     ...(options.trustedProxyHops === undefined

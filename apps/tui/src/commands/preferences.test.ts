@@ -72,7 +72,7 @@ describe('runDefaultModel', () => {
     expect(await runDefaultModel(fake, io, 'openai/gpt-4.1-mini')).toBe(0)
     // The write carries only `default_model`, and the server merges: setting a default from
     // the terminal never resets what the user chose in the browser.
-    expect(await fake.preferences.get()).toEqual({
+    expect(await fake.preferences.get()).toMatchObject({
       default_model: 'openai/gpt-4.1-mini',
       theme: 'dim',
     })

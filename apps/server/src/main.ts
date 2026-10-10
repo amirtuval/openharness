@@ -4,7 +4,7 @@ import { Pool } from 'pg'
 import type { Hono } from 'hono'
 import type { MemoryDB } from 'better-auth/adapters/memory'
 import {
-  type ContextCompactionConfig,
+  type ContextCompactionOption,
   type ContextStrategy,
   createContextStrategy,
   type ModeResolver,
@@ -36,6 +36,7 @@ import { ModelCatalog } from './catalog/catalog'
 import { createMaxOutputResolver, createTokenBudgetResolver } from './catalog/context-budget'
 import { createProviderFetch } from './catalog/provider-fetch'
 import { createReasoningSupportResolver } from './catalog/reasoning-support'
+import { createContextCompactionResolver } from './context-compaction'
 import { createModeResolver } from './modes'
 import { createBundledRegistry, type ModelRegistry } from './catalog/registry'
 import { DeltaCompactor } from './compaction'
@@ -229,17 +230,20 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   const tokenBudgetFor = createTokenBudgetResolver(registry)
   const contextStrategy = createContextStrategy({ tokenBudgetFor })
 
-  // Context compaction (epic #277, C2; #279): when the context a request is about to make is
-  // over `OPENHARNESS_COMPACTION_THRESHOLD` of the chat model's budget, older history is
-  // summarized instead of being trimmed away. The trigger and the tail come from the chat
-  // model's budget, and the passes from the summary model's — both the same registry-derived
+  // Context compaction (epic #277, C2; #279; per-user controls: C3, #282): when the context a
+  // request is about to make is over the trigger's share of the chat model's budget, older
+  // history is summarized instead of being trimmed away. The trigger and the tail come from the
+  // chat model's budget, and the passes from the summary model's — both the same registry-derived
   // resolver the strategy trims with (#246), plus the output ceiling the summary-size cap needs
-  // (K5). The summary model is the chat's until a per-user preference exists (C3).
-  const contextCompaction: ContextCompactionConfig = {
+  // (K5). The threshold, the summary model and the pass limit are the session owner's stored
+  // preferences, resolved per request, over `OPENHARNESS_COMPACTION_THRESHOLD` (the default a
+  // user who has not chosen one gets).
+  const contextCompaction = createContextCompactionResolver({
+    store,
     threshold: config.compactionThreshold,
     tokenBudgetFor,
     maxOutputFor: createMaxOutputResolver(registry),
-  }
+  })
 
   // The reasoning effort (#252's follow-up): which `low | medium | high` levels a model takes,
   // read from the same registry, and asked per request. Before this the brain carried hand-written
@@ -315,6 +319,9 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     },
     catalog,
     registry,
+    // The preferences response reports it as the default a user who has not chosen a compaction
+    // share follows (C3, #282).
+    compactionThreshold: config.compactionThreshold,
     // #151: the client's address behind the deployment's proxies, and the readiness answer
     // the probes see — the store's own `select 1` and this process's drain flag.
     trustedProxyHops: config.trustedProxyHops,
@@ -446,7 +453,7 @@ function createScheduler(
   model: ModelFactory,
   resolveCredential: ResolveSessionCredential,
   contextStrategy: ContextStrategy,
-  contextCompaction: ContextCompactionConfig,
+  contextCompaction: ContextCompactionOption,
   reasoningSupportFor: ReasoningSupportFor,
   resolveMode: ModeResolver,
   logger: Logger,

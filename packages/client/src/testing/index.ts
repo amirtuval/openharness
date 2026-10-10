@@ -12,6 +12,7 @@ import {
   ProviderCredentialSchema,
   PutPreferencesRequestSchema,
   PutProviderCredentialRequestSchema,
+  SUMMARY_MODEL_SAME_AS_CHAT,
   parseServiceAccountKey,
   SendEventsRequestSchema,
   SessionSchema,
@@ -34,6 +35,7 @@ import type {
   Agent,
   EventInput,
   GetPreferencesResponse,
+  PreferencesDefaults,
   ListAgentsResponse,
   ListEventsResponse,
   ListModelsResponse,
@@ -170,6 +172,13 @@ export interface FakeClientOptions {
    * says only that: `{ default_model: 'openai/gpt-5-mini' }` leaves the theme at `system`.
    */
   preferences?: Partial<UserPreferences>
+  /**
+   * The defaults `preferences.get`/`put` report for the two nullable compaction controls, over
+   * `{ compaction_threshold: 0.7, summary_max_passes: 3 }` — the engine's own. A test of a
+   * deployment that sets another threshold seeds it here, the way the server's config would.
+   */
+  preferenceDefaults?: Partial<PreferencesDefaults>
+
   /**
    * The provider credentials {@link Client.providerCredentials} starts with, over the default
    * of none.
@@ -400,13 +409,23 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       message: null,
     }))
   const modelListCalls: ModelListCall[] = []
-  // The caller's settings (#111): one in-memory value, replaced whole by `put`, exactly like
-  // the server's row behind `GET`/`PUT /v1/me/preferences`.
-  let preferences: GetPreferencesResponse = UserPreferencesSchema.parse({
+  // The caller's settings (#111, and the compaction controls of C3/#282): one in-memory value,
+  // replaced whole by `put`, exactly like the server's row behind `GET`/`PUT /v1/me/preferences`.
+  // The `defaults` a `null` control falls back to are the host's, not the stored value's, so
+  // they sit beside `preferences` the way the server's config does.
+  let preferences: UserPreferences = UserPreferencesSchema.parse({
     default_model: null,
     theme: DEFAULT_USER_THEME,
+    compaction_threshold: null,
+    summary_model: SUMMARY_MODEL_SAME_AS_CHAT,
+    summary_max_passes: null,
     ...options.preferences,
   })
+  const preferenceDefaults: PreferencesDefaults = {
+    compaction_threshold: 0.7,
+    summary_max_passes: 3,
+    ...options.preferenceDefaults,
+  }
   let authenticated = options.authenticated ?? true
   let deviceFlow: FakeDeviceFlow | undefined
 
@@ -1074,7 +1093,7 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       if (!authenticated) {
         return unauthenticated()
       }
-      return Promise.resolve(preferences)
+      return Promise.resolve({ ...preferences, defaults: preferenceDefaults })
     },
 
     put(next, requestOptions): Promise<GetPreferencesResponse> {
@@ -1090,8 +1109,17 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
         default_model:
           patch.default_model === undefined ? preferences.default_model : patch.default_model,
         theme: patch.theme ?? preferences.theme,
+        compaction_threshold:
+          patch.compaction_threshold === undefined
+            ? preferences.compaction_threshold
+            : patch.compaction_threshold,
+        summary_model: patch.summary_model ?? preferences.summary_model,
+        summary_max_passes:
+          patch.summary_max_passes === undefined
+            ? preferences.summary_max_passes
+            : patch.summary_max_passes,
       })
-      return Promise.resolve(preferences)
+      return Promise.resolve({ ...preferences, defaults: preferenceDefaults })
     },
   }
 

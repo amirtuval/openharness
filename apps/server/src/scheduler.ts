@@ -1,5 +1,5 @@
 import type {
-  ContextCompactionConfig,
+  ContextCompactionOption,
   ContextStrategy,
   ModeResolver,
   ModelFactory,
@@ -110,8 +110,10 @@ export interface LocalSchedulerOptions {
   readonly retry?: RetryPolicy
   /** How the log becomes model messages, passed to every turn. */
   readonly contextStrategy?: ContextStrategy
-  /** Context compaction (epic #277, C2; #279), passed to every turn. */
-  readonly compaction?: ContextCompactionConfig
+  /** Context compaction (epic #277, C2; #279; per-user controls: C3, #282), passed to
+   * every turn — one configuration, or the resolver the server builds from each owner's
+   * preferences. */
+  readonly compaction?: ContextCompactionOption
   /** Which reasoning efforts a model takes, passed to every turn (#252's follow-up). */
   readonly reasoningSupportFor?: ReasoningSupportFor
   /** What a mode resolves to, passed to every turn (#245, M6). */
