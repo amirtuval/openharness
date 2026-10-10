@@ -287,10 +287,12 @@ export interface TranscriptState {
   /**
    * The model the session is running, as the log last said it (epic #116, U1).
    *
-   * The id a `user.message` carrying a `model` switched the session to, or `null` until a
-   * message carries one. It is what tells a model **change** — a message whose id differs
-   * from it, marked with {@link TranscriptMessage.modelChangedTo} — from the first model a
-   * message names.
+   * The id a `user.message` carrying a `model` switched the session to, or the model the
+   * newest `span.model_request_start` names — whichever the log says last — seeded initially
+   * from the session's own model ({@link TranscriptSeed}). It is what tells a model
+   * **change** — a message whose id differs from it, marked with
+   * {@link TranscriptMessage.modelChangedTo} — from a message that names the model already in
+   * effect.
    */
   readonly model: string | null
   /**
@@ -315,19 +317,39 @@ export interface TranscriptState {
 }
 
 /**
+ * What a transcript is seeded with where it is built (#268).
+ *
+ * `model` is the model the session runs **before the client has seen a single event** — the
+ * `model` of the session resource it opened. It is what makes the *first* mid-chat switch a
+ * change a frontend can draw a marker for: without it the transcript has nothing to compare a
+ * message's model against until one carries a model, so a chat started from a model marks its
+ * first switch not at all. The log is self-correcting — every `span.model_request_start` names
+ * the model its request ran — so what a replayed session ends up with is the same baseline a
+ * client that followed it live started from, whatever it was seeded with.
+ */
+export interface TranscriptSeed {
+  /** The model the session runs before the log says otherwise; absent is the same as `null`. */
+  readonly model?: string | null
+}
+
+/**
  * The state for a session with no events yet.
  *
  * `lastSeq` is `0`, the protocol's "from the start": passing it as `afterSeq` replays the
- * whole log. `deleted` is `false` and `model` is `null`: nothing has happened yet.
+ * whole log. `deleted` is `false`: nothing has happened yet. `model` is `null` unless a
+ * {@link TranscriptSeed} names one — which is how a frontend that opened a session tells the
+ * transcript which model its first message is a continuation of (#268).
+ *
+ * @param seed the session's model, when the caller knows it; see {@link TranscriptSeed}
  */
-export function initialTranscriptState(): TranscriptState {
+export function initialTranscriptState(seed: TranscriptSeed = {}): TranscriptState {
   return {
     messages: [],
     status: 'idle',
     lastError: null,
     lastSeq: 0,
     deleted: false,
-    model: null,
+    model: seed.model ?? null,
     pendingRequests: [],
     usage: null,
   }
@@ -389,10 +411,12 @@ export function initialTranscriptState(): TranscriptState {
  *   replaced, so everything at or after the range's `from_seq` is inside it.
  * - **A `user.message` carrying a `model` may switch the session's model.** When its id
  *   differs from `state.model`, the message carries `modelChangedTo` so a UI can draw the
- *   marker, and `state.model` becomes the new id. The first model the log shows is not a
- *   change — `state.model` starts at `null` — so it sets the state silently, and a message
- *   naming the model already in effect changes nothing. A message with no `model` leaves
- *   `state.model` alone.
+ *   marker, and `state.model` becomes the new id. `state.model` starts at the seed a frontend
+ *   gave it — the session's own model — so a chat started from a model marks its first switch
+ *   (#268), and a message naming the model already in effect changes nothing. A message with
+ *   no `model` leaves `state.model` alone. The model a `span.model_request_start` names is
+ *   taken as `state.model` too: the log says which model each request really ran, which is
+ *   what keeps a resumed chat's markers identical to the live view's.
  * - **A reply carries what it cost** (epic #201, U1). Its {@link TranscriptMessage.meta}
  *   comes from the turn's spans: a `span.model_request_start` names the model and opens a
  *   tracked request, its `span.model_request_end` reports the tokens and closes it, and the
@@ -538,9 +562,17 @@ function reduceStoredEvent(state: TranscriptState, event: StoredEvent): Transcri
       // picked up.
       //
       // The request itself is tracked for the reply's metadata (epic #201, U1): it names the
-      // model that serves the reply and, through its `processed_at`, when the reply began.
+      // model that serves the reply and, through its `processed_at`, when the reply began. The
+      // model it names is also the log's word on what the session is running (#268), and it is
+      // taken as the state's — so a log a client replays (a resumed chat, whose session
+      // resource only carries the model it is on *now*) settles on the same baseline the model
+      // switches were recorded against, and the markers it draws match a live view's.
       return clearClaimedPending(
-        { ...state, pendingRequests: [...state.pendingRequests, openedRequest(event)] },
+        {
+          ...state,
+          ...(event.model === undefined ? {} : { model: event.model }),
+          pendingRequests: [...state.pendingRequests, openedRequest(event)],
+        },
         event.consumes,
         { absentMeansAll: true },
       )
@@ -657,9 +689,10 @@ function withoutPreviews(messages: readonly TranscriptMessage[]): readonly Trans
  *
  * A message that carries a `model` switches the session to it: the state's `model` moves to
  * the new id, and the message carries {@link TranscriptMessage.modelChangedTo} when that id
- * differs from the one already in effect — a change a UI marks. The first model a message
- * carries is not a change (the state was `null`), so the marker is left off and the state is
- * set silently; a message naming the model already in effect is left off too.
+ * differs from the one already in effect — a change a UI marks. What is "already in effect" is
+ * whatever `state.model` held: the session's own model when the frontend seeded it (#268), the
+ * model the last request ran, or the `null` of a transcript nothing has told anything. A
+ * message naming the model already in effect is left unmarked.
  */
 function fromUserMessage(state: TranscriptState, event: UserMessageEvent): TranscriptState {
   const model = event.model?.id
@@ -1212,8 +1245,15 @@ export interface Transcript {
   /** Fold a sequence in — history, or a batch of stream events — and return the new state. */
   applyAll(events: Iterable<StreamEvent>): TranscriptState
 
-  /** Start over from {@link initialTranscriptState}, notifying subscribers. */
-  reset(): TranscriptState
+  /**
+   * Start over from {@link initialTranscriptState}, seeded by `seed` when one is given, and
+   * notify subscribers.
+   *
+   * A frontend that opened a session on the way to building its transcript calls this with the
+   * session's model before it replays the log, which is what seeds the first-switch marker
+   * (#268).
+   */
+  reset(seed?: TranscriptSeed): TranscriptState
 
   /**
    * Watch the state.
@@ -1252,7 +1292,7 @@ export function createTranscript(initial: TranscriptState = initialTranscriptSta
     getState: () => state,
     apply: (event) => setState(reduceTranscript(state, event)),
     applyAll: (events) => setState(reduceTranscriptAll(state, events)),
-    reset: () => setState(initialTranscriptState()),
+    reset: (seed) => setState(initialTranscriptState(seed)),
     subscribe(listener) {
       listeners.add(listener)
       return () => {

@@ -88,6 +88,7 @@ export type {
   TranscriptError,
   TranscriptMessage,
   TranscriptMessageMeta,
+  TranscriptSeed,
   TranscriptState,
   TranscriptUsage,
 } from './transcript'

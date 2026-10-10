@@ -36,13 +36,16 @@ const SWITCHED_AGAIN = 'acme/qa-switched-twice'
 /**
  * The switch is visible in the transcript above the message that carried it.
  *
- * Only from the **second** switch on: the transcript's model state starts at `null`, and the
- * first model a message carries *sets* that state rather than changing it, so it is drawn
- * silently (`packages/client/src/transcript.ts`, `fromUserMessage`). Before that, what the
- * reader sees is the composer's selector, which reads the session's own model.
+ * Every switch draws one, the **first** included (#268): the transcript is seeded with the
+ * session's own model when the chat opens, so the first model a message carries is a change
+ * from the model the session already ran (`packages/client/src/transcript.ts`,
+ * `TranscriptSeed`; the web hook resets the transcript with `opened.model.id`). A message that
+ * carries no model, or the model already in effect, draws none.
  */
 async function expectSwitchedMarker(page: Page, modelId: string) {
-  await expect(page.getByText(`Switched to ${modelId}`)).toBeVisible()
+  // `exact`, because two markers can now be on screen at once (#268) and a substring match
+  // would treat "Switched to acme/qa-switched" and "…-twice" as the same element.
+  await expect(page.getByText(`Switched to ${modelId}`, { exact: true })).toBeVisible()
 }
 
 test.describe('W10 the composer model switch', () => {
@@ -73,6 +76,9 @@ test.describe('W10 the composer model switch', () => {
       await expectNoErrorBanner(page)
       // The selector reads the log back, not a local leftover.
       await expect(page.getByRole('button', { name: `Model: ${SWITCHED}` })).toBeVisible()
+      // The first switch draws its marker too (#268): the transcript was seeded with the
+      // session's own model when the chat opened.
+      await expectSwitchedMarker(page, SWITCHED)
       await shot(page, 'w10-02-switched')
     })
 
@@ -100,6 +106,8 @@ test.describe('W10 the composer model switch', () => {
     await pickModel(page, SWITCHED)
     await sendFromComposer(page, 'the message that switched')
     await waitForAnswer(page, 'the message that switched')
+    // The first switch draws its marker (#268).
+    await expectSwitchedMarker(page, SWITCHED)
 
     await test.step('switching again draws the change in the transcript', async () => {
       // The transcript knows a model from the message that just switched it, so a second
@@ -115,7 +123,9 @@ test.describe('W10 the composer model switch', () => {
     await test.step('a reload shows the switched model, with nothing re-picked', async () => {
       await page.reload()
       await expect(page.getByRole('button', { name: `Model: ${SWITCHED_AGAIN}` })).toBeVisible()
-      // The marker is log data, not local state: replaying the session draws it again.
+      // The markers are log data, not local state: replaying the session draws both of them
+      // again, the first switch's included.
+      await expectSwitchedMarker(page, SWITCHED)
       await expectSwitchedMarker(page, SWITCHED_AGAIN)
       await expectNoErrorBanner(page)
       await shot(page, 'w10-04-after-reload')

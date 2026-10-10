@@ -219,9 +219,10 @@ describe('createChatSession', () => {
     await session.send('Plain.')
     await fake.waitForIdle()
 
-    // The transcript only tracks what a `user.message` said (U1); a session's own model
-    // stands until a message names another, which is what the status line falls back to.
-    expect(session.getState().transcript.model).toBeNull()
+    // The transcript is seeded with the session's own model when the chat opens (#268) and
+    // follows each request's span, so a message sent without a pick leaves it on that model
+    // rather than `null` — the status line reads it directly instead of falling back.
+    expect(session.getState().transcript.model).toBe(fake.session.model.id)
     expect(session.getState().pendingModel).toBeNull()
     session.dispose()
   })

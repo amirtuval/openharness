@@ -377,8 +377,8 @@ describe('App', () => {
     const user = userEvent.setup({ delay: null })
     const fake = makeFake(TWO_PROVIDERS)
     fake.respondWith('ok')
-    // The log already says which model the session runs: the first model a message carries
-    // merely sets it (U3, silently), so a *change* needs one in effect first.
+    // A message switched the session before this client ever saw it, so the log already says
+    // which model the session runs — the form a resumed chat reads.
     await fake.sendMessage(fake.session.id, 'hi', { model: { id: 'anthropic/claude-sonnet-5' } })
     await fake.waitForIdle()
     renderApp(fake)
@@ -399,6 +399,29 @@ describe('App', () => {
     expect(last?.type === 'user.message' ? last.model?.id : null).toBe('openai/gpt-4.1-mini')
 
     // The selector now shows the session's model — the log's, not a leftover pick.
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Model:/ })).toHaveTextContent('GPT-4.1 mini')
+    })
+  })
+
+  it('marks the first switch of a chat started from a model (#268)', async () => {
+    const user = userEvent.setup({ delay: null })
+    const fake = makeFake(TWO_PROVIDERS)
+    fake.respondWith('ok')
+    // The seeded session runs Claude Sonnet 5 and has said nothing yet. The transcript is
+    // seeded with that model when the session is opened, so switching before the first message
+    // is a change it can mark — the bug was that it had nothing to compare against, and drew
+    // the first switch silently.
+    renderApp(fake)
+
+    const selector = await screen.findByRole('button', { name: 'Model: Claude Sonnet 5' })
+    await user.click(selector)
+    await user.click(screen.getByRole('option', { name: /GPT-4.1 mini/ }))
+
+    await user.type(screen.getByLabelText('Message'), 'switch please')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
+
+    expect(await screen.findByText('Switched to GPT-4.1 mini')).toBeInTheDocument()
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /Model:/ })).toHaveTextContent('GPT-4.1 mini')
     })

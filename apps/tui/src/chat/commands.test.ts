@@ -360,9 +360,10 @@ describe('currentModelOf', () => {
   })
 
   it('is the model a mode resolves to, after a mid-chat mode switch (#267)', async () => {
-    // The mode-carrying message names no model, so nothing but the reply's own span (`meta.model`)
-    // says which model the chat now runs — the session the chat was opened from is a snapshot,
-    // exactly as the CLI opens one.
+    // The mode-carrying message names no model, so the request's own span is what says which
+    // model the chat now runs — the session the chat was opened from is a snapshot, exactly
+    // as the CLI opens one. The span is the transcript's model too (#268), so the status line
+    // reads it directly rather than falling back to the reply's `meta.model`.
     const mode = makeMode({ name: 'qa-cli-fast', model: 'openai/gpt-4.1-mini' })
     const fake = createFakeClient({
       modes: [mode],
@@ -380,7 +381,7 @@ describe('currentModelOf', () => {
     await fake.waitForIdle()
     // The session snapshot still names the old model; only the log moved.
     expect(session.session.model.id).toBe(opened.model.id)
-    expect(session.getState().transcript.model).toBeNull()
+    expect(session.getState().transcript.model).toBe('openai/gpt-4.1-mini')
     await waitFor(() => currentModelOf(session) === 'openai/gpt-4.1-mini', {
       describe: () => `still ${currentModelOf(session)}`,
     })

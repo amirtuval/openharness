@@ -269,8 +269,11 @@ the append, the transcript marks that message with `modelChangedTo`, and the UI 
 subtle "Switched to <name>" marker above it. After the message is stored, the selector drops
 the local pick and reads the log again: what is shown is always the log's answer. Switching
 the provider works the same way, because the history is rebuilt per request server-side. A
-message naming the model already in effect is not a change (no marker); neither is the first
-model a message carries — the state starts at `null`, so there is nothing it changed from.
+message naming the model already in effect is not a change (no marker). The state begins at the
+session's own model, seeded when the chat opens (`useSession` resets the transcript with
+`opened.model.id` before replaying the log), so a chat started from a model marks its **first**
+switch too (#268); a resumed chat draws the same markers, because the replay takes each
+request's span model as the baseline.
 
 **Deleting a chat is irreversible, so the UI asks first, in the page** (U5). The sidebar row's
 kebab menu (shown on hover or focus, always in the tab order) and the chat header both offer

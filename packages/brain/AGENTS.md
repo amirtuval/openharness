@@ -92,7 +92,7 @@ emits what that reaches.
 | `credentialSecrets(credential)`                                                                                                        | every secret a credential carries, for redaction — a Bedrock credential has three, a Vertex one its private key PEM                                                                                                                                                                             |
 | `ResolveCredential`                                                                                                                    | `(name) => Promise<ModelCredential \| null>` — where it comes from                                                                                                                                                                                                                              |
 | `ModelFactory`                                                                                                                         | `(modelId, credential) => LanguageModel` — how a `provider/model` becomes a model                                                                                                                                                                                                               |
-| `providerModelFactory`, `createProviderModelFactory(options)`                                                                          | the `ModelFactory` hosts normally pass: the official AI SDK providers, the key passed explicitly                                                                                                                                                                                                |
+| `providerModelFactory`, `createProviderModelFactory(options)`                                                                          | the `ModelFactory` hosts normally pass: the official AI SDK providers, the key passed explicitly, and the egress `fetch` a host injects (#270)                                                                                                                                                  |
 | `azureFetch`, `createAzureFetch(options)`, `azureBaseUrl(endpoint)`                                                                    | the Azure `fetch` (safeFetch under the streaming-safe limits) and the base URL it builds                                                                                                                                                                                                        |
 | `redactSecrets(text, secrets)`                                                                                                         | `redactSecret` for a credential that carries more than one secret                                                                                                                                                                                                                               |
 | `BEDROCK_SERVICE`, `bedrockRuntimeBaseUrl(region)`, `bedrockControlPlaneUrl(region, path)`                                             | the SigV4 service both Bedrock hosts are signed for, and the two AWS hosts a region derives                                                                                                                                                                                                     |
@@ -410,6 +410,15 @@ The base URL is pinned the same way, in that one table (`PROVIDER_CLIENTS`), bec
 The table is keyed by the shared provider id (`Readonly<Record<ProviderId, …>>`, epic #245), so
 a provider a key can be stored for and a request cannot be made to is a compile error rather
 than a test failure.
+
+The `fetch` a fixed provider's client is built with comes from
+`createProviderModelFactory`'s `fetch` option, the way Azure's, a custom endpoint's and
+Vertex's come from theirs (#270). The host injects it — the server passes its
+egress-proxy-aware client, so the eleven providers reach the internet through
+`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` exactly as the catalogue and the save-time checks do,
+with no `NODE_USE_ENV_PROXY`; a host that injects none gets the platform's `fetch`, which is
+what a direct egress path and every test that stubs the global `fetch` want. It carries **no
+deadline**: a model streams a long reply, so a request-level timeout would cut it off.
 
 `model.test.ts` pins both halves of that contract, for **each of the 11 providers**: with every
 `*_API_KEY` and `*_BASE_URL` decoy set, one request goes to the provider's own host with the

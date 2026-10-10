@@ -1,4 +1,4 @@
-import { createTranscript } from '@openharness/client'
+import { createTranscript, initialTranscriptState } from '@openharness/client'
 import type { Client, Transcript, TranscriptState } from '@openharness/client'
 import { EVENT_TYPES } from '@openharness/protocol'
 import type { Mode, ModeId, ModelEntry, Session, StreamEvent } from '@openharness/protocol'
@@ -157,7 +157,12 @@ export function createChatSession(options: ChatSessionOptions): ChatSession {
   const session = options.session
   const sessionId = session.id
   const now = options.now ?? ((): number => Date.now())
-  const transcript: Transcript = createTranscript()
+  // Seeded with the model the session runs (#268), so the first `/model` switch a reader makes
+  // is a change the status line's marker state can compare against — the same baseline the web
+  // hook seeds at its end. The replay corrects it from each request's span.
+  const transcript: Transcript = createTranscript(
+    initialTranscriptState({ model: session.model.id }),
+  )
 
   // Aborted by `dispose()`: every request the session owns hangs off it, so exiting cannot
   // leave a socket, a timer or a reconnect loop behind.

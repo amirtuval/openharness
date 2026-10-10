@@ -1257,6 +1257,75 @@ describe('the model a user message switches to (#111)', () => {
   })
 })
 
+describe('the first model switch of a chat started from a model (#268)', () => {
+  /** The model a chat is started on: what the session resource carries before any event. */
+  const STARTED_ON = 'anthropic/claude-sonnet-5'
+
+  it('marks the first switch against the model the transcript was seeded with', () => {
+    // The bug: without a seed, the transcript's model is `null` until a message carries one,
+    // so the first switch is drawn silently — the session was already running a model the
+    // transcript had never heard of.
+    const message = makeUserMessage('switch', { seq: 1, model: { id: 'openai/gpt-4.1-mini' } })
+
+    const state = reduceTranscriptAll(initialTranscriptState({ model: STARTED_ON }), [message])
+
+    expect(messageById(state, message.id).modelChangedTo).toBe('openai/gpt-4.1-mini')
+    expect(state.model).toBe('openai/gpt-4.1-mini')
+  })
+
+  it('marks nothing on the first message: no model, or the model already running', () => {
+    const plain = makeUserMessage('one', { seq: 1 })
+    const same = makeUserMessage('two', { seq: 2, model: { id: STARTED_ON } })
+
+    const state = reduceTranscriptAll(initialTranscriptState({ model: STARTED_ON }), [plain, same])
+
+    expect(messageById(state, plain.id)).not.toHaveProperty('modelChangedTo')
+    expect(messageById(state, same.id)).not.toHaveProperty('modelChangedTo')
+    expect(state.model).toBe(STARTED_ON)
+  })
+
+  it('takes the model a request ran, so a resumed chat marks exactly what a live one did', () => {
+    // A resumed session's resource carries only the model it is on *now* (U3 projects the
+    // switch onto it), so a seed from it is not the model the log's first messages ran under.
+    // The spans are: every request names the model it ran, so a replay settles on the same
+    // baseline and draws the same markers a client that followed it live drew.
+    const first = makeUserMessage('one', { seq: 1 })
+    const second = makeUserMessage('two', { seq: 3, model: { id: 'openai/gpt-4.1-mini' } })
+    const log = [
+      first,
+      makeModelRequestStart({ id: idA, seq: 2, model: STARTED_ON }),
+      second,
+      makeModelRequestStart({ id: idB, seq: 4, model: 'openai/gpt-4.1-mini' }),
+    ]
+
+    const live = reduceTranscriptAll(initialTranscriptState({ model: STARTED_ON }), log)
+    // The resumed read seeds the model the session is on now — the *second* switch's — which
+    // the first span corrects back to what the conversation actually started on.
+    const resumed = reduceTranscriptAll(
+      initialTranscriptState({ model: 'openai/gpt-4.1-mini' }),
+      log,
+    )
+
+    const marked = (state: TranscriptState): string[] =>
+      state.messages.filter((message) => message.modelChangedTo !== undefined).map((m) => m.id)
+    expect(marked(resumed)).toEqual(marked(live))
+    expect(marked(resumed)).toEqual([second.id])
+    // The seeded value is not thrown away for a log that has nothing to correct it with.
+    expect(initialTranscriptState({ model: STARTED_ON }).model).toBe(STARTED_ON)
+    expect(initialTranscriptState().model).toBeNull()
+  })
+
+  it('seeds through a store reset, which is how the web hook loads a session', () => {
+    const transcript = createTranscript()
+    expect(transcript.getState().model).toBeNull()
+
+    transcript.reset({ model: STARTED_ON })
+
+    expect(transcript.getState().model).toBe(STARTED_ON)
+    expect(transcript.getState().lastSeq).toBe(0)
+  })
+})
+
 /** `text`, split into `count` fragments: the pieces a reply is streamed in. */
 function splitText(text: string, count: number): string[] {
   const size = Math.ceil(text.length / count)

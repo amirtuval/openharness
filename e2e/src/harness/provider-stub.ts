@@ -56,7 +56,10 @@ const FIXTURES = new URL('../../fixtures/provider-stub/', import.meta.url)
 export interface StubRequest {
   /** The provider host, from the request's `Host` header (no port). */
   readonly host: string
-  /** `GET` for every list call; `POST` for the Model Garden EULA check (#273). */
+  /**
+   * `GET` for a list or a check; `POST` for the Model Garden EULA check (#273) or a model
+   * request (#270).
+   */
   readonly method: string
   /** The path **and query**, e.g. `/v1/models?limit=1000` — what an answer branches on. */
   readonly path: string
@@ -74,6 +77,13 @@ export interface StubAnswer {
   readonly status?: number
   /** The JSON body; `{}` by default. */
   readonly json?: unknown
+  /**
+   * A raw body, sent as-is instead of {@link json} — an SSE stream, say, which a model
+   * request's client parses (`openAiResponsesSseBody` is the one this suite sends).
+   */
+  readonly body?: string
+  /** The `content-type` of a {@link body} answer; `application/json` otherwise. */
+  readonly contentType?: string
 }
 
 /** How a test answers requests for one provider host. */
@@ -133,8 +143,10 @@ export async function startProviderStub(): Promise<ProviderStub> {
         status: UNSTUBBED_STATUS,
         json: { error: `the provider stub has no answer for ${stubRequest.host}` },
       }
-      response.writeHead(answer.status ?? 200, { 'content-type': 'application/json' })
-      response.end(JSON.stringify(answer.json ?? {}))
+      response.writeHead(answer.status ?? 200, {
+        'content-type': answer.contentType ?? 'application/json',
+      })
+      response.end(answer.body ?? JSON.stringify(answer.json ?? {}))
     })
   })
 

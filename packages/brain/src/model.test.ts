@@ -8,6 +8,7 @@ import {
   isUnsupportedProviderError,
   providerOf,
   providerModelFactory,
+  createProviderModelFactory,
   streamModelRequest,
   UnsupportedProviderError,
   toModelUsage,
@@ -548,6 +549,39 @@ describe('providerModelFactory', () => {
     )
     expect(isUnsupportedProviderError(new UnsupportedProviderError('acme'))).toBe(true)
     expect(isUnsupportedProviderError(new Error('nope'))).toBe(false)
+  })
+
+  it('sends a fixed provider through the injected fetch, leaving the platform one alone (#270)', async () => {
+    // The eleven fixed providers have no user-typed URL to guard, but they do have an egress
+    // path: the host injects the fetch their clients use, so a deployment behind a proxy
+    // chats without `NODE_USE_ENV_PROXY` — the same seam Azure, custom and Vertex already
+    // have. This drives a real OpenAI Responses stream through it end to end.
+    vi.stubEnv('OPENAI_API_KEY', 'env-decoy')
+    const calls: string[] = []
+    const platformFetch = vi.fn(() => Promise.resolve(refusal()))
+    vi.stubGlobal('fetch', platformFetch)
+    try {
+      const model = createProviderModelFactory({
+        fetch: (input) => {
+          calls.push(
+            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url,
+          )
+          return Promise.resolve(openAiResponsesSse())
+        },
+      })('openai/gpt-4o-mini', TEST_CREDENTIAL)
+
+      const result = await streamModelRequest({ model, messages: PROMPT })
+
+      expect(calls).toEqual(['https://api.openai.com/v1/responses'])
+      // Not one request reached the platform's `fetch` — the injected one carried the whole
+      // model call, and its reply is the one the loop read.
+      expect(platformFetch).not.toHaveBeenCalled()
+      expect(result.error).toBeUndefined()
+      expect(result.text).toBe('Hi there')
+    } finally {
+      vi.unstubAllEnvs()
+      vi.unstubAllGlobals()
+    }
   })
 
   it('reports the numbers a real OpenAI Responses stream carries', async () => {

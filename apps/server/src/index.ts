@@ -160,6 +160,8 @@ export {
 export {
   DEFAULT_PROVIDER_TIMEOUT_MS,
   createProviderFetch,
+  createProviderModelFetch,
+  type ModelFetch,
   type ProviderFetch,
   type ProviderResponse,
 } from './catalog/provider-fetch'

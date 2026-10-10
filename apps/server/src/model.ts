@@ -1,6 +1,7 @@
 import type { ModelCredential, ModelFactory } from '@openharness/brain'
 import { createOpenAICompatibleFetch, createProviderModelFactory } from '@openharness/brain'
 
+import { createProviderModelFetch } from './catalog/provider-fetch'
 import { ENV_VARS, type ServerConfig } from './config'
 import type { ResolveSessionCredential } from './credentials'
 import { MOCK_MODEL_ENV_VALUE, createMockModelFactory } from './mock-model'
@@ -64,6 +65,10 @@ export function resolveModelFactory(config: ServerConfig): ResolvedModel {
       // credential's requests are guarded can be told about the self-host setting (#249, M4).
       // Azure's guard is never told: that type reads no flag.
       factory: createProviderModelFactory({
+        // The eleven fixed providers have no URL to guard, but they do have an egress path:
+        // this is the egress-proxy-aware fetch (#270), so a proxied deployment chats through
+        // the same client the catalogue and the credential checks already use.
+        fetch: createProviderModelFetch(),
         openAICompatibleFetch: createOpenAICompatibleFetch({
           allowPrivate: config.allowPrivateProviderUrls,
         }),
