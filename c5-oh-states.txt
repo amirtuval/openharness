@@ -1,0 +1,37 @@
+C5 — the `oh` (terminal) captures of the same four states, as text.
+Taken against a local server (see the PR body for the stack), on a 120x40 tmux pane.
+
+1. the "conversation summarized" divider, with the summary under it (#280)
+   (a real 3-turn session whose older history the engine summarized — covers.to_seq 12)
+
+   124ms · 59 tokens · —
+
+   ───────────────────────── conversation summarized · automatic · demo/tiny · 1 pass ─────────────────────────
+   History to summarize:
+   turn 1
+   AAAAA… (the summary the mock summarizer wrote, printed because a terminal has no
+   disclosure control)
+
+2. the progress line, mid-compaction (a 2-pass run)
+
+   DD (queued)
+
+   ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   demo/tiny · sesn_…PBSS8Z · — · 0% of context used · ⠋ Summarizing… 1 of 2
+   ❯
+
+3. the context meter in the status line, and its near-threshold colour
+   (with the ANSI escapes, as `tmux capture-pane -e` writes them)
+
+   normal, 61% of a 24576-token budget:
+   ^[[2mDemo Small · sesn_…XEMZSK · — · 61% of context used · idle^[[0m            (all dim chrome)
+
+   at the threshold, 86%:
+   ^[[2mDemo Small · sesn_…DBCEK2 · — · ^[[0m^[[31m86% of context used^[[2m^[[39m · idle^[[0m   (the meter in red)
+
+4. the truncation notice (a request whose newest item was over the budget)
+
+   Demo Small · sesn_…VBAHR1 · — · 133% of context used · idle
+   ❯
+
+   your message was too long for this model and was shortened (about 7234 tokens left out)
