@@ -34,6 +34,15 @@ import type { FencedError } from '@openharness/session'
  * The `retry_status` the brain writes next to it is not part of the classification — the loop
  * knows whether it is retrying or has run out of attempts (see `runTurn`).
  *
+ * ## Too long to send
+ *
+ * A provider refuses a request whose context is over its window with a 400 and its own words for
+ * it. That is not a retry (the same request fails again) and not an ordinary terminal error
+ * either: the loop compacts with tighter caps and tries once more (K2, C2). So the classification
+ * carries {@link ModelErrorClassification.contextOverflow} — recognised per provider by
+ * {@link isContextOverflowError} from its real payload — beside the `type`, which is the
+ * `model_request_failed_error` a 400 already names.
+ *
  * ## Wrapped errors
  *
  * A failure does not always arrive as itself. The AI SDK reports call-level retries that ran
@@ -59,6 +68,15 @@ export interface ModelErrorClassification {
   readonly type: SessionErrorType
   /** A human-readable message for the log; the error's own message when it has one. */
   readonly message: string
+  /**
+   * Whether the provider refused the request for being too long (epic #277, K2; C2).
+   *
+   * A separate flag rather than a `type`, because the turn loop treats it as neither a retry nor
+   * a plain terminal failure: it compacts with tighter caps and tries once more. It rides on the
+   * classification so the two decisions that must agree — "is this an overflow?" and "what does
+   * the log say happened?" — are made in one place, like `retryable` and `type`.
+   */
+  readonly contextOverflow: boolean
 }
 
 /**
@@ -113,7 +131,112 @@ const MAX_WRAPPER_DEPTH = 3
  */
 export function classifyModelError(error: unknown): ModelErrorClassification {
   const message = messageOf(error)
-  return { ...decideModelError(error, 0), message }
+  return {
+    ...decideModelError(error, 0),
+    message,
+    contextOverflow: isContextOverflowError(error),
+  }
+}
+
+/**
+ * The `error.code` / `error.type` values the providers use for "this request is too long".
+ *
+ * Only the ones that are unambiguous: OpenAI's `context_length_exceeded` (and the
+ * `string_above_max_length` a single input over the limit gets), Azure's copy of them, and the
+ * codes the OpenAI-compatible family reuses (vLLM and friends answer with OpenAI's spellings).
+ * A provider that says it only in prose is caught by {@link CONTEXT_OVERFLOW_PATTERN}.
+ */
+const CONTEXT_OVERFLOW_CODES = new Set([
+  'context_length_exceeded',
+  'string_above_max_length',
+  'context_overflow',
+  'context_window_exceeded',
+  'input_too_long',
+  'prompt_too_long',
+  'token_limit_exceeded',
+  'max_tokens_exceeded',
+])
+
+/**
+ * What every provider's own words for an over-long request look like.
+ *
+ * Researched one provider at a time, from the payloads each really sends:
+ *
+ * | provider                       | its words                                                                       |
+ * | ------------------------------ | ------------------------------------------------------------------------------- |
+ * | OpenAI, Azure, vLLM family     | `This model's maximum context length is … tokens. However, your messages …`       |
+ * | Anthropic (and Claude on Bedrock/Vertex) | `prompt is too long: 210000 tokens > 200000 maximum`                   |
+ * | Amazon Bedrock (Converse)      | `Input is too long for requested model.`                                          |
+ * | Google Vertex / Gemini         | `The input token count (…) exceeds the maximum number of tokens allowed (…)`      |
+ * | llama.cpp, Ollama, others      | `the request exceeds the available context size` / `too many tokens`             |
+ *
+ * The pattern is deliberately about *phrases*, not about a status: a 400 is what they all are,
+ * but so is a malformed request, and a malformed request must stay a terminal error rather than
+ * trigger a compaction. A recognisable phrase is the provider saying which one it is.
+ */
+const CONTEXT_OVERFLOW_PATTERN =
+  /context[ _-]?(?:length|window|size)|input is too long|prompt is too long|too many tokens|maximum number of tokens|token count \(?\d[\d,.]*\)? exceeds|exceeds the maximum (?:number of )?(?:tokens|context)|string too long|reduce the length of the (?:messages|prompt|input)|maximum context/i
+
+/**
+ * Whether a failed request was refused for being too long (epic #277, K2; C2).
+ *
+ * The turn loop's overflow handling asks this, so it is the same walk over wrappers that
+ * {@link decideModelError} makes — a provider that wraps the refusal (the AI SDK's retry
+ * wrapper, a provider SDK's own aggregate) must still read as an overflow, or the chat would end
+ * on a context it could have compacted.
+ *
+ * Every provider family is covered by its real payload: the code lives on the error itself (a
+ * provider SDK's duck-typed field), on `data.error.code` / `data.type` (the parsed body both
+ * OpenAI-shaped and Anthropic-shaped families carry), or in the message. The message is what
+ * catches Bedrock's `ValidationException` and Gemini's prose, which carry no code at all.
+ *
+ * @param error whatever the model request failed with
+ */
+export function isContextOverflowError(error: unknown): boolean {
+  return detectsContextOverflow(error, 0)
+}
+
+/** {@link isContextOverflowError}'s walk, one wrapper per step. */
+function detectsContextOverflow(error: unknown, depth: number): boolean {
+  const record = asRecord(error)
+  if (record !== null) {
+    if (codeSaysOverflow(record.code) || codeSaysOverflow(record.name)) {
+      return true
+    }
+    const body = asRecord(record.data)
+    const bodyError = asRecord(body?.error)
+    if (
+      codeSaysOverflow(bodyError?.code) ||
+      codeSaysOverflow(bodyError?.type) ||
+      codeSaysOverflow(body?.error)
+    ) {
+      return true
+    }
+    if (typeof record.message === 'string' && CONTEXT_OVERFLOW_PATTERN.test(record.message)) {
+      return true
+    }
+    if (
+      typeof record.responseBody === 'string' &&
+      CONTEXT_OVERFLOW_PATTERN.test(record.responseBody)
+    ) {
+      return true
+    }
+  }
+  if (typeof error === 'string') {
+    return CONTEXT_OVERFLOW_PATTERN.test(error)
+  }
+  if (depth < MAX_WRAPPER_DEPTH) {
+    const wrapped = wrappedErrorOf(error)
+    if (wrapped !== undefined && wrapped !== error) {
+      return detectsContextOverflow(wrapped, depth + 1)
+    }
+  }
+  return false
+}
+
+/** Whether one code-like value is a context-overflow code. */
+function codeSaysOverflow(value: unknown): boolean {
+  return typeof value === 'string' && CONTEXT_OVERFLOW_CODES.has(value.toLowerCase())
 }
 
 /**
@@ -132,7 +255,7 @@ export function classifyModelError(error: unknown): ModelErrorClassification {
 function decideModelError(
   error: unknown,
   depth: number,
-): Omit<ModelErrorClassification, 'message'> {
+): Omit<ModelErrorClassification, 'message' | 'contextOverflow'> {
   const status = statusOf(error)
   if (status !== undefined) {
     if (status === 429) {

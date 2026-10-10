@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { hostname } from 'node:os'
 
+import { DEFAULT_COMPACTION_THRESHOLD } from '@openharness/brain'
 import { DEFAULT_PARTITION_COUNT } from '@openharness/protocol'
 import { DEFAULT_KEY_CACHE_TTL_MS, envKeyProvider, gcpKmsKeyProvider } from '@openharness/vault'
 
@@ -51,6 +52,7 @@ import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
  * | `OPENHARNESS_SWEEP_MS`              | how often owned partitions are re-scanned; `60000` by default    |
  * | `OPENHARNESS_DELTA_RETENTION_MS`    | how long superseded chunks are kept before compaction deletes them; `3600000` |
  * | `OPENHARNESS_COMPACT_INTERVAL_MS`   | how often compaction runs; `300000` by default, `0` disables it  |
+ * | `OPENHARNESS_COMPACTION_THRESHOLD`  | the share of the chat model's context budget at which history is summarized; `0.7` (epic #277, C2) |
  * | `OPENHARNESS_LOG_FORMAT`            | `text` (default, the readable one-line format) or `json` (Cloud Logging) (#158) |
  * | `OPENHARNESS_TRACING`               | `off` (default) or `cloud-trace`: export spans to Cloud Trace (#158) |
  * | `OPENHARNESS_TRACE_SAMPLE_RATE`     | the fraction of traces kept when tracing is on; `0.1` (#158)      |
@@ -107,6 +109,7 @@ export const ENV_VARS = {
   sweepMs: 'OPENHARNESS_SWEEP_MS',
   deltaRetentionMs: 'OPENHARNESS_DELTA_RETENTION_MS',
   compactIntervalMs: 'OPENHARNESS_COMPACT_INTERVAL_MS',
+  compactionThreshold: 'OPENHARNESS_COMPACTION_THRESHOLD',
   logFormat: 'OPENHARNESS_LOG_FORMAT',
   tracing: 'OPENHARNESS_TRACING',
   traceSampleRate: 'OPENHARNESS_TRACE_SAMPLE_RATE',
@@ -188,6 +191,16 @@ export interface ServerConfig {
   readonly deltaRetentionMs: number
   /** How often the compaction job runs; `0` disables it. */
   readonly compactIntervalMs: number
+  /**
+   * `OPENHARNESS_COMPACTION_THRESHOLD`: the share of the chat model's context budget at which
+   * the brain summarizes older history before making a request (epic #277, K2; C2).
+   *
+   * A fraction in `0..1`. `0` summarizes as soon as anything is in the context (useful for a
+   * trial, and the only value that makes every request compact), `1` fires only once a request
+   * is already over the chat model's budget — the default, 0.7, is what the epic fixes (K2).
+   * Anything outside `0..1` fails the boot rather than being accepted as a setting nobody meant.
+   */
+  readonly compactionThreshold: number
   /** `OPENHARNESS_LOG_FORMAT`: the readable one-line format, or Cloud Logging JSON (#158). */
   readonly logFormat: LogFormat
   /** `OPENHARNESS_TRACING`: where spans go — nowhere, or Cloud Trace (#158). */
@@ -390,6 +403,14 @@ export function readServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
     compactIntervalMs: readInteger(env, ENV_VARS.compactIntervalMs, DEFAULT_COMPACT_INTERVAL_MS, {
       min: 0,
     }),
+    // The context-compaction trigger (epic #277, C2): the share of the chat model's budget at
+    // which the brain summarizes older history. Exclusive bounds on purpose — see the field.
+    compactionThreshold: readNumber(
+      env,
+      ENV_VARS.compactionThreshold,
+      DEFAULT_COMPACTION_THRESHOLD,
+      { min: 0, max: 1 },
+    ),
     // Observability (#158). The log format and the trace mode are a choice each, so an
     // unknown value is a boot failure naming the variable rather than a silent default; the
     // sample rate is a fraction, and 0 is meaningful (trace nothing while keeping the

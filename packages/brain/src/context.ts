@@ -10,6 +10,8 @@ import type {
 import { EVENT_TYPES } from '@openharness/protocol'
 import type { ModelMessage } from 'ai'
 
+import { lastModelRequest } from './log'
+
 /**
  * Turning the session log into the messages a model request is made with — and measuring how
  * big that request is.
@@ -147,7 +149,7 @@ export function createContextStrategy(config: ContextStrategyConfig = {}): Conte
     // Per request, from the model that request runs: the loop re-reads the session at every
     // request boundary, so a switch applies to the next request's budget as well as its model.
     const budget = budgetFor?.(options.model.id) ?? defaultBudget
-    const summary = latestSummary(events)
+    const summary = latestContextSummary(events)
     return planRequest(events, options.system, summary, budget)
   }
 }
@@ -246,7 +248,11 @@ export interface NextRequestSizeOptions {
 export function estimateNextRequestTokens(options: NextRequestSizeOptions): number {
   const since = options.since.reduce((total, text) => total + estimateTokens(text), 0)
   const previous = options.previous
-  if (previous === undefined || previous === null || !isBaselineUsable(previous, options.model)) {
+  if (
+    previous === undefined ||
+    previous === null ||
+    !isUsableContextSizeBaseline(previous, options.model)
+  ) {
     return since
   }
   return promptTokensOf(previous.usage) + since
@@ -260,8 +266,13 @@ export function estimateNextRequestTokens(options: NextRequestSizeOptions): numb
  * replaced is not the context the next request builds on. A span start from before D9 carries no
  * `model`, and an unknown model is no model: the safer answer is the estimate, not a number
  * attributed to the wrong window.
+ *
+ * Exported because a caller that builds {@link NextRequestSizeOptions}`.since` has to make the
+ * same decision: the new text is "what is new since the baseline" only when the baseline is
+ * usable, and the whole visible history otherwise (C2's engine is that caller). Reading the rule
+ * off one exported function is what keeps the two halves from drifting.
  */
-function isBaselineUsable(previous: ContextSizeBaseline, model: string): boolean {
+export function isUsableContextSizeBaseline(previous: ContextSizeBaseline, model: string): boolean {
   return (
     previous.purpose !== 'summary' &&
     previous.superseded !== true &&
@@ -275,6 +286,103 @@ function summaryIntroduction(summary: string): string {
   return `Earlier messages in this conversation were summarized to fit the model's context. Treat the summary below as the history so far, and continue from the messages that follow.\n\n${summary}`
 }
 
+/** How {@link estimateContextSize} is asked. */
+export interface ContextSizeOptions {
+  /** The model the next request will run — the budget the size is compared against (K2). */
+  readonly model: string
+  /** The session's system prompt, or `null` when it has none. */
+  readonly system: string | null
+}
+
+/**
+ * How big the next request's context will be, read off the log (epic #277, K2; C2).
+ *
+ * The log-walking companion of {@link estimateNextRequestTokens}: a caller that only has the
+ * session's events asks this, and it assembles the two inputs the estimate takes — the baseline
+ * request and the text that is new since it — with the rules the module documents. The baseline
+ * is the log's newest `span.model_request_end` (with the `span.model_request_start` it closes,
+ * which carries the model and the purpose), and the new text is every conversation message after
+ * it. When there is no usable baseline — the session's first request, a model switch, a summary
+ * request, a failed summary pass, or a summary written since — the whole visible history is the
+ * estimate's input: the session's system prompt, the summary in force when there is one, and the
+ * messages after its `covers.to_seq`.
+ *
+ * The result is a token count, not a decision: the trigger that compares it against a share of
+ * the chat model's budget is the compaction engine's (C2).
+ *
+ * @param events the session's log, as {@link readLog} handed it over
+ * @param options the model the next request runs, and the session's system prompt
+ */
+export function estimateContextSize(
+  events: readonly StoredEvent[],
+  options: ContextSizeOptions,
+): number {
+  const baseline = lastModelRequest(events)
+  const summary = latestContextSummary(events)
+  const summarySinceBaseline = summary !== null && (baseline === null || summary.seq > baseline.seq)
+  const previous: ContextSizeBaseline | null =
+    baseline === null
+      ? null
+      : {
+          model: baseline.model,
+          usage: baseline.usage,
+          ...(baseline.purpose === undefined ? {} : { purpose: baseline.purpose }),
+          superseded: isSuperseded(events, baseline.seq),
+        }
+  const usable =
+    previous !== null &&
+    !summarySinceBaseline &&
+    isUsableContextSizeBaseline(previous, options.model)
+  const since =
+    usable && baseline !== null
+      ? messageTextsAfter(events, baseline.seq)
+      : visibleHistoryTexts(events, options.system, summary)
+  return estimateNextRequestTokens({
+    model: options.model,
+    previous: usable ? previous : null,
+    since,
+  })
+}
+
+/** The text of every conversation message after `afterSeq`, oldest first. */
+function messageTextsAfter(events: readonly StoredEvent[], afterSeq: number): string[] {
+  return conversationAfter(events, afterSeq).map((entry) => textOfMessage(entry.message))
+}
+
+/**
+ * Everything the next request would be sent, when no baseline can describe it: the system
+ * prompt, the summary in force, and the messages after it (K1/K2).
+ */
+function visibleHistoryTexts(
+  events: readonly StoredEvent[],
+  system: string | null,
+  summary: ContextSummaryEvent | null,
+): string[] {
+  const texts: string[] = []
+  if (system !== null && system.length > 0) {
+    texts.push(system)
+  }
+  if (summary !== null) {
+    texts.push(summaryIntroduction(summary.summary))
+  }
+  texts.push(...messageTextsAfter(events, summary === null ? 0 : summary.covers.to_seq))
+  return texts
+}
+
+/** Whether a `session.rewind` in `events` covers `seq`. */
+function isSuperseded(events: readonly StoredEvent[], seq: number): boolean {
+  for (const event of events) {
+    if (
+      event.type === EVENT_TYPES.sessionRewind &&
+      seq >= event.supersedes.from_seq &&
+      seq <= event.supersedes.to_seq
+    ) {
+      return true
+    }
+  }
+  return false
+}
+
 /**
  * The newest summary no rewind has superseded, or `null` when the log has none (K1).
  *
@@ -282,8 +390,11 @@ function summaryIntroduction(summary: string): string {
  * covered, so the summary is not handed to the model. The range is read off the `session.rewind`
  * events in `events`; the store's replay read would normally have removed the covered events
  * already, and doing it here as well is what keeps the rule true whatever the caller passed.
+ *
+ * Exported because the compaction engine (C2) reads the same event: it updates the latest
+ * summary rather than starting over, so "which summary is in force" has to have one answer.
  */
-function latestSummary(events: readonly StoredEvent[]): ContextSummaryEvent | null {
+export function latestContextSummary(events: readonly StoredEvent[]): ContextSummaryEvent | null {
   const ranges: Supersedes[] = []
   for (const event of events) {
     if (event.type === EVENT_TYPES.sessionRewind) {
@@ -465,6 +576,21 @@ function capNewest(conversation: readonly ConversationMessage[], budget: number)
       tokens_after: estimateTokens(content),
     },
   }
+}
+
+/**
+ * Cut one item's text to at most `budget` tokens, around an {@link OMISSION_MARKER} (K6).
+ *
+ * The same cut the strategy applies to an oversized newest message, exposed because the
+ * compaction engine caps each item it feeds a summarizer with the same rule (K6): a single huge
+ * message must not swallow a whole pass. The record a request's span carries is the strategy's
+ * own business; this answers the text alone.
+ *
+ * @param text the item's text
+ * @param budget the most tokens the result may cost, marker included
+ */
+export function capItemText(text: string, budget: number): string {
+  return capText(text, budget, estimateTokens(text))
 }
 
 /**

@@ -5,6 +5,7 @@ import type {
   AgentMessageEvent,
   ContentDelta,
   ContextSummaryEvent,
+  ContextSummaryProgressEvent,
   ListModelsResponse,
   Mode,
   ModelEntry,
@@ -529,6 +530,29 @@ export function makeContextSummary(
     summary_model: 'anthropic/claude-sonnet-5',
     prompt_version: 'compact-v1',
     passes: 1,
+  }
+  return { ...event, ...overrides }
+}
+
+/**
+ * A stored `session.context_summary_progress`: the compaction engine's next pass (#279).
+ *
+ * The default is the second of three passes — the middle of a chunked summary, which is the
+ * shape a client's progress bar exists for. Override `pass`/`passes` for a one-pass run or the
+ * last pass; the schema refuses zero or a negative on either.
+ *
+ * @param overrides fields to replace on the event
+ */
+export function makeContextSummaryProgress(
+  overrides: Partial<ContextSummaryProgressEvent> = {},
+): ContextSummaryProgressEvent {
+  const event: ContextSummaryProgressEvent = {
+    id: newEventId(),
+    type: 'session.context_summary_progress',
+    seq: takeSeq(),
+    processed_at: fixtureTimestamp(),
+    pass: 2,
+    passes: 3,
   }
   return { ...event, ...overrides }
 }

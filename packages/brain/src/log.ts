@@ -2,6 +2,7 @@ import type { SessionStore } from '@openharness/session'
 import { EVENT_TYPES, MAX_PAGE_LIMIT } from '@openharness/protocol'
 import type {
   EventId,
+  ModelRequestPurpose,
   ModelUsage,
   SessionId,
   SessionModelUsage,
@@ -93,6 +94,10 @@ export function lastStatusEventType(events: readonly StoredEvent[]): StoredEvent
  * request before it. This is the loop's guard against that, and it is what a recovering brain
  * consults before asking for a reply the log already holds.
  *
+ * A **summary** request (`purpose: 'summary'`, C2) is skipped: it answers nothing, is followed by
+ * no `agent.message`, and would otherwise take over the "answer set" its own start recorded — a
+ * message that arrived while the summarizer was running would read as answered.
+ *
  * @param events the log, as {@link contextView} hands it over
  */
 export function needsModelRequest(events: readonly StoredEvent[]): boolean {
@@ -103,12 +108,63 @@ export function needsModelRequest(events: readonly StoredEvent[]): boolean {
       waiting.push(event)
     } else if (event.type === EVENT_TYPES.modelRequestStart) {
       // A copy: a message that arrives while this request streams must not join its answer set.
-      answeredByRequest = [...waiting]
+      // A summary request answers nothing and is left out entirely, so it cannot redefine the
+      // set the chat's own request claimed.
+      answeredByRequest = event.purpose === 'summary' ? answeredByRequest : [...waiting]
     } else if (event.type === EVENT_TYPES.agentMessage) {
       waiting = waiting.filter((message) => !answeredByRequest.includes(message))
     }
   }
   return waiting.length > 0
+}
+
+/**
+ * The log's newest model request, as the size accounting wants it (epic #277, K2; C2).
+ *
+ * A `span.model_request_end` reports the usage and the start it closes carries the model and the
+ * purpose, so this pairs them the way {@link usageByModel} does — and, like that fold, an end
+ * whose start is not in the log contributes nothing. `purpose` is present only for a request
+ * that was not the chat's own (a summary request), which is what lets the size accounting refuse
+ * it as a baseline.
+ */
+export interface LastModelRequest {
+  /** The `seq` of the `span.model_request_end` — the position everything after it is "new". */
+  readonly seq: number
+  /** The `provider/model` the request ran — `span.model_request_start.model`, or `null`. */
+  readonly model: string | null
+  /** What it reported. */
+  readonly usage: ModelUsage
+  /** Why it was made, when it was not the chat's own request (`purpose: 'summary'`). */
+  readonly purpose?: ModelRequestPurpose
+}
+
+/**
+ * The newest request in the log, or `null` when it holds none.
+ *
+ * @param events the session's log, as {@link readLog} handed it over
+ */
+export function lastModelRequest(events: readonly StoredEvent[]): LastModelRequest | null {
+  const starts = new Map<EventId, Pick<LastModelRequest, 'model' | 'purpose'>>()
+  for (const event of events) {
+    if (event.type === EVENT_TYPES.modelRequestStart) {
+      starts.set(event.id, {
+        model: event.model ?? null,
+        ...(event.purpose === undefined ? {} : { purpose: event.purpose }),
+      })
+    }
+  }
+  let latest: LastModelRequest | null = null
+  for (const event of events) {
+    if (event.type !== EVENT_TYPES.modelRequestEnd) {
+      continue
+    }
+    const start = starts.get(event.model_request_start_id)
+    if (start === undefined) {
+      continue
+    }
+    latest = { seq: event.seq, ...start, usage: event.model_usage }
+  }
+  return latest
 }
 
 /**

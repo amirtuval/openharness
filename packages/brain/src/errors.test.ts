@@ -48,6 +48,7 @@ describe('classifyModelError', () => {
       type,
       retryable,
       message: `provider said ${status}`,
+      contextOverflow: false,
     })
   })
 
@@ -125,6 +126,7 @@ describe('classifyModelError', () => {
       type: 'unknown_error',
       retryable: false,
       message: 'something else',
+      contextOverflow: false,
     })
     expect(classifyModelError(undefined)).toMatchObject({
       type: 'unknown_error',
@@ -138,6 +140,7 @@ describe('classifyModelError', () => {
       type: 'unknown_error',
       retryable: false,
       message: 'rate limited, honestly',
+      contextOverflow: false,
     })
   })
 
@@ -163,6 +166,7 @@ describe('classifyModelError', () => {
       retryable: true,
       type: 'model_overloaded_error',
       message: 'Failed after 3 attempts.',
+      contextOverflow: false,
     })
     expect(isRetryableModelError(wrapped)).toBe(true)
   })
@@ -178,6 +182,7 @@ describe('classifyModelError', () => {
       retryable: false,
       type: 'model_request_failed_error',
       message: 'Failed after 2 attempts.',
+      contextOverflow: false,
     })
   })
 
@@ -217,6 +222,198 @@ describe('classifyModelError', () => {
   it('still answers unknown_error, with the wrapper message, for a wrapper around nothing', () => {
     expect(
       classifyModelError(Object.assign(new Error('outer'), { lastError: new Error('inner') })),
-    ).toEqual({ retryable: false, type: 'unknown_error', message: 'outer' })
+    ).toEqual({ retryable: false, type: 'unknown_error', message: 'outer', contextOverflow: false })
+  })
+})
+
+/**
+ * The context-overflow flag (epic #277, K2; C2): one case per provider family, each built from
+ * the payload that provider really sends.
+ *
+ * Getting these shapes wrong is not cosmetic: a missed overflow ends the chat on a context it
+ * could have compacted, and a false positive makes the turn compact an ordinary 400 away. So
+ * each case carries the status, the parsed body and the message a provider's own SDK produces —
+ * not a paraphrase of them.
+ */
+describe('classifyModelError — a request the provider refused as too long', () => {
+  /** An `APICallError` in the shape `@ai-sdk/*` throws for a non-2xx response. */
+  function providerError(options: {
+    readonly status: number
+    readonly body: unknown
+    readonly message?: string
+  }): APICallError {
+    const message =
+      options.message ??
+      (typeof (options.body as { error?: { message?: unknown } })?.error?.message === 'string'
+        ? String((options.body as { error: { message: string } }).error.message)
+        : 'provider refused the request')
+    return new APICallError({
+      message,
+      url: 'https://api.example.test/v1/messages',
+      requestBodyValues: {},
+      statusCode: options.status,
+      responseBody: JSON.stringify(options.body),
+      data: options.body,
+      isRetryable: false,
+    })
+  }
+
+  it('reads OpenAI’s context_length_exceeded', () => {
+    const classification = classifyModelError(
+      providerError({
+        status: 400,
+        body: {
+          error: {
+            message:
+              "This model's maximum context length is 128000 tokens. However, your messages resulted in 131072 tokens.",
+            type: 'invalid_request_error',
+            param: 'messages',
+            code: 'context_length_exceeded',
+          },
+        },
+      }),
+    )
+
+    expect(classification).toMatchObject({
+      contextOverflow: true,
+      retryable: false,
+      type: 'model_request_failed_error',
+    })
+  })
+
+  it('reads Azure OpenAI’s copy of the same payload', () => {
+    const classification = classifyModelError(
+      providerError({
+        status: 400,
+        body: {
+          error: {
+            message:
+              "This model's maximum context length is 16384 tokens. However, your messages resulted in 17000 tokens.",
+            type: 'invalid_request_error',
+            param: 'messages',
+            code: 'context_length_exceeded',
+          },
+        },
+      }),
+    )
+
+    expect(classification.contextOverflow).toBe(true)
+  })
+
+  it('reads Anthropic’s “prompt is too long”', () => {
+    const classification = classifyModelError(
+      providerError({
+        status: 400,
+        body: {
+          type: 'error',
+          error: {
+            type: 'invalid_request_error',
+            message: 'prompt is too long: 210000 tokens > 200000 maximum',
+          },
+        },
+      }),
+    )
+
+    expect(classification).toMatchObject({
+      contextOverflow: true,
+      retryable: false,
+      type: 'model_request_failed_error',
+    })
+  })
+
+  it('reads Bedrock’s Converse ValidationException', () => {
+    const classification = classifyModelError(
+      providerError({
+        status: 400,
+        message: 'Input is too long for requested model.',
+        body: {
+          __type: 'ValidationException',
+          message: 'Input is too long for requested model.',
+        },
+      }),
+    )
+
+    expect(classification).toMatchObject({
+      contextOverflow: true,
+      retryable: false,
+      type: 'model_request_failed_error',
+    })
+  })
+
+  it('reads Vertex Gemini’s token-count refusal', () => {
+    const classification = classifyModelError(
+      providerError({
+        status: 400,
+        body: {
+          error: {
+            code: 400,
+            message:
+              'The input token count (1050000) exceeds the maximum number of tokens allowed (1048576).',
+            status: 'INVALID_ARGUMENT',
+          },
+        },
+      }),
+    )
+
+    expect(classification).toMatchObject({
+      contextOverflow: true,
+      retryable: false,
+      type: 'model_request_failed_error',
+    })
+  })
+
+  it('reads an OpenAI-compatible endpoint’s refusal, code or prose', () => {
+    // vLLM answers with OpenAI's code and prose; a bare llama.cpp answers with prose alone.
+    const vllm = classifyModelError(
+      providerError({
+        status: 400,
+        body: {
+          error: {
+            message:
+              "This model's maximum context length is 32768 tokens. However, you requested 40000 tokens.",
+            type: 'BadRequestError',
+            code: 400,
+          },
+        },
+      }),
+    )
+    const llama = classifyModelError(
+      providerError({
+        status: 400,
+        message: 'the request exceeds the available context size, try increasing it',
+        body: { error: 'the request exceeds the available context size, try increasing it' },
+      }),
+    )
+
+    expect(vllm.contextOverflow).toBe(true)
+    expect(llama.contextOverflow).toBe(true)
+  })
+
+  it('sees through a wrapper the provider SDK put around the refusal', () => {
+    const wrapped = aiRetryError([
+      providerError({
+        status: 400,
+        body: { error: { type: 'invalid_request_error', message: 'prompt is too long: 1 > 0' } },
+      }),
+    ])
+
+    expect(classifyModelError(wrapped).contextOverflow).toBe(true)
+  })
+
+  it('does not mistake an ordinary 400 for an overflow', () => {
+    const classification = classifyModelError(
+      providerError({
+        status: 400,
+        message: 'Unsupported parameter: max_tokens is not supported with this model.',
+        body: {
+          error: {
+            message: 'Unsupported parameter: max_tokens is not supported with this model.',
+            type: 'invalid_request_error',
+          },
+        },
+      }),
+    )
+
+    expect(classification.contextOverflow).toBe(false)
   })
 })

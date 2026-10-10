@@ -16,7 +16,9 @@ import { ModelUsageSchema } from './span'
  * the one that changes what the log *means* rather than what the session is doing: it is a
  * statement about the transcript, not about a turn. A `session.context_summary` is the other
  * kind of statement: it changes nothing about the log or the transcript, and only says what the
- * *model* is told about the history it no longer sees.
+ * *model* is told about the history it no longer sees. `session.context_summary_progress` is the
+ * same statement while it is being made — one event per pass of the compaction engine — and says
+ * nothing beyond which pass is starting.
  */
 
 /**
@@ -333,6 +335,44 @@ export const ContextSummaryEventSchema = z.object({
 export type ContextSummaryEvent = DeepReadonly<z.infer<typeof ContextSummaryEventSchema>>
 
 /**
+ * // extension: the compaction engine started another pass (epic #277, C2; #279).
+ *
+ * A summary of a big history takes more than one model call — the engine folds the older
+ * history in slices, each pass updating the running summary — and this event says which pass is
+ * starting, of how many the plan holds. It is **stored**, not stream-only, because of D9: every
+ * fact a client is shown lives in the log, so a client that reconnects mid-compaction (or reads
+ * the session later) sees the same progress the live stream carried. The one exception in the
+ * codebase stays `session.deleted`.
+ *
+ * It is the brain's bookkeeping, like `session.usage` and `session.context_summary`: not queued,
+ * never claimed, and read by no part of the brain — the context strategy ignores it and the
+ * transcript does not show it. A reader that wants it (a progress bar) reads the newest one
+ * between a summary request's spans. Deleting the stale ones is follow-up work (#285).
+ *
+ * Anthropic has no equivalent: it has no server-side brain, and so nothing to report progress
+ * about.
+ */
+export const ContextSummaryProgressEventSchema = z.object({
+  id: EventIdSchema,
+  type: z.literal(EVENT_TYPES.sessionContextSummaryProgress),
+  seq: EventSeqSchema,
+  processed_at: ProcessedAtSchema,
+  /** Which pass is starting, counting from 1. */
+  pass: z.number().int().positive(),
+  /**
+   * How many passes the plan holds for the model doing the work. A plan ahead of the pass count
+   * is normal — the engine computes the slices before it calls the model — and the two are equal
+   * on the last pass.
+   */
+  passes: z.number().int().positive(),
+})
+
+/** A stored `session.context_summary_progress`, deep-readonly like every event (#279). */
+export type ContextSummaryProgressEvent = DeepReadonly<
+  z.infer<typeof ContextSummaryProgressEventSchema>
+>
+
+/**
  * One model's running total for a session (epic #245, A2; issue #247).
  *
  * The tokens of every request that ran on this model, summed over the session so far. It carries
@@ -453,6 +493,7 @@ export const SessionEventSchema = z.discriminatedUnion('type', [
   SessionRewindEventSchema,
   SessionUsageEventSchema,
   ContextSummaryEventSchema,
+  ContextSummaryProgressEventSchema,
 ])
 
 /** Any stored session event, deep-readonly (D9, issue #46). */
