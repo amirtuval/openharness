@@ -573,16 +573,18 @@ export class ModelCatalog {
    * Both publishers' catalogues for the credential's location, with the partner models that
    * are not enabled for the project dropped.
    *
-   * One token and one deadline cover the whole listing: the token is minted from the
-   * credential's own key (never Application Default Credentials), and every page and every
-   * EULA check runs inside the catalogue's own 5-second window — a Vertex project that cannot
-   * answer in it is the fallback above, not a request held open.
+   * One token covers the whole listing, minted from the credential's own key (never
+   * Application Default Credentials) and with `google-auth-library`'s own deadline; the token
+   * is minted **before** the catalogue's clock starts, so the model-list window is the whole
+   * {@link ModelCatalogOptions.timeoutMs} the module promises and not what a slow token left
+   * of it. Every page and every EULA check after that runs inside that one window — a Vertex
+   * project that cannot answer in it is the fallback above, not a request held open.
    */
   private async listVertexPublisherModels(
     body: Extract<PutProviderCredentialRequest, { type: 'vertex' }>,
   ): Promise<readonly ProviderModel[]> {
-    const signal = AbortSignal.timeout(this.timeoutMs)
     const token = await this.vertexToken(body.service_account)
+    const signal = AbortSignal.timeout(this.timeoutMs)
     const listed: ProviderModel[] = []
     for (const publisher of VERTEX_PUBLISHERS) {
       const page = await this.listPublisherModels(publisher, body.location, token, signal)
