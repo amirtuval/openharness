@@ -449,6 +449,22 @@ describe('the Vertex Model Garden refusal (#273)', () => {
     )
   })
 
+  it('is not read as a context overflow, so the turn does not compact and retry it', () => {
+    // The two decisions are made from the same error and must not meet: the rewrite is a
+    // message mapping (#273) while `contextOverflow` is the compact-and-retry signal (epic
+    // #277, K2; C2). A 404 for a model the project has not enabled is terminal — compacting
+    // the context could not help, and the reader would get "still did not fit" instead of
+    // the sentence naming Model Garden.
+    const classified = classifyModelError(
+      publisherModelError(
+        404,
+        'Publisher model `projects/p/locations/europe-west4/publishers/anthropic/models/claude-sonnet-4-5` was not found or your project does not have access to it.',
+      ),
+    )
+    expect(classified.contextOverflow).toBe(false)
+    expect(classified.type).toBe('model_request_failed_error')
+  })
+
   it('maps a Model Garden terms refusal, whatever status Google answered with', () => {
     expect(
       classifyModelError(
