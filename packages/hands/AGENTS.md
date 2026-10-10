@@ -146,8 +146,8 @@ permission and a timeout; `run(input, ctx)` does the work. The registry holds a 
 and is the only way to call one:
 
 ```ts
-const registry = createToolRegistry([echo]); // throws on two tools sharing a name
-const result = await registry.execute("echo", call.input, { signal, secrets });
+const registry = createToolRegistry([echo]) // throws on two tools sharing a name
+const result = await registry.execute('echo', call.input, { signal, secrets })
 ```
 
 - **Every outcome is a `ToolResult`, and `execute` never throws.** A name no tool has, input the
