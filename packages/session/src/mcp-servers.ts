@@ -72,6 +72,14 @@ export type StoredMcpServer = McpServer & McpServerSecrets
 
 /** What {@link McpServerStore.create} writes. The store assigns `id` and the timestamps. */
 export interface CreateMcpServerInput {
+  /**
+   * The server's `mcps_` id, when the caller mints it.
+   *
+   * The server mints it before the create so its secrets can be sealed under associated data
+   * that names it (#311): the id has to be known before the row exists. Omitted, the store
+   * mints one from its own clock, which is what a bare test does.
+   */
+  readonly id?: McpServerId
   /** The owner: the `user.id` Better Auth minted. */
   readonly ownerId: UserId
   /** The name, unique among the owner's servers. */

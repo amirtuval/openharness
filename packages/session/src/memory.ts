@@ -1503,7 +1503,7 @@ export class InMemoryMcpServerStore implements McpServerStore {
     const now = this.#clock()
     const at = timestampAt(now)
     const record: StoredMcpServer = {
-      id: newMcpServerId(now),
+      id: input.id ?? newMcpServerId(now),
       type: 'mcp_server',
       owner_id: input.ownerId,
       name: input.name,

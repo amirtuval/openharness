@@ -81,7 +81,7 @@ export class PostgresMcpServerStore implements McpServerStore {
     const now = this.#clock()
     const at = instant(now)
     const row: Insertable<McpServersTable> = {
-      id: newMcpServerId(now),
+      id: input.id ?? newMcpServerId(now),
       owner_id: input.ownerId,
       name: input.name,
       url: input.url,
