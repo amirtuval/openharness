@@ -729,14 +729,33 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
           throw rewindRefused(outcome.refusal)
         }
       }
+      // A `user.tool_confirmation` answers a call that is waiting on the user (epic #303,
+      // #309). The fake's brain never pauses — it answers every message in one turn — so no
+      // call in it is ever waiting, and the server's 400 for exactly that is the honest answer.
+      const hasConfirmation = request.data.events.some(
+        (input) => input.type === EVENT_TYPES.userToolConfirmation,
+      )
+      if (hasConfirmation) {
+        throw new ApiError(
+          400,
+          `nothing in session ${brain.session.id} is waiting on the user, so there is nothing to confirm`,
+          { type: 'invalid_request_error' },
+        )
+      }
       // The mode the chat will be on after the batch, and its refusal (#245, M6): checked
       // before anything is stored, exactly where the events route checks it — a batch that
       // continues on a mode whose model cannot be used is refused with nothing stored.
       const modeAfter = resultingFakeMode(brain.session.mode, request.data.events)
       const resolvedMode = modeAfter === null ? null : requireUsableMode(modeAfter)
-      const stored: UserEvent[] = request.data.events.flatMap((input) =>
-        input.type === EVENT_TYPES.sessionRewind ? [] : [brain.appendUserEvent(input)],
-      )
+      const stored: UserEvent[] = request.data.events.flatMap((input) => {
+        if (
+          input.type === EVENT_TYPES.sessionRewind ||
+          input.type === EVENT_TYPES.userToolConfirmation
+        ) {
+          return []
+        }
+        return [brain.appendUserEvent(input)]
+      })
       if (resolvedMode === null) {
         brain.session.mode = null
       } else {

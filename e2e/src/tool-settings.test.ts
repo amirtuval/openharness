@@ -1,5 +1,5 @@
 import { MOCK_TOOL_MARKER, TEST_TOOL_NAME } from '@openharness/server'
-import { EVENT_TYPES } from '@openharness/protocol'
+import { ASK_USER_TOOL_NAME, EVENT_TYPES } from '@openharness/protocol'
 import type { ModelRequestStartEvent, StoredEvent, ToolSettingEntry } from '@openharness/protocol'
 import type { Client } from '@openharness/client'
 import { describe, expect, it } from 'vitest'
@@ -20,6 +20,8 @@ import { e2eHarness, personFor, readLog, waitForTurnEnd } from './harness'
  * not list it, and the call the model made anyway is answered as an unknown tool rather than
  * run. The SDK the server exposes has no tool-settings resource yet (that is the UI, #308), so
  * the routes are called with the harness's own bearer token.
+ *
+ * The process registers `ask_user` (#309) beside the test tool, so the listing holds both.
  */
 
 const harness = e2eHarness('tool-settings')
@@ -79,22 +81,27 @@ describe('the tool settings over the wire', () => {
     const server = await harness.server()
     const me = await person(server, 'drops')
 
-    // The mock process registers exactly the test tool, under its own declared `allow`.
+    // Every deployment registers `ask_user` (#309); the mock process adds the test tool. Both
+    // are on under their own declared `allow`, and a call to `ask_user` is answered by the
+    // user rather than run, which is what its `policy: 'allow'` says about the *tool*.
+    const registered = (name: string): unknown => ({
+      name,
+      source: 'builtin',
+      enabled: true,
+      policy: 'allow',
+      default_policy: 'allow',
+      available: true,
+    })
     expect(await listTools(server, me)).toEqual([
-      {
-        name: TEST_TOOL_NAME,
-        source: 'builtin',
-        enabled: true,
-        policy: 'allow',
-        default_policy: 'allow',
-        available: true,
-      },
+      registered(ASK_USER_TOOL_NAME),
+      registered(TEST_TOOL_NAME),
     ])
 
     const session = await me.client.sessions.create({ model: { id: 'anthropic/claude-sonnet-5' } })
     await sendAndWait(me.client, session.id, `${MOCK_TOOL_MARKER} before the setting`)
     // The tool was offered, so the model's call to it ran and was answered with what it said.
     expect(spans(await readLog(me.client, session.id))[0]?.tools).toEqual([
+      { name: ASK_USER_TOOL_NAME, source: 'builtin' },
       { name: TEST_TOOL_NAME, source: 'builtin' },
     ])
 
@@ -104,21 +111,32 @@ describe('the tool settings over the wire', () => {
     })
     expect(stored.status).toBe(200)
     const written = ((await stored.json()) as { data: ToolSettingEntry[] }).data
-    expect(written[0]).toMatchObject({ name: TEST_TOOL_NAME, enabled: false, policy: 'allow' })
-    // The read the settings screen makes says the same thing.
-    expect((await listTools(server, me))[0]).toMatchObject({ enabled: false })
+    expect(written.find((entry) => entry.name === TEST_TOOL_NAME)).toMatchObject({
+      name: TEST_TOOL_NAME,
+      enabled: false,
+      policy: 'allow',
+    })
+    // The read the settings screen makes says the same thing, and leaves the other tool alone.
+    const listed = await listTools(server, me)
+    expect(listed.find((entry) => entry.name === TEST_TOOL_NAME)).toMatchObject({ enabled: false })
+    expect(listed.find((entry) => entry.name === ASK_USER_TOOL_NAME)).toMatchObject({
+      enabled: true,
+    })
 
     const second = await me.client.sessions.create({ model: { id: 'anthropic/claude-sonnet-5' } })
     await sendAndWait(me.client, second.id, `${MOCK_TOOL_MARKER} after the setting`)
 
     const log = await readLog(me.client, second.id)
-    // The tool was not in the offer at all — the span records no offer, exactly as it does for a
-    // deployment that registers no tools.
-    expect(spans(log)[0]?.tools).toBeUndefined()
+    // The tool turned off was not in the offer at all — the span records what was, which is the
+    // other one.
+    expect(spans(log)[0]?.tools).toEqual([{ name: ASK_USER_TOOL_NAME, source: 'builtin' }])
     // The mock called it anyway (nothing told it what the request offered) and the loop, having
-    // no tool to run a call with, stores nothing about it: a request that offered no tools has
-    // no call in its log, and the turn ends idle behind it.
-    expect(log.some((event) => event.type === EVENT_TYPES.agentToolUse)).toBe(false)
+    // no tool of that name to run, answers it as the unknown tool a disabled one is — the model
+    // is told, and the turn ends idle behind it.
+    const use = log.find((event) => event.type === EVENT_TYPES.agentToolUse)
+    expect(use).toMatchObject({ name: TEST_TOOL_NAME, evaluated_permission: 'allow' })
+    const result = log.find((event) => event.type === EVENT_TYPES.agentToolResult)
+    expect(result).toMatchObject({ is_error: true })
     expect(log.at(-1)?.type).toBe(EVENT_TYPES.sessionStatusIdle)
   })
 })

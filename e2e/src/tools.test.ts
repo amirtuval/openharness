@@ -1,5 +1,5 @@
 import { MOCK_TOOL_MARKER, TEST_TOOL_NAME } from '@openharness/server'
-import { EVENT_TYPES } from '@openharness/protocol'
+import { ASK_USER_TOOL_NAME, EVENT_TYPES } from '@openharness/protocol'
 import type {
   AgentToolResultEvent,
   AgentToolUseEvent,
@@ -18,6 +18,9 @@ import { e2eHarness, readLog, typesOf, waitForTurnEnd } from './harness'
  * through `@openharness/hands` in the server process, stores the answer and asks again — and
  * what a client reads back is the sequence of events that says so. Nothing below is mocked
  * except the model, which is the mock the deployment's test mode is for.
+ *
+ * The `echo` tool is the test hook's; `ask_user` (#309) is registered by every deployment, so
+ * both are in the offer and the span records both.
  */
 
 const harness = e2eHarness('tools')
@@ -67,11 +70,14 @@ describe('a tool turn', () => {
       is_error: false,
     })
 
-    // The step's own request offered the tool before it was called, and the answer bought a
+    // The step's own request offered the tools before one was called, and the answer bought a
     // second request — which is where the model's reply to the result comes from.
     expect(spans).toHaveLength(2)
-    expect(spans[0]?.tools).toEqual([{ name: TEST_TOOL_NAME, source: 'builtin' }])
-    expect(spans[1]?.tools).toEqual([{ name: TEST_TOOL_NAME, source: 'builtin' }])
+    expect(spans[0]?.tools).toEqual([
+      { name: ASK_USER_TOOL_NAME, source: 'builtin' },
+      { name: TEST_TOOL_NAME, source: 'builtin' },
+    ])
+    expect(spans[1]?.tools).toEqual(spans[0]?.tools)
 
     // The order the log holds is the order the loop ran in.
     const types = typesOf(log)

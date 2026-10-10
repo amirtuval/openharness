@@ -772,6 +772,10 @@ server's 400: `invalid_request_error`, the message composed exactly as
 the other kind — or a string that is no cursor at all — is the same 400 the server answers,
 never a silent page 1.
 
+A `user.tool_confirmation` (epic #303, #309) is the same 400: the server accepts one only while
+the call it names is waiting on the user, and the fake's brain never pauses — it answers every
+message in one turn — so every confirmation names a call that is not waiting.
+
 | scripting                  | what it does                                                                                                 |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------ |
 | `respondWith(text, opts?)` | queue a reply for the next model request; `chunks` a count or the exact fragments, `delayMs` a pace          |
