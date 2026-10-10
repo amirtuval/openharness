@@ -47,11 +47,22 @@ export interface CredentialTypeDefinition {
    * runs has no page to send a reader to, and the form simply offers no link.
    */
   readonly keyUrl?: string
+  /**
+   * What the second half of this type's model ids is, for the sentence a form puts under its
+   * name field: Azure OpenAI serves **deployments** (`azure/gpt-4o` names the deployment
+   * `gpt-4o`), Bedrock serves **model ids** (`bedrock/anthropic.claude-…-v1:0`) and a custom
+   * OpenAI-compatible endpoint serves **models** (`custom/llama3.3`).
+   *
+   * It is a fact about the type's model ids rather than a form's business — the same reason
+   * the two halves of a model id are `provider` and `model` everywhere else — and it lives
+   * here so the two frontends' name prompts cannot say different things about one type.
+   */
+  readonly modelIdHint: string
 }
 
 /**
- * The named credential types, in the order every side lists them. Today: Azure OpenAI and a
- * custom OpenAI-compatible endpoint.
+ * The named credential types, in the order every side lists them. Today: Azure OpenAI, a
+ * custom OpenAI-compatible endpoint and Amazon Bedrock.
  *
  * `credential-types.test.ts` holds this list against the request union's members, so a type
  * added to the schema without its facts here — or the reverse — fails a named test rather than
@@ -67,6 +78,8 @@ const CREDENTIAL_TYPE_DEFINITIONS = [
     // The Azure portal's home: the resource's own page is under a subscription and a resource
     // group, so its path is a guess and the portal root is the honest link.
     keyUrl: 'https://portal.azure.com/',
+    // An Azure OpenAI credential's models are its deployments: `azure/gpt-4o`.
+    modelIdHint: 'deployment',
   },
   {
     type: 'openai_compatible',
@@ -74,6 +87,20 @@ const CREDENTIAL_TYPE_DEFINITIONS = [
     defaultName: 'custom',
     // No `modelsDevKey`: the base URL is the user's, so there is no single models.dev provider
     // to file its models under. No `keyUrl`: a self-hosted endpoint has no console to link to.
+    // A custom endpoint's models are whatever its `/models` lists: `custom/llama3.3`.
+    modelIdHint: 'model',
+  },
+  {
+    type: 'bedrock',
+    name: 'Amazon Bedrock',
+    defaultName: 'bedrock',
+    // models.dev files Bedrock under the full product name, `amazon-bedrock`.
+    modelsDevKey: 'amazon-bedrock',
+    // IAM's Security credentials page: the documented place an access key is created, and the
+    // one page of the IAM console a reader with no key yet needs. Base URL, not a per-key path.
+    keyUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials',
+    // A Bedrock credential's models are the Bedrock model ids: `bedrock/anthropic.claude-…-v1:0`.
+    modelIdHint: 'model id',
   },
 ] as const satisfies readonly CredentialTypeDefinition[]
 

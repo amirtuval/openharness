@@ -131,18 +131,21 @@ export interface CredentialKey {
 
 /** What {@link CredentialStore.upsert} writes. */
 export interface UpsertCredentialInput extends CredentialKey {
-  /** The credential's form; `api_key` and `azure_openai` today. */
+  /** The credential's form; `api_key`, `azure_openai` and `bedrock` today. */
   readonly type: ProviderCredentialType
   /** The sealed secret, as `@openharness/vault` produced it. Stored as given, never opened. */
   readonly sealed: SealedSecret
-  /** The last four characters of the plaintext secret, for recognition only. */
-  readonly last4: string
   /**
-   * The public, type-specific facts the credential's type publishes — today a custom
-   * OpenAI-compatible base URL's host (#249, A3b). Absent for a type with none. Never a secret
-   * and never the sealed payload; a `list` answer carries it as-is.
+   * The non-secret facts that identify the credential within its type (epic #245, A3c), as
+   * the protocol's `ProviderCredentialDetails` — a Bedrock credential's region, and nothing
+   * for an `api_key`. Metadata beside the secret rather than part of it: it is written to a
+   * plain column, it is what `list` reports, and no store opens the sealed blob to answer it.
+   * Absent for a type that has nothing to report, which is what keeps the API's `details`
+   * field absent rather than empty.
    */
   readonly details?: ProviderCredentialDetails
+  /** The last four characters of the plaintext secret, for recognition only. */
+  readonly last4: string
   /** When the server validated the credential against the provider, on save. */
   readonly validatedAt: Timestamp
 }

@@ -12,9 +12,10 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { describeError, type ErrorContext } from '../errors'
 import {
   CREDENTIAL_NAME_FIELD,
-  type CredentialField,
+  isChoiceField,
   formForCredential,
   nameErrorMessage,
+  type CredentialField,
 } from '../providers/credential-form'
 import { SecretInput } from './secret-input'
 
@@ -91,6 +92,8 @@ export function ProviderSetup({
   const [storedNames, setStoredNames] = useState<readonly string[] | null>(null)
   /** Which prompt of the form is on screen. */
   const [step, setStep] = useState(0)
+  /** Which row of a choice field is highlighted; ignored for every other kind of field. */
+  const [choice, setChoice] = useState(0)
 
   // The cursor, the pending values and the position the handlers read, for the reason the model
   // picker keeps refs too: Ink hands `useInput` the latest *committed* render, so two keystrokes
@@ -100,6 +103,7 @@ export function ProviderSetup({
   const savingRef = useRef(false)
   const valuesRef = useRef<Record<string, string>>({})
   const stepRef = useRef(0)
+  const choiceRef = useRef(0)
 
   // One read, for the one thing it decides: whether a named target has to ask for a name.
   useEffect(() => {
@@ -122,13 +126,10 @@ export function ProviderSetup({
   const form = target === null ? null : formForCredential(target.credential)
   const asksForName =
     target !== null && target.named && storedNames !== null && storedNames.includes(target.name)
+
   const nameField: CredentialField = {
     name: CREDENTIAL_NAME_FIELD,
-    // The second half of the model id depends on the type: an Azure credential's ids are
-    // `<name>/<deployment>`, a custom endpoint's are `<name>/<model>` (#249).
-    label: `Name (its models will be ${target?.name ?? ''}/${
-      target?.credential === 'azure_openai' ? '<deployment>' : '<model>'
-    })`,
+    label: `Name (its models will be ${target?.name ?? ''}/<${target?.modelIdHint ?? 'model'}>)`,
     secret: false,
   }
   const steps: readonly CredentialField[] =
@@ -144,9 +145,11 @@ export function ProviderSetup({
   const choose = (picked: CredentialTarget): void => {
     targetRef.current = picked
     setTarget(picked)
-    valuesRef.current = {}
+    valuesRef.current = seedDefaults(picked)
     stepRef.current = 0
     setStep(0)
+    choiceRef.current = 0
+    setChoice(0)
     setError(null)
     setNote(null)
   }
@@ -163,6 +166,8 @@ export function ProviderSetup({
     valuesRef.current = {}
     stepRef.current = 0
     setStep(0)
+    choiceRef.current = 0
+    setChoice(0)
     setError(null)
     setNote(null)
   }, [initialProvider, onCancel])
@@ -227,9 +232,26 @@ export function ProviderSetup({
       }
       stepRef.current += 1
       setStep(stepRef.current)
+      // A choice field starts on its default — a region has no "unset" a credential could be
+      // saved with — and its cursor starts at the top of the list.
+      choiceRef.current = 0
+      setChoice(0)
+      const next = steps[stepRef.current]
+      if (next?.defaultValue !== undefined) {
+        valuesRef.current = { ...valuesRef.current, [next.name]: next.defaultValue }
+      }
     },
     [save, steps, storedNames],
   )
+
+  /** The values a target's form starts with: each field's default, where it has one. */
+  function seedDefaults(picked: CredentialTarget): Record<string, string> {
+    const seeded: Record<string, string> = {}
+    for (const field of formForCredential(picked.credential).fields) {
+      if (field.defaultValue !== undefined) seeded[field.name] = field.defaultValue
+    }
+    return seeded
+  }
 
   useInput((input, key) => {
     if (key.ctrl && input === 'c') {
@@ -237,8 +259,34 @@ export function ProviderSetup({
       return
     }
 
-    // The form's own keys belong to the SecretInput; only the shared cancel is read here.
-    if (targetRef.current !== null) return
+    // A choice field is the form's own list — the text input is not mounted for it, so its
+    // keys are read here. Every other field's keys belong to the SecretInput.
+    if (targetRef.current !== null) {
+      const field = steps[stepRef.current]
+      const options = field?.options
+      if (options === undefined || options.length === 0) return
+      if (key.escape) {
+        backToPick()
+        return
+      }
+      if (key.upArrow) {
+        const next = Math.max(choiceRef.current - 1, 0)
+        choiceRef.current = next
+        setChoice(next)
+        return
+      }
+      if (key.downArrow) {
+        const next = Math.min(choiceRef.current + 1, options.length - 1)
+        choiceRef.current = next
+        setChoice(next)
+        return
+      }
+      if (key.return) {
+        const picked = options[choiceRef.current]
+        if (picked !== undefined) submitStep(picked)
+      }
+      return
+    }
 
     if (key.escape) {
       onCancel()
@@ -320,30 +368,43 @@ export function ProviderSetup({
       {note !== null && <Text dimColor>{note}</Text>}
       <Box flexDirection="column" marginTop={1}>
         <Text>{current.label}</Text>
-        <SecretInput
-          // A new prompt is a new input: the key keeps Ink from reusing the previous field's
-          // value, which would silently carry a secret into the next answer.
-          key={`${target.name}:${current.name}:${step}`}
-          placeholder={current.secret ? (target.keyHint ?? 'paste the key') : 'type it'}
-          mask={current.secret}
-          optional={current.optional === true}
-          busy={saving}
-          onChar={(character) => {
-            // Only claim `o` when there is a page to open: a custom endpoint has none, and
-            // claiming the letter would silently drop it from the URL being typed (#249).
-            if (character !== 'o' || target.keyUrl === undefined) return false
-            openKeyPage()
-            return true
-          }}
-          onSubmit={submitStep}
-          onCancel={backToPick}
-        />
+        {isChoiceField(current) ? (
+          // A choice field is a list, not a box: the value goes into an AWS hostname, so a
+          // typed one could only name a host that does not exist. ↑/↓ move, Enter takes the
+          // highlighted row.
+          <Box flexDirection="column">
+            {(current.options ?? []).map((option, position) => (
+              <Text key={option} color={position === choice ? 'cyan' : undefined}>
+                {`${position === choice ? '❯' : ' '} ${option}`}
+              </Text>
+            ))}
+          </Box>
+        ) : (
+          <SecretInput
+            // A new prompt is a new input: the key keeps Ink from reusing the previous field's
+            // value, which would silently carry a secret into the next answer.
+            key={`${target.name}:${current.name}:${step}`}
+            placeholder={current.secret ? (target.keyHint ?? 'paste the key') : 'type it'}
+            mask={current.secret}
+            busy={saving}
+            onChar={(character) => {
+              if (character !== 'o') return false
+              openKeyPage()
+              return true
+            }}
+            optional={current.optional === true}
+            onSubmit={submitStep}
+            onCancel={backToPick}
+          />
+        )}
       </Box>
       {saving ? (
         <Text dimColor>saving…</Text>
       ) : (
         <Text dimColor>
-          {`Enter to continue, Esc to go back${target.keyUrl === undefined ? '' : ', o (before typing) for the key page'}.`}
+          {isChoiceField(current)
+            ? '↑/↓ to choose, Enter to continue, Esc to go back.'
+            : `Enter to continue${current.optional === true ? ' (Enter alone skips it)' : ''}, Esc to go back${target.keyUrl === undefined ? '' : ', o (before typing) for the key page'}.`}
         </Text>
       )}
     </Box>

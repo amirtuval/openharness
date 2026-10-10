@@ -47,3 +47,19 @@ export function redactSecret(text: string, secret: string | undefined): string {
   }
   return redacted
 }
+
+/**
+ * The same scrubbing, for a credential that carries more than one secret.
+ *
+ * A Bedrock credential is an access key ID **and** a secret access key, plus a session token
+ * when its principal has one — and a provider that echoes a rejected request back can echo any
+ * of them. `credentialSecrets` in `./model` is what says which strings those are; this is what
+ * applies them all, so no caller has to write a second loop.
+ */
+export function redactSecrets(text: string, secrets: Iterable<string | undefined>): string {
+  let redacted = text
+  for (const secret of secrets) {
+    redacted = redactSecret(redacted, secret)
+  }
+  return redacted
+}

@@ -166,6 +166,65 @@ export function runCredentialStoreConformance(
         expect(record?.validated_at).toBe(timestampAt(clock.currentMs))
       })
 
+      it('round-trips the per-type details, and keeps an absent one absent', async () => {
+        // #250: a credential may carry the non-secret facts that identify it within its type —
+        // a Bedrock credential's region is the first. They are metadata beside the secret: `get`
+        // and `list` answer them without opening anything, and a credential that reports none —
+        // every `api_key` — has no `details` field at all rather than an empty object.
+        const { store, clock } = await setup()
+        const bedrock = await store.upsert({
+          userId: OWNER_A,
+          name: 'bedrock',
+          type: 'bedrock',
+          sealed: sealedSecret('a-bedrock'),
+          details: { region: 'eu-west-1' },
+          last4: 'ak01',
+          validatedAt: timestampAt(clock.currentMs),
+        })
+        expect(bedrock).toMatchObject({ details: { region: 'eu-west-1' } })
+
+        const record = await store.get({ userId: OWNER_A, name: 'bedrock' })
+        expect(record).toMatchObject({ details: { region: 'eu-west-1' } })
+        expect((await store.list({ userId: OWNER_A }))[0]).toMatchObject({
+          details: { region: 'eu-west-1' },
+        })
+
+        // A replacement takes the new details with the new blob, and a save with none clears
+        // what the row carried — the metadata describes the credential stored, not an older one.
+        const replaced = await store.upsert({
+          userId: OWNER_A,
+          name: 'bedrock',
+          type: 'bedrock',
+          sealed: sealedSecret('a-bedrock-2'),
+          details: { region: 'us-east-2' },
+          last4: 'ak02',
+          validatedAt: timestampAt(clock.currentMs),
+        })
+        expect(replaced).toMatchObject({ details: { region: 'us-east-2' } })
+        const cleared = await store.upsert({
+          userId: OWNER_A,
+          name: 'bedrock',
+          type: 'bedrock',
+          sealed: sealedSecret('a-bedrock-3'),
+          last4: 'ak03',
+          validatedAt: timestampAt(clock.currentMs),
+        })
+        expect(cleared).not.toHaveProperty('details')
+        const reopened = await store.get({ userId: OWNER_A, name: 'bedrock' })
+        expect(reopened).not.toBeNull()
+        expect(reopened).not.toHaveProperty('details')
+
+        const plain = await store.upsert({
+          userId: OWNER_A,
+          name: 'anthropic',
+          type: 'api_key',
+          sealed: sealedSecret('a-anthropic'),
+          last4: 'an01',
+          validatedAt: timestampAt(clock.currentMs),
+        })
+        expect(plain).not.toHaveProperty('details')
+      })
+
       it('keeps a user’s credentials apart, and two users’ copies of one name apart', async () => {
         const { store, clock } = await setup()
         const anthropic = await store.upsert({

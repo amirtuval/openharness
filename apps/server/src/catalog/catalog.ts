@@ -26,10 +26,18 @@ import {
   type ModelEntry,
   type ProviderCatalogStatus,
   type ProviderCredential,
+  type PutProviderCredentialRequest,
 } from '@openharness/protocol'
 import type { CredentialStore } from '@openharness/session'
 import type { Vault } from '@openharness/vault'
-import { openAICompatibleBaseUrl, redactSecret } from '@openharness/brain'
+import {
+  BEDROCK_FOUNDATION_MODELS_PATH,
+  bedrockControlPlaneUrl,
+  openAICompatibleBaseUrl,
+  redactSecret,
+  redactSecrets,
+  signBedrockRequest,
+} from '@openharness/brain'
 import { SAVE_TIME_LIMITS, safeFetch as defaultSafeFetch } from '@openharness/hands'
 
 import { openCredential } from '../credentials'
@@ -212,7 +220,9 @@ export class ModelCatalog {
         ? await this.azureCatalog(input.userId, input.credential.name)
         : input.credential.type === 'openai_compatible'
           ? await this.openAICompatibleCatalog(input.userId, input.credential.name)
-          : await this.fetchProvider(input.userId, input.credential.name)
+          : input.credential.type === 'bedrock'
+            ? await this.bedrockCatalog(input.userId, input.credential.name)
+            : await this.fetchProvider(input.userId, input.credential.name)
     this.cache.set(key, catalog, input.now)
     return catalog
   }
@@ -383,6 +393,99 @@ export class ModelCatalog {
   }
 
   /**
+   * A Bedrock credential's models: the region's on-demand text models, one entry each (epic
+   * #245, A3c).
+   *
+   * `ListFoundationModels` is AWS's own list, read with the user's keys — it needs no account
+   * beyond them and no endpoint the user typed, because its host is derived from the region.
+   * The list is filtered twice: AWS's `byOutputModality=TEXT` and `byInferenceType=ON_DEMAND`
+   * query parameters, and then — because a query parameter is not a promise — the same two
+   * conditions on each summary, plus the drop of a model AWS has marked `LEGACY`. What is left
+   * is a model a text request can be sent to with its own id, which is what makes an entry
+   * callable: an **inference profile** is deliberately not listed (see the method below).
+   *
+   * The status is `ok` when AWS answered, and the registry's Bedrock models stand in with
+   * `fallback` when the call failed — the same visible degradation every other provider gets
+   * (C3) — with AWS's status and a bounded snippet of what it said, scrubbed of the keys.
+   */
+  private async bedrockCatalog(userId: string, name: string): Promise<CachedProviderCatalog> {
+    const stored = await this.credentials.get({ userId, name })
+    if (stored === null) {
+      return this.registryFallbackFor(name, `the stored ${name} credential could not be read`)
+    }
+    const body = await openCredential(this.vault, { userId, name, sealed: stored.sealed })
+    if (body === null || body.type !== 'bedrock') {
+      return this.registryFallbackFor(name, `the stored ${name} credential could not be opened`)
+    }
+    const registryKey = this.bedrockRegistryKey()
+    try {
+      const listed = await this.listFoundationModels(body)
+      return {
+        status: 'ok',
+        fetchedAt: this.now().toISOString(),
+        message: null,
+        models: this.joinProviderList(name, listed, registryKey),
+      }
+    } catch (error) {
+      // AWS's own words, scrubbed of every secret the credential carries before the message
+      // reaches the response (C3): the access key ID, the secret and the session token.
+      const message = redactSecrets(
+        describeFailure(`Bedrock (${body.region})`, error, this.timeoutMs),
+        [body.access_key_id, body.secret_access_key, body.session_token],
+      )
+      this.logger?.warn(`serving the registry's ${name} models: ${message}`)
+      return this.registryFallback(name, message, registryKey)
+    }
+  }
+
+  /**
+   * One `ListFoundationModels` read, as the model list the join consumes.
+   *
+   * The request is SigV4-signed with the credential's keys by `@openharness/brain` — the same
+   * signer the model path's provider package uses — and sent through this module's own
+   * `fetch`, so it honors the egress-proxy variables like every other provider call. Nothing
+   * is retried and nothing is cached beyond this module's per-(user, provider) entry: a
+   * failure is the registry fallback above, which is a state the response reports rather than
+   * an error the caller sees.
+   */
+  private async listFoundationModels(
+    body: Extract<PutProviderCredentialRequest, { type: 'bedrock' }>,
+  ): Promise<ProviderModel[]> {
+    const signed = await signBedrockRequest(
+      {
+        type: 'bedrock',
+        accessKeyId: body.access_key_id,
+        secretAccessKey: body.secret_access_key,
+        ...(body.session_token === undefined ? {} : { sessionToken: body.session_token }),
+        region: body.region,
+      },
+      bedrockControlPlaneUrl(body.region, BEDROCK_FOUNDATION_MODELS_PATH),
+    )
+    const response = await this.fetch(signed.url, {
+      headers: signed.headers,
+      signal: AbortSignal.timeout(this.timeoutMs),
+    })
+    if (!response.ok) {
+      throw new CatalogProviderError(
+        `the Bedrock model list in ${body.region} answered ${response.status}` +
+          (await errorSnippet(response)),
+      )
+    }
+    let payload: unknown
+    try {
+      payload = await response.json()
+    } catch {
+      throw new CatalogProviderError(`the Bedrock model list in ${body.region} was not JSON`)
+    }
+    return bedrockModels(payload)
+  }
+
+  /** The snapshot key a Bedrock credential's models are filed under (models.dev's spelling). */
+  private bedrockRegistryKey(): string {
+    return credentialTypeInfo('bedrock')?.modelsDevKey ?? 'bedrock'
+  }
+
+  /**
    * One provider's catalogue, from the provider or the registry.
    *
    * The credential is read and opened here and only here: the plaintext lives for the one
@@ -412,6 +515,11 @@ export class ModelCatalog {
         provider,
         `the stored ${provider} credential could not be opened`,
       )
+    }
+    if (body.type !== 'api_key') {
+      // The dispatch above sends Azure and Bedrock elsewhere; anything else that reached here
+      // without a key is a credential this module cannot list, and the registry answers it.
+      return this.registryFallback(provider, `no known model-list endpoint for ${provider}`)
     }
     const apiKey = body.api_key
     try {
@@ -478,9 +586,17 @@ export class ModelCatalog {
    * The registry lookup is per provider, once: `RegistryModel` carries what the installed
    * registry knows (in this version, the id), and every field the provider's own entry leaves
    * empty is filled from it where it can be.
+   *
+   * `registryKey` is where that lookup goes, and it is the provider — the credential's name —
+   * unless a type files its models under a different key in models.dev. Bedrock does:
+   * a `bedrock-us` credential's models are in the snapshot's `amazon-bedrock` entry.
    */
-  private joinProviderList(provider: string, listed: readonly ProviderModel[]): ModelEntry[] {
-    const known = this.registryIndex(provider)
+  private joinProviderList(
+    provider: string,
+    listed: readonly ProviderModel[],
+    registryKey: string = provider,
+  ): ModelEntry[] {
+    const known = this.registryIndex(registryKey)
     return dedupe(
       listed.flatMap((raw) => {
         const registry = known.get(raw.id)
@@ -496,11 +612,19 @@ export class ModelCatalog {
    * A provider's chat models from the registry alone (C3): the provider failed, timed out, or
    * has no list endpoint this server knows. The filter is the same one the provider's own list
    * goes through, with no provider capability data to consult.
+   *
+   * `registryKey` names the snapshot entry to read, as in {@link joinProviderList}: a Bedrock
+   * credential falls back to models.dev's `amazon-bedrock` models, labelled with the
+   * credential's own name so `<name>/<modelId>` is the id either way.
    */
-  private registryFallback(provider: string, message: string): CachedProviderCatalog {
+  private registryFallback(
+    provider: string,
+    message: string,
+    registryKey: string = provider,
+  ): CachedProviderCatalog {
     const models = dedupe(
       this.registry
-        .models(provider)
+        .models(registryKey)
         .filter((model) => isChatModel({ rawId: model.id, registryChat: model.chat }))
         .map((model) => entryOf(provider, { id: model.id }, model, 'registry')),
     )
@@ -598,6 +722,81 @@ function statusOf(provider: string, catalog: CachedProviderCatalog): ProviderCat
     fetched_at: catalog.fetchedAt,
     message: catalog.message,
   }
+}
+
+// ------------------------------------------------------------------ bedrock
+
+/** One model summary from `ListFoundationModels`, as far as the catalogue reads it. */
+interface FoundationModelSummary {
+  readonly modelId: string
+  readonly modelName?: string
+  readonly outputModalities?: readonly string[]
+  readonly inferenceTypesSupported?: readonly string[]
+  readonly modelLifecycle?: { readonly status?: string }
+}
+
+/**
+ * AWS's `ListFoundationModels` answer, as the join's input.
+ *
+ * Two things are decided here, and both are deliberately conservative:
+ *
+ * - **Only a model callable by its own id is listed.** AWS supports two inference types: a model
+ *   that answers `ON_DEMAND` can be invoked with its `modelId` in the region, and one that only
+ *   answers `INFERENCE_PROFILE` cannot — it needs a cross-region profile whose id (or ARN) is
+ *   account- and region-specific. Listing such a model under its `modelId` would be a model that
+ *   fails on the first message, so it is left out; the query asks AWS for on-demand models, and
+ *   the check here is what makes the answer true even where AWS returns more than was asked for.
+ *   An absent `inferenceTypesSupported` is not read as "profile only": nothing said it needs a
+ *   profile, and dropping a model over a missing field is the failure this epic is about.
+ * - **A model AWS has retired is left out.** `modelLifecycle.status` is `ACTIVE` or `LEGACY`;
+ *   offering a `LEGACY` model would put a deprecation on the picker.
+ *
+ * A summary without a usable `modelId` is skipped rather than guessed at: the id is half of
+ * every model id this list produces.
+ */
+function bedrockModels(payload: unknown): ProviderModel[] {
+  const summaries = summariesOf(payload)
+  return summaries.flatMap((summary) => {
+    if (typeof summary.modelId !== 'string' || summary.modelId === '') {
+      return []
+    }
+    if (!includesText(summary.outputModalities)) {
+      return []
+    }
+    if (summary.inferenceTypesSupported !== undefined && !includesOnDemand(summary)) {
+      return []
+    }
+    if (summary.modelLifecycle?.status === 'LEGACY') {
+      return []
+    }
+    return [
+      {
+        id: summary.modelId,
+        ...(typeof summary.modelName === 'string' && summary.modelName.trim() !== ''
+          ? { name: summary.modelName }
+          : {}),
+      },
+    ]
+  })
+}
+
+/** The `modelSummaries` array of a payload, or nothing when there is not one. */
+function summariesOf(payload: unknown): FoundationModelSummary[] {
+  if (typeof payload !== 'object' || payload === null) {
+    return []
+  }
+  const value = (payload as Record<string, unknown>).modelSummaries
+  return Array.isArray(value) ? (value as FoundationModelSummary[]) : []
+}
+
+/** Whether the summary says its output includes text; an absent list is not a "no". */
+function includesText(modalities: readonly string[] | undefined): boolean {
+  return modalities === undefined || modalities.includes('TEXT')
+}
+
+/** Whether `ON_DEMAND` is among the inference types AWS named. */
+function includesOnDemand(summary: FoundationModelSummary): boolean {
+  return summary.inferenceTypesSupported?.includes('ON_DEMAND') ?? false
 }
 
 // ------------------------------------------------------------------ failures

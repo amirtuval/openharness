@@ -259,6 +259,7 @@ export function personFor(server: ServerProcess, signedIn: SignedIn): Person {
 
 export {
   seedAzureCredential,
+  seedBedrockCredential,
   seedOpenAICompatibleCredential,
   seedProviderCredential,
 } from './credentials'

@@ -201,7 +201,10 @@ describe('a turn on a model-first session', () => {
       vault,
       resolveCredential: createSessionCredentialResolver({ store, credentials, vault }),
       model: (modelId, credential) => {
-        requests.push({ modelId, apiKey: credential.apiKey })
+        requests.push({
+          modelId,
+          apiKey: credential.type === 'api_key' ? credential.apiKey : '',
+        })
         return scripted.factory(modelId, credential)
       },
     })

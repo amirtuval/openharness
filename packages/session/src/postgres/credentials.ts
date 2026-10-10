@@ -84,10 +84,10 @@ export class PostgresCredentialStore implements CredentialStore {
       // The caller's sealed blob is written as given (#150); `undefined` means a caller that
       // predates the field, and `local` is what the vault reads a `null` back as.
       key_provider: input.sealed.keyProvider ?? null,
-      last4: input.last4,
-      // The public facts the type publishes, or `null` for a type with none (#249, A3b). The
-      // store does not interpret them; they are written and read back as JSON.
+      // A caller with nothing to report writes `null`, which reads back as an absent
+      // `details` rather than an empty object (epic #245, A3c).
       details: input.details ?? null,
+      last4: input.last4,
       created_at: at,
       updated_at: at,
       validated_at: instant(Date.parse(input.validatedAt)),
@@ -106,8 +106,8 @@ export class PostgresCredentialStore implements CredentialStore {
           wrapped_key: row.wrapped_key,
           kek_version: row.kek_version,
           key_provider: row.key_provider,
-          last4: row.last4,
           details: row.details,
+          last4: row.last4,
           updated_at: row.updated_at,
           validated_at: row.validated_at,
         }),

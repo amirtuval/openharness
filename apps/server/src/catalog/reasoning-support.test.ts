@@ -125,6 +125,35 @@ describe('createReasoningSupportResolver', () => {
     expect(supportFor('azure-eu/gpt-5.4', 'api_key')).toBeUndefined()
   })
 
+  it("reads a Bedrock credential's model under models.dev's `amazon-bedrock`", () => {
+    // models.dev files Bedrock under the product's full name; the credential type carries that
+    // key (`credentialTypeInfo('bedrock').modelsDevKey`), so a Bedrock model id — which is the
+    // vendor's own, dots and all — is looked up without the resolver knowing the credential's
+    // name or region.
+    const supportFor = createReasoningSupportResolver(
+      registryOf({
+        'amazon-bedrock': [
+          {
+            id: 'anthropic.claude-sonnet-5-v1:0',
+            reasoning: true,
+            efforts: ['low', 'medium', 'high'],
+          },
+        ],
+      }),
+    )
+
+    expect(supportFor('bedrock/anthropic.claude-sonnet-5-v1:0', 'bedrock')).toEqual([
+      'low',
+      'medium',
+      'high',
+    ])
+    expect(supportFor('bedrock-us/anthropic.claude-sonnet-5-v1:0', 'bedrock')).toEqual([
+      'low',
+      'medium',
+      'high',
+    ])
+  })
+
   it('reads the bundled registry, so a real reasoning model gets its real levels', () => {
     // The acceptance case: the snapshot the catalogue joins for its model pickers is what the
     // answer comes from — `o4-mini` takes all three, `gpt-4o-mini` none.
@@ -137,5 +166,12 @@ describe('createReasoningSupportResolver', () => {
     // the credential type is what reaches that entry from a deployment the reader typed.
     expect(supportFor('azure/gpt-5.4', 'azure_openai')).toEqual(['low', 'medium', 'high'])
     expect(supportFor('azure/gpt-4o', 'azure_openai')).toEqual([])
+    // And a Bedrock model id — the vendor's own spelling — from the same snapshot.
+    expect(supportFor('bedrock/eu.anthropic.claude-fable-5', 'bedrock')).toEqual([
+      'low',
+      'medium',
+      'high',
+    ])
+    expect(supportFor('bedrock/google.gemma-3-12b-it', 'bedrock')).toEqual([])
   })
 })

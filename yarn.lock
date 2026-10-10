@@ -12,6 +12,23 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@ai-sdk/amazon-bedrock@npm:5.0.111":
+  version: 5.0.111
+  resolution: "@ai-sdk/amazon-bedrock@npm:5.0.111"
+  dependencies:
+    "@ai-sdk/anthropic": "npm:4.0.76"
+    "@ai-sdk/openai": "npm:4.0.89"
+    "@ai-sdk/provider": "npm:4.0.25"
+    "@ai-sdk/provider-utils": "npm:5.0.57"
+    "@smithy/eventstream-codec": "npm:^4.3.3"
+    "@smithy/util-utf8": "npm:^4.3.3"
+    aws4fetch: "npm:^1.0.20"
+  peerDependencies:
+    zod: ^3.25.76 || ^4.1.8
+  checksum: 10c0/55fa95ffa284b963c985c19ec3dfa5896957a1e6d02df9bb23d9b050ef3dfcf2ca3b97203cf794f65fa4e581a182b061656933aa31aa366d7212a0b3e3d654ac
+  languageName: node
+  linkType: hard
+
 "@ai-sdk/anthropic@npm:4.0.73":
   version: 4.0.73
   resolution: "@ai-sdk/anthropic@npm:4.0.73"
@@ -21,6 +38,18 @@ __metadata:
   peerDependencies:
     zod: ^3.25.76 || ^4.1.8
   checksum: 10c0/0608a6095a1a6d5e82bd20756e6a377fccf6bc3578a42a5e8bfb31109a0fb46dec29e86bc61229657973a43a76888bb8230641a3debbca955eb0183cc6d2ed36
+  languageName: node
+  linkType: hard
+
+"@ai-sdk/anthropic@npm:4.0.76":
+  version: 4.0.76
+  resolution: "@ai-sdk/anthropic@npm:4.0.76"
+  dependencies:
+    "@ai-sdk/provider": "npm:4.0.25"
+    "@ai-sdk/provider-utils": "npm:5.0.57"
+  peerDependencies:
+    zod: ^3.25.76 || ^4.1.8
+  checksum: 10c0/535fd71a926a007ab442941a0d1c4cc23fd38402bcb1f46ab4b86cdc840262d68cca94d9bf6d82a9896c9699dacd38e5e0bac215e73f160cf0d669d7ea5b24a3
   languageName: node
   linkType: hard
 
@@ -1272,6 +1301,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@openharness/brain@workspace:packages/brain"
   dependencies:
+    "@ai-sdk/amazon-bedrock": "npm:5.0.111"
     "@ai-sdk/anthropic": "npm:4.0.73"
     "@ai-sdk/azure": "npm:4.0.97"
     "@ai-sdk/cerebras": "npm:3.0.64"
@@ -1291,6 +1321,7 @@ __metadata:
     "@openharness/session": "workspace:*"
     "@types/node": "npm:26.6.3"
     ai: "npm:7.0.118"
+    aws4fetch: "npm:1.0.20"
     eslint: "npm:10.11.0"
     prettier: "npm:3.9.9"
     tsdown: "npm:0.23.0"
@@ -3192,6 +3223,45 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@smithy/core@npm:^3.33.2":
+  version: 3.35.1
+  resolution: "@smithy/core@npm:3.35.1"
+  dependencies:
+    "@smithy/types": "npm:^4.19.0"
+    tslib: "npm:^2.6.2"
+  checksum: 10c0/0ad3aac9a6f8546a95e6617ff090fe62cc1db036290b8c766697713b127beb4ea1b9736ea01e375eca8eebdba6f603c199cba1bef30e0ad7c65aa4ba49861f69
+  languageName: node
+  linkType: hard
+
+"@smithy/eventstream-codec@npm:^4.3.3":
+  version: 4.5.2
+  resolution: "@smithy/eventstream-codec@npm:4.5.2"
+  dependencies:
+    "@smithy/core": "npm:^3.33.2"
+    tslib: "npm:^2.6.2"
+  checksum: 10c0/898a60f1f5cc8c8d0e876b636d957eb9e7c0374460c7275129bfcaf592849310d6790eac0e9a6b53d11bebc8604fa4b4065875034377660e5782fdc2e131e2b6
+  languageName: node
+  linkType: hard
+
+"@smithy/types@npm:^4.19.0":
+  version: 4.19.0
+  resolution: "@smithy/types@npm:4.19.0"
+  dependencies:
+    tslib: "npm:^2.6.2"
+  checksum: 10c0/0e9f026e1774aa0089ebd4b67abef7215b09869bd41afc9affdd3382c91e5e3ae4daac54eb2e6b8262c5deaf37019ca7c15e77bcc4be311a69681a40ae047ab0
+  languageName: node
+  linkType: hard
+
+"@smithy/util-utf8@npm:^4.3.3":
+  version: 4.5.2
+  resolution: "@smithy/util-utf8@npm:4.5.2"
+  dependencies:
+    "@smithy/core": "npm:^3.33.2"
+    tslib: "npm:^2.6.2"
+  checksum: 10c0/f29fc11997b94a1579a7697e18a0d4e4a43853666f6479cdc23131e87072b677751dbc2d6ccf070ba0fd2829e7b23e1b178fa6f0bb19c0fbcc8aa531ff2d9f30
+  languageName: node
+  linkType: hard
+
 "@standard-schema/spec@npm:^1.1.0":
   version: 1.1.0
   resolution: "@standard-schema/spec@npm:1.1.0"
@@ -4443,6 +4513,13 @@ __metadata:
   version: 5.0.1
   resolution: "auto-bind@npm:5.0.1"
   checksum: 10c0/a703375350ea7b6e92405d8e6bcc6dbfb84b0d7c7172b33e5788a7593929a18227999ff9aa9c32436741d06d021e6672457b1cec73287efe3fab95cff6627eaf
+  languageName: node
+  linkType: hard
+
+"aws4fetch@npm:1.0.20, aws4fetch@npm:^1.0.20":
+  version: 1.0.20
+  resolution: "aws4fetch@npm:1.0.20"
+  checksum: 10c0/a4eac7bd0d1c3e611c17ed1ef41ac0b48c0a8e74a985ad968c071e74d94586d3572edc943b43fa5ca756c686ea73baa2f48e264d657bb8c2e95c8e0037d48a87
   languageName: node
   linkType: hard
 
@@ -9099,7 +9176,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"tslib@npm:^2.0.0, tslib@npm:^2.1.0, tslib@npm:^2.4.0, tslib@npm:^2.8.1":
+"tslib@npm:^2.0.0, tslib@npm:^2.1.0, tslib@npm:^2.4.0, tslib@npm:^2.6.2, tslib@npm:^2.8.1":
   version: 2.8.1
   resolution: "tslib@npm:2.8.1"
   checksum: 10c0/9c4759110a19c53f992d9aae23aac5ced636e99887b51b9e61def52611732872ff7668757d4e4c61f19691e36f4da981cd9485e869b4a7408d689f6bf1f14e62

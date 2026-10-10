@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { REDACTED_PLACEHOLDER, redactSecret } from './redact'
+import { REDACTED_PLACEHOLDER, redactSecret, redactSecrets } from './redact'
 
 describe('redactSecret', () => {
   const key = 'sk-live-0123456789abcdef'
@@ -46,5 +46,32 @@ describe('redactSecret', () => {
 
   it('matches exactly: case and surroundings are not bent', () => {
     expect(redactSecret(`Key ${key.toUpperCase()} here`, key)).toBe(`Key ${key.toUpperCase()} here`)
+  })
+})
+
+describe('redactSecrets', () => {
+  it('scrubs every secret a credential carries, in one pass', () => {
+    // A Bedrock credential is three strings, and a provider that echoes a rejected request back
+    // can echo any of them — the access key ID, the secret, or the session token.
+    const accessKeyId = 'AKIAIOSFODNN7EXAMPLE'
+    const secret = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY'
+    const token = 'FwoGZXIvYXdzEBYaDEXAMPLEtoken'
+    const text = `denied for ${accessKeyId} / ${secret} / ${token}`
+
+    const scrubbed = redactSecrets(text, [accessKeyId, secret, token])
+    expect(scrubbed).toBe('denied for [REDACTED] / [REDACTED] / [REDACTED]')
+    for (const value of [accessKeyId, secret, token]) {
+      expect(scrubbed).not.toContain(value)
+      // The trimmed variants a provider may echo are gone too.
+      expect(scrubbed).not.toContain(value.slice(4))
+    }
+  })
+
+  it('tolerates an absent optional secret and an empty list', () => {
+    const accessKeyId = 'AKIAIOSFODNN7EXAMPLE'
+    expect(redactSecrets(`denied for ${accessKeyId}`, [accessKeyId, undefined])).toBe(
+      'denied for [REDACTED]',
+    )
+    expect(redactSecrets('denied', [])).toBe('denied')
   })
 })

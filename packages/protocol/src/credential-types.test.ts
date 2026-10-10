@@ -35,6 +35,7 @@ describe('CREDENTIAL_TYPES', () => {
       defaultName: 'azure',
       modelsDevKey: 'azure',
       keyUrl: 'https://portal.azure.com/',
+      modelIdHint: 'deployment',
     })
     expect(credentialTypeName('azure_openai')).toBe('Azure OpenAI')
     expect(defaultCredentialName('azure_openai')).toBe('azure')
@@ -47,9 +48,24 @@ describe('CREDENTIAL_TYPES', () => {
       type: 'openai_compatible',
       name: 'Custom (OpenAI-compatible)',
       defaultName: 'custom',
+      modelIdHint: 'model',
     })
     expect(credentialTypeName('openai_compatible')).toBe('Custom (OpenAI-compatible)')
     expect(defaultCredentialName('openai_compatible')).toBe('custom')
+  })
+
+  it('carries bedrock with a display name, a default name and its models.dev key', () => {
+    expect(credentialTypeInfo('bedrock')).toEqual({
+      type: 'bedrock',
+      name: 'Amazon Bedrock',
+      defaultName: 'bedrock',
+      // models.dev files Bedrock's models under the product's full name.
+      modelsDevKey: 'amazon-bedrock',
+      keyUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials',
+      modelIdHint: 'model id',
+    })
+    expect(credentialTypeName('bedrock')).toBe('Amazon Bedrock')
+    expect(defaultCredentialName('bedrock')).toBe('bedrock')
   })
 
   it('has no facts for api_key — its name is always the fixed provider id', () => {
@@ -65,7 +81,17 @@ describe('CREDENTIAL_TYPES', () => {
     }
   })
 
-  it('sends every reader that has a key page to an https one', () => {
+  it('says what the second half of each type’s model ids is', () => {
+    // The sentence a form puts under its name field: an Azure credential serves deployments,
+    // a Bedrock one serves Bedrock model ids. One fact per type rather than one per frontend.
+    expect(credentialTypeInfo('azure_openai')?.modelIdHint).toBe('deployment')
+    expect(credentialTypeInfo('bedrock')?.modelIdHint).toBe('model id')
+    for (const entry of CREDENTIAL_TYPES) {
+      expect(entry.modelIdHint, entry.type).not.toBe('')
+    }
+  })
+
+  it('sends every reader to an https page to create the secret', () => {
     for (const entry of CREDENTIAL_TYPES) {
       if (entry.keyUrl !== undefined) {
         expect(entry.keyUrl, entry.type).toMatch(/^https:\/\/[^/]+/)

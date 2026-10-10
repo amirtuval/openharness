@@ -947,21 +947,23 @@ export class InMemoryCredentialStore implements CredentialStore {
     // A replacement keeps the id and `created_at` it is replacing — one credential per
     // `(user, name)`, so a second save is the same credential with a new secret.
     // The metadata is a discriminated union on `type`, and the store's caller decides which
-    // variant it is: a `type` and its own `details` are consistent by construction here (the
-    // contract's `UpsertCredentialInput`), which is what the annotation says.
+    // variant it is: the cast is the store boundary's — a `type` and its own `details` are
+    // consistent by construction (the contract's `UpsertCredentialInput`), and the record's
+    // own `type` is the wide union the caller passed.
     const record: StoredCredential = {
       id: existing?.id ?? newProviderCredentialId(now),
       type: input.type,
       name: input.name,
       last4: input.last4,
-      // Absent, not `undefined`: a credential whose type publishes no public facts has no
-      // `details` key, matching the Postgres store's `null` column (#249, A3b).
-      ...(input.details === undefined ? {} : { details: input.details }),
+      // Absent stays absent, and the object is copied rather than aliased: a credential whose
+      // type publishes no public facts has no `details` key at all (matching the Postgres
+      // store's `null` column), and the store never hands back the caller's own object.
+      ...(input.details === undefined ? {} : { details: { ...input.details } }),
       created_at: existing?.created_at ?? at,
       updated_at: at,
       validated_at: input.validatedAt,
       sealed: { ...input.sealed },
-    }
+    } as StoredCredential
     stored.set(input.name, record)
     return resolved(deepFreeze(metadataOf(record)))
   }

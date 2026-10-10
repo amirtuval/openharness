@@ -505,8 +505,16 @@ curl -X PUT localhost:3000/v1/provider-credentials/custom \
 # → 200 {"id":"pcred_01J…","type":"openai_compatible","name":"custom","last4":"…4242",
 #        "details":{"base_url_host":"127.0.0.1:11434"}, …}
 
+# A Bedrock credential is an IAM principal's keys plus a region; the region rides back as the
+# public fact. The secret access key is never any part of a response.
+curl -X PUT localhost:3000/v1/provider-credentials/bedrock \
+  -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"type":"bedrock","access_key_id":"AKIA…","secret_access_key":"…","region":"eu-west-1"}'
+# → 200 {"id":"pcred_01J…","type":"bedrock","name":"bedrock","last4":"…MPLE",
+#        "details":{"region":"eu-west-1"}, …}
+
 curl localhost:3000/v1/provider-credentials -H "Authorization: Bearer $TOKEN"
-# → {"data":[ …the metadata of both… ]}
+# → {"data":[ …the metadata of all three… ]}
 
 curl -X DELETE localhost:3000/v1/provider-credentials/azure-eu \
   -H "Authorization: Bearer $TOKEN"
@@ -517,30 +525,44 @@ curl -X DELETE localhost:3000/v1/provider-credentials/azure-eu \
   event or repeated in an error. `last4` exists so a settings screen can tell two apart, and
   an empty `last4` is a credential that carries **no key at all** (a custom endpoint that takes
   none).
+- **Non-secret per-type facts ride in `details`.** `last4` tells two credentials of one type
+  apart but not which service one is: a Bedrock credential is one account's keys in one region,
+  and a user may keep `bedrock` and `bedrock-us`. Each type's `details` is its own typed object
+  — `{"base_url_host":"127.0.0.1:11434"}` for a custom endpoint (#249) and
+  `{"region":"eu-west-1"}` for a Bedrock credential (#250) — and it never carries a secret or
+  anything a secret could be recovered from. It is **absent** for a credential whose type has
+  nothing to report, which is every `api_key` and `azure_openai` one.
 - **Validated on save** with one cheap call. An `api_key` is checked against the provider's own
   model list; an `azure_openai` credential is checked with one chat request to its **first
   deployment**; an `openai_compatible` credential is checked with `GET {base_url}/models` — the
   same call the catalogue makes. Each of the last two is sent through the SSRF guard, so an
   endpoint that resolves inside the network (loopback, private, link-local, the cloud metadata
-  service) is refused before it can be stored. A credential the endpoint rejects is an
-  `invalid_provider_credential` with status `422`, and nothing is stored.
+  service) is refused before it can be stored; a `bedrock` credential is checked with one
+  `ListFoundationModels` read in its region, SigV4-signed with the user's keys (the host comes
+  from the region, so there is no user-supplied address to guard). A credential the provider
+  rejects is an `invalid_provider_credential` with status `422` — for Bedrock, AWS's own reason
+  for the refusal, scrubbed — and nothing is stored.
 - **A credential is keyed by its `name`**, which is the `provider` half of the model ids it
   serves — and that is also the path parameter, which is why the route's shape did not change
   when names arrived. `PUT` replaces the credential with that name; deletion is immediate.
 - **The eleven fixed providers keep their ids as names**, one each: an `api_key` credential may
   only be stored under `anthropic`, `openai`, … A **named credential type** — `azure_openai`
-  and `openai_compatible` today — may be stored under any short, lowercase name (`[a-z0-9-]`,
-  at most 32 characters) that is not one of those ids, which is how a user keeps `azure` _and_
-  `azure-eu`, or `custom` _and_ `my-local`. Only the first credential of a type defaults to the
-  type's name (`azure`, `custom`); the frontends ask for a name for a second one. Anything else
-  is a `400 invalid_request_error`.
+  and `openai_compatible` or `bedrock` today — may be stored under any short, lowercase name
+  (`[a-z0-9-]`, at most 32 characters) that is not one of those ids, which is how a user keeps
+  `azure` _and_ `azure-eu`, `custom` _and_ `my-local`, or two Bedrock credentials in two
+  regions. Only the first credential of a type defaults to the type's name (`azure`, `custom`,
+  `bedrock`); the frontends ask for a name for a second one. Anything else is a
+  `400 invalid_request_error`.
 - `type` is a discriminated union: `api_key` (`api_key`); `azure_openai` (`endpoint`, an
-  `https` URL; `api_key`; `deployments`, at least one); and `openai_compatible` (`base_url`, an
-  absolute `http`/`https` URL; an **optional** `api_key`). Bedrock and Vertex come later.
-- **The public facts a list shows.** Metadata is the same fields for every type, plus one
-  optional `details` object of safe, type-specific facts — today the base URL's **host** for an
-  `openai_compatible` credential, never the whole URL and never any part of a key. A type with
-  no such facts (an `api_key`, an `azure_openai`) carries no `details` at all.
+  `https` URL; `api_key`; `deployments`, at least one); `openai_compatible` (`base_url`, an
+  absolute `http`/`https` URL; an **optional** `api_key`); and `bedrock` (`access_key_id`,
+  `secret_access_key`, an optional `session_token`, and `region` — validated against the list
+  of AWS regions that serve Bedrock, because the value goes into an AWS hostname; no
+  assume-role in v1). Vertex comes later.
+- **The public facts a list shows.** Metadata is the same fields for every type, plus the
+  `details` object its own type publishes — the base URL's **host** for an `openai_compatible`
+  credential and the **region** for a `bedrock` one, never the whole URL and never any part of a
+  key. A type with no such facts (an `api_key`, an `azure_openai`) carries no `details` at all.
 - A turn whose model's provider half names no stored credential fails with a `session.error`
   whose type is `missing_provider_credential` — non-retryable, the message names the provider.
   The server never falls back to provider keys from the environment.
@@ -604,11 +626,21 @@ is the usual one; the optional `refresh=true` query parameter bypasses the serve
   own list is the deployment names), and its per-provider status is `ok` with the time the
   credential was read. A deployment whose name is one models.dev's `azure` entry knows carries
   that model's context window; one it does not know gets `null` for both limits rather than a
-  guessed number. An `openai_compatible` credential contributes the models its endpoint's
-  `/models` answers — `custom/llama3.3` — filtered to chat models the way a provider's list is;
-  a model id that matches exactly one models.dev entry borrows its metadata, and an id that
-  matches none or more than one (`gpt-4o` is filed under both `openai` and `azure`) gets `null`
-  for both limits, no name and no price rather than a guess.
+  guessed number.
+- **A Bedrock credential contributes the region's on-demand text models.** The server reads
+  `ListFoundationModels` in the credential's region, filtered to text output and `ON_DEMAND`
+  inference, and lists each as `<name>/<bedrock model id>` — `bedrock/anthropic.claude-…-v1:0`
+  — with `source: "provider"`. Names, context windows and prices come from models.dev's Amazon
+  Bedrock entry where it has them. A model that can only be called through a **cross-region
+  inference profile** is not listed: its profile id differs per account and region, so the bare
+  model id would be an entry that fails on the first message. A region whose list cannot be read
+  is the usual visible `fallback` (the registry's Bedrock models, acknowledged to their model
+  ids).
+- An `openai_compatible` credential contributes the models its endpoint's `/models` answers —
+  `custom/llama3.3` — filtered to chat models the way a provider's list is; a model id that
+  matches exactly one models.dev entry borrows its metadata, and an id that matches none or more
+  than one (`gpt-4o` is filed under both `openai` and `azure`) gets `null` for both limits, no
+  name and no price rather than a guess.
 - **Where the list comes from.** Per provider, the server calls that provider's own
   list-models endpoint with the caller's credential (`GET /v1/models` for OpenAI and
   Anthropic, `GET /v1beta/models` for Gemini, `GET /api/v1/models` for OpenRouter,

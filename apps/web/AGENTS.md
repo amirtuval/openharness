@@ -496,22 +496,29 @@ the way `NEW_CHAT_GREETING` is, and the ✨ sits outside the gradient span.
   render it, so "paste and validate" means the same thing everywhere. **Its fields come from the
   credential type** (X6): `CREDENTIAL_FORMS` is a `Record<ProviderCredentialType, …>` holding the
   fields and the request body they build — `api_key`'s one secret, `azure_openai`'s endpoint, key
-  and comma-separated deployment names (#245, A3a), and `openai_compatible`'s base URL plus an
-  **optional** key (#249, A3b). A field carries `secret` (masked or shown) and `optional` (may be
-  left empty; the save is not held for it, and the body omits it). A new member of the protocol's
-  credential union is a compile error there until it has a form — which is where Bedrock and
-  Vertex land.
+  and comma-separated deployment names (#245, A3a), `bedrock`'s region, access key ID, secret
+  access key and optional session token (#245, A3c), and `openai_compatible`'s base URL plus an
+  **optional** key (#249, A3b). A field carries `secret` (masked or shown), `optional` (may be
+  left empty; the save is not held for it, and the body omits it), and how it is drawn:
+  `kind: 'select'` with `options` renders a native `<select>` (the region list — the app sets
+  `color-scheme` per theme, so its popup follows Light/Dim/Dark like the rest of the page), and
+  `defaultValue` is where a field that can never be empty starts (`us-east-1`). A new member of
+  the protocol's credential union is a compile error there until it has a form — which is where
+  Vertex lands.
 - **A custom endpoint's key is optional, and there is no key page.** The `openai_compatible` form
-  saves a keyless endpoint (a local server), publishes only its base URL host — the Settings row
-  shows `no key` where a keyed credential shows `…last4`, and the host under it — and its target
-  carries no `keyUrl`, so the "Get a key" link is not drawn.
-- **A named target may also ask for a name** (#245, A3a). The eleven providers are one each
-  (`name` is their id); an Azure credential keeps as many as the reader wants, each under a name
-  that becomes the `provider` half of its model ids. The name field appears **only when one of
-  that type is already stored** — the first takes the type's default, `azure` — and the three
-  rules the server enforces (short and lowercase; not a fixed provider id; not already taken) are
-  shown next to the field, with the save held until they pass. A row's Replace reopens the form
-  prefilled with the name it replaces, which is how a second Azure credential's row edits _it_.
+  saves a keyless endpoint (a local server), publishes only its base URL host — its Settings row
+  shows `no key` where a keyed credential shows `…last4` — and its target carries no `keyUrl`, so
+  the "Get a key" link is not drawn.
+- **A named target may also ask for a name** (#245, A3a/A3c). The eleven providers are one each
+  (`name` is their id); an Azure or Bedrock credential keeps as many as the reader wants, each
+  under a name that becomes the `provider` half of its model ids. The name field appears **only
+  when one of that type is already stored** — the first takes the type's default, `azure` or
+  `bedrock` — and the three rules the server enforces (short and lowercase; not a fixed provider
+  id; not already taken) are shown next to the field, with the save held until they pass. A row's
+  Replace reopens the form prefilled with the name it replaces, which is how a second Azure
+  credential's row edits _it_. The sentence under the field names what the second half of that
+  type's model ids is — `<deployment>` for Azure, `<model>` for a custom endpoint and a Bedrock
+  model.
 - **Errors are inline**, in the three classes the credentials API has: a refused key
   (`invalid_provider_credential`, titled "Hmm, <provider> didn't accept that key" since #227
   while the server's own 422 message stays the body — warm, never vague), a stale session (401,
@@ -556,10 +563,14 @@ Settings trip.
 **Providers**, **Default model**, **Appearance**, then **Advanced** — the server URL, collapsed.
 The screen used to open on a Connection card only a self-hoster has a use for, with the thing
 everyone needs below the fold. The Providers card is the **list**: it shows each key by display
-name, its last four (or `no key` for a keyless custom credential, #249) and, for a custom
-endpoint, the base URL **host** its `details` publish, and rows carry Replace (which opens the
-dialog on that provider) and Delete (in-page confirm). Adding is the dialog, so there is one form
-in one place.
+name, its last four (or `no key` for a keyless custom credential, #249) and, under them, the
+non-secret per-type facts `credentialFacts` reads from the credential's `details` — a Bedrock
+credential's region, and for a custom endpoint the base URL **host** — because `last4` alone
+cannot tell two credentials of one type apart. The facts sit on the **second line** (with
+"Validated …") rather than after `last4`: the first line is the one that ellipsizes, so at 400px a
+fact behind a long name would be off the edge, which is the one thing it exists to prevent. Rows
+carry Replace (which opens the dialog on that provider) and Delete (in-page confirm). Adding is
+the dialog, so there is one form in one place.
 
 The free-text provider id the card used to offer is gone with `lib/providers.ts`: now that the
 metadata list is the complete set the server can validate, a typed id could only name a provider
@@ -862,6 +873,7 @@ outside `@openharness/client` — is stubbed at `fetch` where a test needs it.
 | `src/screens/settings-screen.test.tsx`                     | the four sections in order and Advanced collapsed by default (and opening on demand), the server-URL round trip, an empty URL as same-origin, the confirmation surviving a client rebuild (#81), and the default model (server-chosen, saved, failed load/save)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `src/screens/first-run-screen.test.tsx`                    | the first-run flow (#209): shown with no credentials and not with one, the tiles and their free-tier hints, a save that names the server's pick and lands on New chat with the cursor in the box, changing that pick, a rejected key, the stale-session prompt and where it returns to, Skip, and back-from-the-form                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `src/components/providers/add-provider-dialog.test.tsx`    | the dialog (#209): opened from the picker without leaving the chat, a save that closes it and re-reads the catalog, the preselected provider from a row's Replace, and Escape returning focus to what opened it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `src/components/providers/bedrock-form.test.tsx`           | the Bedrock form (#245, A3c): the region as a `<select>` over the protocol's list starting at `us-east-1`, a save with a picked region and a typed session token (and no secret anywhere in the page), a save with the token **skipped** — the field is optional and the body omits it — and a second credential with its own name and region, with both rows showing theirs                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `src/components/settings/providers.test.tsx`               | the Providers card: metadata-only rows with display names, Add provider opening the dialog, Replace through it with the list following, the in-page delete (confirm, cancel, failure), the stale-session prompt and the failed-list banner                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `src/components/providers/openai-compatible-form.test.tsx` | the custom OpenAI-compatible form (#249): the tile with a base URL and an optional key and no key page, a **keyless** save enabled with an empty key (the list showing `no key` and the host), a keyed save showing `…last4`, a second credential asking for a name, and the inline name refusals                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `src/screens/sign-in-screen.test.tsx`                      | the 401 landing, provider buttons per auth-config, the card's own padding above the first button and below the last one (#187), the dev form gating and sign-in, returning to the route, sign-out, a later 401                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |

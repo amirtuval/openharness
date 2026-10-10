@@ -1,4 +1,7 @@
 import {
+  BEDROCK_REGIONS,
+  DEFAULT_BEDROCK_REGION,
+  isBedrockRegion,
   isReservedCredentialName,
   isValidCredentialName,
   type ProviderCredentialType,
@@ -9,10 +12,10 @@ import {
  * The credential form, built from the **credential type** (epic #201, X6; #245 A3a) — the CLI's
  * half of the table the web app keeps in `apps/web/src/components/providers/provider-key-form.tsx`.
  *
- * `api_key` is one secret and `azure_openai` is an endpoint, a key and a deployment list; the
- * `Record` is the point: a new member of the protocol's union is a compile error here until it
- * has fields, so a form cannot silently collect the wrong shape for a credential it does not
- * understand.
+ * `api_key` is one secret, `azure_openai` is an endpoint, a key and a deployment list, and
+ * `bedrock` is a region, two IAM keys and an optional session token; the `Record` is the point:
+ * a new member of the protocol's union is a compile error here until it has fields, so a form
+ * cannot silently collect the wrong shape for a credential it does not understand.
  *
  * The two frontends keep their own copies rather than sharing one: the web form is React DOM
  * with Tailwind classes, this one is Ink, and the only thing they have in common — the field
@@ -34,9 +37,17 @@ export interface CredentialField {
    */
   readonly secret: boolean
   /**
-   * Whether the field may be left empty. False for every secret but a custom endpoint's key,
-   * which is optional (#249): a local server may take none, and the prompt must accept an empty
-   * answer rather than asking again.
+   * The values the field may take, in order. A field with choices is drawn as a list the reader
+   * picks from rather than as a text box — which is what a region is: the value goes into an AWS
+   * hostname, so a typed one could only ever be a host that does not exist.
+   */
+  readonly options?: readonly string[]
+  /** Where a field starts, when it is not empty: a choice list needs a selection. */
+  readonly defaultValue?: string
+  /**
+   * Whether the field may be left blank. Enter on an empty optional field moves on rather than
+   * doing nothing, and an absent value is left out of the request body rather than sent as an
+   * empty string (Bedrock's session token).
    */
   readonly optional?: boolean
 }
@@ -99,6 +110,43 @@ export const CREDENTIAL_FORMS: Record<ProviderCredentialType, CredentialForm> = 
       }
     },
   },
+  bedrock: {
+    fields: [
+      {
+        name: 'region',
+        label: 'Region — ↑/↓ to choose',
+        secret: false,
+        options: BEDROCK_REGIONS,
+        defaultValue: DEFAULT_BEDROCK_REGION,
+      },
+      { name: 'access_key_id', label: 'Access key ID (AKIA…)', secret: false },
+      { name: 'secret_access_key', label: 'Secret access key', secret: true },
+      {
+        name: 'session_token',
+        label: 'Session token (only for temporary credentials; Enter to skip)',
+        secret: true,
+        optional: true,
+      },
+    ],
+    build: (values) => {
+      const region = values['region'] ?? ''
+      const sessionToken = (values['session_token'] ?? '').trim()
+      return {
+        type: 'bedrock',
+        // The field is a list over the protocol's regions, so the fallback is unreachable; it
+        // is what makes the value a region to the compiler without a cast.
+        region: isBedrockRegion(region) ? region : DEFAULT_BEDROCK_REGION,
+        access_key_id: (values['access_key_id'] ?? '').trim(),
+        secret_access_key: values['secret_access_key'] ?? '',
+        ...(sessionToken === '' ? {} : { session_token: sessionToken }),
+      }
+    },
+  },
+}
+
+/** Whether a field is drawn as a list the reader picks from, rather than as a text box. */
+export function isChoiceField(field: CredentialField): boolean {
+  return field.options !== undefined && field.options.length > 0
 }
 
 /**

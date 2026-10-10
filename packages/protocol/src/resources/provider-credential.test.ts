@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
+import { BEDROCK_REGIONS, DEFAULT_BEDROCK_REGION } from '../bedrock'
 import { newProviderCredentialId } from '../ids'
 import {
   AzureOpenAICredentialSchema,
+  BedrockCredentialDetailsSchema,
+  BedrockCredentialSchema,
   ListProviderCredentialsResponseSchema,
   MAX_AZURE_DEPLOYMENTS,
   OpenAICompatibleCredentialDetailsSchema,
@@ -71,6 +74,23 @@ describe('ProviderCredentialSchema', () => {
     }
   })
 
+  it('carries per-type details, and none for a credential that has nothing to report', () => {
+    // A Bedrock credential's region is the one non-secret fact that tells two rows of that
+    // type apart; an `api_key` credential has none, and an absent `details` is the shape it
+    // takes rather than an empty object.
+    const bedrock = {
+      ...credential,
+      type: 'bedrock',
+      name: 'bedrock',
+      last4: 'T0KN',
+      details: { region: 'eu-west-1' },
+    }
+    expect(ProviderCredentialSchema.parse(bedrock)).toEqual(bedrock)
+    const parsed = ProviderCredentialSchema.parse(credential)
+    expect(parsed).not.toHaveProperty('details')
+    expect(parsed).toEqual(credential)
+  })
+
   it('rejects an unknown type, an empty name and a malformed timestamp', () => {
     expect(ProviderCredentialSchema.safeParse({ ...credential, type: 'aws' }).success).toBe(false)
     expect(ProviderCredentialSchema.safeParse({ ...credential, name: '' }).success).toBe(false)
@@ -107,13 +127,14 @@ describe('ProviderCredentialSchema', () => {
 })
 
 describe('ProviderCredentialTypeSchema', () => {
-  it('is api_key, azure_openai and openai_compatible today and nothing else', () => {
+  it('is api_key, azure_openai, openai_compatible and bedrock today and nothing else', () => {
     expect(ProviderCredentialTypeSchema.parse('api_key')).toBe('api_key')
     expect(ProviderCredentialTypeSchema.parse('azure_openai')).toBe('azure_openai')
     expect(ProviderCredentialTypeSchema.parse('openai_compatible')).toBe('openai_compatible')
-    // The later types — aws, gcp_service_account — are new members of this union, not new
-    // designs, but until they land the schema stays closed.
-    for (const type of ['aws', 'gcp_service_account', 'azure', 'oauth', 'custom']) {
+    expect(ProviderCredentialTypeSchema.parse('bedrock')).toBe('bedrock')
+    // The later types — gcp_service_account — are new members of this union, not new designs,
+    // but until they land the schema stays closed.
+    for (const type of ['gcp_service_account', 'aws', 'azure', 'oauth', 'custom']) {
       expect(ProviderCredentialTypeSchema.safeParse(type).success, type).toBe(false)
     }
   })
@@ -142,6 +163,17 @@ describe('OpenAICompatibleCredentialDetailsSchema', () => {
   })
 })
 
+describe('BedrockCredentialDetailsSchema', () => {
+  it('carries a region, and only a non-empty string one', () => {
+    expect(BedrockCredentialDetailsSchema.parse({ region: 'us-east-1' })).toEqual({
+      region: 'us-east-1',
+    })
+    expect(BedrockCredentialDetailsSchema.safeParse({}).success).toBe(false)
+    expect(BedrockCredentialDetailsSchema.safeParse({ region: '' }).success).toBe(false)
+    expect(BedrockCredentialDetailsSchema.safeParse({ region: 1 }).success).toBe(false)
+  })
+})
+
 describe('PutProviderCredentialRequestSchema', () => {
   it('parses the api_key form', () => {
     expect(
@@ -155,6 +187,17 @@ describe('PutProviderCredentialRequestSchema', () => {
       endpoint: 'https://my-resource.openai.azure.com',
       api_key: 'az-secret',
       deployments: ['gpt-4o', 'gpt-4o-mini'],
+    }
+    expect(PutProviderCredentialRequestSchema.parse(body)).toEqual(body)
+  })
+
+  it('parses the bedrock form', () => {
+    const body = {
+      type: 'bedrock',
+      access_key_id: 'AKIAIOSFODNN7EXAMPLE',
+      secret_access_key: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+      session_token: 'FwoGZXIvYXdzEBYa',
+      region: 'eu-west-1',
     }
     expect(PutProviderCredentialRequestSchema.parse(body)).toEqual(body)
   })
@@ -279,6 +322,62 @@ describe('OpenAICompatibleCredentialSchema', () => {
   it('requires the type discriminant', () => {
     const { type: _type, ...untyped } = compatible
     expect(OpenAICompatibleCredentialSchema.safeParse(untyped).success).toBe(false)
+  })
+})
+
+describe('BedrockCredentialSchema', () => {
+  const bedrock = {
+    type: 'bedrock',
+    access_key_id: 'AKIAIOSFODNN7EXAMPLE',
+    secret_access_key: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+    region: 'us-east-1',
+  }
+
+  it('accepts the three credentials and a region, with and without a session token', () => {
+    expect(BedrockCredentialSchema.parse(bedrock)).toEqual(bedrock)
+    expect(BedrockCredentialSchema.parse({ ...bedrock, session_token: 'token' })).toEqual({
+      ...bedrock,
+      session_token: 'token',
+    })
+    // A session token is optional: long-lived IAM user keys have none. An empty one is not a
+    // credential, so it is refused rather than stored as a blank.
+    expect(BedrockCredentialSchema.safeParse({ ...bedrock, session_token: '' }).success).toBe(false)
+    expect(BedrockCredentialSchema.safeParse({ ...bedrock, session_token: 42 }).success).toBe(false)
+  })
+
+  it('refuses a region that is not one of the Bedrock regions AWS serves', () => {
+    for (const region of [
+      'us-east-3',
+      'eu-west-4',
+      'us-gov-west-1',
+      'evil.example',
+      'US-EAST-1',
+      'us-east-1.evil.example',
+      '',
+      'us_east_1',
+    ]) {
+      expect(BedrockCredentialSchema.safeParse({ ...bedrock, region }).success, region).toBe(false)
+    }
+  })
+
+  it('accepts every region of the list, and the form default', () => {
+    expect(BEDROCK_REGIONS).toContain(DEFAULT_BEDROCK_REGION)
+    for (const region of BEDROCK_REGIONS) {
+      expect(BedrockCredentialSchema.safeParse({ ...bedrock, region }).success, region).toBe(true)
+    }
+  })
+
+  it('requires every credential field to be a non-empty string, and the type', () => {
+    for (const field of ['access_key_id', 'secret_access_key'] as const) {
+      expect(BedrockCredentialSchema.safeParse({ ...bedrock, [field]: '' }).success, field).toBe(
+        false,
+      )
+      const { [field]: _dropped, ...partial } = bedrock
+      expect(BedrockCredentialSchema.safeParse(partial).success, `without ${field}`).toBe(false)
+    }
+    const { type: _type, ...untyped } = bedrock
+    expect(BedrockCredentialSchema.safeParse(untyped).success).toBe(false)
+    expect(BedrockCredentialSchema.safeParse({ ...bedrock, access_key_id: 42 }).success).toBe(false)
   })
 })
 

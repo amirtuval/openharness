@@ -1229,7 +1229,9 @@ describe('runTurn', () => {
     const { factory } = mockModel({ failWith: rateLimited() }, { text: ['Recovered'] })
     const seen: { modelId: string; apiKey: string }[] = []
     const model: ModelFactory = (modelId, credential) => {
-      seen.push({ modelId, apiKey: credential.apiKey })
+      // The resolver this test hands over answers the one-key type, so the narrowing is a
+      // statement about this test rather than about the factory.
+      seen.push({ modelId, apiKey: credential.type === 'api_key' ? credential.apiKey : '' })
       return factory(modelId, credential)
     }
     const resolveCredential = vi.fn(() =>

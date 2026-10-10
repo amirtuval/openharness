@@ -1,7 +1,7 @@
 import { credentialUpsert, sealCredential } from '@openharness/server'
 import { createPostgresCredentialStore } from '@openharness/session/postgres'
 import { createVault, envKeyProvider } from '@openharness/vault'
-import type { ProviderCredential } from '@openharness/protocol'
+import type { BedrockRegion, ProviderCredential } from '@openharness/protocol'
 
 import type { E2eDatabase } from './database'
 import { E2E_SECRETS_KEY } from './server'
@@ -123,6 +123,48 @@ export async function seedAzureCredential(
     endpoint: input.endpoint,
     api_key: input.apiKey,
     deployments: [...input.deployments],
+  }
+  const sealed = await sealCredential(e2eVault(), { userId: input.userId, name: input.name, body })
+  const store = createPostgresCredentialStore({ connectionString: database.url })
+  try {
+    return await store.upsert(
+      credentialUpsert(
+        { userId: input.userId, name: input.name, body },
+        sealed,
+        new Date().toISOString(),
+      ),
+    )
+  } finally {
+    await store.close()
+  }
+}
+
+/**
+ * Store a sealed **Amazon Bedrock** credential, the way a `PUT` of that payload would.
+ *
+ * The same reason `seedAzureCredential` exists: the save-time check is `ListFoundationModels`
+ * against AWS, which a deterministic offline suite cannot make — the harness writes the row the
+ * route writes, and the route's own refusals (a region AWS does not serve, a name a provider
+ * owns) are exercised through it where they need no network.
+ */
+export async function seedBedrockCredential(
+  database: E2eDatabase,
+  input: {
+    readonly userId: string
+    readonly name: string
+    /** One of the protocol's Bedrock regions; the schema refuses anything else on the wire. */
+    readonly region: BedrockRegion
+    readonly accessKeyId: string
+    readonly secretAccessKey: string
+    readonly sessionToken?: string
+  },
+): Promise<ProviderCredential> {
+  const body = {
+    type: 'bedrock' as const,
+    access_key_id: input.accessKeyId,
+    secret_access_key: input.secretAccessKey,
+    ...(input.sessionToken === undefined ? {} : { session_token: input.sessionToken }),
+    region: input.region,
   }
   const sealed = await sealCredential(e2eVault(), { userId: input.userId, name: input.name, body })
   const store = createPostgresCredentialStore({ connectionString: database.url })

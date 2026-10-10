@@ -85,7 +85,7 @@ migrations/             the SQL the Postgres stores need, applied by `migrate()`
                         0020 what a supersession range covers — chunks or a rewind (#238),
                         0021 the index behind the per-user usage read (#247),
                         0022 the credential's name — unique per user per name (#248),
-                        0023 a credential's public, per-type details (#249)
+                        0023 a credential's public, per-type details (#249, #250)
 docs/postgres.md        the Postgres stores: schema, migrations, delivery, local setup
 ```
 
@@ -477,12 +477,12 @@ wrapped the data key (`local` or `gcp-kms`, #150) and is **optional**: a blob st
 the field existed simply does not have it, and the vault is what reads an absent provider as
 `local`. The store writes and reads it faithfully either way — it knows no provider names.
 
-| method                     | what it does                                                                                                                             |
-| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `upsert(input)`            | writes `{ userId, name, type, sealed, last4, validatedAt }` and answers the metadata; replaces in place for the same `(user, name)`      |
-| `get({ userId, name })`    | the record **including the sealed form**, or `null` — the one read the server's model path uses, and the only one that hands a blob back |
-| `list({ userId })`         | metadata only, ordered by `name`; the sealed columns are not even selected                                                               |
-| `delete({ userId, name })` | `true` when one was deleted, `false` when there was none                                                                                 |
+| method                     | what it does                                                                                                                                 |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `upsert(input)`            | writes `{ userId, name, type, sealed, details, last4, validatedAt }` and answers the metadata; replaces in place for the same `(user, name)` |
+| `get({ userId, name })`    | the record **including the sealed form**, or `null` — the one read the server's model path uses, and the only one that hands a blob back     |
+| `list({ userId })`         | metadata only, ordered by `name`; the sealed columns are not even selected                                                                   |
+| `delete({ userId, name })` | `true` when one was deleted, `false` when there was none                                                                                     |
 
 The answers are the protocol's `ProviderCredential` metadata (`pcred_` id, `type`, `name`,
 `last4`, the optional `details` a type publishes — #249 — and `created_at`, `updated_at`,
@@ -606,7 +606,8 @@ and `0013_provider_credentials`:
 - **`0013_provider_credentials.sql` — the sealed credential table** (decision A5): id
   (`pcred_`), user, provider, type, the four sealed fields, `last4`, the timestamps and
   `validated_at`, unique on `(user_id, provider)` and `on delete cascade` from `"user"`. There
-  is no plaintext column, and none may ever be added. (`0022` renames `provider` to `name`.)
+  is no plaintext column, and none may ever be added. (`0022` renames `provider` to `name`, and
+  `0023` adds the `details` a credential reports about itself.)
 - **`0014_auth_session_revocation.sql` — the revocation trigger** (A2; issue #76): an
   `after delete … for each row` trigger on `"session"` that `pg_notify`s the deleted session's
   **id** (never its token) on the `ohr_auth_session_revoked` channel
@@ -694,18 +695,21 @@ The named credentials of epic #245 (A3a) added one:
   `if exists`, so each rename is guarded by a catalogue check (the runner re-runs every file on
   every `migrate()`).
 
-The custom OpenAI-compatible credential (epic #245, A3b) added one:
+The per-type credential details (epic #245, A3b/A3c) added one:
 
-- **`0023_credential_details.sql` — a credential's public, per-type details** (#249): one
+- **`0023_credential_details.sql` — a credential's public, per-type details** (#249, #250): one
   `add column if not exists details jsonb` on `provider_credentials`. It holds the facts a
-  credential's type chooses to publish — today a custom endpoint's base URL **host** — which a
-  settings list can show without opening the sealed payload (a metadata read must not). It is
-  **not** a secret and never may be. NULL is legitimate and means "this type has no such
-  facts": every `api_key` and `azure_openai` row takes it, and every row written before the
-  column existed, so their metadata is unchanged and there is nothing to backfill. The column
-  round-trips through `upsert`/`get`/`list` exactly as given (`UpsertCredentialInput.details`,
-  `ProviderCredential.details`), and the conformance suite pins that a credential with details
-  gets them back while one without carries no `details` key at all.
+  credential's type chooses to publish — a custom endpoint's base URL **host** (#249) and a
+  Bedrock credential's `{ region }` (#250) — which a settings list can show without opening the
+  sealed payload (a metadata read must not). It is **not** a secret and never may be: the values
+  are a host and a region, the kind a `GET /v1/provider-credentials` response carries openly.
+  NULL is legitimate and means "this type has no such facts": every `api_key` and `azure_openai`
+  row takes it, and every row written before the column existed, so their metadata is unchanged
+  and there is nothing to backfill. The column round-trips through `upsert`/`get`/`list` exactly
+  as given (`UpsertCredentialInput.details`, `ProviderCredential.details`), and the conformance
+  suite pins that a credential with details gets them back while one without carries no `details`
+  key at all. A nullable JSON column rather than a column per type: the fields differ by type and
+  nothing shares them, so each new credential type would otherwise be a schema change of its own.
 
 The vault's key provider (issue #150, deployment epic #148 decision D6) added one before it:
 

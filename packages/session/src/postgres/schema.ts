@@ -213,15 +213,17 @@ export interface ProviderCredentialsTable {
    * was the only provider: the vault treats `null` as `local`.
    */
   key_provider: string | null
-  /** The last four characters of the plaintext, for recognition only. */
-  last4: string
   /**
-   * The public, type-specific facts the credential's type publishes (#249, A3b) — today a
-   * custom OpenAI-compatible base URL's host. `null` when the type has none, which is every
-   * `api_key` and `azure_openai` row and every row written before the column existed. Never a
-   * secret: a metadata read returns it as-is.
+   * The non-secret facts that identify the credential within its type (epic #245, A3c), as
+   * the protocol's `ProviderCredentialDetails` — a Bedrock credential's `{ region }`, a custom
+   * endpoint's base-URL host (#249, A3b). `null` on a row written before the column existed
+   * (see `0023_credential_details.sql`) and for a type with nothing to report, which the API
+   * reads as an absent `details`. Never a secret: the sealed blob is the columns above, and
+   * nothing here may be recoverable from one.
    */
   details: ProviderCredentialDetails | null
+  /** The last four characters of the plaintext, for recognition only. */
+  last4: string
   created_at: Date
   updated_at: Date
   validated_at: Date
@@ -384,14 +386,14 @@ export function credentialMetadataFromRow(row: ProviderCredentialMetadataRow): P
     id: row.id as ProviderCredential['id'],
     type: row.type as ProviderCredential['type'],
     name: row.name,
+    // A `null` column is an absent `details`, not an empty object: the protocol's field is
+    // optional, and an `api_key` credential reports nothing about itself (epic #245, A3c).
+    ...(row.details === null ? {} : { details: { ...row.details } }),
     last4: row.last4,
-    // Absent, not `null`: a credential whose type publishes no facts has no `details` key, so
-    // its metadata is byte-for-byte what it was before the field existed (#249, A3b).
-    ...(row.details === null ? {} : { details: row.details }),
     created_at: timestampOf(row.created_at),
     updated_at: timestampOf(row.updated_at),
     validated_at: timestampOf(row.validated_at),
-  })
+  } as ProviderCredential)
 }
 
 /**

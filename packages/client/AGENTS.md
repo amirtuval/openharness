@@ -81,32 +81,33 @@ src/
 
 ### `@openharness/client`
 
-| export                                                                                          | what it is                                                                                                           |
-| ----------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `createClient(options)`                                                                         | build a client                                                                                                       |
-| `Client`, `ClientOptions`, `RequestOptions`                                                     | the interface both the real and the fake client implement                                                            |
-| `AgentsResource`, `SessionsResource`, `SessionEventsResource`                                   | the resource interfaces                                                                                              |
-| `ProviderCredentialsResource`                                                                   | `providerCredentials.list/put/delete`                                                                                |
-| `ModelsResource`                                                                                | `models.list`: the chat models the caller's keys can use (epic #92)                                                  |
-| `PreferencesResource`                                                                           | `preferences.get/put`: the caller's stored default model (#111)                                                      |
-| `UsageResource`                                                                                 | `usage.session(id)` and `usage.me(range)`: what was spent, priced on the server (#247)                               |
-| `AuthResource`                                                                                  | `auth.startDeviceLogin/pollDeviceLogin/signOut`                                                                      |
-| `OPENHARNESS_CLI_CLIENT_ID`                                                                     | the `client_id` the device flow presents: `'openharness-cli'`                                                        |
-| `DeviceLoginError`, `DeviceLoginStart`, `PollDeviceLoginOptions`                                | the device flow's error, its start result and its poll options                                                       |
-| `StreamOptions`                                                                                 | `{ deltas?, afterSeq?, signal? }` for `events.stream`                                                                |
-| `SendMessageOptions`                                                                            | `sendMessage`'s options: cancellation, the `model` to switch to, the `reasoningEffort` (#252), and `rewindTo` (#238) |
-| `FetchLike`, `DebugHook`, `RawResponse`                                                         | the `fetch` seam, the hook for what the client skips, the raw answer                                                 |
-| `ApiError`, `AuthenticationError`, `ResponseValidationError`, `errorTypeForStatus()`            | the three errors and the status → `error.type` map                                                                   |
-| `createTranscript()`, `reduceTranscript()`, `reduceTranscriptAll()`, `initialTranscriptState()` | the transcript store and the pure reducer                                                                            |
-| `selectMessages()`, `selectIsRunning()`, `selectLastMessage()`, `selectStreamingMessage()`      | selectors                                                                                                            |
-| `Transcript`, `TranscriptState`, `TranscriptMessage`, `TranscriptError`                         | the transcript's types                                                                                               |
-| `MessagePart`, `TextPart`, `TranscriptMessageMeta`, `TranscriptUsage`, `PendingModelRequest`    | a message's typed parts, a reply's metadata, and its bookkeeping (#201)                                              |
-| `SessionUsage`, `SessionModelUsage`, `SessionUsageTotals`, `ModelPriceLookup`                   | the session's totals as the transcript keeps them, and how a frontend prices them (#247)                             |
-| `selectSessionUsage()`, `sessionUsageOf()`, `sessionCost()`, `replyCost()`                      | what a session and a reply cost, from the log's tokens and the catalog's rates (#247)                                |
-| `PROVIDERS`, `providerInfo()`, `providerName()`, `ProviderInfo`                                 | the model providers a form or a tile needs (#209; built from the shared list, #245)                                  |
-| `CREDENTIAL_TARGETS`, `CredentialTarget`                                                        | every provider _and_ named credential type a form or a tile offers (#245 A3a)                                        |
-| `credentialDisplayName()`, `credentialTargetFor()`                                              | what to call a stored credential, and which tile its row reopens                                                     |
-| `PACKAGE_NAME`                                                                                  | the package name; a dependent's cheap proof that the import resolved                                                 |
+| export                                                                                          | what it is                                                                                                                           |
+| ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `createClient(options)`                                                                         | build a client                                                                                                                       |
+| `Client`, `ClientOptions`, `RequestOptions`                                                     | the interface both the real and the fake client implement                                                                            |
+| `AgentsResource`, `SessionsResource`, `SessionEventsResource`                                   | the resource interfaces                                                                                                              |
+| `ProviderCredentialsResource`                                                                   | `providerCredentials.list/put/delete`                                                                                                |
+| `ModelsResource`                                                                                | `models.list`: the chat models the caller's keys can use (epic #92)                                                                  |
+| `PreferencesResource`                                                                           | `preferences.get/put`: the caller's stored default model (#111)                                                                      |
+| `UsageResource`                                                                                 | `usage.session(id)` and `usage.me(range)`: what was spent, priced on the server (#247)                                               |
+| `AuthResource`                                                                                  | `auth.startDeviceLogin/pollDeviceLogin/signOut`                                                                                      |
+| `OPENHARNESS_CLI_CLIENT_ID`                                                                     | the `client_id` the device flow presents: `'openharness-cli'`                                                                        |
+| `DeviceLoginError`, `DeviceLoginStart`, `PollDeviceLoginOptions`                                | the device flow's error, its start result and its poll options                                                                       |
+| `StreamOptions`                                                                                 | `{ deltas?, afterSeq?, signal? }` for `events.stream`                                                                                |
+| `SendMessageOptions`                                                                            | `sendMessage`'s options: cancellation, the `model` to switch to, the `reasoningEffort` (#252), and `rewindTo` (#238)                 |
+| `FetchLike`, `DebugHook`, `RawResponse`                                                         | the `fetch` seam, the hook for what the client skips, the raw answer                                                                 |
+| `ApiError`, `AuthenticationError`, `ResponseValidationError`, `errorTypeForStatus()`            | the three errors and the status → `error.type` map                                                                                   |
+| `createTranscript()`, `reduceTranscript()`, `reduceTranscriptAll()`, `initialTranscriptState()` | the transcript store and the pure reducer                                                                                            |
+| `selectMessages()`, `selectIsRunning()`, `selectLastMessage()`, `selectStreamingMessage()`      | selectors                                                                                                                            |
+| `Transcript`, `TranscriptState`, `TranscriptMessage`, `TranscriptError`                         | the transcript's types                                                                                                               |
+| `MessagePart`, `TextPart`, `TranscriptMessageMeta`, `TranscriptUsage`, `PendingModelRequest`    | a message's typed parts, a reply's metadata, and its bookkeeping (#201)                                                              |
+| `SessionUsage`, `SessionModelUsage`, `SessionUsageTotals`, `ModelPriceLookup`                   | the session's totals as the transcript keeps them, and how a frontend prices them (#247)                                             |
+| `selectSessionUsage()`, `sessionUsageOf()`, `sessionCost()`, `replyCost()`                      | what a session and a reply cost, from the log's tokens and the catalog's rates (#247)                                                |
+| `PROVIDERS`, `providerInfo()`, `providerName()`, `ProviderInfo`                                 | the model providers a form or a tile needs (#209; built from the shared list, #245)                                                  |
+| `CREDENTIAL_TARGETS`, `CredentialTarget`                                                        | every provider _and_ named credential type a form or a tile offers (#245 A3a)                                                        |
+| `credentialDisplayName()`, `credentialTargetFor()`, `credentialFacts()`                         | what to call a stored credential, which tile its row reopens, and the non-secret facts its row shows (a Bedrock credential's region) |
+| `credentialDisplayName()`, `credentialTargetFor()`                                              | what to call a stored credential, and which tile its row reopens                                                                     |
+| `PACKAGE_NAME`                                                                                  | the package name; a dependent's cheap proof that the import resolved                                                                 |
 
 ### `@openharness/client/testing`
 
@@ -528,16 +529,30 @@ list, so there is nothing left for `e2e`'s removed `provider-metadata.test.ts` t
 credentials API takes any router provider, so a reader who typed an id this list does not carry
 sees what they typed, never a blank.
 
-**`CREDENTIAL_TARGETS` is what an Add-provider surface offers** (epic #245, A3a/A3b): the eleven
-providers, then the named credential types. A `CredentialTarget` carries the _name_ a first save
-uses (a provider id, or the type's default — `azure`, `custom`), the display name, the credential
-type that selects the form (X6), the key URL, and `named` — whether the reader may keep more than
-one, each under a name they choose. The key URL is **optional**: a custom OpenAI-compatible
-endpoint (#249) has no console to link to, so its target omits `keyUrl` and the form offers no
-link. `credentialTargetFor(credential)` answers the target a _stored_ credential's Replace
-reopens, and `credentialDisplayName(credential)` is what a list row is called: the provider's
-name, the type's display name where the name is its default, and the reader's own label
-otherwise — so `azure-eu` is called `azure-eu` and two Azure rows are told apart.
+**`CREDENTIAL_TARGETS` is what an Add-provider surface offers** (epic #245, A3a/A3b/A3c): the
+eleven providers, then the named credential types — Azure OpenAI, a custom OpenAI-compatible
+endpoint and Amazon Bedrock. A `CredentialTarget` carries the _name_ a first save uses (a
+provider id, or the type's default — `azure`, `custom`, `bedrock`), the display name, the
+credential type that selects the form (X6), the key URL, and `named` — whether the reader may
+keep more than one, each under a name they choose. The key URL is **optional**: a custom
+OpenAI-compatible endpoint (#249) has no console to link to, so its target omits `keyUrl` and
+the form offers no link. `credentialTargetFor(credential)` answers the target a _stored_
+credential's Replace reopens, and `credentialDisplayName(credential)` is what a list row is
+called: the provider's name, the type's display name where the name is its default, and the
+reader's own label otherwise — so `azure-eu` is called `azure-eu` and two Azure rows are told
+apart.
+
+`credentialFacts(credential)` is the other half of telling rows apart: the non-secret per-type
+facts a list shows **beside** `last4` (epic #245, A3c) — a Bedrock credential's region, read
+from the `details` the server reports. It is a `Record<ProviderCredentialType, …>` like the form
+table, so a new credential type is a compile error there until someone decides what its row
+says; `api_key` and `azure_openai` report none today.
+
+`credentialFacts(credential)` is the other half of telling rows apart: the non-secret per-type
+facts a list shows **beside** `last4` (epic #245, A3c) — a Bedrock credential's region, read
+from the `details` the server reports. It is a `Record<ProviderCredentialType, …>` like the form
+table, so a new credential type is a compile error there until someone decides what its row
+says; `api_key` and `azure_openai` report none today.
 
 The web app builds its first-run tiles, its Add-provider dialog and its Settings list from this
 (#209); `oh` will offer the same providers in the terminal (#210, X7).
@@ -653,10 +668,11 @@ const token = await fake.auth.pollDeviceLogin(start.deviceCode) // FAKE_SESSION_
 const me = await fake.me() // fake.user
 ```
 
-The credential routes are an in-memory store: `put` keeps the metadata (`last4` from the key)
-and never the key, replacing keeps `id` and `created_at`, `delete` is idempotent, and an empty
-key answers 422 `invalid_provider_credential` — the one provider rejection a test can spell
-without a provider.
+The credential routes are an in-memory store: `put` keeps the metadata and never the secret —
+`last4` from the `api_key` of the one-secret type and from the **access key ID** of a `bedrock`
+one, plus the per-type `details` (a region) — replacing keeps `id` and `created_at`, `delete` is
+idempotent, and an empty secret answers 422 `invalid_provider_credential` — the one provider
+rejection a test can spell without a provider.
 
 The preferences routes are an in-memory value too: `{ default_model: null }` unless
 `createFakeClient({ preferences })` seeds it, `put` replaces it whole, and both answer 401
