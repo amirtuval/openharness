@@ -611,6 +611,17 @@ The blank lines around it follow the transcript's existing rules (the divider br
 above itself, the block below brings its own), which is why it is a block among the blocks
 rather than a prefix on a message.
 
+**The settled list is append-only, so a divider that arrives late is written where it can be**
+(#298). `<Static>` renders the _tail_ of its list (Ink's `items.slice(index)`), so a block
+inserted before the end shifts everything after it: the tail is written twice and the block is
+never drawn. A message never does that — it settles at the frontier — but a divider for a
+compaction that ran at the start of a turn does, because the history it covers is already in
+the scrollback (the web can insert it, a terminal cannot). `TranscriptView` therefore keeps the
+written list and **appends** the rest in their own order (`committedSettled`); a divider whose
+true position is inside the written prefix is drawn at the frontier, just above the live area,
+with the history it covers still above it. It is written once and never moves; a replay draws
+it at its position in the log, like the web.
+
 The truncation notice — `your message was too long for this model and was shortened (about N
 tokens left out)` — is one line under the transcript, with the notices. A terminal has no
 tooltip, so the count that the web app keeps in a `title` is in the line. The progress

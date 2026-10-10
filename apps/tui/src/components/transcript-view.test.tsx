@@ -79,7 +79,7 @@ function frameOf(
   return (viewOf(messages, options).lastFrame() ?? '').trimEnd()
 }
 
-/** The transcript redrawn with the same messages, as React would on a new prop value. */
+/** The transcript redrawn with new props, as React would on a new prop value. */
 function redraw(
   app: ReturnType<typeof viewOf>,
   messages: readonly TranscriptMessage[],
@@ -87,12 +87,14 @@ function redraw(
     readonly width?: number
     readonly currentModel?: string
     readonly holdLive?: string
+    readonly summaries?: readonly TranscriptSummary[]
   } = {},
 ): void {
   app.rerender(
     <ThemeProvider theme={{ background: 'dark', color: true, level: 3 }}>
       <TranscriptView
         messages={messages}
+        summaries={options.summaries}
         width={options.width ?? 40}
         currentModel={options.currentModel}
         holdLive={options.holdLive}
@@ -319,5 +321,29 @@ describe('the summary dividers (#280)', () => {
 
     expect(frame.split('\n')[1]).toBe('')
     expect(frame.split('\n')[2]).toContain('conversation summarized')
+  })
+
+  it('draws a divider that arrives once the history under it is already written (#298)', () => {
+    // The compaction runs at the start of a turn, so its divider covers history the terminal
+    // has long since committed to `<Static>` — the scrollback, which Ink never redraws. The
+    // divider must still be drawn (the web draws it), just appended rather than inserted, and
+    // the settled messages must not be written a second time.
+    const messages = [
+      message('sevt_1', 'first', 'user'),
+      message('sevt_2', 'second', 'agent'),
+      message('sevt_3', 'third', 'agent'),
+    ]
+    const app = viewOf(messages, { width: 60 })
+    expect(app.lastFrame()).not.toContain('conversation summarized')
+
+    redraw(app, messages, { summaries: [divider({ position: 2 })], width: 60 })
+
+    const frame = app.lastFrame() ?? ''
+    expect(frame).toContain('conversation summarized')
+    // The summary the divider opens to is drawn under it in the terminal too (#280).
+    expect(frame).toContain('They greeted each other.')
+    // Nothing the scrollback already held is written again.
+    expect(frame.match(/third/gu)).toHaveLength(1)
+    expect(frame.match(/first/gu)).toHaveLength(1)
   })
 })
