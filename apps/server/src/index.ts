@@ -122,11 +122,54 @@ export {
   type ServerConfig,
 } from './config'
 export { createConfigVault } from './key-provider'
+// Remote MCP servers (epic #303, X10): the guarded fetch, the sealing helpers, the OAuth 2.1
+// client, and the service whose `resolve` is the seam the tool loop (#312) uses.
+export {
+  DEFAULT_MCP_FETCH_TIMEOUT_MS,
+  MCP_IDLE_TIMEOUT_MS,
+  createMcpFetch,
+  type McpFetchOptions,
+} from './mcp/fetch'
+export {
+  MCP_OAUTH_STATE_TTL_MS,
+  DEFAULT_MCP_CHECK_TIMEOUT_MS,
+  createMcpServerService,
+  type McpServerService,
+  type McpServerServiceOptions,
+  type ResolvedMcpServer,
+} from './mcp/service'
+export {
+  McpOAuthError,
+  authorizationServerMetadataUrls,
+  authorizationUrl,
+  createPkce,
+  discoverAuthorizationServer,
+  discoverResource,
+  exchangeAuthorizationCode,
+  protectedResourceMetadataUrl,
+  refreshAccessToken,
+  registerClient,
+  type AuthorizationServerMetadata,
+  type OAuthClientRegistration,
+  type OAuthTokens,
+  type PkcePair,
+  type ProtectedResourceMetadata,
+} from './mcp/oauth'
+export {
+  mcpSecretAad,
+  openMcpJson,
+  openMcpSecret,
+  sealMcpJson,
+  sealMcpSecret,
+  type McpSecretBinding,
+  type McpSecretPurpose,
+} from './mcp/secrets'
 export {
   HttpError,
   authenticationError,
   invalidProviderCredential,
   invalidRequest,
+  mcpConnectionError,
   notFoundError,
   permissionError,
   rateLimitError,
