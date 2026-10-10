@@ -266,8 +266,10 @@ CONTEXT TOO LONG — the provider refused the request as over its window, once p
   compact with tighter caps (the overflow tail, half the usual one)
   a summary written .......................... session.status_running, back to step 4c
   a summary not written ...................... session.error
-                                               { message: the provider's, plus "…still did
-                                                 not fit", retry_status: exhausted }
+                                               { message: the provider's, plus why there was
+                                                 no compaction ("no older history to
+                                                 summarize", or "summarizing the history
+                                                 failed"), retry_status: exhausted }
   ........................................... session.status_idle, return error
   a second refusal after the retry ............ the same clear error, no second compaction
 
@@ -490,8 +492,11 @@ compaction is this one, its event is a `session.context_summary`, and nothing is
   tokens allowed", and the OpenAI-compatible family's own prose (see `./errors`). The loop then
   compacts with tighter caps (`OVERFLOW_RECENT_TAIL_RATIO`, half the usual tail) and makes the
   request once more; a second refusal ends the turn with `session.error { retry_status:
-'exhausted' }` and a message saying the context was compacted and still did not fit. It is once
-  per **turn**, not per request, so however many requests a turn makes, it cannot loop.
+'exhausted' }` and a message saying the context was compacted and still did not fit. When the
+  tighter compaction cannot be made, the turn ends the same way but the message says why rather
+  than claiming a compaction that never happened — "there was no older history to summarize" for
+  the trigger's `'skipped'`, "summarizing the history failed" for `'failed'`. It is once per
+  **turn**, not per request, so however many requests a turn makes, it cannot loop.
 - **A summary request does not move the session's model.** The session projects the `model` a
   `span.model_request_start` names onto itself ("the model this chat last ran", #245 M6), so the
   span of a summary request is the one exception — see `@openharness/session` — or the chat would

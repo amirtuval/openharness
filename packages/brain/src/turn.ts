@@ -723,11 +723,17 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
         }
         // The tighter compaction could not be made (K11's failure path, or the trigger found
         // nowhere to cut): the retry would be the same request again, so the turn ends here
-        // with an error that says what was tried.
+        // with an error that says what was tried. It was **not** compacted — the summary was
+        // skipped or failed, which is why nothing was retried — so the message says which of
+        // the two it was rather than claiming a compaction that never happened.
+        const notCompacted =
+          outcome.outcome === 'failed'
+            ? 'summarizing the history failed'
+            : 'there was no older history to summarize'
         await append([
           sessionError({
             type: classification.type,
-            message: `${message} (the context was compacted and the request still did not fit)`,
+            message: `${message} (${notCompacted})`,
             retry_status: { type: 'exhausted' },
           }),
           statusIdle(),
