@@ -27,14 +27,32 @@ import { ModelUsageSchema } from './span'
 /**
  * Why the agent stopped.
  *
- * v1 only ever produces `end_turn`, which is what a turn that finishes on its own *and* a
- * turn cut short by a `user.interrupt` both report; there is no stop reason specific to
- * interruption. Anthropic's union also has `requires_action`, `retries_exhausted` and
- * `budget_reached`, none of which openharness emits yet (see `AGENTS.md`).
+ * `end_turn` is what a turn that finishes on its own *and* a turn cut short by a
+ * `user.interrupt` both report: there is no stop reason specific to interruption. It is also
+ * what a turn that ran out of tool steps reports — that one says so in the `session.error`
+ * beside it, the one event that carries a sentence (X1/X2).
+ *
+ * `requires_action` is the pause (epic #303, X6; #309): the turn ended because a call is
+ * waiting on the user, and `event_ids` names the calls — the ids of the `agent.tool_use`
+ * events, which are the calls' own ids. The session is idle, so a client shows the question
+ * or the approval prompt; when the user answers, one `user.tool_confirmation` starts the turn
+ * that carries on. Anthropic's union also has `retries_exhausted` and `budget_reached`, which
+ * openharness does not emit (see `AGENTS.md`).
  */
-export const StopReasonSchema = z.object({
-  type: z.literal('end_turn'),
-})
+export const StopReasonSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('end_turn'),
+  }),
+  z.object({
+    // extension: the turn stopped because it is waiting on the user (epic #303, #309).
+    type: z.literal('requires_action'),
+    /**
+     * The `agent.tool_use` events the turn is waiting on, in the order they were made —
+     * the calls' own ids, which a `user.tool_confirmation` names to answer one.
+     */
+    event_ids: z.array(EventIdSchema),
+  }),
+])
 
 export type StopReason = z.infer<typeof StopReasonSchema>
 

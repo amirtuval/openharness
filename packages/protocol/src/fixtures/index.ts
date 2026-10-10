@@ -38,6 +38,7 @@ import type {
   UserInterruptEvent,
   UserMessageEvent,
   UserPreferences,
+  UserToolConfirmationEvent,
   UserToolSettings,
   GetPreferencesResponse,
   ListToolSettingsResponse,
@@ -448,6 +449,33 @@ export function makeAgentToolResult(
     tool_use_id: call.id,
     content: [{ type: 'text', text }],
     is_error: false,
+  }
+  return { ...event, ...overrides }
+}
+
+/**
+ * A stored `user.tool_confirmation`: the user's answer to a call that was waiting on them
+ * (epic #303, X6; #309).
+ *
+ * The event names the call it answers — `makeAgentToolUse`'s event carries the call's id, so
+ * passing it here is what pairs the two, exactly as {@link makeAgentToolResult} does. The
+ * default is an approval for this call only; a test that answers an `ask_user` call adds
+ * `answers`, and one that remembers the answer adds `remember`.
+ *
+ * @param call the `agent.tool_use` this answers; its id becomes `tool_use_id`
+ * @param overrides fields to replace on the event
+ */
+export function makeToolConfirmation(
+  call: AgentToolUseEvent,
+  overrides: Partial<UserToolConfirmationEvent> = {},
+): UserToolConfirmationEvent {
+  const event: UserToolConfirmationEvent = {
+    id: newEventId(),
+    type: 'user.tool_confirmation',
+    seq: takeSeq(),
+    processed_at: fixtureTimestamp(),
+    tool_use_id: call.id,
+    result: 'allow',
   }
   return { ...event, ...overrides }
 }
