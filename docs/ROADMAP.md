@@ -7,7 +7,7 @@ plan between phases.
 For a survey of what other harnesses offer (Claude Code, Managed Agents, OpenCode, Codex, pi),
 see the [harness feature inventory](./research/harness-features.md).
 
-_Last updated: 2026-10-08._
+_Last updated: 2026-10-10._
 
 ## Where we are
 
@@ -40,6 +40,10 @@ _Last updated: 2026-10-08._
   (closed 2026-10-10): a context budget per model, usage and cost, Azure OpenAI, custom
   OpenAI-compatible URLs, Bedrock and Vertex credentials behind an SSRF guard, reasoning effort,
   and per-user modes.
+- **Context compaction** ([epic #277](https://github.com/amirtuval/openharness/issues/277)) is
+  done (2026-10-10): long chats summarize their older history instead of silently dropping it,
+  automatically at a share of the model's budget or on demand with `/compact`, with a summary
+  divider, progress and a context meter on the web and in `oh`.
 
 ## Order
 
@@ -47,7 +51,8 @@ _Last updated: 2026-10-08._
 2. Authentication — done
 3. Deployment and CI/CD — done
 4. Chat and TUI UX, pass 1 ([epic #201](https://github.com/amirtuval/openharness/issues/201)) — done
-5. Model selection and provider keys ([epic #245](https://github.com/amirtuval/openharness/issues/245)) — done
+5. Model selection and provider keys ([epic #245](https://github.com/amirtuval/openharness/issues/245)) — done,
+   followed by context compaction ([epic #277](https://github.com/amirtuval/openharness/issues/277)) — done
 6. Tools
 
 **Why this order:** identity and a running deployment are the foundations. Every later feature
@@ -207,6 +212,42 @@ Vertex are covered by automated tests and stub servers only; no real account has
 - Bedrock profile models take the underlying model's price; prefer models.dev's profile-scoped
   price where it exists ([#290](https://github.com/amirtuval/openharness/issues/290)).
 
+## Context compaction (done: [epic #277](https://github.com/amirtuval/openharness/issues/277))
+
+**Status:** implemented as five sub-issues (#278, #279, #282, #283, #280; PRs #289, #291, #294,
+#293, #295), through a hands-on test plan ([#281](https://github.com/amirtuval/openharness/issues/281))
+that passed all 17 cases, with its one finding fixed (#298, PR #299). The real-model cases ran on
+DeepSeek through an OpenAI-compatible endpoint. This is context compaction for the model; it is
+separate from #46's event-store compaction.
+
+**Decided** (details are on the epic):
+
+- **A summary is an event,** `session.context_summary`; nothing is deleted. The model sees the
+  system prompt, the latest summary and everything after it, and the transcript keeps the full
+  history. A rewind to before a summary takes the summary back with it.
+- **Automatic at a share of the chat model's budget,** 70% by default
+  (`OPENHARNESS_COMPACTION_THRESHOLD`, and a per-user preference), measured from the previous
+  request's real token counts. About a quarter of the budget is kept verbatim, cut only at a user
+  message.
+- **A separate summary model,** per user ("same as the chat" by default). It works in chunked
+  passes sized to its own window, and the chat model takes over above a pass limit (3 by
+  default) or when the summary model has no credential. Summary requests appear in usage and
+  cost.
+- **Nothing is silently dropped:** huge old items are capped with a marker, an oversized newest
+  message is shortened with a notice, a provider's "too long" error compacts and retries once,
+  and a failed summary falls back to trimming.
+- **`/compact [instructions]`** on the web and in `oh`, queued while a turn runs.
+
+**Follow-ups:**
+
+- Tool-related context management moves to Tools (§6,
+  [#276](https://github.com/amirtuval/openharness/issues/276)).
+- Delete old summary-progress events after a deadline
+  ([#285](https://github.com/amirtuval/openharness/issues/285)).
+- Named credentials (Azure deployments, custom endpoints) always get the 32,768 fallback budget
+  ([#300](https://github.com/amirtuval/openharness/issues/300)).
+- Turning automatic compaction off per user.
+
 ## 6. Tools
 
 The third pillar of the architecture (the "hands"), built in steps that are each useful on their
@@ -236,6 +277,11 @@ own.
 4. **Sandboxed tools** (`bash`, files) behind the same `hands` interface. The sandbox
    technology, and whether hands run in-process or as a separate worker, are decided then.
 
+**Context management for tools** ([#276](https://github.com/amirtuval/openharness/issues/276),
+deferred from context compaction, epic #277): clear old tool results first, keep tool call/result
+pairs together when history is cut (the cut rule is one replaceable function for this), cap tool
+results, decide what to bring back after a compaction, and handle an oversized tool result.
+
 **Open:**
 
 - **Crash rule for tool calls.** The proposal: never re-run a tool automatically after a crash.
@@ -250,8 +296,6 @@ own.
 - **Organizations, teams and sharing:** shared agents, roles and invitations. Shared
   _sessions_ are spelled out under [Multi-user chat](#multi-user-chat) below.
 - **CLI and web polish:** a lot of smaller UX work in both clients, collected while testing v1.
-- **Context compaction:** summarizing old history for the model. This is separate from #46's
-  event-store compaction.
 - **Agent versioning:** sessions pin a version, and the log records which configuration served
   each request.
 - **Steering vs follow-up messages.** Like pi, a follow-up message waits until the turn ends; we
