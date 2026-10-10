@@ -19,9 +19,11 @@ import {
   seedBedrockCredential,
   seedProviderCredential,
   seedVertexCredential,
+  startProviderStub,
   waitForTurnEnd,
   withDatabaseClient,
   type Person,
+  type ProviderStub,
   type ServerProcess,
 } from './harness'
 
@@ -43,29 +45,169 @@ import {
  * Every scenario gets an account of its own, because the file shares one database: a
  * credential stored for one test's user must not be the next test's credential.
  *
- * The one thing this file does not do is `PUT` a *good* key: validation is a real provider
- * call and the process boundary has no seam for it (`provider-validation.ts`), so the stored
- * credentials here are seeded the way the route stores them (`harness/credentials.ts`). The
- * PUT path itself runs for real in `provider-smoke.test.ts`, when a real key is in the
- * environment.
+ * The one thing this file does not do is `PUT` a *good* key for a keyed provider: validation
+ * is a real provider call and the process boundary has no seam for it
+ * (`provider-validation.ts`), so the stored credentials here are seeded the way the route
+ * stores them (`harness/credentials.ts`). The PUT path itself runs for real in
+ * `provider-smoke.test.ts`, when a real key is in the environment — and, for a **Vertex**
+ * credential, in this file too: that check is a Google call the provider stub can answer, so
+ * `saves a Vertex credential through the route` drives the real route and the real URL (#251).
  */
 
 const harness = e2eHarness('credentials')
 
 /** A key with a recognisable middle, so a dump can be grepped for it meaningfully. */
-/** A service-account document for the vertex tests: shaped like one, and not a real key. */
+/**
+ * A **throwaway** RSA key, generated for this test and protecting nothing — the same trade the
+ * provider-stub TLS leaf makes (`fixtures/provider-stub/README.md` says so of that one). A
+ * Vertex credential has to carry a key `google-auth-library` can *sign* a JWT with: with a
+ * fake PEM the signing fails locally, before the stub could answer the token exchange, and the
+ * listing would never be exercised. This key signs nothing but the stub's own token request.
+ */
+const VERTEX_PRIVATE_KEY =
+  '-----BEGIN PRIVATE KEY-----\n' +
+  'MIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQC5zi1kVAD33MjG\n' +
+  '2bsiZjMWF2BKZXh1pYqWaGe4h36yo4uowg2Aw2iigUMel9rFsrrGrTjeY0N2mZEi\n' +
+  '3kvtoN8ql6rlNVdv9uJfIDbWlTJRssfufdCVeaWShU6VRcGjDDl/20cfxVmaMWi6\n' +
+  'HcCcW+G4axyEjajyIIkqb84bQCs3sDa3+mTL6KGO4Rv+hKm7Nh5nrRymKqwAswG2\n' +
+  'AfzTIDj6F0eQnkcpROr6/CjAla8EcLhLvCEdfCAw9wrNtPi69pvIQEa7qKO1hppV\n' +
+  'GAcu1Hrcpe7zmQzH3ZpfBa6GSqvpx4uFVyIPGQgWE98WOgsXEYcAvEXiqYHuhtq6\n' +
+  'PHe3FsC1AgMBAAECggEAIHEMEmQrbhuVz8h06N7sxQrsVFkOtQXkInpUv86ik8jD\n' +
+  '6gGFz4lu487LfBQ6DcI049sbXpL41MSf53VmTvWDeaGVJGORono6EK9ke8d9i2+6\n' +
+  'glzj1jFw9BoD/EK7ej84a+dKrhSsXiSJ21M2DebqDKPhDRDZ4nrFUExIsY/c6+Iz\n' +
+  'jJZAkIRn36fopxI8kuRap+u/2vohzaxsNth55IJCNBUfQYctgeG7VRaiQ01TdDJz\n' +
+  'ajDbbhoIRDnUVAnqQcl3SkG9rguFt+6vma8rxmPSEQdnTNIqeyYHyXq5CRCALovr\n' +
+  'OE0Mf5oRSc72YRr8zH+cUs8GyzjK+Gfpp5dAn5LH+QKBgQDlpUJLbSJ2dApjyAjX\n' +
+  'ZrC7dkHXTglNYr23d1s4WcvFLNG+EudeU3ucWOvZuMLpPig+BOFZLSFKfVoanPun\n' +
+  '3jkM7HcEndk8YPuRQB4ORJYx+iQRVCkbnR6XteDztHv4sAjLqh5Beq9+B/9rnaBa\n' +
+  '5nmt+F2MUw5mNZhdHlsrXhMR/QKBgQDPIPDusdk3FuI8AKiV0OJl5UdS3PuMc29F\n' +
+  'h4ToR/Nyd/nLOoJ/A1eStGMoDc+/H7ZzlZUBPw49obaNoeICjJ7W14Mq3YNuytry\n' +
+  'yniHBatmlOvHnVt/jb45JHs/nWICnjYFZrC5aeuY4R9yyvYN37gySd+rqvcX0z51\n' +
+  'efz6pe6rGQKBgQCwYHgFdGG2trNQJc/cmIt+v3ocQlxUqlTp92sBYb5mx2CkauJ3\n' +
+  'CQl0cLtcclKJT+sajycBFe9uxc4RiKakLMKGkYtr6Uxy2k39JlCvRrBQ3D0dbhVQ\n' +
+  'lyFrBg8rPmDFBXcL7bHlOrRUyRG89si1aDTmkE5RO21gxSMryefd7BgbhQKBgQCT\n' +
+  'cWOQxtFVQdjx1ZYsb3F6D2hiOCRoqpN+7yVRJEbMKVOLs67JM1vXdslO7eYAq1Z5\n' +
+  'mPVk2boNbVxCHgaAwhEf5nHcxaqV55lMU4zQsNx+PWxJwF4twnyyuKFze1kVfAIA\n' +
+  'fkU294taXIbCdHALGEJKqgOqdB1IvHstrRTEZ/IpoQKBgQDjGdPZZn445XO41db6\n' +
+  '8F0hy2uP83bVfFcFbD0XFzlfBuBmEPd0aJiZU5JDgVmWv28hFQXTYl3y61MdxbPV\n' +
+  'lOzQUWn8Cw2cNa7JvhfqYNpSSkBfqEJKxmiZMxOY/gb3/XWNADBhVJ9xIDvj5C+p\n' +
+  'bPmEyi4igRe6KaHdoUUfXy0kiw==\n' +
+  '-----END PRIVATE KEY-----\n'
+
+/** A distinctive slice of the key's body, for the "never logged" assertions. */
+const VERTEX_KEY_MARKER = VERTEX_PRIVATE_KEY.slice(30, 70)
+
+/** A service-account document for the vertex tests, carrying the throwaway key above. */
 const VERTEX_KEY = JSON.stringify({
   type: 'service_account',
   project_id: 'openharness-vertex',
   private_key_id: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678',
-  private_key:
-    '-----BEGIN PRIVATE KEY-----\\nVERTEX-PRIVATE-KEY-DO-NOT-LOG\\n-----END PRIVATE KEY-----\\n',
+  private_key: VERTEX_PRIVATE_KEY,
   client_email: 'vertex-runner@openharness-vertex.iam.gserviceaccount.com',
 })
 
 const PLAINTEXT = 'sk-ant-e2e-must-never-be-stored-7c41'
 const MIDDLE = 'e2e-must-never-be-stored'
 const LAST_FOUR = '7c41'
+
+/** One page of a Model Garden list, in the shape Google's REST reference documents (#273). */
+function publisherModelsPage(resources: readonly string[]): unknown {
+  return {
+    publisherModels: resources.map((name) => ({
+      name,
+      versionId: '1',
+      openSourceCategory: 'PROPRIETARY',
+      launchStage: 'GA',
+      versionState: 'VERSION_STATE_STABLE',
+    })),
+  }
+}
+
+/** The publisher models the stub's Model Garden offers: runnable ones, and two it is not. */
+const STUB_GOOGLE_MODELS = [
+  'publishers/google/models/gemini-2.5-pro',
+  // Gemini's image family: this build has a Gemini client, and the chat filter still drops it.
+  'publishers/google/models/gemini-2.5-flash-image',
+  // No client in this build at all.
+  'publishers/google/models/imagen-3.0-generate-002',
+]
+const STUB_ANTHROPIC_MODELS = [
+  'publishers/anthropic/models/claude-sonnet-4-5@20250929',
+  'publishers/anthropic/models/claude-opus-4-1@20250805',
+]
+
+/**
+ * Answer every Google-side call a Vertex credential makes, the way Google documents it: the
+ * OAuth token exchange (which `google-auth-library` sends through the egress proxy like any
+ * other request), the project-scoped **endpoints** read the save-time check makes (#251), both
+ * `publishers/{publisher}/models` lists for the credential's location, and the project-scoped
+ * `modelGardenEula:check` — which says yes only for the ids in `enabled`.
+ *
+ * Every path is matched exactly and anything else on a Google host gets the stub's 404: the
+ * product is what decides which route it reads, so a stub that answered a path it does not
+ * recognise would let a wrong URL pass for a working one.
+ *
+ * `refuse` makes the two lists answer that status instead, for the degrade path.
+ */
+function answerVertexListing(
+  stub: ProviderStub,
+  input: { readonly enabled: readonly string[]; readonly refuse?: number },
+): void {
+  const page = (
+    resources: readonly string[],
+  ): { json: unknown } | { status: number; json: unknown } =>
+    input.refuse === undefined
+      ? { json: publisherModelsPage(resources) }
+      : {
+          status: input.refuse,
+          json: { error: { code: input.refuse, status: 'PERMISSION_DENIED' } },
+        }
+
+  stub.answer('oauth2.googleapis.com', (request) =>
+    request.path.startsWith('/token')
+      ? { json: { access_token: 'ya29.e2e-vertex-token', expires_in: 3600, token_type: 'Bearer' } }
+      : undefined,
+  )
+  stub.answer('europe-west4-aiplatform.googleapis.com', (request) => {
+    // The save-time check (#251): one page of the project's endpoints in its location.
+    if (
+      request.path === '/v1/projects/openharness-vertex/locations/europe-west4/endpoints?pageSize=1'
+    ) {
+      return { json: { endpoints: [] } }
+    }
+    // The query delimiter is required, so a path that only looks like one of these is a 404.
+    if (request.path.startsWith('/v1beta1/publishers/google/models?')) {
+      return page(STUB_GOOGLE_MODELS)
+    }
+    if (request.path.startsWith('/v1beta1/publishers/anthropic/models?')) {
+      return page(STUB_ANTHROPIC_MODELS)
+    }
+    return undefined
+  })
+  stub.answer('aiplatform.googleapis.com', (request) => {
+    if (request.path !== '/v1beta1/projects/openharness-vertex/modelGardenEula:check') {
+      return undefined
+    }
+    const resource = (JSON.parse(request.body) as { publisherModel?: string }).publisherModel ?? ''
+    const model = resource.replace(/^publishers\/anthropic\/models\//u, '')
+    return {
+      json: {
+        projectNumber: '42',
+        publisherModel: resource,
+        publisherModelEulaAcked: input.enabled.includes(model),
+      },
+    }
+  })
+}
+
+/**
+ * Put this test's servers away now rather than at the file's teardown, so a stubbed Vertex
+ * listing's server does not stay up for every other file on a small runner (`kill` is
+ * idempotent — the teardown's own call is a no-op after this).
+ */
+async function killServers(): Promise<void> {
+  await Promise.all(harness.servers.map(async (server) => server.kill()))
+}
 
 /** A signed-in person nobody else in this file shares. */
 async function person(server: ServerProcess, name: string): Promise<Person> {
@@ -451,100 +593,229 @@ describe('provider credentials (A5)', () => {
     }
   })
 
-  it('refuses a vertex document that is not a service-account key, and lists a seeded one (A3d)', async () => {
-    const server = await harness.server()
-    const me = await person(server, 'vertex-catalog')
+  it('refuses a vertex document that is not a service-account key, and lists a seeded one live (A3d, #273)', async () => {
+    // Every Google-side call is the stub's: the token exchange (which google-auth-library
+    // makes through the egress proxy like anything else), the two publisher lists, and the
+    // Model Garden enablement check. Nothing here reaches Google.
+    const stub = await startProviderStub()
+    answerVertexListing(stub, { enabled: ['claude-sonnet-4-5@20250929'] })
+    try {
+      const server = await harness.server({ env: stub.env })
+      const me = await person(server, 'vertex-catalog')
 
-    // The document is checked **before** it is sealed, so a file that is not a service-account
-    // key — the wrong download from the console, a gcloud ADC file — is the schema's 400 and
-    // never reaches the vault or a provider call.
-    for (const service_account of [
-      '{}',
-      'not json',
-      JSON.stringify({ type: 'authorized_user', refresh_token: 'x' }),
-    ]) {
-      const refused = await errorOf(() =>
-        me.client.providerCredentials.put('vertex', {
+      // The document is checked **before** it is sealed, so a file that is not a service-account
+      // key — the wrong download from the console, a gcloud ADC file — is the schema's 400 and
+      // never reaches the vault or a provider call.
+      for (const service_account of [
+        '{}',
+        'not json',
+        JSON.stringify({ type: 'authorized_user', refresh_token: 'x' }),
+      ]) {
+        const refused = await errorOf(() =>
+          me.client.providerCredentials.put('vertex', {
+            type: 'vertex',
+            service_account,
+            project: 'openharness-vertex',
+            location: 'europe-west4',
+          }),
+        )
+        expect([service_account, refused.status]).toEqual([service_account, 400])
+        expect([service_account, refused.type]).toEqual([service_account, 'invalid_request_error'])
+      }
+      // A location outside Google's list, and a project that is not a project id: the same 400.
+      // A location outside Google's list, and a project that is not a project id. The typed
+      // client refuses both before a request exists, so these bodies go over the wire by hand —
+      // the same 400 either way, and nothing stored.
+      for (const body of [
+        {
           type: 'vertex',
-          service_account,
+          service_account: VERTEX_KEY,
+          project: 'openharness-vertex',
+          location: 'mars-north1',
+        },
+        {
+          type: 'vertex',
+          service_account: VERTEX_KEY,
+          project: 'Not A Project',
+          location: 'europe-west4',
+        },
+      ]) {
+        const refused = await fetch(`${server.baseUrl}/v1/provider-credentials/vertex`, {
+          method: 'PUT',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${me.signedIn.token}`,
+          },
+          body: JSON.stringify(body),
+        })
+        expect([body.location, body.project, refused.status]).toEqual([
+          body.location,
+          body.project,
+          400,
+        ])
+        expect(ApiErrorBodySchema.parse(await refused.json()).error.type).toBe(
+          'invalid_request_error',
+        )
+      }
+      // A named type may not take a fixed provider id — the Vertex form of the azure rule.
+      await expect(
+        me.client.providerCredentials.put('openai', {
+          type: 'vertex',
+          service_account: VERTEX_KEY,
           project: 'openharness-vertex',
           location: 'europe-west4',
         }),
-      )
-      expect([service_account, refused.status]).toEqual([service_account, 400])
-      expect([service_account, refused.type]).toEqual([service_account, 'invalid_request_error'])
-    }
-    // A location outside Google's list, and a project that is not a project id: the same 400.
-    // A location outside Google's list, and a project that is not a project id. The typed
-    // client refuses both before a request exists, so these bodies go over the wire by hand —
-    // the same 400 either way, and nothing stored.
-    for (const body of [
-      {
-        type: 'vertex',
-        service_account: VERTEX_KEY,
+      ).rejects.toMatchObject({ status: 400, type: 'invalid_request_error' })
+      await expect(me.client.providerCredentials.list()).resolves.toEqual({ data: [] })
+
+      // A stored credential lists what the project can actually call: both publishers read live
+      // from Model Garden, joined with the vendored models.dev snapshot for prices and windows —
+      // and nothing of the private key. The Anthropic half is narrowed to the model this project
+      // enabled; the disabled one is not offered (it would have failed on the first message).
+      await seedVertexCredential(await harness.database(), {
+        userId: me.signedIn.user.id,
+        name: 'vertex',
+        serviceAccount: VERTEX_KEY,
         project: 'openharness-vertex',
-        location: 'mars-north1',
-      },
-      {
-        type: 'vertex',
-        service_account: VERTEX_KEY,
-        project: 'Not A Project',
         location: 'europe-west4',
-      },
-    ]) {
-      const refused = await fetch(`${server.baseUrl}/v1/provider-credentials/vertex`, {
-        method: 'PUT',
-        headers: {
-          'content-type': 'application/json',
-          authorization: `Bearer ${me.signedIn.token}`,
-        },
-        body: JSON.stringify(body),
       })
-      expect([body.location, body.project, refused.status]).toEqual([
-        body.location,
-        body.project,
-        400,
+
+      const catalog = await me.client.models.list()
+      const ids = catalog.data.map((entry) => entry.id)
+      expect(ids).toContain('vertex/gemini-2.5-pro')
+      expect(ids).toContain('vertex/claude-sonnet-4-5@20250929')
+      expect(ids).not.toContain('vertex/claude-opus-4-1@20250805')
+      // Nothing the build has no client for: the MaaS models Google resells on Vertex, and the
+      // non-chat families.
+      expect(ids.some((id) => id.includes('maas'))).toBe(false)
+      expect(ids.some((id) => id.includes('embedding'))).toBe(false)
+      const gemini = catalog.data.find((entry) => entry.id === 'vertex/gemini-2.5-pro')
+      expect(gemini).toMatchObject({ provider: 'vertex', context_window: 1048576 })
+      expect(typeof gemini?.cost?.input).toBe('number')
+      expect(catalog.providers).toEqual([
+        expect.objectContaining({ provider: 'vertex', status: 'ok', message: null }),
       ])
-      expect(ApiErrorBodySchema.parse(await refused.json()).error.type).toBe(
-        'invalid_request_error',
+      expect(JSON.stringify(catalog)).not.toContain(VERTEX_KEY_MARKER)
+
+      // Which calls the listing cost: the token exchange, both publisher lists for the
+      // credential's own location, and the enablement check for each model this build can run —
+      // and never the private key, in any of them.
+      const google = stub.requests.filter(
+        (request) => request.host === 'europe-west4-aiplatform.googleapis.com',
       )
+      expect(google.map((request) => request.path.split('?')[0])).toEqual([
+        '/v1beta1/publishers/google/models',
+        '/v1beta1/publishers/anthropic/models',
+      ])
+      expect(google.every((request) => request.method === 'GET')).toBe(true)
+      expect(stub.requests.some((request) => request.host === 'oauth2.googleapis.com')).toBe(true)
+      const checks = stub.requests.filter(
+        (request) => request.method === 'POST' && request.host === 'aiplatform.googleapis.com',
+      )
+      expect(checks.map((request) => request.host)).toEqual([
+        'aiplatform.googleapis.com',
+        'aiplatform.googleapis.com',
+      ])
+      expect(
+        checks.map(
+          (request) => (JSON.parse(request.body) as { publisherModel: string }).publisherModel,
+        ),
+      ).toEqual([
+        'publishers/anthropic/models/claude-sonnet-4-5@20250929',
+        'publishers/anthropic/models/claude-opus-4-1@20250805',
+      ])
+      expect(stub.requests.every((request) => !request.path.includes(VERTEX_KEY_MARKER))).toBe(true)
+    } finally {
+      await killServers()
+      await stub.stop()
     }
-    // A named type may not take a fixed provider id — the Vertex form of the azure rule.
-    await expect(
-      me.client.providerCredentials.put('openai', {
+  })
+
+  it('saves a Vertex credential through the route, reading the project’s endpoints (#251)', async () => {
+    // The Vertex save-time check is a real provider call, and the stub is the network — so this
+    // is the one place it runs across the process boundary, the way a deployment runs it. The
+    // stub answers exactly the project's **endpoints** read and 404s everything else on the
+    // host, so the route can only succeed if the check reads a route that exists: the old
+    // `…/publishers/google/models` path is a 404 here, exactly as it was at Google.
+    const stub = await startProviderStub()
+    answerVertexListing(stub, { enabled: [] })
+    try {
+      const server = await harness.server({ env: stub.env })
+      const me = await person(server, 'vertex-save')
+
+      const stored = await me.client.providerCredentials.put('vertex', {
         type: 'vertex',
         service_account: VERTEX_KEY,
         project: 'openharness-vertex',
         location: 'europe-west4',
-      }),
-    ).rejects.toMatchObject({ status: 400, type: 'invalid_request_error' })
-    await expect(me.client.providerCredentials.list()).resolves.toEqual({ data: [] })
+      })
+      expect(stored).toMatchObject({
+        name: 'vertex',
+        type: 'vertex',
+        details: {
+          email: 'vertex-runner@openharness-vertex.iam.gserviceaccount.com',
+          project: 'openharness-vertex',
+          location: 'europe-west4',
+        },
+      })
+      // The key **id**'s tail, and no part of the private key in the response.
+      expect(stored.last4).toBe('5678')
+      expect(JSON.stringify(stored)).not.toContain(VERTEX_KEY_MARKER)
 
-    // A stored credential lists the publisher models the build can run — Google's and
-    // Anthropic's, from the vendored models.dev snapshot — and nothing of the private key.
-    await seedVertexCredential(await harness.database(), {
-      userId: me.signedIn.user.id,
-      name: 'vertex',
-      serviceAccount: VERTEX_KEY,
-      project: 'openharness-vertex',
-      location: 'europe-west4',
-    })
+      // The check the save cost: one page of the project's endpoints, in the credential's own
+      // location, exactly where Google serves it.
+      expect(stub.requests.find((request) => request.path.includes('/endpoints'))).toMatchObject({
+        host: 'europe-west4-aiplatform.googleapis.com',
+        method: 'GET',
+        path: '/v1/projects/openharness-vertex/locations/europe-west4/endpoints?pageSize=1',
+      })
+      // It carried the token the credential's key minted (the stub answered the exchange), and
+      // no request carried any part of the private key.
+      expect(stub.requests.some((request) => request.host === 'oauth2.googleapis.com')).toBe(true)
+      expect(stub.requests.every((request) => !request.path.includes(VERTEX_KEY_MARKER))).toBe(true)
+    } finally {
+      await killServers()
+      await stub.stop()
+    }
+  })
 
-    const catalog = await me.client.models.list()
-    const ids = catalog.data.map((entry) => entry.id)
-    expect(ids).toContain('vertex/gemini-2.5-pro')
-    expect(ids).toContain('vertex/claude-sonnet-4-5@20250929')
-    // Nothing the build has no client for: the MaaS models Google resells on Vertex, and the
-    // non-chat families.
-    expect(ids.some((id) => id.includes('maas'))).toBe(false)
-    expect(ids.some((id) => id.includes('embedding'))).toBe(false)
-    const gemini = catalog.data.find((entry) => entry.id === 'vertex/gemini-2.5-pro')
-    expect(gemini).toMatchObject({ provider: 'vertex', context_window: 1048576 })
-    expect(typeof gemini?.cost?.input).toBe('number')
-    expect(catalog.providers).toEqual([
-      expect.objectContaining({ provider: 'vertex', status: 'ok', message: null }),
-    ])
-    expect(JSON.stringify(catalog)).not.toContain('VERTEX-PRIVATE-KEY')
+  it('lists the snapshot’s Vertex models, with the reason, when the Model Garden listing is refused (#273)', async () => {
+    const stub = await startProviderStub()
+    answerVertexListing(stub, { enabled: [], refuse: 403 })
+    try {
+      const server = await harness.server({ env: stub.env })
+      const me = await person(server, 'vertex-degraded')
+      await seedVertexCredential(await harness.database(), {
+        userId: me.signedIn.user.id,
+        name: 'vertex',
+        serviceAccount: VERTEX_KEY,
+        project: 'openharness-vertex',
+        location: 'europe-west4',
+      })
+
+      const catalog = await me.client.models.list()
+      const ids = catalog.data.map((entry) => entry.id)
+      // The list this source answered before #273 — the snapshot's Vertex models, through the
+      // same two filters — so a degraded project keeps a usable picker.
+      expect(ids).toContain('vertex/gemini-2.5-pro')
+      expect(ids).toContain('vertex/claude-sonnet-4-5@20250929')
+      expect(ids.some((id) => id.includes('maas'))).toBe(false)
+      expect(catalog.providers).toEqual([
+        expect.objectContaining({
+          provider: 'vertex',
+          status: 'fallback',
+          fetched_at: null,
+        }),
+      ])
+      // Google's own words, and no part of the credential.
+      expect(catalog.providers[0]?.message).toContain(
+        'the google publisher model list answered 403',
+      )
+      expect(JSON.stringify(catalog)).not.toContain(VERTEX_KEY_MARKER)
+    } finally {
+      await killServers()
+      await stub.stop()
+    }
   })
 
   it('answers 404 in the envelope for a route that does not exist', async () => {

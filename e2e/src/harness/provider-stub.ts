@@ -56,10 +56,16 @@ const FIXTURES = new URL('../../fixtures/provider-stub/', import.meta.url)
 export interface StubRequest {
   /** The provider host, from the request's `Host` header (no port). */
   readonly host: string
-  /** `GET`, for every call this server makes today. */
+  /** `GET` for every list call; `POST` for the Model Garden EULA check (#273). */
   readonly method: string
   /** The path **and query**, e.g. `/v1/models?limit=1000` — what an answer branches on. */
   readonly path: string
+  /**
+   * The request body as text, when the request had one — the Model Garden EULA check (#273)
+   * names the publisher model there, so an answerer that has to tell one model from another
+   * needs it. An empty string for a request with no body.
+   */
+  readonly body: string
 }
 
 /** What the stub answers one request with. `undefined` means "no answer — use the default". */
@@ -109,20 +115,27 @@ export async function startProviderStub(): Promise<ProviderStub> {
   })
 
   // The HTTP server under the TLS layer: the decrypted tunnel sockets are handed to it as
-  // connections, so its handlers see ordinary HTTP requests.
+  // connections, so its handlers see ordinary HTTP requests. The body is read to its end
+  // before the answerer runs, so one that branches on it — the EULA check's publisher model —
+  // sees the whole thing.
   const inner = createServer((request, response) => {
-    const stubRequest: StubRequest = {
-      host: hostOf(request.headers.host),
-      method: request.method ?? 'GET',
-      path: request.url ?? '/',
-    }
-    requests.push(stubRequest)
-    const answer = answerers.get(stubRequest.host)?.(stubRequest) ?? {
-      status: UNSTUBBED_STATUS,
-      json: { error: `the provider stub has no answer for ${stubRequest.host}` },
-    }
-    response.writeHead(answer.status ?? 200, { 'content-type': 'application/json' })
-    response.end(JSON.stringify(answer.json ?? {}))
+    const chunks: Buffer[] = []
+    request.on('data', (chunk: Buffer) => chunks.push(chunk))
+    request.on('end', () => {
+      const stubRequest: StubRequest = {
+        host: hostOf(request.headers.host),
+        method: request.method ?? 'GET',
+        path: request.url ?? '/',
+        body: Buffer.concat(chunks).toString('utf8'),
+      }
+      requests.push(stubRequest)
+      const answer = answerers.get(stubRequest.host)?.(stubRequest) ?? {
+        status: UNSTUBBED_STATUS,
+        json: { error: `the provider stub has no answer for ${stubRequest.host}` },
+      }
+      response.writeHead(answer.status ?? 200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify(answer.json ?? {}))
+    })
   })
 
   // The proxy itself: CONNECT tunnels the provider calls, nothing else.

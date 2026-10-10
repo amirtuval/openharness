@@ -417,6 +417,10 @@ export function inertCatalog(
     vault,
     registry: emptyRegistry,
     fetch: () => Promise.reject(new Error('this catalogue has no provider fetch')),
+    // The Vertex listing mints its own token through `google-auth-library`, which is not the
+    // `fetch` above: without this, a vertex credential in a test would sign a JWT and call
+    // Google's token endpoint for real.
+    vertexToken: () => Promise.reject(new Error('this catalogue has no vertex token')),
   })
 }
 

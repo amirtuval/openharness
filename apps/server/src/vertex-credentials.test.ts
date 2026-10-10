@@ -16,7 +16,16 @@ import type { ModelRegistry } from './catalog/registry'
 import type { ProviderFetch } from './catalog/provider-fetch'
 import { createProviderCredentialValidator } from './provider-validation'
 import { TEST_SECRETS_KEY, createTestApp, type TestContext } from './test-support'
-import { vertexPublisherModelsUrl } from './vertex'
+import {
+  VERTEX_PUBLISHERS,
+  parsePublisherModelEulaAcceptance,
+  parsePublisherModelPage,
+  vertexCredentialSecret,
+  vertexModelGardenEulaCheckUrl,
+  vertexModelGardenListUrl,
+  vertexPublisherModelResource,
+  vertexEndpointsUrl,
+} from './vertex'
 
 /**
  * Google Vertex credentials, end to end (epic #245, A3d).
@@ -103,14 +112,127 @@ const vertexRegistry: ModelRegistry = {
       : [],
 }
 
-/** A catalogue over the given credentials/registry, dialing nothing. */
+/**
+ * One page of a Model Garden list, in the shape Google documents.
+ *
+ * The fixture is built from the documented response, not from a capture: `ListPublisherModels`
+ * answers `{ publisherModels: [PublisherModel], nextPageToken }`, and a `PublisherModel`
+ * carries `name` (the `publishers/{publisher}/models/{model}` resource), `versionId`,
+ * `openSourceCategory`, `launchStage` and `versionState` — read off the `PublisherModel`
+ * message in `@google-cloud/aiplatform`'s protos
+ * (`google/cloud/aiplatform/v1beta1/publisher_model.proto`, package 7.5.0) and the REST
+ * reference (https://cloud.google.com/vertex-ai/docs/reference/rest/v1beta1/publishers.models/list).
+ * Only `name` and `nextPageToken` are read by the catalogue; the rest are here so the fixture
+ * is what Google really sends.
+ */
+function publisherModelPage(resources: readonly string[], next?: string): unknown {
+  return {
+    publisherModels: resources.map((name) => ({
+      name,
+      versionId: '1',
+      openSourceCategory: 'PROPRIETARY',
+      launchStage: 'GA',
+      versionState: 'VERSION_STATE_STABLE',
+    })),
+    ...(next === undefined ? {} : { nextPageToken: next }),
+  }
+}
+
+/** The default Model Garden answer: the two publishers and the one enabled Claude model. */
+const DEFAULT_LISTING = {
+  google: [publisherModelPage(['publishers/google/models/gemini-2.5-pro'])],
+  anthropic: [publisherModelPage(['publishers/anthropic/models/claude-sonnet-4-5@20250929'])],
+  enabled: ['claude-sonnet-4-5@20250929'],
+} as const
+
+/**
+ * A `ProviderFetch` that answers the three Model Garden calls the catalogue makes — the two
+ * publisher lists and the enablement check — and records them in order, so a test can assert
+ * exactly which reads a listing cost. Every other URL is refused, so nothing reaches a socket.
+ */
+function vertexListingFetch(input: {
+  readonly google: readonly unknown[]
+  readonly anthropic: readonly unknown[]
+  readonly enabled: readonly string[]
+  readonly requests: string[]
+  readonly eulaStatus?: number
+}): ProviderFetch {
+  const eulaUrl = vertexModelGardenEulaCheckUrl({ project: PROJECT })
+  return (url, init) => {
+    const method = init.method ?? 'GET'
+    input.requests.push(`${method} ${url}`)
+    if (url === eulaUrl) {
+      const request = JSON.parse(init.body ?? '{}') as { publisherModel?: string }
+      const model = (request.publisherModel ?? '').replace(/^publishers\/anthropic\/models\//u, '')
+      if (input.eulaStatus !== undefined && input.eulaStatus !== 200) {
+        return Promise.resolve(response(input.eulaStatus, { error: { code: input.eulaStatus } }))
+      }
+      return Promise.resolve(
+        response(200, {
+          projectNumber: '42',
+          publisherModel: request.publisherModel,
+          publisherModelEulaAcked: input.enabled.includes(model),
+        }),
+      )
+    }
+    const parsed = new URL(url)
+    const publisher = parsed.pathname.includes('/publishers/anthropic/') ? 'anthropic' : 'google'
+    const pages = input[publisher]
+    const pageToken = parsed.searchParams.get('pageToken')
+    // The cursor is opaque: the next page is the one the previous page's own token names.
+    const afterToken = new Map<string, unknown>()
+    pages.forEach((page, index) => {
+      const token = (pages[index - 1] as { nextPageToken?: string } | undefined)?.nextPageToken
+      if (index > 0 && token !== undefined) {
+        afterToken.set(token, page)
+      }
+    })
+    const page = pageToken === null ? pages[0] : afterToken.get(pageToken)
+    return Promise.resolve(response(200, page ?? { publisherModels: [] }))
+  }
+}
+
+/** The `ProviderResponse` a stubbed call answers with. */
+function response(
+  status: number,
+  body: unknown,
+): {
+  ok: boolean
+  status: number
+  json: () => Promise<unknown>
+  text: () => Promise<string>
+} {
+  const text = JSON.stringify(body)
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: () => Promise.resolve(body),
+    text: () => Promise.resolve(text),
+  }
+}
+
+/** A catalogue over the given credentials/registry, dialing nothing by default. */
 function catalogue(
   credentials: InMemoryCredentialStore,
   vault: ReturnType<typeof createVault>,
   registry: ModelRegistry = vertexRegistry,
+  input?: {
+    readonly fetch?: ProviderFetch
+    readonly vertexToken?: (serviceAccount: string) => Promise<string>
+  },
 ): ModelCatalog {
-  const fetch: ProviderFetch = () => Promise.reject(new Error('the vertex path dials no provider'))
-  return new ModelCatalog({ credentials, vault, registry, fetch })
+  const fetch: ProviderFetch =
+    input?.fetch ?? (() => Promise.reject(new Error('the vertex path dials no provider')))
+  return new ModelCatalog({
+    credentials,
+    vault,
+    registry,
+    fetch,
+    // Never Google's own token provider: minting one signs a JWT and calls Google's token
+    // endpoint, which no test may do.
+    vertexToken:
+      input?.vertexToken ?? (() => Promise.reject(new Error('this catalogue has no vertex token'))),
+  })
 }
 
 /** A credential's published `details`, or `undefined` for a type that carries none. */
@@ -267,7 +389,7 @@ describe('the vertex save-time check', () => {
     return { fetch, requests }
   }
 
-  it('lists the project’s publisher models in the credential’s location, with its token', async () => {
+  it('lists the project’s endpoints in the credential’s location, with its token', async () => {
     const { fetch, requests } = recordingFetch()
     const tokens: string[] = []
     const validator = createProviderCredentialValidator({
@@ -284,7 +406,7 @@ describe('the vertex save-time check', () => {
     // types a host, which is why this call needs no SSRF guard.
     expect(requests).toEqual([
       {
-        url: `https://europe-west4-aiplatform.googleapis.com/v1/projects/${PROJECT}/locations/${LOCATION}/publishers/google/models?pageSize=1`,
+        url: `https://europe-west4-aiplatform.googleapis.com/v1/projects/${PROJECT}/locations/${LOCATION}/endpoints?pageSize=1`,
         headers: { authorization: 'Bearer access-token-4242' },
       },
     ])
@@ -300,7 +422,7 @@ describe('the vertex save-time check', () => {
     })
     await validator('vertex', { ...VERTEX_BODY, location: 'global' })
     expect(requests[0]?.url).toBe(
-      `https://aiplatform.googleapis.com/v1/projects/${PROJECT}/locations/global/publishers/google/models?pageSize=1`,
+      `https://aiplatform.googleapis.com/v1/projects/${PROJECT}/locations/global/endpoints?pageSize=1`,
     )
   })
 
@@ -336,39 +458,105 @@ describe('the vertex save-time check', () => {
     expect(requests).toEqual([])
   })
 
-  it('refuses a location it cannot build a host from, rather than inventing one', () => {
-    // The schema refuses an unknown location before this, so the URL builder only ever sees
-    // Google's own region names — but the rule it follows is worth pinning: every host is
-    // `<location>-aiplatform.googleapis.com`, and `global` is the apex.
-    expect(vertexPublisherModelsUrl({ project: 'p', location: 'us-central1' })).toBe(
-      'https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/google/models?pageSize=1',
+  it('pins the save-time URL to the project’s endpoints, so a wrong path cannot pass (#251)', () => {
+    // The regression this pins: the check used to read `…/publishers/google/models`, a path
+    // that does not exist, so Google's own 404 text/html refused every save. The shape has to
+    // be exactly `v1/projects/{project}/locations/{location}/endpoints` on the location's
+    // host — a wrong host, a missing project or location, or another resource is a 404 (or a
+    // list of the wrong thing), and the check would silently stop proving what it claims to.
+    expect(vertexEndpointsUrl({ project: 'p', location: 'us-central1' })).toBe(
+      'https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/endpoints?pageSize=1',
+    )
+    // The host is the rule the builder follows: `<location>-aiplatform.googleapis.com`, with
+    // `global` on the apex.
+    expect(vertexEndpointsUrl({ project: 'p', location: 'global' })).toBe(
+      'https://aiplatform.googleapis.com/v1/projects/p/locations/global/endpoints?pageSize=1',
+    )
+  })
+
+  it('pins the resource the save-time URL names, and the query that keeps it to one page', () => {
+    const url = vertexEndpointsUrl({ project: 'my-project', location: 'us-central1' })
+    const parsed = new URL(url)
+    expect(parsed.pathname).toBe('/v1/projects/my-project/locations/us-central1/endpoints')
+    // `endpoints`, never the publisher-models path the check used before #251.
+    expect(parsed.pathname).not.toContain('publishers')
+    expect(parsed.searchParams.get('pageSize')).toBe('1')
+    // A project or location that needs escaping is encoded rather than concatenated raw.
+    expect(vertexEndpointsUrl({ project: 'a/b', location: 'us-central1' })).toContain(
+      '/v1/projects/a%2Fb/locations/us-central1/endpoints',
     )
   })
 })
 
 describe('the catalogue over vertex credentials', () => {
-  async function withVertex(): Promise<{
-    test: TestContext
-    credentials: InMemoryCredentialStore
-  }> {
+  async function withVertex(input?: {
+    readonly fetch?: ProviderFetch
+    readonly vertexToken?: (serviceAccount: string) => Promise<string>
+  }): Promise<{ test: TestContext; credentials: InMemoryCredentialStore }> {
     const credentials = new InMemoryCredentialStore()
     const vault = createVault(envKeyProvider(TEST_SECRETS_KEY))
     const test = createTestApp({
       credentials,
       vault,
-      catalog: catalogue(credentials, vault),
+      catalog: catalogue(credentials, vault, vertexRegistry, {
+        // Unless a test says otherwise, the credential lists the two default models live.
+        fetch:
+          input?.fetch ??
+          vertexListingFetch({
+            google: DEFAULT_LISTING.google,
+            anthropic: DEFAULT_LISTING.anthropic,
+            enabled: DEFAULT_LISTING.enabled,
+            requests: [],
+          }),
+        vertexToken: input?.vertexToken ?? (() => Promise.resolve('ya29.stub-token')),
+      }),
       validateProviderCredential: acceptAny,
     })
     await put(test, 'vertex', VERTEX_BODY)
     return { test, credentials }
   }
 
-  it('lists the Vertex models a request can run, with their prices', async () => {
-    const { test } = await withVertex()
+  /** The same, with the listing stubbed and every request it made recorded. */
+  async function withVertexAndSpy(input?: {
+    readonly google?: readonly unknown[]
+    readonly anthropic?: readonly unknown[]
+    readonly enabled?: readonly string[]
+    readonly onToken?: (serviceAccount: string) => void
+  }): Promise<{ test: TestContext; credentials: InMemoryCredentialStore; requests: string[] }> {
+    const requests: string[] = []
+    const fetch = vertexListingFetch({
+      google: input?.google ?? DEFAULT_LISTING.google,
+      anthropic: input?.anthropic ?? DEFAULT_LISTING.anthropic,
+      enabled: input?.enabled ?? DEFAULT_LISTING.enabled,
+      requests,
+    })
+    const credentials = new InMemoryCredentialStore()
+    const vault = createVault(envKeyProvider(TEST_SECRETS_KEY))
+    const test = createTestApp({
+      credentials,
+      vault,
+      catalog: catalogue(credentials, vault, vertexRegistry, {
+        fetch,
+        vertexToken: (serviceAccount) => {
+          input?.onToken?.(serviceAccount)
+          return Promise.resolve('ya29.stub-token')
+        },
+      }),
+      validateProviderCredential: acceptAny,
+    })
+    await put(test, 'vertex', VERTEX_BODY)
+    return { test, credentials, requests }
+  }
+
+  it('lists what the project can call, from both publishers, joined with the registry', async () => {
+    const { test, requests } = await withVertexAndSpy()
     const response = await test.request(`${API_VERSION_PREFIX}/models`)
     expect(response.status).toBe(200)
     const body = (await response.json()) as ListModelsResponse
 
+    // Google's list and Anthropic's, each read once for the credential's location, and the
+    // Anthropic half narrowed to what the project enabled. The MaaS model Google resells and
+    // Gemini's non-chat family are both dropped.
     expect(body.data.map((entry) => entry.id)).toEqual([
       'vertex/claude-sonnet-4-5@20250929',
       'vertex/gemini-2.5-pro',
@@ -379,15 +567,159 @@ describe('the catalogue over vertex credentials', () => {
       context_window: 1_048_576,
       max_output_tokens: 65_536,
       cost: { input: 1.25, output: 10, cache_read: 0.31 },
-      source: 'registry',
+      // The listing is Google's, so the entry is the provider's rather than the registry's.
+      source: 'provider',
     })
-    // The status is `ok` — the credential was read, and its models come from the publisher
-    // catalogue models.dev files — rather than a fallback.
     expect(body.providers[0]).toMatchObject({ provider: 'vertex', status: 'ok', message: null })
     expect(typeof body.providers[0]?.fetched_at).toBe('string')
+    expect(requests).toEqual([
+      `GET ${vertexModelGardenListUrl({ location: LOCATION, publisher: 'google' })}`,
+      `GET ${vertexModelGardenListUrl({ location: LOCATION, publisher: 'anthropic' })}`,
+      `POST ${vertexModelGardenEulaCheckUrl({ project: PROJECT })}`,
+    ])
     // The key, and any part of it, stays out of the catalogue too.
     expect(JSON.stringify(body)).not.toContain('VERTEX-PRIVATE-KEY')
     expect(JSON.stringify(body)).not.toContain(PRIVATE_KEY_ID)
+  })
+
+  it('follows the publisher list’s pagination inside the one listing', async () => {
+    const { test, requests } = await withVertexAndSpy({
+      google: [
+        publisherModelPage(['publishers/google/models/gemini-2.5-pro'], 'opaque-token'),
+        publisherModelPage(['publishers/google/models/gemini-2.5-flash']),
+      ],
+      // Google's list alone, so the pagination is what the ids show.
+      anthropic: [],
+      enabled: [],
+    })
+    const body = (await (
+      await test.request(`${API_VERSION_PREFIX}/models`)
+    ).json()) as ListModelsResponse
+    expect(body.data.map((entry) => entry.id)).toEqual([
+      'vertex/gemini-2.5-pro',
+      'vertex/gemini-2.5-flash',
+    ])
+    const listed = requests.filter((request) => request.includes('/publishers/google/models'))
+    expect(listed).toEqual([
+      `GET ${vertexModelGardenListUrl({ location: LOCATION, publisher: 'google' })}`,
+      `GET ${vertexModelGardenListUrl({
+        location: LOCATION,
+        publisher: 'google',
+        pageToken: 'opaque-token',
+      })}`,
+    ])
+  })
+
+  it('lists only the Anthropic models this project has enabled in Model Garden', async () => {
+    const { test } = await withVertexAndSpy({
+      anthropic: [
+        publisherModelPage([
+          'publishers/anthropic/models/claude-sonnet-4-5@20250929',
+          'publishers/anthropic/models/claude-opus-4-1@20250805',
+        ]),
+      ],
+      enabled: ['claude-sonnet-4-5@20250929'],
+    })
+    const body = (await (
+      await test.request(`${API_VERSION_PREFIX}/models`)
+    ).json()) as ListModelsResponse
+    // The enabled Claude model is listed; the one whose terms this project has not accepted is
+    // not, which is the failure #273 is about — it would have failed on the first message.
+    expect(body.data.map((entry) => entry.id)).toEqual([
+      'vertex/claude-sonnet-4-5@20250929',
+      'vertex/gemini-2.5-pro',
+    ])
+    expect(body.data.some((entry) => entry.id.includes('claude-opus'))).toBe(false)
+  })
+
+  it('mints the token from the credential’s own document, and never asks for a model it cannot run', async () => {
+    const documents: string[] = []
+    const { test, requests } = await withVertexAndSpy({
+      anthropic: [
+        publisherModelPage([
+          // A model this build has no client for: it must not cost an enablement read.
+          'publishers/anthropic/models/titan-embed-text-v1',
+          'publishers/anthropic/models/claude-sonnet-4-5@20250929',
+        ]),
+      ],
+      enabled: ['claude-sonnet-4-5@20250929'],
+      onToken: (document) => documents.push(document),
+    })
+    await test.request(`${API_VERSION_PREFIX}/models`)
+    // The key document, exactly as it was stored: nothing here consults Application Default
+    // Credentials — the token provider is handed the credential's own text (the decoy suite at
+    // the bottom of this file pins that `createVertexTokenProvider` reads nothing else).
+    expect(documents).toEqual([VERTEX_BODY.service_account])
+    expect(requests.filter((request) => request.startsWith('POST'))).toHaveLength(1)
+  })
+
+  it('falls back to the snapshot, saying why, when the listing fails', async () => {
+    const requests: string[] = []
+    const { test } = await withVertex({
+      vertexToken: () => Promise.resolve('ya29.stub'),
+      fetch: (url) => {
+        requests.push(url)
+        return Promise.resolve({
+          ok: false,
+          status: 403,
+          json: () => Promise.resolve({}),
+          text: () =>
+            Promise.resolve(
+              '{"error":{"code":403,"message":"Vertex AI API has not been used in project ' +
+                PROJECT +
+                ' before or it is disabled."}}',
+            ),
+        })
+      },
+    })
+    const body = (await (
+      await test.request(`${API_VERSION_PREFIX}/models`)
+    ).json()) as ListModelsResponse
+
+    // The snapshot's own Vertex models — the list this source answered before #273 — with the
+    // same two filters, and a status that says it was a stand-in.
+    expect(body.data.map((entry) => entry.id)).toEqual([
+      'vertex/claude-sonnet-4-5@20250929',
+      'vertex/gemini-2.5-pro',
+    ])
+    expect(body.data[0]).toMatchObject({ source: 'registry', name: 'Claude Sonnet 4.5' })
+    expect(body.providers[0]).toMatchObject({
+      provider: 'vertex',
+      status: 'fallback',
+      fetched_at: null,
+    })
+    expect(body.providers[0]?.message).toContain('the google publisher model list answered 403')
+    expect(body.providers[0]?.message).toContain('has not been used in project')
+    // Nothing of the credential travels with the reason.
+    expect(JSON.stringify(body)).not.toContain('VERTEX-PRIVATE-KEY')
+    expect(JSON.stringify(body)).not.toContain(PRIVATE_KEY_ID)
+    expect(requests).toEqual([
+      vertexModelGardenListUrl({ location: LOCATION, publisher: 'google' }),
+    ])
+  })
+
+  it('falls back when the token cannot be minted at all, without dialing a model list', async () => {
+    const requests: string[] = []
+    const { test } = await withVertex({
+      vertexToken: () =>
+        Promise.reject(new Error('invalid_grant: Invalid grant: account not found')),
+      fetch: (url) => {
+        requests.push(url)
+        return Promise.reject(new Error('must not be dialed'))
+      },
+    })
+    const body = (await (
+      await test.request(`${API_VERSION_PREFIX}/models`)
+    ).json()) as ListModelsResponse
+    expect(body.providers[0]).toMatchObject({ provider: 'vertex', status: 'fallback' })
+    expect(body.providers[0]?.message).toBe(
+      'could not reach vertex: invalid_grant: Invalid grant: account not found',
+    )
+    expect(requests).toEqual([])
+    expect(body.data.map((entry) => entry.id)).toEqual([
+      'vertex/claude-sonnet-4-5@20250929',
+      'vertex/gemini-2.5-pro',
+    ])
   })
 
   it('lists a second credential’s models under its own name', async () => {
@@ -431,6 +763,112 @@ describe('the catalogue over vertex credentials', () => {
     expect(body.data).toEqual([])
     expect(body.providers[0]).toMatchObject({ provider: 'vertex', status: 'fallback' })
     expect(body.providers[0]?.message).toContain('could not be opened')
+  })
+})
+
+describe('the Model Garden URLs (#273)', () => {
+  it('builds a publisher-list URL from the location, the publisher and the page token', () => {
+    expect(VERTEX_PUBLISHERS).toEqual(['google', 'anthropic'])
+    expect(vertexModelGardenListUrl({ location: 'us-central1', publisher: 'google' })).toBe(
+      'https://us-central1-aiplatform.googleapis.com/v1beta1/publishers/google/models?pageSize=1000',
+    )
+    expect(vertexModelGardenListUrl({ location: 'europe-west4', publisher: 'anthropic' })).toBe(
+      'https://europe-west4-aiplatform.googleapis.com/v1beta1/publishers/anthropic/models?pageSize=1000',
+    )
+    // `global` is the apex host, exactly as the save-time check's URL is.
+    expect(vertexModelGardenListUrl({ location: 'global', publisher: 'google' })).toBe(
+      'https://aiplatform.googleapis.com/v1beta1/publishers/google/models?pageSize=1000',
+    )
+    expect(
+      vertexModelGardenListUrl({
+        location: 'us-central1',
+        publisher: 'anthropic',
+        pageToken: 'a token + more',
+      }),
+    ).toBe(
+      'https://us-central1-aiplatform.googleapis.com/v1beta1/publishers/anthropic/models' +
+        '?pageSize=1000&pageToken=a%20token%20%2B%20more',
+    )
+  })
+
+  it('builds the project-scoped EULA check URL on the global host', () => {
+    // `v1beta1` and the **apex** host: the parent is `projects/{project}` with no location, so
+    // nothing about the check depends on where the credential was saved.
+    expect(vertexModelGardenEulaCheckUrl({ project: 'my-project-123456' })).toBe(
+      'https://aiplatform.googleapis.com/v1beta1/projects/my-project-123456/modelGardenEula:check',
+    )
+    expect(
+      vertexPublisherModelResource({ publisher: 'anthropic', model: 'claude-sonnet-4-5' }),
+    ).toBe('publishers/anthropic/models/claude-sonnet-4-5')
+  })
+})
+
+describe('reading a Model Garden answer (#273)', () => {
+  it('reads the resource names and the page token out of a publisher-model page', () => {
+    expect(
+      parsePublisherModelPage(
+        publisherModelPage(
+          [
+            'publishers/google/models/gemini-2.5-pro',
+            'publishers/anthropic/models/claude-sonnet-4-5@20250929',
+          ],
+          'next-page',
+        ),
+      ),
+    ).toEqual({
+      models: [
+        {
+          id: 'gemini-2.5-pro',
+          resource: 'publishers/google/models/gemini-2.5-pro',
+        },
+        {
+          id: 'claude-sonnet-4-5@20250929',
+          resource: 'publishers/anthropic/models/claude-sonnet-4-5@20250929',
+        },
+      ],
+      next: 'next-page',
+    })
+    // The last page carries no token, and an empty token is no token either.
+    expect(parsePublisherModelPage({ publisherModels: [] }).next).toBeNull()
+    expect(parsePublisherModelPage({ publisherModels: [], nextPageToken: '' }).next).toBeNull()
+    // An entry with no usable resource is skipped rather than failing the page.
+    expect(
+      parsePublisherModelPage({
+        publisherModels: [{ name: 'not-a-resource' }, {}, { name: 42 }],
+      }).models,
+    ).toEqual([])
+  })
+
+  it('refuses a body that is not a publisher-model page', () => {
+    for (const body of [null, 'nope', [], {}, { publisherModels: {} }]) {
+      expect(() => parsePublisherModelPage(body)).toThrow()
+    }
+  })
+
+  it('reads an EULA answer as: only an explicit `true` is enabled', () => {
+    const acked = { projectNumber: '42', publisherModel: 'publishers/anthropic/models/x' }
+    expect(parsePublisherModelEulaAcceptance({ ...acked, publisherModelEulaAcked: true })).toBe(
+      true,
+    )
+    expect(parsePublisherModelEulaAcceptance({ ...acked, publisherModelEulaAcked: false })).toBe(
+      false,
+    )
+    // An answer that never said: the safe reading is "not enabled", never "enabled".
+    expect(parsePublisherModelEulaAcceptance(acked)).toBe(false)
+    expect(parsePublisherModelEulaAcceptance({ publisherModelEulaAcked: 'true' })).toBe(false)
+    // A body that is not an answer at all is an error, which the catalogue reports as the
+    // credential's fallback rather than as a model.
+    for (const body of [null, [], 'true']) {
+      expect(() => parsePublisherModelEulaAcceptance(body)).toThrow()
+    }
+  })
+
+  it('finds the private key a message is scrubbed of, and nothing in a document without one', () => {
+    expect(vertexCredentialSecret(VERTEX_BODY.service_account)).toBe(PRIVATE_KEY)
+    expect(vertexCredentialSecret('{}')).toBeNull()
+    expect(vertexCredentialSecret('not json')).toBeNull()
+    expect(vertexCredentialSecret(JSON.stringify({ private_key: '' }))).toBeNull()
+    expect(vertexCredentialSecret(JSON.stringify({ private_key: 7 }))).toBeNull()
   })
 })
 

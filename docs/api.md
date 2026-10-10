@@ -584,8 +584,9 @@ curl -X DELETE localhost:3000/v1/provider-credentials/azure-eu \
   `ListFoundationModels` read in its region, SigV4-signed with the user's keys (the host comes
   from the region, so there is no user-supplied address to guard); a `vertex` credential is
   checked by signing an OAuth token with its service-account key — never Application Default
-  Credentials — and listing one page of **publisher models** of its project and location
-  (Google's own endpoint, derived from the validated location, so there is nothing to guard). A
+  Credentials — and listing one page of the project's **endpoints** in its location
+  (`projects.locations.endpoints.list`; Google's own endpoint, derived from the validated
+  location, so there is nothing to guard). A
   credential the provider rejects is an `invalid_provider_credential` with status `422` — for
   Bedrock and Vertex, the provider's own reason for the refusal, scrubbed — and nothing is
   stored.- **A credential is keyed by its `name`**, which is the `provider` half of the model ids it
@@ -693,15 +694,25 @@ is the usual one; the optional `refresh=true` query parameter bypasses the serve
   matches exactly one models.dev entry borrows its metadata, and an id that matches none or more
   than one (`gpt-4o` is filed under both `openai` and `azure`) gets `null` for both limits, no
   name and no price rather than a guess.
-- **A Vertex credential contributes the publisher models this build can run.** Google's and
-  Anthropic's models served from Vertex are both filed under models.dev's `google-vertex`
-  entry, so a `vertex` credential contributes those — `vertex/gemini-2.5-pro`,
-  `vertex/claude-sonnet-4-5@20250929` — with `source: "registry"`, their prices and context
-  windows, and a status of `ok` (`fetched_at` is when the credential was read). The entry
-  carries more than a request can run — Gemini's image, speech and embedding families, and the
-  MaaS models Google resells (`xai/…`, `meta/…`) — and two rules keep those out: only
-  `gemini-*` and `claude-*` ids have a client here, and the catalogue's own chat filter drops
-  the non-chat families.- **Where the list comes from.** Per provider, the server calls that provider's own
+- **A Vertex credential contributes the publisher models the project can actually call**
+  (#273). Model Garden's catalogue is per **publisher**, so both are listed live with the
+  credential's own service-account token:
+  `GET https://{location}-aiplatform.googleapis.com/v1beta1/publishers/{publisher}/models` for
+  `publishers/google` and `publishers/anthropic` (there is no `v1` list, and no
+  project- or location-scoped one — the location picks the host). Entries are
+  `vertex/gemini-2.5-pro`, `vertex/claude-sonnet-4-5@20250929`, with `source: "provider"`; the
+  bundled models.dev `google-vertex` entry is joined for names, context windows and prices, so
+  a model the snapshot predates is still listed, with `null` limits and no price.
+  **A partner model must be enabled per project in Model Garden**, and the listing cannot say
+  whether it was: every chat-capable Anthropic candidate is checked with
+  `POST https://aiplatform.googleapis.com/v1beta1/projects/{project}/modelGardenEula:check`,
+  and only the models whose terms this project has accepted are listed — so the picker does not
+  offer a Claude model that would fail on the first message. Two further rules keep the rest
+  out: only `gemini-*` and `claude-*` ids have a client here (the MaaS models Google resells —
+  `xai/…`, `meta/…` — do not), and the catalogue's own chat filter drops the non-chat families
+  (Gemini's image, speech and embedding models). The status is `ok` with the time of the read;
+  a listing that fails is the same visible `fallback` every provider gets — the snapshot's
+  Vertex models, through the same two filters, with the reason.- **Where the list comes from.** Per provider, the server calls that provider's own
   list-models endpoint with the caller's credential (`GET /v1/models` for OpenAI and
   Anthropic, `GET /v1beta/models` for Gemini, `GET /api/v1/models` for OpenRouter,
   `GET /models` for the OpenAI-compatible providers), from a fixed, known table. Each call has

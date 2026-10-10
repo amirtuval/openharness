@@ -220,3 +220,65 @@ describe('classifyModelError', () => {
     ).toEqual({ retryable: false, type: 'unknown_error', message: 'outer' })
   })
 })
+
+describe('the Vertex Model Garden refusal (#273)', () => {
+  /** The APICallError a `:streamGenerateContent` for a not-enabled Claude model gets. */
+  function publisherModelError(statusCode: number, message: string): APICallError {
+    return new APICallError({
+      message,
+      url: 'https://europe-west4-aiplatform.googleapis.com/v1/projects/p/locations/europe-west4/publishers/anthropic/models/claude-sonnet-4-5:streamGenerateContent',
+      requestBodyValues: {},
+      statusCode,
+      responseBody: JSON.stringify({ error: { code: statusCode, message } }),
+      isRetryable: false,
+    })
+  }
+
+  it('turns Google’s “publisher model was not found” 404 into the sentence to act on', () => {
+    const classified = classifyModelError(
+      publisherModelError(
+        404,
+        'Publisher model `projects/p/locations/europe-west4/publishers/anthropic/models/claude-sonnet-4-5` was not found or your project does not have access to it.',
+      ),
+    )
+    // The type is unchanged — the request really did fail and is not retryable — and the
+    // message is the one a reader can act on, naming the model.
+    expect(classified.type).toBe('model_request_failed_error')
+    expect(classified.retryable).toBe(false)
+    expect(classified.message).toBe(
+      'Claude models must be enabled for this Google Cloud project in Vertex AI Model Garden ' +
+        '(claude-sonnet-4-5) — open Model Garden, enable the model for the project, and send ' +
+        'the message again.',
+    )
+  })
+
+  it('maps a Model Garden terms refusal, whatever status Google answered with', () => {
+    expect(
+      classifyModelError(
+        publisherModelError(
+          403,
+          'Permission denied: the Model Garden terms of use have not been accepted for publishers/anthropic/models/claude-opus-4-1@20250805',
+        ),
+      ).message,
+    ).toContain('(claude-opus-4-1@20250805)')
+  })
+
+  it('leaves every other provider’s error text exactly as it was', () => {
+    // A Gemini model on the same credential: Google's own message, unchanged — the sentence
+    // is about the partner-model enablement gate, and Gemini has none.
+    const gemini = publisherModelError(
+      404,
+      'Publisher model `projects/p/locations/europe-west4/publishers/google/models/gemini-9.9-pro` was not found or your project does not have access to it.',
+    )
+    expect(classifyModelError(gemini).message).toContain('was not found or your project')
+    // An Anthropic-publisher resource with none of the Model Garden wording — a plain 404 on a
+    // wrong path — is not this failure either.
+    expect(
+      classifyModelError(
+        publisherModelError(404, 'publishers/anthropic/models/claude-x: not found'),
+      ).message,
+    ).toBe('publishers/anthropic/models/claude-x: not found')
+    // And an ordinary provider failure is untouched.
+    expect(classifyModelError(apiError(429)).message).toBe('provider said 429')
+  })
+})

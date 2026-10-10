@@ -238,9 +238,19 @@ export {
   type ValidatableProvider,
 } from './provider-validation'
 export {
+  VERTEX_PUBLISHERS,
   createVertexTokenProvider,
-  vertexPublisherModelsUrl,
+  parsePublisherModelEulaAcceptance,
+  parsePublisherModelPage,
+  vertexCredentialSecret,
+  vertexEndpointsUrl,
+  vertexModelGardenEulaCheckUrl,
+  vertexModelGardenListUrl,
+  vertexPublisherModelResource,
   vertexTokenProvider,
+  type PublisherModel,
+  type PublisherModelPage,
+  type VertexPublisher,
   type VertexTokenProvider,
 } from './vertex'
 export {

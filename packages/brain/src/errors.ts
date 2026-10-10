@@ -113,7 +113,50 @@ const MAX_WRAPPER_DEPTH = 3
  */
 export function classifyModelError(error: unknown): ModelErrorClassification {
   const message = messageOf(error)
-  return { ...decideModelError(error, 0), message }
+  return { ...decideModelError(error, 0), message: vertexModelGardenMessage(message) ?? message }
+}
+
+/**
+ * Google's Model Garden refusal, as the sentence a reader can act on — or `null` when the
+ * message is not one (#273).
+ *
+ * A **partner model must be enabled per project** in Vertex AI Model Garden before a request
+ * may call it, and a request for one that is not gets Google's own, accurate and unhelpful
+ * `404`: `Publisher model \`projects/…/publishers/anthropic/models/claude-…\` was not found or
+ * your project does not have access to it.` (a project whose terms are unaccepted sometimes
+ * answers `403 PERMISSION_DENIED` with Model Garden wording instead). The catalogue now lists
+ * only what the project has enabled (#273), so this is the **residual** path: an id a chat
+ * already runs, a model a client cached, a model disabled after the catalogue's hour was
+ * taken. Those turns would otherwise end with a provider error that reads like a typo in the
+ * model id, and send a reader looking in the wrong place.
+ *
+ * The match is deliberately narrow: a `publishers/{publisher}/models/{model}` resource in the
+ * text **and** Google's Model Garden wording, and only for the Anthropic publisher — the one
+ * partner whose enablement this server's users meet. A message that is not one is left exactly
+ * as the provider wrote it, so nothing else's error text changes.
+ */
+export function vertexModelGardenMessage(message: string): string | null {
+  const resource = /publishers\/([A-Za-z0-9_-]+)\/models\/([^\s`'"`,)]+)/u.exec(message)
+  if (resource === null || resource[1]?.toLowerCase() !== 'anthropic') {
+    return null
+  }
+  const model = resource[2]
+  if (model === undefined) {
+    return null
+  }
+  const gardenRefusal =
+    /was not found or your project does not have access/u.test(message) ||
+    /model ?garden/iu.test(message) ||
+    /\beula\b/iu.test(message) ||
+    /terms of (use|service)/iu.test(message) ||
+    /not (been )?enabled/iu.test(message)
+  if (!gardenRefusal) {
+    return null
+  }
+  return (
+    'Claude models must be enabled for this Google Cloud project in Vertex AI Model Garden ' +
+    `(${model}) — open Model Garden, enable the model for the project, and send the message again.`
+  )
 }
 
 /**

@@ -60,7 +60,7 @@ import {
   type ProviderFetch,
   type ProviderResponse,
 } from './catalog/provider-fetch'
-import { vertexPublisherModelsUrl, vertexTokenProvider, type VertexTokenProvider } from './vertex'
+import { vertexEndpointsUrl, vertexTokenProvider, type VertexTokenProvider } from './vertex'
 
 /** The provider HTTP client, built once: one outbound path for validation and listing. */
 const providerFetch: ProviderFetch = createProviderFetch()
@@ -386,14 +386,15 @@ async function awsReason(response: ProviderResponse): Promise<string> {
 const AZURE_API_VERSION = 'v1'
 
 /**
- * One authenticated read of the project's publisher models, proving a Vertex credential.
+ * One authenticated read of the project's endpoints, proving a Vertex credential.
  *
  * The token is obtained **from the stored service account** (see `vertex.ts`) and attached as
- * a bearer, and the call is Google's own `publishers.google.models.list` for the credential's
- * project and location: one page, one model. It is the smallest call that proves all three
- * things a Vertex credential has to be right about — the key, the project, and the location —
- * and it fails with Google's reason rather than a generic one when the Vertex AI API is not
- * enabled for the project, which is the misconfiguration a perfectly good key usually meets.
+ * a bearer, and the call is Google's own `projects.locations.endpoints.list` for the
+ * credential's project and location: one page, one endpoint. It is the smallest call that
+ * proves all three things a Vertex credential has to be right about — the key, the project and
+ * the location — and it fails with Google's reason rather than a generic one when the Vertex
+ * AI API is not enabled for the project, which is the misconfiguration a perfectly good key
+ * usually meets. `vertexEndpointsUrl` says why this route and not another.
  *
  * The endpoint is Google's, derived from the validated location, so unlike Azure's it needs no
  * SSRF guard: there is no URL here a user typed. The call goes through the same egress-proxy
@@ -415,7 +416,7 @@ async function validateVertexCredential(
       { cause: error },
     )
   }
-  const url = vertexPublisherModelsUrl({ project: body.project, location: body.location })
+  const url = vertexEndpointsUrl({ project: body.project, location: body.location })
   let response: ProviderResponse
   try {
     response = await fetch(url, {
