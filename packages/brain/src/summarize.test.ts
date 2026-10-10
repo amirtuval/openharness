@@ -608,7 +608,9 @@ describe('runTurn — a request the provider refused as too long (K2)', () => {
     const events = await logOf(session.store, session.sessionId)
     const errors = events.filter((event) => event.type === 'session.error')
     expect(errors.at(-1)?.error.retry_status).toEqual({ type: 'exhausted' })
-    expect(errors.at(-1)?.error.message).toContain('still did not fit')
+    expect(errors.at(-1)?.error.message).toContain(
+      'was compacted and the request still did not fit',
+    )
     expect(eventTypes(events).at(-1)).toBe('session.status_idle')
   })
 
@@ -631,6 +633,40 @@ describe('runTurn — a request the provider refused as too long (K2)', () => {
     const events = await logOf(session.store, session.sessionId)
     expect(eventTypes(events)).toContain('session.error')
     expect(eventTypes(events)).toContain('session.status_idle')
+    // The message must not claim a compaction that never happened — the summary was skipped
+    // because there was nowhere to cut, and it says so.
+    const errors = events.filter((event) => event.type === 'session.error')
+    expect(errors.at(-1)?.error.message).toContain('no older history to summarize')
+    expect(errors.at(-1)?.error.message).not.toContain('was compacted')
+  })
+
+  it('says the summary failed, not that the context was compacted, when it did', async () => {
+    // A cut is possible, but the summarizer itself fails: the context was **not** compacted, and
+    // the error has to say that rather than blame a compaction that never landed.
+    const session = await newSession(messages(15, 2_000))
+    const scripts = scriptedModels(
+      [{ failWith: overflowError() }, { text: ['never reached'] }],
+      [{ failWith: new Error('the summarizer is down') }],
+    )
+    const tokenBudgetFor = (modelId: string) => (modelId === SUMMARY_MODEL ? 8_000 : 200_000)
+
+    const outcome = await runTurn(session.sessionId, {
+      store: session.store,
+      model: scripts.factory,
+      resolveCredential: () => Promise.resolve(TEST_CREDENTIAL),
+      contextStrategy: createContextStrategy({ tokenBudgetFor }),
+      compaction: { summaryModel: SUMMARY_MODEL, tokenBudgetFor },
+    })
+
+    expect(outcome.outcome).toBe('error')
+    expect(scripts.chat.calls).toHaveLength(1)
+    expect(scripts.summary.calls).toHaveLength(1)
+    const events = await logOf(session.store, session.sessionId)
+    expect(contextSummaryOf(events)).toBeNull()
+    const errors = events.filter((event) => event.type === 'session.error')
+    expect(errors.at(-1)?.error.retry_status).toEqual({ type: 'exhausted' })
+    expect(errors.at(-1)?.error.message).toContain('summarizing the history failed')
+    expect(errors.at(-1)?.error.message).not.toContain('was compacted')
   })
 })
 
