@@ -292,6 +292,7 @@ export {
   type OpenAICompatibleStubOptions,
   type OpenAICompatibleStubRequest,
 } from './openai-compatible-stub'
+export { OPENAI_STUB_REPLY, openAiResponsesSseBody } from './provider-bodies'
 export {
   startProviderStub,
   type ProviderStub,

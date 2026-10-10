@@ -226,13 +226,21 @@ interface ProviderClient {
    */
   readonly baseURL: string
   /**
-   * The client's model constructor, given the request's key and the pinned base URL. Two of
-   * these are the Responses API rather than the chat one (see {@link providerModelFactory});
-   * otherwise this is the provider package's own factory function.
+   * The client's model constructor, given the request's key, the pinned base URL and the
+   * `fetch` every request is made through. Two of these are the Responses API rather than the
+   * chat one (see {@link providerModelFactory}); otherwise this is the provider package's own
+   * factory function, and the options are handed to it whole — so a package that reads
+   * `fetch`, `baseURL` or `apiKey` sees exactly the one setting this table passed.
    */
   readonly model: (options: {
     readonly apiKey: string
     readonly baseURL: string
+    /**
+     * The `fetch` the request is made through, when the host injected one (an
+     * egress-proxy-aware client, say). Left out entirely when there is none, so the provider
+     * package falls back to the platform's `fetch` rather than to a setting of `undefined`.
+     */
+    readonly fetch?: ProviderFetch
   }) => (id: string) => LanguageModel
 }
 
@@ -363,6 +371,22 @@ export function isUnsupportedProviderError(value: unknown): value is Unsupported
  * request the guard allows does.
  */
 export interface ProviderModelFactoryOptions {
+  /**
+   * The `fetch` every request to one of the **eleven fixed providers** goes through.
+   *
+   * Their URLs are constants this table pins, so there is no user-typed address to guard — but
+   * there is still an egress path, and a deployment that reaches the internet only through a
+   * proxy sets `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` for it (#270). The provider packages fall
+   * back to the platform's `fetch`, which ignores those variables unless the process was
+   * started with `NODE_USE_ENV_PROXY=1` — so the host injects the egress-aware client here, the
+   * same one the server's catalogue and credential checks already use, and a proxied
+   * deployment can chat as well as list models. It is built **without** the catalogue's 5 s
+   * deadline: a model streams a long reply, so a request-level timeout would cut it off.
+   *
+   * Defaults to the platform's `fetch` (nothing injected), which is what a host with a direct
+   * egress path — and every test that stubs the global `fetch` — wants.
+   */
+  readonly fetch?: ProviderFetch
   /** The `fetch` every Azure OpenAI request goes through. Defaults to the safeFetch guard. */
   readonly azureFetch?: ProviderFetch
   /**
@@ -414,6 +438,7 @@ export interface ProviderModelFactoryOptions {
 export function createProviderModelFactory(
   options: ProviderModelFactoryOptions = {},
 ): ModelFactory {
+  const fixedFetch = options.fetch
   const azureGuard = options.azureFetch ?? azureFetch
   const customGuard = options.openAICompatibleFetch ?? openAICompatibleFetch
   const vertexFetch = options.vertexFetch
@@ -433,7 +458,14 @@ export function createProviderModelFactory(
       if (credential.type !== 'api_key') {
         throw new UnsupportedProviderError(provider)
       }
-      return client.model({ apiKey: credential.apiKey, baseURL: client.baseURL })(id)
+      // The `fetch` a host injected — the server passes its egress-proxy-aware client — is
+      // handed to every fixed provider's client the way the key and the base URL are (#270).
+      // Left out entirely when there is none, so the package uses the platform's `fetch`.
+      return client.model({
+        apiKey: credential.apiKey,
+        baseURL: client.baseURL,
+        ...(fixedFetch === undefined ? {} : { fetch: fixedFetch }),
+      })(id)
     }
     if (credential.type === 'azure_openai') {
       // `chat`, not the provider's default: the default is the Responses API, which newer

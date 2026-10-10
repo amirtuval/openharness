@@ -2,17 +2,24 @@
  * The one HTTP client provider calls go through (issue #90): Node's `fetch`, over an egress
  * proxy when the process environment names one.
  *
- * Provider list calls are the only outbound requests this server makes, and deployments that
- * reach the internet through a proxy set `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` — the
- * documented egress-proxy variables (see `e2e/AGENTS.md`). Node's own `fetch` ignores them
- * unless the process was started with `NODE_USE_ENV_PROXY=1`, a flag a deployment can forget;
- * undici's {@link EnvHttpProxyAgent} reads the same three variables directly, so the
- * documented spelling works with no extra flag, and with no proxy configured it behaves like
- * an ordinary direct connection.
+ * Provider list calls, the save-time credential checks and — since #270 — every **model**
+ * request are the outbound requests this server makes, and deployments that reach the internet
+ * through a proxy set `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` — the documented egress-proxy
+ * variables (see `e2e/AGENTS.md`). Node's own `fetch` ignores them unless the process was
+ * started with `NODE_USE_ENV_PROXY=1`, a flag a deployment can forget; undici's
+ * {@link EnvHttpProxyAgent} reads the same three variables directly, so the documented spelling
+ * works with no extra flag, and with no proxy configured it behaves like an ordinary direct
+ * connection.
  *
- * The fetch is a seam — {@link ProviderFetch} — for the same reason `provider-validation.ts`
- * has one: no test may reach a provider, so the catalogue's tests inject a stub that answers
- * with recorded payloads.
+ * Two fetches are built from that one agent, because a model request and a catalog call have
+ * different shapes: {@link createProviderFetch} is the `GET`-with-a-deadline client the
+ * catalogue and the credential checks use, and {@link createProviderModelFetch} is the AI SDK's
+ * `FetchFunction` a model client's `fetch` option takes — no deadline of its own, because a
+ * model streams a long reply (see `@openharness/brain`'s model seam).
+ *
+ * The catalogue's fetch is a seam — {@link ProviderFetch} — for the same reason
+ * `provider-validation.ts` has one: no test may reach a provider, so the catalogue's tests
+ * inject a stub that answers with recorded payloads.
  */
 
 import { EnvHttpProxyAgent, fetch as undiciFetch } from 'undici'
@@ -57,20 +64,59 @@ export const DEFAULT_PROVIDER_TIMEOUT_MS = 5000
 let proxyDispatcher: EnvHttpProxyAgent | null = null
 
 /**
+ * The agent every provider call is dispatched through, built once from the environment the
+ * process was started in. It reads `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` at construction,
+ * so the two fetches below must share it rather than build one each.
+ */
+function egressDispatcher(): EnvHttpProxyAgent {
+  proxyDispatcher ??= new EnvHttpProxyAgent()
+  return proxyDispatcher
+}
+
+/**
  * The production {@link ProviderFetch}: a request through undici, with the egress proxy the
  * environment names read at the first call.
  */
 export function createProviderFetch(): ProviderFetch {
   return async (url, init) => {
-    proxyDispatcher ??= new EnvHttpProxyAgent()
     const response = await undiciFetch(url, {
       method: init.method ?? 'GET',
       headers: init.headers,
       ...(init.body === undefined ? {} : { body: init.body }),
       signal: init.signal,
-      dispatcher: proxyDispatcher,
+      dispatcher: egressDispatcher(),
     })
     return response
+  }
+}
+
+/** The AI SDK's `FetchFunction` shape — what a model client's `fetch` option is given. */
+export type ModelFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+
+/**
+ * The production model-request fetch (#270): the AI SDK's `FetchFunction` over the same egress
+ * proxy agent {@link createProviderFetch} uses, with the whole request passed through.
+ *
+ * It adds **no deadline**: the catalogue's 5 s bounds one model *list*, while a model request
+ * streams a reply for as long as the model keeps producing — the same reason Azure's guarded
+ * fetch runs under the streaming-safe limits. What bounds a hung stream is the provider
+ * package's own behaviour and undici's agent timeouts, not a total timeout here. The signal
+ * the caller passes (an abort from a turn) is forwarded untouched, because that is the only
+ * deadline a model request should have.
+ *
+ * The server injects it into `createProviderModelFactory` (`apps/server/src/model.ts`) so the
+ * eleven fixed providers reach the internet the same way the catalogue and the credential
+ * checks do — `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` honoured without `NODE_USE_ENV_PROXY`.
+ */
+export function createProviderModelFetch(): ModelFetch {
+  return async (input, init) => {
+    const response = await undiciFetch(
+      input as Parameters<typeof undiciFetch>[0],
+      { ...init, dispatcher: egressDispatcher() } as Parameters<typeof undiciFetch>[1],
+    )
+    // undici's own `Response` is Node's global one at runtime; the cast is only because the
+    // two type identities are spelled separately.
+    return response as unknown as Response
   }
 }
 
