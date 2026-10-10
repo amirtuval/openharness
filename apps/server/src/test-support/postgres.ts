@@ -11,7 +11,12 @@ import {
   migrate,
 } from '@openharness/session/postgres'
 import type { PostgresSchema } from '@openharness/session/postgres'
-import type { AppendableEvent, AppendEventsOptions, PartitionFence } from '@openharness/session'
+import type {
+  AppendableEvent,
+  AppendEventsOptions,
+  Clock,
+  PartitionFence,
+} from '@openharness/session'
 import type { SessionId, StoredEvent, UserId } from '@openharness/protocol'
 
 import { TEST_OWNER_ID } from './harness'
@@ -73,8 +78,16 @@ export interface PostgresFixture {
   readonly pool: Pool
   /** The connection string the tests reached Postgres with. */
   readonly connectionString: string
-  /** A fresh store — a separate listening connection — over the same tables. */
-  store(options?: { partitionCount?: number }): PostgresSessionStore
+  /**
+   * A fresh store — a separate listening connection — over the same tables.
+   *
+   * `now` is the clock the store derives every timestamp, lease expiry and membership window
+   * from, and it exists for the same reason the contract takes one: a test that is about
+   * expiry passes a `TestClock` and moves time by hand instead of waiting for it (#262). Every
+   * store a test means to share a clock with must be handed the same one, or their views of a
+   * lease and of a membership window disagree.
+   */
+  store(options?: { partitionCount?: number; now?: Clock }): PostgresSessionStore
   /** Register a store the test built itself (a subclass, say) to be closed with the fixture. */
   track<T extends PostgresSessionStore>(store: T): T
   /** Empty every table, so the next test starts from nothing. */
@@ -126,7 +139,10 @@ export async function startPostgres(
     store: (storeOptions = {}) => {
       const store = createPostgresSessionStore(
         { pool },
-        { partitionCount: storeOptions.partitionCount ?? options.partitions ?? 64 },
+        {
+          partitionCount: storeOptions.partitionCount ?? options.partitions ?? 64,
+          ...(storeOptions.now === undefined ? {} : { now: storeOptions.now }),
+        },
       )
       stores.push(store)
       return store

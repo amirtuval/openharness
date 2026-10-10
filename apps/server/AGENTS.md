@@ -1459,7 +1459,9 @@ parallel with each other.
   instances settling at theirs), a single idle instance releasing nothing over several TTLs
   (#122) and keeping every partition through a heartbeat cycle that outlives its lease (#185,
   deterministically, with a store whose first renewal is delayed past the TTL), a member that
-  stops heartbeating dropped after about a TTL, `stop()` deleting the
+  stops heartbeating dropped after exactly one TTL the test moves itself — its stores are
+  handed a `TestClock`, so that window is a fact the test states rather than one a loaded
+  runner has to stay inside (#262) — `stop()` deleting the
   membership row and a restart re-joining, one turn per session, a crash mid-turn and the
   recovery that finishes it, a zombie that cannot write, a lease that cannot be renewed,
   interrupts routed across instances, the sweep, the fences a turn writes with, and shutdown
