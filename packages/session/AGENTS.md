@@ -319,7 +319,11 @@ plain model, never both — a message that carries a `model` but no `mode` clear
 message that carries neither leaves the mode alone. A `span.model_request_start` carrying a
 `model` updates the session's `model` to the model the request **ran**, which for a chat on a
 mode is the mode's resolved model: that is what keeps `model` meaning "the model this chat
-last ran", so a chat whose mode is deleted afterwards continues on it.
+last ran", so a chat whose mode is deleted afterwards continues on it. A span with
+`purpose: 'summary'` is the one exception (epic #277, C2): it is the compaction engine's own
+request, its `model` is the _summarizer's_, and projecting it would move the chat onto the model
+that summarized it. Its tokens are still in the log — and still counted by the usage read — but
+the projection is about which model the chat runs, not about what was spent.
 
 The log stays the source of truth: the events' fields are stored on them either way, and a
 `span.model_request_start` records the model and mode each request actually used.
@@ -896,8 +900,8 @@ dependency table.
   and the `RangeError` a window that is not one raises. The modes (#245, M6) are there as well:
   create, read, list, partial update and delete, owner scoping on every one of them, the
   unique-name rule (on create and on rename) and the `MAX_MODES_PER_USER` cap, a delete leaving
-  the chats that followed the mode an ordinary chat, and both projections — a message's `mode`
-  and a span's resolved `model`.
+  the chats that followed the mode an ordinary chat, and the projections — a message's `mode`,
+  a span's resolved `model`, and a `purpose: 'summary'` span projecting nothing (epic #277, C2).
 - `postgres/postgres.test.ts` runs both suites against Postgres — the acceptance tests of the
   durable stores — and adds what only a shared store can be asked: concurrent appends from
   two stores, a supplied event id two of them try to take, fencing across stores, a burst that
