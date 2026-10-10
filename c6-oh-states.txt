@@ -1,0 +1,45 @@
+`oh` compaction visibility — captured from tmux against the built stack (#281 C6)
+==============================================================================
+
+1. A divider that arrives LIVE, while the history under it is already written
+   -----------------------------------------------------------------------
+   Session opened in `oh -s <id>` with the history on screen, then a manual
+   `/compact` run from the shell (the same event a `/compact` in `oh` sends).
+   The clipboard below is `tmux capture-pane -S -3000` around the divider.
+
+   ─────────── conversation summarized · manual · openai/gpt-4 · 1 pass ───────────
+   History to summarize:
+   Fact A: the codename is BLUEHERON-42. lorem ipsum dolor sit amet …
+   …
+
+   (Before the C6 fix the divider was never drawn here — `<Static>` cannot
+   insert a block that belongs above what it has already written, and the last
+   settled message was written a second time instead. See the regression test
+   `TranscriptView › draws a divider that arrives once the history under it is
+   already written`.)
+
+2. A divider on REPLAY (a session that already has one, opened fresh)
+   -----------------------------------------------------------------
+   $ oh -s sesn_01M4K73NGKHFNRBTCG7J1HB32M
+   tmux capture-pane -S -8000 | grep "conversation summarized"
+   ────────── conversation summarized · automatic · groq/allam-2-7b · 1 pass ──────────
+   ───────── conversation summarized · automatic · groq/allam-2-7b · 2 passes ─────────
+
+3. `oh settings` — defaults, validation, set
+   -----------------------------------------
+   $ oh settings
+   Summarize at 10% of the context (the server default).
+   Summary model: same as the chat.
+   Summary pass limit: 3 (default).
+
+   $ oh settings --threshold 5
+   oh: --threshold needs a share between 0.3 and 0.95 (0.7 is 70%), or 'default'.
+
+   $ oh settings --summary-passes 99
+   oh: --summary-passes needs a whole number between 1 and 10, or 'default'.
+
+   $ oh settings --threshold 0.3 --summary-passes 5
+   Saved.
+   Summarize at 30% of the context.
+   Summary model: same as the chat.
+   Summary pass limit: 5.
