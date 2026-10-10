@@ -10,6 +10,7 @@ import type {
   Metadata,
   ModelConfig,
   ModelRequestStartEvent,
+  ModelUsage,
   Session,
   SessionId,
   SessionRewindEvent,
@@ -114,6 +115,11 @@ export type { UserPreferences } from '@openharness/protocol'
  * - **Deletion** (#111, epic #116 U5). {@link SessionStore.deleteSession} removes a session
  *   and its whole log — owner-scoped, and irreversible — and a subscription to it ends with a
  *   final `session.deleted` stream event instead of starving.
+ * - **Usage is one read per user** (epic #245, A2; issue #247).
+ *   {@link SessionStore.listModelRequests} pairs each `span.model_request_end` with the
+ *   `span.model_request_start` that names its model, for one owner and one UTC window, without
+ *   walking the owner's sessions — the read a per-user usage report is assembled from, and the
+ *   reason it does not have to read every event of a month of use.
  * - **Async.** Every method is asynchronous. Nothing may assume synchronous delivery: a store
  *   built on `LISTEN`/`NOTIFY`, or one that commits a transaction before it notifies, delivers
  *   subscriptions and signals a tick later than it stored the event.
@@ -494,6 +500,41 @@ export interface SessionStore {
    * @throws SessionNotFoundError when the session does not exist
    */
   getTurnState(sessionId: SessionId): Promise<TurnState>
+
+  // ------------------------------------------------------------- usage reads
+
+  /**
+   * Every model request one user's sessions recorded in a UTC window, in **one** read
+   * (epic #245, A2; issue #247).
+   *
+   * A model request is a `span.model_request_start` — which names the model it ran on —
+   * bracketed by the `span.model_request_end` that reports its tokens, and this is the pairing
+   * the per-user usage report needs. Answering "what did this user spend between these two
+   * instants" by walking the user's sessions and reading each log page by page would read every
+   * event of a month of heavy use on every request; this answers it in one query, and it is a
+   * store method rather than a caller's loop for exactly that reason.
+   *
+   * The window is half-open: an end event at exactly `from` is in the answer, one at exactly
+   * `to` is not. Which local day each request fell on is the caller's question — the instants
+   * here are UTC, and the days are the reader's zone — so a caller converts its local days into
+   * a window like this one and groups what comes back.
+   *
+   * **Owner-scoped, and the owner is required** (epic #65, A4): only the owner's sessions are
+   * read, so another user's requests cannot be in the answer — the same refusal by omission the
+   * other scoped reads make.
+   *
+   * A request a `session.rewind` replaced is **not** in the answer (#238), exactly as it is not
+   * in a replay: what a recorded range covers is not billed, and a `span.model_request_end` is
+   * never a chunk, so only a rewind's range can cover one.
+   *
+   * The answer is ordered by `(session_id, seq)` — the log's own order, session by session —
+   * so two reads of an unchanged log hand back the same list.
+   *
+   * @param options.from the window's start, inclusive
+   * @param options.to the window's end, exclusive
+   * @throws RangeError when a bound is not an instant, or `from` is after `to`
+   */
+  listModelRequests(options: ListModelRequestsOptions): Promise<ModelRequestUsage[]>
 
   /**
    * Delete the stored events a supersession covers — older than the retention window — and
@@ -943,6 +984,40 @@ export interface TurnState {
    * there is none. It is not `null` exactly when `state` is `running`.
    */
   readonly openSpan: ModelRequestStartEvent | null
+}
+
+/** Query of {@link SessionStore.listModelRequests} (epic #245, A2; issue #247). */
+export interface ListModelRequestsOptions extends OwnerScope {
+  /** The window's start, inclusive — a UTC instant, as the caller's local day was converted. */
+  readonly from: Date
+  /** The window's end, exclusive. */
+  readonly to: Date
+}
+
+/**
+ * One model request the log recorded, as {@link SessionStore.listModelRequests} reads it
+ * (epic #245, A2; issue #247).
+ *
+ * The three facts a usage report is assembled from and nothing else: the model the request ran
+ * on, what it spent, and when it finished. The money is not here — prices are not in the log —
+ * so a caller pairs this with its own price lookup.
+ */
+export interface ModelRequestUsage {
+  /**
+   * The `provider/model` the request's `span.model_request_start` named, or `null` when there
+   * is nothing to read: a start stored before the field existed, or an end whose
+   * `model_request_start_id` names no event this store has. The tokens are real either way, so
+   * such a request is in the totals and in no per-model breakdown.
+   */
+  readonly model: string | null
+  /** What the request reported, as its end event carried it. */
+  readonly usage: ModelUsage
+  /**
+   * When the request finished: the `processed_at` of the `span.model_request_end`. It is what
+   * the caller groups by — the window filters on it — and it is the end's, so a request counts
+   * on the day it ended.
+   */
+  readonly processed_at: Timestamp
 }
 
 /**

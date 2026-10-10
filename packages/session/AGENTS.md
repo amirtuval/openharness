@@ -82,7 +82,8 @@ migrations/             the SQL the Postgres stores need, applied by `migrate()`
                         0017 the scheduler-instance membership (#122),
                         0018 the credential key provider (#150),
                         0019 the theme on the per-user preferences (#203),
-                        0020 what a supersession range covers — chunks or a rewind (#238)
+                        0020 what a supersession range covers — chunks or a rewind (#238),
+                        0021 the index behind the per-user usage read (#247)
 docs/postgres.md        the Postgres stores: schema, migrations, delivery, local setup
 ```
 
@@ -105,6 +106,7 @@ docs/postgres.md        the Postgres stores: schema, migrations, delivery, local
 | `CompactOptions`                                                                                                                                    | what `compact()` takes: the retention cutoff (`olderThan: Date \| number`)                                                                                                                                                                                                                                                                |
 | `PartitionLease`, `PartitionSignal`, `PartitionSignalInput`, `PartitionSignalKind`                                                                  | leases over a partition, and the signals sent to its owner                                                                                                                                                                                                                                                                                |
 | `TurnState`, `TurnStateKind`                                                                                                                        | what `getTurnState()` answers                                                                                                                                                                                                                                                                                                             |
+| `ListModelRequestsOptions`, `ModelRequestUsage`                                                                                                     | the per-user usage read (#247): its `{ ownerId, from, to }` half-open UTC window, and one request as it answers it — the model, the usage and the instant it finished                                                                                                                                                                     |
 | `SessionEventListener`, `PartitionSignalListener`, `AuthSessionRevocationListener`, `Unsubscribe`                                                   | subscription plumbing                                                                                                                                                                                                                                                                                                                     |
 | `AuthSessionId`                                                                                                                                     | a Better Auth session id (A2) — deliberately not a `SessionId`, which names a log                                                                                                                                                                                                                                                         |
 | `InMemorySessionStore`, `InMemorySessionStoreOptions`                                                                                               | the in-memory implementation and its `{ now, partitionCount }` options                                                                                                                                                                                                                                                                    |
@@ -351,6 +353,20 @@ session acts on anything other than `idle`: it closes `openSpan` if there is one
 (`span.model_request_end` with `error: { type: "brain_lost" }`, pointing at it) and runs the
 turn again. `findSessionsNeedingWork` treats both open states as work.
 
+**Usage reads** (#247) are the one place the contract asks a question of many sessions at
+once, and the reason it is a method rather than a caller's loop. `listModelRequests({ ownerId,
+from, to })` answers the model requests one **owner's** sessions recorded in a half-open UTC
+window — `from` in, `to` out — as `ModelRequestUsage[]`: the `model` each request's
+`span.model_request_start` named (`null` when the log cannot attribute one), the `model_usage`
+its `span.model_request_end` reported, and that end's `processed_at`, which is the instant the
+window filters on and the day a caller groups by. The pairing is the whole point: a model
+request is two events, and answering "what did this user spend between these two instants"
+session by session and page by page would read every event of a month of heavy use on every
+request. It is owner-scoped like the other user-facing reads, it skips what a recorded range
+covers (a request a `session.rewind` replaced is not billed — a span end is never a chunk, so
+only a rewind's range can cover one, #238), and it answers in `(session_id, seq)` order. A
+window that is not two instants, or that ends before it starts, is a `RangeError`.
+
 **Pagination** is the protocol's, passed through untouched. `page` and `next_page` are the
 opaque cursor strings the API uses: `seq` cursors for the event log
 (`encodeSeqCursor`/`decodePageCursor`), keyset cursors for the resource lists
@@ -494,8 +510,10 @@ and
 `agent_id`, `agent_name`, `agent_model_id`, `agent_system`, all NULL together for a model-first
 session; #93), `events` (`id`,
 `session_id`, `seq`, `type`, `payload jsonb`, `created_at`, `processed_at`, `unique
-(session_id, seq)`, an index on `(session_id, seq)` and a partial index for queued user
-events), `event_claims` (one row per claim of a user event: `event_id` primary key,
+(session_id, seq)`, an index on `(session_id, seq)`, a partial index for queued user
+events and a partial index for the windowed usage read — `(session_id, processed_at) where
+type = 'span.model_request_end'`, #247), `event_claims` (one row per claim of a user event:
+`event_id` primary key,
 `claimed_by_event_id` — the event whose `consumes` claimed it, `null` only on pre-P4 rows —
 and `claimed_at`; the primary key is what makes double-claiming fail atomically),
 `event_supersessions` (one row per
@@ -616,6 +634,18 @@ The partition scheduler's membership (issue #122) added another:
   `last_seen > now - withinMs`) and deleted by `removeInstance` on a graceful `stop()`. There
   is nothing to backfill — an absent row means nobody has announced that id — and a lost row
   costs one heartbeat's announcement rather than anything durable.
+
+The per-user usage read (issue #247, epic #245 A2) added the newest one:
+
+- **`0021_model_request_end_usage.sql` — the index behind `listModelRequests`** (#247): a
+  **partial** index, `(session_id, processed_at) where type = 'span.model_request_end'`. The
+  usage read narrows to the caller's sessions and then to a window of instants, and `(session_id,
+seq)` (0003) seeks by position, not by time — so without this the query would walk every event
+  of every one of the caller's sessions, which is the cost the read exists to remove. Partial
+  because only request ends are ever read that way: a user event's `processed_at` is NULL (its
+  time is the claim's) and the other span and status events are not part of a usage report, so
+  leaving them out keeps the index a fraction of the log. Nothing to backfill; an index is
+  built, not migrated.
 
 Editing a sent message (#238) added one more:
 
@@ -787,6 +817,10 @@ dependency table.
   the ids it held free again, and the final `session.deleted` a subscriber receives — and the
   scheduler membership (#122): a heartbeat's row, the window that keeps it live (gone at
   exactly the edge), a re-heartbeat refreshing it, removal, and the window's argument check.
+  The per-user usage read (#247) is in the suite too: the start/end pairing that names each
+  request's model, the half-open window (`from` in, `to` out), owner scoping, the `model: null`
+  a request nothing attributes gets, the `(session_id, seq)` order, a rewind's branch left out,
+  and the `RangeError` a window that is not one raises.
 - `postgres/postgres.test.ts` runs both suites against Postgres — the acceptance tests of the
   durable stores — and adds what only a shared store can be asked: concurrent appends from
   two stores, a supplied event id two of them try to take, fencing across stores, a burst that

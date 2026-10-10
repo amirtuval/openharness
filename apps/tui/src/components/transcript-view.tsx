@@ -1,4 +1,4 @@
-import type { TranscriptMessage } from '@openharness/client'
+import type { ModelPriceLookup, TranscriptMessage } from '@openharness/client'
 import { Static, Text } from 'ink'
 import { Fragment } from 'react'
 
@@ -54,15 +54,29 @@ export function TranscriptView({
   messages,
   width,
   currentModel,
+  costOf,
   holdLive,
+  holdAll,
 }: {
   readonly messages: readonly TranscriptMessage[]
   /** How wide the terminal is; the tests draw at a width they can read (see `MessageView`). */
   readonly width?: number | undefined
   /** The model the session runs, for the per-reply metadata lines (issue #208). */
   readonly currentModel?: string | undefined
+  /** The catalog's prices, for what each reply cost (#247); omitted, no cost is drawn. */
+  readonly costOf?: ModelPriceLookup | undefined
   /** The reply to keep live until its metadata arrives (issue #208); usually the last one. */
   readonly holdLive?: string | undefined
+  /**
+   * Keep **every** message live, settling nothing yet (#247).
+   *
+   * A settled message is written once and never redrawn (#208, X2), so a footer that settled
+   * before the prices were known would keep that line for the life of the screen — including
+   * for the replies loaded from history, which are settled the moment they are drawn. While the
+   * rates are still being read the transcript therefore draws everything live, and settles it
+   * the moment the read answers (however it answered).
+   */
+  readonly holdAll?: boolean | undefined
 }) {
   // Only the messages that draw something are laid out as blocks. A reply that has been
   // announced but has not produced a token yet draws nothing at all (`message-view.tsx`), so
@@ -70,10 +84,10 @@ export function TranscriptView({
   // the input section owes the last of them (issue #233), are about the blocks, not about the
   // lines the log happens to hold.
   const blocks = messages.filter(draws)
-  const firstLive = blocks.findIndex((message) => isLive(message, holdLive))
+  const firstLive = holdAll === true ? 0 : blocks.findIndex((message) => isLive(message, holdLive))
   const settled = firstLive === -1 ? blocks : blocks.slice(0, firstLive)
   const live = firstLive === -1 ? [] : blocks.slice(firstLive)
-  const metaLines = replyMetaLines(messages, currentModel)
+  const metaLines = replyMetaLines(messages, currentModel, costOf)
 
   /** The message at `index`, framed by the blank line the transcript owes it, if any. */
   const draw = (message: TranscriptMessage, index: number) => (

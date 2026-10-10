@@ -1,4 +1,4 @@
-import type { TranscriptMessage } from '@openharness/client'
+import type { ModelPriceLookup, TranscriptMessage } from '@openharness/client'
 import { ArrowDown, MessagesSquare } from 'lucide-react'
 
 import { useStickToBottom } from '../../hooks/use-stick-to-bottom'
@@ -34,6 +34,7 @@ export function MessageList({
   messages,
   loading,
   nameOf,
+  costOf,
   working = null,
   onEdit,
   editDisabled = false,
@@ -43,6 +44,8 @@ export function MessageList({
   loading: boolean
   /** The catalog lookup for a model-change marker's display name. */
   nameOf?: ModelNameLookup | undefined
+  /** The catalog's prices, for each reply's cost (#247). */
+  costOf?: ModelPriceLookup | undefined
   /** The state row at the foot of the transcript, or `null` for none ({@link workingState}). */
   working?: WorkingState | null
   /** Rewrite a message the reader wrote (#238): its text goes back in the composer, and
@@ -90,6 +93,7 @@ export function MessageList({
                 key={message.id}
                 message={message}
                 nameOf={nameOf}
+                costOf={costOf}
                 previousModel={previousModels[index]}
                 editDisabled={editDisabled}
                 replacing={replacingFrom !== undefined && message.position > replacingFrom}

@@ -54,6 +54,7 @@ src/
   common.ts             timestamps, metadata, page limits
   constants.ts          route prefix, header names, partition count, partitionOf()
   ids.ts                id prefixes, ULID, generators, parsers, branded id schemas
+  cost.ts               what a pile of tokens costs: usageCost / totalCost (#245, #247)
   pagination.ts         page cursors: `seq` (events) and keyset `key` (agents, sessions)
   errors.ts             the Anthropic error envelope, error types and status codes
   content.ts            message content blocks (text only in v1)
@@ -63,12 +64,13 @@ src/
     model.ts            the model catalog (GET /v1/models) and its entries
     provider-credential.ts  provider credential metadata (write-only) + its endpoints
     session.ts          the session resource + its endpoints
+    usage.ts            the usage surface: totals, cost, per-model and per-day (#247)
     user.ts             the signed-in user: GET /v1/me, /v1/me/preferences, UserIdSchema
   events/
     common.ts           the event vocabulary, the fields every stored event carries, supersedes
     user.ts             user.message (with the #111 model switch), user.interrupt, inputs
     agent.ts            agent.message
-    session.ts          status events, session.error, session.rewind, the session.deleted stream event
+    session.ts          status events, session.error, session.rewind, session.usage, session.deleted
     span.ts             span.model_request_start / _end, model_usage, claims (consumes/model)
     stream.ts           event_start / event_delta: the stored chunks of a reply
     union.ts            StoredEvent, StreamEvent and isStoredEvent()
@@ -85,25 +87,26 @@ Two entry points, named in `package.json`'s `exports`. Both resolve to built out
 
 **Resources**
 
-| export                                                                                                     | what it is                                                                                    |
-| ---------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `AgentSchema` / `Agent`                                                                                    | the `agent` resource (carries a read-only `owner_id`)                                         |
-| `CreateAgentRequestSchema`, `UpdateAgentRequestSchema`                                                     | bodies of `POST /v1/agents`, `POST /v1/agents/{agent_id}`                                     |
-| `ListAgentsQuerySchema`, `ListAgentsResponseSchema`                                                        | `GET /v1/agents`                                                                              |
-| `ModelConfigSchema` / `ModelConfig`                                                                        | `{ id }`, where `id` is a model id `provider/model`                                           |
-| `ModelEntrySchema` / `ModelEntry`, `ProviderCatalogStatusSchema` / `ProviderCatalogStatus`                 | one `GET /v1/models` entry, and one provider's catalog status (epic #92)                      |
-| `ListModelsResponseSchema` / `ListModelsResponse`, `ListModelsQuerySchema` / `ListModelsQuery`             | `GET /v1/models`; `refresh` bypasses the cache (C4)                                           |
-| `SessionSchema` / `Session`, `SessionAgentSchema` / `SessionAgent`                                         | the `session` resource (read-only `owner_id`), its effective config and its optional snapshot |
-| `SessionStatusSchema`, `StopReasonSchema`                                                                  | `idle`/`running`; `{ type: 'end_turn' }`                                                      |
-| `CreateSessionRequestSchema`, `ListSessionsQuerySchema`, `ListSessionsResponseSchema`                      | the sessions endpoints                                                                        |
-| `UserSchema` / `User`, `GetMeResponseSchema` / `GetMeResponse`                                             | the signed-in user; `GET /v1/me`                                                              |
-| `UserIdSchema` / `UserId`                                                                                  | an opaque Better Auth user id; what `owner_id` holds                                          |
-| `UserPreferencesSchema` / `UserPreferences`, `GetPreferencesResponseSchema`, `PutPreferencesRequestSchema` | the per-user default model; `GET`/`PUT /v1/me/preferences` (#111)                             |
-| `DEFAULT_MODEL_PATTERN`                                                                                    | the `provider/model` shape a `default_model` must have                                        |
-| `ProviderCredentialSchema` / `ProviderCredential`, `ProviderCredentialTypeSchema`                          | credential metadata (`api_key` only today); never the secret                                  |
-| `ApiKeyProviderCredentialSchema`, `PutProviderCredentialRequestSchema` / `PutProviderCredentialRequest`    | body of `PUT /v1/provider-credentials/{provider}` (write-only)                                |
-| `ListProviderCredentialsResponseSchema` / `ListProviderCredentialsResponse`                                | `GET /v1/provider-credentials`                                                                |
-| `AGENT_NAME_MAX_LENGTH`, `AGENT_DESCRIPTION_MAX_LENGTH`, `SESSION_TITLE_MAX_LENGTH`, `MAX_INITIAL_EVENTS`  | limits Anthropic documents                                                                    |
+| export                                                                                                     | what it is                                                                                                          |
+| ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `AgentSchema` / `Agent`                                                                                    | the `agent` resource (carries a read-only `owner_id`)                                                               |
+| `CreateAgentRequestSchema`, `UpdateAgentRequestSchema`                                                     | bodies of `POST /v1/agents`, `POST /v1/agents/{agent_id}`                                                           |
+| `ListAgentsQuerySchema`, `ListAgentsResponseSchema`                                                        | `GET /v1/agents`                                                                                                    |
+| `ModelConfigSchema` / `ModelConfig`                                                                        | `{ id }`, where `id` is a model id `provider/model`                                                                 |
+| `ModelEntrySchema` / `ModelEntry`, `ProviderCatalogStatusSchema` / `ProviderCatalogStatus`                 | one `GET /v1/models` entry — with its list price (`ModelCost`) — and one provider's catalog status (epic #92; #247) |
+| `ModelCostSchema` / `ModelCost`                                                                            | a model's price: USD per million tokens, input/output required and the two cache rates nullable (#247)              |
+| `ListModelsResponseSchema` / `ListModelsResponse`, `ListModelsQuerySchema` / `ListModelsQuery`             | `GET /v1/models`; `refresh` bypasses the cache (C4)                                                                 |
+| `SessionSchema` / `Session`, `SessionAgentSchema` / `SessionAgent`                                         | the `session` resource (read-only `owner_id`), its effective config and its optional snapshot                       |
+| `SessionStatusSchema`, `StopReasonSchema`                                                                  | `idle`/`running`; `{ type: 'end_turn' }`                                                                            |
+| `CreateSessionRequestSchema`, `ListSessionsQuerySchema`, `ListSessionsResponseSchema`                      | the sessions endpoints                                                                                              |
+| `UserSchema` / `User`, `GetMeResponseSchema` / `GetMeResponse`                                             | the signed-in user; `GET /v1/me`                                                                                    |
+| `UserIdSchema` / `UserId`                                                                                  | an opaque Better Auth user id; what `owner_id` holds                                                                |
+| `UserPreferencesSchema` / `UserPreferences`, `GetPreferencesResponseSchema`, `PutPreferencesRequestSchema` | the per-user default model; `GET`/`PUT /v1/me/preferences` (#111)                                                   |
+| `DEFAULT_MODEL_PATTERN`                                                                                    | the `provider/model` shape a `default_model` must have                                                              |
+| `ProviderCredentialSchema` / `ProviderCredential`, `ProviderCredentialTypeSchema`                          | credential metadata (`api_key` only today); never the secret                                                        |
+| `ApiKeyProviderCredentialSchema`, `PutProviderCredentialRequestSchema` / `PutProviderCredentialRequest`    | body of `PUT /v1/provider-credentials/{provider}` (write-only)                                                      |
+| `ListProviderCredentialsResponseSchema` / `ListProviderCredentialsResponse`                                | `GET /v1/provider-credentials`                                                                                      |
+| `AGENT_NAME_MAX_LENGTH`, `AGENT_DESCRIPTION_MAX_LENGTH`, `SESSION_TITLE_MAX_LENGTH`, `MAX_INITIAL_EVENTS`  | limits Anthropic documents                                                                                          |
 
 **Events**
 
@@ -368,6 +371,8 @@ column points at the definition in code; the same list appears in the TSDoc ther
 | `model` on `user.message` and its input (#111)                         | `events/user.ts`                                        | Mid-chat model switching (epic #116, U3): a message that carries a `model` also sets the session's current `model` in the same transaction, and the brain uses that for each request. Anthropic's model is the agent's, fixed at session creation.                                                                                                                                                                                                                                                                                    |
 | `session.deleted` — a stream-only event (#111)                         | `events/session.ts`, `events/common.ts`                 | A `DELETE /v1/sessions/{session_id}` removes the session and its log, so the stream that was following it gets one final `session.deleted` (`{ type, session_id }`) before the server closes it — an end state, not an event of the log. The only event type not in `STORED_EVENT_TYPES`.                                                                                                                                                                                                                                             |
 | `session.rewind` (#238)                                                | `events/session.ts`, `events/common.ts`                 | Editing a sent message restarts the conversation from it: the event carries `supersedes: { from_seq, to_seq }` over the tail of the log from the edited `user.message`, replay and the client's transcript skip it, and compaction deletes it after the retention window. The edited text is an ordinary `user.message` appended right behind it, in the same append — and `SendEventsRequestSchema` accepts at most one rewind per batch and only as its first event. Anthropic has no edit: there is no way to take a message back. |
+| `session.usage` (#247)                                                 | `events/session.ts`                                     | The session's running token totals, per model, written after every model request that reported usage. Anthropic has the event — a snapshot of cumulative usage and its tracked list cost — but writes it once per idle, stamps the cost onto it and keeps it flat; here it is per request, carries no cost (cost is computed on read, epic #245) and is broken down by model — each entry with the request count that lets a reader count unpriced requests — because an openharness session may switch models mid-conversation.      |
+| `cost` on a model entry, and the usage endpoints (#247)                | `resources/model.ts`, `resources/usage.ts`              | The price of a model, and what a session or a user spent. Anthropic has no per-user usage endpoint and no price on its catalog: its cost figures are platform-computed and stored. openharness computes cost from the tokens the log holds and the vendored rates, on the read that asked for it.                                                                                                                                                                                                                                     |
 | `GET`/`PUT /v1/me/preferences` (#111)                                  | `resources/user.ts`                                     | A per-user default model (epic #116, U1), stored server-side and shared by the web app and `oh`. `default_model` is `provider/model`-shaped or `null`; the id does not have to be in the catalog. Anthropic has no per-user settings: its API is account-scoped by the caller's key.                                                                                                                                                                                                                                                  |
 | `DELETE /v1/sessions/{session_id}` → 204 (#111)                        | `resources/session.ts`                                  | Hard delete of a chat (epic #116, U5): owner-scoped (another user's session is a 404) and irreversible — it removes the session and its whole log. The explicit exception to the immutable log besides compaction; open streams receive `session.deleted` and close. Anthropic has no session-delete route.                                                                                                                                                                                                                           |
 
@@ -437,6 +442,37 @@ Packages consume each other through built output only (`exports` → `dist/`); E
 `import-x/no-relative-packages` (in the shared config) rejects a relative import that leaves
 the package, and `yarn check:deps` at the repo root enforces the allowed `@openharness/*`
 dependency table.
+
+## Usage and cost (#247)
+
+The other half of the protocol that is not a wire shape: **what a pile of tokens costs**. Cost
+is never stored — the log holds tokens, and the money is derived on the read that asked for it —
+so the arithmetic has to live somewhere both the server and the frontends can reach, and
+`src/cost.ts` is that place. It is pure (no I/O, no state), which is what lets it sit in this
+package beside the schemas it prices:
+
+- **`usageCost(usage, cost)`** — the four counters times the model's rates, per million tokens.
+  A model with no price at all answers `null`; so does one whose cache rate nobody published
+  when the request spent cache tokens, because charging nothing for tokens that were really
+  spent would understate the bill. A counter of zero costs zero whatever the rate is.
+- **`totalCost(costs)`** — a `TotalCost`: `cost`, the sum of the parts that could be priced (or
+  `null` when none could), and `unpriced_requests`, how many were left out (#247, decided
+  2026-10-09). One request nobody prices no longer makes a whole total unknown; the known part
+  is the money and the unknown part is named, and neither is guessed. An empty set is `null`
+  with nothing counted, not `0`.
+
+`resources/usage.ts` is the wire half: the totals, the per-model breakdown, the per-day cut and
+the query the per-user route takes. Every total carries the two fields of `TotalCostSchema` —
+`cost`, a `MoneySchema` (a non-negative number of dollars, or `null` for "unknown", the only way
+this package says so), and `unpriced_requests` — as siblings, so a client renders `$1.23 + 4
+unpriced` and reserves `—` for a total with nothing priced. `ModelCost` itself lives on
+`resources/model.ts`, because a price is a property of a model entry (the catalog is where a
+client gets its rates); `SessionModelUsage` (`events/session.ts`) carries the per-model `requests`
+count beside its tokens, which is what lets a reader of the running `session.usage` totals count
+unpriced requests the way the routes do without storing any money.
+
+The semantics — local days, ownership, what a rewind does to a bill — are in
+[`docs/api.md`](../../docs/api.md#usage-and-cost) and the server's `AGENTS.md`.
 
 ## Testing
 

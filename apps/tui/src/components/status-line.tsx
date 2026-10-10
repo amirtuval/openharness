@@ -1,3 +1,4 @@
+import type { ModelPriceLookup } from '@openharness/client'
 import type { ModelEntry, SessionStatus } from '@openharness/protocol'
 import { Text, useStdout } from 'ink'
 import { useEffect, useState } from 'react'
@@ -66,6 +67,19 @@ export interface StatusLineProps {
   readonly status: SessionStatus
   /** Whether the history and the stream are in place yet. */
   readonly phase: ChatViewState['phase']
+  /**
+   * What the session has spent (epic #245, A2; issue #247), already formatted — `$0.0042`,
+   * `$1.23 + 4 unpriced`, or `—` when nothing in the session could be priced. Omitted when there
+   * is nothing to say: a session that has not answered yet, or a caller with no catalog to price
+   * with.
+   */
+  readonly cost?: string | undefined
+  /**
+   * The same money for a terminal with no room for the words — `$1.23+` — used only when the
+   * full line does not fit and the compact one does. Omitted alongside {@link cost} when there is
+   * nothing to say.
+   */
+  readonly costCompact?: string | undefined
   /** Extra context, e.g. that this is the dev fake. */
   readonly banner?: string | undefined
   /** When the turn in progress started, in epoch milliseconds; `null` when none is running. */
@@ -177,11 +191,17 @@ export function statusSpans(
     readonly theme: TerminalTheme
   },
 ): Span[] {
-  return fitSegments(
-    lineSegments(props, options.field, options.frame),
-    options.columns,
-    options.theme,
-  )
+  const full = lineSegments(props, options.field, options.frame, false)
+  // A cost that could not price every request carries a count the line may not have room for:
+  // try the compact spelling (`$1.23+`) before letting `fitSegments` drop the money whole, so a
+  // tight terminal shortens what it shows rather than losing it.
+  if (props.costCompact !== undefined && lineWidth(full) > options.columns) {
+    const compact = lineSegments(props, options.field, options.frame, true)
+    if (lineWidth(compact) < lineWidth(full)) {
+      return fitSegments(compact, options.columns, options.theme)
+    }
+  }
+  return fitSegments(full, options.columns, options.theme)
 }
 
 /** What the status field is saying, and how loudly (issue #208). */
@@ -287,6 +307,20 @@ export function modelLabel(modelId: string, catalog: readonly ModelEntry[]): str
   return catalog.find((entry) => entry.id === modelId)?.name ?? modelId
 }
 
+/**
+ * The catalog's prices, by model id (epic #245, A2; issue #247).
+ *
+ * The catalog is where prices reach the CLI — each entry carries the model's list rates — so
+ * this is the lookup the status line's session total and every reply's footer are computed
+ * with. A model it does not carry has no price, and its cost reads `—`: the CLI never invents
+ * a rate, and a chat that never read the catalog (one opened on `--model`, before the
+ * background read lands) simply shows no cost at all.
+ */
+export function modelPriceLookup(catalog: readonly ModelEntry[]): ModelPriceLookup {
+  const byId = new Map(catalog.map((entry) => [entry.id, entry.cost]))
+  return (modelId) => byId.get(modelId) ?? null
+}
+
 /** One part of the line, with what it takes to drop it. */
 interface Segment {
   /** The span as it will be drawn, spinner included. */
@@ -298,20 +332,28 @@ interface Segment {
 /**
  * How much each part of the line is worth when there is not room for all of it.
  *
- * The status is the line's reason to exist; the model is what the chat *is*; the session is a
- * handle nobody needs at a glance (and which the CLI prints in full on the way out); and the
- * banner is for whoever is developing the CLI.
+ * The status is the line's reason to exist; the model is what the chat *is*; what it has cost
+ * so far is the next thing a reader looks for (#247) and goes when the line is tight; the
+ * session is a handle nobody needs at a glance (and which the CLI prints in full on the way
+ * out); and the banner is for whoever is developing the CLI.
  */
-const PRIORITY = { banner: 1, session: 2, who: 3, status: 4 } as const
+const PRIORITY = { banner: 1, session: 2, who: 3, cost: 3, status: 4 } as const
 
 /** The line's parts, in the order they are drawn and with the weight they carry. */
-function lineSegments(props: StatusLineProps, field: StatusField, frame: string): Segment[] {
+function lineSegments(
+  props: StatusLineProps,
+  field: StatusField,
+  frame: string,
+  compactCost: boolean,
+): Segment[] {
   const who = props.agentName === undefined ? props.model : `${props.agentName} · ${props.model}`
   const status = field.spinner ? `${frame} ${field.text}` : field.text
+  const cost = compactCost ? (props.costCompact ?? props.cost) : props.cost
 
   const segments: Segment[] = [
     { span: chrome(who), priority: PRIORITY.who },
     { span: chrome(shortSessionId(props.sessionId)), priority: PRIORITY.session },
+    ...(cost === undefined ? [] : [{ span: chrome(cost), priority: PRIORITY.cost }]),
     {
       span: { text: status, color: toneColor(field.tone), dim: field.tone === 'plain' },
       priority: PRIORITY.status,

@@ -71,6 +71,7 @@ import {
   decodeSeqPage,
   effectiveSessionConfig,
   pageSize,
+  usageWindowOf,
 } from '../inputs'
 import type {
   AppendableEvent,
@@ -79,7 +80,9 @@ import type {
   CreateSessionOptions,
   ListAgentsOptions,
   ListEventsOptions,
+  ListModelRequestsOptions,
   ListSessionsOptions,
+  ModelRequestUsage,
   OwnerScope,
   UnscopedListEventsOptions,
   PartitionFence,
@@ -107,6 +110,7 @@ import {
   encodeStoredNotification,
   eventFromRow,
   isPartitionChannel,
+  modelRequestFromRow,
   partitionChannel,
   decodePartitionNotification,
   decodeSessionDeletedNotification,
@@ -648,6 +652,50 @@ export class PostgresSessionStore implements SessionStore {
     return openSpan === null
       ? { state: 'unfinished', openSpan: null }
       : { state: 'running', openSpan }
+  }
+
+  // ------------------------------------------------------------- usage reads
+
+  async listModelRequests(options: ListModelRequestsOptions): Promise<ModelRequestUsage[]> {
+    const { fromMs, toMs } = usageWindowOf(options)
+    // One query for the whole answer: the owner's sessions, their request ends inside the
+    // window, and the model each request ran on — read from the span start
+    // `model_request_start_id` names, joined by that id. `sessions.owner_id` is what makes it
+    // owner-scoped; another user's rows cannot join in.
+    //
+    // A request a rewind replaced is left out, exactly as replay leaves it out (#238). A
+    // `span.model_request_end` is never a chunk, so only a rewind's range can cover one — and
+    // the join is a `left` one, so an end whose start the log does not have still answers, with
+    // `model: null`.
+    const rows = await this.#db
+      .selectFrom('events as e')
+      .innerJoin('sessions as se', 'se.id', 'e.session_id')
+      .leftJoin('events as start', (join) =>
+        join.on(sql<SqlBool>`start.id = e.payload ->> 'model_request_start_id'`),
+      )
+      .select(sql<unknown>`e.payload -> 'model_usage'`.as('model_usage'))
+      // The column is nullable only because a queued user event leaves it NULL; a span end
+      // never does, and the window's `>=` is what excludes one that somehow were — so the
+      // selected value is an instant, and the raw select says so.
+      .select(sql<Date>`e.processed_at`.as('processed_at'))
+      .select(sql<string | null>`start.payload ->> 'model'`.as('model'))
+      .where('se.owner_id', '=', options.ownerId)
+      .where('e.type', '=', EVENT_TYPES.modelRequestEnd)
+      .where('e.processed_at', '>=', instant(fromMs))
+      .where('e.processed_at', '<', instant(toMs))
+      .where(
+        sql<SqlBool>`not exists (
+        select 1
+          from event_supersessions s
+         where s.session_id = e.session_id
+           and s.kind = ${REWIND_KIND}
+           and e.seq between s.from_seq and s.to_seq
+      )`,
+      )
+      .orderBy('e.session_id', 'asc')
+      .orderBy('e.seq', 'asc')
+      .execute()
+    return rows.map(modelRequestFromRow)
   }
 
   async compact(options: CompactOptions): Promise<number> {

@@ -69,6 +69,7 @@ import {
   decodeSeqPage,
   effectiveSessionConfig,
   pageSize,
+  usageWindowOf,
 } from './inputs'
 import type {
   AppendableEvent,
@@ -79,7 +80,9 @@ import type {
   CreateSessionOptions,
   ListAgentsOptions,
   ListEventsOptions,
+  ListModelRequestsOptions,
   ListSessionsOptions,
+  ModelRequestUsage,
   OwnerScope,
   UnscopedListEventsOptions,
   PartitionFence,
@@ -469,6 +472,48 @@ export class InMemorySessionStore implements SessionStore {
         ? { state: state.state, openSpan: null }
         : { state: state.state, openSpan: this.#share(openSpan) },
     )
+  }
+
+  // ------------------------------------------------------------- usage reads
+
+  listModelRequests(options: ListModelRequestsOptions): Promise<ModelRequestUsage[]> {
+    const { fromMs, toMs } = usageWindowOf(options)
+    const requests: ModelRequestUsage[] = []
+    const sessions = [...this.#sessions.values()]
+      .filter((record) => matchesOwner(record.session, options))
+      .sort((left, right) => compareIds(left.session.id, right.session.id))
+    for (const record of sessions) {
+      const ranges = this.#supersessions.get(record.session.id)
+      // The model a request ran on is on its own span start, so the log is walked once for the
+      // starts and once for the ends — the pair the Postgres read joins on
+      // `model_request_start_id`. A start the log never had leaves the request's model `null`.
+      const modelOf = new Map<EventId, string | undefined>()
+      for (const entry of record.events) {
+        if (entry.event.type === EVENT_TYPES.modelRequestStart) {
+          modelOf.set(entry.event.id, entry.event.model)
+        }
+      }
+      for (const entry of record.events) {
+        const event = entry.event
+        if (event.type !== EVENT_TYPES.modelRequestEnd) {
+          continue
+        }
+        const atMs = new Date(event.processed_at).getTime()
+        // The window is half-open, and what a recorded range covers is not read — a request a
+        // rewind replaced is not billed (#238), exactly as replay leaves it out.
+        if (atMs < fromMs || atMs >= toMs || isSuperseded(event, ranges)) {
+          continue
+        }
+        requests.push(
+          deepFreeze({
+            model: modelOf.get(event.model_request_start_id) ?? null,
+            usage: { ...event.model_usage },
+            processed_at: event.processed_at,
+          }),
+        )
+      }
+    }
+    return resolved(requests)
   }
 
   compact(options: CompactOptions): Promise<number> {
@@ -926,7 +971,7 @@ export class InMemoryCredentialStore implements CredentialStore {
       return resolved([])
     }
     const metadata = [...stored.values()]
-      .sort((left, right) => compareProviders(left.provider, right.provider))
+      .sort((left, right) => compareIds(left.provider, right.provider))
       .map((record) => deepFreeze(metadataOf(record)))
     return resolved(metadata)
   }
@@ -972,8 +1017,15 @@ function metadataOf(record: SealedProviderCredential): ProviderCredential {
   return metadata
 }
 
-/** The `provider` ordering `list` promises: byte order, the `C` collation the SQL uses. */
-function compareProviders(left: string, right: string): number {
+/**
+ * Byte order for two ids — the `C` collation the SQL orders by.
+ *
+ * The `provider` ordering the credential `list` promises, and the session ordering
+ * `listModelRequests` reads a user's requests in: in both places the in-memory store has to
+ * answer in the order the Postgres store's `order by` does, and the two agree on this one
+ * comparison.
+ */
+function compareIds(left: string, right: string): number {
   if (left === right) {
     return 0
   }

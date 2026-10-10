@@ -181,6 +181,7 @@ databases while applying to new ones. Add a new file instead.
 | `0016_user_preferences.sql`        | `user_preferences`, one row per user: the stored `default_model`, or NULL (#111)                                      |
 | `0017_scheduler_instances.sql`     | `scheduler_instances`, one row per live scheduler instance: `instance_id`, `last_seen` (#122)                         |
 | `0018_credential_key_provider.sql` | `key_provider` on `provider_credentials`: which provider wrapped a credential's data key (#150)                       |
+| `0021_model_request_end_usage.sql` | the partial index behind `listModelRequests`: `(session_id, processed_at)` where the type is a request end (#247)     |
 
 To run them outside an application:
 

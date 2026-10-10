@@ -318,6 +318,10 @@ function entryOf(
     name: firstNonEmpty(raw.name, registry?.name, `${provider}/${raw.id}`),
     context_window: raw.contextWindow ?? registry?.contextWindow ?? null,
     max_output_tokens: raw.maxOutput ?? registry?.maxOutput ?? null,
+    // Prices are the registry's alone (epic #245, A2): no provider's list-models payload
+    // carries what it charges, and a model models.dev does not price has `null` here rather
+    // than a guess — its requests report tokens and no cost.
+    cost: registry?.cost ?? null,
     source,
   }
 }

@@ -122,6 +122,74 @@ export function formatCount(value: number): string {
   return COUNT_FORMAT.format(value)
 }
 
+/**
+ * What something cost, in dollars — or `—` when the cost is not known (epic #245, #247).
+ *
+ * The em dash is not a fallback for a failure: it is the answer for a model nobody publishes a
+ * price for, and the one thing this function must never do is invent a number. A cost that is
+ * known is written with as much precision as it needs and no more: a reply that cost a tenth of
+ * a cent is `$0.0001`-shaped, not `$0.00`, and a dollar-scale total is cents.
+ */
+export function formatCost(cost: number | null): string {
+  if (cost === null) {
+    return '—'
+  }
+  if (cost === 0) {
+    return '$0.00'
+  }
+  if (cost < 0.0001) {
+    // Below the precision the line has room for: say so rather than rounding to zero, which
+    // would read as "free".
+    return '<$0.0001'
+  }
+  if (cost < 0.01) {
+    return `$${trimZeros(cost.toFixed(4))}`
+  }
+  if (cost < 1) {
+    return `$${trimZeros(cost.toFixed(3))}`
+  }
+  return `$${(Math.round(cost * 100) / 100).toFixed(2)}`
+}
+
+/** `0.0240` → `0.024`, `0.0100` → `0.01`: trailing zeros say nothing about what was spent. */
+function trimZeros(value: string): string {
+  const trimmed = value.replace(/0+$/, '')
+  return trimmed.endsWith('.') ? `${trimmed}0` : trimmed
+}
+
+/**
+ * A total's money, with the part nobody could price named beside it (epic #245, A2; #247,
+ * decided 2026-10-09).
+ *
+ * A total **sums the priced requests and counts the unpriced ones**: `$1.23 + 4 unpriced`. One
+ * request with no published price no longer turns a whole session's total into `—`; the known
+ * part is the money and the unknown part is the count, and neither is guessed. A total with
+ * nothing priced is `—` alone — there is no number to qualify — and a fully priced one is just
+ * the number.
+ */
+export function formatCostTotal(total: {
+  readonly cost: number | null
+  readonly unpriced_requests: number
+}): string {
+  if (total.cost === null) {
+    return '—'
+  }
+  if (total.unpriced_requests === 0) {
+    return formatCost(total.cost)
+  }
+  return `${formatCost(total.cost)} + ${formatCount(total.unpriced_requests)} unpriced`
+}
+
+/**
+ * What `unpriced_requests` means, as one sentence — the explanation a title or a tooltip shows,
+ * so "+ 4 unpriced" is never a riddle.
+ */
+export function unpricedExplanation(unpricedRequests: number): string {
+  return unpricedRequests === 1
+    ? '1 request had no published price and is not in the total.'
+    : `${formatCount(unpricedRequests)} requests had no published price and are not in the total.`
+}
+
 /** The last path segment of a resource id, for a compact label. */
 export function shortId(id: string): string {
   const [prefix = '', suffix = ''] = id.split('_')

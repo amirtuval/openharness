@@ -1,14 +1,16 @@
-import { providerName, type Client, type TranscriptError } from '@openharness/client'
+import { providerName, selectSessionUsage, sessionCost } from '@openharness/client'
+import type { Client, TranscriptError } from '@openharness/client'
 import type { ModelEntry } from '@openharness/protocol'
 import { Box, Text, useApp, useInput, useStdout } from 'ink'
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 
 import { ModelPicker } from '../components/model-picker'
 import { NoticeView } from '../components/notice-view'
 import { PromptInput } from '../components/prompt-input'
 import { usePromptSlot } from '../components/prompt-slot'
 import { ProviderSetup } from '../components/provider-setup'
-import { InputRule, modelLabel, StatusLine } from '../components/status-line'
+import { formatCostTotal } from '../components/reply-meta'
+import { InputRule, modelLabel, modelPriceLookup, StatusLine } from '../components/status-line'
 import { lastDrawn, TranscriptView } from '../components/transcript-view'
 import type { PromptHistory } from '../history'
 import type { ErrorContext } from '../errors'
@@ -92,12 +94,56 @@ export function ChatScreen({
   // whatever a `/model` pick reads later through the slot. Nothing is fetched for this on
   // its own — a chat opened on `--model` or a stored default must not pay for a catalog it
   // does not need.
-  const [catalog, setCatalog] = useState<readonly ModelEntry[]>(known ?? [])
+  const [catalog, setCatalog] = useState<readonly ModelEntry[] | null>(known ?? null)
   const { stdout } = useStdout()
   const { suspendTerminal } = useApp()
   // A clear is in flight. A second Ctrl+L while the first is being handed over has nowhere
   // to go — Ink refuses to suspend a suspended terminal — so it is dropped instead.
   const clearing = useRef(false)
+
+  /**
+   * Read the catalog once, in the background, for the two things beyond the picker it is good
+   * for (#247): the **prices** a cost is computed with, and the display names the status line
+   * prefers over the raw id.
+   *
+   * It is deliberately not awaited, and a failure is silent. A chat opened on `--model` or on
+   * a stored default starts immediately — that is the point of never paying for a catalog up
+   * front — and a chat that cannot read one still chats: it just shows no cost.
+   *
+   * `null` is "not read yet", which is not the same statement as "read, and it lists nothing":
+   * nothing is priced until the list arrives (see {@link costOf}), so a screen that has not
+   * read a catalog shows no costs rather than showing every one of them as unknown.
+   */
+  useEffect(() => {
+    if (known !== undefined) return undefined
+    let cancelled = false
+    void session
+      .listModels()
+      .then((models) => {
+        if (!cancelled) setCatalog(models)
+      })
+      .catch(() => {
+        // A read that failed is still an answered question: the transcript settles (see
+        // `holdAll`), and a cost it cannot compute reads `—` rather than never arriving.
+        if (!cancelled) setCatalog([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [session, known])
+
+  // The catalog's prices: what every cost on screen — a reply's, the session's — is computed
+  // with. A model the catalog does not carry has none, and its cost reads `—`; a catalog that
+  // has not been read yet leaves the costs off entirely, because "—" would be a claim about a
+  // price nobody looked up.
+  //
+  // A reply that settles before the list arrives therefore keeps whatever line it had — Ink's
+  // `<Static>` writes a settled message once (#208, X2) — while the status line, which is
+  // live, picks the cost up the moment it can.
+  const costOf = useMemo(
+    () => (catalog === null ? undefined : modelPriceLookup(catalog)),
+    [catalog],
+  )
 
   // A model-first session has no agent to name (issues #93, #95): the status line shows the
   // model that session runs. A pick that has not been sent yet is the model it *will* run,
@@ -108,8 +154,24 @@ export function ChatScreen({
   // (issue #208) — and the model a pending `/model` pick *will* run, said so.
   const model =
     view.pendingModel === null
-      ? modelLabel(currentModel, catalog)
-      : `${modelLabel(view.pendingModel, catalog)} (next message)`
+      ? modelLabel(currentModel, catalog ?? [])
+      : `${modelLabel(view.pendingModel, catalog ?? [])} (next message)`
+
+  // What the session has spent (#247), priced from the transcript's own totals — the running
+  // ones the log reported, or the ones derived from its replies for a session stored before
+  // they existed. Nothing until a request has run: a chat that has not answered has no cost
+  // to report rather than a `$0.00` that claims its model is free.
+  //
+  // The total sums the requests the catalog could price and counts the rest (`$1.23 + 4
+  // unpriced`, decided 2026-10-09); `—` is reserved for a session where nothing could be priced.
+  // The compact form is what the status line falls back to when the terminal has no room for
+  // the words: `$1.23+`.
+  const usage = selectSessionUsage(view.transcript)
+  const costTotal =
+    costOf === undefined || usage.models.length === 0 ? undefined : sessionCost(usage, costOf)
+  const cost = costTotal === undefined ? undefined : formatCostTotal(costTotal)
+  const costCompact =
+    costTotal === undefined ? undefined : formatCostTotal(costTotal, { compact: true })
 
   // A turn the server is retrying says so in the status line rather than in a notice of its
   // own (#208) — one line, not two about the same thing. An error that outlives its turn,
@@ -283,7 +345,14 @@ export function ChatScreen({
       <TranscriptView
         messages={view.transcript.messages}
         currentModel={currentModel}
+        costOf={costOf}
+        // A reply settles into Ink's static output once and never redraws (#208, X2), so it is
+        // held live until *everything* its footer needs has arrived: its own metadata, and —
+        // while the prices are still being read (#247) — the rates that footer's cost is
+        // computed from. That second half is `holdAll`: it covers the replies loaded from
+        // history too, which would otherwise settle uncosted the instant they are drawn.
         holdLive={view.awaitingMetaId ?? undefined}
+        holdAll={catalog === null}
       />
       {hasNotice && (
         <>
@@ -302,6 +371,8 @@ export function ChatScreen({
         sessionId={session.session.id}
         status={view.transcript.status}
         phase={view.phase}
+        cost={cost}
+        costCompact={costCompact}
         banner={banner}
         runningSince={view.runningSince}
         lastTextAt={view.lastTextAt}

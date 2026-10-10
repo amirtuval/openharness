@@ -16,10 +16,12 @@ import type {
   SessionDeletedEvent,
   SessionError,
   SessionErrorEvent,
+  SessionModelUsage,
   SessionRewindEvent,
   SessionStatusIdleEvent,
   SessionStatusRescheduledEvent,
   SessionStatusRunningEvent,
+  SessionUsageEvent,
   StoredEvent,
   StoredEventDelta,
   StoredEventStart,
@@ -189,6 +191,9 @@ export function makeModelEntry(overrides: Partial<ModelEntry> = {}): ModelEntry 
     name: 'Claude Sonnet 5',
     context_window: 200_000,
     max_output_tokens: 64_000,
+    // The real rates for this id, so a test that prices bytes with them asserts something
+    // true of the model the entry names (#247). Pass `cost: null` for an unpriced model.
+    cost: { input: 2, output: 10, cache_read: 0.2, cache_write: 2.5 },
     source: 'provider',
   }
   return { ...entry, ...overrides }
@@ -428,6 +433,44 @@ export function makeModelRequestEnd(
     model_request_start_id: start.id,
     model_usage: { ...FIXTURE_MODEL_USAGE },
     is_error: null,
+  }
+  return { ...event, ...overrides }
+}
+
+// ------------------------------------------------------- session usage (#247)
+
+/**
+ * A stored `session.usage`: the session's running totals, one entry per model it has run.
+ *
+ * The counters beside the breakdown are **derived from it**, so the fixture always satisfies the
+ * schema's own rule that the two agree — a test that wants the totals to differ from the sum of
+ * the models has to build the event by hand, which is exactly the case the schema refuses.
+ *
+ * @param models one entry per model, its running totals for the session
+ * @param overrides fields to replace on the event
+ */
+export function makeSessionUsage(
+  models: readonly SessionModelUsage[] = [
+    { model: 'anthropic/claude-sonnet-5', usage: { ...FIXTURE_MODEL_USAGE }, requests: 1 },
+  ],
+  overrides: Partial<Omit<SessionUsageEvent, 'models'>> = {},
+): SessionUsageEvent {
+  const sum = (pick: (usage: ModelUsage) => number): number =>
+    models.reduce((total, entry) => total + pick(entry.usage), 0)
+  const event: SessionUsageEvent = {
+    id: newEventId(),
+    type: 'session.usage',
+    seq: takeSeq(),
+    processed_at: fixtureTimestamp(),
+    input_tokens: sum((usage) => usage.input_tokens),
+    output_tokens: sum((usage) => usage.output_tokens),
+    cache_creation_input_tokens: sum((usage) => usage.cache_creation_input_tokens),
+    cache_read_input_tokens: sum((usage) => usage.cache_read_input_tokens),
+    models: models.map((entry) => ({
+      model: entry.model,
+      usage: { ...entry.usage },
+      requests: entry.requests,
+    })),
   }
   return { ...event, ...overrides }
 }

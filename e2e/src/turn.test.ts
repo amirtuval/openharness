@@ -129,11 +129,15 @@ describe('a full turn', () => {
       EVENT_TYPES.sessionStatusRunning,
       EVENT_TYPES.modelRequestStart,
       EVENT_TYPES.agentMessage,
+      // The running totals ride in the span end's own append (#247), so the full turn is eight
+      // events with the chunks compacted away.
       EVENT_TYPES.modelRequestEnd,
+      EVENT_TYPES.sessionUsage,
       EVENT_TYPES.sessionStatusIdle,
     ])
     // seq 4 is the reply's `event_start`, 5.. its deltas; the message supersedes them all.
     const messageSeq = 3 + MOCK_ECHO_CHUNKS + 2
+    // …and the running totals ride in the span end's own append, one `seq` behind it (#247).
     expect(log.map((event) => event.seq)).toEqual([
       1,
       2,
@@ -141,6 +145,7 @@ describe('a full turn', () => {
       messageSeq,
       messageSeq + 1,
       messageSeq + 2,
+      messageSeq + 3,
     ])
     expect(log.every((event) => event.processed_at !== null)).toBe(true)
 
@@ -212,6 +217,8 @@ describe('a full turn', () => {
       EVENT_TYPES.sessionStatusRunning,
       EVENT_TYPES.modelRequestStart,
       EVENT_TYPES.userInterrupt,
+      // An interrupted request adds no running totals: it closes its span with zero usage and
+      // nothing to add (#247).
       EVENT_TYPES.agentMessage,
       EVENT_TYPES.modelRequestEnd,
       EVENT_TYPES.sessionStatusIdle,
@@ -388,6 +395,8 @@ describe('a full turn', () => {
       EVENT_TYPES.sessionStatusRunning,
       EVENT_TYPES.userMessage,
       EVENT_TYPES.modelRequestStart,
+      // An interrupted request adds no running totals: it closes its span with zero usage and
+      // nothing to add (#247).
       EVENT_TYPES.agentMessage,
       EVENT_TYPES.modelRequestEnd,
       EVENT_TYPES.sessionStatusIdle,

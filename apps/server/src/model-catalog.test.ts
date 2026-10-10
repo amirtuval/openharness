@@ -321,6 +321,9 @@ describe('GET /v1/models', () => {
             contextWindow: 1047576,
             maxOutput: 32768,
             chat: true,
+            // The price is the registry's too (#247): a client prices a reply itself with what
+            // the catalog hands it, so the join is where a rate has to arrive.
+            cost: { input: 2, output: 8, cache_read: 0.5, cache_write: null },
           },
           // The registry says this one cannot chat, so it is dropped even though its name
           // would pass the heuristic.
@@ -341,6 +344,7 @@ describe('GET /v1/models', () => {
       name: 'GPT-4.1',
       context_window: 1047576,
       max_output_tokens: 32768,
+      cost: { input: 2, output: 8, cache_read: 0.5, cache_write: null },
       source: 'provider',
     })
     // A model neither side knows is still listed: never hide a usable chat model.
@@ -348,6 +352,9 @@ describe('GET /v1/models', () => {
       name: 'openai/custom-model',
       context_window: null,
       max_output_tokens: null,
+      // A model the registry does not price keeps its tokens and reports no cost — `null`, and
+      // never a guessed rate.
+      cost: null,
       source: 'provider',
     })
   })

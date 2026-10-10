@@ -3,6 +3,7 @@ import type {
   EventId,
   ModelUsage,
   SessionError,
+  SessionModelUsage,
   SpanError,
   Supersedes,
 } from '@openharness/protocol'
@@ -123,6 +124,39 @@ export function spanEnd(
     ...(error === undefined ? {} : { error }),
     ...(supersedes === undefined ? {} : { supersedes }),
     ...(consumes === undefined || consumes.length === 0 ? {} : { consumes: [...consumes] }),
+  }
+}
+
+/**
+ * The session's running totals, after a request that reported usage (epic #245, A2; #247).
+ *
+ * Written by the brain rather than derived by the reader: the fold over the log's spans is
+ * something the writer already has in hand, and storing it means a client watching a long turn
+ * reads the session's cost off the stream instead of re-deriving it from every span end.
+ *
+ * It is **cumulative**, not per request — `models` is the session's whole history per model, each
+ * entry with the token counters and how many requests produced them. It carries no cost: cost is
+ * computed when it is read, from these tokens and the model catalog's prices, and is never written
+ * into the log (epic #245). The request counts are a fact about the log rather than about money —
+ * they say nothing about prices — which is what lets a reader of the running totals count the
+ * requests a model nobody prices leaves unpriced (#247).
+ *
+ * @param models the session's tokens per model, as {@link usageByModel} folds them
+ */
+export function sessionUsage(models: readonly SessionModelUsage[]): AppendableEvent {
+  const sum = (pick: (usage: ModelUsage) => number): number =>
+    models.reduce((total, entry) => total + pick(entry.usage), 0)
+  return {
+    type: EVENT_TYPES.sessionUsage,
+    input_tokens: sum((usage) => usage.input_tokens),
+    output_tokens: sum((usage) => usage.output_tokens),
+    cache_creation_input_tokens: sum((usage) => usage.cache_creation_input_tokens),
+    cache_read_input_tokens: sum((usage) => usage.cache_read_input_tokens),
+    models: models.map((entry) => ({
+      model: entry.model,
+      usage: { ...entry.usage },
+      requests: entry.requests,
+    })),
   }
 }
 

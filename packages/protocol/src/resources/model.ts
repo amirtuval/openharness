@@ -26,6 +26,32 @@ import { TimestampSchema } from '../common'
  */
 
 /**
+ * One model's list price: US dollars per **million tokens**, as models.dev publishes it.
+ *
+ * `input` and `output` are always there — a model cannot be priced at all without them — and the
+ * two cache rates are `null` when the registry does not carry them, which is common (models.dev
+ * has `cache_write` for Anthropic and almost nobody else). A `null` rate is not "free": nothing
+ * spends cache tokens at a rate nobody published, and
+ * {@link usageCost} answers "unknown" rather than zero for a request that did.
+ *
+ * // extension: Anthropic's model catalog carries no price at all — its usage figures are
+ * platform-computed and stored. openharness computes cost when it is read, from the tokens the
+ * log holds and these rates, so the rates are what a client needs to price a reply itself.
+ */
+export const ModelCostSchema = z.object({
+  /** USD per million input tokens. */
+  input: z.number().nonnegative(),
+  /** USD per million output tokens. */
+  output: z.number().nonnegative(),
+  /** USD per million tokens read from the prompt cache, when the registry has a rate. */
+  cache_read: z.number().nonnegative().nullable(),
+  /** USD per million tokens written to the prompt cache, when the registry has a rate. */
+  cache_write: z.number().nonnegative().nullable(),
+})
+
+export type ModelCost = z.infer<typeof ModelCostSchema>
+
+/**
  * One chat model the caller can use.
  *
  * `id` is the model id an agent's `model.id` takes, `provider/model`, and
@@ -42,6 +68,16 @@ export const ModelEntrySchema = z.object({
   context_window: z.number().int().nonnegative().nullable(),
   /** The largest output the model accepts, when it is known; `null` when it is not. */
   max_output_tokens: z.number().int().nonnegative().nullable(),
+  /**
+   * // extension: the model's list price, when the registry has one, and `null` when it does
+   * not (epic #245; issue #247).
+   *
+   * It is what a client prices a reply with — the reply's own tokens times these rates — so a
+   * session's cost is readable without a second request and without the server storing it. A
+   * model whose price the registry lacks keeps its tokens and reports no cost: `null` here is
+   * what turns into "—" in a UI, and never into an estimate.
+   */
+  cost: ModelCostSchema.nullable(),
   /**
    * // extension: where this entry's listing came from — `provider` when the provider's own
    * list carried it, `registry` when it came from the registry alone (C3).

@@ -186,7 +186,7 @@ export function createSessionsResource(transport: Transport): SessionsResource {
     get(sessionId, options) {
       return transport.json(SessionSchema, {
         method: 'GET',
-        path: `${path}/${sessionId}`,
+        path: sessionPath(sessionId),
         signal: options?.signal,
       })
     },
@@ -203,13 +203,22 @@ export function createSessionsResource(transport: Transport): SessionsResource {
     delete(sessionId, options) {
       return transport.noContent({
         method: 'DELETE',
-        path: `${path}/${sessionId}`,
+        path: sessionPath(sessionId),
         signal: options?.signal,
       })
     },
 
     events: createSessionEventsResource(transport),
   }
+}
+
+/**
+ * The path of a session resource: `GET` here to read it, `DELETE` here to remove it.
+ *
+ * @param sessionId the `sesn_` id
+ */
+export function sessionPath(sessionId: string): string {
+  return `${API_VERSION_PREFIX}/sessions/${sessionId}`
 }
 
 /**
@@ -221,7 +230,7 @@ export function createSessionsResource(transport: Transport): SessionsResource {
  * @param sessionId the `sesn_` id
  */
 export function sessionEventsPath(sessionId: string): string {
-  return `${API_VERSION_PREFIX}/sessions/${sessionId}/events`
+  return `${sessionPath(sessionId)}/events`
 }
 
 /** Build the events sub-resource over a transport. */

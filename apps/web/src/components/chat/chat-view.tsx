@@ -1,4 +1,5 @@
-import { providerName, type TranscriptMessage } from '@openharness/client'
+import { providerName, sessionCost } from '@openharness/client'
+import type { ModelPriceLookup, TranscriptMessage } from '@openharness/client'
 import { Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
@@ -6,7 +7,7 @@ import { useClient } from '../client-provider'
 import type { DeleteSessionResult } from '../../hooks/use-sessions'
 import { useSession } from '../../hooks/use-session'
 import type { ModelsView } from '../../hooks/use-models'
-import { shortId, sessionLabel } from '../../lib/format'
+import { formatCostTotal, shortId, sessionLabel, unpricedExplanation } from '../../lib/format'
 import { providerOf, type ModelNameLookup } from '../../lib/models'
 import { showNotice } from '../../lib/notice'
 import { ModelPicker } from '../models/model-picker'
@@ -52,9 +53,13 @@ import { workingState } from './working-row'
  *   server takes a rewind only from an idle session (409 otherwise), because the turn in
  *   flight owns the branch being taken back.
  */
+/** The lookup a screen with no catalog prices with: nothing is known, so every cost is `—`. */
+const unknownPrices: ModelPriceLookup = () => null
+
 export function ChatView({
   sessionId,
   nameOf,
+  costOf,
   catalog,
   onDelete,
   onDeleted,
@@ -66,6 +71,8 @@ export function ChatView({
    * is never named — a chat is started from a model now (epic #92).
    */
   nameOf?: ModelNameLookup | undefined
+  /** The catalog's prices: what a reply's cost and the session's total are computed with (#247). */
+  costOf?: ModelPriceLookup | undefined
   /** The shell's catalog: what the composer's model selector offers. */
   catalog: ModelsView
   /** Delete this chat; the shell navigates away when it was the open one. */
@@ -77,6 +84,7 @@ export function ChatView({
   const {
     session,
     messages,
+    usage,
     status,
     lastError,
     loadingHistory,
@@ -96,6 +104,12 @@ export function ChatView({
   // The model the session runs as the log last said it; a session created with a model shows
   // it through the header resource until a message carries one (the transcript's `model`).
   const sessionModel = model ?? session?.model.id ?? null
+  // What the session has spent, priced with the catalog's rates (#247) — computed here, never
+  // stored. The total sums the requests that could be priced and counts the ones that could
+  // not, and `—` is reserved for a session where nothing at all could be priced. Nothing to say
+  // until a request has run.
+  const sessionCostTotal =
+    usage.models.length === 0 ? null : sessionCost(usage, costOf ?? unknownPrices)
   // A pick that has not been sent yet (U3): the selector shows it, the next message carries it.
   const [chosen, setChosen] = useState<string | null>(null)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
@@ -237,8 +251,27 @@ export function ChatView({
           <h1 className="truncate text-sm font-medium">
             {session === null ? shortId(sessionId) : sessionLabel(session, nameOf)}
           </h1>
-          <p className="truncate text-xs text-muted-foreground">
+          <p className="truncate text-xs text-muted-foreground" data-slot="session-subtitle">
             {session === null ? 'Loading…' : session.model.id}
+            {sessionCostTotal === null ? null : (
+              <>
+                {' · '}
+                {/* What the session spent, beside the model it spent it on (#247). The money is
+                    the priced part and `+ N unpriced` names the rest — `—` only when nothing in
+                    the session could be priced — and nothing at all until something has run: a
+                    chat that has not answered yet has no cost to report. */}
+                <span
+                  data-slot="session-cost"
+                  title={
+                    sessionCostTotal.unpriced_requests === 0
+                      ? undefined
+                      : unpricedExplanation(sessionCostTotal.unpriced_requests)
+                  }
+                >
+                  {formatCostTotal(sessionCostTotal)}
+                </span>
+              </>
+            )}
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-1">
@@ -288,6 +321,7 @@ export function ChatView({
         messages={messages}
         loading={loadingHistory}
         nameOf={nameOf}
+        costOf={costOf}
         working={statusRow}
         onEdit={editFromTranscript}
         editDisabled={!idle}

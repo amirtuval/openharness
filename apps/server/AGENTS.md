@@ -38,30 +38,32 @@ Everything under `API_VERSION_PREFIX` (`/v1`). Bodies and queries are validated 
 protocol's schemas, so the shapes are not repeated here — see
 [`packages/protocol/AGENTS.md`](../../packages/protocol/AGENTS.md).
 
-| method   | path                                      | body / query                             | answers                                                                                                                                              |
-| -------- | ----------------------------------------- | ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET`    | `/health`                                 | —                                        | liveness: `{ status: 'ok' }`; never needs a session                                                                                                  |
-| `GET`    | `/ready`                                  | —                                        | readiness (#151): `{ status: 'ok' }`, or 503 while draining or when the store does not answer; never needs a session                                 |
-| `GET`    | `/v1/auth-config`                         | —                                        | `{ providers, dev_login }`; never needs a session                                                                                                    |
-| `GET`    | `/v1/me`                                  | —                                        | the signed-in `User`                                                                                                                                 |
-| `GET`    | `/v1/me/preferences`                      | —                                        | the caller's `UserPreferences`, unwrapped                                                                                                            |
-| `PUT`    | `/v1/me/preferences`                      | `PutPreferencesRequestSchema`            | the stored preferences; 400 for a malformed `default_model`                                                                                          |
-| `POST`   | `/v1/agents`                              | `CreateAgentRequestSchema`               | 201, the `Agent`                                                                                                                                     |
-| `GET`    | `/v1/agents`                              | `ListAgentsQuerySchema`                  | `{ data, next_page }`                                                                                                                                |
-| `GET`    | `/v1/agents/{agent_id}`                   | —                                        | the `Agent`, or 404                                                                                                                                  |
-| `POST`   | `/v1/agents/{agent_id}`                   | `UpdateAgentRequestSchema`               | the updated `Agent`, or 404                                                                                                                          |
-| `POST`   | `/v1/sessions`                            | `CreateSessionRequestSchema`             | 201, the `Session`; 404 for an unknown agent; 400 for neither an agent nor a model                                                                   |
-| `GET`    | `/v1/sessions`                            | `ListSessionsQuerySchema`                | `{ data, next_page }`                                                                                                                                |
-| `GET`    | `/v1/sessions/{session_id}`               | —                                        | the `Session`, or 404                                                                                                                                |
-| `DELETE` | `/v1/sessions/{session_id}`               | —                                        | 204; hard delete (U5); 404 for another owner's or an unknown session                                                                                 |
-| `POST`   | `/v1/sessions/{session_id}/events`        | `SendEventsRequestSchema`                | `{ data: user event[] }`; then signals, and a title; 409 for a rewind while running, 400 for a batch whose rewind is not its only first event (#238) |
-| `GET`    | `/v1/sessions/{session_id}/events`        | `ListEventsQuerySchema`                  | `{ data, next_page }`                                                                                                                                |
-| `GET`    | `/v1/sessions/{session_id}/events/stream` | `StreamEventsQuerySchema`                | the SSE stream; 404 for an unknown session                                                                                                           |
-| `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`   | the AI SDK `useChat` request (see below) | an AI SDK UI message stream — an **extension**                                                                                                       |
-| `GET`    | `/v1/models`                              | `ListModelsQuerySchema` (`refresh`)      | `{ data, providers }`; 429 for a refresh inside the minute                                                                                           |
-| `PUT`    | `/v1/provider-credentials/{provider}`     | `PutProviderCredentialRequestSchema`     | the credential's metadata; 422 if the key is refused                                                                                                 |
-| `GET`    | `/v1/provider-credentials`                | —                                        | `{ data: ProviderCredential[] }`, metadata only                                                                                                      |
-| `DELETE` | `/v1/provider-credentials/{provider}`     | —                                        | 204; never an error for one that is not there                                                                                                        |
+| method   | path                                      | body / query                                | answers                                                                                                                                              |
+| -------- | ----------------------------------------- | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET`    | `/health`                                 | —                                           | liveness: `{ status: 'ok' }`; never needs a session                                                                                                  |
+| `GET`    | `/ready`                                  | —                                           | readiness (#151): `{ status: 'ok' }`, or 503 while draining or when the store does not answer; never needs a session                                 |
+| `GET`    | `/v1/auth-config`                         | —                                           | `{ providers, dev_login }`; never needs a session                                                                                                    |
+| `GET`    | `/v1/me`                                  | —                                           | the signed-in `User`                                                                                                                                 |
+| `GET`    | `/v1/me/preferences`                      | —                                           | the caller's `UserPreferences`, unwrapped                                                                                                            |
+| `PUT`    | `/v1/me/preferences`                      | `PutPreferencesRequestSchema`               | the stored preferences; 400 for a malformed `default_model`                                                                                          |
+| `POST`   | `/v1/agents`                              | `CreateAgentRequestSchema`                  | 201, the `Agent`                                                                                                                                     |
+| `GET`    | `/v1/agents`                              | `ListAgentsQuerySchema`                     | `{ data, next_page }`                                                                                                                                |
+| `GET`    | `/v1/agents/{agent_id}`                   | —                                           | the `Agent`, or 404                                                                                                                                  |
+| `POST`   | `/v1/agents/{agent_id}`                   | `UpdateAgentRequestSchema`                  | the updated `Agent`, or 404                                                                                                                          |
+| `POST`   | `/v1/sessions`                            | `CreateSessionRequestSchema`                | 201, the `Session`; 404 for an unknown agent; 400 for neither an agent nor a model                                                                   |
+| `GET`    | `/v1/sessions`                            | `ListSessionsQuerySchema`                   | `{ data, next_page }`                                                                                                                                |
+| `GET`    | `/v1/sessions/{session_id}`               | —                                           | the `Session`, or 404                                                                                                                                |
+| `DELETE` | `/v1/sessions/{session_id}`               | —                                           | 204; hard delete (U5); 404 for another owner's or an unknown session                                                                                 |
+| `POST`   | `/v1/sessions/{session_id}/events`        | `SendEventsRequestSchema`                   | `{ data: user event[] }`; then signals, and a title; 409 for a rewind while running, 400 for a batch whose rewind is not its only first event (#238) |
+| `GET`    | `/v1/sessions/{session_id}/events`        | `ListEventsQuerySchema`                     | `{ data, next_page }`                                                                                                                                |
+| `GET`    | `/v1/sessions/{session_id}/events/stream` | `StreamEventsQuerySchema`                   | the SSE stream; 404 for an unknown session                                                                                                           |
+| `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`   | the AI SDK `useChat` request (see below)    | an AI SDK UI message stream — an **extension**                                                                                                       |
+| `GET`    | `/v1/models`                              | `ListModelsQuerySchema` (`refresh`)         | `{ data, providers }`; 429 for a refresh inside the minute                                                                                           |
+| `GET`    | `/v1/sessions/{session_id}/usage`         | —                                           | what one session spent: totals, cost and the per-model breakdown; 404 for another owner's                                                            |
+| `GET`    | `/v1/me/usage`                            | `UserUsageQuerySchema` (`from`, `to`, `tz`) | the caller's own usage: totals, cost, by model and by day; 400 for a zone or range it cannot read                                                    |
+| `PUT`    | `/v1/provider-credentials/{provider}`     | `PutProviderCredentialRequestSchema`        | the credential's metadata; 422 if the key is refused                                                                                                 |
+| `GET`    | `/v1/provider-credentials`                | —                                           | `{ data: ProviderCredential[] }`, metadata only                                                                                                      |
+| `DELETE` | `/v1/provider-credentials/{provider}`     | —                                           | 204; never an error for one that is not there                                                                                                        |
 
 Every `/v1` route except `auth-config` requires a session (see "Authentication"), and every
 resource is scoped to its owner. `/api/auth/*` is Better Auth's own surface: sign-in, sign-out,
@@ -321,7 +323,12 @@ parses the query and maps the one error it can raise.
      stays. The principle is asymmetric on purpose: an unfamiliar id is **kept**, because
      hiding a usable chat model is the failure the epic is about.
 
-  The name, context window and max output of an entry come from the provider's own payload
+  **The price** comes from the snapshot alone (`cost` on a `ModelEntry`, #247): no provider's
+  list-models payload carries what it charges. models.dev publishes rates per million tokens,
+  and the refresh script keeps the ones it has — `input` and `output` for every priced model,
+  the two cache rates where they exist. It is what a client prices a reply with, so a model the
+  snapshot does not price reports `cost: null` and its requests keep their tokens and report no
+  money. The name, context window and max output of an entry come from the provider's own payload
   where it has them (Gemini's `displayName`/`inputTokenLimit`/`outputTokenLimit`, OpenRouter's
   `name`/`context_length`/`top_provider.max_completion_tokens`), from the snapshot where it
   has them, and from the model id otherwise; `null` is a legitimate value for the two limits.
@@ -415,6 +422,50 @@ request's whole prompt (`ScriptedModel.histories`) for the tests that read it. T
 (`createTestApp`) wires the same strategy as `main.ts`, against the injected registry, so a test
 with none gets the brain's 32,768-token fallback, exactly as it did before the budget was per
 model.
+
+## Usage and cost (epic #245, A2; issue #247)
+
+`GET /v1/sessions/{session_id}/usage` and `GET /v1/me/usage` answer what was spent, and `usage.ts`
+is the whole of it. Both are **reads of the log**: a model request is a
+`span.model_request_start` (which names the model) followed by the `span.model_request_end` that
+reports its tokens, so `createUsageReader` pairs the two — through the store's replay read, which
+skips what a supersession covers, so a branch a `session.rewind` replaced is **not billed** —
+prices each request with the registry's rates, and assembles the totals and the per-model split.
+
+- **Cost is computed on read and never stored.** `registryPrices(registry)` builds the price
+  lookup over the same bundled snapshot the catalogue joins (`cost` on a `RegistryModel`), and
+  the arithmetic is the protocol's `usageCost`/`totalCost` — the same functions the frontends
+  price a reply with. A model the snapshot does not price contributes its tokens and no cost, and
+  a total **sums the requests it can price and counts the rest** (`cost` plus
+  `unpriced_requests`, #247 decided 2026-10-09): one such request no longer turns a whole total
+  into `—`, the unknown part is named rather than guessed, and `cost` is `null` only when nothing
+  in the total could be priced. A request whose span start named no model (a log from before the
+  field existed) is in the totals and in no breakdown, and counts among the unpriced ones.
+- **The per-session route** is owner-scoped (another user's session is the store's
+  `SessionNotFoundError`, which `app.onError` maps to the 404) and reads that session's whole
+  log. **The per-user route** has no id in its path — it is always the caller — and is **one
+  store read**, not a walk: the range's local days become a UTC window (`utcWindowOf`), the
+  store's `listModelRequests` answers the caller's own model requests in it in one query, and
+  what comes back is grouped by local day. Walking the caller's sessions and reading each log
+  page by page — what this did first — read every event of a month of heavy use on every
+  request, which is the cost the store method exists to remove. Usage is broken down **by
+  model, never by mode**, and days are **absent rather than zero** where nothing ran.
+- **Local days** are `local-day.ts`: `usageRange` reads the `tz` query parameter (400 for a zone
+  the runtime does not know — never a silent UTC), defaults the range to the current month so
+  far in that zone, and refuses a `from` after `to`. `localDayOf` reads an instant as the day it
+  fell on there with `Intl`, rather than with Postgres' `AT TIME ZONE`: the in-memory store has
+  no SQL at all, the frontends read their own zone from the same `Intl` data, and the semantics
+  (which day an instant belongs to, DST included) are identical. `utcWindowOf` turns the range
+  into the half-open UTC window the store read takes — local midnight of `from` to local
+  midnight after `to` — by asking `localDayOf` for a day's first instant rather than by adding
+  offsets, so a 23- or 25-hour DST day and a zone whose day does not begin at midnight are both
+  exact. Nothing is rolled up or stored, so two readers in two zones get two right answers from
+  one log.
+- `usage.test.ts` (the routes: ownership, ranges, zones, a rewind not billed, unpriced models,
+  and the one store read — the store counts its calls, so a `listSessions`/`listEvents` walk
+  would fail the test) and `local-day.test.ts` (the day arithmetic on its own, DST-window
+  conversion included) are the in-process halves; `e2e/src/usage.test.ts` is the same routes
+  against a real server process and Postgres.
 
 ## Errors
 
@@ -997,6 +1048,9 @@ src/
   session-watch.ts      revocation registry + periodic re-check for long-lived responses (#76)
   credentials.ts        sealing, opening and the session-bound credential resolver (A5)
   provider-validation.ts the one cheap provider call a saved key is checked with
+  local-day.ts        local calendar days: the zone a request named, the day of an instant, and
+                        the UTC window a range's days span (#247)
+  usage.ts            what a session or a user spent: the log priced on read (#247)
   catalog/
     catalog.ts          ModelCatalog: per-provider fetch, join, filter, cache, fallback (#90)
     adapters.ts         the fixed provider endpoint table and each provider's payload shape
@@ -1028,7 +1082,7 @@ src/
   http/
     errors.ts           HttpError and the protocol's error envelope
     request.ts          body/query/path reading, through the protocol's schemas
-  routes/               agents.ts, sessions.ts, events.ts, ai-sdk.ts, me.ts, models.ts,
+  routes/               agents.ts, sessions.ts, events.ts, ai-sdk.ts, me.ts, models.ts, usage.ts,
                         provider-credentials.ts, plus deps.ts (RouteDeps) and signals.ts
                         (what a stored user event tells the scheduler)
   test-support/         test-only: scripted model, SSE reader, the server harness, Postgres

@@ -15,10 +15,12 @@ import type {
   ListEventsResponse,
   ModelRequestEndEvent,
   ModelRequestStartEvent,
+  ModelUsage,
   RetryStatusType,
   Session,
   SessionDeletedEvent,
   SessionError,
+  SessionModelUsage,
   SessionRewindEvent,
   SessionErrorType,
   StoredEvent,
@@ -103,6 +105,27 @@ export const FAKE_MODEL_USAGE = {
   cache_creation_input_tokens: 0,
   cache_read_input_tokens: 0,
 } as const
+
+/** The four token counters at zero — the starting point of every usage fold. */
+const EMPTY_USAGE: ModelUsage = {
+  input_tokens: 0,
+  output_tokens: 0,
+  cache_creation_input_tokens: 0,
+  cache_read_input_tokens: 0,
+}
+
+/** A model's running total, created empty for a fold to add into. */
+function emptyModelUsage(model: string): SessionModelUsage {
+  return { model, usage: { ...EMPTY_USAGE }, requests: 0 }
+}
+
+/** One usage report added into another, counter by counter. */
+function addUsage(into: ModelUsage, next: ModelUsage): void {
+  into.input_tokens += next.input_tokens
+  into.output_tokens += next.output_tokens
+  into.cache_creation_input_tokens += next.cache_creation_input_tokens
+  into.cache_read_input_tokens += next.cache_read_input_tokens
+}
 
 /** The largest number of fragments a reply is split into, so `chunks` cannot spin forever. */
 const MAX_CHUNKS = 1000
@@ -513,6 +536,9 @@ export class FakeBrain {
           supersedes: range,
         }),
       )
+      if (!interrupted) {
+        this.#emit(this.#sessionUsage())
+      }
       return interrupted
     }
     // Whatever the model produced before the interrupt is still a message; the span says why
@@ -530,6 +556,11 @@ export class FakeBrain {
           : { is_error: null },
       ),
     )
+    // A request that reported usage is followed by the session's running totals, in the same
+    // spot the real brain writes them (#247); a request that was interrupted has none to add.
+    if (!interrupted) {
+      this.#emit(this.#sessionUsage())
+    }
     return interrupted
   }
 
@@ -690,6 +721,51 @@ export class FakeBrain {
     }
     this.#emit(event)
     return event
+  }
+
+  /**
+   * The session's running totals, as the real brain writes them (#247).
+   *
+   * The fake restates the server's fold: pair every `span.model_request_start` with the
+   * `span.model_request_end` that closes it, attribute the tokens to the model the start
+   * named, and sum per model. The replay read's filter is applied first, so a branch a rewind
+   * replaced is not counted — the fake's log is the same log the server's reads see.
+   */
+  #sessionUsage(): StoredEvent {
+    const events = this.#log.filter((event) => !this.#isSuperseded(event))
+    const modelOf = new Map<string, string>()
+    for (const event of events) {
+      if (event.type === EVENT_TYPES.modelRequestStart && event.model !== undefined) {
+        modelOf.set(event.id, event.model)
+      }
+    }
+    const models: SessionModelUsage[] = []
+    const totals = { ...EMPTY_USAGE }
+    for (const event of events) {
+      if (event.type !== EVENT_TYPES.modelRequestEnd) {
+        continue
+      }
+      const model = modelOf.get(event.model_request_start_id)
+      if (model === undefined) {
+        continue
+      }
+      const entry = models.find((candidate) => candidate.model === model)
+      const usage = entry ?? emptyModelUsage(model)
+      if (entry === undefined) {
+        models.push(usage)
+      }
+      addUsage(usage.usage, event.model_usage)
+      usage.requests += 1
+      addUsage(totals, event.model_usage)
+    }
+    return deepFreeze({
+      id: newEventId(),
+      type: EVENT_TYPES.sessionUsage,
+      seq: this.#nextSeq(),
+      processed_at: this.#timestamp(),
+      ...totals,
+      models,
+    })
   }
 
   #modelRequestEnd(

@@ -115,6 +115,53 @@ describe('StatusLine', () => {
     expect(frameOf({ phase: 'loading', status: 'idle' })).toContain('loading history')
   })
 
+  it('shows what the session has spent, between the session and the status (#247)', () => {
+    // Where the money goes: a reader scanning the line finds the model, the chat, what it has
+    // cost, and what it is doing — in that order.
+    expect(frameOf({ cost: '$0.0013' })).toBe(
+      'anthropic/claude-sonnet-5 · sesn_…Q092B1 · $0.0013 · idle',
+    )
+    // A model nobody prices reads `—`; a session that has not run, or a caller with no
+    // catalog, passes nothing and the line has no cost at all.
+    expect(frameOf({ cost: '—' })).toContain('· — · idle')
+    expect(frameOf()).not.toContain('$')
+  })
+
+  it('names the unpriced requests, and shortens instead of dropping them when tight (#247)', () => {
+    // A total that could not price every request carries the count beside the money.
+    const wide = spansOf({ cost: '$0.0013 + 1 unpriced' }, { columns: 100 })
+    expect(textOf(wide)).toContain('$0.0013 + 1 unpriced')
+
+    // At 50 columns there is room for the money but not the words: the compact spelling stays
+    // (`$0.0013+`), and the session handle — the line's least useful part — goes for it.
+    const narrow = spansOf(
+      { cost: '$0.0013 + 1 unpriced', costCompact: '$0.0013+' },
+      { columns: 50 },
+    )
+    expect(textOf(narrow)).toContain('$0.0013+')
+    expect(textOf(narrow)).not.toContain('unpriced')
+    expect(textOf(narrow)).not.toContain('sesn_')
+  })
+
+  it('drops what the line is worth least when the terminal is too narrow', () => {
+    const wide = spansOf({ cost: '$0.0013' }, { columns: 100 })
+    expect(textOf(wide)).toContain('sesn_…Q092B1')
+    expect(textOf(wide)).toContain('$0.0013')
+
+    // 45 columns: the session handle goes first — it is the line's least useful part, and the
+    // CLI prints the whole id on the way out — while what the chat costs stays.
+    const narrow = spansOf({ cost: '$0.0013' }, { columns: 45 })
+    expect(textOf(narrow)).toContain('$0.0013')
+    expect(textOf(narrow)).toContain('idle')
+    expect(textOf(narrow)).not.toContain('sesn_')
+
+    // Narrower still: the money goes too, and the status — why the line exists — is what is
+    // left.
+    const tiniest = spansOf({ cost: '$0.0013' }, { columns: 30 })
+    expect(textOf(tiniest)).not.toContain('$0.0013')
+    expect(textOf(tiniest)).toContain('idle')
+  })
+
   it('says nothing at all about a session id it cannot shorten', () => {
     expect(shortSessionId(SESSION)).toBe('sesn_…Q092B1')
     expect(shortSessionId('sesn_ABCDEF')).toBe('sesn_ABCDEF')

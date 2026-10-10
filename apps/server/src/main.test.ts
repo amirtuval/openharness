@@ -213,7 +213,9 @@ describe('startServer', () => {
     // The route only signalled: the turn ran because this instance holds the session's
     // partition — the whole path the multi-instance server takes.
     await waitForIdle(store, session.id)
-    expect(await readHistory(store, session.id)).toHaveLength(6)
+    // The turn's events: the message, the turn opening, the request's span and its reply, the
+    // span end with the running totals beside it, and the idle that closes it (#247).
+    expect(await readHistory(store, session.id)).toHaveLength(7)
     expect(scheduler.heldPartitions().length).toBeGreaterThan(0)
 
     await server.shutdown()

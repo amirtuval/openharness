@@ -3,10 +3,11 @@ import { z } from 'zod'
 import { EventIdSchema, SessionIdSchema } from '../ids'
 import type { DeepReadonly } from '../readonly'
 import { EVENT_TYPES, EventSeqSchema, ProcessedAtSchema, SupersedesSchema } from './common'
+import { ModelUsageSchema } from './span'
 
 /**
- * Events the session itself emits: status transitions, errors, and the rewind that restarts
- * the conversation from an earlier message (#238).
+ * Events the session itself emits: status transitions, errors, the running usage of the turn
+ * (epic #245, A2) and the rewind that restarts the conversation from an earlier message (#238).
  *
  * They bracket a turn — `session.status_running` opens it, `session.status_idle` closes it —
  * so replaying just these events gives the session's state at any point in the log. A
@@ -245,6 +246,101 @@ export const SessionRewindEventSchema = z.object({
 export type SessionRewindEvent = DeepReadonly<z.infer<typeof SessionRewindEventSchema>>
 
 /**
+ * One model's running total for a session (epic #245, A2; issue #247).
+ *
+ * The tokens of every request that ran on this model, summed over the session so far. It carries
+ * the model id because a session's totals are only priceable per model — a session that switched
+ * providers mid-conversation ran some requests at one set of rates and some at another.
+ */
+export const SessionModelUsageSchema = z.object({
+  /** The `provider/model` these requests ran on. */
+  model: z.string().min(1),
+  /** What they reported, summed. */
+  usage: ModelUsageSchema,
+  /**
+   * How many requests ran on this model so far — at least one, since an entry exists because a
+   * request named it.
+   *
+   * The count is what lets a reader of the running totals price them per model the way the usage
+   * routes do: a model nobody publishes a price for contributes `requests` unpriced requests, and
+   * a priced one contributes none (#247). It is a fact about the log, not about money — no cost
+   * is stored — so it stays true whatever the catalog's prices turn out to be.
+   */
+  requests: z.number().int().positive(),
+})
+
+export type SessionModelUsage = z.infer<typeof SessionModelUsageSchema>
+
+/**
+ * // extension: the session's running totals, written after a model request (epic #245, A2).
+ *
+ * Anthropic has the event — a `session.usage` snapshot of the session's cumulative usage and its
+ * tracked list cost — and openharness keeps its name and its placement in the log. Three things
+ * differ, all of them deliberate:
+ *
+ * - **It is written after every model request, not once per idle.** Anthropic emits one
+ *   immediately before the session goes idle, whatever the stop reason. openharness's client
+ *   shows the session's cost as the turn runs, and a request that finishes mid-turn is exactly
+ *   the moment the number moved, so the event is written there. Fewer events would be cheaper
+ *   and a client would have to derive the same totals from the spans it already reads.
+ * - **It carries no cost.** Anthropic stamps `list_cost` (platform-computed and stored) onto the
+ *   snapshot; here cost is computed when it is read, from the tokens below and the model
+ *   catalog's prices, and is never written into the log (epic #245). The tokens are what is
+ *   stored, and they are the part that cannot be recovered from anywhere else.
+ * - **It breaks the totals down by model.** Anthropic's snapshot is flat — a session there runs
+ *   one model — while an openharness session may switch models mid-conversation (epic #116, U3),
+ *   and its tokens can only be priced one model at a time.
+ *
+ * The totals are **cumulative over the whole session**, not per request: a reader that wants
+ * what the last request cost subtracts the previous event's totals, and one that wants the
+ * session's cost reads the newest event alone. `models` breaks the same totals down, and the
+ * four counters beside it are their sum — the schema refuses a snapshot where the two disagree.
+ *
+ * A session stored before this event existed has none, and its usage is derived on read from the
+ * `span.model_request_end` events it does have: the running total an event carries is exactly
+ * what a fold over those spans produces, so a log replay answers the same numbers a live stream
+ * does, whichever of the two a client is reading.
+ */
+export const SessionUsageEventSchema = z
+  .object({
+    id: EventIdSchema,
+    type: z.literal(EVENT_TYPES.sessionUsage),
+    seq: EventSeqSchema,
+    processed_at: ProcessedAtSchema,
+    /** Input tokens every request of this session reported, summed. */
+    input_tokens: z.number().int().nonnegative(),
+    /** Output tokens every request of this session reported, summed. */
+    output_tokens: z.number().int().nonnegative(),
+    /** Prompt-cache write tokens, summed. */
+    cache_creation_input_tokens: z.number().int().nonnegative(),
+    /** Prompt-cache read tokens, summed. */
+    cache_read_input_tokens: z.number().int().nonnegative(),
+    /** The same totals per model, in `model` order. */
+    models: z.array(SessionModelUsageSchema),
+  })
+  .refine(
+    (event) =>
+      event.models.reduce((sum, entry) => sum + entry.usage.input_tokens, 0) ===
+        event.input_tokens &&
+      event.models.reduce((sum, entry) => sum + entry.usage.output_tokens, 0) ===
+        event.output_tokens &&
+      event.models.reduce((sum, entry) => sum + entry.usage.cache_creation_input_tokens, 0) ===
+        event.cache_creation_input_tokens &&
+      event.models.reduce((sum, entry) => sum + entry.usage.cache_read_input_tokens, 0) ===
+        event.cache_read_input_tokens,
+    {
+      error: 'the totals must be the sum of `models`: the breakdown is the same tokens',
+      path: ['models'],
+    },
+  )
+
+/** A stored `session.usage`, deep-readonly like every event (#247). */
+export type SessionUsageEvent = DeepReadonly<z.infer<typeof SessionUsageEventSchema>>
+
+/** @deprecated The plain name is deep-readonly now; use {@link SessionUsageEvent}. */
+export type ImmutableSessionUsageEvent = SessionUsageEvent
+
+/**
  * A `session.rewind` as a client sends it: the message the session should restart from.
  *
  * The input names `from_seq` alone. How far the restart reaches is not the caller's to say:
@@ -268,6 +364,7 @@ export const SessionEventSchema = z.discriminatedUnion('type', [
   SessionStatusRescheduledEventSchema,
   SessionErrorEventSchema,
   SessionRewindEventSchema,
+  SessionUsageEventSchema,
 ])
 
 /** Any stored session event, deep-readonly (D9, issue #46). */

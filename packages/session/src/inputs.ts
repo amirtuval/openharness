@@ -94,6 +94,35 @@ export function assertLivenessWindow(withinMs: number): void {
 }
 
 /**
+ * A UTC window's two bounds as milliseconds, checked.
+ *
+ * {@link SessionStore.listModelRequests} reads between two instants — a caller's local days
+ * converted into a half-open UTC window — and a bound that is not an instant, or a window that
+ * ends before it starts, is a caller bug and a `RangeError` rather than a silently empty or
+ * silently too-large answer. Both stores check it here, so they refuse the same arguments.
+ *
+ * @throws RangeError when a bound is not a valid instant, or `from` is after `to`
+ */
+export function usageWindowOf(options: { readonly from: Date; readonly to: Date }): {
+  fromMs: number
+  toMs: number
+} {
+  const fromMs = options.from.getTime()
+  const toMs = options.to.getTime()
+  if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) {
+    throw new RangeError(
+      `a usage window must be two instants, got from ${String(options.from)} and to ${String(options.to)}`,
+    )
+  }
+  if (fromMs > toMs) {
+    throw new RangeError(
+      `a usage window must not end before it starts, got from ${options.from.toISOString()} to ${options.to.toISOString()}`,
+    )
+  }
+  return { fromMs, toMs }
+}
+
+/**
  * Check the ids an append is carrying before the store writes anything.
  *
  * An event may bring its own id (see `AppendableEvent`), and the id has to be one the store

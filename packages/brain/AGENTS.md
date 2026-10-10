@@ -142,6 +142,9 @@ LOOP — once per model request
                                                              carries the range)
   8. ...................................................... span.model_request_end
                                                              { model_usage, is_error: null }
+     ...................................................... session.usage
+                                                             { the session's running totals,
+                                                               per model (#247) }
   9. another user.message arrived ......................... loop, from 1
  10. otherwise ............................................ session.status_idle, return idle
 
@@ -240,6 +243,19 @@ Notes on the corners:
   `supersedes` covers the `event_start` the request announced. An interrupted request stores its
   partial text for the same reason, and only when there is one — with the range on the message,
   or on the span end when there is no message to carry it.
+- **The session's running totals follow every request that reported usage** (epic #245, A2;
+  #247). `session.usage` carries the tokens and the request count of every request the session
+  has made, summed per model — the loop folds them from the log it already read for the request
+  (`usageByModel`) and adds the request that just finished. It rides in the **same append as the
+  span end**, so the two land in one transaction and a reader never sees a finished request whose
+  totals lag behind it; a request that failed or was interrupted closes its span with no usage to
+  add (`ZERO_MODEL_USAGE`) and writes none. It carries no cost: cost is computed when it is read,
+  from these tokens and the model catalog's prices, and is never stored. The per-model `requests`
+  count is what lets a reader price those running totals the way the usage routes do — counting
+  the requests a model nobody prices leaves unpriced (#247, decided 2026-10-09) — and it is a
+  fact about the log, not about money. Models appear in the order their first request ran, and a
+  request whose span start named no model — a log from before the field existed — contributes to
+  no entry rather than to a guessed one.
 - **Partial output is never stored as a reply.** A failure mid-stream supersedes the chunks the
   attempt streamed and the retry mints a **new** message id with its own `event_start`; a reply
   that is not the model's final answer never becomes one.

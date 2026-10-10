@@ -4,6 +4,7 @@ import type {
   Agent,
   Metadata,
   ModelConfig,
+  ModelUsage,
   ProviderCredential,
   Session,
   SessionAgent,
@@ -18,7 +19,7 @@ import { timestampAt } from '../clock'
 import type { SealedProviderCredential } from '../credentials'
 import { isUserEventType } from '../events'
 import { deepFreeze } from '../freeze'
-import type { AppendableEvent, PartitionSignal } from '../store'
+import type { AppendableEvent, ModelRequestUsage, PartitionSignal } from '../store'
 
 /**
  * How the Postgres store's tables look to Kysely, and how a row becomes a protocol value.
@@ -419,6 +420,36 @@ export function eventFromRow(row: EventWithClaimRow): StoredEvent {
     seq: row.seq,
     processed_at,
   }) as StoredEvent
+}
+
+/**
+ * A row of the per-user model-request read (epic #245, A2; issue #247): one
+ * `span.model_request_end` inside the caller's window, with what it reported and the model the
+ * span start its `model_request_start_id` names carried.
+ *
+ * The three columns are all the read selects — the payload is never fetched whole — and
+ * `model` and `model_usage` come straight out of the two payloads as `jsonb`, so they are the
+ * JSON the protocol defines rather than a column type.
+ */
+export interface ModelRequestRow {
+  /** The span start's `model`, or `null` when it named none (or the log has no such start). */
+  readonly model: string | null
+  /** The end event's `model_usage`, as it was stored. */
+  readonly model_usage: unknown
+  /** The end event's `processed_at`: when the request finished. */
+  readonly processed_at: Date
+}
+
+/**
+ * The model request a row carries, deep-frozen like every other answer this package hands out
+ * (a caller owns it, and writing to it throws).
+ */
+export function modelRequestFromRow(row: ModelRequestRow): ModelRequestUsage {
+  return deepFreeze({
+    model: row.model,
+    usage: row.model_usage as ModelUsage,
+    processed_at: timestampOf(row.processed_at),
+  })
 }
 
 // --------------------------------------------------------------------- channels

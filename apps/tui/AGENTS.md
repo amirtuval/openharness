@@ -545,10 +545,30 @@ about the screen and not about any one component.
 `components/status-line.tsx` draws the input section: the rule that opens it, and one line —
 who is answering, the model, the session and the status. The model is named the way the catalog
 names it when the catalog is known, and by its `provider/model` id otherwise — a chat opened on
-`--model` or a stored default never reads the catalog, which is what makes it start immediately.
+`--model` or a stored default never _waits_ for the catalog, which is what makes it start
+immediately (a background read fills the names and the prices in, #247).
 The session is a shortened handle (`sesn_…Q092B1`), for recognition rather than for `oh -s`. The
 parts are dropped — whole, least important first — when the terminal is too narrow, and the
 status is the one that stays. Only named ANSI colours, and `NO_COLOR` drops them (#201, X4).
+
+The line also carries **what the session has spent** (#247), between the session handle and
+the status: `formatCostTotal(sessionCost(selectSessionUsage(transcript), costOf))`, priced with
+the catalog's rates. A total **sums the requests it can price and counts the rest** (`$1.23 + 4
+unpriced`, decided 2026-10-09), and `—` is drawn only when nothing in the session could be
+priced. Nothing is drawn until a request has run. When the terminal is too narrow for the full
+line the cost is **shortened before it is dropped** — `$1.23+`, the money with the count
+collapsed to a trailing plus — and only then does the segment go, before the session and the
+model: the status is what the line exists for.
+
+The rates come from a catalog the screen reads **once, in the background**, purely for the
+prices and the display names (`chat/screen.tsx`): a chat opened on `--model` or on a stored
+default still starts immediately, and a chat that never reads one shows no cost at all rather
+than a dash that claims to know. Until it lands the transcript settles **nothing** (`holdAll` on
+`TranscriptView`) — Ink writes a settled message once and never redraws it (#208, X2), so a
+footer that settled early would keep a cost it could not compute, and that applies to the
+replies loaded from history as much as to the live one. The messages are still drawn while they
+are held (live rather than static); they settle, with their costs, the moment the read answers,
+whatever the answer was.
 
 The status field doubles as the **working indicator** (#208): `Working… 12s` with a turning
 spinner while a running turn has produced no text yet, `running` once it has, the spinner back
@@ -757,7 +777,7 @@ denial, cancellation, revoke failures); `src/index.test.ts` drives `run()` all t
 | `src/markdown/highlight.test.ts`                  | highlight.js → spans: tokens, nested scopes, entities, a language it does not know, half a snippet (#205)                                                                                                                                                                                                                                 |
 | `src/markdown/render.test.ts`                     | mdast → lines: every element, the table in the room it has, the code panel (the label at the right edge, the padding, the code at column 0, the labels-less fallback), NO_COLOR, no line wider than its box, and a fence that has not closed laid out like the block it becomes (#205, #229, #231)                                        |
 | `src/components/message-view.test.tsx`            | the frame: column 0, a reply rendered as Markdown, wide characters, the cursor, `(queued)`, the metadata line and the blank line above it, the band a user's message sits on (per colour level) and its `NO_COLOR` mark, the code panel growing line by line, and a half-streamed fence that does not jump (#205, #208, #229, #231, #233) |
-| `src/components/reply-meta.test.ts`               | durations and token counts, and the line they compose: the model only when it is news, nothing invented, no line when there is nothing to say (#208)                                                                                                                                                                                      |
+| `src/components/reply-meta.test.ts`               | durations, token counts and costs, and the line they compose: the model only when it is news, nothing invented, no line when there is nothing to say, `—` at the end of the line for a model nobody prices, and no cost at all from a caller with no catalog (#208, #247)                                                                 |
 | `src/components/status-line.test.tsx`             | the input section's rule (its width, its colour, `NO_COLOR`, the blank line above it), the line's parts and colours, the shortened id, the model's display name, the spinner on fake timers, the quiet window, retrying and interrupted, and what a narrow terminal drops (#208, #233)                                                    |
 | `src/browser.test.ts`                             | the skip rules and the per-platform command, with an injected spawn                                                                                                                                                                                                                                                                       |
 | `src/commands/auth.test.ts`                       | `oh login` / `logout` / `whoami` against the fake's scripted device flow, mid-poll cancellation included, and `offerSignIn` — the chat's offer, and the answers it takes as yes (#210)                                                                                                                                                    |

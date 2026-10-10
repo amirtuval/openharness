@@ -1,4 +1,9 @@
-import type { TranscriptMessage, TranscriptMessageMeta } from '@openharness/client'
+import { replyCost } from '@openharness/client'
+import type {
+  ModelPriceLookup,
+  TranscriptMessage,
+  TranscriptMessageMeta,
+} from '@openharness/client'
 
 /**
  * The one dim line a settled reply carries: what it ran on, how long it took, what it cost
@@ -12,6 +17,12 @@ import type { TranscriptMessage, TranscriptMessageMeta } from '@openharness/clie
  * duration and no tokens, and one whose turn was written before the spans existed has
  * neither, so its line is empty and `null` is what comes back — no line at all rather than a
  * line of dashes. `0` is a number a model really did report, and the two must not look alike.
+ *
+ * The **cost** is the one part computed rather than read (epic #245, A2; #247): the log stores
+ * tokens and never money, so a reply's counters are priced with its model's rates when the
+ * line is written. A model nobody publishes a price for shows `—`, which is the honest answer
+ * and never a zero — and a caller with no catalog at all leaves the cost off the line rather
+ * than showing it as unknown.
  */
 
 /** What the line is written against: the session's model, and the reply before this one. */
@@ -66,6 +77,7 @@ export function formatTokens(count: number): string {
 export function replyMetaLine(
   meta: TranscriptMessageMeta | undefined,
   context: ReplyMetaContext,
+  costOf?: ModelPriceLookup,
 ): string | null {
   if (meta === undefined) return null
 
@@ -80,7 +92,12 @@ export function replyMetaLine(
     parts.push(meta.model)
   }
   if (meta.durationMs !== undefined) parts.push(formatDuration(meta.durationMs))
-  if (meta.usage !== undefined) parts.push(`${formatTokens(meta.usage.total)} tokens`)
+  if (meta.usage !== undefined) {
+    parts.push(`${formatTokens(meta.usage.total)} tokens`)
+    if (costOf !== undefined) {
+      parts.push(formatCost(replyCost(meta, costOf)))
+    }
+  }
 
   return parts.length === 0 ? null : parts.join(' · ')
 }
@@ -96,17 +113,19 @@ export function replyMetaLine(
  * @param messages the transcript, in order
  * @param currentModel the model the session runs, or `undefined` when the caller does not know
  * it — every model a reply names is then worth printing, since none of them is assumed
+ * @param costOf the catalog's prices (#247); omitted, the lines carry no cost
  */
 export function replyMetaLines(
   messages: readonly TranscriptMessage[],
   currentModel: string | undefined,
+  costOf?: ModelPriceLookup,
 ): ReadonlyMap<string, string> {
   const lines = new Map<string, string>()
   let previousModel: string | undefined
 
   for (const message of messages) {
     if (message.role !== 'agent') continue
-    const line = replyMetaLine(message.meta, { currentModel, previousModel })
+    const line = replyMetaLine(message.meta, { currentModel, previousModel }, costOf)
     if (line !== null) lines.set(message.id, line)
     if (message.meta?.model !== undefined) previousModel = message.meta.model
   }
@@ -114,7 +133,67 @@ export function replyMetaLines(
   return lines
 }
 
+/**
+ * What a reply cost: `$0.0013`, `$0.024`, `$1.23` — or `—` when nobody published a price
+ * (epic #245, A2; #247).
+ *
+ * The precision follows the number: a fraction of a cent keeps the digits that make it
+ * meaningful, and a dollar-scale total does not pretend to more. Anything below what four
+ * decimals can say is `<$.0001`-shaped rather than rounded to zero, which would read as free.
+ */
+export function formatCost(cost: number | null): string {
+  if (cost === null) {
+    return '—'
+  }
+  if (cost === 0) {
+    return '$0.00'
+  }
+  if (cost < 0.0001) {
+    return '<$0.0001'
+  }
+  if (cost < 0.01) {
+    return `$${trimCost(cost.toFixed(4))}`
+  }
+  if (cost < 1) {
+    return `$${trimCost(cost.toFixed(3))}`
+  }
+  return `$${(Math.round(cost * 100) / 100).toFixed(2)}`
+}
+
 /** `4.0` → `4`, `1.3` → `1.3`: a trailing zero says nothing about how much anything cost. */
 function trimZero(value: string): string {
   return value.endsWith('.0') ? value.slice(0, -2) : value
+}
+
+/**
+ * A total's money, with the part nobody could price named beside it (epic #245, A2; #247,
+ * decided 2026-10-09).
+ *
+ * A total **sums the priced requests and counts the unpriced ones**: `$1.23 + 4 unpriced`. One
+ * request with no published price no longer turns a whole session's total into `—`; the money is
+ * the priced part and the count names the rest, and neither is guessed. A total with nothing
+ * priced is `—` alone; a fully priced one is just the number.
+ *
+ * `compact` is for the status line, where the terminal decides how much of the line fits: it
+ * shortens the count to a trailing `+` — `$1.23+` — and only ever drops the words, never the
+ * number.
+ */
+export function formatCostTotal(
+  total: { readonly cost: number | null; readonly unpriced_requests: number },
+  options: { readonly compact?: boolean } = {},
+): string {
+  if (total.cost === null) {
+    return '—'
+  }
+  const money = formatCost(total.cost)
+  if (total.unpriced_requests === 0) {
+    return money
+  }
+  return options.compact === true ? `${money}+` : `${money} + ${total.unpriced_requests} unpriced`
+}
+
+/** `0.0240` → `0.024`, `0.0100` → `0.01`: the same rule, for a number with more places. */
+function trimCost(value: string): string {
+  const trimmed = value.replace(/0+$/, '')
+  return trimmed.endsWith('.') ? `${trimmed}0` : trimmed
 }

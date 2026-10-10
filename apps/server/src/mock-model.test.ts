@@ -144,6 +144,7 @@ describe('__fail_retryable__', () => {
       EVENT_TYPES.modelRequestStart,
       EVENT_TYPES.agentMessage,
       EVENT_TYPES.modelRequestEnd,
+      EVENT_TYPES.sessionUsage,
       EVENT_TYPES.sessionStatusIdle,
     ])
     const error = history.find(

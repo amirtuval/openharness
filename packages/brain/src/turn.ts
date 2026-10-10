@@ -18,6 +18,7 @@ import {
   eventDelta,
   eventStart,
   sessionError,
+  sessionUsage,
   spanEnd,
   spanStart,
   statusIdle,
@@ -34,6 +35,8 @@ import {
   lastStatusEventType,
   needsModelRequest,
   readLog,
+  usageByModel,
+  withRequestUsage,
 } from './log'
 import type { ModelFactory, ResolveCredential } from './model'
 import {
@@ -96,6 +99,7 @@ import { backoffDelay, resolveRetryPolicy } from './retry'
  *   8. text streamed ......... agent.message { supersedes: the chunk range }
  *      no text ................................... (no message; the span end supersedes)
  *   9. .............................. span.model_request_end { model_usage }
+ *                                     session.usage { the session's running totals, #247 }
  *  10. another user.message arrived .......................... loop from 1
  *  11. otherwise ............................................. session.status_idle, return idle
  *
@@ -452,8 +456,11 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       throw new Error('the store did not return the span it was asked to append')
     }
     // Read the log again: the claim just landed, and what this request answers is the log as it
-    // stands after it — the messages it consumes, in order, and nothing still queued.
-    const answered = contextView(await readLog(store, sessionId))
+    // stands after it — the messages it consumes, in order, and nothing still queued. The same
+    // read is the fold the running totals below are built from (#247): it is the log before
+    // this request's span end, so all this request adds to it is its own usage.
+    const read = await readLog(store, sessionId)
+    const answered = contextView(read)
     const messages = strategy(answered, { model: requestModel, system: current.system })
 
     // The reply's chunks are stored as they arrive, under one pre-minted id: the stored
@@ -538,11 +545,19 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     // reply the model did not make. The span still records that it ran, superseding the
     // `event_start` so the orphaned chunk does not outlive the request.
     try {
+      // The session's running totals ride in the same append as the span end (#247): the store
+      // assigns both a `seq` in one transaction, so a reader never sees the request finished
+      // and the totals lagging behind it. Only a request that reported usage writes one — a
+      // request that failed or was interrupted closes its span with nothing to add, and the
+      // running total it would carry is already in the log.
+      const totals = sessionUsage(
+        withRequestUsage(usageByModel(read), requestModel.id, result.usage),
+      )
       if (result.text.length > 0) {
         await append([agentMessage(eventId, result.text, range)])
-        await append([spanEnd(start.id, result.usage)])
+        await append([spanEnd(start.id, result.usage), totals])
       } else {
-        await append([spanEnd(start.id, result.usage, { supersedes: range })])
+        await append([spanEnd(start.id, result.usage, { supersedes: range }), totals])
       }
     } catch (error) {
       // The events a model's report shapes are the ones that can turn out not to be protocol

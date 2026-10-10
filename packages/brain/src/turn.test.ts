@@ -294,9 +294,10 @@ describe('runTurn', () => {
       EVENT_TYPES.eventDelta,
       EVENT_TYPES.agentMessage,
       EVENT_TYPES.modelRequestEnd,
+      EVENT_TYPES.sessionUsage,
       EVENT_TYPES.sessionStatusIdle,
     ])
-    const [user, running, start, chunkStart, deltaOne, deltaTwo, reply, end, idle] = raw
+    const [user, running, start, chunkStart, deltaOne, deltaTwo, reply, end, totals, idle] = raw
     expect(running?.type).toBe(EVENT_TYPES.sessionStatusRunning)
     expect(user?.processed_at).not.toBeNull()
 
@@ -328,6 +329,14 @@ describe('runTurn', () => {
       model_usage: FIXTURE_MODEL_USAGE,
       is_error: null,
     })
+    // The running totals ride in the same append as the span end (#247): this session's only
+    // request, so the session total is that request's usage.
+    expect(totals).toMatchObject({
+      type: EVENT_TYPES.sessionUsage,
+      input_tokens: FIXTURE_MODEL_USAGE.input_tokens,
+      output_tokens: FIXTURE_MODEL_USAGE.output_tokens,
+      models: [{ model: TEST_MODEL_ID, usage: FIXTURE_MODEL_USAGE, requests: 1 }],
+    })
     expect(idle).toMatchObject({
       type: EVENT_TYPES.sessionStatusIdle,
       stop_reason: { type: 'end_turn' },
@@ -341,6 +350,7 @@ describe('runTurn', () => {
       EVENT_TYPES.modelRequestStart,
       EVENT_TYPES.agentMessage,
       EVENT_TYPES.modelRequestEnd,
+      EVENT_TYPES.sessionUsage,
       EVENT_TYPES.sessionStatusIdle,
     ])
     expect(replayed.every((event) => event.processed_at !== null)).toBe(true)
@@ -458,13 +468,37 @@ describe('runTurn', () => {
       EVENT_TYPES.eventDelta,
       EVENT_TYPES.agentMessage,
       EVENT_TYPES.modelRequestEnd,
+      EVENT_TYPES.sessionUsage,
       EVENT_TYPES.modelRequestStart,
       EVENT_TYPES.eventStart,
       EVENT_TYPES.eventDelta,
       EVENT_TYPES.agentMessage,
       EVENT_TYPES.modelRequestEnd,
+      EVENT_TYPES.sessionUsage,
       EVENT_TYPES.sessionStatusIdle,
     ])
+
+    // Two requests, two running-total events, and the second one is the session's: the first
+    // request's tokens plus the second's (#247). A client reads the newest one for the session's
+    // cost, which is why it must be cumulative rather than per request.
+    const totals = raw.filter((event) => event.type === EVENT_TYPES.sessionUsage)
+    expect(totals).toHaveLength(2)
+    expect(totals[0]).toMatchObject({
+      input_tokens: FIXTURE_MODEL_USAGE.input_tokens,
+      output_tokens: FIXTURE_MODEL_USAGE.output_tokens,
+    })
+    expect(totals[1]).toMatchObject({
+      input_tokens: FIXTURE_MODEL_USAGE.input_tokens * 2,
+      output_tokens: FIXTURE_MODEL_USAGE.output_tokens * 2,
+      models: [
+        {
+          model: TEST_MODEL_ID,
+          usage: { input_tokens: 1024, output_tokens: 128 },
+          // Both requests ran on the same model, so the running totals say two (#247).
+          requests: 2,
+        },
+      ],
+    })
 
     // The second request claims the steering message; the first one claims only the message it
     // was started for.
@@ -593,6 +627,7 @@ describe('runTurn', () => {
       EVENT_TYPES.modelRequestStart,
       EVENT_TYPES.eventStart,
       EVENT_TYPES.modelRequestEnd,
+      EVENT_TYPES.sessionUsage,
       EVENT_TYPES.sessionStatusIdle,
     ])
     expect(raw.some((event) => event.type === EVENT_TYPES.agentMessage)).toBe(false)
@@ -754,6 +789,7 @@ describe('runTurn', () => {
       EVENT_TYPES.eventDelta,
       EVENT_TYPES.agentMessage,
       EVENT_TYPES.modelRequestEnd,
+      EVENT_TYPES.sessionUsage,
       EVENT_TYPES.sessionStatusIdle,
     ])
     // The failed attempt closes its span with the range of the chunks it announced — there is
@@ -823,6 +859,7 @@ describe('runTurn', () => {
       EVENT_TYPES.eventDelta,
       EVENT_TYPES.agentMessage,
       EVENT_TYPES.modelRequestEnd,
+      EVENT_TYPES.sessionUsage,
       EVENT_TYPES.sessionStatusIdle,
     ])
     // The retry is the loop's, and the log says so: the provider's error as the session error,
@@ -1328,7 +1365,7 @@ describe('runTurn', () => {
 
     // The rewind is not a message either: the prompt has one user turn, and the reply the
     // turn stored follows it.
-    expect(textOf((await rawLogOf(store, sessionId)).at(-3))).toBe('snow, on the window')
+    expect(textOf((await rawLogOf(store, sessionId)).at(-4))).toBe('snow, on the window')
   })
 
   it('stops at a fenced write and writes nothing more', async () => {
@@ -1575,6 +1612,7 @@ describe('runTurn', () => {
       EVENT_TYPES.modelRequestStart,
       EVENT_TYPES.agentMessage,
       EVENT_TYPES.modelRequestEnd,
+      EVENT_TYPES.sessionUsage,
       EVENT_TYPES.sessionStatusIdle,
     ])
   })
@@ -1601,6 +1639,7 @@ describe('runTurn', () => {
       EVENT_TYPES.modelRequestStart,
       EVENT_TYPES.agentMessage,
       EVENT_TYPES.modelRequestEnd,
+      EVENT_TYPES.sessionUsage,
       EVENT_TYPES.sessionStatusIdle,
     ])
     expect((await rawLogOf(store, sessionId))[0]?.processed_at).not.toBeNull()
@@ -1641,6 +1680,7 @@ describe('runTurn', () => {
       EVENT_TYPES.eventDelta,
       EVENT_TYPES.agentMessage,
       EVENT_TYPES.modelRequestEnd,
+      EVENT_TYPES.sessionUsage,
       EVENT_TYPES.sessionStatusIdle,
     ])
     // There is nothing left to claim — the message was claimed before the crash — so the new

@@ -33,6 +33,7 @@ import {
   makeSession,
   makeSessionAgent,
   makeSessionError,
+  makeSessionUsage,
   makeStatusIdle,
   makeStatusRescheduled,
   makeStatusRunning,
@@ -70,6 +71,7 @@ describe('fixture builders', () => {
       makeSessionError(),
       start,
       makeModelRequestEnd(start),
+      makeSessionUsage(),
       makeStoredEventStart(previewed),
       makeStoredEventDelta(previewed, 'fragment'),
     ]
@@ -77,7 +79,7 @@ describe('fixture builders', () => {
       expect(StoredEventSchema.safeParse(event).success, event.type).toBe(true)
       expect(StreamEventSchema.safeParse(event).success, event.type).toBe(true)
     }
-    expect(built).toHaveLength(11)
+    expect(built).toHaveLength(12)
   })
 
   it('builds a user that parses, with the profile fields optional', () => {
@@ -121,6 +123,32 @@ describe('fixture builders', () => {
     })
     expect(ListModelsResponseSchema.safeParse(response).success).toBe(true)
     expect(response.data[0]?.provider).toBe('openai')
+  })
+
+  it('builds a session.usage snapshot whose totals are its breakdown', () => {
+    const usage = makeSessionUsage()
+    expect(StoredEventSchema.safeParse(usage).success).toBe(true)
+    // The schema refuses a snapshot whose totals disagree with `models`, which is why the
+    // builder derives one from the other rather than restating it.
+    const inconsistent = { ...usage, input_tokens: usage.input_tokens + 1 }
+    expect(StoredEventSchema.safeParse(inconsistent).success).toBe(false)
+
+    const switched = makeSessionUsage([
+      { model: 'anthropic/claude-sonnet-5', usage: FIXTURE_MODEL_USAGE, requests: 1 },
+      {
+        model: 'openai/gpt-5.1',
+        usage: { ...FIXTURE_MODEL_USAGE, input_tokens: 1, output_tokens: 0 },
+        requests: 2,
+      },
+    ])
+    expect(switched.input_tokens).toBe(FIXTURE_MODEL_USAGE.input_tokens + 1)
+    expect(switched.models.map((entry) => entry.model)).toEqual([
+      'anthropic/claude-sonnet-5',
+      'openai/gpt-5.1',
+    ])
+    // The request counts ride with each model (#247): a reader of the running totals needs them
+    // to count how many requests a model nobody prices leaves unpriced.
+    expect(switched.models.map((entry) => entry.requests)).toEqual([1, 2])
   })
 
   it('build content deltas that parse', () => {

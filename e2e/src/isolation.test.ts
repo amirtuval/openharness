@@ -92,6 +92,8 @@ describe('two people on one server (A4)', () => {
       ['GET /v1/sessions/{id}', () => b.client.sessions.get(session.id)],
       ['GET /v1/sessions/{id}/events', () => b.client.sessions.events.list(session.id)],
       ['POST /v1/sessions/{id}/events', () => b.client.sendMessage(session.id, 'B was here')],
+      // What A spent is A's too (#247): the usage of a session B does not own is the same 404.
+      ['GET /v1/sessions/{id}/usage', () => b.client.usage.session(session.id)],
     ]
 
     for (const [what, call] of routes) {
@@ -171,6 +173,8 @@ describe('two people on one server (A4)', () => {
       ['GET', '/v1/sessions/sesn_01JZZZZZZZZZZZZZZZZZZZZZZZ'],
       ['DELETE', '/v1/sessions/sesn_01JZZZZZZZZZZZZZZZZZZZZZZZ'],
       ['GET', '/v1/sessions/sesn_01JZZZZZZZZZZZZZZZZZZZZZZZ/events'],
+      ['GET', '/v1/sessions/sesn_01JZZZZZZZZZZZZZZZZZZZZZZZ/usage'],
+      ['GET', '/v1/me/usage'],
       ['POST', '/v1/sessions/sesn_01JZZZZZZZZZZZZZZZZZZZZZZZ/events'],
       ['GET', '/v1/sessions/sesn_01JZZZZZZZZZZZZZZZZZZZZZZZ/events/stream'],
       ['POST', '/v1/sessions/sesn_01JZZZZZZZZZZZZZZZZZZZZZZZ/ai-sdk/chat'],

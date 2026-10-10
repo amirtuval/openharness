@@ -36,7 +36,13 @@ import {
   SESSION_NOT_FOUND_ERROR_CODE,
   isFencedError,
 } from '../errors'
-import type { AppendableEvent, AppendEventsOptions, PartitionLease, SessionStore } from '../store'
+import type {
+  AppendableEvent,
+  AppendEventsOptions,
+  ListModelRequestsOptions,
+  PartitionLease,
+  SessionStore,
+} from '../store'
 import { type TestClock, createTestClock } from './clock'
 
 /**
@@ -122,6 +128,11 @@ import { type TestClock, createTestClock } from './clock'
  * - **status updates** — the session `status` mirroring the log, and a reschedule not ending a
  *   turn.
  * - **turn state** — `idle`, `running` (with the open span) and `unfinished`, from the log.
+ * - **model requests in a window** (epic #245, A2; issue #247) — `listModelRequests`: the
+ *   `span.model_request_end` / `span.model_request_start` pairing that names each request's
+ *   model, the half-open window (`from` in, `to` out), owner scoping, the `model: null` a
+ *   request nothing attributes gets, the `(session_id, seq)` order, a rewind's branch left
+ *   out, and the `RangeError` a window that is not one raises.
  * - **reading the log** — order, `after_seq`, `types`, `seq` pagination and bad cursors.
  * - **subscriptions** — stored events in `seq` order, chunk delivery interleaved, isolation,
  *   unsubscribe, and the final `session.deleted` a deleted session's subscribers receive.
@@ -2016,6 +2027,155 @@ export function runSessionStoreConformance(
       })
     })
 
+    // ----------------------------------------------------------- usage reads
+
+    describe('model requests in a window (#247)', () => {
+      it('pairs each request end with the model its span start named', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        await recordModelRequest(store, session.id, MODEL_ID)
+
+        expect(
+          await store.listModelRequests(usageWindow(OWNER_A, START_MS - SECOND, START_MS + SECOND)),
+        ).toEqual([
+          {
+            model: MODEL_ID,
+            usage: REQUEST_USAGE,
+            processed_at: timestampAt(START_MS),
+          },
+        ])
+      })
+
+      it('reads the half-open window: `from` is in it and `to` is not', async () => {
+        const { store, clock } = await setup()
+        const { session } = await seed(store)
+        await recordModelRequest(store, session.id, MODEL_ID)
+        clock.advance(SECOND)
+        await recordModelRequest(store, session.id, MODEL_ID)
+
+        expect(
+          (await store.listModelRequests(usageWindow(OWNER_A, START_MS, START_MS + SECOND))).map(
+            (request) => request.processed_at,
+          ),
+        ).toEqual([timestampAt(START_MS)])
+        expect(
+          (
+            await store.listModelRequests(usageWindow(OWNER_A, START_MS, START_MS + SECOND + 1))
+          ).map((request) => request.processed_at),
+        ).toEqual([timestampAt(START_MS), timestampAt(START_MS + SECOND)])
+        // Nothing between the two instants: a window that starts after the first request and
+        // ends at the second one is empty, because the second is not in it.
+        expect(
+          await store.listModelRequests(usageWindow(OWNER_A, START_MS + 1, START_MS + SECOND)),
+        ).toEqual([])
+      })
+
+      it('is owner-scoped: another user’s requests are never in the answer', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        await recordModelRequest(store, session.id, MODEL_ID)
+        const theirs = await store.createSession(null, {
+          ownerId: OWNER_B,
+          model: { id: MODEL_ID },
+        })
+        await recordModelRequest(store, theirs.id, MODEL_ID)
+        await recordModelRequest(store, theirs.id, MODEL_ID)
+
+        const mine = await store.listModelRequests(
+          usageWindow(OWNER_A, START_MS - SECOND, START_MS + SECOND),
+        )
+        const other = await store.listModelRequests(
+          usageWindow(OWNER_B, START_MS - SECOND, START_MS + SECOND),
+        )
+        expect(mine).toHaveLength(1)
+        expect(other).toHaveLength(2)
+      })
+
+      it('reads a request whose model cannot be attributed, with `model: null`', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        // A start stored without a model — the shape a log written before the field existed
+        // has — and an end whose `model_request_start_id` names no event this log holds.
+        const [start] = await append(store, session.id, [spanStart()])
+        await append(store, session.id, [spanEnd(start as ModelRequestStartEvent)])
+        await append(store, session.id, [
+          {
+            type: EVENT_TYPES.modelRequestEnd,
+            model_request_start_id: unknownEventId(),
+            model_usage: { ...REQUEST_USAGE },
+            is_error: null,
+          },
+        ])
+
+        const requests = await store.listModelRequests(
+          usageWindow(OWNER_A, START_MS - SECOND, START_MS + SECOND),
+        )
+        expect(requests.map((request) => request.model)).toEqual([null, null])
+        // The tokens are real either way: an unattributable request is in the totals and in no
+        // per-model breakdown.
+        expect(requests.map((request) => request.usage)).toEqual([REQUEST_USAGE, REQUEST_USAGE])
+      })
+
+      it('reads every session of the owner, session by session and in log order', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const other = await store.createSession(null, {
+          ownerId: OWNER_A,
+          model: { id: 'openai/gpt-5' },
+        })
+        await recordModelRequest(store, session.id, MODEL_ID)
+        await recordModelRequest(store, session.id, MODEL_ID)
+        await recordModelRequest(store, other.id, 'openai/gpt-5')
+
+        // The answer is ordered by `(session_id, seq)`, whichever order the sessions were
+        // created in — so the two sessions' requests are grouped, not interleaved by time.
+        const expected = [MODEL_ID, MODEL_ID, 'openai/gpt-5']
+        if (session.id > other.id) {
+          expected.reverse()
+        }
+        const requests = await store.listModelRequests(
+          usageWindow(OWNER_A, START_MS - SECOND, START_MS + SECOND),
+        )
+        expect(requests.map((request) => request.model)).toEqual(expected)
+      })
+
+      it('does not read a request a rewind replaced (#238)', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const { events } = await completeTurn(store, session.id, 'hello')
+        expect(
+          await store.listModelRequests(usageWindow(OWNER_A, START_MS - SECOND, START_MS + SECOND)),
+        ).toHaveLength(1)
+
+        const message = events[0]
+        if (message === undefined) {
+          throw new Error('the turn stored no message')
+        }
+        await append(store, session.id, [rewindTo(message.seq)])
+        expect(
+          await store.listModelRequests(usageWindow(OWNER_A, START_MS - SECOND, START_MS + SECOND)),
+        ).toEqual([])
+      })
+
+      it('rejects a window it cannot read', async () => {
+        const { store } = await setup()
+        expect(
+          await thrownBy(() =>
+            store.listModelRequests(usageWindow(OWNER_A, START_MS + 1, START_MS)),
+          ),
+        ).toBeInstanceOf(RangeError)
+        expect(
+          await thrownBy(() =>
+            store.listModelRequests({
+              ownerId: OWNER_A,
+              from: new Date(Number.NaN),
+              to: new Date(START_MS),
+            }),
+          ),
+        ).toBeInstanceOf(RangeError)
+      })
+    })
+
     // --------------------------------------------------------- reading the log
 
     describe('reading the log', () => {
@@ -2761,6 +2921,17 @@ const SETTLE_MS = 20
 /** How many pages `readAllPages` walks before it gives up on a list that never ends. */
 const MAX_PAGES = 100
 
+/** The model the suite's span starts name, where a test does not say otherwise. */
+const MODEL_ID = 'anthropic/claude-sonnet-5'
+
+/** What the suite's `span.model_request_end` events report: fixed, so a total is assertable. */
+const REQUEST_USAGE = {
+  input_tokens: 512,
+  output_tokens: 64,
+  cache_creation_input_tokens: 0,
+  cache_read_input_tokens: 0,
+}
+
 /** A `POST /v1/agents` body. */
 function agentInput(name = 'Summarizer'): CreateAgentRequest {
   return { name, model: { id: 'anthropic/claude-sonnet-5' }, system: 'You are concise.' }
@@ -2859,7 +3030,7 @@ function spanStart(): AppendableEvent {
 
 /** A `span.model_request_start` claiming the user events it is given (D9). */
 function spanStartFor(consumes: EventId[]): AppendableEvent {
-  return { type: EVENT_TYPES.modelRequestStart, consumes, model: 'anthropic/claude-sonnet-5' }
+  return { type: EVENT_TYPES.modelRequestStart, consumes, model: MODEL_ID }
 }
 
 /**
@@ -2915,12 +3086,7 @@ function spanEnd(start: ModelRequestStartEvent): AppendableEvent {
   const end: AppendableEvent = {
     type: EVENT_TYPES.modelRequestEnd,
     model_request_start_id: start.id,
-    model_usage: {
-      input_tokens: 512,
-      output_tokens: 64,
-      cache_creation_input_tokens: 0,
-      cache_read_input_tokens: 0,
-    },
+    model_usage: { ...REQUEST_USAGE },
     is_error: null,
   }
   return end
@@ -2931,16 +3097,37 @@ function spanEndFor(start: ModelRequestStartEvent, consumes: EventId[]): Appenda
   return {
     type: EVENT_TYPES.modelRequestEnd,
     model_request_start_id: start.id,
-    model_usage: {
-      input_tokens: 512,
-      output_tokens: 64,
-      cache_creation_input_tokens: 0,
-      cache_read_input_tokens: 0,
-    },
+    model_usage: { ...REQUEST_USAGE },
     is_error: true,
     error: { type: 'interrupted' },
     consumes,
   }
+}
+
+/**
+ * One model request: a `span.model_request_start` — naming `model`, or naming none when it is
+ * `null` — and the `span.model_request_end` that reports {@link REQUEST_USAGE} for it.
+ *
+ * That pair is what {@link SessionStore.listModelRequests} reads, so the tests that need a
+ * request in a log rather than a whole turn start from here.
+ */
+async function recordModelRequest(
+  store: SessionStore,
+  sessionId: SessionId,
+  model: string | null,
+): Promise<void> {
+  const [start] = await append(store, sessionId, [
+    model === null ? spanStart() : { type: EVENT_TYPES.modelRequestStart, model },
+  ])
+  if (start?.type !== EVENT_TYPES.modelRequestStart) {
+    throw new Error('the store did not return the span start it was given')
+  }
+  await append(store, sessionId, [spanEnd(start)])
+}
+
+/** A `listModelRequests` query for `ownerId`, over the half-open window `[fromMs, toMs)`. */
+function usageWindow(ownerId: UserId, fromMs: number, toMs: number): ListModelRequestsOptions {
+  return { ownerId, from: new Date(fromMs), to: new Date(toMs) }
 }
 
 /** An `event_start` chunk previewing `id`. */

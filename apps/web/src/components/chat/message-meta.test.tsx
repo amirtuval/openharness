@@ -1,9 +1,13 @@
-import type { TranscriptMessage, TranscriptMessageMeta } from '@openharness/client'
+import type {
+  ModelPriceLookup,
+  TranscriptMessage,
+  TranscriptMessageMeta,
+} from '@openharness/client'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 
-import { modelNameLookup } from '../../lib/models'
+import { modelNameLookup, modelPriceLookup } from '../../lib/models'
 import { MessageMeta, previousReplyModels } from './message-meta'
 
 /**
@@ -22,9 +26,26 @@ const nameOf = modelNameLookup([
     name: 'Claude Sonnet 5',
     context_window: 200_000,
     max_output_tokens: 64_000,
+    cost: null,
     source: 'provider',
   },
 ])
+
+/** The catalog's prices, as `useModels` hands them to a screen (#247). */
+const costOf = modelPriceLookup([
+  {
+    id: 'anthropic/claude-sonnet-5',
+    provider: 'anthropic',
+    name: 'Claude Sonnet 5',
+    context_window: 200_000,
+    max_output_tokens: 64_000,
+    cost: { input: 2, output: 10, cache_read: 0.2, cache_write: 2.5 },
+    source: 'provider',
+  },
+])
+
+/** The same catalog with nothing priced: every cost is unknown. */
+const unpriced: ModelPriceLookup = () => null
 
 /** A message, with whatever the case is about overridden. */
 function message(overrides: Partial<TranscriptMessage> = {}): TranscriptMessage {
@@ -57,7 +78,7 @@ describe('MessageMeta', () => {
         message={reply({
           model: 'anthropic/claude-sonnet-5',
           durationMs: 4200,
-          usage: { input: 1100, output: 212, total: 1312 },
+          usage: { input: 1100, output: 212, cacheCreation: 0, cacheRead: 0, total: 1312 },
         })}
         previousModel={undefined}
         nameOf={nameOf}
@@ -123,7 +144,9 @@ describe('MessageMeta', () => {
     const user = userEvent.setup()
     render(
       <MessageMeta
-        message={reply({ usage: { input: 1100, output: 212, total: 1312 } })}
+        message={reply({
+          usage: { input: 1100, output: 212, cacheCreation: 0, cacheRead: 0, total: 1312 },
+        })}
         previousModel={undefined}
       />,
     )
@@ -139,7 +162,9 @@ describe('MessageMeta', () => {
   it('says "token" for one of them', () => {
     render(
       <MessageMeta
-        message={reply({ usage: { input: 1, output: 0, total: 1 } })}
+        message={reply({
+          usage: { input: 1, output: 0, cacheCreation: 0, cacheRead: 0, total: 1 },
+        })}
         previousModel={undefined}
       />,
     )
@@ -158,5 +183,66 @@ describe('previousReplyModels', () => {
     ]
 
     expect(previousReplyModels(messages)).toEqual([undefined, 'a', 'a', 'a', 'b'])
+  })
+})
+
+describe('MessageMeta’s cost (#247)', () => {
+  const usage = { input: 1100, output: 212, cacheCreation: 0, cacheRead: 0, total: 1312 }
+
+  it('prices the reply with its model’s rates, beside the tokens', () => {
+    render(
+      <MessageMeta
+        message={reply({ model: 'anthropic/claude-sonnet-5', usage })}
+        previousModel={undefined}
+        nameOf={nameOf}
+        costOf={costOf}
+      />,
+    )
+
+    // 1,100 input at $2/Mtok and 212 output at $10/Mtok: $0.00432.
+    expect(screen.getByText('$0.0043')).toBeInTheDocument()
+    expect(lineText()).toBe('Claude Sonnet 5 · 1,312 tokens · $0.0043')
+  })
+
+  it('shows a dash for a model nobody publishes a price for', () => {
+    render(
+      <MessageMeta
+        message={reply({ model: 'anthropic/claude-sonnet-5', usage })}
+        previousModel={undefined}
+        nameOf={nameOf}
+        costOf={unpriced}
+      />,
+    )
+
+    // "—" and never `$0.00`: the tokens are real, the money is not known, and the two must not
+    // look alike.
+    expect(screen.getByText('—')).toBeInTheDocument()
+    expect(lineText()).toBe('Claude Sonnet 5 · 1,312 tokens · —')
+  })
+
+  it('leaves the cost out entirely when the caller has no catalog', () => {
+    render(
+      <MessageMeta
+        message={reply({ model: 'anthropic/claude-sonnet-5', usage })}
+        previousModel={undefined}
+        nameOf={nameOf}
+      />,
+    )
+
+    expect(lineText()).toBe('Claude Sonnet 5 · 1,312 tokens')
+    expect(document.querySelector('[data-slot="message-cost"]')).toBeNull()
+  })
+
+  it('has no cost without tokens: there is nothing to price', () => {
+    render(
+      <MessageMeta
+        message={reply({ model: 'anthropic/claude-sonnet-5', durationMs: 900 })}
+        previousModel={undefined}
+        nameOf={nameOf}
+        costOf={costOf}
+      />,
+    )
+
+    expect(lineText()).toBe('Claude Sonnet 5 · 0.9s')
   })
 })

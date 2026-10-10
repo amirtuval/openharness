@@ -1,6 +1,8 @@
 import {
   createTranscript,
+  selectSessionUsage,
   type Client,
+  type SessionUsage,
   type TranscriptError,
   type TranscriptMessage,
 } from '@openharness/client'
@@ -53,6 +55,15 @@ export interface SessionView {
    * instead.
    */
   readonly model: string | null
+  /**
+   * What the session has spent (epic #245, A2; issue #247): the running totals the log reports,
+   * or the same totals derived from the replies in it — a session stored before `session.usage`
+   * existed has none of those events and still answers.
+   *
+   * Tokens only: the money is computed where the catalog's prices are, which is the screen's
+   * business and not this hook's.
+   */
+  readonly usage: SessionUsage
   /**
    * Send a message. While the agent is running this is a steering message.
    *
@@ -209,6 +220,7 @@ export function useSession(client: Client, sessionId: string): SessionView {
   return {
     session,
     messages: state.messages,
+    usage: selectSessionUsage(state),
     status: state.status,
     lastError: state.lastError,
     lastSeq: state.lastSeq,

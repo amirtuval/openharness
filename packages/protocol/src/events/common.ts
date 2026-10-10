@@ -32,6 +32,13 @@ export const EVENT_TYPES = {
   modelRequestStart: 'span.model_request_start',
   /** A model request finished, with its token usage. */
   modelRequestEnd: 'span.model_request_end',
+  /**
+   * // extension: the session's running totals, after a model request (epic #245, A2; #247).
+   *
+   * Anthropic has the event; openharness writes it on a different cadence and with the cost
+   * left out — see {@link SessionUsageEventSchema} for what it carries and why.
+   */
+  sessionUsage: 'session.usage',
   /** A previewed event started generating. A stored chunk since D9; stream-only before it. */
   eventStart: 'event_start',
   /** Incremental content for a previewed event. A stored chunk since D9; stream-only before it. */
@@ -81,6 +88,7 @@ export const STORED_EVENT_TYPES = [
   EVENT_TYPES.sessionError,
   EVENT_TYPES.modelRequestStart,
   EVENT_TYPES.modelRequestEnd,
+  EVENT_TYPES.sessionUsage,
   EVENT_TYPES.eventStart,
   EVENT_TYPES.eventDelta,
   EVENT_TYPES.sessionRewind,

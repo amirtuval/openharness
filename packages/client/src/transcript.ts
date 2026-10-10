@@ -1,9 +1,11 @@
-import { EVENT_TYPES } from '@openharness/protocol'
+import { EVENT_TYPES, totalCost, usageCost } from '@openharness/protocol'
 import type {
   AgentMessageEvent,
+  ModelCost,
   ModelRequestEndEvent,
   ModelRequestStartEvent,
   ModelUsage,
+  SessionUsageEvent,
   StreamEvent,
   StoredEvent,
   UserMessageEvent,
@@ -11,6 +13,7 @@ import type {
   SessionErrorType,
   SessionRewindEvent,
   SessionStatus,
+  TotalCost,
 } from '@openharness/protocol'
 
 /**
@@ -78,15 +81,67 @@ export type MessagePart = TextPart
 /**
  * The tokens a reply used, summed over the model requests it took (epic #201, U1).
  *
- * `total` is `input + output`: the two numbers a reader thinks in. The protocol's `ModelUsage`
- * also carries the cache creation and cache read counts; a reply's headline cost is not them,
- * and the log itself is where a caller that wants them reads them.
+ * `total` is `input + output`: the two numbers a reader thinks in. The cache counters are
+ * carried too — they are not part of that headline, and they are what a price is computed
+ * from — because they are what the log reported and nothing else can recover them (epic #245,
+ * #247).
  */
 export interface TranscriptUsage {
   readonly input: number
   readonly output: number
+  /** Tokens written to the prompt cache, summed. */
+  readonly cacheCreation: number
+  /** Tokens read from the prompt cache, summed. */
+  readonly cacheRead: number
+  /** `input + output` — the headline number, which the cache counters are not part of. */
   readonly total: number
 }
+
+/**
+ * The session's tokens, broken down by model (epic #245, A2; issue #247).
+ *
+ * A session may switch models mid-conversation (epic #116, U3), so its usage is a per-model
+ * question: the totals are the sum of `models`, and a cost is per model because the rates are.
+ */
+export interface SessionUsage {
+  /** Every request the session made, summed. */
+  readonly totals: SessionUsageTotals
+  /** The same totals per model, in the order the models first ran. */
+  readonly models: readonly SessionModelUsage[]
+}
+
+/** The four counters a session's usage is summed in — the protocol's `ModelUsage`, in camelCase. */
+export interface SessionUsageTotals {
+  readonly input: number
+  readonly output: number
+  readonly cacheCreation: number
+  readonly cacheRead: number
+}
+
+/** One model's share of a session's tokens. */
+export interface SessionModelUsage {
+  /** The `provider/model` the requests named. */
+  readonly model: string
+  /** What those requests reported, summed. */
+  readonly usage: SessionUsageTotals
+  /**
+   * How many requests ran on this model (epic #245, A2; #247).
+   *
+   * A `session.usage` event carries the count per model, and the derivation from a transcript's
+   * replies sets it to how many replies named the model. It is what lets {@link sessionCost}
+   * count the requests a model nobody prices leaves unpriced, rather than the model alone.
+   */
+  readonly requests: number
+}
+
+/**
+ * A model's list price by `provider/model` id, or `null` when nobody publishes one — the
+ * `cost` of a `ModelEntry` from the catalog (epic #245, A2).
+ *
+ * The frontends price what they show with this: the catalog is the one place prices reach a
+ * client, and a model it does not price reports tokens and no cost rather than a guess.
+ */
+export type ModelPriceLookup = (modelId: string) => ModelCost | null
 
 /**
  * What a reply cost, read off the turn's span events (epic #201, X1).
@@ -247,6 +302,16 @@ export interface TranscriptState {
    * never outlives the turn that opened the requests.
    */
   readonly pendingRequests: readonly PendingModelRequest[]
+
+  /**
+   * The session's running totals as the log last reported them (epic #245, A2; issue #247).
+   *
+   * The newest `session.usage` event the reducer has folded in, or `null` for a session whose
+   * log holds none — one stored before the event existed, or one nothing has run on yet.
+   * {@link selectSessionUsage} is what a UI reads: it answers this when it is there and
+   * derives the same totals from the transcript's replies when it is not, so the two agree.
+   */
+  readonly usage: SessionUsage | null
 }
 
 /**
@@ -264,6 +329,7 @@ export function initialTranscriptState(): TranscriptState {
     deleted: false,
     model: null,
     pendingRequests: [],
+    usage: null,
   }
 }
 
@@ -442,6 +508,13 @@ function reduceStoredEvent(state: TranscriptState, event: StoredEvent): Transcri
         event.consumes,
       )
 
+    case EVENT_TYPES.sessionUsage:
+      // The session's running totals, as the writer folded them (#247). It replaces what the
+      // state held — the totals are cumulative, so the newest one is the whole answer — and a
+      // session stored before the event existed simply never gets one, which is what
+      // `selectSessionUsage` reads as "derive it from the replies".
+      return { ...state, usage: usageFromEvent(event) }
+
     case EVENT_TYPES.sessionRewind:
       return dropRewound(state, event)
 
@@ -520,11 +593,16 @@ function dropRewound(state: TranscriptState, event: SessionRewindEvent): Transcr
   if (
     messages.length === state.messages.length &&
     state.lastError === null &&
-    state.pendingRequests.length === 0
+    state.pendingRequests.length === 0 &&
+    state.usage === null
   ) {
     return state
   }
-  return { ...state, messages, lastError: null, pendingRequests: [] }
+  // The running totals go with the branch (#247): the newest `session.usage` the state holds
+  // counted the requests the edit took back, so it is stale by definition — and the derivation
+  // from the replies that survived is the right answer until the next request writes a fresh
+  // one.
+  return { ...state, messages, lastError: null, pendingRequests: [], usage: null }
 }
 
 /**
@@ -748,6 +826,8 @@ function metaFrom(requests: readonly PendingModelRequest[]): TranscriptMessageMe
 function summedUsage(requests: readonly PendingModelRequest[]): TranscriptUsage | undefined {
   let input = 0
   let output = 0
+  let cacheCreation = 0
+  let cacheRead = 0
   let reported = false
   for (const request of requests) {
     if (request.usage === undefined) {
@@ -755,9 +835,11 @@ function summedUsage(requests: readonly PendingModelRequest[]): TranscriptUsage 
     }
     input += request.usage.input
     output += request.usage.output
+    cacheCreation += request.usage.cacheCreation
+    cacheRead += request.usage.cacheRead
     reported = true
   }
-  return reported ? { input, output, total: input + output } : undefined
+  return reported ? { input, output, cacheCreation, cacheRead, total: input + output } : undefined
 }
 
 /**
@@ -787,7 +869,31 @@ function usageFrom(usage: ModelUsage): TranscriptUsage {
   return {
     input: usage.input_tokens,
     output: usage.output_tokens,
+    cacheCreation: usage.cache_creation_input_tokens,
+    cacheRead: usage.cache_read_input_tokens,
     total: usage.input_tokens + usage.output_tokens,
+  }
+}
+
+/** A `session.usage` event in the shape the transcript keeps (#247). */
+function usageFromEvent(event: SessionUsageEvent): SessionUsage {
+  return {
+    totals: totalsOf(event),
+    models: event.models.map((entry) => ({
+      model: entry.model,
+      usage: totalsOf(entry.usage),
+      requests: entry.requests,
+    })),
+  }
+}
+
+/** The four counters of a usage report, in the transcript's spelling. */
+function totalsOf(usage: ModelUsage): SessionUsageTotals {
+  return {
+    input: usage.input_tokens,
+    output: usage.output_tokens,
+    cacheCreation: usage.cache_creation_input_tokens,
+    cacheRead: usage.cache_read_input_tokens,
   }
 }
 
@@ -904,6 +1010,8 @@ function sameMeta(
     current.durationMs === next.durationMs &&
     current.usage?.input === next.usage?.input &&
     current.usage?.output === next.usage?.output &&
+    current.usage?.cacheCreation === next.usage?.cacheCreation &&
+    current.usage?.cacheRead === next.usage?.cacheRead &&
     current.usage?.total === next.usage?.total
   )
 }
@@ -967,6 +1075,130 @@ export function selectLastMessage(state: TranscriptState): TranscriptMessage | n
 /** The `agent.message` being previewed right now, or `null`. */
 export function selectStreamingMessage(state: TranscriptState): TranscriptMessage | null {
   return state.messages.find((message) => message.streaming) ?? null
+}
+
+/**
+ * The session's usage: the running totals the log reported, or the same totals derived from
+ * its replies (epic #245, A2; issue #247).
+ *
+ * **A session stored before `session.usage` existed derives its totals here**, which is what
+ * makes a replay equal a live stream: the newest event's totals are exactly what a fold over
+ * the stored `span.model_request_end` events produces, and the fold is what a transcript built
+ * from those spans already holds. The event is preferred when there is one because it is the
+ * whole answer in one place — and because it also counts a request that produced no reply.
+ *
+ * The derivation attributes each reply to the model its metadata names. A reply whose model
+ * the log does not name — a client that joined mid-request — contributes to no entry, so the
+ * totals are always the models' sum and a reader never sees a total it cannot break down.
+ */
+export function selectSessionUsage(state: TranscriptState): SessionUsage {
+  return state.usage ?? sessionUsageOf(state.messages)
+}
+
+/**
+ * The totals a transcript's replies add up to, per model.
+ *
+ * The derivation {@link selectSessionUsage} falls back to; exported for a caller that holds
+ * messages without a transcript around them.
+ *
+ * @param messages the conversation, in order
+ */
+export function sessionUsageOf(messages: readonly TranscriptMessage[]): SessionUsage {
+  const models = new Map<string, SessionUsageTotals>()
+  const requests = new Map<string, number>()
+  let totals = emptyTotals()
+  for (const message of messages) {
+    const model = message.meta?.model
+    const usage = message.meta?.usage
+    if (model === undefined || usage === undefined) {
+      continue
+    }
+    totals = plus(totals, usage)
+    models.set(model, plus(models.get(model) ?? emptyTotals(), usage))
+    // One reply is one entry in the derivation: a reply the log retried carries the failed
+    // attempt's tokens in the same metadata, so its request count is the reply's, not the
+    // attempts'. The event's own count is exact; this is the best a transcript can say.
+    requests.set(model, (requests.get(model) ?? 0) + 1)
+  }
+  return {
+    totals,
+    models: [...models].map(([model, usage]) => ({
+      model,
+      usage,
+      requests: requests.get(model) ?? 0,
+    })),
+  }
+}
+
+/**
+ * What a session's tokens cost: the sum of the requests that could be priced, and how many could
+ * not (epic #245, A2; #247, decided 2026-10-09).
+ *
+ * `prices` is the model catalog's (`ModelEntry.cost`). A model it does not price makes its
+ * requests — all of them, which the totals count per model — unpriced rather than free: the cost
+ * is the priced part, and `unpriced_requests` names the rest, which is what a frontend renders as
+ * "+ N unpriced". The cost is `null` only when nothing in the session could be priced, which is
+ * what "—" means.
+ *
+ * @param usage the session's totals, as {@link selectSessionUsage} answers them
+ * @param prices the price of a `provider/model` id, or `null` for one nobody publishes
+ */
+export function sessionCost(usage: SessionUsage, prices: ModelPriceLookup): TotalCost {
+  // An unpriced model stands for every request that ran on it, so the count `totalCost` reports
+  // is requests — the same unit the usage routes count — rather than models.
+  const parts = usage.models.flatMap((entry) => {
+    const cost = totalsCost(entry.usage, prices(entry.model))
+    return cost === null ? Array<number | null>(entry.requests).fill(null) : [cost]
+  })
+  return totalCost(parts)
+}
+
+/**
+ * What one reply cost, in USD — or `null` when the log or the catalog cannot say (epic #245,
+ * A2; issue #247).
+ *
+ * A reply with no metadata, no model, or no tokens has no cost to report: `null`, which a
+ * frontend draws as "—" beside the tokens it does have.
+ *
+ * @param meta the reply's metadata, from {@link TranscriptMessage.meta}
+ * @param prices the price of a `provider/model` id, or `null` for one nobody publishes
+ */
+export function replyCost(
+  meta: TranscriptMessageMeta | undefined,
+  prices: ModelPriceLookup,
+): number | null {
+  if (meta?.usage === undefined) {
+    return null
+  }
+  return totalsCost(meta.usage, meta.model === undefined ? null : prices(meta.model))
+}
+
+/** The cost of a set of counters at one model's rates, via the protocol's arithmetic. */
+function totalsCost(usage: SessionUsageTotals, cost: ModelCost | null): number | null {
+  return usageCost(
+    {
+      input_tokens: usage.input,
+      output_tokens: usage.output,
+      cache_creation_input_tokens: usage.cacheCreation,
+      cache_read_input_tokens: usage.cacheRead,
+    },
+    cost,
+  )
+}
+
+/** The four counters at zero. */
+function emptyTotals(): SessionUsageTotals {
+  return { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 }
+}
+
+/** A reply's tokens added into a running total, counter by counter. */
+function plus(into: SessionUsageTotals, usage: TranscriptUsage): SessionUsageTotals {
+  return {
+    input: into.input + usage.input,
+    output: into.output + usage.output,
+    cacheCreation: into.cacheCreation + usage.cacheCreation,
+    cacheRead: into.cacheRead + usage.cacheRead,
+  }
 }
 
 /** The stateful wrapper {@link createTranscript} hands out. */
