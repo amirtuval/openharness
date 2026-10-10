@@ -28,14 +28,15 @@ runs through the slot), starting a new chat, clearing the screen, leaving, and p
 above the status bar (`showNotice`). Nothing else — the screen builds the context, so a
 command that wants a new power has to grow the context, where it can be seen.
 
-| command                 | what it does                                                            |
-| ----------------------- | ----------------------------------------------------------------------- |
-| `/model`                | pick a model; the choice rides the next message (epic #116 U3)          |
-| `/providers [provider]` | connect a model provider — paste its key into a hidden input (#210, X7) |
-| `/new`                  | start a new chat on the current model                                   |
-| `/clear`                | clear the screen; the session stays (the same wipe as Ctrl+L)           |
-| `/help`                 | print the commands and the keys above the prompt                        |
-| `/exit`                 | leave the chat (`/quit` is the same command)                            |
+| command                   | what it does                                                            |
+| ------------------------- | ----------------------------------------------------------------------- |
+| `/model`                  | pick a model; the choice rides the next message (epic #116 U3)          |
+| `/providers [provider]`   | connect a model provider — paste its key into a hidden input (#210, X7) |
+| `/new`                    | start a new chat on the current model                                   |
+| `/compact [instructions]` | summarize the older history now, with optional guidance (#283)          |
+| `/clear`                  | clear the screen; the session stays (the same wipe as Ctrl+L)           |
+| `/help`                   | print the commands and the keys above the prompt                        |
+| `/exit`                   | leave the chat (`/quit` is the same command)                            |
 
 ## What a line is
 
@@ -129,6 +130,19 @@ That is what makes the next pieces fit the same way:
 
 After a `/providers` save the screen reads the catalog again, so `/model` offers the models the
 provider just connected, and the default the server picked is named in a notice.
+
+## Manual compaction (#283)
+
+`/compact [instructions]` asks the brain to summarize the session's older history now, with the
+rest of the line as the reader's guidance for the summary ("keep the API decisions in detail").
+It is not a message and takes no prompt slot: the command calls `client.sessions.compact`, which
+stores a `session.compact` request and wakes the session — the brain answers at its next request
+boundary if a turn is running, and in a turn of its own if the chat is idle, and the answer is a
+`session.compaction` event. The runtime shows that outcome as a notice above the status line
+(`Compacted: the older history is a summary now.`, `There was no older history to summarize.`, or
+the failure), because the transcript draws no bubble for a compaction — everything a reader needs
+to be told lives in the notice. The event pair and the outcome field are the server's (epic #277
+K8); this command is the terminal's way in.
 
 ## Tests
 

@@ -59,6 +59,30 @@ export const EVENT_TYPES = {
    * follow-up work (#285), not this event's job. See {@link ContextSummaryProgressEventSchema}.
    */
   sessionContextSummaryProgress: 'session.context_summary_progress',
+  /**
+   * // extension: the user asked for a manual compaction, `/compact [instructions]` (epic #277,
+   * K8; #283).
+   *
+   * A client-requested event like `session.rewind` (#238): the server writes it on the caller's
+   * behalf when `POST /v1/sessions/{id}/compact` lands, and the brain answers it — at the next
+   * request boundary when a turn is running, or in a turn of its own when the session is idle —
+   * with a {@link EVENT_TYPES.sessionCompaction}. It carries the user's optional guidance, which
+   * the compaction engine folds into the summary prompt as the user's own instruction. A request
+   * already waiting for an answer is not appended again: the route is idempotent while one is
+   * pending. See {@link SessionCompactEventSchema}.
+   */
+  sessionCompact: 'session.compact',
+  /**
+   * // extension: the answer to a manual compaction request (epic #277, K8; #283).
+   *
+   * The brain writes it once it has handled the newest pending `session.compact`, whatever came
+   * of it: `summarized` (the summary itself is a `session.context_summary` with reason
+   * `manual`), `nothing_to_summarize` (there was no older history to fold, or the chat is short),
+   * or `failed` (the summarizer failed; the chat carries on). This is the clear, stored outcome
+   * a client shows — the request is never a silent no-op — and it is what makes a request no
+   * longer pending. See {@link SessionCompactionEventSchema}.
+   */
+  sessionCompaction: 'session.compaction',
   /** A previewed event started generating. A stored chunk since D9; stream-only before it. */
   eventStart: 'event_start',
   /** Incremental content for a previewed event. A stored chunk since D9; stream-only before it. */
@@ -111,6 +135,8 @@ export const STORED_EVENT_TYPES = [
   EVENT_TYPES.sessionUsage,
   EVENT_TYPES.sessionContextSummary,
   EVENT_TYPES.sessionContextSummaryProgress,
+  EVENT_TYPES.sessionCompact,
+  EVENT_TYPES.sessionCompaction,
   EVENT_TYPES.eventStart,
   EVENT_TYPES.eventDelta,
   EVENT_TYPES.sessionRewind,

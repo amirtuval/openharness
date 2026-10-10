@@ -1326,3 +1326,48 @@ describe('the sidebar below md', () => {
     expect([...sidebar.classList].filter((name) => name.startsWith('max-md:'))).not.toHaveLength(0)
   })
 })
+
+describe('the /compact command (#283)', () => {
+  it('asks for a manual compaction with the reader’s instructions instead of sending a message', async () => {
+    const user = userEvent.setup({ delay: null })
+    const fake = makeFake()
+    renderApp(fake)
+
+    const input = await screen.findByLabelText('Message')
+    await user.type(input, '/compact keep the API decisions')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
+
+    // The request is stored, with the guidance, and the box is cleared.
+    await waitFor(() => {
+      const request = fake.history().find((event) => event.type === EVENT_TYPES.sessionCompact)
+      expect(request).toMatchObject({ instructions: 'keep the API decisions' })
+    })
+    expect(input).toHaveValue('')
+
+    // Nothing was sent as words: the line is a command, not a message.
+    expect(
+      fake
+        .history()
+        .some(
+          (event) =>
+            event.type === EVENT_TYPES.userMessage &&
+            event.content.some((block) => block.text.includes('/compact')),
+        ),
+    ).toBe(false)
+  })
+
+  it('runs a bare /compact with no instructions', async () => {
+    const user = userEvent.setup({ delay: null })
+    const fake = makeFake()
+    renderApp(fake)
+
+    await user.type(await screen.findByLabelText('Message'), '/compact')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
+
+    await waitFor(() => {
+      expect(fake.history().some((event) => event.type === EVENT_TYPES.sessionCompact)).toBe(true)
+    })
+    const request = fake.history().find((event) => event.type === EVENT_TYPES.sessionCompact)
+    expect(request).not.toHaveProperty('instructions')
+  })
+})

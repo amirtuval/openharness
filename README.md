@@ -198,7 +198,10 @@ picker by mode name, model name, id or provider; Esc clears the search. `oh sess
 sessions, `oh sessions
 delete <id>` deletes one (it asks first; `--yes` skips the question), `oh -c` continues the
 most recent one, and `oh -s <id>` resumes a particular one — a chat deleted elsewhere says
-so and exits. `apps/tui/AGENTS.md` documents the keys and the exit codes.
+so and exits. `/compact [instructions]` summarizes the older history on demand, with optional
+guidance for the summary (`/compact keep the API decisions`); the outcome — summarized, nothing
+to summarize, or a failure — is printed above the status line. `apps/tui/AGENTS.md` documents
+the keys and the exit codes.
 
 The web app and `oh` speak to the server through the same client
 ([`packages/client`](./packages/client/AGENTS.md)), so a behaviour one of them has, the other

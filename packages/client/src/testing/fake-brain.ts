@@ -18,6 +18,7 @@ import type {
   ModelUsage,
   RetryStatusType,
   Session,
+  SessionCompactEvent,
   SessionDeletedEvent,
   SessionError,
   SessionModelUsage,
@@ -271,6 +272,39 @@ export class FakeBrain {
    */
   history(): readonly StoredEvent[] {
     return this.#log.map((event) => this.#view(event))
+  }
+
+  /**
+   * Record a manual compaction request the way `POST /v1/sessions/{id}/compact` does (#283), and
+   * — when no turn is running — the `session.compaction` outcome the brain answers it with.
+   *
+   * The fake has no summary engine, so its outcome is always `nothing_to_summarize`: what a
+   * component test can prove here is the request's round trip and the log's shape, not a
+   * summary. While a turn is running the request is stored and left pending, the way the real
+   * server queues it for the next request boundary — and, unlike the server, the fake does not
+   * run a second turn to answer it (a documented difference, the same one modes carry).
+   */
+  compact(instructions?: string): SessionCompactEvent {
+    const request: SessionCompactEvent = {
+      id: newEventId(),
+      type: EVENT_TYPES.sessionCompact,
+      seq: this.#nextSeq(),
+      processed_at: this.#timestamp(),
+      ...(instructions === undefined ? {} : { instructions }),
+    }
+    this.#emit(request)
+    if (!this.running && !this.#deleted) {
+      this.#emit({
+        id: newEventId(),
+        type: EVENT_TYPES.sessionCompaction,
+        seq: this.#nextSeq(),
+        processed_at: this.#timestamp(),
+        outcome: 'nothing_to_summarize',
+        ...(instructions === undefined ? {} : { instructions }),
+        message: 'There was no older history to summarize.',
+      })
+    }
+    return request
   }
 
   /** Append a user event as the server would: with an `id`, a `seq` and a `processed_at`. */

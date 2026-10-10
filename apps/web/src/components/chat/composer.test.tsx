@@ -150,6 +150,31 @@ describe('Composer', () => {
     expect(input).toHaveValue('the rewrite')
   })
 
+  it('hints at the /compact command while it is being typed (#283)', async () => {
+    const { user, input } = setup()
+
+    // Nothing is offered for an ordinary message, and a bare slash is one keystroke from one.
+    expect(screen.queryByText('/compact [instructions]')).not.toBeInTheDocument()
+    await user.type(input, '/')
+    expect(screen.queryByText('/compact [instructions]')).not.toBeInTheDocument()
+
+    // A prefix of the command names it, and the description says what running it does.
+    await user.type(input, 'comp')
+    expect(screen.getByText('/compact [instructions]')).toBeInTheDocument()
+    expect(screen.getByText('Summarize the older history now')).toBeInTheDocument()
+
+    // It is still just a line until it is sent — clearing the box clears the hint.
+    await user.clear(input)
+    expect(screen.queryByText('/compact [instructions]')).not.toBeInTheDocument()
+  })
+
+  it('offers no hint for a line that names no command (#283)', async () => {
+    const { user, input } = setup()
+
+    await user.type(input, '/composing a thought')
+    expect(screen.queryByText('/compact [instructions]')).not.toBeInTheDocument()
+  })
+
   it('shows the model selector in the input area', async () => {
     const { user } = setup()
 

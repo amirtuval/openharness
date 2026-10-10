@@ -40,6 +40,12 @@ export interface CommandContext {
    * runs in the prompt slot; `provider` is the one to start on, when the line named it.
    */
   readonly setupProviders: (provider: string | undefined) => void
+  /**
+   * Ask the brain to compact the session's older history now — `/compact [instructions]`
+   * (epic #277, K8; #283). `instructions` is the reader's guidance for the summary, or the
+   * empty string when the line named none.
+   */
+  readonly compact: (instructions: string) => void
   /** Wipe the screen, the session untouched — the Ctrl+L wipe, by another name. */
   readonly clearScreen: () => void
   /** Leave the chat, the way the second idle Ctrl+C does. */
@@ -95,6 +101,14 @@ export const CHAT_COMMANDS: readonly ChatCommand[] = [
     description: 'start a new chat on the current model',
     run: (context) => {
       context.newChat(currentModelOf(context.session))
+    },
+  },
+  {
+    name: 'compact',
+    description: 'summarize the older history now',
+    args: '[instructions]',
+    run: (context, args) => {
+      context.compact(args)
     },
   },
   {

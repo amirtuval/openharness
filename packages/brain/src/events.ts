@@ -7,6 +7,7 @@ import type {
   ModelRequestPurpose,
   ModelUsage,
   ReasoningEffortRun,
+  SessionCompactionOutcome,
   SessionError,
   SessionModelUsage,
   SpanError,
@@ -198,6 +199,40 @@ export interface ContextSummaryRecord {
   readonly passes: number
   /** Why the chat model summarized instead of the chosen summary model, if it did (K3/K5). */
   readonly fallbackReason?: string
+}
+
+/** What {@link compactionOutcome} carries beside the outcome itself. */
+export interface CompactionOutcomeRecord {
+  /** The request's guidance, echoed when it carried any (K8), so the log records it was used. */
+  readonly instructions?: string
+  /** For `summarized`, the `seq` of the `session.context_summary` that was written. */
+  readonly summarySeq?: number
+  /** For `nothing_to_summarize` or `failed`, a sentence a client can show. */
+  readonly message?: string
+}
+
+/**
+ * The brain's answer to a manual compaction request (`/compact [instructions]`; epic #277, K8).
+ *
+ * Written once per pending `session.compact`, whatever came of it. It supersedes nothing and
+ * claims nothing — the request is not a user event — and it is what makes the request no longer
+ * pending, so a client reads the outcome from the log or the stream. See the protocol's
+ * `SessionCompactionEventSchema` for what each field records.
+ *
+ * @param outcome what came of the compaction
+ * @param record the guidance used, the summary's `seq` when one was written, and why not
+ */
+export function compactionOutcome(
+  outcome: SessionCompactionOutcome,
+  record: CompactionOutcomeRecord = {},
+): AppendableEvent {
+  return {
+    type: EVENT_TYPES.sessionCompaction,
+    outcome,
+    ...(record.instructions === undefined ? {} : { instructions: record.instructions }),
+    ...(record.summarySeq === undefined ? {} : { summary_seq: record.summarySeq }),
+    ...(record.message === undefined ? {} : { message: record.message }),
+  }
 }
 
 /** What {@link spanEnd} carries beyond the request it closes. */

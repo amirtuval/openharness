@@ -31,6 +31,7 @@ import { noopTracer, type Tracer } from './observability/tracing'
 import { errorResponse, httpErrorResponse, HttpError } from './http/errors'
 import { registerAgentRoutes } from './routes/agents'
 import { registerAiSdkRoutes } from './routes/ai-sdk'
+import { registerCompactRoutes } from './routes/compact'
 import type { AuthDeps, RouteDeps } from './routes/deps'
 import { registerEventRoutes } from './routes/events'
 import { registerMeRoutes } from './routes/me'
@@ -430,6 +431,7 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
   registerSessionRoutes(app, deps)
   registerUsageRoutes(app, deps)
   registerEventRoutes(app, deps)
+  registerCompactRoutes(app, deps)
   registerAiSdkRoutes(app, deps)
   registerProviderCredentialRoutes(app, deps)
   registerModelRoutes(app, deps)

@@ -74,6 +74,15 @@ export interface SessionView {
    * keep the text on a failure — including the 409 a rewind gets while a turn is running.
    */
   readonly send: (text: string, options?: { model?: string; rewindTo?: number }) => Promise<boolean>
+  /**
+   * Ask the brain to compact the older history now — `/compact [instructions]` (#283).
+   *
+   * `instructions` is the reader's guidance for the summary, or `undefined` for none. The
+   * stored request is folded into the transcript at once, so the composer clears and the log
+   * shows the ask; the outcome arrives on the stream like any other event. Answers whether the
+   * request was stored, so the composer keeps the text on a failure.
+   */
+  readonly compact: (instructions?: string) => Promise<boolean>
   /** Ask the running session to stop. */
   readonly interrupt: () => Promise<void>
   /** Clear {@link requestError}. */
@@ -214,6 +223,28 @@ export function useSession(client: Client, sessionId: string): SessionView {
     [client, sessionId, transcript, serverUrl],
   )
 
+  const compact = useCallback(
+    async (instructions?: string): Promise<boolean> => {
+      setRequestError(null)
+      try {
+        const request = await client.sessions.compact(sessionId, {
+          ...(instructions === undefined ? {} : { instructions }),
+        })
+        // The request shows at once, like a sent message: the reducer folds the stored event in
+        // and the stream's echo of it is dropped by the `seq` rule. The outcome the brain writes
+        // arrives later, on the stream.
+        transcript.apply(request)
+        return true
+      } catch (caught) {
+        if (!noteAuthenticationError(client, caught)) {
+          setRequestError(describeError(caught, { serverUrl }))
+        }
+        return false
+      }
+    },
+    [client, sessionId, transcript, serverUrl],
+  )
+
   const interrupt = useCallback(async (): Promise<void> => {
     setRequestError(null)
     try {
@@ -241,6 +272,7 @@ export function useSession(client: Client, sessionId: string): SessionView {
     deleted: state.deleted,
     model: state.model,
     send,
+    compact,
     interrupt,
     dismissError,
   }

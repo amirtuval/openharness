@@ -195,6 +195,22 @@ const storedSamples = {
       },
     ],
   },
+  'session.compact': {
+    id: eventId(),
+    type: 'session.compact',
+    seq: 15,
+    processed_at: '2026-03-15T10:00:00Z',
+    instructions: 'keep the API decisions in detail',
+  },
+  'session.compaction': {
+    id: eventId(),
+    type: 'session.compaction',
+    seq: 16,
+    processed_at: '2026-03-15T10:00:00Z',
+    outcome: 'summarized',
+    instructions: 'keep the API decisions in detail',
+    summary_seq: 14,
+  },
 } as const
 
 describe('stored event schemas', () => {

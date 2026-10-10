@@ -45,7 +45,10 @@ import { redactSecrets } from './redact'
  * 1. **The trigger** (K2). The caller measures the next request (C1's `estimateContextSize`) and
  *    compares it against the threshold share of the **chat** model's budget. Over it, this runs;
  *    under it, `'skipped'` and nothing is written — a chat that never comes near the threshold
- *    behaves exactly as it did before.
+ *    behaves exactly as it did before. A **manual** run (K8) skips the check entirely: the user
+ *    asked, so the engine tries at any size (and `'skipped'` means only that there was nowhere
+ *    to cut), and its `guidance` is folded into the summarizer's instructions as the user's own
+ *    instruction.
  * 2. **Where to cut** (K4, K12). One replaceable function answers "where may history be cut?"
  *    ({@link ContextCutRule}); the default keeps about a quarter of the chat model's budget
  *    verbatim and cuts at a `user.message` boundary, so no model turn is split. Everything
@@ -370,6 +373,14 @@ export interface SummarizeContextOptions {
   readonly chatModel: string
   /** Why the summary is being made (K2/K8); `'overflow'` also skips the trigger check. */
   readonly reason: ContextSummaryReason
+  /**
+   * The user's guidance for a **manual** summary (K8), or `null`/absent for none. Only
+   * `reason: 'manual'` carries it; a threshold or overflow pass makes none. The engine folds it
+   * into the summarizer's instructions as the user's own instruction, after the base prompt and
+   * before the size line, and never into the recorded `prompt_version` — the base prompt's
+   * meaning is unchanged, so the version stays `context-summary-v1`.
+   */
+  readonly guidance?: string | null
   /** The log as the request boundary sees it, as `readLog` handed it over. */
   readonly events: readonly StoredEvent[]
   /** The session's system prompt, or `null`. */
@@ -401,6 +412,8 @@ export interface SummarizeResult {
   readonly outcome: 'summarized' | 'skipped' | 'failed'
   /** The `seq` the new summary covers, when one was written. */
   readonly coversTo?: number
+  /** The `seq` of the `session.context_summary` that was written, when one was. */
+  readonly summarySeq?: number
   /** The model that wrote it — the summary model, or the chat model on a fallback. */
   readonly summaryModel?: string
   /** Why the chat model wrote it instead of the chosen summary model (K3/K5), when it did. */
@@ -431,7 +444,11 @@ interface SummaryWriter {
 export async function summarizeContext(options: SummarizeContextOptions): Promise<SummarizeResult> {
   const { config, events } = options
   const chatBudget = budgetFor(config, options.chatModel)
-  if (options.reason !== 'overflow' && options.estimatedTokens <= chatBudget * config.threshold) {
+  // The threshold is the automatic trigger's (K2). A manual request (K8) compacts whatever the
+  // size — it is the user asking, so the engine tries even on a short chat and answers
+  // `'skipped'` only when there is genuinely nowhere to cut. `'overflow'` skips the check too:
+  // the provider has already said the request does not fit.
+  if (options.reason === 'threshold' && options.estimatedTokens <= chatBudget * config.threshold) {
     return { outcome: 'skipped' }
   }
 
@@ -460,12 +477,15 @@ export async function summarizeContext(options: SummarizeContextOptions): Promis
   }
 
   const runningSummary = previous === null ? null : previous.summary
+  // The user's guidance for a manual summary (K8), or `null` for none — the engine folds it into
+  // the summarizer's instructions, and the caller records it on the outcome event.
+  const guidance = options.reason === 'manual' ? (options.guidance ?? null) : null
   // Everything that depends on which model writes the summary, in one place, so the plan the
   // fallback is judged by and the plan the run follows are computed the same way.
   const plan = (modelId: string) => {
     const budget = budgetFor(config, modelId)
     const cap = summarySizeCap(config, budget, chatBudget, modelId)
-    const instructions = instructionsFor(previous !== null, cap)
+    const instructions = instructionsFor(previous !== null, cap, guidance)
     const sliceBudget = sliceBudgetOf(budget, estimateTokens(instructions), cap)
     const needsFold = runningSummary !== null && estimateTokens(runningSummary) > cap
     const capped = capItems(covered, budget)
@@ -508,7 +528,7 @@ export async function summarizeContext(options: SummarizeContextOptions): Promis
   if (written === null) {
     return { outcome: 'failed' }
   }
-  await options.append([
+  const stored = await options.append([
     contextSummary(written.text, { to_seq: coversTo }, options.reason, {
       tokensBefore: options.estimatedTokens,
       summaryModel: writer_.modelId,
@@ -520,6 +540,7 @@ export async function summarizeContext(options: SummarizeContextOptions): Promis
   return {
     outcome: 'summarized',
     coversTo,
+    ...(stored[0] === undefined ? {} : { summarySeq: stored[0].seq }),
     summaryModel: writer_.modelId,
     passes: written.passes,
     ...(fallbackReason === undefined ? {} : { fallbackReason }),
@@ -653,9 +674,22 @@ function sliceBudgetOf(summaryBudget: number, instructionTokens: number, sizeCap
   )
 }
 
-/** The summarizer's instructions, with the update clause when there is a summary to update. */
-function instructionsFor(incremental: boolean, sizeCap: number): string {
-  return `${SUMMARY_PROMPT}${incremental ? SUMMARY_UPDATE_CLAUSE : ''}\n\nKeep the summary under ${sizeCap} tokens.`
+/**
+ * The summarizer's instructions: the base prompt, the update clause when there is a summary to
+ * update, the user's guidance when they gave any (K8), and the size line.
+ *
+ * The guidance is written as the user's own instruction — the epic's example is "keep the API
+ * decisions in detail" — so it reads as an addition to the base prompt rather than a replacement
+ * of it, and it does not change what {@link SUMMARY_PROMPT_VERSION} names: the base prompt's
+ * meaning is the same whether or not someone asked for a particular emphasis.
+ */
+function instructionsFor(incremental: boolean, sizeCap: number, guidance: string | null): string {
+  const base = `${SUMMARY_PROMPT}${incremental ? SUMMARY_UPDATE_CLAUSE : ''}`
+  const tailored =
+    guidance === null || guidance.trim().length === 0
+      ? base
+      : `${base}\n\nThe user asked for this summary and gave you this guidance, which you must follow:\n${guidance}`
+  return `${tailored}\n\nKeep the summary under ${sizeCap} tokens.`
 }
 
 /** The covered items, each capped to a quarter of the summary model's budget (K6). */

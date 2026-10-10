@@ -159,6 +159,7 @@ for await (const event of client.sessions.events.stream(session.id, { deltas: tr
 | `sessions.get(id, options?)`                     | `GET /v1/sessions/{id}`                                                                             | `Session`                                                    |
 | `sessions.list(params?, options?)`               | `GET /v1/sessions`                                                                                  | `{ data, next_page }`                                        |
 | `sessions.delete(id, options?)`                  | `DELETE /v1/sessions/{id}`                                                                          | `void` (the wire answers `204`)                              |
+| `sessions.compact(id, options?)`                 | `POST /v1/sessions/{id}/compact`                                                                    | the stored (or already pending) `session.compact` (#283)     |
 | `sessions.events.send(id, events, options?)`     | `POST /v1/sessions/{id}/events`                                                                     | `{ data: user event[] }` (a rewind's event is the server's)  |
 | `sessions.events.list(id, params?, options?)`    | `GET /v1/sessions/{id}/events`                                                                      | `{ data: stored event[], next_page }`                        |
 | `sessions.events.iterate(id, params?, options?)` | the same, page after page                                                                           | `AsyncIterable<StoredEvent>`                                 |
@@ -218,6 +219,12 @@ Notes worth knowing before reading the code:
   `seq` is the edited message's own position, which {@link TranscriptMessage.position}
   carries. The server refuses one while a turn is running (409 `conflict_error`): the reply in
   flight belongs to the branch being taken back.
+- **`sessions.compact(id, { instructions? })`** is `/compact [instructions]` (epic #277, K8;
+  #283): it posts to `POST /v1/sessions/{id}/compact` and answers the stored — or already
+  pending — `session.compact` request. The brain answers it with a `session.compaction` the
+  caller reads from the log or the stream, so the client returns the request and the outcome
+  arrives as an event, exactly like a `session.rewind`'s does. `instructions` is bounded by the
+  protocol; a longer one is the server's 400.
 - A failed `fetch` (no network, DNS, TLS, an abort) rejects with the original error — only an
   answer from the server becomes an `ApiError`.
 
@@ -671,6 +678,13 @@ that names nothing a reader could edit — no event there, not a `user.message`,
 earlier range already replaced. What a range covers is skipped by the fake's reads too, which
 is what the server's replay does: a reloaded client sees the conversation as if the edited
 message had been the one sent.
+
+`sessions.compact` is `POST …/compact` (#283): the fake stores a `session.compact` request, and
+— when the session is idle — answers it immediately with a `session.compaction`, because it has
+no summary engine to run (the outcome is always `nothing_to_summarize`). While a turn is running
+it stores the request and leaves it pending, as the server queues it; unlike the server, it does
+not run a second turn to answer it (a documented difference, the same one modes carry). The
+instructions go through the protocol's request schema, so an over-long one is the server's 400.
 
 **The fake refuses what the server refuses, the way the server refuses it** (#121). Bodies go
 through the same protocol schemas the routes parse them with — `agents.create` and

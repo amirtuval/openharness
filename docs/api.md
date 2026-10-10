@@ -107,6 +107,7 @@ the only way an event is ever removed together with its session.
 | `POST`   | `/v1/sessions/{session_id}/events`        | append user events; the server owns every other event type                                      |
 | `GET`    | `/v1/sessions/{session_id}/events`        | read the log, with `types[]`, `after_seq`, `limit` and `page`                                   |
 | `GET`    | `/v1/sessions/{session_id}/events/stream` | follow it live over SSE; `event_deltas[]` opts into a reply's chunks                            |
+| `POST`   | `/v1/sessions/{session_id}/compact`       | ask for a manual compaction; optional `instructions` (epic #277, K8; #283)                      |
 | `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`   | AI SDK `useChat` compatibility — an extension, not the protocol                                 |
 | `PUT`    | `/v1/provider-credentials/{name}`         | add or replace one of the caller's credentials, under that name (write-only)                    |
 | `GET`    | `/v1/provider-credentials`                | list the caller's credential metadata; never the secrets                                        |
@@ -128,24 +129,26 @@ The log is the source of truth, and `seq` is the order it happened in: `1`, `2`,
 session. It is also the SSE `id` and the resume position, so a client that reconnects with
 `last-event-id: 7` gets `8` next — never `7` twice, never a gap.
 
-| event                              | who writes it | what it means                                                                        |
-| ---------------------------------- | ------------- | ------------------------------------------------------------------------------------ |
-| `user.message`                     | the client    | a message, until the brain claims it                                                 |
-| `user.interrupt`                   | the client    | stop the turn in flight                                                              |
-| `agent.message`                    | the brain     | a reply, under the `sevt_` id its chunks announced                                   |
-| `session.status_running`           | the brain     | a turn started (also after a retry)                                                  |
-| `session.status_idle`              | the brain     | the turn ended; the session is waiting for input                                     |
-| `session.status_rescheduled`       | the brain     | a transient failure; it is retrying                                                  |
-| `session.error`                    | the brain     | what went wrong, and whether it is retrying — `missing_provider_credential` never is |
-| `span.model_request_start`         | the brain     | a model request began, the messages it claims, and the effort it ran at              |
-| `span.model_request_end`           | the brain     | it finished — usage, any error, the interrupts it ends                               |
-| `event_start`                      | the brain     | a reply started streaming — a stored chunk since D9                                  |
-| `event_delta`                      | the brain     | a streamed fragment of it — a stored chunk since D9                                  |
-| `session.usage`                    | the brain     | the session's running token totals, per model, after a request that reported usage   |
-| `session.context_summary`          | the brain     | // extension: older history replaced for the model by a summary (epic #277, #278)    |
-| `session.context_summary_progress` | the brain     | // extension: a summary is being written — which pass is running (#279)              |
-| `session.rewind`                   | the server    | // extension: the session restarts from an earlier `user.message` (#238)             |
-| `session.deleted`                  | the server    | stream-only: the session was deleted; sent last, then the stream closes (#111)       |
+| event                              | who writes it | what it means                                                                           |
+| ---------------------------------- | ------------- | --------------------------------------------------------------------------------------- |
+| `user.message`                     | the client    | a message, until the brain claims it                                                    |
+| `user.interrupt`                   | the client    | stop the turn in flight                                                                 |
+| `agent.message`                    | the brain     | a reply, under the `sevt_` id its chunks announced                                      |
+| `session.status_running`           | the brain     | a turn started (also after a retry)                                                     |
+| `session.status_idle`              | the brain     | the turn ended; the session is waiting for input                                        |
+| `session.status_rescheduled`       | the brain     | a transient failure; it is retrying                                                     |
+| `session.error`                    | the brain     | what went wrong, and whether it is retrying — `missing_provider_credential` never is    |
+| `span.model_request_start`         | the brain     | a model request began, the messages it claims, and the effort it ran at                 |
+| `span.model_request_end`           | the brain     | it finished — usage, any error, the interrupts it ends                                  |
+| `event_start`                      | the brain     | a reply started streaming — a stored chunk since D9                                     |
+| `event_delta`                      | the brain     | a streamed fragment of it — a stored chunk since D9                                     |
+| `session.usage`                    | the brain     | the session's running token totals, per model, after a request that reported usage      |
+| `session.context_summary`          | the brain     | // extension: older history replaced for the model by a summary (epic #277, #278)       |
+| `session.context_summary_progress` | the brain     | // extension: a summary is being written — which pass is running (#279)                 |
+| `session.compact`                  | the server    | // extension: the user asked for a manual compaction, `/compact [instructions]` (#283)  |
+| `session.compaction`               | the brain     | // extension: what came of it — `summarized`, `nothing_to_summarize` or `failed` (#283) |
+| `session.rewind`                   | the server    | // extension: the session restarts from an earlier `user.message` (#238)                |
+| `session.deleted`                  | the server    | stream-only: the session was deleted; sent last, then the stream closes (#111)          |
 
 A `user.message` may also carry a `model` (`{ "id": "provider/model" }`): it switches the
 model the session runs from that message on, and the session keeps running it until another
@@ -292,6 +295,45 @@ pass starts with a stored progress event:
 `pass` is the pass starting (from 1) and `passes` how many the plan holds, so a client can show
 "summarizing (2/3)". The event is the brain's bookkeeping like the summary itself: it is never
 claimed, the transcript and replay do not show it, and the context strategy ignores it.
+
+**A user can ask for it on demand — `/compact [instructions]`.** `POST /v1/sessions/{id}/compact`
+takes an optional `instructions` string (at most `COMPACT_INSTRUCTIONS_MAX_LENGTH`, 2000
+characters) and stores a `session.compact` request — a client-requested event like
+`session.rewind`, written by the server, not queued and never claimed:
+
+```json
+// POST /v1/sessions/{id}/compact  { "instructions": "keep the API decisions in detail" }
+// → 200 { "data": { "type": "session.compact", "id": "sevt_…", "seq": 44,
+//                   "processed_at": "…", "instructions": "keep the API decisions in detail" } }
+```
+
+The brain answers it with a `session.compaction` — always, whatever came of the run — and folds
+the guidance into the summarizer's prompt as the user's own instruction:
+
+```json
+{
+  "type": "session.compaction",
+  "id": "sevt_…",
+  "seq": 46,
+  "processed_at": "…",
+  "outcome": "summarized",
+  "instructions": "keep the API decisions in detail",
+  "summary_seq": 45
+}
+```
+
+`outcome` is `summarized` (a `session.context_summary` with `reason: "manual"` was written, and
+`summary_seq` points at it), `nothing_to_summarize` (there was no older history to fold — a short
+chat, or nothing before the newest turn) or `failed` (the summarizer failed; the chat carries on
+with the usual trimming). `instructions` echoes the request's guidance when it had any. It is the
+clear, stored outcome a client shows — a manual compaction is never a silent no-op.
+
+The request is answered **at a request boundary**: a turn already running folds it in at its next
+request, and a session that is idle gets a turn of its own that answers the request and makes no
+model reply. Repeating the call while a request is still waiting is the same request, not a
+second — the route reads the log to decide, and returns the pending event. The instructions
+bound the guidance a reader can give; a longer string is the protocol's `400` and nothing is
+stored.
 
 **A message too big to send is shortened, never dropped.** If the newest message alone is over
 the chat model's budget, summarizing cannot help — that message has to stay verbatim — so the

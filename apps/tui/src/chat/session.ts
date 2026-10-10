@@ -1,7 +1,14 @@
 import { createTranscript, initialTranscriptState } from '@openharness/client'
 import type { Client, Transcript, TranscriptState } from '@openharness/client'
 import { EVENT_TYPES } from '@openharness/protocol'
-import type { Mode, ModeId, ModelEntry, Session, StreamEvent } from '@openharness/protocol'
+import type {
+  Mode,
+  ModeId,
+  ModelEntry,
+  Session,
+  SessionCompactionOutcome,
+  StreamEvent,
+} from '@openharness/protocol'
 
 import { describeError, type ErrorContext } from '../errors'
 import { CTRL_C_WINDOW_MS, decideCtrlC, type CtrlCAction } from './ctrl-c'
@@ -119,6 +126,14 @@ export interface ChatSession {
   readonly start: () => Promise<void>
   /** Send a message. Allowed while a turn is running — that is what steering is. */
   readonly send: (text: string) => Promise<void>
+  /**
+   * Ask the brain to compact the older history now — `/compact [instructions]` (#283).
+   *
+   * `instructions` is the reader's guidance for the summary, or empty for none. The request is
+   * stored and folded into the transcript; the outcome the brain writes arrives on the stream
+   * and is shown as a notice, so `/compact` is never a silent no-op.
+   */
+  readonly compact: (instructions: string) => Promise<void>
   /**
    * Remember a model for the next message (#114, epic #116 U3): the choice is sent on the
    * next `user.message`, which is what makes the session run it from then on.
@@ -326,6 +341,25 @@ export function createChatSession(options: ChatSessionOptions): ChatSession {
       }
     },
 
+    async compact(instructions) {
+      armedAt = null
+      const guidance = instructions.trim()
+      try {
+        const request = await client.sessions.compact(sessionId, {
+          signal: lifetime.signal,
+          ...(guidance === '' ? {} : { instructions: guidance }),
+        })
+        // The request is stored; fold it in now so the log has it. The outcome the brain writes
+        // arrives on the stream and is what the notice below is about.
+        apply(request)
+        setState({ notice: { kind: 'info', text: 'Compacting the older history…', hints: [] } })
+      } catch (error) {
+        if (!lifetime.signal.aborted) {
+          setState({ notice: noticeFor(error) })
+        }
+      }
+    },
+
     setModel(modelId) {
       // Picking a model is activity: it dismisses the armed exit, like typing does. It also
       // clears a pending mode (#245, M6): a chat follows a mode or a plain model, never both.
@@ -427,6 +461,13 @@ export function createChatSession(options: ChatSessionOptions): ChatSession {
 
       for await (const event of events) {
         apply(event)
+        // The answer to a manual compaction (#283) is the one thing a reader who asked for it
+        // must be told: the transcript shows no bubble for it, so the notice line carries the
+        // outcome — "summarized", "nothing to summarize", or that it failed — as the clear,
+        // stored outcome K8 asks for.
+        if (event.type === EVENT_TYPES.sessionCompaction) {
+          setState({ notice: compactionNotice(event.outcome, event.message) })
+        }
       }
     } catch (error) {
       // An abort is the normal way out. Anything else — a key the server will not take, a
@@ -459,4 +500,20 @@ function awaitingMeta(transcript: TranscriptState): string | null {
 function epochMs(timestamp: string): number | undefined {
   const ms = Date.parse(timestamp)
   return Number.isNaN(ms) ? undefined : ms
+}
+
+/** The notice line for a manual compaction's outcome (#283): what came of a `/compact`. */
+function compactionNotice(outcome: SessionCompactionOutcome, message: string | undefined): Notice {
+  if (outcome === 'summarized') {
+    return { kind: 'info', text: 'Compacted: the older history is a summary now.', hints: [] }
+  }
+  return {
+    kind: outcome === 'failed' ? 'error' : 'info',
+    text:
+      message ??
+      (outcome === 'failed'
+        ? 'The summary could not be written.'
+        : 'There was no older history to summarize.'),
+    hints: [],
+  }
 }

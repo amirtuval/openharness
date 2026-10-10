@@ -31,7 +31,11 @@ export { createClient } from './client'
 export type { Client, ClientOptions, RequestOptions, SendMessageOptions } from './client'
 
 export type { AgentsResource } from './resources/agents'
-export type { SessionEventsResource, SessionsResource } from './resources/sessions'
+export type {
+  CompactSessionOptions,
+  SessionEventsResource,
+  SessionsResource,
+} from './resources/sessions'
 export type { ProviderCredentialsResource } from './resources/provider-credentials'
 export type { ModesResource } from './resources/modes'
 export type { ModelsResource } from './resources/models'

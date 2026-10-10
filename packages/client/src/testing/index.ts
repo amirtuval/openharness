@@ -1,5 +1,6 @@
 import {
   AgentSchema,
+  CompactSessionRequestSchema,
   CreateAgentRequestSchema,
   CreateModeRequestSchema,
   EVENT_TYPES,
@@ -52,6 +53,7 @@ import type {
   ProviderCredential,
   SendEventsResponse,
   Session,
+  SessionCompactEvent,
   SessionErrorType,
   StoredEvent,
   StreamEvent,
@@ -854,6 +856,25 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       // The 204 has no body: the effect is the deletion — one final `session.deleted` event
       // to the subscribers, the streams closed behind it, and the log dropped.
       brain.markDeleted()
+    },
+
+    async compact(sessionId, requestOptions): Promise<SessionCompactEvent> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      const brain = await requireBrain(sessionId)
+      // The body goes through the same schema the route parses it with, so an over-long
+      // instruction is the server's 400 (#283), not a silently stored event.
+      const parsed = CompactSessionRequestSchema.safeParse({
+        ...(requestOptions?.instructions === undefined
+          ? {}
+          : { instructions: requestOptions.instructions }),
+      })
+      if (!parsed.success) {
+        throw badRequestFor(parsed.error.issues)
+      }
+      return brain.compact(parsed.data.instructions)
     },
 
     events: eventsResource,

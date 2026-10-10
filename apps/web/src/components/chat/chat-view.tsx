@@ -9,6 +9,7 @@ import type { DeleteSessionResult } from '../../hooks/use-sessions'
 import type { ModesView } from '../../hooks/use-modes'
 import { useSession } from '../../hooks/use-session'
 import type { ModelsView } from '../../hooks/use-models'
+import { parseComposerInput } from '../../lib/commands'
 import { formatCostTotal, shortId, sessionLabel, unpricedExplanation } from '../../lib/format'
 import { providerOf, type ModelNameLookup } from '../../lib/models'
 import { modeNameOf } from '../../lib/modes'
@@ -98,6 +99,7 @@ export function ChatView({
     deleted,
     model,
     send,
+    compact,
     interrupt,
     dismissError,
   } = useSession(client, sessionId)
@@ -191,6 +193,16 @@ export function ChatView({
       if (editBlocked) {
         return false
       }
+      // A slash command is not a message (#283): `/compact [instructions]` asks the brain to
+      // summarize the older history instead of sending words, so it never carries a model, a
+      // mode or a rewind — and a line that names no command falls through as an ordinary send.
+      const command = parseComposerInput(text)
+      if (command.kind === 'compact') {
+        setInterrupted(false)
+        // The request is stored and folded into the transcript; the outcome arrives on the
+        // stream. A failure keeps the text in the box, exactly as a failed send does.
+        return await compact(command.instructions)
+      }
       // Sending is the start of a new turn: whatever the last one was stopped short of is no
       // longer what the foot of the transcript is about.
       setInterrupted(false)
@@ -223,7 +235,7 @@ export function ChatView({
       }
       return stored
     },
-    [chosen, editBlocked, editing, pendingMode, sessionModeId, sessionModel, send],
+    [chosen, compact, editBlocked, editing, pendingMode, sessionModeId, sessionModel, send],
   )
 
   // Stop, and the word for it (U10): the interrupt request goes out, and the row at the foot

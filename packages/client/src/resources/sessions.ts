@@ -1,5 +1,6 @@
 import {
   API_VERSION_PREFIX,
+  CompactSessionResponseSchema,
   ListEventsResponseSchema,
   ListSessionsResponseSchema,
   SendEventsResponseSchema,
@@ -14,6 +15,7 @@ import type {
   ListSessionsResponse,
   SendEventsResponse,
   Session,
+  SessionCompactEvent,
   StoredEvent,
   StreamEvent,
 } from '@openharness/protocol'
@@ -35,6 +37,7 @@ import { isEventList } from '../internal/events'
  * POST   /v1/sessions/{id}/events            send    -> { data: user event[] }
  * GET    /v1/sessions/{id}/events            list    -> { data: stored event[], next_page }
  * GET    /v1/sessions/{id}/events/stream     stream  -> a live event stream
+ * POST   /v1/sessions/{id}/compact           compact -> { data: session.compact } (#283)
  * ```
  *
  * A session is a durable, append-only event log; the resource is its header. The log is the
@@ -96,8 +99,38 @@ export interface SessionsResource {
    */
   delete(sessionId: string, options?: RequestOptions): Promise<void>
 
+  /**
+   * Ask the brain to compact the session's older history on demand — `/compact [instructions]`
+   * (epic #277, K8; #283).
+   *
+   * The optional `instructions` are the reader's guidance for the summary — "keep the API
+   * decisions in detail" — which the brain folds into the summarizer's prompt as the user's own
+   * instruction. The route stores a `session.compact` request and wakes the session; the brain
+   * answers it with a `session.compaction` outcome (`summarized`, `nothing_to_summarize`, or
+   * `failed`), which a client reads from the log or the stream. A turn already running is not
+   * interrupted: the request is answered at its next request boundary.
+   *
+   * ```ts
+   * await client.sessions.compact(session.id, { instructions: 'keep the API decisions' })
+   * ```
+   *
+   * Idempotent while a request is pending: a second call before the brain has answered returns
+   * the request already waiting rather than appending another, which is why the answer is the
+   * stored event and not a fresh one every time.
+   *
+   * @param sessionId the `sesn_` id
+   * @param options the guidance for the summary, and cancellation
+   */
+  compact(sessionId: string, options?: CompactSessionOptions): Promise<SessionCompactEvent>
+
   /** The session's event log: read it, append to it, follow it. */
   readonly events: SessionEventsResource
+}
+
+/** Options for {@link SessionsResource.compact} (#283). */
+export interface CompactSessionOptions extends RequestOptions {
+  /** The reader's guidance for the summary; bounded by the protocol's instruction limit. */
+  readonly instructions?: string
 }
 
 /** A session's event log, on the wire. */
@@ -208,6 +241,18 @@ export function createSessionsResource(transport: Transport): SessionsResource {
       })
     },
 
+    async compact(sessionId, options) {
+      const response = await transport.json(CompactSessionResponseSchema, {
+        method: 'POST',
+        path: sessionCompactPath(sessionId),
+        body: {
+          ...(options?.instructions === undefined ? {} : { instructions: options.instructions }),
+        },
+        signal: options?.signal,
+      })
+      return response.data
+    },
+
     events: createSessionEventsResource(transport),
   }
 }
@@ -231,6 +276,15 @@ export function sessionPath(sessionId: string): string {
  */
 export function sessionEventsPath(sessionId: string): string {
   return `${sessionPath(sessionId)}/events`
+}
+
+/**
+ * The path of a session's manual compaction: `POST` here to ask for one (#283).
+ *
+ * @param sessionId the `sesn_` id
+ */
+export function sessionCompactPath(sessionId: string): string {
+  return `${sessionPath(sessionId)}/compact`
 }
 
 /** Build the events sub-resource over a transport. */
