@@ -1,4 +1,10 @@
-import type { ModelPriceLookup, TranscriptMessage } from '@openharness/client'
+import type {
+  ModelPriceLookup,
+  TranscriptMessage,
+  TranscriptSummary,
+  TranscriptTruncation,
+} from '@openharness/client'
+import { transcriptEntries } from '@openharness/client'
 import { ArrowDown, MessagesSquare } from 'lucide-react'
 
 import { useStickToBottom } from '../../hooks/use-stick-to-bottom'
@@ -7,6 +13,8 @@ import { Button } from '../ui/button'
 import { Skeleton } from '../ui/skeleton'
 import { MessageItem } from './message-item'
 import { previousReplyModels } from './message-meta'
+import { SummaryDivider } from './summary-divider'
+import { TruncationNotice } from './truncation-notice'
 import { WorkingRow, type WorkingState } from './working-row'
 
 /**
@@ -27,11 +35,20 @@ import { WorkingRow, type WorkingState } from './working-row'
  * what the reply *before* this one ran on, so the meta line names a model only when it changed.
  * That is read off the list here and handed down, rather than carried out of the map.
  *
+ * **The transcript is messages *and* summary dividers** (epic #277, K10; #280). A divider is a
+ * mark in the conversation, not a message: it draws where the history it covers ends, and the
+ * history above it stays exactly where it was. The order comes from `transcriptEntries` in
+ * `@openharness/client`, so the web and the terminal put the divider in the same place. Two
+ * other compaction states sit at the foot, where the newest message is: the truncation notice
+ * — the reader's own message was shortened for the model — above the working row.
+ *
  * Edit and resend (#238) is offered on **every** message the reader wrote, not just the last:
  * sending one rewinds the session to it, so the edit is what the conversation continues from.
  */
 export function MessageList({
   messages,
+  summaries = [],
+  truncation = null,
   loading,
   nameOf,
   costOf,
@@ -41,6 +58,10 @@ export function MessageList({
   replacingFrom,
 }: {
   messages: readonly TranscriptMessage[]
+  /** The summary dividers still in the conversation, in order (epic #277; #280). */
+  summaries?: readonly TranscriptSummary[]
+  /** The newest item a request had to shorten, or `null` (epic #277, K6; #280). */
+  truncation?: TranscriptTruncation | null
   loading: boolean
   /** The catalog lookup for a model-change marker's display name. */
   nameOf?: ModelNameLookup | undefined
@@ -63,13 +84,21 @@ export function MessageList({
 }) {
   const last = messages.at(-1)
   const { ref, onScroll, isStuck, scrollToLatest } = useStickToBottom(
-    `${messages.length}:${last?.text.length ?? 0}`,
+    // The truncation notice is at the foot too (epic #277, K10; #280), and it can arrive on a
+    // turn that adds no message at all (a request whose newest item did not change): it counts
+    // as content, so a reader who is already at the bottom is shown it rather than being left
+    // with it below the fold.
+    `${messages.length}:${last?.text.length ?? 0}:${truncation === null ? '' : 'truncated'}`,
   )
 
   // What each reply's meta line compares its model against (#212). The list is the only place
   // that has the neighbouring replies, so it is computed here rather than guessed at in the
-  // item; {@link previousReplyModels} keeps the rule itself out of this component.
-  const previousModels = previousReplyModels(messages)
+  // item; {@link previousReplyModels} keeps the rule itself out of this component. It is keyed
+  // by message, because the entries below are interleaved with the dividers.
+  const previous = previousReplyModels(messages)
+  const previousModels = new Map<string, string | undefined>(
+    messages.map((message, index) => [message.id, previous[index]] as [string, string | undefined]),
+  )
 
   return (
     <div className="relative min-h-0 flex-1">
@@ -88,25 +117,30 @@ export function MessageList({
               <EmptyConversation />
             )
           ) : (
-            messages.map((message, index) => (
-              <MessageItem
-                key={message.id}
-                message={message}
-                nameOf={nameOf}
-                costOf={costOf}
-                previousModel={previousModels[index]}
-                editDisabled={editDisabled}
-                replacing={replacingFrom !== undefined && message.position > replacingFrom}
-                onEdit={
-                  message.role === 'user' && onEdit !== undefined
-                    ? () => {
-                        onEdit(message)
-                      }
-                    : undefined
-                }
-              />
-            ))
+            transcriptEntries(messages, summaries).map((entry) =>
+              entry.kind === 'summary' ? (
+                <SummaryDivider key={entry.summary.id} summary={entry.summary} />
+              ) : (
+                <MessageItem
+                  key={entry.message.id}
+                  message={entry.message}
+                  nameOf={nameOf}
+                  costOf={costOf}
+                  previousModel={previousModels.get(entry.message.id)}
+                  editDisabled={editDisabled}
+                  replacing={replacingFrom !== undefined && entry.message.position > replacingFrom}
+                  onEdit={
+                    entry.message.role === 'user' && onEdit !== undefined
+                      ? () => {
+                          onEdit(entry.message)
+                        }
+                      : undefined
+                  }
+                />
+              ),
+            )
           )}
+          {truncation === null ? null : <TruncationNotice truncation={truncation} />}
           {working === null ? null : <WorkingRow state={working} />}
         </div>
       </div>

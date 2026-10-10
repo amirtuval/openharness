@@ -20,6 +20,14 @@ import { cn } from '../../lib/utils'
 export type WorkingState =
   /** A turn is in flight and nothing has arrived yet. */
   | { readonly kind: 'working' }
+  /**
+   * The compaction engine is writing a summary, one pass at a time (epic #277, K10; #280).
+   *
+   * The chat's older history is being summarized, which is a wait like any other and a longer
+   * one than a single request — so it says what it is doing and how far through it is, from the
+   * `session.context_summary_progress` events rather than from a guess.
+   */
+  | { readonly kind: 'summarizing'; readonly pass: number; readonly passes: number }
   /** The brain hit a retryable error and is trying again, with the server's reason. */
   | { readonly kind: 'retrying'; readonly detail: string }
   /** The reader pressed Stop; the turn is over and this is what says so. */
@@ -35,14 +43,23 @@ export interface WorkingRowInput {
   readonly interrupted: boolean
   /** A reply has started arriving, in which case a "Working…" row would be a lie. */
   readonly hasReplyText: boolean
+  /**
+   * The summary being written right now, or `null` (epic #277, C2; #280).
+   *
+   * The transcript clears it when the summary lands, when the chat's own request starts, on an
+   * error and on the turn ending, so a stale one cannot outrank the turn it was about.
+   */
+  readonly summarizing?: { readonly pass: number; readonly passes: number } | null | undefined
 }
 
 /**
  * Which row to draw, or none — a pure function so the rule is testable without a render.
  *
  * The order is the whole of it: an interrupt outranks everything (it is the reader's own,
- * most recent action), a running session that has text needs no row, and a running one
- * without text is either retrying or working. Anything else is no row at all.
+ * most recent action); a session that is not running has nothing to report; a compaction
+ * outranks a retry, because it is the newer statement about what the turn is doing (and a
+ * summarizer's own failure ends it without a `session.error` at all); and a running session
+ * that has text needs no row, so what is left is a retry or plain work. Anything else is no row.
  */
 export function workingState(input: WorkingRowInput): WorkingState | null {
   if (input.interrupted) {
@@ -50,6 +67,9 @@ export function workingState(input: WorkingRowInput): WorkingState | null {
   }
   if (input.status !== 'running') {
     return null
+  }
+  if (input.summarizing !== null && input.summarizing !== undefined) {
+    return { kind: 'summarizing', pass: input.summarizing.pass, passes: input.summarizing.passes }
   }
   if (input.retrying) {
     return { kind: 'retrying', detail: input.retryReason ?? 'the model request failed' }
@@ -88,9 +108,6 @@ export function WorkingRow({ state }: { state: WorkingState }) {
     return () => clearInterval(timer)
   }, [live])
 
-  const label =
-    state.kind === 'working' ? 'Working…' : state.kind === 'retrying' ? 'Retrying…' : 'Interrupted'
-
   return (
     <div
       role="status"
@@ -98,14 +115,14 @@ export function WorkingRow({ state }: { state: WorkingState }) {
       data-state={state.kind}
       className="flex items-center gap-inline text-sm text-muted-foreground"
     >
-      {state.kind === 'working' ? (
+      {state.kind === 'working' || state.kind === 'summarizing' ? (
         <Loader2 aria-hidden="true" className="size-3.5 shrink-0 animate-spin text-coral" />
       ) : state.kind === 'retrying' ? (
         <span aria-hidden="true" className="size-2 shrink-0 animate-pulse rounded-full bg-coral" />
       ) : (
         <Square aria-hidden="true" className="size-3 shrink-0" />
       )}
-      <span>{label}</span>
+      <span>{rowLabel(state)}</span>
       {state.kind === 'retrying' ? (
         // The reason is the server's sentence: it can be long, so it is clipped rather than
         // allowed to push the clock off the row.
@@ -120,4 +137,24 @@ export function WorkingRow({ state }: { state: WorkingState }) {
       ) : null}
     </div>
   )
+}
+
+/**
+ * What the row says, per state.
+ *
+ * `summarizing` carries its own numbers rather than a plain "Working…": a compaction can take
+ * several model calls, and "3 of 7" is the difference between a wait a reader can size and one
+ * that looks stuck.
+ */
+function rowLabel(state: WorkingState): string {
+  switch (state.kind) {
+    case 'working':
+      return 'Working…'
+    case 'summarizing':
+      return `Summarizing… ${String(state.pass)} of ${String(state.passes)}`
+    case 'retrying':
+      return 'Retrying…'
+    case 'interrupted':
+      return 'Interrupted'
+  }
 }

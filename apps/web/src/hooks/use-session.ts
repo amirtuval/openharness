@@ -3,8 +3,12 @@ import {
   selectSessionUsage,
   type Client,
   type SessionUsage,
+  type TranscriptContext,
   type TranscriptError,
   type TranscriptMessage,
+  type TranscriptSummarizing,
+  type TranscriptSummary,
+  type TranscriptTruncation,
 } from '@openharness/client'
 import type { ModeId, Session, SessionStatus } from '@openharness/protocol'
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
@@ -37,6 +41,20 @@ export interface SessionView {
   readonly session: Session | null
   /** The conversation, in order. */
   readonly messages: readonly TranscriptMessage[]
+  /**
+   * The "Conversation summarized" dividers still in the conversation (epic #277, K10; #280),
+   * each carrying where it draws among the messages.
+   *
+   * A summary supersedes nothing, so the history above a divider stays on screen; only a rewind
+   * takes one back, and the reducer drops it with the branch it replaced.
+   */
+  readonly summaries: readonly TranscriptSummary[]
+  /** The summary being written right now, or `null` (epic #277, C2; #280). */
+  readonly summarizing: TranscriptSummarizing | null
+  /** How full the context was at the last real model request, or `null` (epic #277, #280). */
+  readonly context: TranscriptContext | null
+  /** The newest item a request had to shorten to fit, or `null` (epic #277, K6; #280). */
+  readonly truncation: TranscriptTruncation | null
   /** Whether the agent is working. */
   readonly status: SessionStatus
   /** The latest `session.error` in the log, until a reply supersedes it. */
@@ -263,6 +281,10 @@ export function useSession(client: Client, sessionId: string): SessionView {
   return {
     session,
     messages: state.messages,
+    summaries: state.summaries,
+    summarizing: state.summarizing,
+    context: state.context,
+    truncation: state.truncation,
     usage: selectSessionUsage(state),
     status: state.status,
     lastError: state.lastError,

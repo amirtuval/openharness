@@ -61,6 +61,31 @@ describe('workingState', () => {
       kind: 'interrupted',
     })
   })
+
+  it('says a compaction is running, and how far through it is (#280)', () => {
+    expect(workingState(input({ summarizing: { pass: 3, passes: 7 } }))).toEqual({
+      kind: 'summarizing',
+      pass: 3,
+      passes: 7,
+    })
+  })
+
+  it('reports a compaction over a retry and over plain work (#280)', () => {
+    // The compaction is the newer statement about the same wait, and a summarizer's own
+    // failure ends it without a `session.error` at all — so nothing else can outrank it.
+    expect(
+      workingState(input({ summarizing: { pass: 1, passes: 2 }, retrying: true })),
+    ).toMatchObject({ kind: 'summarizing' })
+    expect(
+      workingState(input({ summarizing: { pass: 1, passes: 2 }, hasReplyText: true })),
+    ).toEqual({ kind: 'summarizing', pass: 1, passes: 2 })
+  })
+
+  it('says nothing about a compaction while the session is not running (#280)', () => {
+    // The transcript clears the progress on an idle, so this is belt and braces: a stale one
+    // must not be drawn over a session that has stopped.
+    expect(workingState(input({ status: 'idle', summarizing: { pass: 1, passes: 2 } }))).toBeNull()
+  })
 })
 
 describe('WorkingRow', () => {
@@ -96,6 +121,15 @@ describe('WorkingRow', () => {
     expect(row).toHaveTextContent('Retrying…')
     expect(row).toHaveTextContent('(The model is overloaded.)')
     expect(row).toHaveAttribute('data-state', 'retrying')
+  })
+
+  it('names the pass a summary is on (#280)', () => {
+    render(<WorkingRow state={{ kind: 'summarizing', pass: 3, passes: 7 }} />)
+    const row = screen.getByRole('status')
+    expect(row).toHaveTextContent('Summarizing… 3 of 7')
+    expect(row).toHaveAttribute('data-state', 'summarizing')
+    // A compaction is a wait like any other, so the clock runs for it too.
+    expect(row).toHaveTextContent('0s')
   })
 
   it('says the turn was interrupted, and shows no clock for it', () => {

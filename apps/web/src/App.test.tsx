@@ -105,6 +105,31 @@ describe('App', () => {
     expect(total?.textContent).toBe(cost?.textContent)
   })
 
+  it('shows how full the context is once a request has run (#280)', async () => {
+    const user = userEvent.setup({ delay: null })
+    const fake = makeFake()
+    renderApp(fake)
+
+    // Nothing has measured a prompt yet: a chat that has not made a request has no meter, which
+    // is not the same statement as a context that is empty.
+    expect(document.querySelector('[data-slot="context-meter"]')).toBeNull()
+
+    await user.type(await screen.findByLabelText('Message'), 'Hi there')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
+    // The size arrives with the reply's span end, which follows the reply itself.
+    await waitFor(() => {
+      expect(document.querySelector('[data-slot="context-meter"]')).not.toBeNull()
+    })
+
+    // The fake's request reported 512 uncached input tokens — the counters are disjoint
+    // (epic #277, K2) — against the catalog entry's 200k window and 64k ceiling, so the budget
+    // is 150k and the context is 0% full. Below the threshold, so the meter is in its plain
+    // state.
+    const meter = document.querySelector('[data-slot="context-meter"]')
+    expect(meter).toHaveAttribute('data-state', 'normal')
+    expect(meter).toHaveTextContent('0% of context used')
+  })
+
   it('shows a dash for a session whose model nobody prices (#247)', async () => {
     const user = userEvent.setup({ delay: null })
     // A catalog with one model nobody prices, which is not the model the session runs: the
