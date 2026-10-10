@@ -150,7 +150,7 @@ export const AskUserAnswerSchema = z.object({
   /** The `question` text of the question this answers. */
   question: z.string().min(1),
   /** The labels chosen, for a `choice` question. */
-  labels: z.array(z.string().min(1)).optional(),
+  labels: z.array(z.string().min(1)).readonly().optional(),
   /** The user's own words: a `text` answer, or the write-in answer to a `choice`. */
   text: z.string().min(1).optional(),
   /** The answer to a `confirm` question. */
@@ -166,7 +166,7 @@ export type AskUserAnswer = z.infer<typeof AskUserAnswerSchema>
  * the `question` each answer names, and {@link askUserAnswerProblems} is what says whether
  * every question got exactly one.
  */
-export const AskUserAnswersSchema = z.array(AskUserAnswerSchema)
+export const AskUserAnswersSchema = z.array(AskUserAnswerSchema).readonly()
 
 export type AskUserAnswers = z.infer<typeof AskUserAnswersSchema>
 
