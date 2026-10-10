@@ -38,40 +38,40 @@ Everything under `API_VERSION_PREFIX` (`/v1`). Bodies and queries are validated 
 protocol's schemas, so the shapes are not repeated here — see
 [`packages/protocol/AGENTS.md`](../../packages/protocol/AGENTS.md).
 
-| method   | path                                      | body / query                                | answers                                                                                                                                                                |
-| -------- | ----------------------------------------- | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET`    | `/health`                                 | —                                           | liveness: `{ status: 'ok' }`; never needs a session                                                                                                                    |
-| `GET`    | `/ready`                                  | —                                           | readiness (#151): `{ status: 'ok' }`, or 503 while draining or when the store does not answer; never needs a session                                                   |
-| `GET`    | `/v1/auth-config`                         | —                                           | `{ providers, dev_login }`; never needs a session                                                                                                                      |
-| `GET`    | `/v1/me`                                  | —                                           | the signed-in `User`                                                                                                                                                   |
-| `GET`    | `/v1/me/preferences`                      | —                                           | the caller's `UserPreferences` plus the `defaults` its `null`s mean (#282), unwrapped                                                                                  |
-| `PUT`    | `/v1/me/preferences`                      | `PutPreferencesRequestSchema`               | the stored preferences, merged; 400 for a malformed id or an out-of-range number                                                                                       |
-| `GET`    | `/v1/me/tools`                            | `ListToolSettingsQuerySchema` (`mode_id`)   | `{ data: ToolSettingEntry[] }` — the effective settings, as a chat on `mode_id` would see them (#307)                                                                  |
-| `PUT`    | `/v1/me/tools`                            | `PutToolSettingsRequestSchema`              | the stored settings, merged per tool; 400 for a permission or shape the schema refuses                                                                                 |
-| `POST`   | `/v1/me/modes`                            | `CreateModeRequestSchema`                   | 201, the `Mode`; 409 for a duplicate name (per user) or the twentieth-plus-one mode (#245, M6)                                                                         |
-| `GET`    | `/v1/me/modes`                            | —                                           | `{ data: Mode[] }`, the caller's own; no pagination (a user holds at most 20)                                                                                          |
-| `GET`    | `/v1/me/modes/{mode_id}`                  | —                                           | the `Mode`, or 404 for another user's or an unknown id                                                                                                                 |
-| `POST`   | `/v1/me/modes/{mode_id}`                  | `UpdateModeRequestSchema`                   | the updated `Mode`, or 404; 409 for a rename onto a name the caller has                                                                                                |
-| `DELETE` | `/v1/me/modes/{mode_id}`                  | —                                           | 204; lands the chats that followed the mode on the model they last ran; 404 for another user's                                                                         |
-| `POST`   | `/v1/agents`                              | `CreateAgentRequestSchema`                  | 201, the `Agent`                                                                                                                                                       |
-| `GET`    | `/v1/agents`                              | `ListAgentsQuerySchema`                     | `{ data, next_page }`                                                                                                                                                  |
-| `GET`    | `/v1/agents/{agent_id}`                   | —                                           | the `Agent`, or 404                                                                                                                                                    |
-| `POST`   | `/v1/agents/{agent_id}`                   | `UpdateAgentRequestSchema`                  | the updated `Agent`, or 404                                                                                                                                            |
-| `POST`   | `/v1/sessions`                            | `CreateSessionRequestSchema`                | 201, the `Session`; 404 for an unknown agent or mode; 400 for none of an agent, a model or a mode; 422 for a mode whose model cannot be used                           |
-| `GET`    | `/v1/sessions`                            | `ListSessionsQuerySchema`                   | `{ data, next_page }`                                                                                                                                                  |
-| `GET`    | `/v1/sessions/{session_id}`               | —                                           | the `Session`, or 404                                                                                                                                                  |
-| `DELETE` | `/v1/sessions/{session_id}`               | —                                           | 204; hard delete (U5); 404 for another owner's or an unknown session                                                                                                   |
-| `POST`   | `/v1/sessions/{session_id}/events`        | `SendEventsRequestSchema`                   | `{ data: user event[] }`; then signals, and a title; 409 for a rewind while running, 400 for a batch whose rewind is not its only first event (#238)                   |
-| `GET`    | `/v1/sessions/{session_id}/events`        | `ListEventsQuerySchema`                     | `{ data, next_page }`                                                                                                                                                  |
-| `GET`    | `/v1/sessions/{session_id}/events/stream` | `StreamEventsQuerySchema`                   | the SSE stream; 404 for an unknown session                                                                                                                             |
-| `POST`   | `/v1/sessions/{session_id}/compact`       | `CompactSessionRequestSchema`               | `{ data: session.compact }` — stores a manual-compaction request, or returns the one already pending; 400 for over-long `instructions`, 404 for another owner's (#283) |
-| `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`   | the AI SDK `useChat` request (see below)    | an AI SDK UI message stream — an **extension**                                                                                                                         |
-| `GET`    | `/v1/models`                              | `ListModelsQuerySchema` (`refresh`)         | `{ data, providers }`; 429 for a refresh inside the minute                                                                                                             |
-| `GET`    | `/v1/sessions/{session_id}/usage`         | —                                           | what one session spent: totals, cost and the per-model breakdown; 404 for another owner's                                                                              |
-| `GET`    | `/v1/me/usage`                            | `UserUsageQuerySchema` (`from`, `to`, `tz`) | the caller's own usage: totals, cost, by model and by day; 400 for a zone or range it cannot read                                                                      |
-| `PUT`    | `/v1/provider-credentials/{name}`         | `PutProviderCredentialRequestSchema`        | the credential's metadata; 422 if it is refused, 400 for a name its type may not take                                                                                  |
-| `GET`    | `/v1/provider-credentials`                | —                                           | `{ data: ProviderCredential[] }`, metadata only                                                                                                                        |
-| `DELETE` | `/v1/provider-credentials/{name}`         | —                                           | 204; never an error for one that is not there                                                                                                                          |
+| method   | path                                      | body / query                                | answers                                                                                                                                                                                                                         |
+| -------- | ----------------------------------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET`    | `/health`                                 | —                                           | liveness: `{ status: 'ok' }`; never needs a session                                                                                                                                                                             |
+| `GET`    | `/ready`                                  | —                                           | readiness (#151): `{ status: 'ok' }`, or 503 while draining or when the store does not answer; never needs a session                                                                                                            |
+| `GET`    | `/v1/auth-config`                         | —                                           | `{ providers, dev_login }`; never needs a session                                                                                                                                                                               |
+| `GET`    | `/v1/me`                                  | —                                           | the signed-in `User`                                                                                                                                                                                                            |
+| `GET`    | `/v1/me/preferences`                      | —                                           | the caller's `UserPreferences` plus the `defaults` its `null`s mean (#282), unwrapped                                                                                                                                           |
+| `PUT`    | `/v1/me/preferences`                      | `PutPreferencesRequestSchema`               | the stored preferences, merged; 400 for a malformed id or an out-of-range number                                                                                                                                                |
+| `GET`    | `/v1/me/tools`                            | `ListToolSettingsQuerySchema` (`mode_id`)   | `{ data: ToolSettingEntry[] }` — the effective settings, as a chat on `mode_id` would see them (#307)                                                                                                                           |
+| `PUT`    | `/v1/me/tools`                            | `PutToolSettingsRequestSchema`              | the stored settings, merged per tool; 400 for a permission or shape the schema refuses                                                                                                                                          |
+| `POST`   | `/v1/me/modes`                            | `CreateModeRequestSchema`                   | 201, the `Mode`; 409 for a duplicate name (per user) or the twentieth-plus-one mode (#245, M6)                                                                                                                                  |
+| `GET`    | `/v1/me/modes`                            | —                                           | `{ data: Mode[] }`, the caller's own; no pagination (a user holds at most 20)                                                                                                                                                   |
+| `GET`    | `/v1/me/modes/{mode_id}`                  | —                                           | the `Mode`, or 404 for another user's or an unknown id                                                                                                                                                                          |
+| `POST`   | `/v1/me/modes/{mode_id}`                  | `UpdateModeRequestSchema`                   | the updated `Mode`, or 404; 409 for a rename onto a name the caller has                                                                                                                                                         |
+| `DELETE` | `/v1/me/modes/{mode_id}`                  | —                                           | 204; lands the chats that followed the mode on the model they last ran; 404 for another user's                                                                                                                                  |
+| `POST`   | `/v1/agents`                              | `CreateAgentRequestSchema`                  | 201, the `Agent`                                                                                                                                                                                                                |
+| `GET`    | `/v1/agents`                              | `ListAgentsQuerySchema`                     | `{ data, next_page }`                                                                                                                                                                                                           |
+| `GET`    | `/v1/agents/{agent_id}`                   | —                                           | the `Agent`, or 404                                                                                                                                                                                                             |
+| `POST`   | `/v1/agents/{agent_id}`                   | `UpdateAgentRequestSchema`                  | the updated `Agent`, or 404                                                                                                                                                                                                     |
+| `POST`   | `/v1/sessions`                            | `CreateSessionRequestSchema`                | 201, the `Session`; 404 for an unknown agent or mode; 400 for none of an agent, a model or a mode; 422 for a mode whose model cannot be used                                                                                    |
+| `GET`    | `/v1/sessions`                            | `ListSessionsQuerySchema`                   | `{ data, next_page }`                                                                                                                                                                                                           |
+| `GET`    | `/v1/sessions/{session_id}`               | —                                           | the `Session`, or 404                                                                                                                                                                                                           |
+| `DELETE` | `/v1/sessions/{session_id}`               | —                                           | 204; hard delete (U5); 404 for another owner's or an unknown session                                                                                                                                                            |
+| `POST`   | `/v1/sessions/{session_id}/events`        | `SendEventsRequestSchema`                   | `{ data: user event[] }`; then signals, and a title; 409 for a rewind while running, 400 for a batch whose rewind is not its only first event (#238) or for a `user.tool_confirmation` naming a call that is not waiting (#309) |
+| `GET`    | `/v1/sessions/{session_id}/events`        | `ListEventsQuerySchema`                     | `{ data, next_page }`                                                                                                                                                                                                           |
+| `GET`    | `/v1/sessions/{session_id}/events/stream` | `StreamEventsQuerySchema`                   | the SSE stream; 404 for an unknown session                                                                                                                                                                                      |
+| `POST`   | `/v1/sessions/{session_id}/compact`       | `CompactSessionRequestSchema`               | `{ data: session.compact }` — stores a manual-compaction request, or returns the one already pending; 400 for over-long `instructions`, 404 for another owner's (#283)                                                          |
+| `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`   | the AI SDK `useChat` request (see below)    | an AI SDK UI message stream — an **extension**                                                                                                                                                                                  |
+| `GET`    | `/v1/models`                              | `ListModelsQuerySchema` (`refresh`)         | `{ data, providers }`; 429 for a refresh inside the minute                                                                                                                                                                      |
+| `GET`    | `/v1/sessions/{session_id}/usage`         | —                                           | what one session spent: totals, cost and the per-model breakdown; 404 for another owner's                                                                                                                                       |
+| `GET`    | `/v1/me/usage`                            | `UserUsageQuerySchema` (`from`, `to`, `tz`) | the caller's own usage: totals, cost, by model and by day; 400 for a zone or range it cannot read                                                                                                                               |
+| `PUT`    | `/v1/provider-credentials/{name}`         | `PutProviderCredentialRequestSchema`        | the credential's metadata; 422 if it is refused, 400 for a name its type may not take                                                                                                                                           |
+| `GET`    | `/v1/provider-credentials`                | —                                           | `{ data: ProviderCredential[] }`, metadata only                                                                                                                                                                                 |
+| `DELETE` | `/v1/provider-credentials/{name}`         | —                                           | 204; never an error for one that is not there                                                                                                                                                                                   |
 
 Every `/v1` route except `auth-config` requires a session (see "Authentication"), and every
 resource is scoped to its owner. `/api/auth/*` is Better Auth's own surface: sign-in, sign-out,
@@ -585,25 +585,34 @@ CRUD, and the store's mode methods (`@openharness/session`) hold the rows.
   `mode_` ULID, so a malformed one in a path is the 400 every bad id gets, and in a body it is
   the protocol's own 400.
 
-## Tools and their settings (epic #303; #304; the per-user settings: #307)
+## Tools and their settings (epic #303; #304; the per-user settings: #307; pausing: #309)
 
 The brain's tool loop — the model asks for a tool, the brain runs it and sends the result back —
-is `@openharness/brain`'s (`packages/brain/AGENTS.md` has the loop itself) and the tools
-themselves are `@openharness/hands`'. The server's half is two modules: `tools.ts` — which tools
-a process registers, which models may be offered them, and how many requests a turn may make —
-and `tool-settings.ts`, the per-user choices over them (#307).
+is `@openharness/brain`'s (`packages/brain/AGENTS.md` has the loop itself, and the pause that
+half of it does for the user) and the tools themselves are `@openharness/hands`'. The server's
+half is three modules: `tools.ts` — which tools a process registers, which models may be offered
+them, and how many requests a turn may make — `tool-settings.ts`, the per-user choices over them
+(#307), and `pausing.ts`, the `ask_user` tool every deployment gets and the checks a
+`user.tool_confirmation` passes before it is stored (#309).
 
-- **No built-in tool ships yet.** The real ones — `web_fetch`, `web_search`, `todo_write` —
-  arrive with [#305](https://github.com/amirtuval/openharness/issues/305), so a deployment on a
-  provider model registers **nothing**: `createTurnRegistry` answers `undefined`,
-  `createTurnTools` answers `undefined`, the brain offers no tools and a chat runs exactly as it
-  did before #304. That is not a degraded mode; it is the behaviour every process had until now.
-- **The one tool this build registers is a test one, behind the test model.** An `echo` tool
+- **`ask_user` ships with every deployment** (epic #303, #309). It is the one built-in the
+  server itself provides: a model that needs a decision asks the user for one, the turn ends
+  `requires_action`, and the user's answers _are_ the call's result — the tool never runs, and
+  its `run` is only the sentence that reaches the log if something ran it anyway. So
+  `createTurnRegistry` always answers a registry, `createTurnTools` always answers options, and a
+  chat offers `ask_user` unless its owner has turned that tool off.
+- **The other built-ins arrive with [#305](https://github.com/amirtuval/openharness/issues/305).**
+  `web_fetch`, `web_search` and `todo_write` are not registered yet, so a deployment on a
+  provider model offers `ask_user` and nothing else.
+- **The one test tool is registered behind the test model.** An `echo` tool
   (its input echoed back) is registered when `OPENHARNESS_TEST_MODEL=mock`, which is what lets
   the e2e suite drive a whole tool turn through the real server, scheduler, brain, store and log.
   The mock model calls it on a `__tool__ …` prompt and answers what it said back
   (`mock-model.ts`), so a test can assert the call, the result, the second request and the reply
-  without a provider.
+  without a provider. A `__ask__ …` prompt calls `ask_user` with the questions
+  `MOCK_ASK_INPUT` names, which is what drives a whole pause end to end — and the mock answers a
+  prompt with what a tool said only while the **last** message of the prompt is that tool's
+  result, so a later message in the same chat is a message like any other.
 - **Which models may call tools comes from the same registry** as the context budget and the
   reasoning gate, through one more resolver: `catalog/tool-support.ts` answers models.dev's
   `tool_call` for the id a request runs, `false` meaning the request is offered nothing. The
@@ -663,6 +672,45 @@ answer is the **effective** state of each tool:
 - **Called once per process, and read twice.** `main.ts` builds the registry once and hands the
   same instance to the turn options and to the app, so "available" and "a chat can call it" are
   one fact rather than two that could drift.
+
+### Pausing for the user (epic #303, X6; #309)
+
+A turn can end because it is waiting for the user, and this server is the half that decides
+whether a confirmation may be acted on. `pausing.ts` is the whole of it.
+
+- **`ask_user` is registered by every deployment.** It is the one built-in the server itself
+  provides — a model that needs a decision asks the user for one — so `createTurnRegistry`
+  always answers a registry. Its declared policy is `allow` (the pause is the _tool's_, not a
+  permission's, which is why `GET /v1/me/tools` reports `default_policy: "allow"` for it) and its
+  `run` only ever produces a sentence saying the call is answered by the user: nothing should
+  run it, and if something does, the log says what happened rather than pretending to answer.
+- **A `user.tool_confirmation` is checked against the log before it is stored.** The route reads
+  the session's tool events (a `types` filter over `agent.tool_use`/`agent.tool_result`, so the
+  walk is over the calls a session made and not its conversation), and refuses with the
+  protocol's 400 `invalid_request_error` — storing nothing — when:
+  - the `tool_use_id` names no call of this session, one that already has a result, or one the
+    policy evaluated `allow`/`deny`: only a call that is really waiting can be confirmed, which
+    is what makes "every confirmation in this log names a call that was waiting" a property of
+    the log rather than a hope;
+  - `answers` are sent for a call that asked no questions, or `remember` is sent for an
+    `ask_user` call (a question is not an approval, and `remember` would silence the next one),
+    or an `ask_user` call is _allowed_ without any answers;
+  - the answers do not fit the questions the call asked — every question answered once, each
+    answer of the type its question takes, the labels the question offers and no more than it
+    takes. The rule is the protocol's `askUserAnswerProblems`, so the shape a client is held to
+    is exactly the shape the brain writes its result from.
+- **`remember: always` is also the user's stored policy** (#307). The confirmation is this
+  chat's record — the brain reads it back off the log, which is why it survives compaction and
+  dies with a rewind — and the _next_ chat inherits the answer only because the route writes the
+  tool's policy to `allow` in the owner's settings, keeping whatever `enabled` they had. One
+  read and one write per batch, only when there is something to remember.
+- **A confirmation is a signal.** The route tells the scheduler `work` (the same kind a
+  `user.message` sends), because a session sitting on an answer looks idle: the confirmation is
+  not a queued user event, so nothing else would start the turn that acts on it.
+- **The e2e round trip.** `MOCK_ASK_MARKER` (`__ask__`) makes the deterministic model call
+  `ask_user` with `MOCK_ASK_INPUT`, so a whole pause — the call stored, the turn idle with
+  `requires_action`, the confirmation, the answers as the result, the request that follows — is
+  driven through the real server in `e2e/src/pausing.test.ts`.
 
 ## Usage and cost (epic #245, A2; issue #247)
 
@@ -1241,13 +1289,14 @@ and no network. It is an AI SDK `MockLanguageModelV4`, streamed through the same
 path a real provider goes through, and it lives in `mock-model.ts`; `resolveModelFactory` is
 the only thing that constructs it, and it only does so when the variable says `mock`:
 
-| last user message    | what happens                                                                |
-| -------------------- | --------------------------------------------------------------------------- |
-| anything else        | echoed back in 4 chunks, 25 ms apart                                        |
-| `__slow__`           | 40 chunks, 250 ms apart — about 10 seconds, for interrupt and restart tests |
-| `__hold__`           | one chunk, then nothing: the request stays open until it is aborted         |
-| `__fail_retryable__` | HTTP 503 (`model_overloaded_error`) on the **first** attempt, then the echo |
-| `__fail_terminal__`  | HTTP 400 (`model_request_failed_error`) on every attempt                    |
+| last user message    | what happens                                                                   |
+| -------------------- | ------------------------------------------------------------------------------ |
+| anything else        | echoed back in 4 chunks, 25 ms apart                                           |
+| `__slow__`           | 40 chunks, 250 ms apart — about 10 seconds, for interrupt and restart tests    |
+| `__hold__`           | one chunk, then nothing: the request stays open until it is aborted            |
+| `__fail_retryable__` | HTTP 503 (`model_overloaded_error`) on the **first** attempt, then the echo    |
+| `__fail_terminal__`  | HTTP 400 (`model_request_failed_error`) on every attempt                       |
+| `__ask__`            | calls `ask_user` with `MOCK_ASK_INPUT`, so the turn pauses for the user (#309) |
 
 A marker matches the _start_ of the message, so `__slow__ tell me something` still streams
 slowly. Usage is fixed (`MOCK_MODEL_USAGE`: 42 input, 17 output, no cache) so a test can assert
@@ -1467,7 +1516,8 @@ before the instance stops serving it (#151).
 | `contextTokenBudget`, `createTokenBudgetResolver`, `OUTPUT_RESERVE_RATIO`                                                                                                                                                                                                         | the per-model context budget: `contextWindow − min(maxOutput, 25%)`, per request (#246)                                                                                                                                                                                                                                                     |
 | `createContextCompactionResolver`, `ContextCompactionDeps`                                                                                                                                                                                                                        | the per-owner compaction resolver (epic #277 C3; #282): the session owner's stored threshold, summary model and pass limit, resolved per request over `OPENHARNESS_COMPACTION_THRESHOLD` and the registry's budgets                                                                                                                         |
 | `createReasoningSupportResolver`                                                                                                                                                                                                                                                  | the per-model reasoning gate: the `low \| medium \| high` a model takes, per request (#252)                                                                                                                                                                                                                                                 |
-| `createTurnRegistry`, `createTurnTools`, `TurnToolDeps`, `TurnToolOptions`                                                                                                                                                                                                        | the registry a process runs with — the test one under `OPENHARNESS_TEST_MODEL=mock`, nothing at all otherwise — and the tools a turn is handed: the registry, the settings resolver (#307), the support gate and the step budget                                                                                                            |
+| `createTurnRegistry`, `createTurnTools`, `TurnToolDeps`, `TurnToolOptions`                                                                                                                                                                                                        | the registry a process runs with — `ask_user` everywhere, plus the test `echo` tool under `OPENHARNESS_TEST_MODEL=mock` — and the tools a turn is handed: the registry, the settings resolver (#307), the support gate and the step budget                                                                                                  |
+| `askUserTool`, `assertConfirmations`, `rememberAlwaysApprovals`, `withAlwaysApprovals`, `isConfirmation`, `PausingDeps`, `RememberDeps`                                                                                                                                           | the pause's server half (epic #303, X6; #309): the `ask_user` tool every deployment registers, the checks a `user.tool_confirmation` passes (the call is waiting, the answers fit its questions, the extensions make sense for it), and the stored policy an `always` approval writes                                                       |
 | `effectiveTools`, `toolSettingEntries`, `toolDecisions`, `createToolSettingsResolver`, `listToolSettings`, `ToolSettingsDeps`                                                                                                                                                     | the per-user tool settings (epic #303, X4; #307): the effective answer, as the wire's entries, as the brain's decisions, the resolver `runTurn` is handed, and the listing a route makes (a mode's override included)                                                                                                                       |
 | `createTestToolRegistry`, `testEchoTool`, `TEST_TOOL_NAME`, `TEST_TOOL_DESCRIPTION`                                                                                                                                                                                               | the test `echo` tool, and the registry that holds it — test-only, behind the mock model                                                                                                                                                                                                                                                     |
 | `createToolSupportResolver`                                                                                                                                                                                                                                                       | the per-model tool gate: whether a model can call tools, read from models.dev's `tool_call` (epic #303, X2)                                                                                                                                                                                                                                 |
@@ -1543,8 +1593,11 @@ src/
   model.ts              which model factory the process runs (the router, or the mock)
   mock-model.ts         the deterministic test model and its markers
   tools.ts              the tools a turn may offer (epic #303): the registry this build
-                        registers — the test `echo` tool, behind the mock — the support gate
-                        and the turn's options
+                        registers — `ask_user` everywhere, the test `echo` tool behind the
+                        mock — the support gate and the turn's options
+  pausing.ts            the pause (epic #303, X6; #309): the `ask_user` tool every deployment
+                        registers, and the checks a `user.tool_confirmation` passes before it is
+                        stored
   tool-settings.ts      the per-user tool settings (epic #303, X4; #307): the effective answer
                         a settings screen and the brain both read, and the resolver the loop
                         is handed
@@ -1870,9 +1923,19 @@ parallel with each other.
   snapshot key, a Bedrock inference profile read through the model it wraps, and the bundled
   snapshot's own answers (`openai/gpt-3.5-turbo` false; the models a chat normally runs, and a
   custom endpoint's, left to be offered tools).
+- `pausing.test.ts` (epic #303, X6; #309) — the pause over HTTP, with the real `ask_user` and a
+  test tool in the registry: the round trip (a call pauses, one confirmation carries the answers,
+  the brain writes them as the result and the turn carries on), the 400s (a call that is not
+  waiting, an unknown id, answers that do not fit the questions, an approval of a question with
+  no answers, `remember` on a question, `answers` for a tool that asked nothing) each storing
+  nothing, and an approval remembered `always` turning into the user's stored policy for that
+  tool while this chat reads the answer back off the log.
 - `mock-model.test.ts` also covers the `__tool__` marker (epic #303): a turn with the test tools
   wired calls `echo`, stores the call and its result adjacently, makes a second request and
   answers what the tool said; without them the call is stored nowhere and the turn ends idle.
+  `__ask__` (epic #303, #309) calls `ask_user` with `MOCK_ASK_INPUT`, and a prompt is answered
+  with what a tool said only while its last message is that tool's result — which is what makes
+  two tool turns in one chat work.
 - `catalog/reasoning-support.test.ts` (#252) — the reasoning gate on its own: a reasoning model's
   levels narrowed to ours, a model whose own levels leave out one of ours, a non-reasoning
   model, a reasoning model with a token-budget knob, and an effort vocabulary sharing nothing

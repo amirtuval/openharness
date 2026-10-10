@@ -185,6 +185,9 @@ export {
 } from './main'
 export {
   createMockModelFactory,
+  MOCK_ASK_ANSWERS,
+  MOCK_ASK_INPUT,
+  MOCK_ASK_MARKER,
   MOCK_ECHO_CHUNKS,
   MOCK_HOLD_MARKER,
   MOCK_HOLD_TEXT,
@@ -225,12 +228,14 @@ export {
 } from './scheduler'
 export {
   createTestToolRegistry,
+  createTurnRegistry,
   createTurnTools,
   TEST_TOOL_DESCRIPTION,
   TEST_TOOL_NAME,
   testEchoTool,
   type TurnToolOptions,
 } from './tools'
+export { askUserTool, withAlwaysApprovals } from './pausing'
 export {
   DefaultModelPicker,
   RECOMMENDED_DEFAULT_MODELS,

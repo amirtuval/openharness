@@ -436,7 +436,7 @@ describe('a chat under the settings', () => {
     expect(textOf(result)).toBe('Permission to use web_search has been denied.')
   })
 
-  it('honours an ask as a refusal that says the approval is not here yet', async () => {
+  it('pauses on an ask: the call is recorded, nothing runs it, and the turn waits', async () => {
     const test = createTestApp({
       tools: REGISTRY,
       registry: createBundledRegistry(),
@@ -451,12 +451,16 @@ describe('a chat under the settings', () => {
     await send(test, session.id, message('add a todo'))
     await waitForIdle(test.store, session.id)
 
-    expect((await toolUses(test, session.id))[0]).toMatchObject({
-      name: 'todo_write',
-      evaluated_permission: 'ask',
+    const [call] = await toolUses(test, session.id)
+    expect(call).toMatchObject({ name: 'todo_write', evaluated_permission: 'ask' })
+    // No result: the user has not answered, and the turn is idle naming the call it waits on.
+    expect(await toolResults(test, session.id)).toEqual([])
+    const idle = (await readHistory(test.store, session.id))
+      .filter((event) => event.type === EVENT_TYPES.sessionStatusIdle)
+      .at(-1)
+    expect(idle).toMatchObject({
+      type: EVENT_TYPES.sessionStatusIdle,
+      stop_reason: { type: 'requires_action', event_ids: [call?.id] },
     })
-    expect(textOf((await toolResults(test, session.id))[0])).toBe(
-      'Permission to use todo_write requires your approval, which is not available yet.',
-    )
   })
 })

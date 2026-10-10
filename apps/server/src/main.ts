@@ -258,13 +258,13 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   // applies whatever this answers.
   const resolveMode = createModeResolver({ store, credentials })
 
-  // The tools a turn may offer (epic #303, X4), and the per-user settings over them (#307).
-  // This build registers one — the test `echo` tool — and only behind
-  // `OPENHARNESS_TEST_MODEL=mock`, so a deployment on a provider model runs exactly the chat it
-  // ran before #304; #305's built-ins are what changes that. Which models may call tools at all
-  // comes from the same registry, as `models.dev`'s `tool_call`. The registry is built once and
-  // handed to both readers — the turn options and the `/v1/me/tools` routes (`createApp`) — so
-  // a tool the settings screen calls available is one a chat can really call.
+  // The tools a turn may offer (epic #303, X4), the per-user settings over them (#307) and the
+  // pause they can stop on (#309). Every deployment registers `ask_user`; the test `echo` tool
+  // is added behind `OPENHARNESS_TEST_MODEL=mock`, and #305's built-ins are what else arrives.
+  // Which models may call tools at all comes from the same registry, as `models.dev`'s
+  // `tool_call`. The registry is built once and handed to both readers — the turn options and
+  // the `/v1/me/tools` routes (`createApp`) — so a tool the settings screen calls available is
+  // one a chat can really call.
   const turnRegistry = createTurnRegistry(resolvedModel.kind)
   const turnTools = createTurnTools({ config, tools: turnRegistry, store, registry })
 
@@ -335,7 +335,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     catalog,
     registry,
     // The tools `/v1/me/tools` reports on: the same registry the turn options were built from.
-    ...(turnRegistry === undefined ? {} : { tools: turnRegistry }),
+    tools: turnRegistry,
     // The preferences response reports it as the default a user who has not chosen a compaction
     // share follows (C3, #282).
     compactionThreshold: config.compactionThreshold,

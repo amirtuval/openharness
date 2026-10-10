@@ -7,17 +7,21 @@ import { z } from 'zod'
 import type { ModelRegistry } from './catalog/registry'
 import { createToolSupportResolver } from './catalog/tool-support'
 import type { ResolvedModel } from './model'
+import { askUserTool } from './pausing'
 import { createToolSettingsResolver } from './tool-settings'
 
 /**
- * The tools a turn may offer (epic #303, X4), and the one this build registers.
+ * The tools a turn may offer (epic #303, X4), and the ones this build registers.
  *
- * **A real tool ships with [#305](https://github.com/amirtuval/openharness/issues/305)**, so the
- * only registry this server builds is the test one: an `echo` tool registered behind
- * `OPENHARNESS_TEST_MODEL=mock`, which is what lets the e2e suite drive a whole tool turn through
- * the real server, scheduler, brain and log. A process on a provider model has no tools at all —
- * `createTurnTools` answers `undefined` — which is exactly the behaviour of every server before
- * #304.
+ * **`ask_user` is registered by every deployment** (epic #303, #309): a model that needs a
+ * decision asks the user for one, and the turn pauses until they answer. It is the one tool the
+ * server itself provides, and it is process-independent — nothing about it is a test hook.
+ *
+ * The rest of the built-ins ship with
+ * [#305](https://github.com/amirtuval/openharness/issues/305), so the only other registry this
+ * server builds is the test one: an `echo` tool registered behind
+ * `OPENHARNESS_TEST_MODEL=mock`, which is what lets the e2e suite drive a whole tool turn
+ * through the real server, scheduler, brain and log.
  */
 
 /** The name of the test tool; the mock model calls it by this name. */
@@ -43,28 +47,27 @@ export const testEchoTool: ToolDefinition<{ text: string }> = {
   run: (input) => textResult(input.text),
 }
 
-/** The registry the test hook runs with: just {@link testEchoTool}. */
+/** The registry the test hook runs with: {@link testEchoTool} beside the real {@link askUserTool}. */
 export function createTestToolRegistry(): ToolRegistry {
-  return createToolRegistry([testEchoTool])
+  return createToolRegistry([askUserTool, testEchoTool])
 }
 
 /**
- * The tools this process registers, or `undefined` for a deployment that registers none.
+ * The tools this process registers.
  *
- * `undefined` is every deployment on a real provider model, and is not a degraded mode: it is a
- * chat with no tools, which is what this server was before #304 and what it will keep being
- * until #305's built-ins land. The test model gets {@link createTestToolRegistry} because it is
- * the model the tests speak to, so a tool turn — and a tool **setting** — can be driven through
- * the real server.
+ * Every deployment gets `ask_user` (#309) — the model can ask the user a question, and the turn
+ * pauses until they answer. The test model additionally gets the `echo` tool, so a whole tool
+ * turn — the call stored, run, answered, the second request — can be driven through the real
+ * server in an e2e test.
  *
  * One function, called once, because two readers need the same answer: the turn's options and
  * the `/v1/me/tools` routes both build from this registry, and a tool listed as available must
  * be one a chat can really call.
  *
- * @param kind which factory the process runs — `mock` is what turns the test registry on
+ * @param kind which factory the process runs — `mock` adds the test tool
  */
-export function createTurnRegistry(kind: ResolvedModel['kind']): ToolRegistry | undefined {
-  return kind === 'mock' ? createTestToolRegistry() : undefined
+export function createTurnRegistry(kind: ResolvedModel['kind']): ToolRegistry {
+  return kind === 'mock' ? createTestToolRegistry() : createToolRegistry([askUserTool])
 }
 
 /**
@@ -92,8 +95,8 @@ export interface TurnToolOptions {
 export interface TurnToolDeps {
   /** The parsed environment: how many requests a turn may make. */
   readonly config: { readonly maxToolSteps: number }
-  /** The tools this process registers ({@link createTurnRegistry}), or `undefined` for none. */
-  readonly tools: ToolRegistry | undefined
+  /** The tools this process registers (always at least `ask_user`). */
+  readonly tools: ToolRegistry
   /** The store the settings resolver reads a user's choices from. */
   readonly store: Pick<SessionStore, 'getToolSettings' | 'getMode' | 'getPreferences'>
   /** The model registry, which answers which models can call tools at all. */
@@ -101,16 +104,14 @@ export interface TurnToolDeps {
 }
 
 /**
- * Resolve the tools a turn runs with, or `undefined` when this process registers none.
+ * Resolve the tools a turn runs with.
  *
- * A deployment with no registry has nothing to offer and is never asked for a user's settings:
- * there is nothing a setting could turn on.
+ * Every deployment registers `ask_user` (#309), so this always answers: a chat whose owner has
+ * turned everything off offers nothing — an empty offer, not a missing one — and a host that
+ * would rather run without tools passes the turn no options at all.
  */
-export function createTurnTools(deps: TurnToolDeps): TurnToolOptions | undefined {
+export function createTurnTools(deps: TurnToolDeps): TurnToolOptions {
   const { tools } = deps
-  if (tools === undefined) {
-    return undefined
-  }
   return {
     tools,
     toolSettings: createToolSettingsResolver({ store: deps.store, tools }),
