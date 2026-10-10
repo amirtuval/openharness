@@ -97,13 +97,19 @@ async function statusEventsAfter(
  * it. That makes this the fact a test that steers a reply "mid-stream" has to see before it
  * sends its steering message: until the span start is there, the switch is still an edit the
  * request in flight would pick up, and the two-models-in-one-turn premise would never exist.
+ *
+ * `afterSeq` is therefore required, and every caller names the turn it means — the `seq` of
+ * the message that turn answers. It used to default to `0`, "the log's first span start",
+ * which in a session that has already run a turn is a request that finished long ago: a test
+ * that meant "the turn I just started" was answered at once and went on to race the brain it
+ * meant to wait for (#261).
  */
 export async function waitForModelRequestStart(
   client: Client,
   sessionId: string,
-  options: { readonly afterSeq?: number; readonly timeoutMs?: number } = {},
+  options: { readonly afterSeq: number; readonly timeoutMs?: number },
 ): Promise<ModelRequestStartEvent> {
-  const afterSeq = options.afterSeq ?? 0
+  const afterSeq = options.afterSeq
   return await waitFor(
     `a model request to start after seq ${String(afterSeq)}`,
     async () => {

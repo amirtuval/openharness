@@ -1,6 +1,6 @@
 import { createTranscript, selectMessages, type Client, type Transcript } from '@openharness/client'
 import { EVENT_TYPES, type Session } from '@openharness/protocol'
-import { MOCK_SLOW_MARKER, MOCK_SLOW_TOTAL_MS } from '@openharness/server'
+import { MOCK_HOLD_MARKER } from '@openharness/server'
 import { describe, expect, it } from 'vitest'
 
 import {
@@ -227,13 +227,13 @@ describe('edit and resend (#238)', () => {
     const original = await client.sendMessage(session.id, 'the first thing')
     await waitForTurnEnd(client, session.id, { afterSeq: original.seq })
 
-    const running = await client.sendMessage(session.id, `${MOCK_SLOW_MARKER} slowly now`)
-    // The span start is the request being in flight — the session is `running` from here until
-    // the slow reply finishes — so the rewind below is aimed at a turn that is really running,
-    // rather than racing the brain to the first append.
-    await waitForModelRequestStart(client, session.id, {
-      timeoutMs: MOCK_SLOW_TOTAL_MS * 3,
-    })
+    // A turn the test holds open: `__hold__` streams its one chunk and then waits, so the
+    // session is `running` for as long as the test needs rather than for as long as a slow
+    // reply happens to last — a loaded runner can outlast any fixed one (#261). The span start
+    // *this* message's turn opened is what says the request is in flight; the interrupt below
+    // is what ends it.
+    const running = await client.sendMessage(session.id, `${MOCK_HOLD_MARKER} and hold it open`)
+    await waitForModelRequestStart(client, session.id, { afterSeq: running.seq })
 
     // The turn in flight owns the branch being taken back, so the server refuses the rewind
     // with the protocol's 409 — and stores nothing of the batch.
@@ -243,10 +243,10 @@ describe('edit and resend (#238)', () => {
     expect(refusal.status).toBe(409)
     expect(refusal.type).toBe('conflict_error')
 
-    await waitForTurnEnd(client, session.id, {
-      afterSeq: running.seq,
-      timeoutMs: MOCK_SLOW_TOTAL_MS * 3,
-    })
+    // Releasing the latch is the test's own move: an interrupt ends the held turn the way it
+    // ends any reply in flight, and the rewind below finds a session that is over it.
+    const interrupt = await client.interrupt(session.id)
+    await waitForTurnEnd(client, session.id, { afterSeq: interrupt.seq })
 
     // Once the turn is over the same rewind is accepted, and the conversation restarts from it.
     const edited = await client.sendMessage(session.id, 'the edited thing', {

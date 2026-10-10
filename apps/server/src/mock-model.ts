@@ -24,6 +24,8 @@ import type { ModelFactory } from '@openharness/brain'
  * | anything else            | the message echoed back in {@link MOCK_ECHO_CHUNKS} chunks, one delay each        |
  * | `__slow__`               | {@link MOCK_SLOW_CHUNKS} chunks over about {@link MOCK_SLOW_TOTAL_MS}, so a turn  |
  * |                          | can be interrupted, killed and resumed mid-stream                                 |
+ * | `__hold__`               | one chunk, and then nothing: the request stays open until it is aborted, so a     |
+ * |                          | test can hold a turn open as long as it needs and release it itself               |
  * | `__fail_retryable__`     | HTTP 503 (`model_overloaded_error`) on the *first* attempt, then the echo         |
  * | `__fail_terminal__`      | HTTP 400 (`model_request_failed_error`) on every attempt                          |
  *
@@ -54,6 +56,20 @@ export const MOCK_SLOW_CHUNK_DELAY_MS = 250
 
 /** How long a `__slow__` reply takes to stream, near enough: 40 × 250 ms. */
 export const MOCK_SLOW_TOTAL_MS = MOCK_SLOW_CHUNKS * MOCK_SLOW_CHUNK_DELAY_MS
+
+/**
+ * The marker that streams one chunk and then stops producing anything while keeping the request
+ * open, until whatever is streaming it aborts.
+ *
+ * A `__slow__` reply is *long*; this one is *endless*, which is the difference between a test
+ * that hopes the turn is still running when its next request arrives and a test that knows it:
+ * the turn stays open as long as the test needs, and the `user.interrupt` that ends it — the
+ * way any reply in flight ends — is the test's own move (#261).
+ */
+export const MOCK_HOLD_MARKER = '__hold__'
+
+/** The one chunk a `__hold__` reply streams before it waits. */
+export const MOCK_HOLD_TEXT = 'holding the turn open'
 
 /** The marker that fails the first attempt with a 503 and succeeds on the retry. */
 export const MOCK_RETRYABLE_MARKER = '__fail_retryable__'
@@ -92,7 +108,7 @@ export function createMockModelFactory(): ModelFactory {
       if (plan.error !== undefined) {
         return Promise.reject(plan.error)
       }
-      return Promise.resolve({ stream: streamOf(plan) })
+      return Promise.resolve({ stream: streamOf(plan, options.abortSignal) })
     },
   })
   return () => model
@@ -106,6 +122,11 @@ interface ModelPlan {
   readonly delayMs: number
   /** The error to reject the request with, if any. */
   readonly error?: Error
+  /**
+   * Whether the reply keeps its request open after the chunks, until the caller aborts it,
+   * instead of closing itself and reporting usage.
+   */
+  readonly hold?: boolean
 }
 
 /**
@@ -129,6 +150,9 @@ export function planFor(message: string, attempt: number): ModelPlan {
   if (message.startsWith(MOCK_SLOW_MARKER)) {
     const text = slowReplyText()
     return { chunks: chunkText(text, MOCK_SLOW_CHUNKS), delayMs: MOCK_SLOW_CHUNK_DELAY_MS }
+  }
+  if (message.startsWith(MOCK_HOLD_MARKER)) {
+    return { chunks: [MOCK_HOLD_TEXT], delayMs: 0, hold: true }
   }
   return { chunks: chunkText(message, MOCK_ECHO_CHUNKS), delayMs: MOCK_ECHO_CHUNK_DELAY_MS }
 }
@@ -221,9 +245,14 @@ interface PromptPart {
  * of them, then the usage.
  *
  * Pulled rather than pushed on purpose — a consumer that stops reading (an abort) stops the
- * stream, which is exactly what makes `__slow__` interruptible.
+ * stream, which is exactly what makes `__slow__` interruptible and a `hold` reply endable: a
+ * held pull settles only when the request is aborted, so the request stays open until the
+ * caller interrupts it and then closes like any other aborted reply.
  */
-function streamOf(plan: ModelPlan): ReadableStream<LanguageModelV4StreamPart> {
+function streamOf(
+  plan: ModelPlan,
+  abortSignal: AbortSignal | undefined,
+): ReadableStream<LanguageModelV4StreamPart> {
   const steps: (() => Promise<LanguageModelV4StreamPart>)[] = [
     () => Promise.resolve({ type: 'stream-start', warnings: [] }),
     () => Promise.resolve({ type: 'text-start', id: TEXT_ID }),
@@ -231,29 +260,19 @@ function streamOf(plan: ModelPlan): ReadableStream<LanguageModelV4StreamPart> {
       await delay(plan.delayMs)
       return { type: 'text-delta', id: TEXT_ID, delta: chunk }
     }),
-    () => Promise.resolve({ type: 'text-end', id: TEXT_ID }),
-    () =>
-      Promise.resolve({
-        type: 'finish',
-        finishReason: { unified: 'stop', raw: undefined },
-        usage: {
-          inputTokens: {
-            total: MOCK_MODEL_USAGE.input_tokens,
-            noCache: MOCK_MODEL_USAGE.input_tokens - MOCK_MODEL_USAGE.cache_read_input_tokens,
-            cacheRead: MOCK_MODEL_USAGE.cache_read_input_tokens,
-            cacheWrite: MOCK_MODEL_USAGE.cache_creation_input_tokens,
-          },
-          outputTokens: {
-            total: MOCK_MODEL_USAGE.output_tokens,
-            text: MOCK_MODEL_USAGE.output_tokens,
-            reasoning: 0,
-          },
-        },
-      }),
+    ...(plan.hold === true ? [] : [closing, finishing]),
   ]
   let step = 0
   return new ReadableStream<LanguageModelV4StreamPart>({
     async pull(controller) {
+      if (plan.hold === true && step >= steps.length) {
+        // A held reply produces nothing more of its own: its one remaining pull waits for the
+        // abort a `user.interrupt` raises, and closes the stream there. Nothing else can end
+        // it, which is the whole point — the turn is open for as long as the test needs.
+        await aborted(abortSignal)
+        controller.close()
+        return
+      }
       const next = steps[step]
       step += 1
       if (next === undefined) {
@@ -262,6 +281,51 @@ function streamOf(plan: ModelPlan): ReadableStream<LanguageModelV4StreamPart> {
       }
       controller.enqueue(await next())
     },
+  })
+}
+
+/** The `text-end` a reply that ran to completion closes its text block with. */
+function closing(): Promise<LanguageModelV4StreamPart> {
+  return Promise.resolve({ type: 'text-end', id: TEXT_ID })
+}
+
+/** The `finish` a reply that ran to completion ends with, carrying the fixed usage. */
+function finishing(): Promise<LanguageModelV4StreamPart> {
+  return Promise.resolve({
+    type: 'finish',
+    finishReason: { unified: 'stop', raw: undefined },
+    usage: {
+      inputTokens: {
+        total: MOCK_MODEL_USAGE.input_tokens,
+        noCache: MOCK_MODEL_USAGE.input_tokens - MOCK_MODEL_USAGE.cache_read_input_tokens,
+        cacheRead: MOCK_MODEL_USAGE.cache_read_input_tokens,
+        cacheWrite: MOCK_MODEL_USAGE.cache_creation_input_tokens,
+      },
+      outputTokens: {
+        total: MOCK_MODEL_USAGE.output_tokens,
+        text: MOCK_MODEL_USAGE.output_tokens,
+        reasoning: 0,
+      },
+    },
+  })
+}
+
+/**
+ * Resolve when `signal` aborts, or at once when it already has.
+ *
+ * A `__hold__` reply cannot be ended without one: without a signal there is nothing that could
+ * abort it, and waiting would hang the request it is meant to hold — so it fails loudly
+ * instead.
+ */
+function aborted(signal: AbortSignal | undefined): Promise<void> {
+  if (signal === undefined) {
+    throw new Error(`${MOCK_HOLD_MARKER} needs an abort signal: nothing could end this reply`)
+  }
+  if (signal.aborted) {
+    return Promise.resolve()
+  }
+  return new Promise((resolve) => {
+    signal.addEventListener('abort', () => resolve(), { once: true })
   })
 }
 

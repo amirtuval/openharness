@@ -54,7 +54,12 @@ function requestedModels(log: readonly { type: string }[]): (string | undefined)
 }
 
 /** One message, sent with the optional model switch the composer sends. */
-async function send(client: Client, sessionId: string, text: string, model?: string) {
+async function send(
+  client: Client,
+  sessionId: string,
+  text: string,
+  model?: string,
+): Promise<number> {
   const response = await client.sessions.events.send(sessionId, [
     {
       type: 'user.message',
@@ -62,7 +67,13 @@ async function send(client: Client, sessionId: string, text: string, model?: str
       ...(model === undefined ? {} : { model: { id: model } }),
     },
   ])
-  return response.data[0]?.seq
+  const stored = response.data[0]
+  if (stored === undefined) {
+    // The route answers with the events it stored, and this helper sends exactly one: nothing
+    // stored means the premise of every assertion below is gone.
+    throw new Error('the events route stored nothing')
+  }
+  return stored.seq
 }
 
 describe('switching the model mid-chat (U3)', () => {
@@ -125,7 +136,7 @@ describe('switching the model mid-chat (U3)', () => {
     // The steering message is accepted while the turn runs: the reply's own request is already
     // past its model lookup, so this one cannot change it — only the request after it.
     const secondSeq = await send(client, session.id, 'steer it somewhere else', SECOND_MODEL)
-    expect(secondSeq).toBeGreaterThan(firstSeq ?? 0)
+    expect(secondSeq).toBeGreaterThan(firstSeq)
 
     await waitForTurnEnd(client, session.id, { afterSeq: secondSeq })
 
