@@ -50,6 +50,7 @@ import type {
   AppendableEvent,
   AppendEventsOptions,
   ListModelRequestsOptions,
+  ListToolUsesOptions,
   PartitionLease,
   SessionStore,
 } from '../store'
@@ -2460,6 +2461,132 @@ export function runSessionStoreConformance(
       })
     })
 
+    describe('tool calls in a window (epic #303, #305)', () => {
+      it('reads a call its result answered, with the name and the instant', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        await recordToolUse(store, session.id, 'web_search')
+
+        expect(
+          await store.listToolUses(toolWindow(OWNER_A, START_MS - SECOND, START_MS + SECOND)),
+        ).toEqual([{ name: 'web_search', processed_at: timestampAt(START_MS) }])
+      })
+
+      it('leaves out a call that failed and one nothing answered', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        await recordToolUse(store, session.id, 'web_search', { isError: true })
+        // A call the brain stored and a crashed turn never ran: no result names it.
+        await append(store, session.id, [toolUse(newEventId(), 'web_search')])
+        await recordToolUse(store, session.id, 'web_search')
+
+        // Only the call that was answered successfully counts: a refused or failed call did not
+        // search, and a call nothing answered never ran.
+        expect(
+          await store.listToolUses(toolWindow(OWNER_A, START_MS - SECOND, START_MS + SECOND)),
+        ).toHaveLength(1)
+      })
+
+      it('counts one tool’s calls when a name is named', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        await recordToolUse(store, session.id, 'web_search')
+        await recordToolUse(store, session.id, 'web_fetch')
+        await recordToolUse(store, session.id, 'web_search', { isError: true })
+
+        const all = await store.listToolUses(
+          toolWindow(OWNER_A, START_MS - SECOND, START_MS + SECOND),
+        )
+        expect(all.map((call) => call.name)).toEqual(['web_search', 'web_fetch'])
+        const searches = await store.listToolUses({
+          ...toolWindow(OWNER_A, START_MS - SECOND, START_MS + SECOND),
+          name: 'web_search',
+        })
+        expect(searches.map((call) => call.name)).toEqual(['web_search'])
+      })
+
+      it('is owner-scoped: another user’s calls are never in the answer', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        await recordToolUse(store, session.id, 'web_search')
+        const theirs = await store.createSession(null, {
+          ownerId: OWNER_B,
+          model: { id: MODEL_ID },
+        })
+        await recordToolUse(store, theirs.id, 'web_search')
+        await recordToolUse(store, theirs.id, 'web_search')
+
+        expect(
+          await store.listToolUses(toolWindow(OWNER_A, START_MS - SECOND, START_MS + SECOND)),
+        ).toHaveLength(1)
+        expect(
+          await store.listToolUses(toolWindow(OWNER_B, START_MS - SECOND, START_MS + SECOND)),
+        ).toHaveLength(2)
+      })
+
+      it('reads the half-open window, and every session of the owner in log order', async () => {
+        const { store, clock } = await setup()
+        const { session } = await seed(store)
+        const other = await store.createSession(null, { ownerId: OWNER_A, model: { id: MODEL_ID } })
+        await recordToolUse(store, session.id, 'web_search')
+        clock.advance(SECOND)
+        await recordToolUse(store, other.id, 'web_search')
+        clock.advance(SECOND)
+        await recordToolUse(store, session.id, 'web_search')
+
+        // `from` is in the window and `to` is not: the third call, at exactly `to`, is out.
+        expect(
+          await store.listToolUses(toolWindow(OWNER_A, START_MS, START_MS + 2 * SECOND)),
+        ).toHaveLength(2)
+        // Ordered by `(session_id, seq)`, so a session's calls are grouped rather than
+        // interleaved by time — whichever order the two sessions were created in.
+        const expected =
+          session.id < other.id
+            ? [timestampAt(START_MS), timestampAt(START_MS + SECOND)]
+            : [timestampAt(START_MS + SECOND), timestampAt(START_MS)]
+        expect(
+          (await store.listToolUses(toolWindow(OWNER_A, START_MS, START_MS + 2 * SECOND))).map(
+            (call) => call.processed_at,
+          ),
+        ).toEqual(expected)
+      })
+
+      it('does not read a call a rewind replaced (#238)', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const { events } = await completeTurn(store, session.id, 'hello')
+        await recordToolUse(store, session.id, 'web_search')
+        expect(
+          await store.listToolUses(toolWindow(OWNER_A, START_MS - SECOND, START_MS + SECOND)),
+        ).toHaveLength(1)
+
+        const message = events[0]
+        if (message === undefined) {
+          throw new Error('the turn stored no message')
+        }
+        await append(store, session.id, [rewindTo(message.seq)])
+        expect(
+          await store.listToolUses(toolWindow(OWNER_A, START_MS - SECOND, START_MS + SECOND)),
+        ).toEqual([])
+      })
+
+      it('rejects a window it cannot read', async () => {
+        const { store } = await setup()
+        expect(
+          await thrownBy(() => store.listToolUses(toolWindow(OWNER_A, START_MS + 1, START_MS))),
+        ).toBeInstanceOf(RangeError)
+        expect(
+          await thrownBy(() =>
+            store.listToolUses({
+              ownerId: OWNER_A,
+              from: new Date(Number.NaN),
+              to: new Date(START_MS),
+            }),
+          ),
+        ).toBeInstanceOf(RangeError)
+      })
+    })
+
     // --------------------------------------------------------- reading the log
 
     describe('reading the log', () => {
@@ -3437,6 +3564,50 @@ async function recordModelRequest(
 /** A `listModelRequests` query for `ownerId`, over the half-open window `[fromMs, toMs)`. */
 function usageWindow(ownerId: UserId, fromMs: number, toMs: number): ListModelRequestsOptions {
   return { ownerId, from: new Date(fromMs), to: new Date(toMs) }
+}
+
+/** The same window, for the tool-call read (epic #303, #305). */
+function toolWindow(ownerId: UserId, fromMs: number, toMs: number): ListToolUsesOptions {
+  return { ownerId, from: new Date(fromMs), to: new Date(toMs) }
+}
+
+/**
+ * An `agent.tool_use` under an id the test chose, so the result that answers it can name it —
+ * the store mints an id otherwise, and a call and its result are one identity (epic #303, X1).
+ */
+function toolUse(id: EventId, name: string): AppendableEvent {
+  return {
+    id,
+    type: EVENT_TYPES.agentToolUse,
+    name,
+    input: {},
+    evaluated_permission: 'allow',
+  }
+}
+
+/** The `agent.tool_result` that answers a call, successfully or as a failure. */
+function toolResult(callId: EventId, isError: boolean): AppendableEvent {
+  return {
+    type: EVENT_TYPES.agentToolResult,
+    tool_use_id: callId,
+    content: [{ type: 'text', text: isError ? 'failed' : 'ok' }],
+    is_error: isError,
+  }
+}
+
+/** A tool call and the result that answers it, appended as the brain appends the pair. */
+async function recordToolUse(
+  store: SessionStore,
+  sessionId: SessionId,
+  name: string,
+  options: { readonly isError?: boolean } = {},
+): Promise<{ call: EventId; result: EventId }> {
+  const call = newEventId()
+  const stored = await append(store, sessionId, [
+    toolUse(call, name),
+    toolResult(call, options.isError ?? false),
+  ])
+  return { call, result: stored[1]?.id ?? call }
 }
 
 /** An `event_start` chunk previewing `id`. */

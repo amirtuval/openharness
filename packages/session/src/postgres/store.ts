@@ -93,8 +93,10 @@ import type {
   ListEventsOptions,
   ListModelRequestsOptions,
   ListSessionsOptions,
+  ListToolUsesOptions,
   ModelRequestUsage,
   OwnerScope,
+  ToolUseRecord,
   UnscopedListEventsOptions,
   PartitionFence,
   PartitionLease,
@@ -130,6 +132,7 @@ import {
   sessionChannel,
   sessionFromRow,
   timestampOf,
+  toolUseFromRow,
   type AgentRow,
   type EventsTable,
   type EventWithClaimRow,
@@ -852,6 +855,46 @@ export class PostgresSessionStore implements SessionStore {
       .orderBy('e.seq', 'asc')
       .execute()
     return rows.map(modelRequestFromRow)
+  }
+
+  async listToolUses(options: ListToolUsesOptions): Promise<ToolUseRecord[]> {
+    const { fromMs, toMs } = usageWindowOf(options)
+    // The companion read (#305): the owner's sessions, their tool calls inside the window, and
+    // the result each call is answered by — joined on `tool_use_id`, the id the result names
+    // (the call's own event id, epic #303 X1). The join is an `inner` one, which is exactly the
+    // rule this read follows: a call with no result was never run, and one whose result is an
+    // error did not do what it asked for, so neither is a call this answers.
+    // The join is on the event id alone: an event id identifies one event for the whole store
+    // (the primary key says so), so the result a call is answered by cannot belong to another
+    // session.
+    const rows = await this.#db
+      .selectFrom('events as e')
+      .innerJoin('sessions as se', 'se.id', 'e.session_id')
+      .innerJoin('events as r', (join) => join.on(sql<SqlBool>`r.payload ->> 'tool_use_id' = e.id`))
+      .select(sql<string>`e.payload ->> 'name'`.as('name'))
+      .select(sql<Date>`e.processed_at`.as('processed_at'))
+      .where('se.owner_id', '=', options.ownerId)
+      .where('e.type', '=', EVENT_TYPES.agentToolUse)
+      .where('e.processed_at', '>=', instant(fromMs))
+      .where('e.processed_at', '<', instant(toMs))
+      .where('r.type', '=', EVENT_TYPES.agentToolResult)
+      .where(sql<SqlBool>`(r.payload ->> 'is_error') = 'false'`)
+      .$if(options.name !== undefined, (query) =>
+        query.where(sql<SqlBool>`e.payload ->> 'name' = ${options.name ?? ''}`),
+      )
+      .where(
+        sql<SqlBool>`not exists (
+        select 1
+          from event_supersessions s
+         where s.session_id = e.session_id
+           and s.kind = ${REWIND_KIND}
+           and e.seq between s.from_seq and s.to_seq
+      )`,
+      )
+      .orderBy('e.session_id', 'asc')
+      .orderBy('e.seq', 'asc')
+      .execute()
+    return rows.map(toolUseFromRow)
   }
 
   async compact(options: CompactOptions): Promise<number> {
