@@ -36,6 +36,7 @@ import { ModelCatalog } from './catalog/catalog'
 import { createMaxOutputResolver, createTokenBudgetResolver } from './catalog/context-budget'
 import { createProviderFetch } from './catalog/provider-fetch'
 import { createReasoningSupportResolver } from './catalog/reasoning-support'
+import { createSearchAllowance } from './searches'
 import { createContextCompactionResolver } from './context-compaction'
 import { createModeResolver } from './modes'
 import { createBundledRegistry, type ModelRegistry } from './catalog/registry'
@@ -258,11 +259,22 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   // applies whatever this answers.
   const resolveMode = createModeResolver({ store, credentials })
 
-  // The tools a turn may offer (epic #303, X4). This build registers one — the test `echo` tool
-  // — and only behind `OPENHARNESS_TEST_MODEL=mock`, so a deployment on a provider model runs
-  // exactly the chat it ran before #304; #305's built-ins are what changes that. Which models
-  // may call tools at all comes from the same registry, as `models.dev`'s `tool_call`.
-  const turnTools = createTurnTools(config, resolvedModel.kind, registry)
+  // The tools a turn may offer (epic #303, X4; the built-ins are #305): `web_fetch` and
+  // `todo_write` for every deployment, `web_search` where an operator configured a search API,
+  // and the test `echo` tool behind `OPENHARNESS_TEST_MODEL=mock`. Which models may call tools
+  // at all comes from the same registry, as `models.dev`'s `tool_call`.
+  const turnTools = createTurnTools({
+    config,
+    kind: resolvedModel.kind,
+    registry,
+    // The search request goes out through the server's egress, like every provider call
+    // (#270); the fixed endpoint and the operator's key are the only things it carries.
+    searchTransport: createProviderFetch(),
+    allowance:
+      config.search === null
+        ? undefined
+        : createSearchAllowance({ store, dailyLimit: config.search.dailyLimit }),
+  })
 
   const scheduler = createScheduler(
     config,
