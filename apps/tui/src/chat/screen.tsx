@@ -264,7 +264,8 @@ export function ChatScreen({
   const compaction = selectManualCompaction(view.transcript)
   // `null` for a summary — the divider is that outcome — so this is also the test for whether a
   // line is owed at all.
-  const manualCompactionNoticeDrawn = compaction === null ? null : manualCompactionNotice(compaction)
+  const manualCompactionNoticeDrawn =
+    compaction === null ? null : manualCompactionNotice(compaction)
 
   // The lines that sit under the transcript: what a command printed or a hint, the turn's own
   // error when the status line is not already saying it (#208), the newest message's shortening

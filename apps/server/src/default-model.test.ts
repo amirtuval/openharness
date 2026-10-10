@@ -5,6 +5,7 @@ import {
   type ProviderCatalogStatus,
 } from '@openharness/protocol'
 import { makeUserPreferences } from '@openharness/protocol/fixtures'
+import { DEFAULT_CONTEXT_TOKEN_BUDGET } from '@openharness/brain'
 import { InMemorySessionStore } from '@openharness/session'
 
 import type { ModelCatalog } from './catalog/catalog'
@@ -55,6 +56,8 @@ function listedOf(models: readonly string[]): ListModelsResponse {
       context_window: null,
       max_output_tokens: null,
       cost: null,
+      // No window, so the budget the server would report is the brain's own fallback (#280).
+      context_budget: DEFAULT_CONTEXT_TOKEN_BUDGET,
       source: 'provider' as const,
     })),
     providers: providers.map((provider): ProviderCatalogStatus => ({

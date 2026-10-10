@@ -1,3 +1,4 @@
+import { DEFAULT_CONTEXT_TOKEN_BUDGET, contextTokenBudget } from '@openharness/client'
 import { newProviderCredentialId } from '@openharness/protocol'
 import type { ModelEntry, ProviderCatalogStatus, ProviderCredential } from '@openharness/protocol'
 
@@ -7,19 +8,35 @@ import type { ModelEntry, ProviderCatalogStatus, ProviderCredential } from '@ope
  * sidebar all read, so several test files want the same two-provider catalog.
  */
 
-/** A catalog entry with the fields a test does not care about filled in. */
+/**
+ * A catalog entry with the fields a test does not care about filled in.
+ *
+ * `context_budget` is stamped from the limits the way a real server stamps it (#280): the
+ * window less `min(maxOutput, 25% of it)`, or the brain's own 32,768 when there is no window to
+ * derive one from. A test may pin it in `overrides` — a meter reads this field and not the
+ * window, so a fixture that left it out would not be a shape the server ever sends.
+ */
 export function modelEntry(
   overrides: Partial<ModelEntry> & Pick<ModelEntry, 'id' | 'provider' | 'name'>,
 ): ModelEntry {
-  return {
+  const entry = {
     context_window: null,
     max_output_tokens: null,
     // Unpriced unless a test says otherwise: a fixture that invented rates would make a cost
     // assertion pass for the wrong reason (#247).
     cost: null,
-    source: 'provider',
+    source: 'provider' as const,
     ...overrides,
   }
+  const window = entry.context_window
+  const budget =
+    window === null || window <= 0
+      ? DEFAULT_CONTEXT_TOKEN_BUDGET
+      : contextTokenBudget({
+          contextWindow: window,
+          ...(entry.max_output_tokens === null ? {} : { maxOutput: entry.max_output_tokens }),
+        })
+  return { ...entry, context_budget: entry.context_budget ?? budget }
 }
 
 /** One provider's catalog status, `ok` unless overridden. */

@@ -605,6 +605,8 @@ describe('model-first labels, hidden agents', () => {
       context_window: 128_000,
       max_output_tokens: null,
       cost: null,
+      // The budget a real server reports for a 128k window with no declared ceiling (#280).
+      context_budget: 96_000,
       source: 'provider',
     }
     // The seeded session runs anthropic/claude-sonnet-5; this catalog does not list it.

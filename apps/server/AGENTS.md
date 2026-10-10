@@ -446,7 +446,14 @@ turns dropped first, never the newest turn.
 
 `catalog/context-budget.ts` is the whole of it: `contextTokenBudget` is the rule, and
 `createTokenBudgetResolver(registry)` answers `(modelId) => budget | undefined` — a `find` over
-the registry's list for the id's provider. It is a **resolver rather than a record** because the
+the registry's list for the id's provider. **Every `GET /v1/models` entry reports the answer as
+`context_budget`** (epic #277, K10; #280): `list()` resolves it with this very resolver — the
+one `main.ts` hands the scheduler — and falls back to `DEFAULT_CONTEXT_TOKEN_BUDGET`, so a
+client's context meter and the trimming that really happens are one number. The case that makes
+it matter is a model the registry knows nothing about (a custom endpoint, an Azure deployment
+under a named credential): the entry may describe a window while the resolver derives no budget,
+and a meter computing one from the window would measure against a number no request is trimmed
+to. It is a **resolver rather than a record** because the
 registry holds hundreds of models and the snapshot is refreshed wholesale: a record would mean
 enumerating all of it to answer for the one id a request runs, and rebuilding it whenever the
 snapshot changed. `undefined` is a real answer — an unknown provider, a model the snapshot

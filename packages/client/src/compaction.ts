@@ -10,20 +10,28 @@ import type { TranscriptContext, TranscriptManualCompaction, TranscriptSummary }
  * are things a transcript already holds (the size) or a catalog already answers (the budget), so
  * this module is a handful of pure functions and nothing else — no store, no I/O.
  *
- * ## The budget restates the server's rule
+ * ## The budget comes from the server
  *
- * A model's history budget is the server's (`apps/server/src/catalog/context-budget.ts`, #246):
+ * A model entry carries the **budget the brain will actually trim to** as `context_budget`
+ * (epic #277, C3/C5; #246, #280): the server resolves it with the same resolver it hands the
+ * brain, so a meter and the trimming that really happens cannot disagree. That matters most for
+ * a model the bundled registry knows nothing about — a custom OpenAI-compatible endpoint, an
+ * Azure deployment — where the catalog can still describe a window while the brain's resolver
+ * has nothing to derive a budget from and falls back to `DEFAULT_CONTEXT_TOKEN_BUDGET`. Deriving
+ * a budget from the window here instead would measure against a number no request is trimmed to.
+ *
+ * {@link contextTokenBudget} stays as the **fallback** for a response that predates the field
+ * (an older server, a caller that made its own entry): the server's rule restated —
  *
  * ```
  * budget = contextWindow − min(maxOutput, 25% of contextWindow)
  * ```
  *
- * — the window less room for the reply. It is restated here rather than shared because the rule
- * lives in a package this one may not depend on, and both frontends need it (the web header and
- * the `oh` status line must agree). A model the catalog does not list — an unknown id, a free-text
- * one — gets the brain's `DEFAULT_CONTEXT_TOKEN_BUDGET`, exactly as the server's resolver answers
- * `undefined` for one and the brain falls back to the same number. Keep the two in step: they are
- * one rule written twice, the way the fake's session-naming rule is (`testing/titles.ts`).
+ * — and `DEFAULT_CONTEXT_TOKEN_BUDGET` (32,768, the brain's own) for a model whose window even
+ * that cannot describe. It is restated rather than shared because the rule lives in a package
+ * this one may not depend on, and both frontends need it (the web header and the `oh` status
+ * line must agree). Keep the two in step: that path is one rule written twice, the way the
+ * fake's session-naming rule is (`testing/titles.ts`).
  *
  * ## What the meter measures
  *
@@ -80,14 +88,35 @@ export function contextTokenBudget(model: {
 }
 
 /**
- * The history budget of a catalog entry, or {@link DEFAULT_CONTEXT_TOKEN_BUDGET} when the entry
- * cannot say: an id nobody lists, or one with no context window (C6's `null`).
+ * The limits a history budget is read from (epic #277, K10; #246, #280).
+ *
+ * `context_budget` is optional in this *type* even though the server always sends it: a response
+ * from a server that predates the field is a real case, and {@link modelContextBudget} answers
+ * it with the client-side rule. Anything carrying the two limits — a whole {@link ModelEntry},
+ * or a test's smaller object — is a `BudgetModelLimits`.
+ */
+export type BudgetModelLimits = Pick<ModelEntry, 'context_window' | 'max_output_tokens'> & {
+  /** The budget the server reports for this model, when the response carries one. */
+  readonly context_budget?: number | undefined
+}
+
+/**
+ * The history budget of a catalog entry, in tokens.
+ *
+ * The server's `context_budget` is the answer whenever the entry carries one — it is the number
+ * the brain trims to, resolved by the server with the same resolver (`#246`, `#280`), which is
+ * what keeps this meter honest for a model the registry does not know. The window rule below is
+ * the fallback for an entry that predates the field, and `DEFAULT_CONTEXT_TOKEN_BUDGET` the
+ * fallback of *that* for an entry with no window either (C6's `null`) — the brain's own number,
+ * so a model nobody can size is measured against exactly what the server would trim it to.
  *
  * @param entry the catalog's entry for the model the meter is drawn against, if it has one
  */
-export function modelContextBudget(
-  entry: Pick<ModelEntry, 'context_window' | 'max_output_tokens'> | null | undefined,
-): number {
+export function modelContextBudget(entry: BudgetModelLimits | null | undefined): number {
+  const reported = entry?.context_budget
+  if (typeof reported === 'number' && reported > 0) {
+    return reported
+  }
   const window = entry?.context_window
   if (window === null || window === undefined || window <= 0) {
     return DEFAULT_CONTEXT_TOKEN_BUDGET
@@ -203,7 +232,7 @@ export interface ContextMeter {
 export function contextMeter(
   context: TranscriptContext | null,
   options: {
-    readonly model?: Pick<ModelEntry, 'context_window' | 'max_output_tokens'> | null | undefined
+    readonly model?: BudgetModelLimits | null | undefined
     readonly threshold?: number | undefined
   } = {},
 ): ContextMeter | null {
@@ -285,8 +314,8 @@ export interface SummaryModelFallback {
  *   pass limit in force (the stored one, or the `defaults` the response reports)
  */
 export function summaryModelFallback(options: {
-  readonly chat: Pick<ModelEntry, 'context_window' | 'max_output_tokens'>
-  readonly summary: Pick<ModelEntry, 'context_window' | 'max_output_tokens'>
+  readonly chat: BudgetModelLimits
+  readonly summary: BudgetModelLimits
   readonly maxPasses: number
 }): SummaryModelFallback | null {
   const chatBudget = modelContextBudget(options.chat)

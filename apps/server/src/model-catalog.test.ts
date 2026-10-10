@@ -6,10 +6,12 @@ import {
   type ModelEntry,
   type ProviderCatalogStatus,
 } from '@openharness/protocol'
+import { DEFAULT_CONTEXT_TOKEN_BUDGET } from '@openharness/brain'
 import { InMemoryCredentialStore, type CredentialStore } from '@openharness/session'
 import { createVault, envKeyProvider } from '@openharness/vault'
 
 import { ModelCatalog } from './catalog/catalog'
+import { createTokenBudgetResolver } from './catalog/context-budget'
 import { createBundledRegistry } from './catalog/registry'
 import type { ModelRegistry, RegistryModel } from './catalog/registry'
 import type { ProviderFetch, ProviderResponse } from './catalog/provider-fetch'
@@ -361,6 +363,9 @@ describe('GET /v1/models', () => {
       context_window: 1047576,
       max_output_tokens: 32768,
       cost: { input: 2, output: 8, cache_read: 0.5, cache_write: null },
+      // The budget the brain trims this model to (#246, epic #277 K10; #280): the registry's
+      // window less its own output ceiling, which is under the quarter the rule reserves.
+      context_budget: 1047576 - 32768,
       source: 'provider',
     })
     // A model neither side knows is still listed: never hide a usable chat model.
@@ -371,8 +376,48 @@ describe('GET /v1/models', () => {
       // A model the registry does not price keeps its tokens and reports no cost — `null`, and
       // never a guessed rate.
       cost: null,
+      // And its budget is the brain's own fallback, because the resolver that trims a request
+      // knows nothing about it either — the single source of truth a meter reads (#280).
+      context_budget: DEFAULT_CONTEXT_TOKEN_BUDGET,
       source: 'provider',
     })
+  })
+
+  it('reports the budget the brain trims with, for a known and an unknown model (#280)', async () => {
+    // The one assertion that makes `context_budget` worth exposing: it has to be the number the
+    // scheduler resolves, not a second opinion. `createTokenBudgetResolver` is the function
+    // `main.ts` hands the brain, over the same registry the catalogue joins.
+    const registry = fakeRegistry({
+      openai: [
+        { id: 'gpt-4.1', name: 'GPT-4.1', contextWindow: 100_000, maxOutput: 20_000, chat: true },
+      ],
+    })
+    const trimsTo = createTokenBudgetResolver(registry)
+    const fixture = catalogueApp({
+      registry,
+      responders: {
+        'api.openai.com': () =>
+          json({ object: 'list', data: [{ id: 'gpt-4.1' }, { id: 'custom-model' }] }),
+      },
+    })
+    await fixture.putKey('openai', KEY_A)
+
+    const response = await modelsOf(fixture)
+
+    for (const entry of response.data) {
+      // The brain's own answer: the resolver's budget, or its `undefined` turned into the
+      // fallback the brain uses (`DEFAULT_CONTEXT_TOKEN_BUDGET`) — which is what a chat on
+      // `custom-model` is really trimmed to.
+      expect(entry.context_budget, entry.id).toBe(trimsTo(entry.id) ?? DEFAULT_CONTEXT_TOKEN_BUDGET)
+    }
+    // The known model's is derived from its window; the unknown one's is the fallback, even
+    // though the provider listed it and a window rule would have nothing to compute from.
+    expect(response.data.find((entry) => entry.id === 'openai/gpt-4.1')?.context_budget).toBe(
+      80_000,
+    )
+    expect(response.data.find((entry) => entry.id === 'openai/custom-model')?.context_budget).toBe(
+      DEFAULT_CONTEXT_TOKEN_BUDGET,
+    )
   })
 
   it('falls back to the registry when the provider times out', async () => {

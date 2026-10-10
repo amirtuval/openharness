@@ -119,14 +119,14 @@ src/
 
 ### `@openharness/client/testing`
 
-| export                                                                      | what it is                                                                                 |
-| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| `createFakeClient(options?)`                                                | an in-memory `Client` with a scriptable brain and device flow                              |
-| `FakeClient`, `FakeClientOptions`, `FakeReplyOptions`, `FakeFailureOptions` | the fake's interface and the options its scripting takes                                   |
-| `FakeDeviceFlowOptions`                                                     | the script `scriptDeviceLogin` takes                                                       |
-| `FakeReply`, `FakeFailure`, `FakeScript`                                    | one scripted reply, one scripted failure, and the queue entry they compose                 |
-| `ModelListCall`                                                             | one `models.list` call the fake answered, and its `refresh` flag                           |
-| `FAKE_MODEL_USAGE`, `FAKE_SESSION_TOKEN`                                    | the token usage every fake model request reports; the token the fake's device flow returns |
+| export                                                                                        | what it is                                                                                                                                     |
+| --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `createFakeClient(options?)`                                                                  | an in-memory `Client` with a scriptable brain and device flow; it stamps `context_budget` on a catalog entry it is given that lacks one (#280) |
+| `FakeClient`, `FakeClientOptions`, `FakeModelEntry`, `FakeReplyOptions`, `FakeFailureOptions` | the fake's interface and the options its scripting takes                                                                                       |
+| `FakeDeviceFlowOptions`                                                                       | the script `scriptDeviceLogin` takes                                                                                                           |
+| `FakeReply`, `FakeFailure`, `FakeScript`                                                      | one scripted reply, one scripted failure, and the queue entry they compose                                                                     |
+| `ModelListCall`                                                                               | one `models.list` call the fake answered, and its `refresh` flag                                                                               |
+| `FAKE_MODEL_USAGE`, `FAKE_SESSION_TOKEN`                                                      | the token usage every fake model request reports; the token the fake's device flow returns                                                     |
 
 ## The client
 
@@ -609,9 +609,15 @@ must say the same thing. The state lives in the reducer (above) and the arithmet
   ("Compacting…"); `manualCompactionNotice` turns the outcome into the line a reader is owed
   (`null` for `summarized`, because the divider is the outcome), and both frontends draw those
   words so the terminal and the web say the same thing.
-- **The budget restates the server's rule** (#246): `contextWindow − min(maxOutput, 25% of
-contextWindow)`, and `DEFAULT_CONTEXT_TOKEN_BUDGET` (32,768) for a model the catalog cannot
-  describe. It is written twice because the rule lives in a package this one may not depend
+- **The budget comes from the server** (#246, #280): `modelContextBudget(entry)` answers the
+  entry's `context_budget` — the number the brain really trims to, which the server resolves
+  with its own resolver, so a meter cannot disagree with a request. For a model the registry
+  does not know (a custom endpoint, an Azure deployment) that is 32,768 while `context_window`
+  may describe something far larger, which is exactly why the client must not derive one. The
+  rule `contextWindow − min(maxOutput, 25% of contextWindow)`, and
+  `DEFAULT_CONTEXT_TOKEN_BUDGET` (32,768) for an entry with no window either, stay as the
+  fallback for a response that predates the field. The module header has the whole of it (`The
+budget comes from the server`). It is written twice because the rule lives in a package this one may not depend
   on; keep the two in step.
 - **What the meter measures** is the last real request's **real prompt size** — the three
   input-side counters summed, the brain's `promptTokensOf` — because the protocol's counters

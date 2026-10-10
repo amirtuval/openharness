@@ -23,7 +23,6 @@ import {
   ListModelsResponseSchema,
   credentialTypeInfo,
   type ListModelsResponse,
-  type ModelEntry,
   type ProviderCatalogStatus,
   type ProviderCredential,
   type PutProviderCredentialRequest,
@@ -33,6 +32,7 @@ import type { Vault } from '@openharness/vault'
 import {
   BEDROCK_FOUNDATION_MODELS_PATH,
   BEDROCK_INFERENCE_PROFILES_PATH,
+  DEFAULT_CONTEXT_TOKEN_BUDGET,
   bedrockControlPlaneUrl,
   isVertexModelId,
   openAICompatibleBaseUrl,
@@ -64,12 +64,18 @@ import {
   type ProviderAdapter,
   type ProviderModel,
 } from './adapters'
-import { CatalogCache, RefreshLimiter, type CachedProviderCatalog } from './cache'
 import {
   bedrockInferenceProfilePage,
   bedrockProfileDisplayName,
   type BedrockInferenceProfile,
 } from './bedrock-profiles'
+import {
+  CatalogCache,
+  RefreshLimiter,
+  type CachedProviderCatalog,
+  type CatalogEntry,
+} from './cache'
+import { createTokenBudgetResolver } from './context-budget'
 import { isChatModel } from './filter'
 import type { ModelRegistry, RegistryModel } from './registry'
 import {
@@ -128,6 +134,16 @@ export interface ModelCatalogOptions {
   readonly now?: () => Date
   /** Where a fallback is explained — provider and reason only, never a key. */
   readonly logger?: Logger
+  /**
+   * The per-model history budget the **brain** will trim a request to (epic #277, K10; #280).
+   *
+   * The default is `createTokenBudgetResolver(registry)` — the very function `main.ts` hands the
+   * scheduler, over the same registry — so every entry reports the number a chat on it is really
+   * trimmed to. The option exists for a caller that wants another resolver; an `undefined` answer
+   * means the brain's own `DEFAULT_CONTEXT_TOKEN_BUDGET`, which is what that resolver's
+   * `undefined` means there too.
+   */
+  readonly tokenBudgetFor?: ((modelId: string) => number | undefined) | undefined
 }
 
 /**
@@ -166,6 +182,8 @@ export class ModelCatalog {
 
   private readonly logger: Logger | undefined
 
+  private readonly tokenBudgetFor: (modelId: string) => number | undefined
+
   constructor(options: ModelCatalogOptions) {
     this.credentials = options.credentials
     this.vault = options.vault
@@ -179,6 +197,9 @@ export class ModelCatalog {
     this.timeoutMs = options.timeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS
     this.now = options.now ?? (() => new Date())
     this.logger = options.logger
+    // The brain's own resolver over the registry this catalogue joins (#246): one rule, one
+    // input, so an entry's `context_budget` is what the server would really trim to.
+    this.tokenBudgetFor = options.tokenBudgetFor ?? createTokenBudgetResolver(this.registry)
   }
 
   /**
@@ -206,7 +227,17 @@ export class ModelCatalog {
       })),
     )
 
-    const data = catalogs.flatMap(({ catalog }) => [...catalog.models]).sort(compareModelEntries)
+    const data = catalogs
+      .flatMap(({ catalog }) => [...catalog.models])
+      .sort(compareModelEntries)
+      // Every entry carries the budget the brain will trim it to (epic #277, K10; #280), resolved
+      // here with the very function the scheduler was handed — so a meter comparing a prompt size
+      // against it measures what the server really does, including the fallback for a model the
+      // registry does not know (a custom endpoint, an Azure deployment).
+      .map((entry) => ({
+        ...entry,
+        context_budget: this.tokenBudgetFor(entry.id) ?? DEFAULT_CONTEXT_TOKEN_BUDGET,
+      }))
     const statuses = catalogs
       .map(({ name, catalog }) => statusOf(name, catalog))
       .sort((a, b) => compareStrings(a.provider, b.provider))
@@ -400,7 +431,7 @@ export class ModelCatalog {
    * ({@link exactRegistryModel}), so an unknown custom model gets no window, no price and no
    * invented name.
    */
-  private joinOpenAICompatibleList(name: string, listed: readonly ProviderModel[]): ModelEntry[] {
+  private joinOpenAICompatibleList(name: string, listed: readonly ProviderModel[]): CatalogEntry[] {
     return dedupe(
       listed.flatMap((raw) => {
         const registry = this.exactRegistryModel(raw.id)
@@ -601,7 +632,7 @@ export class ModelCatalog {
     onDemand: readonly ProviderModel[],
     profiles: readonly BedrockInferenceProfile[],
     registryKey: string,
-  ): ModelEntry[] {
+  ): CatalogEntry[] {
     const known = this.registryIndex(registryKey)
     const entries = this.joinProviderList(name, onDemand, registryKey)
     for (const profile of profiles) {
@@ -837,7 +868,7 @@ export class ModelCatalog {
    * join a provider's own list goes through, and the same two rules: an id this build has no
    * client for is dropped, and so is one the chat filter refuses.
    */
-  private joinVertexList(name: string, listed: readonly ProviderModel[]): ModelEntry[] {
+  private joinVertexList(name: string, listed: readonly ProviderModel[]): CatalogEntry[] {
     const known = this.vertexRegistryIndex()
     return dedupe(
       listed.flatMap((raw) => {
@@ -992,7 +1023,7 @@ export class ModelCatalog {
     provider: string,
     listed: readonly ProviderModel[],
     registryKey: string = provider,
-  ): ModelEntry[] {
+  ): CatalogEntry[] {
     const known = this.registryIndex(registryKey)
     return dedupe(
       listed.flatMap((raw) => {
@@ -1057,9 +1088,9 @@ function entryOf(
   provider: string,
   raw: ProviderModel,
   registry: RegistryModel | undefined,
-  source: ModelEntry['source'],
+  source: CatalogEntry['source'],
   fallbackName: string = `${provider}/${raw.id}`,
-): ModelEntry {
+): CatalogEntry {
   return {
     id: `${provider}/${raw.id}`,
     provider,
@@ -1086,7 +1117,7 @@ function firstNonEmpty(...values: readonly (string | undefined)[]): string {
 }
 
 /** One entry per id, first one wins: a provider that repeats an id gets it listed once. */
-function dedupe(entries: readonly ModelEntry[]): ModelEntry[] {
+function dedupe(entries: readonly CatalogEntry[]): CatalogEntry[] {
   const seen = new Set<string>()
   return entries.filter((entry) => {
     if (seen.has(entry.id)) {
@@ -1098,7 +1129,7 @@ function dedupe(entries: readonly ModelEntry[]): ModelEntry[] {
 }
 
 /** The protocol's order: by provider, then by name (case-insensitively), then by id. */
-function compareModelEntries(a: ModelEntry, b: ModelEntry): number {
+function compareModelEntries(a: CatalogEntry, b: CatalogEntry): number {
   const byProvider = compareStrings(a.provider, b.provider)
   if (byProvider !== 0) {
     return byProvider

@@ -56,6 +56,37 @@ describe('contextTokenBudget (#246, #280)', () => {
     expect(modelContextBudget({ context_window: 128_000, max_output_tokens: 4_096 })).toBe(123_904)
     expect(modelContextBudget({ context_window: 128_000, max_output_tokens: null })).toBe(96_000)
   })
+
+  it('takes the budget the server reports over one derived from the window (#280)', () => {
+    // The server's `context_budget` is the number the brain really trims to. It differs from
+    // the window rule exactly where it must: a model the registry does not know — a custom
+    // endpoint, an Azure deployment under a named credential — is trimmed to the fallback even
+    // though its window may describe something far larger, so a meter reading the window would
+    // be measuring against a budget no request has.
+    expect(
+      modelContextBudget({
+        context_window: 400_000,
+        max_output_tokens: null,
+        context_budget: DEFAULT_CONTEXT_TOKEN_BUDGET,
+      }),
+    ).toBe(DEFAULT_CONTEXT_TOKEN_BUDGET)
+    // When the two agree, nothing changes.
+    expect(
+      modelContextBudget({
+        context_window: 200_000,
+        max_output_tokens: 8_000,
+        context_budget: 192_000,
+      }),
+    ).toBe(192_000)
+  })
+
+  it('ignores a reported budget that could not be one', () => {
+    // A response from a server that predates the field, or a nonsense zero: the window rule is
+    // the fallback rather than a budget of nothing.
+    expect(
+      modelContextBudget({ context_window: 128_000, max_output_tokens: 4_096, context_budget: 0 }),
+    ).toBe(123_904)
+  })
 })
 
 describe('compactionThreshold (#277, C3; #280)', () => {
@@ -275,12 +306,29 @@ describe('summaryModelFallback (epic #277, K5; #282)', () => {
   })
 })
 
-/** A catalog entry carrying just the two limits the math reads. */
+/**
+ * A catalog entry as the server would send it: the limits, and the `context_budget` they
+ * resolve to (#280).
+ *
+ * The budget is what the meter reads, so a test of the pass math has to carry one — the window
+ * rule is only the fallback for a response that predates the field. A model with no window is
+ * what the server has nothing to derive from, so it reports the brain's own fallback.
+ */
 function model(
   contextWindow: number | null,
   maxOutput: number | null,
 ): ReturnType<typeof makeModelEntry> {
-  return makeModelEntry({ context_window: contextWindow, max_output_tokens: maxOutput })
+  return makeModelEntry({
+    context_window: contextWindow,
+    max_output_tokens: maxOutput,
+    context_budget:
+      contextWindow === null || contextWindow <= 0
+        ? DEFAULT_CONTEXT_TOKEN_BUDGET
+        : contextTokenBudget({
+            contextWindow,
+            ...(maxOutput === null ? {} : { maxOutput }),
+          }),
+  })
 }
 
 describe('the manual compaction’s words (#277, K8; #283)', () => {

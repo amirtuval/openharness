@@ -1,5 +1,5 @@
-import type { FakeClient } from '@openharness/client/testing'
-import { MODE_DEFAULT_MODEL, type CreateModeRequest, type ModelEntry } from '@openharness/protocol'
+import type { FakeClient, FakeModelEntry } from '@openharness/client/testing'
+import { MODE_DEFAULT_MODEL, type CreateModeRequest } from '@openharness/protocol'
 import { makeProviderCredential } from '@openharness/protocol/fixtures'
 
 /** Set this (to `1`, `true` or `yes`) and `oh` runs against the in-memory fake client. */
@@ -56,8 +56,11 @@ function isTruthy(value: string | undefined): boolean {
 /**
  * The catalog the dev fake serves: three providers, so the model picker's grouping and
  * context windows are visible without a server or a key.
+ *
+ * The `context_budget` each entry is served with is the fake's (#280): the server's rule over
+ * these limits, stamped by `createFakeClient` the way a real server stamps it.
  */
-export const DEV_MODELS: readonly ModelEntry[] = [
+export const DEV_MODELS: readonly FakeModelEntry[] = [
   {
     id: 'anthropic/claude-sonnet-5',
     provider: 'anthropic',

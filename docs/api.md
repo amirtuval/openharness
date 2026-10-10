@@ -826,6 +826,7 @@ is the usual one; the optional `refresh=true` query parameter bypasses the serve
       "context_window": 1048576,
       "max_output_tokens": 65536,
       "cost": { "input": 0.3, "output": 2.5, "cache_read": 0.075, "cache_write": null },
+      "context_budget": 983040,
       "source": "provider"
     },
     {
@@ -835,6 +836,7 @@ is the usual one; the optional `refresh=true` query parameter bypasses the serve
       "context_window": null,
       "max_output_tokens": null,
       "cost": null,
+      "context_budget": 32768,
       "source": "provider"
     },
     {
@@ -843,6 +845,7 @@ is the usual one; the optional `refresh=true` query parameter bypasses the serve
       "name": "Claude Sonnet 5",
       "context_window": null,
       "max_output_tokens": null,
+      "context_budget": 32768,
       "source": "registry"
     }
   ],
@@ -862,6 +865,16 @@ is the usual one; the optional `refresh=true` query parameter bypasses the serve
   neither a key nor any part of one appears in a response, an error or a log. `data` is sorted
   by provider, then name; the form stays free text regardless — the router accepts
   `provider/model` ids the catalog does not know yet.
+- **`context_budget` is the budget the brain will trim a request to** (epic #277, K10; #246).
+  Every entry carries it, resolved by the server with the very resolver the scheduler is handed
+  — the model's `context_window` less room for the reply (`min(max_output_tokens, 25% of the
+window)`), or **32,768** when the resolver knows the model not at all. That last case is the
+  point of the field: a custom OpenAI-compatible endpoint or an Azure deployment under a named
+  credential can carry a `context_window` the registry supplied while the resolver — keyed by
+  the model id's provider half, which is the credential's name — derives nothing, so a meter
+  computing a budget from the window would measure against a number no request is trimmed to.
+  Clients should read `context_budget` and fall back to the window rule only for a server that
+  predates the field.
 - **A named credential contributes its own models.** Azure OpenAI offers no endpoint that
   lists deployments, so an `azure_openai` credential contributes one model per name the user
   typed — `azure/gpt-4o`, `azure-eu/gpt-4o-mini` — with `source: "provider"` (the credential's

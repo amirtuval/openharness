@@ -292,6 +292,9 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
       // through safeFetch — and honours the self-host setting (#249, M4). The other providers
       // use the egress-proxy fetch above, whose URLs are constants.
       allowPrivateProviderUrls: config.allowPrivateProviderUrls,
+      // The budget each entry reports (`context_budget`, epic #277 K10; #280) is the one the
+      // brain trims to: the catalogue builds the same `createTokenBudgetResolver(registry)` the
+      // scheduler was handed above, from the same registry.
       logger,
     })
 

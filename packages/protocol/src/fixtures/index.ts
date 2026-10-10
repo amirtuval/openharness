@@ -264,6 +264,10 @@ export function makeModelEntry(overrides: Partial<ModelEntry> = {}): ModelEntry 
     // The real rates for this id, so a test that prices bytes with them asserts something
     // true of the model the entry names (#247). Pass `cost: null` for an unpriced model.
     cost: { input: 2, output: 10, cache_read: 0.2, cache_write: 2.5 },
+    // The budget the server reports for these limits: 200k less the 64k output ceiling (a
+    // quarter of the window, 50k, is the cap — so the ceiling only ever takes less room). A
+    // test that overrides the limits should override this too, or not care about it.
+    context_budget: 150_000,
     source: 'provider',
   }
   return { ...entry, ...overrides }

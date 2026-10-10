@@ -1497,6 +1497,7 @@ describe("the fake's authentication", () => {
           context_window: 200_000,
           max_output_tokens: 64_000,
           cost: { input: 2, output: 10, cache_read: 0.2, cache_write: 2.5 },
+          context_budget: 150_000,
           source: 'provider',
         },
         {
@@ -1506,6 +1507,7 @@ describe("the fake's authentication", () => {
           context_window: 128_000,
           max_output_tokens: 16_000,
           cost: null,
+          context_budget: 112_000,
           source: 'provider',
         },
       ],
