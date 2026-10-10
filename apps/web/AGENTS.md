@@ -675,8 +675,11 @@ said), else the model the session was created with. Picking another one **holds 
 next message** — that message carries `{ model }` and the session's model moves with it — and
 after a successful send the selector reads the log again, so what is shown is the log's answer,
 not a local leftover. A switch is visible in the transcript: `TranscriptMessage.modelChangedTo`
-draws a "Switched to <display name>" marker above that message. (The _first_ model a message
-carries only sets the state, silently — there is nothing it changed from.)
+draws a "Switched to <display name>" marker above that message. The transcript is seeded with
+the session's own model when the chat opens (`useSession` resets it with `opened.model.id`
+before replaying the log), so a chat **started from a model** marks its first switch too (#268)
+— there is no message that set the state first; and the replay takes each request's span model,
+so a resumed chat draws the same markers a live one did.
 
 ### Default model in Settings (#113, U1/U4)
 

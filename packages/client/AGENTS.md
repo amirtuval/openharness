@@ -99,7 +99,7 @@ src/
 | `SendMessageOptions`                                                                                                  | `sendMessage`'s options: cancellation, the `model` to switch to, the `reasoningEffort` (#252), and `rewindTo` (#238)                                                                                         |
 | `FetchLike`, `DebugHook`, `RawResponse`                                                                               | the `fetch` seam, the hook for what the client skips, the raw answer                                                                                                                                         |
 | `ApiError`, `AuthenticationError`, `ResponseValidationError`, `errorTypeForStatus()`                                  | the three errors and the status → `error.type` map                                                                                                                                                           |
-| `createTranscript()`, `reduceTranscript()`, `reduceTranscriptAll()`, `initialTranscriptState()`                       | the transcript store and the pure reducer                                                                                                                                                                    |
+| `createTranscript()`, `reduceTranscript()`, `reduceTranscriptAll()`, `initialTranscriptState()`, `TranscriptSeed`     | the transcript store and the pure reducer, and the model a frontend seeds it with (#268)                                                                                                                     |
 | `selectMessages()`, `selectIsRunning()`, `selectLastMessage()`, `selectStreamingMessage()`                            | selectors                                                                                                                                                                                                    |
 | `Transcript`, `TranscriptState`, `TranscriptMessage`, `TranscriptError`                                               | the transcript's types                                                                                                                                                                                       |
 | `MessagePart`, `TextPart`, `TranscriptMessageMeta`, `TranscriptUsage`, `PendingModelRequest`                          | a message's typed parts, a reply's metadata, and its bookkeeping (#201)                                                                                                                                      |
@@ -447,7 +447,7 @@ interface TranscriptState {
   lastError: TranscriptError | null // { type, message, retryStatus }
   lastSeq: number // the `seq` to resume from
   deleted: boolean // a `session.deleted` arrived: the session is gone (#111)
-  model: string | null // the model the log last said the session runs (#111)
+  model: string | null // the model the log last said the session runs (#111, seeded per #268)
   pendingRequests: PendingModelRequest[] // bookkeeping for `meta`; empty between turns (#201)
 }
 ```
@@ -533,9 +533,13 @@ true`, keyed by the id of the event it previews; `event_delta`s extend it (per c
   A rewind is applied wherever it arrives, and applying it twice changes nothing.
 - **A `model` on a `user.message` may switch the session** (epic #116, U1). `state.model`
   becomes the new id, and the message carries `modelChangedTo` when that id differs from the
-  one already in effect — the change a UI draws its marker for. The first model the log shows
-  is not a change (`state.model` starts at `null`), so it sets the state silently, and a
-  message naming the model already in effect changes nothing.
+  one already in effect — the change a UI draws its marker for. What is "already in effect" is
+  seeded where the transcript is built: `initialTranscriptState({ model })` (or
+  `createTranscript` / a store's `reset`) takes the session's own model, so a chat started from
+  a model marks its **first** switch rather than drawing it silently (#268) — and a message
+  naming the model already in effect changes nothing. A `span.model_request_start` names the
+  model its request ran and is taken as `state.model` too, so a resumed chat (whose session
+  resource carries only the model it is on now) replays to the same markers a live view drew.
 
 ## Provider metadata (#209, #245)
 
@@ -828,7 +832,7 @@ stack or debug line), the device flow's polling with fake timers (`src/auth.test
 SSE parser's edge cases, reconnect/resume (including a resume mid-reply, from a stored chunk,
 and the stream ending on `session.deleted` without a reconnect), the server's `event: error`
 goodbye being skipped with the loop ending on the 401 its reconnect meets, every transcript
-rule (the model-switch marker and the deleted flag
+rule (the model-switch marker — the first switch of a seeded transcript's included, #268 — and the deleted flag
 included), typed parts (one text part per content block, a streamed reply's parts equal to the
 stored one's) and per-reply metadata (the model, the duration and the tokens off the spans; a
 retried reply's summed tokens; `undefined` where the log says nothing), one scripted D9

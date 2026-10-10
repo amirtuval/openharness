@@ -50,9 +50,9 @@ export interface SessionView {
   /** Whether the session was deleted (#111, epic #116, U5): its stream ended, its log is gone. */
   readonly deleted: boolean
   /**
-   * The model the log last said the session runs (epic #116, U1), or `null` until a message
-   * carries one — a session created with a model shows it through {@link SessionView.session}
-   * instead.
+   * The model the log last said the session runs (epic #116, U1): the id a `user.message`
+   * switched it to, or the one the newest request ran, seeded from the session's own model
+   * (#268). `null` only for a transcript nothing has told anything.
    */
   readonly model: string | null
   /**
@@ -120,6 +120,12 @@ export function useSession(client: Client, sessionId: string): SessionView {
           return
         }
         setLoaded(opened)
+        // Seed the transcript with the model the session runs before replaying its log (#268):
+        // the first message a reader switches the model on then has something to differ from,
+        // so the marker the composer draws matches the one a live view drew. The replay
+        // corrects the baseline from each request's span, so a resumed chat lands on the same
+        // markers however much history it loaded.
+        transcript.reset({ model: opened.model.id })
 
         for await (const event of client.sessions.events.iterate(
           sessionId,
