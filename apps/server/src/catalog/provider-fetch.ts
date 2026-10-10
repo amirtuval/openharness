@@ -29,11 +29,22 @@ export interface ProviderResponse {
   text(): Promise<string>
 }
 
-/** One request the catalogue makes. `GET` only, headers, and the 5-second deadline. */
+/**
+ * One request the catalogue makes: headers, the 5-second deadline, and — for the one call that
+ * is not a read — a method and a body.
+ *
+ * Everything a provider's model list takes is a `GET`, and that default is what a caller gets
+ * when it says nothing; the exception is Google's Model Garden EULA check (#273), which is a
+ * `POST` with a small JSON body, and the one place a request method has to be named.
+ */
 export interface ProviderRequest {
   readonly headers: Record<string, string>
   /** The request deadline; see {@link DEFAULT_PROVIDER_TIMEOUT_MS}. */
   readonly signal: AbortSignal
+  /** The HTTP method; `GET`, the only one most calls use, when this is absent. */
+  readonly method?: string
+  /** The request body, for a `POST`; absent for every `GET`. */
+  readonly body?: string
 }
 
 /** How the catalogue reaches a provider. Injectable, so tests never touch a socket. */
@@ -46,15 +57,16 @@ export const DEFAULT_PROVIDER_TIMEOUT_MS = 5000
 let proxyDispatcher: EnvHttpProxyAgent | null = null
 
 /**
- * The production {@link ProviderFetch}: `GET` through undici, with the egress proxy the
+ * The production {@link ProviderFetch}: a request through undici, with the egress proxy the
  * environment names read at the first call.
  */
 export function createProviderFetch(): ProviderFetch {
   return async (url, init) => {
     proxyDispatcher ??= new EnvHttpProxyAgent()
     const response = await undiciFetch(url, {
-      method: 'GET',
+      method: init.method ?? 'GET',
       headers: init.headers,
+      ...(init.body === undefined ? {} : { body: init.body }),
       signal: init.signal,
       dispatcher: proxyDispatcher,
     })

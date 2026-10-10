@@ -1,12 +1,13 @@
 /**
- * The two Google-side facts a Vertex credential's save-time check needs (epic #245, A3d): an
- * OAuth token for its service account, and the URL that proves the account can reach the
- * project and location it was saved with.
+ * The Google-side facts a Vertex credential needs (epic #245, A3d; #273): an OAuth token for
+ * its service account, the URL that proves the account can reach the project and location it
+ * was saved with, and — since #273 — the Model Garden calls the **catalogue** lists a project's
+ * models with.
  *
- * Both live here rather than inside `provider-validation.ts` because both are Google's rules
- * and neither is a policy of this server's: the check is one request built out of them, and a
- * second caller with the same need — a catalogue that listed a project's publisher models —
- * would otherwise restate them.
+ * They live here rather than inside `provider-validation.ts` or `catalog/` because they are
+ * Google's rules and not a policy of this server's: the save-time check is one request built
+ * out of them, the catalogue's listing is two more, and both callers would otherwise restate
+ * the same hosts and paths.
  *
  * **The token is signed with the stored key and nothing else.** `GoogleAuth` is constructed
  * with the parsed document as its `credentials`, which is the one path through
@@ -73,7 +74,7 @@ export function createVertexTokenProvider(): VertexTokenProvider {
 export const vertexTokenProvider: VertexTokenProvider = createVertexTokenProvider()
 
 /**
- * Where a project's and location's **publisher models** are listed.
+ * Where one of a location's **publisher models** is listed.
  *
  * This is the call the save-time check makes: it is the cheapest authenticated Vertex read
  * there is, it proves the service account can reach *this* project in *this* location, and it
@@ -89,14 +90,204 @@ export function vertexPublisherModelsUrl(input: {
   readonly project: string
   readonly location: string
 }): string {
-  const host =
-    input.location === 'global'
-      ? 'aiplatform.googleapis.com'
-      : `${input.location}-aiplatform.googleapis.com`
   const path = `v1/projects/${encodeURIComponent(input.project)}/locations/${encodeURIComponent(
     input.location,
   )}/publishers/google/models`
   // One model is enough: the answer's *existence* is the proof, and asking for a page keeps
   // the response to a few hundred bytes.
-  return `https://${host}/${path}?pageSize=1`
+  return `https://${vertexHost(input.location)}/${path}?pageSize=1`
+}
+
+/** The host a location's Vertex requests go to: `global` is the apex, a region is prefixed. */
+function vertexHost(location: string): string {
+  return location === 'global'
+    ? 'aiplatform.googleapis.com'
+    : `${location}-aiplatform.googleapis.com`
+}
+
+// ------------------------------------------------------- Model Garden (#273)
+
+/**
+ * The publishers whose models a Vertex project can call, and the ones this build has clients
+ * for: Google's own models and Anthropic's, served from the same credential.
+ *
+ * The Model Garden catalogue is organized by **publisher**, which is what the listing endpoint
+ * is scoped by — `publishers/google/models` and `publishers/anthropic/models`. A third-party
+ * model Google resells (a MaaS model) lives under its own publisher and is deliberately left
+ * out: this build has no client for one (#251's `isVertexModelId`).
+ */
+export const VERTEX_PUBLISHERS = ['google', 'anthropic'] as const
+
+/** One of the publishers {@link VERTEX_PUBLISHERS} names. */
+export type VertexPublisher = (typeof VERTEX_PUBLISHERS)[number]
+
+/** How many models one page of a Model Garden list asks for. */
+const PUBLISHER_MODEL_PAGE_SIZE = 1000
+
+/**
+ * One page of a publisher's Model Garden catalogue, for a location.
+ *
+ * This is `ModelGardenService.ListPublisherModels` — `GET
+ * https://{host}/v1beta1/publishers/{publisher}/models` — the one endpoint that lists a
+ * publisher's models, and the one the catalogue reads to see what the project can call. It is
+ * **not** project- or location-scoped in its path (the parent is `publishers/{publisher}`
+ * alone); the location only picks the host, exactly as it does for every other Vertex request,
+ * and the project's own entitlements are a separate read per model (see
+ * {@link vertexModelGardenEulaCheckUrl}).
+ *
+ * `v1beta1` is not a preference: the `v1` surface has no `list` method at all, and a
+ * `v1` list path answers Google's own 404.
+ */
+export function vertexModelGardenListUrl(input: {
+  readonly location: string
+  readonly publisher: VertexPublisher
+  readonly pageToken?: string
+}): string {
+  const path = `v1beta1/publishers/${input.publisher}/models`
+  const pageToken = input.pageToken
+  const query =
+    pageToken === undefined
+      ? `pageSize=${PUBLISHER_MODEL_PAGE_SIZE}`
+      : `pageSize=${PUBLISHER_MODEL_PAGE_SIZE}&pageToken=${encodeURIComponent(pageToken)}`
+  return `https://${vertexHost(input.location)}/${path}?${query}`
+}
+
+/**
+ * Where one publisher model's **EULA acceptance** is checked for a project.
+ *
+ * `ModelGardenService.CheckPublisherModelEulaAcceptance` — `POST
+ * https://aiplatform.googleapis.com/v1beta1/projects/{project}/modelGardenEula:check` — is the
+ * project-scoped answer to "may this project call this partner model", and the API's own name
+ * for the Model Garden "Enable" a reader clicks on a model card. A partner model (Anthropic's)
+ * must be enabled per project, and the listing endpoint above cannot say whether it was; this
+ * is the read that can, one model at a time.
+ *
+ * The host is the **global** one, always: the parent is `projects/{project}`, with no location
+ * in the path, which is why nothing about this call depends on where the credential was saved.
+ */
+export function vertexModelGardenEulaCheckUrl(input: { readonly project: string }): string {
+  return `https://aiplatform.googleapis.com/v1beta1/projects/${encodeURIComponent(
+    input.project,
+  )}/modelGardenEula:check`
+}
+
+/** The `publishers/{publisher}/models/{model}` resource name Google keys a publisher model by. */
+export function vertexPublisherModelResource(input: {
+  readonly publisher: VertexPublisher
+  readonly model: string
+}): string {
+  return `publishers/${input.publisher}/models/${input.model}`
+}
+
+/** One publisher model a Model Garden list named, as far as the catalogue reads it. */
+export interface PublisherModel {
+  /** The raw model id, without the `publishers/{publisher}/models/` prefix. */
+  readonly id: string
+  /** The resource name Google spelled, e.g. `publishers/anthropic/models/claude-sonnet-4-5`. */
+  readonly resource: string
+}
+
+/** One page of a publisher's model list. */
+export interface PublisherModelPage {
+  /** The models this page carried, in Google's order. */
+  readonly models: readonly PublisherModel[]
+  /** The cursor for the next page, or `null` when this was the last one. */
+  readonly next: string | null
+}
+
+/**
+ * One page of `ListPublisherModels`, as the catalogue's input.
+ *
+ * The payload is `{ publisherModels: [{ name, versionId, openSourceCategory, … }],
+ * nextPageToken }` — see the REST reference and the `PublisherModel` message in
+ * `@google-cloud/aiplatform`'s protos. Only two things are read here, and deliberately: the
+ * resource `name` (which is the model id, and the only field a request is addressed with) and
+ * the page token. There is **no field on a `PublisherModel` that says whether the calling
+ * project may use it** — that is what the EULA check is for — and none that says whether the
+ * model is a chat model, which is the catalogue's own filter to apply.
+ *
+ * An entry whose `name` is not a usable string is skipped rather than failing the page: a
+ * resource with no id is not a model a caller could pick, and one such entry must not cost the
+ * whole listing.
+ *
+ * @throws Error when the body is not a Model Garden list at all; the catalogue turns that into
+ *   the credential's registry fallback, so an unexpected shape is a visible `fallback`.
+ */
+export function parsePublisherModelPage(body: unknown): PublisherModelPage {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    throw new Error('the publisher model list was not a JSON object')
+  }
+  const page = body as Record<string, unknown>
+  const entries = page.publisherModels
+  if (!Array.isArray(entries)) {
+    throw new Error('the publisher model list carried no `publisherModels` array')
+  }
+  const models: PublisherModel[] = []
+  for (const entry of entries) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      continue
+    }
+    const name = (entry as Record<string, unknown>).name
+    if (typeof name !== 'string') {
+      continue
+    }
+    const parsed = publisherModelOfResource(name)
+    if (parsed !== null) {
+      models.push(parsed)
+    }
+  }
+  const next = page.nextPageToken
+  return { models, next: typeof next === 'string' && next.length > 0 ? next : null }
+}
+
+/** One `publishers/{publisher}/models/{model}` resource name as a model, or `null`. */
+function publisherModelOfResource(resource: string): PublisherModel | null {
+  const parsed = /^publishers\/([^/]+)\/models\/(.+)$/u.exec(resource)
+  if (parsed === null) {
+    return null
+  }
+  const [, publisher, model] = parsed
+  if (publisher === undefined || model === undefined || model.length === 0) {
+    return null
+  }
+  return { id: model, resource }
+}
+
+/**
+ * Whether `CheckPublisherModelEulaAcceptance` says the project has accepted a model's terms.
+ *
+ * The payload is `{ projectNumber, publisherModel, publisherModelEulaAcked }`; only the
+ * boolean is read, and only an explicit `true` counts — an absent field means the API did not
+ * say the terms were accepted, which is the state the catalogue must treat as "not enabled".
+ *
+ * @throws Error when the body is not a JSON object, so an unreadable answer is the credential's
+ *   visible fallback rather than a silently empty (or silently full) model list.
+ */
+export function parsePublisherModelEulaAcceptance(body: unknown): boolean {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    throw new Error('the Model Garden EULA answer was not a JSON object')
+  }
+  return (body as Record<string, unknown>).publisherModelEulaAcked === true
+}
+
+/**
+ * The one secret a Vertex credential carries — the key document's `private_key` — or `null`
+ * when the stored text is not a document that has one.
+ *
+ * It is what a message about a failed Vertex call is scrubbed of (C3's rule for every
+ * credential): a document that never parses has no string this could name, and a caller with
+ * nothing to redact is left with `redactSecret`'s own no-op for `undefined`.
+ */
+export function vertexCredentialSecret(serviceAccount: string): string | null {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(serviceAccount)
+  } catch {
+    return null
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return null
+  }
+  const privateKey = (parsed as Record<string, unknown>).private_key
+  return typeof privateKey === 'string' && privateKey.length > 0 ? privateKey : null
 }

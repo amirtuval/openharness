@@ -28,7 +28,7 @@ openssl req -x509 -newkey rsa:2048 -keyout ca.key -out ca.pem -days 36500 -nodes
   -subj "/CN=openharness-e2e-test-ca"
 cat > leaf.ext <<'EOF'
 [v3_req]
-subjectAltName = DNS:api.anthropic.com,DNS:api.openai.com,DNS:generativelanguage.googleapis.com,DNS:api.groq.com,DNS:openrouter.ai,DNS:api.deepseek.com,DNS:api.mistral.ai,DNS:api.together.xyz,DNS:api.x.ai,DNS:api.cerebras.ai,DNS:api.fireworks.ai
+subjectAltName = DNS:api.anthropic.com,DNS:api.openai.com,DNS:generativelanguage.googleapis.com,DNS:api.groq.com,DNS:openrouter.ai,DNS:api.deepseek.com,DNS:api.mistral.ai,DNS:api.together.xyz,DNS:api.x.ai,DNS:api.cerebras.ai,DNS:api.fireworks.ai,DNS:oauth2.googleapis.com,DNS:aiplatform.googleapis.com,DNS:europe-west4-aiplatform.googleapis.com,DNS:us-central1-aiplatform.googleapis.com
 basicConstraints = CA:FALSE
 keyUsage = digitalSignature, keyEncipherment
 extendedKeyUsage = serverAuth

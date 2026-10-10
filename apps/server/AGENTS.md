@@ -878,13 +878,41 @@ second Azure OpenAI credential.
   registry's Bedrock models, acknowledged to their model ids. Because a Bedrock credential's
   registry key (`amazon-bedrock`) is not its name, `joinProviderList`/`registryFallback` take
   the key as an argument rather than assuming the provider — the one place the two differ.
-- **The catalogue answers a Vertex credential from the registry** (`catalog.ts`'s
-  `vertexCatalog`): models.dev's `google-vertex` entry carries every publisher model Vertex
-  serves, Anthropic's included, so the entries are `<name>/<model>` with the registry's prices
-  and context windows and the credential's status is `ok`. Two rules narrow it, each in its own
-  place: `@openharness/brain`'s `isVertexModelId` keeps the ids this build has a client for
-  (Gemini's and Anthropic's; the MaaS models Google resells have none), and the catalogue's own
-  chat filter drops the non-chat families — Gemini's image, speech and embedding models.
+- **A Vertex credential's models are listed live from Model Garden (#273)** (`catalog.ts`'s
+  `vertexCatalog`). Model Garden organizes its catalogue by **publisher**, so the listing is
+  `GET https://{location}-aiplatform.googleapis.com/v1beta1/publishers/{publisher}/models` for
+  `google` and for `anthropic` — the one endpoint that lists a publisher's models (there is no
+  `v1` list, and no project- or location-scoped one; the location only picks the host). Both
+  are read with a token minted from the credential's own service-account key (`vertexToken`,
+  defaulting to `vertex.ts`'s `vertexTokenProvider` — never ADC), paginated on
+  `nextPageToken`, inside the catalogue's own 5-second deadline.
+  **Claude on Vertex must be enabled per project in Model Garden**, and the listing cannot say
+  whether it was: so every chat-capable Anthropic candidate is checked against Google's
+  `POST https://aiplatform.googleapis.com/v1beta1/projects/{project}/modelGardenEula:check`
+  (body `{ publisherModel }`), and only the models whose `publisherModelEulaAcked` is `true`
+  are listed — an unenabled Claude model is not offered rather than failing on the first
+  message. What comes back is joined with models.dev's `google-vertex` entry the way every
+  provider's list is, so an entry's **identity** is Google's (a model newer than the snapshot
+  is still listed, with `null` limits and no price) and its name, window and price are the
+  snapshot's where it has them. Two rules narrow the entries, each in its own place:
+  `@openharness/brain`'s `isVertexModelId` keeps the ids this build has a client for (Gemini's
+  and Anthropic's; the MaaS models Google resells have none), and the catalogue's own chat
+  filter drops the non-chat families — Gemini's image, speech and embedding models. The status
+  is `ok` with the time of the read.
+- **A listing that fails is the same visible `fallback` every other provider gets** (#273):
+  the snapshot's `google-vertex` models through the same two filters, `status: "fallback"`,
+  `fetched_at: null`, and a `message` carrying Google's own status and a bounded snippet of
+  what it said — or the plain reason, `invalid_grant: …` for a key Google will not sign with —
+  scrubbed of the credential's private key (`vertexCredentialSecret`). A credential row that
+  cannot be read or opened is the same fallback with no models, as for every other type.
+- **The first-message failure is named, not raw** (`@openharness/brain`'s
+  `vertexModelGardenMessage`, #273). The enabled-only listing is the fix; this is the residual
+  path — an id a chat already runs, a model a client cached, one disabled after the catalogue's
+  hour was taken. A `publishers/anthropic/models/…` resource in Google's `404 … was not found or
+  your project does not have access to it` (or a Model Garden/terms `403`) becomes a
+  `session.error` reading *"Claude models must be enabled for this Google Cloud project in
+  Vertex AI Model Garden (&lt;model&gt;) …"*. Every other provider's error text, and every other
+  publisher's, is left exactly as the provider wrote it.
 - **A model id resolves by name, then by type**: the brain's `providerModelFactory` takes the
   first half as a credential name, and builds an Azure, a Bedrock or a Vertex model when the
   credential says so.
@@ -1258,6 +1286,7 @@ before the instance stops serving it (#151).
 | `createProviderCredentialValidator`, `validateProviderCredential`, `VALIDATABLE_PROVIDERS`                                       | the one cheap call a saved credential is checked with — a provider list for `api_key`, a guarded Azure request for `azure_openai`, a guarded `GET {base_url}/models` for `openai_compatible`, a signed `ListFoundationModels` for `bedrock`, an authenticated publisher-models read for `vertex` (#245 A3a/A3b/A3c/A3d) |
 | `ProviderValidatorFetch`                                                                                                         | the `safeFetch` shape the URL-typed checks (Azure, custom) take, injectable for a test                                                                                                                                                                                                                                  |
 | `createVertexTokenProvider()`, `vertexTokenProvider`, `vertexPublisherModelsUrl()`, `VertexTokenProvider`                        | the Vertex credential's two Google-side facts: the OAuth token signed from the stored service account, and the publisher-models URL the check reads (#245 A3d)                                                                                                                                                          |
+| `VERTEX_PUBLISHERS`, `VertexPublisher`, `vertexModelGardenListUrl()`, `vertexModelGardenEulaCheckUrl()`, `vertexPublisherModelResource()`, `parsePublisherModelPage()`, `parsePublisherModelEulaAcceptance()`, `vertexCredentialSecret()`, `PublisherModel`, `PublisherModelPage` | the Model Garden calls the catalogue lists a project's models with: the per-publisher list URL, the project-scoped EULA-acceptance check, their payload readers, and the one secret a Vertex message is scrubbed of (#273) |
 | `parseOpenAICompatibleModelList`                                                                                                 | the OpenAI-compatible `/models` parser, shared by the fixed adapters and a custom credential's catalogue (#249)                                                                                                                                                                                                         |
 | `ModelCatalog`, `ModelCatalogOptions`, `CatalogRefreshLimitedError`                                                              | the model catalogue: provider lists, registry join, cache, fallback (#90)                                                                                                                                                                                                                                               |
 | `createBundledRegistry()`, `emptyRegistry`, `SNAPSHOT_DATE`, `ModelRegistry`, `RegistryModel`                                    | the registry join's seam, over the bundled models.dev snapshot                                                                                                                                                                                                                                                          |
@@ -1528,8 +1557,19 @@ parallel with each other.
   gives a document that is not a service-account key or a location Google does not serve, the
   422 Google's refusal becomes, "never in a response or a log line", the save-time check's own
   unit tests (the URL and bearer the credential's project and location produce, `global`'s apex
-  host, Google's reason on a 403 and on a key that cannot be signed), and the catalogue's
-  registry answer with its two filters.
+  host, Google's reason on a 403 and on a key that cannot be signed), and — since #273 — the
+  live listing over a scripted `ProviderFetch` and an injected token provider: the per-location
+  Model Garden URL builders (`global`'s apex host, the EULA check's global host and path), the
+  payload readers (a page's `name`/`nextPageToken`, an entry with no usable resource skipped
+  rather than failing the page, only an explicit `publisherModelEulaAcked: true` counting as
+  enabled, a body that is neither refusing), pagination inside one listing, the models.dev join
+  (a MaaS id and Gemini's image family both dropped; prices and windows from the snapshot), the
+  enabled-only Anthropic half (the disabled Claude model is not listed, and no enablement read
+  is spent on an id this build cannot run), the credential's own document being what the token
+  is minted from, and the two degrade paths — a refused list and a key Google will not sign
+  with — both `fallback` with the snapshot's models and a reason carrying no part of the key.
+  `e2e/src/credentials.test.ts` is the same over a real server, with the token exchange, both
+  publisher lists and the EULA check answered at the egress-proxy seam.
 - `credentials.test.ts` — the write-only round trip, the 422 a refused key gets, the fresh
   session rule, the vault's AAD binding, "never in a response or a log", and the env-key test:
   with `OPENAI_API_KEY` set and no stored credential, a turn ends with

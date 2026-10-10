@@ -42,6 +42,19 @@ import {
 import { SAVE_TIME_LIMITS, safeFetch as defaultSafeFetch } from '@openharness/hands'
 
 import { openCredential } from '../credentials'
+import {
+  VERTEX_PUBLISHERS,
+  parsePublisherModelEulaAcceptance,
+  parsePublisherModelPage,
+  vertexCredentialSecret,
+  vertexModelGardenEulaCheckUrl,
+  vertexModelGardenListUrl,
+  vertexPublisherModelResource,
+  vertexTokenProvider,
+  type PublisherModelPage,
+  type VertexPublisher,
+  type VertexTokenProvider,
+} from '../vertex'
 import type { Logger } from '../types'
 import {
   adapterFor,
@@ -79,6 +92,13 @@ export interface ModelCatalogOptions {
   readonly registry: ModelRegistry
   /** How a provider is reached; the production one is `createProviderFetch()`. */
   readonly fetch: ProviderFetch
+  /**
+   * How a Vertex credential's service-account key becomes an OAuth token (#273). The
+   * production one is `vertexTokenProvider` — Google's, signed with the credential's own key
+   * and never with Application Default Credentials — so nothing here reaches Google unless a
+   * call is actually made; a test injects a stub so no test does.
+   */
+  readonly vertexToken?: VertexTokenProvider
   /**
    * The SSRF guard every **user-supplied** base URL goes through — a custom OpenAI-compatible
    * credential (#249, A3b). Defaults to `@openharness/hands`' `safeFetch`; a test injects a
@@ -123,6 +143,8 @@ export class ModelCatalog {
 
   private readonly fetch: ProviderFetch
 
+  private readonly vertexToken: VertexTokenProvider
+
   private readonly safeFetch: typeof defaultSafeFetch
 
   private readonly allowPrivateProviderUrls: boolean
@@ -142,6 +164,7 @@ export class ModelCatalog {
     this.vault = options.vault
     this.registry = options.registry
     this.fetch = options.fetch
+    this.vertexToken = options.vertexToken ?? vertexTokenProvider
     this.safeFetch = options.safeFetch ?? defaultSafeFetch
     this.allowPrivateProviderUrls = options.allowPrivateProviderUrls === true
     this.cache = options.cache ?? new CatalogCache()
@@ -489,24 +512,32 @@ export class ModelCatalog {
   }
 
   /**
-   * A Vertex credential's models: the Vertex entries of the registry the brain can build
-   * (epic #245, A3d).
+   * A Vertex credential's models: what the project can call, listed live from Model Garden
+   * (epic #245, A3d; #273).
    *
-   * Vertex serves Google's and Anthropic's models from the same credential, and models.dev
-   * files both under `google-vertex`, so the registry entries **are** the publisher catalogue —
-   * each addressed as `<name>/<model>`, which is the id a session runs. Listing them from the
-   * registry rather than from the project costs no network call, needs no OAuth token at
-   * catalogue time, and carries the price and the context window that models.dev publishes;
-   * the save-time check is what proved the credential can actually reach its project.
+   * Vertex serves Google's and Anthropic's models from one credential, and Model Garden
+   * organizes its catalogue by **publisher**, so the listing is one call per publisher —
+   * `publishers/google/models` and `publishers/anthropic/models` — with the credential's own
+   * token, and it is the project's and the location's answer rather than a snapshot's.
    *
-   * The registry's Vertex entry carries more than a request can run — Gemini's image, speech
-   * and embedding models, and the MaaS models Google resells — so two rules narrow it, in the
-   * places each belongs: `isVertexModelId` (the brain's, and the same rule its factory builds
-   * clients by) keeps the models that have a client here, and the catalogue's own chat filter
-   * keeps the non-chat ones out, exactly as it does for every provider.
+   * The Anthropic half is narrowed once more, and that is the point of #273: a partner model
+   * must be **enabled per project** in Model Garden before a request may call it, so the list
+   * alone would offer models that fail on the first message. Every chat-capable candidate is
+   * checked against Google's own EULA-acceptance read for this project
+   * ({@link listEnabledPublisherModels}) and only the accepted ones are listed.
    *
-   * The status is `ok`, as it is for Azure: reading the credential succeeded, and this list is
-   * the answer rather than a stand-in for a failed call. `fetched_at` is when it was read.
+   * What comes back is joined with models.dev's `google-vertex` entry the way every provider's
+   * list is: the model's *identity* is Google's (so a model newer than the snapshot is still
+   * listed, with `null` limits and no price rather than a guessed one), and its name, context
+   * window and price are the snapshot's where it has them. Two rules narrow the entries, in the
+   * places each belongs: `isVertexModelId` keeps the ids this build has a client for — the MaaS
+   * models Google resells have none — and the catalogue's own chat filter drops the non-chat
+   * families (Gemini's image, speech and embedding models).
+   *
+   * A listing that fails — no token, a refusal, an unreadable body, the deadline — is the same
+   * visible `fallback` every other provider gets (C3): the snapshot's Vertex models, with a
+   * reason scrubbed of the credential. That is the list this source answered before #273, so a
+   * degraded Vertex project keeps working; what it loses is only the project-specific narrowing.
    */
   private async vertexCatalog(userId: string, name: string): Promise<CachedProviderCatalog> {
     const stored = await this.credentials.get({ userId, name })
@@ -517,6 +548,200 @@ export class ModelCatalog {
     if (body === null || body.type !== 'vertex') {
       return this.registryFallbackFor(name, `the stored ${name} credential could not be opened`)
     }
+    try {
+      const listed = await this.listVertexPublisherModels(body)
+      return {
+        status: 'ok',
+        fetchedAt: this.now().toISOString(),
+        message: null,
+        models: this.joinVertexList(name, listed),
+      }
+    } catch (error) {
+      // The credential's one secret is the key document's private key; Google's own words are
+      // kept and the key is scrubbed out of them before either a response or a log line sees
+      // the text (C3).
+      const message = redactSecret(
+        describeFailure(name, error, this.timeoutMs),
+        vertexCredentialSecret(body.service_account) ?? undefined,
+      )
+      this.logger?.warn(`serving the registry's ${name} models: ${message}`)
+      return this.vertexRegistryFallback(name, message)
+    }
+  }
+
+  /**
+   * Both publishers' catalogues for the credential's location, with the partner models that
+   * are not enabled for the project dropped.
+   *
+   * One token and one deadline cover the whole listing: the token is minted from the
+   * credential's own key (never Application Default Credentials), and every page and every
+   * EULA check runs inside the catalogue's own 5-second window — a Vertex project that cannot
+   * answer in it is the fallback above, not a request held open.
+   */
+  private async listVertexPublisherModels(
+    body: Extract<PutProviderCredentialRequest, { type: 'vertex' }>,
+  ): Promise<readonly ProviderModel[]> {
+    const signal = AbortSignal.timeout(this.timeoutMs)
+    const token = await this.vertexToken(body.service_account)
+    const listed: ProviderModel[] = []
+    for (const publisher of VERTEX_PUBLISHERS) {
+      const page = await this.listPublisherModels(publisher, body.location, token, signal)
+      // Only the ids this build can run are worth a project-scoped read: the publisher
+      // catalogue carries fine-tunes and families no client here builds.
+      const usable = page.filter((model) => isVertexModelId(model.id))
+      listed.push(
+        ...(publisher === 'anthropic'
+          ? await this.listEnabledPublisherModels(body.project, usable, token, signal)
+          : usable),
+      )
+    }
+    return listed
+  }
+
+  /** One publisher's whole catalogue for a location, page by page, inside the one deadline. */
+  private async listPublisherModels(
+    publisher: VertexPublisher,
+    location: string,
+    token: string,
+    signal: AbortSignal,
+  ): Promise<ProviderModel[]> {
+    const models: ProviderModel[] = []
+    let pageToken: string | undefined
+    for (let page = 0; page < MAX_PAGES; page += 1) {
+      const url = vertexModelGardenListUrl({
+        location,
+        publisher,
+        ...(pageToken === undefined ? {} : { pageToken }),
+      })
+      const response = await this.fetch(url, {
+        headers: { authorization: `Bearer ${token}` },
+        signal,
+      })
+      if (!response.ok) {
+        throw new CatalogProviderError(
+          `the ${publisher} publisher model list answered ${response.status}` +
+            (await errorSnippet(response)),
+        )
+      }
+      let payload: unknown
+      try {
+        payload = await response.json()
+      } catch {
+        throw new CatalogProviderError(`the ${publisher} publisher model list was not JSON`)
+      }
+      let parsed: PublisherModelPage
+      try {
+        parsed = parsePublisherModelPage(payload)
+      } catch (error) {
+        throw new CatalogProviderError(
+          `the ${publisher} publisher model list was not the expected shape: ` +
+            (error instanceof Error ? error.message : 'unreadable'),
+        )
+      }
+      models.push(...parsed.models.map((model) => ({ id: model.id })))
+      if (parsed.next === null) {
+        break
+      }
+      pageToken = parsed.next
+    }
+    return models
+  }
+
+  /**
+   * The candidate models the project has actually enabled, asked one model at a time.
+   *
+   * Google exposes no "which partner models are enabled" list — the EULA-acceptance check is
+   * per publisher model — so this is one authenticated `POST` per candidate, all in flight
+   * together inside the listing's deadline. The candidates are already narrowed to chat-capable
+   * ids this build can run, so the number of calls is the size of the picker's Anthropic half,
+   * not the size of Model Garden.
+   */
+  private async listEnabledPublisherModels(
+    project: string,
+    candidates: readonly ProviderModel[],
+    token: string,
+    signal: AbortSignal,
+  ): Promise<ProviderModel[]> {
+    const enabled = await Promise.all(
+      candidates.map(async (candidate) => ({
+        candidate,
+        enabled: await this.publisherModelEnabled(project, candidate.id, token, signal),
+      })),
+    )
+    return enabled.filter((entry) => entry.enabled).map((entry) => entry.candidate)
+  }
+
+  /**
+   * Whether this project may call one publisher model — Google's
+   * `CheckPublisherModelEulaAcceptance`, which is what the Model Garden "Enable" a reader
+   * clicks records. An answer the read cannot parse throws, so an unreadable check is the
+   * credential's visible fallback rather than a model silently kept or dropped.
+   */
+  private async publisherModelEnabled(
+    project: string,
+    model: string,
+    token: string,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    const response = await this.fetch(vertexModelGardenEulaCheckUrl({ project }), {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        publisherModel: vertexPublisherModelResource({ publisher: 'anthropic', model }),
+      }),
+      signal,
+    })
+    if (!response.ok) {
+      throw new CatalogProviderError(
+        `the Model Garden EULA check for ${model} answered ${response.status}` +
+          (await errorSnippet(response)),
+      )
+    }
+    let payload: unknown
+    try {
+      payload = await response.json()
+    } catch {
+      throw new CatalogProviderError(`the Model Garden EULA check for ${model} was not JSON`)
+    }
+    try {
+      return parsePublisherModelEulaAcceptance(payload)
+    } catch (error) {
+      throw new CatalogProviderError(
+        `the Model Garden EULA check for ${model} was not the expected shape: ` +
+          (error instanceof Error ? error.message : 'unreadable'),
+      )
+    }
+  }
+
+  /**
+   * The live publisher list, joined with the registry and filtered to chat models (C2).
+   *
+   * The registry is read once, under the type's models.dev key (`google-vertex`) — the same
+   * join a provider's own list goes through, and the same two rules: an id this build has no
+   * client for is dropped, and so is one the chat filter refuses.
+   */
+  private joinVertexList(name: string, listed: readonly ProviderModel[]): ModelEntry[] {
+    const known = this.vertexRegistryIndex()
+    return dedupe(
+      listed.flatMap((raw) => {
+        if (!isVertexModelId(raw.id)) {
+          return []
+        }
+        const registry = known.get(raw.id)
+        if (!isChatModel({ rawId: raw.id, providerChat: raw.chat, registryChat: registry?.chat })) {
+          return []
+        }
+        return [entryOf(name, raw, registry, 'provider')]
+      }),
+    )
+  }
+
+  /**
+   * The registry's Vertex chat models, for a listing that could not be read (C3) — the list
+   * this source answered before #273, narrowed by the same two rules as the live one, so a
+   * degraded listing is a subset of an undegraded one rather than a different catalogue.
+   */
+  private vertexRegistryFallback(name: string, message: string): CachedProviderCatalog {
     const models = dedupe(
       this.vertexRegistry()
         .filter(
@@ -525,13 +750,19 @@ export class ModelCatalog {
         )
         .map((model) => entryOf(name, { id: model.id }, model, 'registry')),
     )
-    return { status: 'ok', fetchedAt: this.now().toISOString(), message: null, models }
+    return { status: 'fallback', fetchedAt: null, message, models }
   }
 
   /** The registry's Vertex entries: what models.dev files under the type's models.dev key. */
   private vertexRegistry(): readonly RegistryModel[] {
     const key = credentialTypeInfo('vertex')?.modelsDevKey
     return key === undefined ? [] : this.registry.models(key)
+  }
+
+  /** The registry's Vertex entries by raw id, for the live list's join. */
+  private vertexRegistryIndex(): ReadonlyMap<string, RegistryModel> {
+    const key = credentialTypeInfo('vertex')?.modelsDevKey
+    return key === undefined ? new Map() : this.registryIndex(key)
   }
 
   /**
