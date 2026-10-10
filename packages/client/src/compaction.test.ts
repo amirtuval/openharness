@@ -1,4 +1,4 @@
-import { makeModelEntry } from '@openharness/protocol/fixtures'
+import { makeGetPreferencesResponse, makeModelEntry } from '@openharness/protocol/fixtures'
 import { describe, expect, it } from 'vitest'
 
 import {
@@ -57,23 +57,30 @@ describe('contextTokenBudget (#246, #280)', () => {
 })
 
 describe('compactionThreshold (#277, C3; #280)', () => {
-  it('is 0.7 when the server sends nothing', () => {
+  it('reads the caller’s stored share when they chose one', () => {
+    expect(compactionThreshold(makeGetPreferencesResponse({ compaction_threshold: 0.5 }))).toBe(0.5)
+    expect(compactionThreshold(makeGetPreferencesResponse({ compaction_threshold: 0.95 }))).toBe(
+      0.95,
+    )
+  })
+
+  it('follows the share the server reports for a caller who chose none (#282)', () => {
+    // `null` is "follow the deployment's", and a deployment may set its own — so the number
+    // comes from the response's `defaults`, not from a constant of this package's.
+    expect(
+      compactionThreshold(
+        makeGetPreferencesResponse({ compaction_threshold: null }, { compaction_threshold: 0.85 }),
+      ),
+    ).toBe(0.85)
+    expect(compactionThreshold(makeGetPreferencesResponse({ compaction_threshold: null }))).toBe(
+      DEFAULT_COMPACTION_THRESHOLD,
+    )
+  })
+
+  it('falls back to 0.7 only when there are no preferences at all', () => {
+    // A failed read, or a server that predates `GET /v1/me/preferences`: nothing to read.
     expect(compactionThreshold(null)).toBe(DEFAULT_COMPACTION_THRESHOLD)
     expect(compactionThreshold(undefined)).toBe(DEFAULT_COMPACTION_THRESHOLD)
-    expect(compactionThreshold({})).toBe(DEFAULT_COMPACTION_THRESHOLD)
-  })
-
-  it('reads the caller’s stored share when there is one', () => {
-    expect(compactionThreshold({ compaction_threshold: 0.5 })).toBe(0.5)
-    expect(compactionThreshold({ compaction_threshold: 1 })).toBe(1)
-  })
-
-  it('ignores a stored value that could not be a share', () => {
-    for (const stored of [0, -1, 1.5, '0.5', null, Number.NaN]) {
-      expect(compactionThreshold({ compaction_threshold: stored })).toBe(
-        DEFAULT_COMPACTION_THRESHOLD,
-      )
-    }
   })
 })
 

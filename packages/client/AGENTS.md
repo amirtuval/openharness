@@ -595,8 +595,10 @@ must say the same thing. The state lives in the reducer (above) and the arithmet
   Both frontends use it, so a divider lands in the same place on the web and in `oh`.
 - **The meter** is `contextMeter(context, { model, threshold })`: `model` is the catalog's
   entry for the model the chat **currently** runs (so a switch re-measures against the new
-  model) and `threshold` is `compactionThreshold(preferences)` — the caller's
-  `compaction_threshold` when the server sends one (C3), else 0.7. It answers `null` when
+  model) and `threshold` is `compactionThreshold(preferences)` — the caller's stored
+  `compaction_threshold` when they chose one, else the `defaults.compaction_threshold` the
+  preferences response reports for the deployment (#282), and 0.7 only when there is no
+  preferences response at all. It answers `null` when
   nothing has measured a prompt, and otherwise the percentage, the two words for it
   (`62% of context used` / `62%`) and `nearThreshold`.
 - **The budget restates the server's rule** (#246): `contextWindow − min(maxOutput, 25% of

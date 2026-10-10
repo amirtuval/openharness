@@ -1,4 +1,4 @@
-import type { ModelEntry } from '@openharness/protocol'
+import type { GetPreferencesResponse, ModelEntry } from '@openharness/protocol'
 
 import type { TranscriptContext, TranscriptSummary } from './transcript'
 
@@ -40,10 +40,10 @@ import type { TranscriptContext, TranscriptSummary } from './transcript'
  *
  * ## The threshold
  *
- * Compaction fires at a share of the budget (`OPENHARNESS_COMPACTION_THRESHOLD`, 0.7 by default;
- * a per-user `compaction_threshold` preference is coming in C3). {@link compactionThreshold} is the
- * one place that lookup lives, so the frontends read the preference the same way and a default
- * change is one edit.
+ * Compaction fires at a share of the budget: the caller's stored `compaction_threshold`
+ * preference, or the deployment's own share (`defaults.compaction_threshold`) for one they never
+ * chose. {@link compactionThreshold} is the one place that lookup lives, so the frontends read
+ * the preference the same way and a default change is one edit.
  */
 
 /** The share of a model's budget at which older history is summarized when nothing says otherwise. */
@@ -100,26 +100,28 @@ export function modelContextBudget(
 }
 
 /**
- * The share of the budget a chat compacts at: the caller's stored choice when the server sends
- * one, else {@link DEFAULT_COMPACTION_THRESHOLD}.
+ * The share of the budget a chat compacts at: the caller's stored choice when they made one,
+ * else the default the server reports (epic #277; C3, #282).
  *
- * **The one place the preference is read** (epic #277; C3 adds the field). Its parameter is
- * deliberately `unknown` rather than a shape with the field on it: the preference arrives from a
- * server that may predate the field, and a frontend should be able to hand this whatever
- * `GET /v1/me/preferences` answered without a cast. A value that is not a usable share — absent,
- * out of range, not a number — is ignored rather than clamped, so the two frontends cannot
- * disagree about what an absent one means.
+ * **The one place the preference is read.** `compaction_threshold` is the caller's own share or
+ * `null` for "follow the deployment's", and the deployment's number is not knowable here — a
+ * server may set `OPENHARNESS_COMPACTION_THRESHOLD` to anything — so a `null` is answered with
+ * the `defaults.compaction_threshold` the preferences response carries, which is the same value
+ * the server resolves for that owner's chats. `DEFAULT_COMPACTION_THRESHOLD` is what is left for
+ * a caller that has no preferences at all (a failed read, or a server that predates the route):
+ * the deployment's own share is the only fact this package cannot derive, and everything else is
+ * the server's answer.
  *
  * @param preferences the caller's stored preferences, as `GET /v1/me/preferences` answers them
  */
-export function compactionThreshold(preferences: unknown): number {
-  const stored =
-    typeof preferences === 'object' && preferences !== null
-      ? (preferences as { readonly compaction_threshold?: unknown }).compaction_threshold
-      : undefined
-  return typeof stored === 'number' && stored > 0 && stored <= 1
-    ? stored
-    : DEFAULT_COMPACTION_THRESHOLD
+export function compactionThreshold(
+  preferences: Pick<GetPreferencesResponse, 'compaction_threshold' | 'defaults'> | null | undefined,
+): number {
+  return (
+    preferences?.compaction_threshold ??
+    preferences?.defaults.compaction_threshold ??
+    DEFAULT_COMPACTION_THRESHOLD
+  )
 }
 
 /** A string's token cost, at the same characters-per-token estimate the budget is measured in. */
