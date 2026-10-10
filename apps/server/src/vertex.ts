@@ -74,27 +74,40 @@ export function createVertexTokenProvider(): VertexTokenProvider {
 export const vertexTokenProvider: VertexTokenProvider = createVertexTokenProvider()
 
 /**
- * Where one of a location's **publisher models** is listed.
+ * Where a location's **endpoints** are listed — the save-time check's read.
  *
- * This is the call the save-time check makes: it is the cheapest authenticated Vertex read
- * there is, it proves the service account can reach *this* project in *this* location, and it
- * fails with Google's own words when the Vertex AI API is not enabled for the project — the
- * one misconfiguration a key that is otherwise perfectly good will hit.
+ * `projects.locations.endpoints.list` — `GET https://{host}/v1/projects/{project}/locations/
+ * {location}/endpoints?pageSize=1` — is the cheapest authenticated Vertex read that is *about
+ * this credential's own project and location*. (An earlier version of this check read
+ * `…/publishers/google/models`; that path does not exist — the publishers surface is global
+ * and spells its listing `v1beta1/publishers/{publisher}/models` — so Google answered every
+ * save with a **404 text/html**, and the check could never pass. See `vertexModelGardenListUrl`
+ * for the listing the catalogue uses.) Two things make this the right route:
+ *
+ * - **It proves all three facts it has to.** A key Google rejects is a **401
+ *   `application/json`** `UNAUTHENTICATED` with Google's own message; a project or location
+ *   the account cannot see, and a project without the Vertex AI API enabled, are 403/404 in
+ *   Google's words naming it — the misconfiguration a perfectly good key usually meets.
+ * - **It asks only for permissions `roles/aiplatform.user` carries.** Reading endpoints
+ *   needs `aiplatform.endpoints.list`, which that role includes (it is the read a user who
+ *   may call models already has) — a check no more privileged than the model calls the
+ *   credential is saved to make.
+ *
+ * One endpoint is enough: the answer's *existence* is the proof, and asking for a page keeps
+ * the response to a few hundred bytes. Nothing in the response is read.
  *
  * The host is Google's, derived from the location exactly as the AI SDK derives it: the
  * `global` location is served from the apex host, and every other location from
  * `<location>-aiplatform.googleapis.com`. A user never types a host — the protocol validates
  * the location against Google's published list, and this is what turns it into an endpoint.
  */
-export function vertexPublisherModelsUrl(input: {
+export function vertexEndpointsUrl(input: {
   readonly project: string
   readonly location: string
 }): string {
   const path = `v1/projects/${encodeURIComponent(input.project)}/locations/${encodeURIComponent(
     input.location,
-  )}/publishers/google/models`
-  // One model is enough: the answer's *existence* is the proof, and asking for a page keeps
-  // the response to a few hundred bytes.
+  )}/endpoints`
   return `https://${vertexHost(input.location)}/${path}?pageSize=1`
 }
 

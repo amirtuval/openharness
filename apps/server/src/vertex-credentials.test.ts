@@ -24,7 +24,7 @@ import {
   vertexModelGardenEulaCheckUrl,
   vertexModelGardenListUrl,
   vertexPublisherModelResource,
-  vertexPublisherModelsUrl,
+  vertexEndpointsUrl,
 } from './vertex'
 
 /**
@@ -389,7 +389,7 @@ describe('the vertex save-time check', () => {
     return { fetch, requests }
   }
 
-  it('lists the project’s publisher models in the credential’s location, with its token', async () => {
+  it('lists the project’s endpoints in the credential’s location, with its token', async () => {
     const { fetch, requests } = recordingFetch()
     const tokens: string[] = []
     const validator = createProviderCredentialValidator({
@@ -406,7 +406,7 @@ describe('the vertex save-time check', () => {
     // types a host, which is why this call needs no SSRF guard.
     expect(requests).toEqual([
       {
-        url: `https://europe-west4-aiplatform.googleapis.com/v1/projects/${PROJECT}/locations/${LOCATION}/publishers/google/models?pageSize=1`,
+        url: `https://europe-west4-aiplatform.googleapis.com/v1/projects/${PROJECT}/locations/${LOCATION}/endpoints?pageSize=1`,
         headers: { authorization: 'Bearer access-token-4242' },
       },
     ])
@@ -422,7 +422,7 @@ describe('the vertex save-time check', () => {
     })
     await validator('vertex', { ...VERTEX_BODY, location: 'global' })
     expect(requests[0]?.url).toBe(
-      `https://aiplatform.googleapis.com/v1/projects/${PROJECT}/locations/global/publishers/google/models?pageSize=1`,
+      `https://aiplatform.googleapis.com/v1/projects/${PROJECT}/locations/global/endpoints?pageSize=1`,
     )
   })
 
@@ -458,12 +458,32 @@ describe('the vertex save-time check', () => {
     expect(requests).toEqual([])
   })
 
-  it('refuses a location it cannot build a host from, rather than inventing one', () => {
-    // The schema refuses an unknown location before this, so the URL builder only ever sees
-    // Google's own region names — but the rule it follows is worth pinning: every host is
-    // `<location>-aiplatform.googleapis.com`, and `global` is the apex.
-    expect(vertexPublisherModelsUrl({ project: 'p', location: 'us-central1' })).toBe(
-      'https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/google/models?pageSize=1',
+  it('pins the save-time URL to the project’s endpoints, so a wrong path cannot pass (#251)', () => {
+    // The regression this pins: the check used to read `…/publishers/google/models`, a path
+    // that does not exist, so Google's own 404 text/html refused every save. The shape has to
+    // be exactly `v1/projects/{project}/locations/{location}/endpoints` on the location's
+    // host — a wrong host, a missing project or location, or another resource is a 404 (or a
+    // list of the wrong thing), and the check would silently stop proving what it claims to.
+    expect(vertexEndpointsUrl({ project: 'p', location: 'us-central1' })).toBe(
+      'https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/endpoints?pageSize=1',
+    )
+    // The host is the rule the builder follows: `<location>-aiplatform.googleapis.com`, with
+    // `global` on the apex.
+    expect(vertexEndpointsUrl({ project: 'p', location: 'global' })).toBe(
+      'https://aiplatform.googleapis.com/v1/projects/p/locations/global/endpoints?pageSize=1',
+    )
+  })
+
+  it('pins the resource the save-time URL names, and the query that keeps it to one page', () => {
+    const url = vertexEndpointsUrl({ project: 'my-project', location: 'us-central1' })
+    const parsed = new URL(url)
+    expect(parsed.pathname).toBe('/v1/projects/my-project/locations/us-central1/endpoints')
+    // `endpoints`, never the publisher-models path the check used before #251.
+    expect(parsed.pathname).not.toContain('publishers')
+    expect(parsed.searchParams.get('pageSize')).toBe('1')
+    // A project or location that needs escaping is encoded rather than concatenated raw.
+    expect(vertexEndpointsUrl({ project: 'a/b', location: 'us-central1' })).toContain(
+      '/v1/projects/a%2Fb/locations/us-central1/endpoints',
     )
   })
 })

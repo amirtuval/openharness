@@ -45,11 +45,13 @@ import {
  * Every scenario gets an account of its own, because the file shares one database: a
  * credential stored for one test's user must not be the next test's credential.
  *
- * The one thing this file does not do is `PUT` a *good* key: validation is a real provider
- * call and the process boundary has no seam for it (`provider-validation.ts`), so the stored
- * credentials here are seeded the way the route stores them (`harness/credentials.ts`). The
- * PUT path itself runs for real in `provider-smoke.test.ts`, when a real key is in the
- * environment.
+ * The one thing this file does not do is `PUT` a *good* key for a keyed provider: validation
+ * is a real provider call and the process boundary has no seam for it
+ * (`provider-validation.ts`), so the stored credentials here are seeded the way the route
+ * stores them (`harness/credentials.ts`). The PUT path itself runs for real in
+ * `provider-smoke.test.ts`, when a real key is in the environment — and, for a **Vertex**
+ * credential, in this file too: that check is a Google call the provider stub can answer, so
+ * `saves a Vertex credential through the route` drives the real route and the real URL (#251).
  */
 
 const harness = e2eHarness('credentials')
@@ -135,10 +137,15 @@ const STUB_ANTHROPIC_MODELS = [
 ]
 
 /**
- * Answer every Google-side call a Vertex listing makes, the way Google documents it: the OAuth
- * token exchange (which `google-auth-library` sends through the egress proxy like any other
- * request), both `publishers/{publisher}/models` lists for the credential's location, and the
- * project-scoped `modelGardenEula:check` — which says yes only for the ids in `enabled`.
+ * Answer every Google-side call a Vertex credential makes, the way Google documents it: the
+ * OAuth token exchange (which `google-auth-library` sends through the egress proxy like any
+ * other request), the project-scoped **endpoints** read the save-time check makes (#251), both
+ * `publishers/{publisher}/models` lists for the credential's location, and the project-scoped
+ * `modelGardenEula:check` — which says yes only for the ids in `enabled`.
+ *
+ * Every path is matched exactly and anything else on a Google host gets the stub's 404: the
+ * product is what decides which route it reads, so a stub that answered a path it does not
+ * recognise would let a wrong URL pass for a working one.
  *
  * `refuse` makes the two lists answer that status instead, for the degrade path.
  */
@@ -162,16 +169,23 @@ function answerVertexListing(
       : undefined,
   )
   stub.answer('europe-west4-aiplatform.googleapis.com', (request) => {
-    if (request.path.startsWith('/v1beta1/publishers/google/models')) {
+    // The save-time check (#251): one page of the project's endpoints in its location.
+    if (
+      request.path === '/v1/projects/openharness-vertex/locations/europe-west4/endpoints?pageSize=1'
+    ) {
+      return { json: { endpoints: [] } }
+    }
+    // The query delimiter is required, so a path that only looks like one of these is a 404.
+    if (request.path.startsWith('/v1beta1/publishers/google/models?')) {
       return page(STUB_GOOGLE_MODELS)
     }
-    if (request.path.startsWith('/v1beta1/publishers/anthropic/models')) {
+    if (request.path.startsWith('/v1beta1/publishers/anthropic/models?')) {
       return page(STUB_ANTHROPIC_MODELS)
     }
     return undefined
   })
   stub.answer('aiplatform.googleapis.com', (request) => {
-    if (!request.path.startsWith('/v1beta1/projects/openharness-vertex/modelGardenEula:check')) {
+    if (request.path !== '/v1beta1/projects/openharness-vertex/modelGardenEula:check') {
       return undefined
     }
     const resource = (JSON.parse(request.body) as { publisherModel?: string }).publisherModel ?? ''
@@ -710,6 +724,54 @@ describe('provider credentials (A5)', () => {
         'publishers/anthropic/models/claude-sonnet-4-5@20250929',
         'publishers/anthropic/models/claude-opus-4-1@20250805',
       ])
+      expect(stub.requests.every((request) => !request.path.includes(VERTEX_KEY_MARKER))).toBe(true)
+    } finally {
+      await killServers()
+      await stub.stop()
+    }
+  })
+
+  it('saves a Vertex credential through the route, reading the project’s endpoints (#251)', async () => {
+    // The Vertex save-time check is a real provider call, and the stub is the network — so this
+    // is the one place it runs across the process boundary, the way a deployment runs it. The
+    // stub answers exactly the project's **endpoints** read and 404s everything else on the
+    // host, so the route can only succeed if the check reads a route that exists: the old
+    // `…/publishers/google/models` path is a 404 here, exactly as it was at Google.
+    const stub = await startProviderStub()
+    answerVertexListing(stub, { enabled: [] })
+    try {
+      const server = await harness.server({ env: stub.env })
+      const me = await person(server, 'vertex-save')
+
+      const stored = await me.client.providerCredentials.put('vertex', {
+        type: 'vertex',
+        service_account: VERTEX_KEY,
+        project: 'openharness-vertex',
+        location: 'europe-west4',
+      })
+      expect(stored).toMatchObject({
+        name: 'vertex',
+        type: 'vertex',
+        details: {
+          email: 'vertex-runner@openharness-vertex.iam.gserviceaccount.com',
+          project: 'openharness-vertex',
+          location: 'europe-west4',
+        },
+      })
+      // The key **id**'s tail, and no part of the private key in the response.
+      expect(stored.last4).toBe('5678')
+      expect(JSON.stringify(stored)).not.toContain(VERTEX_KEY_MARKER)
+
+      // The check the save cost: one page of the project's endpoints, in the credential's own
+      // location, exactly where Google serves it.
+      expect(stub.requests.find((request) => request.path.includes('/endpoints'))).toMatchObject({
+        host: 'europe-west4-aiplatform.googleapis.com',
+        method: 'GET',
+        path: '/v1/projects/openharness-vertex/locations/europe-west4/endpoints?pageSize=1',
+      })
+      // It carried the token the credential's key minted (the stub answered the exchange), and
+      // no request carried any part of the private key.
+      expect(stub.requests.some((request) => request.host === 'oauth2.googleapis.com')).toBe(true)
       expect(stub.requests.every((request) => !request.path.includes(VERTEX_KEY_MARKER))).toBe(true)
     } finally {
       await killServers()

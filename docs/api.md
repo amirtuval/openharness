@@ -584,8 +584,9 @@ curl -X DELETE localhost:3000/v1/provider-credentials/azure-eu \
   `ListFoundationModels` read in its region, SigV4-signed with the user's keys (the host comes
   from the region, so there is no user-supplied address to guard); a `vertex` credential is
   checked by signing an OAuth token with its service-account key — never Application Default
-  Credentials — and listing one page of **publisher models** of its project and location
-  (Google's own endpoint, derived from the validated location, so there is nothing to guard). A
+  Credentials — and listing one page of the project's **endpoints** in its location
+  (`projects.locations.endpoints.list`; Google's own endpoint, derived from the validated
+  location, so there is nothing to guard). A
   credential the provider rejects is an `invalid_provider_credential` with status `422` — for
   Bedrock and Vertex, the provider's own reason for the refusal, scrubbed — and nothing is
   stored.- **A credential is keyed by its `name`**, which is the `provider` half of the model ids it
