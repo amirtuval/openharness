@@ -36,6 +36,10 @@ _Last updated: 2026-10-08._
 - **Mastra is gone** ([#234](https://github.com/amirtuval/openharness/issues/234), PR #237): the
   brain builds models with the official AI SDK providers, and the catalog reads a bundled
   models.dev snapshot instead of Mastra's registry.
+- **Model selection** ([epic #245](https://github.com/amirtuval/openharness/issues/245)) is done
+  (closed 2026-10-10): a context budget per model, usage and cost, Azure OpenAI, custom
+  OpenAI-compatible URLs, Bedrock and Vertex credentials behind an SSRF guard, reasoning effort,
+  and per-user modes.
 
 ## Order
 
@@ -43,7 +47,7 @@ _Last updated: 2026-10-08._
 2. Authentication — done
 3. Deployment and CI/CD — done
 4. Chat and TUI UX, pass 1 ([epic #201](https://github.com/amirtuval/openharness/issues/201)) — done
-5. Model selection and provider keys
+5. Model selection and provider keys ([epic #245](https://github.com/amirtuval/openharness/issues/245)) — done
 6. Tools
 
 **Why this order:** identity and a running deployment are the foundations. Every later feature
@@ -139,57 +143,59 @@ pass, comes after tools step 3.
 **Not in pass 1:** showing reasoning (it goes with phase 5's reasoning effort and modes), a
 fullscreen TUI, and session rename, archive and fork.
 
-## 5. Model selection
+## 5. Model selection (done: [epic #245](https://github.com/amirtuval/openharness/issues/245))
 
-**Scope:**
+**Status:** implemented as nine sub-issues, through a hands-on test plan
+([#255](https://github.com/amirtuval/openharness/issues/255)) that passed clean on its second
+pass, with its findings fixed (#267, #269, #271). The real-account paths for Azure, Bedrock and
+Vertex are covered by automated tests and stub servers only; no real account has been used yet.
 
-- **more credential types**, on top of the single-API-key providers that authentication (#65)
-  supports:
-  - Bedrock (AWS access keys or an assumed role);
-  - Vertex (a GCP service account or workload identity);
-  - Azure OpenAI (endpoint, key and deployment);
-  - custom OpenAI-compatible base URLs, which need SSRF protection first.
+**Decided** (details and the sub-issues are on the epic):
+
+- **The context budget comes from the model** and is chosen per request
+  ([#246](https://github.com/amirtuval/openharness/issues/246)): `contextWindow − min(maxOutput,
+25% of contextWindow)`, from the bundled models.dev snapshot, so a mid-chat switch trims to
+  the new model on the next request. 32,768 tokens is the fallback for unknown models.
+- **Usage and cost** ([#247](https://github.com/amirtuval/openharness/issues/247)): cost is
+  computed when read, from the stored tokens and the snapshot's prices, and never stored or
+  estimated. A total sums what is priced and counts what is not ("$1.23 + 4 unpriced"). Usage is
+  per reply, per session (live, through a stored `session.usage` event) and per user by the
+  user's local day. Budgets and limits are not part of this phase.
+- **One provider list** in `@openharness/protocol`
+  ([#254](https://github.com/amirtuval/openharness/issues/254)), which the server, brain, client
+  and snapshot script are typed against.
+- **More credential types**, each checked once on save:
+  - Azure OpenAI, with `safeFetch`, the SSRF guard in `@openharness/hands`, and **named
+    credentials**: a user may hold several of a type, and the credential's name is the provider
+    half of its model ids ([#248](https://github.com/amirtuval/openharness/issues/248));
+  - custom OpenAI-compatible base URLs, with a self-host setting for private addresses that is
+    off by default ([#249](https://github.com/amirtuval/openharness/issues/249));
+  - Amazon Bedrock, with static access keys only
+    ([#250](https://github.com/amirtuval/openharness/issues/250));
+  - Google Vertex, with a service-account key only and never the server's own credentials
+    ([#251](https://github.com/amirtuval/openharness/issues/251)).
 
   Signing in with a provider subscription is **not** planned: the terms of the subscription
   providers do not allow it, so it is off the table rather than deferred.
 
-  The credential store keeps a type plus an encrypted payload, so these are new types rather
-  than a new design;
+- **Reasoning effort** ([#252](https://github.com/amirtuval/openharness/issues/252)):
+  `low | medium | high`, mapped onto each provider's own option for the models models.dev says
+  take one, and recorded per request.
+- **Modes** ([#253](https://github.com/amirtuval/openharness/issues/253)), an idea from Amp: a
+  named preset of a model (or "my default model"), an effort and a system-prompt addition. Modes
+  are **per user, stored in the database, and optional**, with no starter modes. A chat follows
+  its mode live; an unusable mode is refused rather than silently replaced; every request
+  records the mode and what it resolved to. A tool set joins modes in phase 6.
 
-- the **model catalog** and **model-first chat** shipped early in
-  [epic #92](https://github.com/amirtuval/openharness/issues/92) (closed 2026-10-04):
-  - New chat picks a model from the models the user's own keys can use, read live from each
-    provider's API and joined with a vendored models.dev snapshot for filtering and context
-    windows;
-  - sessions carry their own model, and agents are optional;
-  - customizable agents are hidden from the UI until they return as an advanced feature
-    ([#96](https://github.com/amirtuval/openharness/issues/96)).
+**Follow-ups:**
 
-  What remains in this phase is below;
-
-- **modes** (an idea from Amp) — done ([epic #245](https://github.com/amirtuval/openharness/issues/245)):
-  a named preset that bundles a model, a reasoning effort and a system prompt addition behind a
-  stable name such as `smart`, `fast` or `deep`, so a user picks a mode instead of a raw
-  `provider/model` id. **Modes are per user, stored in the database, and optional** — there is
-  no operator-level mode, and a raw model id stays available for those who want it. A chat
-  follows its mode live, and every request records the mode it ran under beside the model,
-  effort and prompt addition it resolved to, so the log stays accurate when a mode's mapping
-  changes later. A tool set is the part still to come: it arrives with phase 6;
-- **switching the model mid-session** (sessions already carry their own model after #92), and modes;
-- usage and cost per user, from the token counts the spans already store, and
-  possibly budgets that stop a session at a limit, with usage events so clients can show
-  spending live (as Managed Agents' `session.usage` does).
-
-**Decided:**
-
-- **The context budget comes from the model and is chosen per model request** — done
-  ([#246](https://github.com/amirtuval/openharness/issues/246)): `contextWindow − min(maxOutput,
-25% of contextWindow)`, read from the bundled models.dev registry and resolved per request, so
-  a mid-session model switch trims correctly on the next request. The fixed 32,768-token default
-  is the fallback for unknown models. Each request records its model on
-  `span.model_request_start` (#46).
-- **Modes are part of this phase.** Each request records the mode it ran under alongside the
-  resolved model, so the log stays accurate when a mode's mapping changes later.
+- Assume-role for Bedrock and workload identity federation for Vertex.
+- Usage budgets and limits, and an operator-wide usage view.
+- Vertex lists the snapshot's models rather than the project's
+  ([#273](https://github.com/amirtuval/openharness/issues/273)); Bedrock omits models reachable
+  only through inference profiles ([#274](https://github.com/amirtuval/openharness/issues/274)).
+- Model requests to the fixed providers ignore `HTTPS_PROXY`
+  ([#270](https://github.com/amirtuval/openharness/issues/270)).
 
 ## 6. Tools
 
