@@ -120,12 +120,23 @@ export function needsModelRequest(events: readonly StoredEvent[]): boolean {
  * a message the user sends while the request is already in flight stays out of it. Without that,
  * the steering message would be answered twice — once by the request in flight, and once by the
  * request the loop runs for it afterwards.
+ *
+ * @param events the log, as {@link readLog} handed it over
+ * @param claimed ids the caller is about to claim in the same step — the span start the request
+ *   is built for. A pending user event among them counts as processed, which is what lets the
+ *   loop build the prompt *before* it appends the claim (the span start carries the truncation
+ *   record the strategy produced, so the prompt has to exist first) without the claimed messages
+ *   dropping out of it. Omitted, nothing is admitted and this is the post-claim view.
  */
-export function contextView(events: readonly StoredEvent[]): StoredEvent[] {
+export function contextView(
+  events: readonly StoredEvent[],
+  claimed?: ReadonlySet<EventId>,
+): StoredEvent[] {
   return events.filter(
     (event) =>
       (event.type !== EVENT_TYPES.userMessage && event.type !== EVENT_TYPES.userInterrupt) ||
-      event.processed_at !== null,
+      event.processed_at !== null ||
+      claimed?.has(event.id) === true,
   )
 }
 

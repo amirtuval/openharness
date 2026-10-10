@@ -516,27 +516,33 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       ])
       return { outcome: 'error' }
     }
-    // What this request runs with (#252): the newest effort the log asks for, read at this
-    // request's boundary like the model. A message that set one applies from here on — one that
-    // arrived while the previous request was streaming was appended before this read, so it is
-    // this request's, and one that arrives after it belongs to the next — and the read is the
-    // replay read, so an effort an edit took back is already gone from it. The record rides the
-    // span below, which is the only place the log says what a request ran with.
+    // The log as this request will see it, read once: the effort comes from it, the prompt is
+    // built from it, and the running totals below are folded from it (#247). It is the read
+    // *before* the claim, with the messages this request is about to claim admitted into the
+    // view (`contextView`) — the prompt has to exist before the span start, because the span
+    // start carries the truncation record the strategy produced (K6), and the record cannot be
+    // written after the fact. The claim itself still lands atomically in the append below.
     //
     // The effort lives in the log while the model this request runs lives on the session
     // (`getSessionUnscoped`, above), and the two cannot be one read: the session is where
     // `system` and the model projection are, the log is where a message's effort is, and the
     // store has no method that answers both. Folding the effort into the model read would mean
     // projecting it onto the session, a `packages/protocol`/`packages/session` change that a
-    // per-message field deliberately avoids (see the module note in `reasoning.ts`). The read is
-    // the same replay read the context below is built from; it is the cost of asking the log
-    // rather than a session field.
-    // The effort, in precedence order: an explicit effort the newest message carried wins (the
-    // reader asked for it on that message, #252), and otherwise the mode's own effort applies
-    // (#245, M6) — a mode bundles one, and that is what a chat on the mode runs unless a
-    // message overrides it. `undefined` is "no message carried one", which is what lets the
-    // mode's effort through; an explicit `null` is "the provider's default" and wins.
-    const loggedEffort = requestedReasoningEffort(await readLog(store, sessionId))
+    // per-message field deliberately avoids (see the module note in `reasoning.ts`).
+    //
+    // What this request runs with (#252): the newest effort the log asks for, read at this
+    // request's boundary like the model. A message that set one applies from here on — one that
+    // arrived while the previous request was streaming was appended before this read, so it is
+    // this request's, and one that arrives after it belongs to the next — and the read is the
+    // replay read, so an effort an edit took back is already gone from it. The record rides the
+    // span below, which is the only place the log says what a request ran with. The effort, in
+    // precedence order: an explicit effort the newest message carried wins (the reader asked for
+    // it on that message, #252), and otherwise the mode's own effort applies (#245, M6) — a mode
+    // bundles one, and that is what a chat on the mode runs unless a message overrides it.
+    // `undefined` is "no message carried one", which is what lets the mode's effort through; an
+    // explicit `null` is "the provider's default" and wins.
+    const read = await readLog(store, sessionId)
+    const loggedEffort = requestedReasoningEffort(read)
     const requestedEffort =
       loggedEffort === undefined ? (mode?.reasoningEffort ?? null) : loggedEffort
     const reasoning = planReasoning(
@@ -545,22 +551,22 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       requestedEffort,
       options.reasoningSupportFor,
     )
+    const answered = contextView(read, new Set(claims))
+    const context = strategy(answered, {
+      model: requestModel,
+      system: withModePrompt(current.system, mode?.systemPromptAddition ?? null),
+    })
     const [start] = await append([
-      spanStart(claims, requestModel.id, reasoning.record, mode === null ? undefined : mode),
+      spanStart(claims, requestModel.id, {
+        ...(reasoning.record === undefined ? {} : { reasoningEffort: reasoning.record }),
+        ...(mode === null ? {} : { mode }),
+        ...(context.truncated === undefined ? {} : { truncated: context.truncated }),
+      }),
     ])
     if (start === undefined) {
       throw new Error('the store did not return the span it was asked to append')
     }
-    // Read the log again: the claim just landed, and what this request answers is the log as it
-    // stands after it — the messages it consumes, in order, and nothing still queued. The same
-    // read is the fold the running totals below are built from (#247): it is the log before
-    // this request's span end, so all this request adds to it is its own usage.
-    const read = await readLog(store, sessionId)
-    const answered = contextView(read)
-    const messages = strategy(answered, {
-      model: requestModel,
-      system: withModePrompt(current.system, mode?.systemPromptAddition ?? null),
-    })
+    const messages = context.messages
 
     // The reply's chunks are stored as they arrive, under one pre-minted id: the stored
     // `event_start` announces the id the `agent.message` will be stored under, and every

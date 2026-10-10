@@ -155,7 +155,12 @@ function streamOf(script: MockModelScript): ReadableStream<LanguageModelV4Stream
         usage: {
           inputTokens: {
             total: usage.input_tokens,
-            noCache: usage.input_tokens - usage.cache_read_input_tokens,
+            // `usage.input_tokens` is the cache-inclusive total here, the way an OpenAI-shaped
+            // report reads: the uncached half is it minus both cache counters (epic #277, K2).
+            noCache:
+              usage.input_tokens -
+              usage.cache_read_input_tokens -
+              usage.cache_creation_input_tokens,
             cacheRead: usage.cache_read_input_tokens,
             cacheWrite: usage.cache_creation_input_tokens,
           },

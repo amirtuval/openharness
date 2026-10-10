@@ -884,9 +884,18 @@ export async function streamModelRequest(params: ModelRequestParams): Promise<Mo
 /**
  * The protocol's token counts for an AI SDK usage report.
  *
- * The protocol keeps Anthropic's four counters; the AI SDK reports totals plus a breakdown.
- * The two cache counters are the breakdown's read and write halves, so the numbers add up the
- * same way on both sides of the boundary.
+ * The protocol keeps Anthropic's four counters, and they are **disjoint**: `input_tokens` is the
+ * uncached input and the two cache counters the cached halves, which is what lets `usageCost`
+ * price each at its own rate without double-charging a token. The AI SDK reports something else:
+ * `inputTokens` is the **cache-inclusive total**, and `inputTokenDetails` carries the breakdown.
+ * On Anthropic the two disagree about what "input tokens" means — the provider's own
+ * `input_tokens` leaves cached tokens out, so its total is the three input-side counters summed —
+ * while on OpenAI and the OpenAI-compatible family `prompt_tokens` already includes the cached
+ * ones and the total is the raw number. `toModelUsage` is the one place that normalises the
+ * provider families apart, and it does it by reading the SDK's `noCacheTokens`, which each
+ * provider package computes correctly for its own API: the uncached half, for every family.
+ * Summing the three input-side counters of the result is therefore the real prompt size a request
+ * was made with (epic #277, K2), for every provider.
  *
  * Takes `unknown` because the report that actually arrives is not always the shape its type
  * promises — an `ai` version and a provider package that disagree about the provider spec
@@ -905,13 +914,21 @@ export function toModelUsage(usage: unknown): ModelUsage {
   const report = asRecord(usage) ?? {}
   const details = asRecord(report.inputTokenDetails) ?? {}
   const input = report.inputTokens
+  const cache_read_input_tokens =
+    detailOf(details, 'cacheReadTokens') ?? detailOf(input, 'cacheRead') ?? 0
+  const cache_creation_input_tokens =
+    detailOf(details, 'cacheWriteTokens') ?? detailOf(input, 'cacheWrite') ?? 0
+  // The uncached input, the half the protocol stores. A report that carries no breakdown
+  // (a numeric `inputTokens`, or one nested where a number belongs) is normalized here: the
+  // total minus both cache halves, never below zero.
+  const noCache = detailOf(details, 'noCacheTokens')
+  const total = countOf(input) ?? 0
   return {
-    input_tokens: countOf(input) ?? 0,
+    input_tokens:
+      noCache ?? Math.max(0, total - cache_read_input_tokens - cache_creation_input_tokens),
     output_tokens: countOf(report.outputTokens) ?? 0,
-    cache_read_input_tokens:
-      detailOf(details, 'cacheReadTokens') ?? detailOf(input, 'cacheRead') ?? 0,
-    cache_creation_input_tokens:
-      detailOf(details, 'cacheWriteTokens') ?? detailOf(input, 'cacheWrite') ?? 0,
+    cache_read_input_tokens,
+    cache_creation_input_tokens,
   }
 }
 
