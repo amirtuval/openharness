@@ -377,11 +377,10 @@ with a failure the SDK's own classifier would retry.
 
 **One message is rewritten, and only one** (#273). Vertex answers a request for a partner model
 the project has not enabled in Model Garden with Google's own `404 … Publisher model
-\`publishers/anthropic/models/…\` was not found or your project does not have access to it` (or a
-Model Garden terms `403`), which reads like a typo in the model id. `vertexModelGardenMessage`
-turns exactly that — an `anthropic` publisher resource **and** Model Garden wording — into
+\`publishers/anthropic/models/…\` was not found or your project does not have access to it`(or a
+Model Garden terms`403`), which reads like a typo in the model id. `vertexModelGardenMessage`turns exactly that — an`anthropic`publisher resource **and** Model Garden wording — into
 *"Claude models must be enabled for this Google Cloud project in Vertex AI Model Garden
-(&lt;model&gt;) …"*, and `classifyModelError` applies it to the message it reports; the type and
+(&lt;model&gt;) …"*, and`classifyModelError` applies it to the message it reports; the type and
 the retry decision are unchanged. The server's catalogue lists only enabled models now, so this
 is the residual path — an id a chat already runs, a model disabled after the catalogue's hour was
 taken — and no other provider's, or publisher's, error text is touched.
