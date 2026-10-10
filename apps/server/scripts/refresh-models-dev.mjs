@@ -7,11 +7,16 @@
  * unchanged). This script is the one place that reaches out: it fetches models.dev once,
  * keeps the providers of the shared list (`@openharness/protocol`'s `PROVIDERS`, epic #245),
  * reduces each model to the fields the catalogue's join and the usage routes read — name,
- * limits and list prices — and writes the file back.
+ * limits, list prices and the reasoning data (#252's follow-up) — and writes the file back.
  *
  * Run it by hand when the data should move — `yarn workspace @openharness/server
  * catalog:refresh` — and commit the diff. Nothing runs it at build, test or boot time, so a
  * sandbox with no network still builds: the snapshot is a source file, like any other.
+ *
+ * The JSON this writes is `JSON.stringify(…, null, 2)`, which is not quite Prettier's single-line
+ * form for an array of strings (the `efforts` of #252) — run `yarn format` (or
+ * `yarn prettier --write src/catalog/models-dev.json`) before committing so `format:check` stays
+ * green.
  *
  * **The list is the protocol package's, not this script's.** It is read from protocol's build
  * output — the same `dist/` every other consumer reads — so the ids, their order and the
@@ -75,9 +80,44 @@ function reduceCost(model) {
 }
 
 /**
- * One model, reduced to what the catalogue's registry join reads: its name, its context
- * window, its output limit and its list price, straight from models.dev's `name`,
- * `limit.{context,output}` and `cost`.
+ * The effort levels models.dev lists for a model's own reasoning knob, or `nothing` when it
+ * lists none (#252's follow-up).
+ *
+ * models.dev describes a model's knob with `reasoning_options`, an array of typed options. Only
+ * an `effort` option is one our `low | medium | high` can be spoken to: its `values` are the
+ * levels the provider's own API takes, which may include ones we never name (`minimal`, `none`,
+ * `xhigh`, `max`). A `budget_tokens` or `toggle` option is a different knob, and is left out —
+ * the model then carries no `efforts`, which is what keeps it on the provider's default.
+ *
+ * The values are kept **verbatim**: the intersection with our three levels is the server's
+ * reasoning resolver (`src/catalog/reasoning-support.ts`), not this snapshot's, so the file stays
+ * a faithful copy of what models.dev publishes.
+ */
+function reduceEfforts(reasoningOptions) {
+  if (!Array.isArray(reasoningOptions)) {
+    return undefined
+  }
+  for (const option of reasoningOptions) {
+    if (option?.type !== 'effort' || !Array.isArray(option.values)) {
+      continue
+    }
+    const values = option.values.filter((value) => typeof value === 'string')
+    if (values.length > 0) {
+      return values
+    }
+  }
+  return undefined
+}
+
+/**
+ * One model, reduced to what the catalogue's registry join and the reasoning resolver read: its
+ * name, its context window, its output limit, its list price, and its reasoning data — straight
+ * from models.dev's `name`, `limit.{context,output}`, `cost`, `reasoning` and
+ * `reasoning_options`.
+ *
+ * `reasoning` is written only when models.dev says `true`, so absence means "not a reasoning
+ * model, or the registry says nothing" — the two the resolver reads alike. It is informational;
+ * the effort gate is `efforts`, which a reasoning model whose knob is a token budget does not get.
  *
  * **No chat verdict.** models.dev carries no chat flag, and the fields it does carry are not
  * one: `modalities.output` is `["text"]` even for `text-embedding-3-small`, and `family` is a
@@ -92,6 +132,13 @@ function reduceModel(model) {
   }
   if (typeof model.limit?.output === 'number') {
     reduced.maxOutput = model.limit.output
+  }
+  if (model.reasoning === true) {
+    reduced.reasoning = true
+  }
+  const efforts = reduceEfforts(model.reasoning_options)
+  if (efforts !== undefined) {
+    reduced.efforts = efforts
   }
   const cost = reduceCost(model)
   if (cost !== undefined) {

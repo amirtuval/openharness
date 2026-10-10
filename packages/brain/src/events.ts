@@ -2,6 +2,7 @@ import type { AppendableEvent } from '@openharness/session'
 import type {
   EventId,
   ModelUsage,
+  ReasoningEffortRun,
   SessionError,
   SessionModelUsage,
   SpanError,
@@ -71,14 +72,26 @@ export function sessionError(error: SessionError): AppendableEvent {
  * Every span start is a real model request: since P4 an interrupt is never claimed by a span of
  * its own, so there is no such thing as a span start without a request behind it.
  *
+ * `reasoning_effort` records what the log asked the request to run with and what it ran with,
+ * for the requests that were asked for an effort at all (#252). It is one value because it is
+ * one fact about one request: `applied` is what the model actually took, and it is `null` when
+ * the model takes none — an effort asked for and not applied is exactly what the log has to be
+ * able to say.
+ *
  * @param consumes the ids of the pending user events this request answers; `[]` claims nothing
  * @param model the model id (`provider/model`) the request is made with
+ * @param reasoningEffort the effort asked for and applied, or `undefined` when nothing was asked
  */
-export function spanStart(consumes: readonly EventId[], model: string): AppendableEvent {
+export function spanStart(
+  consumes: readonly EventId[],
+  model: string,
+  reasoningEffort?: ReasoningEffortRun,
+): AppendableEvent {
   return {
     type: EVENT_TYPES.modelRequestStart,
     consumes: [...consumes],
     model,
+    ...(reasoningEffort === undefined ? {} : { reasoning_effort: reasoningEffort }),
   }
 }
 

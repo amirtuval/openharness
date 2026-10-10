@@ -93,6 +93,16 @@ export type ResolveCredential = (provider: string) => Promise<ModelCredential | 
  */
 export type ModelFactory = (modelId: string, credential: ModelCredential) => LanguageModel
 
+/**
+ * Per-provider options for one model request: what a provider's own client reads, keyed by the
+ * name that client looks itself up under (`anthropic`, `openai`, `openaiCompatible`, …).
+ *
+ * Read off `streamText`'s own call options rather than imported from the AI SDK's provider
+ * package, which this package does not depend on: what the loop hands over is exactly what the
+ * call takes, whatever the SDK version calls the shape.
+ */
+export type ProviderOptions = NonNullable<Parameters<typeof streamText>[0]['providerOptions']>
+
 /** What one provider is: where its API lives, and how a client for it is built. */
 interface ProviderClient {
   /**
@@ -447,6 +457,12 @@ export interface ModelRequestParams {
   readonly model: LanguageModel
   /** The messages to send, system prompt included; see `ContextStrategy`. */
   readonly messages: readonly ModelMessage[]
+  /**
+   * Per-provider options for this one request — the provider's own knobs, keyed the way its AI
+   * SDK client reads them. The loop's use of it is the reasoning effort (`./reasoning`), which
+   * is the one thing openharness sends that the AI SDK's own call options do not express.
+   */
+  readonly providerOptions?: ProviderOptions
   /** Aborting this ends the request early; the partial text is still in the result. */
   readonly signal?: AbortSignal
   /**
@@ -491,6 +507,10 @@ export async function streamModelRequest(params: ModelRequestParams): Promise<Mo
     model: params.model,
     messages: [...params.messages],
     abortSignal: params.signal,
+    // The provider's own options for this request, when the loop has any to send (the reasoning
+    // effort): `undefined` here is the AI SDK's own "nothing to add", so a request with no
+    // effort reaches the provider exactly as it did before #252.
+    providerOptions: params.providerOptions,
     // The context strategy puts the session's system prompt in `messages`, which is where the
     // loop hands it over; the AI SDK otherwise warns about a system message there.
     allowSystemInMessages: true,

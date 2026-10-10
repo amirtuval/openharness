@@ -659,6 +659,41 @@ describe('helpers', () => {
     })
   })
 
+  it('sendMessage posts the reasoning effort beside the text when one is given (#252)', async () => {
+    const stored = makeUserMessage('think hard', { seq: 7, reasoning_effort: 'high' })
+    const { client, mock } = clientWith(() => jsonResponse({ data: [stored] }))
+
+    const message = await client.sendMessage('sesn_1', 'think hard', { reasoningEffort: 'high' })
+
+    expect(message).toEqual(stored)
+    expect(bodyOf(mock.requests[0]?.init)).toEqual({
+      events: [
+        {
+          type: 'user.message',
+          content: [{ type: 'text', text: 'think hard' }],
+          reasoning_effort: 'high',
+        },
+      ],
+    })
+  })
+
+  it('sendMessage posts an explicit null effort: "back to the provider default" (#252)', async () => {
+    const stored = makeUserMessage('never mind', { seq: 7, reasoning_effort: null })
+    const { client, mock } = clientWith(() => jsonResponse({ data: [stored] }))
+
+    await client.sendMessage('sesn_1', 'never mind', { reasoningEffort: null })
+
+    expect(bodyOf(mock.requests[0]?.init)).toEqual({
+      events: [
+        {
+          type: 'user.message',
+          content: [{ type: 'text', text: 'never mind' }],
+          reasoning_effort: null,
+        },
+      ],
+    })
+  })
+
   it('sendMessage rewinds the session in the same request as the edit (#238)', async () => {
     const stored = makeUserMessage('write a haiku about snow', { seq: 10 })
     const { client, mock } = clientWith(() => jsonResponse({ data: [stored] }))

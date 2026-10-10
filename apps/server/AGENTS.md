@@ -332,21 +332,25 @@ parses the query and maps the one error it can raise.
   where it has them (Gemini's `displayName`/`inputTokenLimit`/`outputTokenLimit`, OpenRouter's
   `name`/`context_length`/`top_provider.max_completion_tokens`), from the snapshot where it
   has them, and from the model id otherwise; `null` is a legitimate value for the two limits.
-  **What the snapshot actually carries** — the model's own `name`, `limit.context` and
-  `limit.output`, for the 11 providers whose keys this server can validate; it is keyed by our
-  provider ids, so `fireworks`/`together` are models.dev's `fireworks-ai`/`togetherai` mapped
-  at generation time. It carries **no chat flag, and could not**: models.dev has none, and the
-  fields it does have are not one — `modalities.output` is `["text"]` for
-  `text-embedding-3-small` too, and `family` is a name family. So step 3 is what classifies,
-  and its principle is unchanged. `RegistryModel` still carries `name`/`contextWindow`/
-  `maxOutput`/`chat`, so a registry that finds a real chat signal is a one-place change; the
-  tests inject a stub with all four to pin the join itself. The limits the snapshot supplies
-  are what fill the `null`s the provider's own list leaves for OpenAI, Anthropic and the rest
-  (`model-catalog.test.ts` pins the OpenAI and Anthropic entries end to end).
+  **What the snapshot actually carries** — the model's own `name`, `limit.context`,
+  `limit.output`, its price, and its **reasoning data** (`reasoning`, and the effort levels
+  models.dev lists for the model's own knob — #252's follow-up), for the 11 providers whose keys
+  this server can validate; it is keyed by our provider ids, so `fireworks`/`together` are
+  models.dev's `fireworks-ai`/`togetherai` mapped at generation time. It carries **no chat flag,
+  and could not**: models.dev has none, and the fields it does have are not one —
+  `modalities.output` is `["text"]` for `text-embedding-3-small` too, and `family` is a name
+  family. So step 3 is what classifies, and its principle is unchanged. `RegistryModel` still
+  carries `name`/`contextWindow`/`maxOutput`/`chat`, so a registry that finds a real chat signal
+  is a one-place change; the tests inject a stub with all four to pin the join itself. The limits
+  the snapshot supplies are what fill the `null`s the provider's own list leaves for OpenAI,
+  Anthropic and the rest (`model-catalog.test.ts` pins the OpenAI and Anthropic entries end to
+  end).
 
   Regenerate it with `yarn workspace @openharness/server catalog:refresh`
   (`scripts/refresh-models-dev.mjs`), which fetches https://models.dev/api.json, maps the
-  provider keys and writes the file; the snapshot's date is in the file (`SNAPSHOT_DATE`). The
+  provider keys and writes the file; then `yarn format` it, which the script's plain
+  `JSON.stringify` output needs for the per-model effort arrays. The
+  snapshot's date is in the file (`SNAPSHOT_DATE`). The
   providers and their models.dev keys are no longer restated there: since #245 the script reads
   `PROVIDERS` from `@openharness/protocol`'s build output — the same list the validating and
   model-list tables are keyed by — so build the workspace (`yarn build` at the root, or
@@ -428,6 +432,50 @@ request's whole prompt (`ScriptedModel.histories`) for the tests that read it. T
 (`createTestApp`) wires the same strategy as `main.ts`, against the injected registry, so a test
 with none gets the brain's 32,768-token fallback, exactly as it did before the budget was per
 model.
+
+## The reasoning effort, per model (#252's follow-up)
+
+Which `low | medium | high` a model takes is data now, not the brain's hand-written patterns.
+`catalog/reasoning-support.ts` is the whole of it: `createReasoningSupportResolver(registry)`
+answers `(modelId, credentialType) => levels | undefined` — the registry's model, split on its
+first slash, with its `efforts` narrowed to the three levels a request may ask for:
+
+```
+efforts = { low, medium, high } ∩ models.dev's effort levels for the model
+```
+
+models.dev marks a model's reasoning knob with `reasoning_options`; only an
+`{ type: 'effort', values: […] }` option is an effort knob, and its `values` are the levels the
+provider's own API takes — including ones our three never name (`minimal`, `none`, `xhigh`,
+`max`). A `budget_tokens` or `toggle` knob is not an effort knob however reasoning-capable the
+model is, and carries no `efforts`: it takes none, like a plain chat model.
+
+**The id's first half may be a credential's name, so the resolver reads the credential's type
+too.** A fixed provider id is its own key in the snapshot; anything else is a **named
+credential** — `azure-eu`, a name the reader chose and the snapshot has never heard of — and its
+models are filed under the credential _type_'s models.dev key (`credentialTypeInfo('azure_openai')
+.modelsDevKey` → `azure`), the same mapping the catalogue borrows a deployment's window and price
+with (A3a). So `azure-eu/gpt-5.4` reads the snapshot's `azure` entry, and `undefined` — unknown,
+not sent — is what a deployment models.dev has no model for answers, and what an `api_key`
+credential under a name no provider carries answers, because `api_key` has no models.dev key of
+its own.
+
+`main.ts` builds one resolver from the same registry the catalogue, the automatic default (U4)
+and the context budget (above) use, and hands it to whichever scheduler the config asks for; the
+resolver reaches the brain as `RunTurnOptions.reasoningSupportFor` (the same injected-resolver
+seam as `tokenBudgetFor`), asked once per request — the brain supplies the credential type it
+resolved the request with. The brain keeps only _how_ a provider (or a credential type) spells an
+effort and the clamp its own knob needs (`packages/brain/src/reasoning.ts`); a level the model
+does not take is clamped to the nearest one it does.
+
+`undefined` is a real answer, like the budget's: an unknown provider, a model the snapshot
+predates, a free-text id a host accepts (C5). So is `[]`, the model the registry knows takes
+none. The brain reads both as "not sent, `applied: null`" — the safe default, because a level a
+model's API does not know is a 400 rather than an ignored parameter. A host that injects no
+resolver at all is the same as a registry that knows no model. OpenRouter is no exception any
+more: it used to get the effort for every model on the promise that it maps or drops one it does
+not know, and follows the data now — that promise was a hand-maintained assumption about a third
+party, and models.dev carries OpenRouter's own per-model effort options.
 
 ## Usage and cost (epic #245, A2; issue #247)
 
@@ -612,6 +660,17 @@ session's **current** model at every request boundary, so the switch — a diffe
 included — applies from the next message. `POST …/events` and the `initial_events` of
 `POST /v1/sessions` check that id's `provider/model` shape (`model-id.ts`) and answer 400
 otherwise; the check is shared with the session's inline model.
+
+A **`reasoning_effort`** rides the same message the same way (#252): `low`, `medium` or `high`,
+or `null` for the provider's default again. The server stores it exactly as sent — on
+`POST …/events` and on the `initial_events` of creation alike — and the brain reads the newest
+one out of the log at each request boundary and records what a request was asked for and what it
+ran with on its span. The field needs no route-level check the way a model id does: it is an
+enum, so the protocol's schema is what refuses a level it does not have, with the 400 the route
+gives every bad body. How each provider is asked, and the clamp its own knob needs, is the
+brain's (`packages/brain/src/reasoning.ts`); which models take an effort at all is this server's,
+from the same models.dev registry the context budget reads — see "The reasoning effort, per
+model".
 
 ## Preferences and the automatic default (U1/U4)
 
@@ -1045,6 +1104,7 @@ before the instance stops serving it (#151).
 | `ModelCatalog`, `ModelCatalogOptions`, `CatalogRefreshLimitedError`                                                              | the model catalogue: provider lists, registry join, cache, fallback (#90)                                                                    |
 | `createBundledRegistry()`, `emptyRegistry`, `SNAPSHOT_DATE`, `ModelRegistry`, `RegistryModel`                                    | the registry join's seam, over the bundled models.dev snapshot                                                                               |
 | `contextTokenBudget`, `createTokenBudgetResolver`, `OUTPUT_RESERVE_RATIO`                                                        | the per-model context budget: `contextWindow − min(maxOutput, 25%)`, per request (#246)                                                      |
+| `createReasoningSupportResolver`                                                                                                 | the per-model reasoning gate: the `low \| medium \| high` a model takes, per request (#252)                                                  |
 | `createProviderFetch()`, `ProviderFetch`, `DEFAULT_PROVIDER_TIMEOUT_MS`                                                          | the provider HTTP client: egress-proxy aware, 5 s deadline                                                                                   |
 | `CatalogCache`, `RefreshLimiter`, `DEFAULT_CATALOG_TTL_MS`, `DEFAULT_REFRESH_INTERVAL_MS`                                        | the in-memory per-(user, provider) cache and the refresh rate limit (C4)                                                                     |
 | `adapterFor()`, `adaptedProviders()`, `isChatModel()`, `isNonChatFamily()`                                                       | the fixed endpoint table and the chat filter (C1/C2)                                                                                         |
@@ -1096,6 +1156,7 @@ src/
     adapters.ts         the fixed provider endpoint table and each provider's payload shape
     registry.ts         ModelRegistry over the bundled models.dev snapshot (C2)
     context-budget.ts   the per-model context budget: the rule, and the resolver (#246)
+    reasoning-support.ts the per-model reasoning gate: which efforts a model takes (#252)
     filter.ts           isChatModel: the never-hide/never-show rule, and the name families
     cache.ts            CatalogCache (one hour per user+provider) and RefreshLimiter (C4)
     provider-fetch.ts   ProviderFetch: fetch over the egress-proxy env, and the 5 s deadline
@@ -1206,6 +1267,12 @@ parallel with each other.
   from a wide model to a narrow one carries the whole conversation into the wide model's
   request and only the newest message into the narrow one's (read off the prompts the scripted
   model recorded).
+- `reasoning-effort.test.ts` — #252 over HTTP: a `reasoning_effort` accepted on `POST …/events`
+  and on a creation's `initial_events`, stored on the event, and run by the turn the message
+  starts — the span recording `{ requested, applied }` off the bundled registry's data,
+  `applied: null` for a model that takes no effort, a `medium` clamped to `high` for a model
+  whose knob has no `medium`, a 400 for a level the protocol does not have with nothing
+  appended, and a message without one leaving both the event and the span exactly as they were.
 - `scheduler.test.ts` — one turn per session, steering, interrupts (running and idle), a
   message queued behind an interrupt, recovery on start, concurrency, stopping, and the fence
   reaching the store.
@@ -1314,6 +1381,11 @@ parallel with each other.
   and without `maxOutput`, a tiny model, a model id with a slash of its own, an unknown model
   and a known model with no window (both `undefined`, the brain's 32,768-token fallback), and
   the bundled snapshot answering a real window for a real model.
+- `catalog/reasoning-support.test.ts` (#252) — the reasoning gate on its own: a reasoning model's
+  levels narrowed to ours, a model whose own levels leave out one of ours, a non-reasoning
+  model, a reasoning model with a token-budget knob, and an effort vocabulary sharing nothing
+  with ours (all `[]`), an unknown model (`undefined`), a model id with a slash of its own, and
+  the bundled snapshot answering a real model's real levels.
 
 ## Rules
 

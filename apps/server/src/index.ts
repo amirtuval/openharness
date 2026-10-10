@@ -162,6 +162,7 @@ export {
   type ProviderFetch,
   type ProviderResponse,
 } from './catalog/provider-fetch'
+export { createReasoningSupportResolver } from './catalog/reasoning-support'
 export {
   createBundledRegistry,
   emptyRegistry,

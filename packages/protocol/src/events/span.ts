@@ -2,6 +2,7 @@ import { z } from 'zod'
 
 import { EventIdSchema } from '../ids'
 import type { DeepReadonly } from '../readonly'
+import { ReasoningEffortRunSchema } from '../reasoning'
 import { EVENT_TYPES, EventSeqSchema, ProcessedAtSchema, SupersedesSchema } from './common'
 
 /**
@@ -91,6 +92,19 @@ export const ModelRequestStartEventSchema = z.object({
    * for the D9 transition only, like `consumes` above.
    */
   model: z.string().min(1).optional(),
+  /**
+   * // extension: the reasoning effort this request was asked for and ran with (#252).
+   *
+   * Written when the session's log asks for one: `requested` is the effort the newest
+   * effort-carrying `user.message` named, and `applied` is what the request actually ran with —
+   * the same level, or `null` when the model takes no effort and the provider's default was
+   * used. It is recorded per request, like `model`, so a session that changes its effort
+   * mid-conversation keeps, for every request, what that request ran with.
+   *
+   * Absent when nothing was asked for, which is every request of a session that never set an
+   * effort — a reader without the field reads the provider's default, exactly as before.
+   */
+  reasoning_effort: ReasoningEffortRunSchema.optional(),
 })
 
 /** A stored `span.model_request_start`, deep-readonly (D9, issue #46). */

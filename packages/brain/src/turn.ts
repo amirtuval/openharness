@@ -47,6 +47,7 @@ import {
   streamModelRequest,
   ZERO_MODEL_USAGE,
 } from './model'
+import { planReasoning, type ReasoningSupportFor, requestedReasoningEffort } from './reasoning'
 import { redactSecret } from './redact'
 import type { RetryPolicy } from './retry'
 import { backoffDelay, resolveRetryPolicy } from './retry'
@@ -199,6 +200,15 @@ export interface RunTurnOptions {
   readonly fence?: PartitionFence
   /** How the log becomes messages; defaults to `DEFAULT_CONTEXT_STRATEGY`. */
   readonly contextStrategy?: ContextStrategy
+  /**
+   * Which reasoning efforts the model of a request takes, asked once per request — the same
+   * injected-resolver seam as the context budget's `tokenBudgetFor` (#252's follow-up).
+   *
+   * Omitted, no model is known to take an effort and every request keeps its provider's default.
+   * The server builds one from its models.dev registry
+   * (`apps/server/src/catalog/reasoning-support.ts`); see {@link ReasoningSupportFor}.
+   */
+  readonly reasoningSupportFor?: ReasoningSupportFor
   /** How model failures are retried; see {@link RetryPolicy}. */
   readonly retry?: RetryPolicy
 }
@@ -451,7 +461,28 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       ])
       return { outcome: 'error' }
     }
-    const [start] = await append([spanStart(claims, requestModel.id)])
+    // What this request runs with (#252): the newest effort the log asks for, read at this
+    // request's boundary like the model. A message that set one applies from here on — one that
+    // arrived while the previous request was streaming was appended before this read, so it is
+    // this request's, and one that arrives after it belongs to the next — and the read is the
+    // replay read, so an effort an edit took back is already gone from it. The record rides the
+    // span below, which is the only place the log says what a request ran with.
+    //
+    // The effort lives in the log while the model this request runs lives on the session
+    // (`getSessionUnscoped`, above), and the two cannot be one read: the session is where
+    // `system` and the model projection are, the log is where a message's effort is, and the
+    // store has no method that answers both. Folding the effort into the model read would mean
+    // projecting it onto the session, a `packages/protocol`/`packages/session` change that a
+    // per-message field deliberately avoids (see the module note in `reasoning.ts`). The read is
+    // the same replay read the context below is built from; it is the cost of asking the log
+    // rather than a session field.
+    const reasoning = planReasoning(
+      requestModel.id,
+      credential.type,
+      requestedReasoningEffort(await readLog(store, sessionId)),
+      options.reasoningSupportFor,
+    )
+    const [start] = await append([spanStart(claims, requestModel.id, reasoning.record)])
     if (start === undefined) {
       throw new Error('the store did not return the span it was asked to append')
     }
@@ -476,6 +507,7 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     const result = await streamModelRequest({
       model: agentModel,
       messages,
+      providerOptions: reasoning.providerOptions,
       signal,
       onTextDelta: async (text) => {
         // One append per chunk, awaited: a chunk that could not be stored ends the request the

@@ -13,6 +13,8 @@ import { PACKAGE_NAME as SESSION_PACKAGE_NAME } from '@openharness/session'
  *
  * - **{@link runTurn}** (`./turn`) — the loop, and the lifecycle it writes.
  * - **{@link ContextStrategy}** (`./context`) — how the log becomes model messages.
+ * - **{@link PROVIDER_REASONING}** (`./reasoning`) — how `low | medium | high` is asked for from
+ *   each provider, and what the log asked the next request to run with (#252).
  * - **{@link ModelFactory}** (`./model`) — how a `provider/model` id becomes a model to stream,
  *   made with the {@link ModelCredential} the request runs under.
  * - **{@link ResolveCredential}** (`./model`) — where that credential comes from: the session
@@ -42,6 +44,7 @@ export * from './context'
 export * from './errors'
 export * from './azure-fetch'
 export * from './model'
+export * from './reasoning'
 export * from './redact'
 export * from './retry'
 export * from './turn'

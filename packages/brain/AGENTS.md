@@ -14,7 +14,9 @@ that holds a partition lease writes under its fence.
 
 What a turn streams is the **session's** configuration: `session.model` is the id every request
 is built from and recorded on its span, and `session.system` is the system prompt the context
-strategy is handed (epic #92, #93/#94). Since #111/#116 the model is not frozen for a turn: a
+strategy is handed (epic #92, #93/#94). The **reasoning effort** a request runs at is read from
+the log at each request boundary — the newest `user.message` that carried one (#252) — and
+recorded on the span beside it, since nothing stores an effort on a session. Since #111/#116 the model is not frozen for a turn: a
 `user.message` carrying `model` switches it in the append transaction, and the loop re-reads
 the session at **every request boundary**, so a switch applies from the next request on —
 across providers, since each request is built from the current id and credential alone (U3).
@@ -50,6 +52,7 @@ src/
   context.ts            ContextStrategy: the log as model messages, trimmed
   model.ts              ModelFactory, credentials, and streaming one request through the AI SDK
   azure-fetch.ts        the Azure endpoint's base URL, and the safeFetch guard a model call goes through
+  reasoning.ts          the reasoning effort: per provider, gated by the injected resolver
   redact.ts             redactSecret: scrubbing a provider key out of error text
   errors.ts             classifyModelError: retryable or terminal, and which session.error
   retry.ts              RetryPolicy, backoff, and the injectable sleep
@@ -67,34 +70,36 @@ emits what that reaches.
 
 ### `@openharness/brain`
 
-| export                                                                        | what it is                                                                                               |
-| ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| `runTurn(sessionId, options)`                                                 | run one turn; resolves to a `TurnOutcome`                                                                |
-| `RunTurnOptions`                                                              | `{ store, model, resolveCredential, signal?, fence?, contextStrategy?, retry? }`                         |
-| `TurnOutcome`, `TurnOutcomeKind`                                              | `{ outcome: 'idle' \| 'noop' \| 'interrupted' \| 'error' }`                                              |
-| `ContextStrategy`, `ContextStrategyOptions`                                   | `(events, { model, system }) => ModelMessage[]`                                                          |
-| `createContextStrategy(config?)`, `ContextStrategyConfig`                     | the default strategy: the conversation, trimmed to a token budget resolved per model                     |
-| `DEFAULT_CONTEXT_STRATEGY`, `DEFAULT_CONTEXT_TOKEN_BUDGET`, `CHARS_PER_TOKEN` | its defaults                                                                                             |
-| `estimateTokens(text)`                                                        | the chars/4 estimate the budget is measured in                                                           |
-| `ModelCredential`                                                             | `{ type: 'api_key', apiKey }` or `{ type: 'azure_openai', apiKey, endpoint }` — one request's credential |
-| `ResolveCredential`                                                           | `(name) => Promise<ModelCredential \| null>` — where it comes from                                       |
-| `ModelFactory`                                                                | `(modelId, credential) => LanguageModel` — how a `provider/model` becomes a model                        |
-| `providerModelFactory`, `createProviderModelFactory(options)`                 | the `ModelFactory` hosts normally pass: the official AI SDK providers, the key passed explicitly         |
-| `azureFetch`, `createAzureFetch(options)`, `azureBaseUrl(endpoint)`           | the Azure `fetch` (safeFetch under the streaming-safe limits) and the base URL it builds                 |
-| `providerOf(modelId)`                                                         | the provider of a `provider/model` id: the part before the first slash                                   |
-| `isUsableCredential(credential)`                                              | whether a resolved credential is a key at all (a blank one is not)                                       |
-| `missingCredentialMessage(provider)`                                          | the `session.error` sentence for a provider with no key                                                  |
-| `redactSecret(text, secret)`, `REDACTED_PLACEHOLDER`                          | the credential scrubbed out of provider error text                                                       |
-| `streamModelRequest(params)`, `ModelRequestParams`, `ModelRequestResult`      | one model request, as text, usage, error and abort                                                       |
-| `toModelUsage(usage)`, `ZERO_MODEL_USAGE`                                     | what a request reported → the protocol's four counters, always integers                                  |
-| `classifyModelError(error)`, `ModelErrorClassification`                       | retryable or not, and the `session.error` type that says so                                              |
-| `isRetryableModelError(error)`                                                | the same answer, when only the boolean is wanted                                                         |
-| `isClaimConflictError(error)`                                                 | whether the store refused a claim another owner had taken                                                |
-| `isOwnershipError(error)`                                                     | a fenced write or a claim conflict: the log is somebody else's (D9)                                      |
-| `RetryPolicy`, `ResolvedRetryPolicy`, `resolveRetryPolicy(policy?)`           | how failures are retried                                                                                 |
-| `backoffDelay(attempt, policy)`, `abortableSleep`, `Sleep`                    | the delay, and the sleep that honors an abort                                                            |
-| `DEFAULT_MAX_RETRIES`, `DEFAULT_BASE_DELAY_MS`, `DEFAULT_MAX_DELAY_MS`        | `3`, `500`, `8000`                                                                                       |
-| `PACKAGE_NAME`, `DEPENDENCIES`                                                | the package name, and the edges that must resolve through built output                                   |
+| export                                                                                                                                 | what it is                                                                                                                                                        |
+| -------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `runTurn(sessionId, options)`                                                                                                          | run one turn; resolves to a `TurnOutcome`                                                                                                                         |
+| `RunTurnOptions`                                                                                                                       | `{ store, model, resolveCredential, signal?, fence?, contextStrategy?, reasoningSupportFor?, retry? }`                                                            |
+| `TurnOutcome`, `TurnOutcomeKind`                                                                                                       | `{ outcome: 'idle' \| 'noop' \| 'interrupted' \| 'error' }`                                                                                                       |
+| `ContextStrategy`, `ContextStrategyOptions`                                                                                            | `(events, { model, system }) => ModelMessage[]`                                                                                                                   |
+| `createContextStrategy(config?)`, `ContextStrategyConfig`                                                                              | the default strategy: the conversation, trimmed to a token budget resolved per model                                                                              |
+| `DEFAULT_CONTEXT_STRATEGY`, `DEFAULT_CONTEXT_TOKEN_BUDGET`, `CHARS_PER_TOKEN`                                                          | its defaults                                                                                                                                                      |
+| `estimateTokens(text)`                                                                                                                 | the chars/4 estimate the budget is measured in                                                                                                                    |
+| `ModelCredential`                                                                                                                      | `{ type: 'api_key', apiKey }` or `{ type: 'azure_openai', apiKey, endpoint }` — one request's credential                                                          |
+| `ResolveCredential`                                                                                                                    | `(name) => Promise<ModelCredential \| null>` — where it comes from                                                                                                |
+| `ModelFactory`                                                                                                                         | `(modelId, credential) => LanguageModel` — how a `provider/model` becomes a model                                                                                 |
+| `providerModelFactory`, `createProviderModelFactory(options)`                                                                          | the `ModelFactory` hosts normally pass: the official AI SDK providers, the key passed explicitly                                                                  |
+| `azureFetch`, `createAzureFetch(options)`, `azureBaseUrl(endpoint)`                                                                    | the Azure `fetch` (safeFetch under the streaming-safe limits) and the base URL it builds                                                                          |
+| `providerOf(modelId)`                                                                                                                  | the provider of a `provider/model` id: the part before the first slash                                                                                            |
+| `isUsableCredential(credential)`                                                                                                       | whether a resolved credential is a key at all (a blank one is not)                                                                                                |
+| `missingCredentialMessage(provider)`                                                                                                   | the `session.error` sentence for a provider with no key                                                                                                           |
+| `redactSecret(text, secret)`, `REDACTED_PLACEHOLDER`                                                                                   | the credential scrubbed out of provider error text                                                                                                                |
+| `streamModelRequest(params)`, `ModelRequestParams`, `ModelRequestResult`                                                               | one model request, as text, usage, error and abort                                                                                                                |
+| `ProviderOptions`                                                                                                                      | the AI SDK's per-provider options for one call, read off `streamText`                                                                                             |
+| `PROVIDER_REASONING`, `CREDENTIAL_TYPE_REASONING`, `planReasoning`, `ReasoningPlan`, `ReasoningSupportFor`, `requestedReasoningEffort` | `low \| medium \| high` in each provider's — and named credential type's — own option, gated by the injected resolver, and what the log asks a request for (#252) |
+| `toModelUsage(usage)`, `ZERO_MODEL_USAGE`                                                                                              | what a request reported → the protocol's four counters, always integers                                                                                           |
+| `classifyModelError(error)`, `ModelErrorClassification`                                                                                | retryable or not, and the `session.error` type that says so                                                                                                       |
+| `isRetryableModelError(error)`                                                                                                         | the same answer, when only the boolean is wanted                                                                                                                  |
+| `isClaimConflictError(error)`                                                                                                          | whether the store refused a claim another owner had taken                                                                                                         |
+| `isOwnershipError(error)`                                                                                                              | a fenced write or a claim conflict: the log is somebody else's (D9)                                                                                               |
+| `RetryPolicy`, `ResolvedRetryPolicy`, `resolveRetryPolicy(policy?)`                                                                    | how failures are retried                                                                                                                                          |
+| `backoffDelay(attempt, policy)`, `abortableSleep`, `Sleep`                                                                             | the delay, and the sleep that honors an abort                                                                                                                     |
+| `DEFAULT_MAX_RETRIES`, `DEFAULT_BASE_DELAY_MS`, `DEFAULT_MAX_DELAY_MS`                                                                 | `3`, `500`, `8000`                                                                                                                                                |
+| `PACKAGE_NAME`, `DEPENDENCIES`                                                                                                         | the package name, and the edges that must resolve through built output                                                                                            |
 
 `log.ts`, `events.ts` and `validate.ts` are internal: they are how the loop is written, not what
 a host talks to.
@@ -133,7 +138,9 @@ LOOP — once per model request
   4. no credential for the model's provider ............... MISSING CREDENTIAL (below)
   4b. the id names a provider with no client here .......... UNSUPPORTED PROVIDER (below)
   5. ... span.model_request_start { consumes: the queued user.message ids,
-                                    model: the provider/model of the request }
+                                    model: the provider/model of the request,
+                                    reasoning_effort: what the newest effort-carrying
+                                    user.message asked for, and what was applied }
      (the append IS the claim: atomic, fenced, refused whole with ClaimConflictError)
   6. stream ............................................... stored event_start under a fresh
                                                              sevt_ id, then one stored
@@ -290,6 +297,7 @@ Notes on the corners:
 | how the log becomes messages         | `contextStrategy` on `runTurn`; the default trims to a token budget, per model                   |
 | how `provider/model` becomes a model | `model` on `runTurn` (required): a `ModelFactory`; the server passes `providerModelFactory`      |
 | where the key comes from             | `resolveCredential` on `runTurn`: the owner's credential per provider, resolved per request (A5) |
+| which models take a reasoning effort | `reasoningSupportFor` on `runTurn`: the levels a model takes, asked per request (#252)           |
 | how failures are retried             | `retry` on `runTurn`: attempts, base delay, ceiling, and the `sleep` itself                      |
 
 `ContextStrategy` is called once per model request, with the log as that request sees it and the
@@ -456,6 +464,56 @@ purpose and stays as `toModelUsage`'s regression test; no shipped provider is th
 Sessions whose turns ran before the fix keep the unreadable rows they were stored with; v1 is
 unreleased, so nothing migrates them — the fix is what stops new ones being written.
 
+### The reasoning effort
+
+How hard a request is asked to think is a property of the **request**, and `low | medium | high`
+is the vocabulary the protocol fixes (`@openharness/protocol`); this package is where a level
+becomes the thing a provider actually reads (`src/reasoning.ts`).
+
+- **One table, keyed by the provider list, that keeps only the spelling.** `PROVIDER_REASONING`
+  is a `Readonly<Record<ProviderId, …>>` — the same shared list #245 built — so a provider the
+  server can store a key for and this table has no effort for is a compile error. Each row keeps
+  only the `providerOptions` its AI SDK client reads: Anthropic's `effort`, OpenAI's and xAI's
+  and Groq's and Cerebras' `reasoningEffort`, DeepSeek's, Mistral's, Fireworks' and Together's,
+  Gemini's `thinkingConfig.thinkingLevel`, OpenRouter's — each checked against the installed
+  `@ai-sdk/*` version — and the clamp its own knob needs (DeepSeek has no `medium` and runs it
+  at `high`; Mistral has only `none` and `high`, and every level above the default runs at
+  `high`; `applied`).
+- **A second table, keyed by credential type, for the named credentials.** A named credential's
+  model ids carry its _name_ as the first half (`azure-eu/gpt-4o`), and a name is the reader's,
+  so the provider table has no row for it. `CREDENTIAL_TYPE_REASONING` is the
+  `Readonly<Record<NamedCredentialType, …>>` that does: `azure_openai` asks Azure OpenAI for an
+  effort through the **`openai`** options key, which is what `@ai-sdk/azure`'s chat model reads
+  (it _is_ the OpenAI chat model under an Azure URL, `azure.chat`; `providerOptions.azure` would
+  never be looked at). A type the protocol grows without a row here is a compile error.
+- **Which models take an effort is the host's, through an injected resolver.** It used to be
+  hand-written patterns per provider in this table, which rotted with every model release — a new
+  reasoning model silently got no effort, a renamed one could be sent a level its API rejects
+  with a 400. `RunTurnOptions.reasoningSupportFor` is a `(modelId, credentialType) => levels |
+undefined` resolver, the same seam the context budget's `tokenBudgetFor` uses, built by the
+  host from the registry it already holds (the server's models.dev snapshot); the rows above
+  supply only the option and the clamp. The credential type travels with the id because the id's
+  first half may be a credential's name rather than a provider id, and the _type_ is what says
+  which registry entry a deployment reads (see the server's resolver). A host that injects none —
+  and a model the resolver does not know (a custom URL, an Azure deployment models.dev has no
+  entry for, a model a snapshot predates) — is the **safe default**: no model is known to take an
+  effort, so nothing is sent and the request keeps the provider's default. `undefined` (unknown)
+  and `[]` (known to take none) are kept apart for that reason.
+- **A level the model does not take is clamped to one it does.** When the resolver names the
+  levels a model takes and the level the provider's knob produced is outside them, the nearest
+  is sent — a `medium` asked of a model that takes `low` and `high` runs at `high` — so a level
+  the model's API would reject is never put on the wire.
+- **The loop reads the effort out of the log, per request.** `requestedReasoningEffort` walks the
+  replay read for the newest `user.message` carrying one — the same "from this message on"
+  reading as the model switch of #111, and the same boundary, so a message that arrived while the
+  previous request was streaming belongs to the next one. Nothing is stored on the session, so a
+  log that never carried an effort answers `null` and its requests are built exactly as they were
+  before #252.
+- **Both facts land on the span.** `span.model_request_start.reasoning_effort` records
+  `{ requested, applied }`: `applied` is `null` when the model took none, and the field is absent
+  when nothing was asked for. That record is the only durable statement of what a request ran
+  with — the session's own field is the message that asked.
+
 ## Chunks, ids and supersession (D9)
 
 A streamed reply is stored as it streams (issue #46). The brain mints the `sevt_` id the
@@ -498,6 +556,15 @@ retries run on an injected `sleep`, the clock is a `TestClock` from
   resolved), a steering message carrying a switch — across providers — is the model of the
   **next** request while the first keeps its own, the session's projection follows the log,
   and the newest switch among several queued messages wins.
+- `reasoning.test.ts` and `reasoning-effort.test.ts` — the effort: the option spelling for every
+  one of the eleven providers (with a resolver granting the model the levels), the levels a
+  provider's own knob cannot spell, the resolver's gate (`undefined` and `[]` both send nothing,
+  an unknown provider sends nothing), the clamp to the nearest level a model takes, the newest
+  effort winning the walk over the log, and the loop's own half — the option reaching the
+  model call, the span recording what was asked for and applied (including `applied: null`
+  for a model that takes none, the same when no resolver is injected), a switch that arrives
+  mid-stream belonging to the next request, and a session that never asked for one writing no
+  field at all.
 - The credential paths live in `turn.test.ts` too: a turn that ends with
   `missing_provider_credential` (no span, the queued message claimed by the idle event, no
   model call), the same with `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` set to decoys and `fetch`

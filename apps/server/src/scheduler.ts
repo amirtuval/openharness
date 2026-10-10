@@ -1,4 +1,9 @@
-import type { ContextStrategy, ModelFactory, RetryPolicy } from '@openharness/brain'
+import type {
+  ContextStrategy,
+  ModelFactory,
+  ReasoningSupportFor,
+  RetryPolicy,
+} from '@openharness/brain'
 import { DEFAULT_PARTITION_COUNT, type SessionId } from '@openharness/protocol'
 import type { PartitionSignalKind, SessionStore } from '@openharness/session'
 
@@ -103,6 +108,8 @@ export interface LocalSchedulerOptions {
   readonly retry?: RetryPolicy
   /** How the log becomes model messages, passed to every turn. */
   readonly contextStrategy?: ContextStrategy
+  /** Which reasoning efforts a model takes, passed to every turn (#252's follow-up). */
+  readonly reasoningSupportFor?: ReasoningSupportFor
   /**
    * How many partitions the server's sessions are spread over; the protocol's 64 by default.
    *
@@ -158,6 +165,9 @@ export class LocalScheduler implements SessionScheduler {
         ...(options.contextStrategy === undefined
           ? {}
           : { contextStrategy: options.contextStrategy }),
+        ...(options.reasoningSupportFor === undefined
+          ? {}
+          : { reasoningSupportFor: options.reasoningSupportFor }),
       })
     this.#queue = new PassQueue({
       runner,

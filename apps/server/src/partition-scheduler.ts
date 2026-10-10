@@ -1,4 +1,9 @@
-import type { ContextStrategy, ModelFactory, RetryPolicy } from '@openharness/brain'
+import type {
+  ContextStrategy,
+  ModelFactory,
+  ReasoningSupportFor,
+  RetryPolicy,
+} from '@openharness/brain'
 import { DEFAULT_PARTITION_COUNT, partitionOf, type SessionId } from '@openharness/protocol'
 import {
   isFencedError,
@@ -134,6 +139,8 @@ export interface PostgresPartitionSchedulerOptions {
   readonly retry?: RetryPolicy
   /** How the log becomes model messages, passed to every turn. */
   readonly contextStrategy?: ContextStrategy
+  /** Which reasoning efforts a model takes, passed to every turn (#252's follow-up). */
+  readonly reasoningSupportFor?: ReasoningSupportFor
   /**
    * Called when a pass rejects, and when a background tick fails. Never throws.
    *
@@ -253,6 +260,9 @@ export class PostgresPartitionScheduler implements SessionScheduler {
           ...(options.contextStrategy === undefined
             ? {}
             : { contextStrategy: options.contextStrategy }),
+          ...(options.reasoningSupportFor === undefined
+            ? {}
+            : { reasoningSupportFor: options.reasoningSupportFor }),
         }),
       ...(options.maxConcurrentSessions === undefined
         ? {}
