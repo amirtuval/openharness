@@ -70,8 +70,9 @@ src/
   redact.ts             redactSecret: scrubbing a provider key out of error text
   errors.ts             classifyModelError: retryable or terminal, and which session.error
   retry.ts              RetryPolicy, backoff, and the injectable sleep
-  tools.ts              the loop's tool half: what a request offers, what the policy says, how
-                        one step's calls are stored, run and answered (epic #303, #304)
+  tools.ts              the loop's tool half: what a request offers, what the settings say, how
+                        one step's calls are stored, run and answered (epic #303, #304; the
+                        per-user settings and the mode's override: #307)
   events.ts             the events the loop appends, built in one place
   validate.ts           the protocol check every appended event passes
   testing/
@@ -89,15 +90,15 @@ emits what that reaches.
 | export                                                                                                                                                                                                                                            | what it is                                                                                                                                                                                                                                                                                                                 |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `runTurn(sessionId, options)`                                                                                                                                                                                                                     | run one turn; resolves to a `TurnOutcome`                                                                                                                                                                                                                                                                                  |
-| `RunTurnOptions`                                                                                                                                                                                                                                  | `{ store, model, resolveCredential, signal?, fence?, contextStrategy?, reasoningSupportFor?, resolveMode?, retry?, tools?, toolPolicy?, toolSupportFor?, resolveToolSecrets?, maxToolSteps? }`                                                                                                                             |
-| `runToolStep(options)`, `ToolStepOptions`                                                                                                                                                                                                         | one step's tool calls (epic #303, X2): the policy resolved, the calls stored, run concurrently through the registry and answered in call order                                                                                                                                                                             |
+| `RunTurnOptions`                                                                                                                                                                                                                                  | `{ store, model, resolveCredential, signal?, fence?, contextStrategy?, reasoningSupportFor?, resolveMode?, retry?, tools?, toolSettings?, toolSupportFor?, resolveToolSecrets?, maxToolSteps? }`                                                                                                                           |
+| `runToolStep(options)`, `ToolStepOptions`                                                                                                                                                                                                         | one step's tool calls (epic #303, X2; #307): the permission read off the request's settings, the calls stored, run concurrently through the registry and answered in call order                                                                                                                                            |
 | `repairLostExecutions(events, append)`, `pendingToolUse(events)`                                                                                                                                                                                  | the crash rule (X3): the calls the log holds with no answer, and the `execution lost` results a brain that inherited them writes — never running them again                                                                                                                                                                |
-| `offeredTools(registry)`, `toolSet(registry)`, `toolsFor(registry, supportFor, modelId, credentialType)`                                                                                                                                          | what a request's span records, the definitions the model is offered (with **no** `execute`, so the AI SDK never loops), and whether this request offers any                                                                                                                                                                |
+| `offeredTools(registry)`, `toolSet(registry)`, `toolsFor(registry, supportFor, settings, modelId, credentialType)`                                                                                                                                | what a request's span records, the definitions the model is offered (with **no** `execute`, so the AI SDK never loops), and the registry this request may call from — the settings' disabled tools left out, `undefined` when that leaves none                                                                             |
 | `asToolInput(value)`                                                                                                                                                                                                                              | a model's arguments as the JSON object the log stores: anything JSON cannot carry is dropped, and a value that is not an object becomes `{}`                                                                                                                                                                               |
 | `DEFAULT_MAX_TOOL_STEPS`                                                                                                                                                                                                                          | `50` — the model requests one turn may make before it ends with the step-limit notice (X2)                                                                                                                                                                                                                                 |
-| `ToolPolicyResolver`, `ToolSupportFor`, `ToolSecretResolver`                                                                                                                                                                                      | the three injected seams: the policy in force per call (settings, #307), whether a model can call tools at all (models.dev's `tool_call`), and where a turn's per-user values come from (#311)                                                                                                                             |
+| `ToolDecision`, `ToolSettings`, `ToolSettingsResolver`, `ToolSupportFor`, `ToolSecretResolver`                                                                                                                                                    | the injected seams around tools: the settings in force per request — an `enabled` and a `permission` per tool name, asked with the owner and the mode's override (#307) — whether a model can call tools at all (models.dev's `tool_call`), and where a turn's per-user values come from (#311)                            |
 | `TurnOutcome`, `TurnOutcomeKind`                                                                                                                                                                                                                  | `{ outcome: 'idle' \| 'noop' \| 'interrupted' \| 'error' }`                                                                                                                                                                                                                                                                |
-| `ResolvedMode`, `ModeResolver`                                                                                                                                                                                                                    | a mode as the host resolved it — id, name, model, effort, prompt addition — and where a request's mode comes from (#245, M6)                                                                                                                                                                                               |
+| `ResolvedMode`, `ModeResolver`                                                                                                                                                                                                                    | a mode as the host resolved it — id, name, model, effort, prompt addition, and the tool override it imposes (#245, M6; #307) — and where a request's mode comes from                                                                                                                                                       |
 | `ContextStrategy`, `ContextStrategyOptions`, `ContextStrategyResult`                                                                                                                                                                              | `(events, { model, system }) => { messages, truncated? }` — the messages, and what the strategy had to cap to fit (epic #277, K6)                                                                                                                                                                                          |
 | `createContextStrategy(config?)`, `ContextStrategyConfig`                                                                                                                                                                                         | the default strategy: the conversation, summarized where the log says so (#277 K1), trimmed to a token budget resolved per model, with an oversized newest item capped (K6)                                                                                                                                                |
 | `DEFAULT_CONTEXT_STRATEGY`, `DEFAULT_CONTEXT_TOKEN_BUDGET`, `CHARS_PER_TOKEN`                                                                                                                                                                     | its defaults                                                                                                                                                                                                                                                                                                               |
@@ -225,14 +226,14 @@ LOOP — once per model request
  10. another user.message arrived ......................... loop, from 1
  11. otherwise ............................................ session.status_idle, return idle
 
-TOOL STEP — one model request's calls, run and answered (epic #303, X2)
-  each call's policy resolved ............................. the host's resolver, else the tool's
-                                                             own permission
+TOOL STEP — one model request's calls, run and answered (epic #303, X2; #307)
+  each call's permission read off the request's settings ... else the tool's own declaration
   ...................................................... agent.tool_use × N { name, input,
                                                              evaluated_permission }
                                                              (one append, before anything runs)
-  the calls run CONCURRENTLY through the registry .......... what the policy allowed; a refused
-                                                             call is answered without running
+  the calls run CONCURRENTLY through the registry .......... what the permission allowed; a
+                                                             refused call is answered without
+                                                             running
   ...................................................... agent.tool_result × N { tool_use_id,
                                                              content, is_error }
                                                              (one append, in CALL ORDER)
@@ -424,17 +425,27 @@ the transcript, usage and compaction see tools as one more thing the log holds.
   `toolCallId` — so a call and its answer are one identity end to end, and a turn that finds a
   call with no answer knows exactly which execution was lost. The provider's own id is
   discarded.
-- **`evaluated_permission` is decided before the call is stored.** The host's resolver is asked
-  once per call with the session's owner (`toolPolicy`), and the answer is recorded on the
-  event — so a setting changed later does not rewrite what a call ran under. `deny` refuses the
-  call without running it (`Permission to use <name> has been denied.`) — unless the name is one
-  no tool carries, which is not a policy question at all and gets the registry's own
-  `No tool named <name> is registered.`; `ask` is the pause of
-  [#309](https://github.com/amirtuval/openharness/issues/309) and is treated as a refusal until
-  pausing exists, so a policy nobody can honour never quietly becomes "run it". A host that
-  injects no resolver gets each tool's own `permission`, which for every built-in is `allow`
-  (#305) — the epic's "allow every registered tool" — while an MCP tool's `ask` (#312) is
-  honoured rather than silently allowed.
+- **The settings are resolved once per request, before the offer is built** (#307). The host's
+  resolver is asked with the session's owner **and the tool override the request's mode
+  imposes**, and what comes back is a decision per tool name: `enabled` — whether the tool is in
+  the offer at all — and `permission` — what a call to it is evaluated under. Asking per request
+  rather than per call is what makes a disabled tool **absent from the request**: the model
+  cannot see it, so it cannot call it, and `span.model_request_start.tools` records only what
+  was really offered. It is also why a settings change, or a mode edit, applies from the next
+  request on — exactly like a model switch. The mode's override travels with the question rather
+  than being merged here, because the host holds both the mode row and the user's settings; a
+  mode decides on/off and never a permission.
+- **`evaluated_permission` is the decision the call was made under.** It is read off the
+  request's settings before the call is stored, so a setting changed later does not rewrite what
+  a call ran under. `deny` refuses the call without running it (`Permission to use <name> has
+been denied.`) — unless the name is one no tool carries, which is not a permission question at
+  all and gets the registry's own `No tool named <name> is registered.`; `ask` is the pause of
+  [#309](https://github.com/amirtuval/openharness/issues/309) and is refused with a sentence
+  saying the approval does not exist yet, so a setting nobody can honour never quietly becomes
+  "run it" — and never reads as a denial the user did not make. A host that injects no settings
+  gets each tool's own `permission`, which for every built-in is `allow` (#305) — the epic's
+  "allow every registered tool" — while an MCP tool's `ask` (#312) is honoured rather than
+  silently allowed. A tool a name nothing declares reads as `deny`.
 - **Several calls of one step run concurrently and are stored in call order.** The calls are
   one append before anything runs (what the model asked for is in the log whatever happens
   next), the executions are concurrent, and the results are one append in the order the model
@@ -502,15 +513,15 @@ message whose parts name the calls they answer by id.
 
 ### The seams the rest of the epic plugs into
 
-| what                                   | how                                                                                                                                                                                     |
-| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| a tool that runs                       | `ToolDefinition` + `ToolRegistry.execute` in `@openharness/hands` (#305's `web_fetch`, `web_search`, `todo_write` live there)                                                           |
-| whether a model can call tools         | `toolSupportFor` on `runTurn`; the server answers from models.dev's `tool_call`                                                                                                         |
-| what the policy in force says per call | `toolPolicy` on `runTurn`; #307's settings and #309's `ask` live behind it (the `ask` branch is the seam, and it refuses until then)                                                    |
-| a call waiting on the user             | `repairLostExecutions`'s "waiting on the user" check, and the `ask` branch of the policy — #309 replaces both with the pause and the `user.tool_confirmation` result                    |
-| per-user values a tool needs           | `resolveToolSecrets` on `runTurn` (asked per step with the owner); #311's MCP tokens arrive here                                                                                        |
-| MCP tools                              | `agent.mcp_tool_use` / `agent.mcp_tool_result` and a second source in the offered-tools record (#312); nothing in this loop is built-in-specific today besides `offeredTools`' `source` |
-| tool results in the context            | #306 owns what a result may cost and how old ones are cleared; the trimming and pairing rules above are what it must not break                                                          |
+| what                                                 | how                                                                                                                                                                                       |
+| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| a tool that runs                                     | `ToolDefinition` + `ToolRegistry.execute` in `@openharness/hands` (#305's `web_fetch`, `web_search`, `todo_write` live there)                                                             |
+| whether a model can call tools                       | `toolSupportFor` on `runTurn`; the server answers from models.dev's `tool_call`                                                                                                           |
+| which tools a request offers, and what a call may do | `toolSettings` on `runTurn`: the per-request decisions #307 stores per user and a mode overrides; a disabled tool is left out of the offer, and `ask` is refused until #309 can honour it |
+| a call waiting on the user                           | `repairLostExecutions`'s "waiting on the user" check, and the `ask` branch of `refusal` — #309 replaces both with the pause and the `user.tool_confirmation` result                       |
+| per-user values a tool needs                         | `resolveToolSecrets` on `runTurn` (asked per step with the owner); #311's MCP tokens arrive here                                                                                          |
+| MCP tools                                            | `agent.mcp_tool_use` / `agent.mcp_tool_result` and a second source in the offered-tools record (#312); nothing in this loop is built-in-specific today besides `offeredTools`' `source`   |
+| tool results in the context                          | #306 owns what a result may cost and how old ones are cleared; the trimming and pairing rules above are what it must not break                                                            |
 
 ## Extension points
 
@@ -519,7 +530,7 @@ message whose parts name the calls they answer by id.
 | how the log becomes messages         | `contextStrategy` on `runTurn`; the default reads the latest summary (#277 K1), trims to a token budget per model, and caps an oversized newest item (K6)                                                                                                                |
 | when history is summarized           | `compaction` on `runTurn`: one config, or a per-owner `ContextCompactionResolver` the loop asks at each request boundary — the threshold, the summary model, the pass limit, the per-model budgets and output ceilings, and the cut rule (#279; per-user controls: #282) |
 | which tools a turn may call          | `tools` on `runTurn`: a `ToolRegistry` from `@openharness/hands`, or none at all (epic #303, X4)                                                                                                                                                                         |
-| what the policy says about a call    | `toolPolicy` on `runTurn`: the resolver #307's settings live behind; each tool's own permission when it is absent (X3)                                                                                                                                                   |
+| what the settings say about a tool   | `toolSettings` on `runTurn`: the resolver #307's per-user settings and a mode's override live behind, asked per request with the owner and the override; each tool's own declaration when absent (X4)                                                                    |
 | which models may call tools          | `toolSupportFor` on `runTurn`: models.dev's `tool_call`, `false` meaning no tools are offered to that model (X2)                                                                                                                                                         |
 | what a tool is handed besides input  | `resolveToolSecrets` on `runTurn`: the per-user values the host resolved for the step (X4; #311)                                                                                                                                                                         |
 | how many requests a turn may make    | `maxToolSteps` on `runTurn`: the deployment's `OPENHARNESS_MAX_TOOL_STEPS`, ending the turn with a notice past it (X2)                                                                                                                                                   |
@@ -1208,10 +1219,13 @@ Bearer` with a decoy environment, **no** `Authorization` header for a keyless en
   and the assistant/tool messages it is built from), two calls in one step (started together —
   the scenario's own gate deadlocks if they are not — and stored in call order), a loop across
   three steps, the step limit ending the turn with `tool_steps_exhausted_error` and every call
-  answered, a timeout, an interrupt during a call, a `deny` (and an unhonoured `ask`) answered
-  without running anything, the policy asked once per call with the owner, the turn's resolved
-  secrets scrubbed out of a tool's answer, a model the support resolver rejects getting no tools
-  at all, an unknown model getting them, and a turn with no registry calling nothing. Two more
+  answered, a timeout, an interrupt during a call, a `deny` (and an `ask`, refused with the
+  sentence saying the approval of #309 does not exist yet) answered without running anything,
+  the settings asked **once per request** with the owner and the mode's override, a disabled
+  tool left out of the offer (and every tool disabled meaning no offer at all, exactly as a
+  tools-less deployment builds it), the turn's resolved secrets scrubbed out of a tool's
+  answer, a model the support resolver rejects getting no tools at all, an unknown model
+  getting them, and a turn with no registry calling nothing. Two more
   are the crash rule: a call with no result is answered `execution lost` and **not** run, with
   the dead brain's span closed first when one was left open; and one is steering — a message
   that arrives while a tool runs is claimed by the request after the step.

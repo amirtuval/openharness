@@ -1,8 +1,8 @@
 import type { LanguageModelV4CallOptions } from '@ai-sdk/provider'
 import { createToolRegistry, textResult } from '@openharness/hands'
 import type { ToolDefinition, ToolResult } from '@openharness/hands'
-import { EVENT_TYPES } from '@openharness/protocol'
-import type { StoredEvent, StoredEventType } from '@openharness/protocol'
+import { EVENT_TYPES, newModeId } from '@openharness/protocol'
+import type { ModeToolOverride, StoredEvent, StoredEventType } from '@openharness/protocol'
 import { makeUserMessage } from '@openharness/protocol/fixtures'
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
@@ -14,7 +14,8 @@ import {
   asToolInput,
   pendingToolUse,
   toolsFor,
-  type ToolPolicyResolver,
+  type ToolSettings,
+  type ToolSettingsResolver,
   type ToolSupportFor,
 } from './tools'
 import { eventTypes, logOf, message, newSession, spanStartOf, textOf } from './testing/harness'
@@ -345,7 +346,7 @@ describe('the tool loop', () => {
     expect(eventTypes(log).at(-1)).toBe(EVENT_TYPES.sessionStatusIdle)
   })
 
-  it('refuses a call the policy denies, without running it', async () => {
+  it('refuses a call the settings deny, without running it', async () => {
     const { store, sessionId } = await newSession([message('denied')])
     const { tool, run } = echo()
     const { factory } = mockModel(
@@ -358,7 +359,7 @@ describe('the tool loop', () => {
       model: factory,
       resolveCredential: resolveTestCredential,
       tools: createToolRegistry([tool]),
-      toolPolicy: () => 'deny',
+      toolSettings: () => ({ echo: { enabled: true, permission: 'deny' } }),
     })
 
     expect(outcome).toEqual({ outcome: 'idle' })
@@ -409,7 +410,7 @@ describe('the tool loop', () => {
     ])
   })
 
-  it('treats an unhonoured `ask` as a refusal rather than running the call', async () => {
+  it('refuses a call a setting asks about, and says the approval it needs is not there yet', async () => {
     const { store, sessionId } = await newSession([message('maybe')])
     const { tool, run } = echo()
     const { factory } = mockModel(
@@ -422,20 +423,25 @@ describe('the tool loop', () => {
       model: factory,
       resolveCredential: resolveTestCredential,
       tools: createToolRegistry([tool]),
-      toolPolicy: () => 'ask',
+      toolSettings: () => ({ echo: { enabled: true, permission: 'ask' } }),
     })
 
-    // `ask` is the pause of #309; until pausing exists the safe reading is "do not run it".
+    // `ask` is the pause of #309; until pausing exists the safe reading is "do not run it" —
+    // and the model is told that, rather than that a user denied a call no user saw (#307).
     expect(run).not.toHaveBeenCalled()
     const log = await logOf(store, sessionId)
     expect(of(log, EVENT_TYPES.agentToolUse)[0]).toMatchObject({ evaluated_permission: 'ask' })
-    expect(of(log, EVENT_TYPES.agentToolResult)[0]).toMatchObject({ is_error: true })
+    const result = of(log, EVENT_TYPES.agentToolResult)[0]
+    expect(result).toMatchObject({ is_error: true })
+    expect(textOfEvent(result)).toBe(
+      'Permission to use echo requires your approval, which is not available yet.',
+    )
   })
 
-  it('asks the policy once per call with the session’s owner', async () => {
+  it('asks the settings once per request, with the owner and the mode’s override', async () => {
     const { store, sessionId } = await newSession([message('who')])
     const { tool } = echo()
-    const policy = vi.fn<ToolPolicyResolver>(() => 'allow')
+    const settings = vi.fn<ToolSettingsResolver>(() => ({}))
     const { factory } = mockModel(
       {
         toolCalls: [
@@ -451,13 +457,89 @@ describe('the tool loop', () => {
       model: factory,
       resolveCredential: resolveTestCredential,
       tools: createToolRegistry([tool]),
-      toolPolicy: policy,
+      toolSettings: settings,
     })
 
-    expect(policy.mock.calls).toEqual([
-      ['echo', 'user_brain_tests'],
-      ['echo', 'user_brain_tests'],
+    // Once per request — two here, each having offered the tool — and never once per call,
+    // though the step made two of them: the settings decide the offered set, and an edit
+    // applies from the next request on. A chat with no mode hands the resolver `null`.
+    expect(settings.mock.calls).toEqual([
+      ['user_brain_tests', null],
+      ['user_brain_tests', null],
     ])
+  })
+
+  it('hands the resolver the mode’s tool override, so a mode can force a tool on or off', async () => {
+    const modeId = newModeId()
+    const toolOverride: ModeToolOverride = { builtin: { echo: false, other: true } }
+    const { store, sessionId } = await newSession([message('on a mode')], { mode: modeId })
+    const settings = vi.fn<ToolSettingsResolver>(() => ({}))
+    const { factory } = mockModel({ text: ['Done.'] })
+
+    await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+      tools: createToolRegistry([echo().tool]),
+      toolSettings: settings,
+      resolveMode: () =>
+        Promise.resolve({
+          id: modeId,
+          name: 'deep',
+          model: TEST_MODEL_ID,
+          reasoningEffort: null,
+          systemPromptAddition: null,
+          toolOverride,
+        }),
+    })
+
+    // The mode travels with the question rather than being merged here: the host holds both the
+    // mode row and the user's settings (#307).
+    expect(settings.mock.calls).toEqual([['user_brain_tests', toolOverride]])
+  })
+
+  it('offers only the tools the settings leave on', async () => {
+    const { store, sessionId } = await newSession([message('pick one')])
+    const first = echo()
+    const second = echo({ name: 'other' })
+    const { factory, calls } = mockModel({ text: ['Done.'] })
+    const settings: ToolSettings = {
+      echo: { enabled: false, permission: 'allow' },
+      other: { enabled: true, permission: 'allow' },
+    }
+
+    await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+      tools: createToolRegistry([first.tool, second.tool]),
+      toolSettings: () => settings,
+    })
+
+    // The disabled tool is not in the request at all: the model cannot see it or call it.
+    expect(offeredTo(calls[0]!)).toMatchObject([{ type: 'function', name: 'other' }])
+    const span = of(await logOf(store, sessionId), EVENT_TYPES.modelRequestStart)[0]
+    expect(span?.tools).toEqual([{ name: 'other', source: 'builtin' }])
+  })
+
+  it('offers nothing at all when the settings turn every tool off', async () => {
+    const { store, sessionId } = await newSession([message('none')])
+    const { tool } = echo()
+    const { factory, calls } = mockModel({ text: ['Just chat.'] })
+
+    await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+      tools: createToolRegistry([tool]),
+      toolSettings: () => ({ echo: { enabled: false, permission: 'allow' } }),
+    })
+
+    // As if this deployment registered no tools: nothing in the offer, nothing on the span —
+    // which is the same request a tools-less deployment builds, byte for byte.
+    expect(offeredTo(calls[0]!)).toBeUndefined()
+    const span = of(await logOf(store, sessionId), EVENT_TYPES.modelRequestStart)[0]
+    expect(span?.tools).toBeUndefined()
   })
 
   it('hands a tool the turn’s resolved values, and scrubs them out of its answer', async () => {
@@ -664,12 +746,41 @@ describe('the tool helpers on their own', () => {
   })
 
   it('answers the offering question with the registry, not a boolean', () => {
-    const registry = createToolRegistry([echo().tool])
+    const echo_ = echo().tool
+    const other = echo({ name: 'other' }).tool
+    const registry = createToolRegistry([echo_, other])
+    const off = { echo: { enabled: false, permission: 'allow' } } as const
 
-    expect(toolsFor(registry, undefined, 'any/model', 'api_key')).toBe(registry)
-    expect(toolsFor(registry, () => true, 'any/model', 'api_key')).toBe(registry)
-    expect(toolsFor(registry, () => false, 'any/model', 'api_key')).toBeUndefined()
-    expect(toolsFor(undefined, undefined, 'any/model', 'api_key')).toBeUndefined()
+    expect(toolsFor(registry, undefined, undefined, 'any/model', 'api_key')).toBe(registry)
+    expect(toolsFor(registry, () => true, undefined, 'any/model', 'api_key')).toBe(registry)
+    expect(toolsFor(registry, () => false, undefined, 'any/model', 'api_key')).toBeUndefined()
+    expect(toolsFor(undefined, undefined, undefined, 'any/model', 'api_key')).toBeUndefined()
+    // Settings that disable nothing hand back the same registry; one disabled tool comes back
+    // as a registry without it, and every tool disabled is no offer at all.
+    expect(
+      toolsFor(
+        registry,
+        undefined,
+        { other: { enabled: true, permission: 'ask' } },
+        'm',
+        'api_key',
+      ),
+    ).toBe(registry)
+    expect(
+      toolsFor(registry, undefined, off, 'm', 'api_key')?.tools.map((tool) => tool.name),
+    ).toEqual(['other'])
+    expect(
+      toolsFor(
+        registry,
+        undefined,
+        {
+          echo: { enabled: false, permission: 'allow' },
+          other: { enabled: false, permission: 'allow' },
+        },
+        'm',
+        'api_key',
+      ),
+    ).toBeUndefined()
   })
 
   it('caps the step budget where a real task cannot reach it by accident', () => {

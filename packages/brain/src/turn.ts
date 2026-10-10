@@ -2,6 +2,7 @@ import { EVENT_TYPES, newEventId } from '@openharness/protocol'
 import type {
   EventId,
   ModeId,
+  ModeToolOverride,
   ModelConfig,
   ReasoningEffort,
   SessionCompactionOutcome,
@@ -57,7 +58,7 @@ import {
 } from './model'
 import { planReasoning, type ReasoningSupportFor, requestedReasoningEffort } from './reasoning'
 import { redactSecrets } from './redact'
-import type { ToolPolicyResolver, ToolSecretResolver, ToolSupportFor } from './tools'
+import type { ToolSecretResolver, ToolSettingsResolver, ToolSupportFor } from './tools'
 import {
   DEFAULT_MAX_TOOL_STEPS,
   offeredTools,
@@ -117,6 +118,8 @@ import { resolveContextCompaction, summarizeContext } from './summarize'
  *                                                             { consumes: the queued ids }
  *                                                             return error
  *   7. claim the queued user.message events; the claim is the append of the span start below
+ *   7b. the request's tool settings resolved (#307): the host's resolver, asked with the
+ *      session's owner and the mode's override; a tool turned off drops out of the offer
  *   8. ............. span.model_request_start { consumes, model,
  *                                    tools: the { name, source } of every tool offered,
  *                                    reasoning_effort, mode, truncated }
@@ -129,19 +132,20 @@ import { resolveContextCompaction, summarizeContext } from './summarize'
  *  13. another user.message arrived .......................... loop from 1
  *  14. otherwise ............................................. session.status_idle, return idle
  *
- * TOOL STEP — one model request's calls, run and answered (epic #303, X2)
- *   each call's policy resolved (the host's resolver, else the tool's own permission)
+ * TOOL STEP — one model request's calls, run and answered (epic #303, X2; #307)
+ *   each call's permission read off the request's settings, else the tool's own declaration
  *   ................. agent.tool_use × N { name, input, evaluated_permission }
  *                      (one append, before anything runs: what the model asked for is in the
  *                       log whatever happens next)
- *   the calls run CONCURRENTLY through the registry — those the policy allowed; a refused
+ *   the calls run CONCURRENTLY through the registry — those the permission allowed; a refused
  *   one is answered without running
  *   ................. agent.tool_result × N { tool_use_id, content, is_error }
  *                      (one append, in CALL ORDER, whatever order they finished in)
  *   then loop from 1: the answers are what owes the next request
  *
  *   A tool_result is `is_error: true` for everything that is not what the tool produced: a
- *   refusal (`Permission to use <name> has been denied.`), a timeout, an interrupt
+ *   refusal (`Permission to use <name> has been denied.`, or, for a policy of `ask`, the
+ *   sentence that says the approval #309 adds does not exist yet), a timeout, an interrupt
  *   (`Interrupted by the user.`), the tool's own failure, or `execution lost` (below).
  *
  * STEPS EXHAUSTED — the turn has made OPENHARNESS_MAX_TOOL_STEPS model requests (X2)
@@ -312,16 +316,20 @@ export interface RunTurnOptions {
    */
   readonly tools?: ToolRegistry
   /**
-   * What the policy in force says about each call (epic #303, X3/X4), asked once per call with
-   * the session's owner.
+   * The tool settings in force for this request (epic #303, X3/X4; the per-user settings and
+   * the mode's override: issue #307), asked **once per request** with the session's owner and
+   * the tool override the request's mode imposes.
    *
-   * A resolver rather than a value because the policy is per user and per tool — the settings
-   * of #307 live behind it — and asked per call so a change applies from the next call on. A
-   * host that injects none gets each tool's own declared permission. In this issue `allow` and
-   * `deny` are honoured; `ask` is the pause of #309 and is treated as a refusal until it
-   * exists, so a policy nobody can honour never quietly becomes "run it".
+   * A resolver rather than a value for the reason the credential resolver is one: the settings
+   * belong to the session's owner and live in the host's store, and nothing in this package
+   * reads a database. Per request rather than per call, because the offered set has to exist
+   * before the request is built — a tool the user turned off is left out of the offer entirely
+   * — and because an edit then applies from the next request on, exactly as a model switch
+   * does. A host that injects none gets each tool's own declared permission. `allow` and `deny`
+   * are honoured; `ask` is the pause of #309 and is refused with a message that says so until
+   * it exists, so a setting nobody can honour never quietly becomes "run it".
    */
-  readonly toolPolicy?: ToolPolicyResolver
+  readonly toolSettings?: ToolSettingsResolver
   /**
    * Whether a model can call tools at all (epic #303, X2), asked once per request with the
    * credential type the request was resolved with — the same injected-resolver seam as
@@ -371,6 +379,16 @@ export interface ResolvedMode {
   readonly reasoningEffort: ReasoningEffort | null
   /** Appended after the session's system prompt, or `null` for no addition. */
   readonly systemPromptAddition: string | null
+  /**
+   * Which built-in tools this mode forces on or off, or `null` for a mode that says nothing
+   * about tools (issue #307) — the host has the mode row, so it answers this from it.
+   *
+   * It is handed to {@link RunTurnOptions.toolSettings} with the owner rather than applied
+   * here, because a mode **overrides** a user's settings and the host is where both live: the
+   * loop never merges the two itself. A mode may not touch a permission, so nothing about a
+   * call's `evaluated_permission` depends on this field.
+   */
+  readonly toolOverride: ModeToolOverride | null
 }
 
 /**
@@ -822,12 +840,21 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       model: requestModel,
       system: requestSystem,
     })
-    // The tools this request offers (epic #303, X2), if any: a deployment with no registry has
-    // nothing to offer, and a model the registry marks as tool-less gets none — its request is
-    // built exactly as it was before tools existed, which is what keeps such a model working.
+    // The tools this request offers (epic #303, X2/X4; #307), if any: a deployment with no
+    // registry has nothing to offer, a model the registry marks as tool-less gets none, and a
+    // user who turned every tool off gets none either — in each case the request is built
+    // exactly as it was before tools existed. The settings are resolved here, once per request
+    // and before the offer is built, because a disabled tool must not be in the offer at all;
+    // the mode the request follows rides along, since a mode may force tools on or off. A host
+    // that wired no resolver, or no registry, is never asked.
+    const toolSettings =
+      options.toolSettings === undefined || options.tools === undefined
+        ? undefined
+        : await options.toolSettings(current.owner_id, mode?.toolOverride ?? null)
     const toolRegistry = toolsFor(
       options.tools,
       options.toolSupportFor,
+      toolSettings,
       requestModel.id,
       credential.type,
     )
@@ -1040,8 +1067,7 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       await runToolStep({
         calls: result.toolCalls,
         registry: toolRegistry,
-        ownerId: current.owner_id,
-        ...(options.toolPolicy === undefined ? {} : { policy: options.toolPolicy }),
+        ...(toolSettings === undefined ? {} : { settings: toolSettings }),
         ...(secrets === undefined ? {} : { secrets }),
         ...(signal === undefined ? {} : { signal }),
         append,
