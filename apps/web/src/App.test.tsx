@@ -607,6 +607,7 @@ describe('model-first labels, hidden agents', () => {
       cost: null,
       // The budget a real server reports for a 128k window with no declared ceiling (#280).
       context_budget: 96_000,
+      tool_call: true,
       source: 'provider',
     }
     // The seeded session runs anthropic/claude-sonnet-5; this catalog does not list it.
