@@ -442,6 +442,11 @@ export interface SessionStore {
    * `model` meaning "the model this chat last ran", so a chat whose mode is deleted afterwards
    * continues on the model it last ran.
    *
+   * A span with `purpose: 'summary'` is the exception (epic #277, C2): it is the compaction
+   * engine's own request, its `model` is the summarizer's, and projecting it would move the chat
+   * onto the model that summarized it. Its tokens are still in the log and still count in the
+   * usage read — the projection is about which model the chat runs, not about what was spent.
+   *
    *
    * The input carries only the fields the caller owns — an `AppendableEvent` is a `StoredEvent`
    * without the assigned ones. Inputs are stored as given and not validated: callers validate

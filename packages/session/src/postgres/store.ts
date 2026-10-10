@@ -1861,7 +1861,13 @@ function projectionAfter(events: readonly AppendableEvent[]): {
       if (event.mode !== undefined) {
         mode = event.mode
       }
-    } else if (event.type === EVENT_TYPES.modelRequestStart && event.model !== undefined) {
+    } else if (
+      event.type === EVENT_TYPES.modelRequestStart &&
+      event.model !== undefined &&
+      event.purpose !== 'summary'
+    ) {
+      // A summary request's span names the summarizer, not the chat's model, so it projects
+      // nothing (epic #277, C2).
       model = { id: event.model }
     }
   }

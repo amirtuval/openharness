@@ -1049,6 +1049,28 @@ export function runSessionStoreConformance(
         })
       })
 
+      it('leaves the session’s model alone for a summary request (epic #277, C2)', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        await append(store, session.id, [
+          userMessageWith('switch', 'openai/gpt-5-mini'),
+          {
+            type: EVENT_TYPES.modelRequestStart,
+            model: 'anthropic/claude-sonnet-5',
+            purpose: 'summary',
+          },
+        ])
+        // The summarizer's model is recorded on the span — and counted in the usage read — but
+        // the chat keeps running the model it last ran.
+        expect((await store.getSessionUnscoped(session.id))?.model).toEqual({
+          id: 'openai/gpt-5-mini',
+        })
+        await append(store, session.id, [
+          { type: EVENT_TYPES.modelRequestStart, model: 'xai/grok-5' },
+        ])
+        expect((await store.getSessionUnscoped(session.id))?.model).toEqual({ id: 'xai/grok-5' })
+      })
+
       it('projects a model carried by a createSession initial_events message', async () => {
         const { store } = await setup()
         const agent = await store.createAgent(agentInput(), OWNER_A)
