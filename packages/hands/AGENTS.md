@@ -4,7 +4,9 @@ Pluggable _hands_: the sandboxes and tools behind `execute(name, input)` — and
 land, the one outbound-request guard the rest of openharness uses.
 
 The tools are **not implemented yet**: no sandbox, no `execute()`. What is here is
-**`safeFetch`** (epic #245, A3a), the SSRF guard for a URL a **user** supplied. Everything
+**`safeFetch`** (epic #245, A3a), the SSRF guard for a URL a **user** supplied, and
+**`openMcpClient`** (#303, X10), the remote-MCP client the server's connection check and the
+tool loop (#312) share. Everything
 else the server fetches is a constant URL it wrote itself, so there is no address to choose
 and nothing to guard; a provider credential's endpoint is different — an Azure OpenAI endpoint
 is typed by the user, and a URL the user chose is exactly what a guard is for. The tools' own
@@ -31,17 +33,20 @@ repo.
 
 ## Public API
 
-| export                                                                                                                               | what it is                                                                          |
-| ------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
-| `safeFetch(url, init?, options?)`                                                                                                    | fetch a user-supplied URL, refusing everything below                                |
-| `SafeFetchError`, `isSafeFetchError()`, `SafeFetchErrorCode`                                                                         | the refusal, with a stable `code`                                                   |
-| `AddressResolver`, `SafeFetchTransport`, `SafeFetchRequest`                                                                          | the two seams: how a host resolves, and how the request is made                     |
-| `SafeFetchOptions`                                                                                                                   | `allowPrivate`, `maxBytes`, `timeoutMs`, `idleTimeoutMs`, `maxRedirects`, the seams |
-| `SAVE_TIME_LIMITS`, `STREAMING_LIMITS`, `STREAMING_IDLE_TIMEOUT_MS`                                                                  | the two presets: a tight check, and a streaming-safe model call                     |
-| `DEFAULT_MAX_BYTES`, `DEFAULT_TIMEOUT_MS`, `DEFAULT_MAX_REDIRECTS`                                                                   | `1 MiB`, `30 s`, `5` — what a call with no options gets                             |
-| `isBlockedAddress()`, `isPublicAddress()`, `isMetadataHostname()`, `parseIpAddress()`, `parseIPv4()`, `parseIPv6()`, `ParsedAddress` | the address rules, exported so a caller can reason about one on its own             |
-| `PACKAGE_NAME`                                                                                                                       | `'@openharness/hands'`                                                              |
-| `PROTOCOL_DEPENDENCY`                                                                                                                | `@openharness/protocol`'s `PACKAGE_NAME`; proves the built-output edge              |
+| export                                                                                                                               | what it is                                                                           |
+| ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
+| `safeFetch(url, init?, options?)`                                                                                                    | fetch a user-supplied URL, refusing everything below                                 |
+| `SafeFetchError`, `isSafeFetchError()`, `SafeFetchErrorCode`                                                                         | the refusal, with a stable `code`                                                    |
+| `AddressResolver`, `SafeFetchTransport`, `SafeFetchRequest`                                                                          | the two seams: how a host resolves, and how the request is made                      |
+| `SafeFetchOptions`                                                                                                                   | `allowPrivate`, `maxBytes`, `timeoutMs`, `idleTimeoutMs`, `maxRedirects`, the seams  |
+| `SAVE_TIME_LIMITS`, `STREAMING_LIMITS`, `STREAMING_IDLE_TIMEOUT_MS`                                                                  | the two presets: a tight check, and a streaming-safe model call                      |
+| `DEFAULT_MAX_BYTES`, `DEFAULT_TIMEOUT_MS`, `DEFAULT_MAX_REDIRECTS`                                                                   | `1 MiB`, `30 s`, `5` — what a call with no options gets                              |
+| `isBlockedAddress()`, `isPublicAddress()`, `isMetadataHostname()`, `parseIpAddress()`, `parseIPv4()`, `parseIPv6()`, `ParsedAddress` | the address rules, exported so a caller can reason about one on its own              |
+| `openMcpClient(options)`                                                                                                             | open and initialize a Streamable HTTP connection to a remote MCP server              |
+| `McpClientSession`, `McpClientOptions`, `McpFetch`                                                                                   | the session (`listTools()`, `client`, `close()`), its options and the injected fetch |
+| `mcpToolDefinition(tool)`, `MCP_CLIENT_NAME`, `MCP_CLIENT_VERSION`                                                                   | one SDK tool as this protocol's definition, and the identity this client announces   |
+| `PACKAGE_NAME`                                                                                                                       | `'@openharness/hands'`                                                               |
+| `PROTOCOL_DEPENDENCY`                                                                                                                | `@openharness/protocol`'s `PACKAGE_NAME`; proves the built-output edge               |
 
 ### What `safeFetch` refuses, and how
 
@@ -105,6 +110,20 @@ Both presets set **`maxRedirects: 0`**, so a provider API call that answers a re
 neither the key nor the model request should follow a `Location` off it. Following redirects (up
 to `DEFAULT_MAX_REDIRECTS`) is the default policy, which the tools' `web_fetch` will use.
 
+## The remote-MCP client (epic #303, X10)
+
+`openMcpClient(options)` opens one **Streamable HTTP** connection to a remote MCP server, over
+the official `@modelcontextprotocol/sdk`. It initializes, and `listTools()` reads the server's
+whole tool list (following pagination) as this protocol's `McpToolDefinition`s. The underlying
+SDK `client` is exposed so the tool loop (#312) can call tools without this module inventing a
+call API the connection check does not need.
+
+It is deliberately thin and reaches nothing on its own: the **server** injects the URL, the
+auth headers (a sealed header map, or an OAuth bearer token) and the `fetch` — a `safeFetch`
+wrapper, so a user-supplied URL is guarded. stdio, the deprecated HTTP+SSE transport and the
+SDK's own OAuth provider are all unused: the server is the OAuth client, and its tokens are
+sealed in the deployment's vault, so the flow is the server's.
+
 ## Allowed `@openharness/*` dependencies
 
 Only these (see the table in `docs/architecture.md`):
@@ -138,6 +157,11 @@ dependency table.
   is read, errors or is cancelled — the server's own socket set goes empty. Those tests delete
   the proxy variables at module load (`safeFetch` honours the environment, and a sandbox's egress
   proxy would otherwise answer for `127.0.0.2`).
+- `mcp-client.test.ts` runs `openMcpClient` against a real MCP server built from the same SDK
+  on loopback: it initializes and lists tools as protocol definitions, follows pagination,
+  carries the headers it was given, makes every request through the injected fetch, and closes.
+  It uses the platform `fetch`, because `safeFetch` and the credential are the server's to
+  inject.
 - `index.test.ts` covers the barrel.
 
 ## Rules

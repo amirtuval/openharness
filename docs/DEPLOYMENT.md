@@ -642,9 +642,10 @@ deployment. Override one by adding it to the `monitoring` module call.
 
 ### Private addresses for custom provider URLs, and why they stay off
 
-A **custom OpenAI-compatible** credential is a base URL a user typed, and every request to it
-goes through the SSRF guard (`safeFetch`): loopback, private, link-local and cloud-metadata
-addresses are refused, on save and on every model call and `/models` listing afterwards. A
+A **custom OpenAI-compatible** credential, and a **remote MCP server** (epic #303, X10), are
+URLs a user typed, and every request to them goes through the SSRF guard (`safeFetch`):
+loopback, private, link-local and cloud-metadata addresses are refused, on save and on every
+model call, listing and MCP connection check afterwards. A
 **self-hosted** deployment whose users point that credential type at a server on its own
 network — an Ollama or vLLM beside the app, a gateway on a private subnet — can turn the
 refusal off for that one credential type with:
@@ -660,9 +661,34 @@ behind a public load balancer with sign-in to the open internet, where the guard
 exactly the job it exists for: a private address in a credential can only be a mistake or an
 attack. The flag is for a single-tenant, self-hosted install whose operator knows the network;
 turning it on here would let any signed-in user make the service connect anywhere it can
-reach. It applies to the `openai_compatible` credential type alone — Azure OpenAI never reads
-it — and the server says so loudly at startup when it is on
+reach. It applies to the `openai_compatible` credential type and to remote MCP servers — Azure OpenAI
+never reads it — and the server says so loudly at startup when it is on
 (`custom provider URLs: PRIVATE ADDRESSES ALLOWED`).
+
+### Remote MCP servers and the OAuth callback (#303, X10)
+
+A user can register remote **MCP** servers (epic #303, X10); openharness is the MCP client.
+Three deployment facts follow from that, and only the first is new configuration — and none of
+it is a variable this infrastructure sets.
+
+- **The OAuth callback URL is derived, not configured.** An OAuth MCP server's authorization
+  flow redirects the user's browser back to
+  `${BETTER_AUTH_URL}/v1/me/mcp_servers/oauth/callback`. `BETTER_AUTH_URL` is already the
+  deployment's public URL — the app is served same-origin — so there is nothing to set; a
+  reverse proxy that rewrites the host must keep `BETTER_AUTH_URL` the browser-facing origin,
+  exactly as it already must for sign-in. The dynamic client registration this server sends to
+  the authorization server names that URL as its `redirect_uri`, so it must be reachable from
+  the user's browser.
+- **The secrets live in the same vault as provider credentials.** An MCP server's header map
+  and OAuth tokens are sealed with `@openharness/vault` under `OPENHARNESS_SECRETS_KEY` (or
+  Cloud KMS, `OPENHARNESS_KEY_PROVIDER`), and are never returned, logged, or put in a model
+  request's context. Nothing about the deployment changes because of them: the same key, the
+  same key-provider switch, the same "rekeying means re-saving" rule.
+- **The SSRF guard applies, and the self-host flag above is the one exception.** An MCP
+  server's URL, and every endpoint the OAuth flow discovers, go through `safeFetch`. A
+  self-hosted deployment that runs MCP servers on a private network turns the refusal off with
+  the same `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS=1` documented above. Staging and production
+  leave it off, so an MCP server there must be on the public internet.
 
 ### Context compaction, and the one knob it has
 

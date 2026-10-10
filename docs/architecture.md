@@ -19,7 +19,8 @@ ideas carry the design:
   A4): it carries the owner's id, the reads a user-facing route makes are scoped to it, and
   another user's resource is answered 404, never 403. `@openharness/session` also owns the SQL
   everything else sits on: Better Auth's own tables (A1) and the sealed
-  `provider_credentials` users' model keys live in (A5).
+  `provider_credentials` users' model keys live in (A5), and the `mcp_servers`/`mcp_oauth_states`
+  a user's remote MCP servers and their pending OAuth flows live in (#303, X10).
 
   What a model request answers is a fact in the log, not state beside it: the events that
   claim user input — a `span.model_request_start` claims the messages its request folds in,
@@ -98,7 +99,9 @@ envelope encryption from `@openharness/vault` under a master key that comes from
 `OPENHARNESS_SECRETS_KEY` (`OPENHARNESS_KEY_PROVIDER=local`, the default) or from Cloud KMS
 (`gcp-kms`, #150), and never returned.
 [`docs/api.md`](./api.md#authentication) has the routes and rules;
-[`apps/server/AGENTS.md`](../apps/server/AGENTS.md) has the implementation.
+[`apps/server/AGENTS.md`](../apps/server/AGENTS.md) has the implementation. A user's **remote
+MCP servers** (epic #303, X10) are sealed the same way: their header maps and OAuth tokens live
+in the vault, never in the event log or a model request's context (X11).
 
 ## Package map
 
@@ -120,7 +123,10 @@ The TUI is the one workspace published to npm — as **`@openh/cli`**, its bundl
 (#152; the name is scoped because npm refuses the unscoped `openharness`, #194) — which is why
 its name is not `@openharness/cli`; the other workspaces are private to the repo.
 
-`@openharness/hands` is a placeholder today — the tools phase builds it, and the seam is
+`@openharness/hands` holds the one outbound-request guard the rest of openharness uses
+(`safeFetch`, the SSRF guard for a URL a user supplied) and the remote-MCP client
+(`openMcpClient`, Streamable HTTP over the official `@modelcontextprotocol/sdk`). The tools
+themselves are not built yet — the tools phase builds them, and the seam is
 `execute(name, input)` ([`docs/ROADMAP.md`](./ROADMAP.md), "Tools").
 
 ## Allowed dependency graph
