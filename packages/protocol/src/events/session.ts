@@ -7,13 +7,16 @@ import { ModelUsageSchema } from './span'
 
 /**
  * Events the session itself emits: status transitions, errors, the running usage of the turn
- * (epic #245, A2) and the rewind that restarts the conversation from an earlier message (#238).
+ * (epic #245, A2), the rewind that restarts the conversation from an earlier message (#238) and
+ * the summary that replaces older history for the model (epic #277, K1; #278).
  *
  * They bracket a turn — `session.status_running` opens it, `session.status_idle` closes it —
  * so replaying just these events gives the session's state at any point in the log. A
  * `session.rewind` is the one member a client asks for rather than the brain writing it, and
  * the one that changes what the log *means* rather than what the session is doing: it is a
- * statement about the transcript, not about a turn.
+ * statement about the transcript, not about a turn. A `session.context_summary` is the other
+ * kind of statement: it changes nothing about the log or the transcript, and only says what the
+ * *model* is told about the history it no longer sees.
  */
 
 /**
@@ -246,6 +249,90 @@ export const SessionRewindEventSchema = z.object({
 export type SessionRewindEvent = DeepReadonly<z.infer<typeof SessionRewindEventSchema>>
 
 /**
+ * Why the older history was summarized (epic #277, K1; #278).
+ *
+ * - `threshold` — the context reached the share of the chat model's budget the settings allow,
+ *   so the compaction engine summarized before the provider would have refused the request (K2).
+ * - `overflow` — the provider refused a request as too long, so the engine summarized with
+ *   tighter caps and retried once (K2).
+ * - `manual` — the user asked for it (`/compact`, K8).
+ */
+export const ContextSummaryReasonSchema = z.enum(['threshold', 'overflow', 'manual'])
+
+export type ContextSummaryReason = z.infer<typeof ContextSummaryReasonSchema>
+
+/**
+ * The part of the log a summary replaces **for the model** (epic #277, K1; #278).
+ *
+ * `to_seq` is the last event the summary covers, inclusive: the context strategy hands the model
+ * the summary and then every event **after** it. Nothing here is a supersession — the log, the
+ * transcript and replay keep the history whole; the range says only where the model is told to
+ * start reading. `seq`-shaped rather than an event id, because it is a position in the log.
+ */
+export const ContextSummaryCoversSchema = z.object({
+  /** The `seq` of the last event the summary replaces for the model, inclusive. */
+  to_seq: EventSeqSchema,
+})
+
+export type ContextSummaryCovers = z.infer<typeof ContextSummaryCoversSchema>
+
+/**
+ * // extension: a summary of the older history, written by the brain (epic #277, K1; #278).
+ *
+ * When a chat's context fills, the brain summarizes the older messages and continues from the
+ * summary plus the recent messages verbatim, instead of dropping the oldest messages (which is
+ * what `trimToBudget` in `@openharness/brain` did before this). The summary is an **event**, and
+ * it supersedes **nothing**: the log stays append-only, the transcript and replay still show the
+ * full history, and the only reader of this event is the context strategy — what the model sees
+ * is the system prompt, then the latest non-superseded summary, then every event after
+ * `covers.to_seq`.
+ *
+ * A summary is written by the compaction engine (`packages/brain`, epic #277 C2), never by a
+ * client: like `session.usage` it is the brain's own bookkeeping, and it is not queued and never
+ * claimed. A later summary replaces an earlier one simply by being newer; a `session.rewind`
+ * that reaches back before this event supersedes it along with the rest of the tail it replaced,
+ * so it disappears from the strategy's reading the way everything the edit took back does.
+ *
+ * Anthropic has no equivalent: its API has no server-side brain to summarize with, and no
+ * compaction event that leaves the transcript intact.
+ */
+export const ContextSummaryEventSchema = z.object({
+  id: EventIdSchema,
+  type: z.literal(EVENT_TYPES.sessionContextSummary),
+  seq: EventSeqSchema,
+  processed_at: ProcessedAtSchema,
+  /** The summary text: what the model is told instead of the events `covers` names. */
+  summary: z.string(),
+  /** The last event the summary replaces for the model, inclusive. */
+  covers: ContextSummaryCoversSchema,
+  /** Why the summary was made (K2/K8), recorded so a reader can tell them apart. */
+  reason: ContextSummaryReasonSchema,
+  /**
+   * The context size when the summary was made, in tokens, measured on the chat model before the
+   * summary replaced anything. Recorded so the log says how full the context was when it happened
+   * (K10's meter reads it back).
+   */
+  tokens_before: z.number().int().nonnegative(),
+  /** The `provider/model` that wrote the summary — the summary model, or the chat model. */
+  summary_model: z.string().min(1),
+  /** The version of the summary prompt that produced the text (K7), so a later change is visible. */
+  prompt_version: z.string().min(1),
+  /** How many passes the summary took (K5; the pass limit is a user preference). */
+  passes: z.number().int().positive(),
+  /**
+   * Why the chat model summarized instead of the summary model the user chose (K3/K5).
+   *
+   * Written only when a fallback happened — no credential for the chosen summary model, or the
+   * chosen model would have needed more passes than the limit allows — and absent when the chosen
+   * model did the work.
+   */
+  fallback_reason: z.string().optional(),
+})
+
+/** A stored `session.context_summary`, deep-readonly like every event (#278). */
+export type ContextSummaryEvent = DeepReadonly<z.infer<typeof ContextSummaryEventSchema>>
+
+/**
  * One model's running total for a session (epic #245, A2; issue #247).
  *
  * The tokens of every request that ran on this model, summed over the session so far. It carries
@@ -365,6 +452,7 @@ export const SessionEventSchema = z.discriminatedUnion('type', [
   SessionErrorEventSchema,
   SessionRewindEventSchema,
   SessionUsageEventSchema,
+  ContextSummaryEventSchema,
 ])
 
 /** Any stored session event, deep-readonly (D9, issue #46). */

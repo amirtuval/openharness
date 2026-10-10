@@ -3,6 +3,7 @@ import { z } from 'zod'
 import type { DeepReadonly } from '../readonly'
 import { AgentMessageEventSchema } from './agent'
 import {
+  ContextSummaryEventSchema,
   SessionDeletedEventSchema,
   SessionErrorEventSchema,
   SessionRewindEventInputSchema,
@@ -54,6 +55,7 @@ const StoredEventCoreSchema = z.discriminatedUnion('type', [
   ModelRequestEndEventSchema,
   SessionRewindEventSchema,
   SessionUsageEventSchema,
+  ContextSummaryEventSchema,
 ])
 
 /**

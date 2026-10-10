@@ -142,6 +142,7 @@ session. It is also the SSE `id` and the resume position, so a client that recon
 | `event_start`                | the brain     | a reply started streaming — a stored chunk since D9                                  |
 | `event_delta`                | the brain     | a streamed fragment of it — a stored chunk since D9                                  |
 | `session.usage`              | the brain     | the session's running token totals, per model, after a request that reported usage   |
+| `session.context_summary`    | the brain     | // extension: older history replaced for the model by a summary (epic #277, #278)    |
 | `session.rewind`             | the server    | // extension: the session restarts from an earlier `user.message` (#238)             |
 | `session.deleted`            | the server    | stream-only: the session was deleted; sent last, then the stream closes (#111)       |
 
@@ -211,6 +212,72 @@ money is computed when it is read, from these tokens and the model catalog's pri
 never stored (see [Usage and cost](#usage-and-cost)). A session stored before the event existed
 has none, and its totals are derived on read from the `span.model_request_end` events it does
 have — the same numbers, from the events underneath.
+
+### Context summaries and oversized messages (epic #277)
+
+When a chat's context fills, the brain summarizes the older history and continues from the
+summary plus the recent messages verbatim, instead of dropping the oldest messages. The summary
+is an **event** — `session.context_summary`, written by the brain — and it **supersedes
+nothing**: the log, the transcript and replay stay whole, and the only reader is the context
+strategy, which builds each model request as the system prompt, then the latest summary no
+rewind has superseded, then every event after `covers.to_seq`.
+
+```json
+{
+  "type": "session.context_summary",
+  "id": "sevt_…",
+  "seq": 42,
+  "processed_at": "…",
+  "summary": "The user asked for the README summary; the license is MIT.",
+  "covers": { "to_seq": 40 },
+  "reason": "threshold",
+  "tokens_before": 51200,
+  "summary_model": "anthropic/claude-sonnet-5",
+  "prompt_version": "compact-v1",
+  "passes": 1
+}
+```
+
+`reason` is `threshold` (the context reached the share of the model's budget that triggers a
+summary), `overflow` (the provider refused a request as too long) or `manual` (the user asked
+for it). `tokens_before` is how full the context was, and `summary_model`, `prompt_version` and
+`passes` record what wrote the summary and how — with an optional `fallback_reason` when the
+chat's own model summarized instead of the summary model the user chose (no credential for it,
+or it would have needed more passes than the limit allows). A `session.rewind` that reaches back
+before a summary supersedes it along with the rest of the tail it covered, so it disappears from
+what the model sees the same way the messages it replaced do — while the transcript, which never
+read the summary in the first place, is unchanged.
+
+**A message too big to send is shortened, never dropped.** If the newest message alone is over
+the chat model's budget, summarizing cannot help — that message has to stay verbatim — so the
+request carries it capped to a head and a tail with an `[… N tokens omitted …]` marker, and the
+request's `span.model_request_start` records it:
+
+```json
+{
+  "type": "span.model_request_start",
+  "id": "sevt_…",
+  "seq": 43,
+  "processed_at": "…",
+  "consumes": ["sevt_…"],
+  "model": "anthropic/claude-sonnet-5",
+  "truncated": { "seq": 41, "tokens_before": 40000, "tokens_after": 30000 }
+}
+```
+
+`seq` names the event whose text was cut, and the two counts bracket what it cost before and
+after — so a client can tell the user their message was shortened rather than let it silently
+disappear. The field is absent for every request whose newest message fits.
+
+**The token counters are disjoint, and that is what `usage` prices.** `ModelUsage.input_tokens`
+is the **uncached** input (the way Anthropic's own `input_tokens` reads) and the two cache
+counters are the cached halves, so summing the three input-side counters answers the real prompt
+size a request was made with. A provider whose API reports a cache-inclusive input — OpenAI's
+`prompt_tokens`, a Gemini `promptTokenCount` — is normalized on the way into the log, so the
+same arithmetic is right for every provider; a provider whose `input_tokens` leaves cached tokens
+out is not double-counted either. This is the measure the compaction trigger compares against the
+model's budget, and a request the compaction engine made to summarize carries
+`purpose: "summary"` on its span so it is never used as the baseline for the chat's own size.
 
 ### Claims, chunks and superseding (D9)
 
