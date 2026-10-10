@@ -11,6 +11,7 @@ import type {
   SessionError,
   SessionModelUsage,
   SpanError,
+  StopReason,
   Supersedes,
   TextBlock,
   ToolInput,
@@ -39,22 +40,41 @@ export function statusRunning(): AppendableEvent {
   return { type: EVENT_TYPES.sessionStatusRunning }
 }
 
+/** What the idle event that closes a turn carries besides its type. */
+export interface StatusIdleOptions {
+  /**
+   * The queued user events the turn is ending on, when no other event did.
+   *
+   * That is the `user.interrupt` events (P4): an interrupt that arrived with no model request
+   * running — before the turn opened, between two requests, or during a backoff — has no span
+   * start to claim it, so the `session.status_idle` that ends the turn does. It is also the
+   * `user.message` events of a request that could not be made for lack of a provider credential
+   * (epic #65, A5): that turn opens no span, so this idle event claims them — left queued, the
+   * scheduler would run the same failing turn again. Omitted when the list is empty: a turn that
+   * ends on its own claims nothing.
+   */
+  readonly consumes?: readonly EventId[]
+  /**
+   * Why the turn stopped, when it is not `end_turn`.
+   *
+   * The pause is the one case (epic #303, X6; #309): the turn ended because calls are waiting
+   * on the user, and the stop reason names them. Omitted for every other ending, `end_turn`
+   * included — a stop reason no reader has to look for is one the log does not carry.
+   */
+  readonly stopReason?: StopReason
+}
+
 /**
  * The agent finished its turn. Closes one, whatever the reason.
  *
- * `consumes` claims the queued user events the turn is ending on, when no other event did.
- * That is the `user.interrupt` events (P4): an interrupt that arrived with no model request
- * running — before the turn opened, between two requests, or during a backoff — has no span
- * start to claim it, so the `session.status_idle` that ends the turn does. It is also the
- * `user.message` events of a request that could not be made for lack of a provider credential
- * (epic #65, A5): that turn opens no span, so this idle event claims them — left queued, the
- * scheduler would run the same failing turn again. Omitted when the list is empty: a turn that
- * ends on its own claims nothing.
+ * `consumes` claims the queued user events the turn is ending on; `stop_reason` says why it
+ * ended when that is not `end_turn` — the pause, which names the calls the user has to answer.
  */
-export function statusIdle(consumes?: readonly EventId[]): AppendableEvent {
+export function statusIdle(options: StatusIdleOptions = {}): AppendableEvent {
+  const { consumes, stopReason } = options
   return {
     type: EVENT_TYPES.sessionStatusIdle,
-    stop_reason: { type: 'end_turn' },
+    stop_reason: stopReason ?? { type: 'end_turn' },
     ...(consumes === undefined || consumes.length === 0 ? {} : { consumes: [...consumes] }),
   }
 }
