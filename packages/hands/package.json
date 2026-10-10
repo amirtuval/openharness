@@ -30,6 +30,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.0",
     "@openharness/protocol": "workspace:*",
     "undici": "8.11.2"
   },
