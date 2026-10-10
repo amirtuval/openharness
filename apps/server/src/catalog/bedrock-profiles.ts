@@ -20,8 +20,8 @@
  *
  * - {@link BedrockInferenceProfile} is one summary, reduced to what the catalogue needs.
  * - {@link bedrockInferenceProfilePage} parses one page, and never throws: a payload that is
- *   not the documented shape answers an empty page, which the catalogue reports the way it
- *   reports any provider it cannot read (C3), rather than a 500.
+ *   not the documented shape answers an empty page, which the catalogue reads as "no profiles
+ *   here" — the on-demand models stand, with a warning — rather than as a 500.
  * - {@link bedrockProfileScope} and {@link bedrockUnderlyingModelId} turn the id's geography
  *   prefix into the scope a reader sees and back into the foundation model id the profile
  *   wraps; {@link bedrockProfileDisplayName} names the entry.
