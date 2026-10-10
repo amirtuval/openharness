@@ -136,9 +136,15 @@ export const FAKE_SESSION_TOKEN = 'fake_session_token'
  * the same split `GET /v1/models` makes server-side, so a test writes the limits and the fake
  * reports the budget a real server would. Pass `context_budget` to pin one instead.
  */
-export type FakeModelEntry = Omit<ModelEntry, 'context_budget'> & {
+export type FakeModelEntry = Omit<ModelEntry, 'context_budget' | 'tool_call'> & {
   /** The budget to report; the server's rule over the limits when absent. */
   readonly context_budget?: number | undefined
+  /**
+   * Whether the model can call tools (epic #303): `true` when absent, the same
+   * never-hide-a-usable-model default the server applies to a model its registry does not know.
+   * Pass `false` for a model that cannot, which is what a screen saying so (#308) reads.
+   */
+  readonly tool_call?: boolean | undefined
 }
 
 /**
@@ -148,16 +154,19 @@ export type FakeModelEntry = Omit<ModelEntry, 'context_budget'> & {
  * real resolver answers `undefined` there and the brain falls back.
  */
 function withContextBudget(entry: FakeModelEntry): ModelEntry {
-  if (entry.context_budget !== undefined) {
-    return { ...entry, context_budget: entry.context_budget }
+  // The tool verdict is stamped first, so every path through the budget arithmetic carries it:
+  // `tool_call` is why this cannot just spread the entry in each branch.
+  const stamped = { ...entry, tool_call: entry.tool_call ?? true }
+  if (stamped.context_budget !== undefined) {
+    return { ...stamped, context_budget: stamped.context_budget }
   }
-  const window = entry.context_window
+  const window = stamped.context_window
   if (window === null || window <= 0) {
-    return { ...entry, context_budget: DEFAULT_CONTEXT_TOKEN_BUDGET }
+    return { ...stamped, context_budget: DEFAULT_CONTEXT_TOKEN_BUDGET }
   }
-  const maxOutput = entry.max_output_tokens
+  const maxOutput = stamped.max_output_tokens
   return {
-    ...entry,
+    ...stamped,
     context_budget: contextTokenBudget({
       contextWindow: window,
       ...(maxOutput === null ? {} : { maxOutput }),
