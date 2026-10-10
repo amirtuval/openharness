@@ -5,6 +5,7 @@ import {
   type SessionUsage,
   type TranscriptContext,
   type TranscriptError,
+  type TranscriptManualCompaction,
   type TranscriptMessage,
   type TranscriptSummarizing,
   type TranscriptSummary,
@@ -55,6 +56,14 @@ export interface SessionView {
   readonly context: TranscriptContext | null
   /** The newest item a request had to shorten to fit, or `null` (epic #277, K6; #280). */
   readonly truncation: TranscriptTruncation | null
+  /**
+   * The manual compaction the log last asked for, or `null` (epic #277, K8; #283).
+   *
+   * `pending` is the "Compacting…" state between the reader's `/compact` and the brain's answer;
+   * the outcome is what a notice is drawn from for a `nothing_to_summarize` or `failed` run,
+   * and is simply `summarized` once the divider is there.
+   */
+  readonly manualCompaction: TranscriptManualCompaction | null
   /** Whether the agent is working. */
   readonly status: SessionStatus
   /** The latest `session.error` in the log, until a reply supersedes it. */
@@ -285,6 +294,7 @@ export function useSession(client: Client, sessionId: string): SessionView {
     summarizing: state.summarizing,
     context: state.context,
     truncation: state.truncation,
+    manualCompaction: state.manualCompaction,
     usage: selectSessionUsage(state),
     status: state.status,
     lastError: state.lastError,

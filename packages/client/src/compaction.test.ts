@@ -6,11 +6,13 @@ import {
   DEFAULT_COMPACTION_THRESHOLD,
   DEFAULT_CONTEXT_TOKEN_BUDGET,
   OUTPUT_RESERVE_RATIO,
+  COMPACTING_LABEL,
   compactionThreshold,
   contextAfterSummary,
   contextMeter,
   contextTokenBudget,
   estimateTokens,
+  manualCompactionNotice,
   modelContextBudget,
   summaryModelFallback,
   summaryDescription,
@@ -280,3 +282,36 @@ function model(
 ): ReturnType<typeof makeModelEntry> {
   return makeModelEntry({ context_window: contextWindow, max_output_tokens: maxOutput })
 }
+
+describe('the manual compaction’s words (#277, K8; #283)', () => {
+  it('says “Compacting…” while the brain has not answered', () => {
+    // One string for both frontends, so the terminal and the web word the same wait alike.
+    expect(COMPACTING_LABEL).toBe('Compacting…')
+  })
+
+  it('needs no notice for a summary, because the divider is the outcome', () => {
+    expect(manualCompactionNotice({ outcome: 'summarized' })).toBeNull()
+    expect(manualCompactionNotice({ outcome: null })).toBeNull()
+  })
+
+  it('shows the brain’s own sentence when it sent one', () => {
+    expect(
+      manualCompactionNotice({ outcome: 'nothing_to_summarize', message: 'Nothing older yet.' }),
+    ).toEqual({ tone: 'info', text: 'Nothing older yet.' })
+    expect(manualCompactionNotice({ outcome: 'failed', message: 'The model refused.' })).toEqual({
+      tone: 'error',
+      text: 'The model refused.',
+    })
+  })
+
+  it('falls back to a fixed sentence when it did not', () => {
+    expect(manualCompactionNotice({ outcome: 'nothing_to_summarize' })).toEqual({
+      tone: 'info',
+      text: 'There was no older history to summarize.',
+    })
+    expect(manualCompactionNotice({ outcome: 'failed' })).toEqual({
+      tone: 'error',
+      text: 'The summary could not be written.',
+    })
+  })
+})

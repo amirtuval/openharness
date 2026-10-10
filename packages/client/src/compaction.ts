@@ -1,6 +1,6 @@
 import type { GetPreferencesResponse, ModelEntry } from '@openharness/protocol'
 
-import type { TranscriptContext, TranscriptSummary } from './transcript'
+import type { TranscriptContext, TranscriptManualCompaction, TranscriptSummary } from './transcript'
 
 /**
  * How full the context is, and where the line the user chose sits (epic #277, K10/C1–C4; #280).
@@ -296,4 +296,57 @@ export function summaryModelFallback(options: {
   return passesNeeded > options.maxPasses
     ? { chatBudget, summaryBudget, passesNeeded, maxPasses: options.maxPasses }
     : null
+}
+
+/**
+ * What a manual compaction says while the brain has not answered it yet (epic #277, K8; #283):
+ * `Compacting…`.
+ *
+ * A `/compact` is stored and answered asynchronously, so a UI that said nothing between the
+ * ask and the outcome would look like it had ignored the reader. Both frontends draw this word,
+ * from {@link TranscriptManualCompaction.pending} — one string, so the terminal and the web
+ * cannot word the same wait differently.
+ */
+export const COMPACTING_LABEL = 'Compacting…'
+
+/** The tone of a manual compaction's notice: something to read, or something that went wrong. */
+export type ManualCompactionTone = 'info' | 'error'
+
+/** The line a frontend shows for a manual compaction's outcome, and how loudly. */
+export interface ManualCompactionNotice {
+  /** `info` for a result that is merely explanatory, `error` for a failure. */
+  readonly tone: ManualCompactionTone
+  /** The words: the brain's own sentence where it sent one, a fixed one otherwise. */
+  readonly text: string
+}
+
+/**
+ * The notice a manual compaction's outcome is owed, or `null` when no notice is needed
+ * (epic #277, K8; #283).
+ *
+ * `summarized` is `null`: the summary landed, the conversation shows C5's divider for it, and a
+ * second line saying so would be noise. The other two outcomes are exactly what the epic asks a
+ * client to show — "there was no older history to summarize" and "the summary could not be
+ * written" — and the brain's `message` is preferred over these fallbacks wherever it sent one,
+ * because it knows why. The words live here rather than in each frontend so `oh` and the web
+ * say the same thing, the same reason `summaryDescription` does.
+ *
+ * @param compaction the state `selectManualCompaction` answers
+ */
+export function manualCompactionNotice(
+  compaction: Pick<TranscriptManualCompaction, 'outcome' | 'message'>,
+): ManualCompactionNotice | null {
+  if (compaction.outcome === null || compaction.outcome === 'summarized') {
+    return null
+  }
+  if (compaction.outcome === 'failed') {
+    return {
+      tone: 'error',
+      text: compaction.message ?? 'The summary could not be written.',
+    }
+  }
+  return {
+    tone: 'info',
+    text: compaction.message ?? 'There was no older history to summarize.',
+  }
 }

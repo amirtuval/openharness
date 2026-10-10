@@ -1,3 +1,4 @@
+import { COMPACTING_LABEL } from '@openharness/client'
 import type { ModelPriceLookup } from '@openharness/client'
 import type { ModelEntry, SessionStatus } from '@openharness/protocol'
 import { Text, useStdout } from 'ink'
@@ -121,6 +122,14 @@ export interface StatusLineProps {
    * so it cannot outlive the compaction it describes.
    */
   readonly summarizing?: { readonly pass: number; readonly passes: number } | null | undefined
+  /**
+   * Whether a manual compaction is waiting for the brain (epic #277, K8; #283).
+   *
+   * `/compact` is stored and answered later, so the field says `Compacting…` until the engine
+   * reports a pass — which then takes its place, being the more precise statement about the same
+   * wait.
+   */
+  readonly compacting?: boolean | undefined
   /** The user cut the running turn short with Ctrl+C. */
   readonly interrupted?: boolean | undefined
   /**
@@ -161,6 +170,7 @@ export function StatusLine(props: StatusLineProps) {
     lastTextAt: props.lastTextAt ?? null,
     retrying: props.retrying,
     summarizing: props.summarizing ?? null,
+    compacting: props.compacting === true,
     interrupted: props.interrupted ?? false,
     now: now(),
   })
@@ -260,6 +270,14 @@ export interface StatusFieldInput {
   readonly retrying: string | undefined
   /** The summary being written right now; `null` when no compaction is running (epic #277; #280). */
   readonly summarizing?: { readonly pass: number; readonly passes: number } | null | undefined
+  /**
+   * Whether a manual compaction is waiting for the brain (epic #277, K8; #283).
+   *
+   * `/compact` is stored and answered later, so the field says `Compacting…` until the engine
+   * reports a pass — which then takes its place, being the more precise statement about the
+   * same wait.
+   */
+  readonly compacting?: boolean | undefined
   readonly interrupted: boolean
   /** The clock, as epoch milliseconds. */
   readonly now: number
@@ -292,6 +310,12 @@ export function statusField(input: StatusFieldInput): StatusField {
       spinner: true,
       tone: 'busy',
     }
+  }
+  if (running && input.compacting === true) {
+    // A manual compaction nobody has reported a pass for yet — the request is queued behind a
+    // turn, or the engine has not written its first progress event (#283). It outranks a retry
+    // for the same reason `Summarizing…` does.
+    return { text: COMPACTING_LABEL, spinner: true, tone: 'busy' }
   }
   if (running && input.retrying !== undefined) {
     return { text: `Retrying… ${input.retrying}`, spinner: true, tone: 'busy' }

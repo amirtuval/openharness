@@ -7,6 +7,8 @@ import {
   makeStoredEventStart,
   makeModelRequestEnd,
   makeModelRequestStart,
+  makeSessionCompact,
+  makeSessionCompaction,
   makeSessionDeleted,
   makeSessionRewind,
   makeSessionError,
@@ -31,6 +33,7 @@ import {
   selectContext,
   selectIsRunning,
   selectLastMessage,
+  selectManualCompaction,
   selectMessages,
   selectSessionUsage,
   selectStreamingMessage,
@@ -118,6 +121,7 @@ describe('reduceTranscript', () => {
       summarizing: null,
       context: null,
       truncation: null,
+      manualCompaction: null,
     })
   })
 
@@ -1983,5 +1987,71 @@ describe('selectTranscriptEntries (#280)', () => {
     const state = reduceEvents([makeUserMessage('hello', { seq: 1 })])
 
     expect(selectTranscriptEntries(state).every((entry) => entry.kind === 'message')).toBe(true)
+  })
+})
+
+describe('a manual compaction (#277, K8; #283)', () => {
+  it('is pending from the request until the brain answers it', () => {
+    const pending = reduceEvents([makeSessionCompact({ seq: 5 })])
+
+    // The ask is stored and answered asynchronously, so "the newest of the pair is a request" is
+    // the state a UI draws "Compacting…" from.
+    expect(selectManualCompaction(pending)).toEqual({ pending: true, outcome: null, seq: 5 })
+
+    const answered = reduceEvents([
+      makeSessionCompact({ seq: 5 }),
+      makeSessionCompaction({ seq: 6, outcome: 'summarized', summary_seq: 9 }),
+    ])
+    expect(selectManualCompaction(answered)).toEqual({
+      pending: false,
+      outcome: 'summarized',
+      seq: 6,
+    })
+  })
+
+  it('carries the brain’s sentence for the two outcomes a reader is owed one for', () => {
+    const nothing = reduceEvents([
+      makeSessionCompact({ seq: 1 }),
+      makeSessionCompaction({
+        seq: 2,
+        outcome: 'nothing_to_summarize',
+        message: 'There is no older history yet.',
+      }),
+    ])
+    expect(selectManualCompaction(nothing)).toEqual({
+      pending: false,
+      outcome: 'nothing_to_summarize',
+      message: 'There is no older history yet.',
+      seq: 2,
+    })
+
+    const failed = reduceEvents([
+      makeSessionCompact({ seq: 1 }),
+      makeSessionCompaction({ seq: 2, outcome: 'failed', message: 'The model refused.' }),
+    ])
+    expect(selectManualCompaction(failed)?.outcome).toBe('failed')
+  })
+
+  it('is the same rule the route’s idempotency reads, so a second ask while one waits is pending', () => {
+    // Two requests with no answer between them: the newest of the pair is still a request, which
+    // is exactly what `POST …/compact` reads to answer with the one already waiting (#283).
+    const state = reduceEvents([makeSessionCompact({ seq: 1 }), makeSessionCompact({ seq: 2 })])
+    expect(selectManualCompaction(state)).toEqual({ pending: true, outcome: null, seq: 2 })
+  })
+
+  it('is null for a conversation nobody asked to compact', () => {
+    expect(selectManualCompaction(reduceEvents([makeUserMessage('hello', { seq: 1 })]))).toBeNull()
+  })
+
+  it('goes with the branch a rewind took back', () => {
+    const state = reduceEvents([
+      makeSessionCompact({ seq: 2 }),
+      makeSessionCompaction({ seq: 3, outcome: 'failed', message: 'The model refused.' }),
+      // The edit reaches from the request through the outcome, so both are the reader's to take
+      // back — the same test a summary's or a truncation notice's `seq` gets.
+      makeSessionRewind({ seq: 4, supersedes: { from_seq: 2, to_seq: 3 } }),
+    ])
+
+    expect(selectManualCompaction(state)).toBeNull()
   })
 })

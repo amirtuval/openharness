@@ -1,7 +1,9 @@
 import {
   compactionThreshold,
   contextMeter,
+  manualCompactionNotice,
   providerName,
+  selectManualCompaction,
   selectSessionUsage,
   sessionCost,
 } from '@openharness/client'
@@ -10,6 +12,7 @@ import type { GetPreferencesResponse, Mode, ModelEntry } from '@openharness/prot
 import { Box, Text, useApp, useInput, useStdout } from 'ink'
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 
+import { CompactionNotice } from '../components/compaction-notice'
 import { ModelPicker } from '../components/model-picker'
 import { NoticeView } from '../components/notice-view'
 import { PromptInput } from '../components/prompt-input'
@@ -255,12 +258,25 @@ export function ChatScreen({
     threshold: compactionThreshold(preferences),
   })
   const truncation = view.transcript.truncation
+  // The manual compaction the log last asked for (#283): its outcome notice, when it is one a
+  // reader has to be told (a failed or nothing-to-summarize run). The divider above is what a
+  // `summarized` outcome shows, and the status line carries the "Compacting…" wait.
+  const compaction = selectManualCompaction(view.transcript)
+  // `null` for a summary — the divider is that outcome — so this is also the test for whether a
+  // line is owed at all.
+  const manualCompactionNoticeDrawn = compaction === null ? null : manualCompactionNotice(compaction)
 
-  // The two notices that sit under the transcript: what a command printed or a hint, and the
-  // turn's own error when the status line is not already saying it (#208).
+  // The lines that sit under the transcript: what a command printed or a hint, the turn's own
+  // error when the status line is not already saying it (#208), the newest message's shortening
+  // (#280) and what a manual compaction came to (#283). The flag is what draws the block at all,
+  // so every one of them has to be in it — a compaction notice on its own is a notice.
   const error = view.transcript.lastError
   const failure = error !== null && retrying === undefined ? turnErrorNotice(error) : null
-  const hasNotice = view.notice !== null || failure !== null || truncation !== null
+  const hasNotice =
+    view.notice !== null ||
+    failure !== null ||
+    truncation !== null ||
+    manualCompactionNoticeDrawn !== null
 
   /**
    * Whether the transcript owes the block under it a blank line (issue #233).
@@ -438,6 +454,9 @@ export function ChatScreen({
               newest message was shortened for the model, which is news about the turn that just
               went out rather than about a message's own text. */}
           {truncation !== null && <TruncationNotice truncation={truncation} />}
+          {manualCompactionNoticeDrawn !== null && compaction !== null && (
+            <CompactionNotice compaction={compaction} />
+          )}
           {view.notice !== null && <NoticeView notice={view.notice} />}
           {failure !== null && <NoticeView notice={failure} />}
         </>
@@ -463,6 +482,7 @@ export function ChatScreen({
         lastTextAt={view.lastTextAt}
         retrying={retrying}
         summarizing={view.transcript.summarizing}
+        compacting={compaction?.pending === true}
         interrupted={view.interrupted}
       />
       {element ?? (

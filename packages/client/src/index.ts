@@ -74,6 +74,7 @@ export {
   selectContext,
   selectIsRunning,
   selectLastMessage,
+  selectManualCompaction,
   selectMessages,
   selectSessionUsage,
   selectStreamingMessage,
@@ -98,6 +99,7 @@ export type {
   TranscriptContext,
   TranscriptEntry,
   TranscriptError,
+  TranscriptManualCompaction,
   TranscriptMessage,
   TranscriptMessageMeta,
   TranscriptSeed,
@@ -110,6 +112,7 @@ export type {
 
 export {
   CHARS_PER_TOKEN,
+  COMPACTING_LABEL,
   DEFAULT_COMPACTION_THRESHOLD,
   DEFAULT_CONTEXT_TOKEN_BUDGET,
   OUTPUT_RESERVE_RATIO,
@@ -118,10 +121,16 @@ export {
   contextMeter,
   contextTokenBudget,
   estimateTokens,
+  manualCompactionNotice,
   modelContextBudget,
   summaryDescription,
   summaryModelFallback,
 } from './compaction'
-export type { ContextMeter, SummaryModelFallback } from './compaction'
+export type {
+  ContextMeter,
+  ManualCompactionNotice,
+  ManualCompactionTone,
+  SummaryModelFallback,
+} from './compaction'
 
 export type { StreamOptions } from './events/stream'

@@ -312,6 +312,44 @@ describe('statusField', () => {
     ).toBe('Summarizing… 1 of 2')
   })
 
+  it('says “Compacting…” for a manual compaction with no pass reported yet (#283)', () => {
+    const compacting = field({ status: 'running', runningSince: 1000, compacting: true, now: 2000 })
+
+    expect(compacting).toEqual({ text: 'Compacting…', spinner: true, tone: 'busy' })
+    // It outranks a retry for the same reason `Summarizing…` does: it is the newer statement
+    // about what the turn is doing.
+    expect(
+      field({
+        status: 'running',
+        runningSince: 1000,
+        compacting: true,
+        retrying: 'the model is overloaded',
+        now: 2000,
+      }).text,
+    ).toBe('Compacting…')
+  })
+
+  it('lets the pass count take over from “Compacting…” once the engine reports one (#283)', () => {
+    // The two describe the same wait, and the pass count is the more precise statement.
+    expect(
+      field({
+        status: 'running',
+        runningSince: 1000,
+        compacting: true,
+        summarizing: { pass: 1, passes: 4 },
+        now: 2000,
+      }),
+    ).toEqual({ text: 'Summarizing… 1 of 4', spinner: true, tone: 'busy' })
+  })
+
+  it('says nothing about a manual compaction while the session is not running (#283)', () => {
+    expect(field({ status: 'idle', compacting: true })).toEqual({
+      text: 'idle',
+      spinner: false,
+      tone: 'plain',
+    })
+  })
+
   it('says nothing about a summary while the session is not running (#280)', () => {
     // The transcript clears the progress on an idle; this is the backstop, so a stale one can
     // never be the only thing on the line.

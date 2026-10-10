@@ -12,6 +12,7 @@ import type {
   StoredEvent,
   UserMessageEvent,
   RetryStatusType,
+  SessionCompactionOutcome,
   SessionErrorType,
   SessionRewindEvent,
   SessionStatus,
@@ -383,6 +384,38 @@ export interface TranscriptTruncation {
   readonly recordedAt: number
 }
 
+/**
+ * A manual compaction the log has asked for, as the conversation shows it (epic #277, K8; #283).
+ *
+ * The newest of the `session.compact` / `session.compaction` pair the transcript has folded in —
+ * the same two events the *server* reads to answer "is a compaction waiting?", so the client and
+ * the route agree about what pending means without a second source of truth. A request with no
+ * answer yet is {@link TranscriptManualCompaction.pending}: the UI says "Compacting…" until the
+ * brain's outcome lands, which is the state a reader who ran `/compact` needs (the ask is stored
+ * and answered asynchronously, and a silent gap looks like nothing happened).
+ *
+ * The outcome is kept rather than cleared, because a `nothing_to_summarize` or `failed` result is
+ * the *clear, stored answer* the epic asks for: the reader must be told there was nothing to
+ * summarize or that the summarizer failed, and the brain's own `message` is what says so.
+ * `summarized` needs no notice — the divider C5 draws is the outcome — which is why
+ * {@link manualCompactionNotice} answers `null` for it.
+ */
+export interface TranscriptManualCompaction {
+  /** Whether the newest of the pair is a request nobody has answered yet. */
+  readonly pending: boolean
+  /** What came of the request, or `null` while it is pending. */
+  readonly outcome: SessionCompactionOutcome | null
+  /** The brain's sentence for a `nothing_to_summarize` or `failed` outcome, when it sent one. */
+  readonly message?: string
+  /**
+   * The `seq` of the newest of the pair.
+   *
+   * The event's own position, not where its divider would draw — the test a `session.rewind`
+   * makes, exactly as {@link TranscriptSummary.seq} is for a summary.
+   */
+  readonly seq: number
+}
+
 /** Everything a UI needs to render a session. */
 export interface TranscriptState {
   /** The conversation, in order (`position`). */
@@ -459,6 +492,9 @@ export interface TranscriptState {
 
   /** The newest item a request had to shorten, or `null` (epic #277, K6; #280). */
   readonly truncation: TranscriptTruncation | null
+
+  /** The manual compaction the log last asked for, or `null` (epic #277, K8; #283). */
+  readonly manualCompaction: TranscriptManualCompaction | null
 }
 
 /**
@@ -501,6 +537,7 @@ export function initialTranscriptState(seed: TranscriptSeed = {}): TranscriptSta
     summarizing: null,
     context: null,
     truncation: null,
+    manualCompaction: null,
   }
 }
 
@@ -723,6 +760,30 @@ function reduceStoredEvent(state: TranscriptState, event: StoredEvent): Transcri
         summarizing: null,
       }
 
+    case EVENT_TYPES.sessionCompact:
+      // The reader asked for a compaction (`/compact`, epic #277 K8; #283) and the brain has not
+      // answered yet: the state is "pending" until the `session.compaction` below lands, which is
+      // what the UI's "Compacting…" says. Nothing else changes — the request carries no reply and
+      // no claim — so this is the whole of it.
+      return {
+        ...state,
+        manualCompaction: { pending: true, outcome: null, seq: event.seq },
+      }
+
+    case EVENT_TYPES.sessionCompaction:
+      // The brain's answer, whether or not a summary came of it. `summarized` clears the pending
+      // state and needs no notice (the divider is the outcome); the other two carry the sentence
+      // the reader is owed, so the outcome and the message are kept for the UI to show.
+      return {
+        ...state,
+        manualCompaction: {
+          pending: false,
+          outcome: event.outcome,
+          ...(event.message === undefined ? {} : { message: event.message }),
+          seq: event.seq,
+        },
+      }
+
     case EVENT_TYPES.sessionContextSummary:
       return fromContextSummary(state, event)
 
@@ -841,11 +902,17 @@ function dropRewound(state: TranscriptState, event: SessionRewindEvent): Transcr
   const summarizing = progress !== null && inRange(progress.seq) ? null : progress
   const notice = state.truncation
   const truncation = notice !== null && inRange(notice.recordedAt) ? null : notice
+  // A manual compaction inside the range goes with the branch too (#283): its request, and the
+  // outcome it was answered with, are events the edit took back. The test is the event's `seq`,
+  // as it is for a summary.
+  const compaction = state.manualCompaction
+  const manualCompaction = compaction !== null && inRange(compaction.seq) ? null : compaction
   if (
     messages.length === state.messages.length &&
     summaries.length === state.summaries.length &&
     summarizing === state.summarizing &&
     truncation === state.truncation &&
+    manualCompaction === state.manualCompaction &&
     state.lastError === null &&
     state.pendingRequests.length === 0 &&
     state.usage === null &&
@@ -865,6 +932,7 @@ function dropRewound(state: TranscriptState, event: SessionRewindEvent): Transcr
     summaries,
     summarizing,
     truncation,
+    manualCompaction,
     lastError: null,
     pendingRequests: [],
     usage: null,
@@ -1509,6 +1577,17 @@ export function selectContext(state: TranscriptState): TranscriptContext | null 
 /** The newest item a request had to shorten to fit, or `null` (epic #277, K6/K10; #280). */
 export function selectTruncation(state: TranscriptState): TranscriptTruncation | null {
   return state.truncation
+}
+
+/**
+ * The manual compaction the log last asked for, or `null` (epic #277, K8; #283).
+ *
+ * What a frontend draws the ask and its outcome from: `pending` is the "Compacting…" state, and
+ * the outcome is a notice for the two results a reader has to be told about
+ * ({@link manualCompactionNotice} turns it into the words).
+ */
+export function selectManualCompaction(state: TranscriptState): TranscriptManualCompaction | null {
+  return state.manualCompaction
 }
 
 /**

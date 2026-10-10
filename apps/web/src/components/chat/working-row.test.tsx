@@ -86,6 +86,29 @@ describe('workingState', () => {
     // must not be drawn over a session that has stopped.
     expect(workingState(input({ status: 'idle', summarizing: { pass: 1, passes: 2 } }))).toBeNull()
   })
+
+  it('says “Compacting…” from the ask until the brain answers it (#283)', () => {
+    // The request is stored at once and answered later, so a `/compact` that said nothing in
+    // between would look ignored.
+    expect(workingState(input({ compacting: true }))).toEqual({ kind: 'compacting' })
+  })
+
+  it('lets the pass count take over from “Compacting…” once the engine reports one (#283)', () => {
+    // Both describe the same wait; the pass count is the more precise statement, so it wins —
+    // which is how the two states coexist rather than fighting.
+    expect(workingState(input({ compacting: true, summarizing: { pass: 1, passes: 4 } }))).toEqual({
+      kind: 'summarizing',
+      pass: 1,
+      passes: 4,
+    })
+  })
+
+  it('outranks a retry, and needs a running session (#283)', () => {
+    expect(workingState(input({ compacting: true, retrying: true }))).toMatchObject({
+      kind: 'compacting',
+    })
+    expect(workingState(input({ status: 'idle', compacting: true }))).toBeNull()
+  })
 })
 
 describe('WorkingRow', () => {
@@ -129,6 +152,15 @@ describe('WorkingRow', () => {
     expect(row).toHaveTextContent('Summarizing… 3 of 7')
     expect(row).toHaveAttribute('data-state', 'summarizing')
     // A compaction is a wait like any other, so the clock runs for it too.
+    expect(row).toHaveTextContent('0s')
+  })
+
+  it('draws the wait a manual compaction asked for (#283)', () => {
+    render(<WorkingRow state={{ kind: 'compacting' }} />)
+    const row = screen.getByRole('status')
+    expect(row).toHaveTextContent('Compacting…')
+    expect(row).toHaveAttribute('data-state', 'compacting')
+    // A wait like any other, so the clock runs for it too.
     expect(row).toHaveTextContent('0s')
   })
 

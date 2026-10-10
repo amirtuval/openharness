@@ -1,5 +1,6 @@
 import type {
   ModelPriceLookup,
+  TranscriptManualCompaction,
   TranscriptMessage,
   TranscriptSummary,
   TranscriptTruncation,
@@ -11,6 +12,7 @@ import { useStickToBottom } from '../../hooks/use-stick-to-bottom'
 import type { ModelNameLookup } from '../../lib/models'
 import { Button } from '../ui/button'
 import { Skeleton } from '../ui/skeleton'
+import { CompactionNotice } from './compaction-notice'
 import { MessageItem } from './message-item'
 import { previousReplyModels } from './message-meta'
 import { SummaryDivider } from './summary-divider'
@@ -40,7 +42,8 @@ import { WorkingRow, type WorkingState } from './working-row'
  * history above it stays exactly where it was. The order comes from `transcriptEntries` in
  * `@openharness/client`, so the web and the terminal put the divider in the same place. Two
  * other compaction states sit at the foot, where the newest message is: the truncation notice
- * — the reader's own message was shortened for the model — above the working row.
+ * — the reader's own message was shortened for the model, and what a manual compaction came
+ * to (#283) — above the working row.
  *
  * Edit and resend (#238) is offered on **every** message the reader wrote, not just the last:
  * sending one rewinds the session to it, so the edit is what the conversation continues from.
@@ -49,6 +52,7 @@ export function MessageList({
   messages,
   summaries = [],
   truncation = null,
+  compaction = null,
   loading,
   nameOf,
   costOf,
@@ -62,6 +66,11 @@ export function MessageList({
   summaries?: readonly TranscriptSummary[]
   /** The newest item a request had to shorten, or `null` (epic #277, K6; #280). */
   truncation?: TranscriptTruncation | null
+  /**
+   * The manual compaction the log last asked for, or `null` (epic #277, K8; #283): the notice a
+   * `nothing_to_summarize` or `failed` outcome is owed.
+   */
+  compaction?: TranscriptManualCompaction | null
   loading: boolean
   /** The catalog lookup for a model-change marker's display name. */
   nameOf?: ModelNameLookup | undefined
@@ -88,7 +97,9 @@ export function MessageList({
     // turn that adds no message at all (a request whose newest item did not change): it counts
     // as content, so a reader who is already at the bottom is shown it rather than being left
     // with it below the fold.
-    `${messages.length}:${last?.text.length ?? 0}:${truncation === null ? '' : 'truncated'}`,
+    `${messages.length}:${last?.text.length ?? 0}:${truncation === null ? '' : 'truncated'}:${
+      compaction?.outcome ?? ''
+    }`,
   )
 
   // What each reply's meta line compares its model against (#212). The list is the only place
@@ -140,6 +151,7 @@ export function MessageList({
               ),
             )
           )}
+          {compaction === null ? null : <CompactionNotice compaction={compaction} />}
           {truncation === null ? null : <TruncationNotice truncation={truncation} />}
           {working === null ? null : <WorkingRow state={working} />}
         </div>

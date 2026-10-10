@@ -102,6 +102,7 @@ export function ChatView({
     summarizing,
     context,
     truncation,
+    manualCompaction,
     usage,
     status,
     lastError,
@@ -309,6 +310,10 @@ export function ChatView({
     // "Working…" because it says how many passes are left, and a retry because it is the newer
     // statement about the same wait.
     summarizing,
+    // The ask is stored and answered later (#283), so between the two the row says what the
+    // reader is waiting for — unless the engine has already reported a pass, which is a more
+    // precise statement about the same wait.
+    compacting: manualCompaction?.pending === true,
   })
 
   const confirmDelete = async (): Promise<void> => {
@@ -416,6 +421,7 @@ export function ChatView({
         messages={messages}
         summaries={summaries}
         truncation={truncation}
+        compaction={manualCompaction}
         loading={loadingHistory}
         nameOf={nameOf}
         costOf={costOf}

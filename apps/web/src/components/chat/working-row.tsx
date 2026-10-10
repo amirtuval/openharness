@@ -1,3 +1,4 @@
+import { COMPACTING_LABEL } from '@openharness/client'
 import type { SessionStatus } from '@openharness/protocol'
 import { Loader2, Square } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
@@ -28,6 +29,15 @@ export type WorkingState =
    * `session.context_summary_progress` events rather than from a guess.
    */
   | { readonly kind: 'summarizing'; readonly pass: number; readonly passes: number }
+  /**
+   * A manual compaction is waiting for the brain (epic #277, K8; #283).
+   *
+   * `/compact` is answered asynchronously — the request is stored and folded into the log at
+   * once, the summary comes later — so between the two the reader is owed "Compacting…". It
+   * yields to {@link WorkingState} `summarizing` as soon as the engine reports a pass: the pass
+   * count is the more precise statement about the same wait.
+   */
+  | { readonly kind: 'compacting' }
   /** The brain hit a retryable error and is trying again, with the server's reason. */
   | { readonly kind: 'retrying'; readonly detail: string }
   /** The reader pressed Stop; the turn is over and this is what says so. */
@@ -50,6 +60,13 @@ export interface WorkingRowInput {
    * error and on the turn ending, so a stale one cannot outrank the turn it was about.
    */
   readonly summarizing?: { readonly pass: number; readonly passes: number } | null | undefined
+  /**
+   * Whether a manual compaction is waiting for the brain (epic #277, K8; #283).
+   *
+   * From the transcript's `manualCompaction.pending` — the log's own "the newest of the pair is
+   * a request" rule, so a client that reconnects mid-wait shows the same state.
+   */
+  readonly compacting?: boolean | undefined
 }
 
 /**
@@ -70,6 +87,12 @@ export function workingState(input: WorkingRowInput): WorkingState | null {
   }
   if (input.summarizing !== null && input.summarizing !== undefined) {
     return { kind: 'summarizing', pass: input.summarizing.pass, passes: input.summarizing.passes }
+  }
+  if (input.compacting === true) {
+    // A manual compaction with no pass reported yet — the request is queued behind a turn, or the
+    // engine has not written its first progress event. Outranking a retry for the same reason
+    // `summarizing` does: it is the newer statement about what the turn is doing.
+    return { kind: 'compacting' }
   }
   if (input.retrying) {
     return { kind: 'retrying', detail: input.retryReason ?? 'the model request failed' }
@@ -115,7 +138,7 @@ export function WorkingRow({ state }: { state: WorkingState }) {
       data-state={state.kind}
       className="flex items-center gap-inline text-sm text-muted-foreground"
     >
-      {state.kind === 'working' || state.kind === 'summarizing' ? (
+      {state.kind === 'working' || state.kind === 'summarizing' || state.kind === 'compacting' ? (
         <Loader2 aria-hidden="true" className="size-3.5 shrink-0 animate-spin text-coral" />
       ) : state.kind === 'retrying' ? (
         <span aria-hidden="true" className="size-2 shrink-0 animate-pulse rounded-full bg-coral" />
@@ -152,6 +175,8 @@ function rowLabel(state: WorkingState): string {
       return 'Working…'
     case 'summarizing':
       return `Summarizing… ${String(state.pass)} of ${String(state.passes)}`
+    case 'compacting':
+      return COMPACTING_LABEL
     case 'retrying':
       return 'Retrying…'
     case 'interrupted':

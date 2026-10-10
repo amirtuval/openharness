@@ -1,14 +1,7 @@
 import { createTranscript, initialTranscriptState } from '@openharness/client'
 import type { Client, Transcript, TranscriptState } from '@openharness/client'
 import { EVENT_TYPES } from '@openharness/protocol'
-import type {
-  Mode,
-  ModeId,
-  ModelEntry,
-  Session,
-  SessionCompactionOutcome,
-  StreamEvent,
-} from '@openharness/protocol'
+import type { Mode, ModeId, ModelEntry, Session, StreamEvent } from '@openharness/protocol'
 
 import { describeError, type ErrorContext } from '../errors'
 import { CTRL_C_WINDOW_MS, decideCtrlC, type CtrlCAction } from './ctrl-c'
@@ -349,10 +342,10 @@ export function createChatSession(options: ChatSessionOptions): ChatSession {
           signal: lifetime.signal,
           ...(guidance === '' ? {} : { instructions: guidance }),
         })
-        // The request is stored; fold it in now so the log has it. The outcome the brain writes
-        // arrives on the stream and is what the notice below is about.
+        // The request is stored; fold it in now so the log has it, and the transcript's
+        // `manualCompaction` goes pending — which is what the status line's "Compacting…" is
+        // drawn from, in both frontends. The outcome the brain writes arrives on the stream.
         apply(request)
-        setState({ notice: { kind: 'info', text: 'Compacting the older history…', hints: [] } })
       } catch (error) {
         if (!lifetime.signal.aborted) {
           setState({ notice: noticeFor(error) })
@@ -461,13 +454,6 @@ export function createChatSession(options: ChatSessionOptions): ChatSession {
 
       for await (const event of events) {
         apply(event)
-        // The answer to a manual compaction (#283) is the one thing a reader who asked for it
-        // must be told: the transcript shows no bubble for it, so the notice line carries the
-        // outcome — "summarized", "nothing to summarize", or that it failed — as the clear,
-        // stored outcome K8 asks for.
-        if (event.type === EVENT_TYPES.sessionCompaction) {
-          setState({ notice: compactionNotice(event.outcome, event.message) })
-        }
       }
     } catch (error) {
       // An abort is the normal way out. Anything else — a key the server will not take, a
@@ -500,20 +486,4 @@ function awaitingMeta(transcript: TranscriptState): string | null {
 function epochMs(timestamp: string): number | undefined {
   const ms = Date.parse(timestamp)
   return Number.isNaN(ms) ? undefined : ms
-}
-
-/** The notice line for a manual compaction's outcome (#283): what came of a `/compact`. */
-function compactionNotice(outcome: SessionCompactionOutcome, message: string | undefined): Notice {
-  if (outcome === 'summarized') {
-    return { kind: 'info', text: 'Compacted: the older history is a summary now.', hints: [] }
-  }
-  return {
-    kind: outcome === 'failed' ? 'error' : 'info',
-    text:
-      message ??
-      (outcome === 'failed'
-        ? 'The summary could not be written.'
-        : 'There was no older history to summarize.'),
-    hints: [],
-  }
 }
