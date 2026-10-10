@@ -141,6 +141,20 @@ const storedSamples = {
     processed_at: '2026-03-15T10:00:00Z',
     supersedes: { from_seq: 1, to_seq: 11 },
   },
+  'session.context_summary': {
+    id: eventId(),
+    type: 'session.context_summary',
+    seq: 14,
+    processed_at: '2026-03-15T10:00:00Z',
+    summary: 'The user asked for the README, and the license.',
+    covers: { to_seq: 13 },
+    reason: 'threshold',
+    tokens_before: 51_200,
+    summary_model: 'anthropic/claude-sonnet-5',
+    prompt_version: 'compact-v1',
+    passes: 2,
+    fallback_reason: 'the summary model had no credential',
+  },
   'session.usage': {
     id: eventId(),
     type: 'session.usage',
@@ -217,6 +231,23 @@ describe('stored event schemas', () => {
     expect(StoredEventSchema.safeParse({ ...storedSamples['user.message'], seq: 0 }).success).toBe(
       false,
     )
+  })
+
+  it('accepts the span fields a capped or summarizing request adds (epic #277)', () => {
+    // Both optional, so a session that never overflowed and never summarized keeps the span
+    // shape it always had — and one that did carries the record.
+    const start = {
+      ...storedSamples['span.model_request_start'],
+      truncated: { seq: 3, tokens_before: 40_000, tokens_after: 30_000 },
+      purpose: 'summary',
+    }
+    expect(StoredEventSchema.safeParse(start).success).toBe(true)
+    expect(
+      StoredEventSchema.safeParse({
+        ...storedSamples['span.model_request_start'],
+        purpose: 'something-else',
+      }).success,
+    ).toBe(false)
   })
 
   it('accepts an offset timestamp as well as Zulu', () => {
