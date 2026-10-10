@@ -9,7 +9,13 @@ import {
   ulid,
 } from '@openharness/protocol'
 import { cors } from 'hono/cors'
-import { AgentNotFoundError, SessionNotFoundError, type SessionStore } from '@openharness/session'
+import {
+  AgentNotFoundError,
+  DuplicateModeNameError,
+  ModeLimitReachedError,
+  SessionNotFoundError,
+  type SessionStore,
+} from '@openharness/session'
 
 import { consoleLogger, type AppEnv, type Logger } from './types'
 import { createAuthGuard } from './auth-guard'
@@ -27,6 +33,7 @@ import { registerAiSdkRoutes } from './routes/ai-sdk'
 import type { AuthDeps, RouteDeps } from './routes/deps'
 import { registerEventRoutes } from './routes/events'
 import { registerMeRoutes } from './routes/me'
+import { registerModeRoutes } from './routes/modes'
 import { registerModelRoutes } from './routes/models'
 import {
   registerProviderCredentialRoutes,
@@ -412,6 +419,7 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
   registerAiSdkRoutes(app, deps)
   registerProviderCredentialRoutes(app, deps)
   registerModelRoutes(app, deps)
+  registerModeRoutes(app, deps)
 
   app.onError((error, c) => {
     if (error instanceof HttpError) {
@@ -419,6 +427,12 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
     }
     if (error instanceof SessionNotFoundError || error instanceof AgentNotFoundError) {
       return errorResponse(c, 'not_found_error', error.message)
+    }
+    if (error instanceof DuplicateModeNameError || error instanceof ModeLimitReachedError) {
+      // A mode write the store refused: a name the caller already has, or the cap (#245, M6).
+      // Both are conflicts with the resource's current state, and the store's messages say
+      // which — `conflict_error` is the protocol's type for exactly that.
+      return errorResponse(c, 'conflict_error', error.message)
     }
     if (error instanceof RangeError) {
       // A cursor this endpoint cannot decode, or an id the store refused: the request is at

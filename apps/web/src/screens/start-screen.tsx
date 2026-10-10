@@ -1,7 +1,8 @@
-import type { Session } from '@openharness/protocol'
 import { useEffect, useState } from 'react'
 
 import { useClient } from '../components/client-provider'
+import type { CreateChatOptions, CreateChatResult } from '../hooks/use-sessions'
+import type { ModesView } from '../hooks/use-modes'
 import type { ModelsView } from '../hooks/use-models'
 import { useProviderCredentials } from '../hooks/use-provider-credentials'
 import { FirstRunScreen } from './first-run-screen'
@@ -24,10 +25,13 @@ import { NewChatScreen } from './new-chat-screen'
 export function StartScreen({
   createSession,
   catalog,
+  modes,
 }: {
-  /** Create the session for New chat, refresh the sidebar, and return it. */
-  createSession: (modelId: string) => Promise<Session | null>
+  /** Create the session for New chat — from a model or a mode (#245, M6) — and return it. */
+  createSession: (options: CreateChatOptions) => Promise<CreateChatResult>
   catalog: ModelsView
+  /** The shell's modes: the presets New chat's picker offers. */
+  modes: ModesView
 }) {
   const client = useClient()
   const { credentials, loading, error } = useProviderCredentials(client)
@@ -57,5 +61,5 @@ export function StartScreen({
     return <FirstRunScreen catalog={catalog} onLeave={() => setFirstRun(false)} />
   }
 
-  return <NewChatScreen createSession={createSession} catalog={catalog} />
+  return <NewChatScreen createSession={createSession} catalog={catalog} modes={modes} />
 }

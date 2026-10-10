@@ -1,7 +1,9 @@
 import {
   AgentSchema,
   EVENT_TYPES,
+  MAX_MODES_PER_USER,
   MAX_PAGE_LIMIT,
+  ModeSchema,
   SESSION_TITLE_MAX_LENGTH,
   SessionSchema,
   StoredEventSchema,
@@ -14,7 +16,9 @@ import {
   type Agent,
   type AgentId,
   type CreateAgentRequest,
+  type CreateModeRequest,
   type EventId,
+  type ModeId,
   type KeyCursorPosition,
   type ModelRequestStartEvent,
   type NextPage,
@@ -31,8 +35,12 @@ import {
   AGENT_NOT_FOUND_ERROR_CODE,
   CLAIM_CONFLICT_ERROR_CODE,
   DUPLICATE_EVENT_ID_ERROR_CODE,
+  DUPLICATE_MODE_NAME_ERROR_CODE,
   DuplicateEventIdError,
+  DuplicateModeNameError,
   FENCED_ERROR_CODE,
+  MODE_LIMIT_REACHED_ERROR_CODE,
+  ModeLimitReachedError,
   SESSION_NOT_FOUND_ERROR_CODE,
   isFencedError,
 } from '../errors'
@@ -267,6 +275,168 @@ export function runSessionStoreConformance(
           store.createSession(unknownAgentId(), { ownerId: OWNER_A }),
         )
         expectErrorIdentity(error, 'AgentNotFoundError', AGENT_NOT_FOUND_ERROR_CODE)
+      })
+    })
+
+    // ------------------------------------------------------------------- modes
+
+    describe('modes (#245, M6)', () => {
+      it('creates a mode stamped with the clock instant, and reads it back', async () => {
+        const { store, clock } = await setup()
+        const mode = await store.createMode(modeInput('smart'), OWNER_A)
+        expect(mode).toMatchObject({
+          type: 'mode',
+          name: 'smart',
+          model: 'anthropic/claude-sonnet-5',
+          reasoning_effort: 'high',
+          system_prompt_addition: 'Think step by step.',
+          created_at: timestampAt(clock.currentMs),
+          updated_at: timestampAt(clock.currentMs),
+        })
+        expect(mode.id).toMatch(/^mode_/)
+        expectExact(ModeSchema, mode, 'a mode')
+        expect(await store.getMode(mode.id, { ownerId: OWNER_A })).toEqual(mode)
+        expect(await store.getMode(unknownModeId(), { ownerId: OWNER_A })).toBeNull()
+      })
+
+      it('defaults the effort and the addition to null when the body leaves them out', async () => {
+        const { store } = await setup()
+        const mode = await store.createMode(
+          { name: 'plain', model: 'openai/gpt-4.1-mini' },
+          OWNER_A,
+        )
+        expect(mode.reasoning_effort).toBeNull()
+        expect(mode.system_prompt_addition).toBeNull()
+      })
+
+      it('accepts the default-model sentinel as the model', async () => {
+        const { store } = await setup()
+        const mode = await store.createMode({ name: 'mine', model: 'my-default-model' }, OWNER_A)
+        expect(mode.model).toBe('my-default-model')
+      })
+
+      it('lists one owner’s modes oldest first, and nobody else’s', async () => {
+        const { store, clock } = await setup()
+        const first = await store.createMode(modeInput('a'), OWNER_A)
+        clock.advance(SECOND)
+        const second = await store.createMode(modeInput('b'), OWNER_A)
+        const otherUsers = await store.createMode(modeInput('a'), OWNER_B)
+        const listed = await store.listModes({ ownerId: OWNER_A })
+        expect(listed.map((mode) => mode.id)).toEqual([first.id, second.id])
+        expect(await store.listModes({ ownerId: OWNER_B })).toEqual([otherUsers])
+        // Another owner's mode is a null read, not a 403 — the same answer as an unknown id.
+        expect(await store.getMode(second.id, { ownerId: OWNER_B })).toBeNull()
+      })
+
+      it('updates a mode partially: omitted fields stay, null clears, updated_at moves', async () => {
+        const { store, clock } = await setup()
+        const mode = await store.createMode(modeInput('smart'), OWNER_A)
+        clock.advance(SECOND)
+        const updated = await store.updateMode(
+          mode.id,
+          { name: 'fast', system_prompt_addition: null, model: 'openai/gpt-4.1-mini' },
+          { ownerId: OWNER_A },
+        )
+        expect(updated).toEqual({
+          ...mode,
+          name: 'fast',
+          model: 'openai/gpt-4.1-mini',
+          system_prompt_addition: null,
+          reasoning_effort: 'high',
+          updated_at: timestampAt(clock.currentMs),
+        })
+        expect(await store.getMode(mode.id, { ownerId: OWNER_A })).toEqual(updated)
+        // Clearing the effort explicitly is different from omitting it.
+        const cleared = await store.updateMode(
+          mode.id,
+          { reasoning_effort: null },
+          { ownerId: OWNER_A },
+        )
+        expect(cleared?.reasoning_effort).toBeNull()
+      })
+
+      it('answers null when another owner updates or deletes a mode', async () => {
+        const { store } = await setup()
+        const mode = await store.createMode(modeInput('smart'), OWNER_A)
+        expect(await store.updateMode(mode.id, { name: 'nope' }, { ownerId: OWNER_B })).toBeNull()
+        expect(await store.deleteMode(mode.id, { ownerId: OWNER_B })).toBe(false)
+        expect(await store.getMode(mode.id, { ownerId: OWNER_A })).toEqual(mode)
+      })
+
+      it('refuses a name the owner already has, on create and on rename', async () => {
+        const { store } = await setup()
+        const first = await store.createMode(modeInput('smart'), OWNER_A)
+        const error = await thrownBy(() => store.createMode(modeInput('smart'), OWNER_A))
+        expect(error).toBeInstanceOf(DuplicateModeNameError)
+        expectErrorIdentity(error, 'DuplicateModeNameError', DUPLICATE_MODE_NAME_ERROR_CODE)
+        // The same name for a different user is fine; the uniqueness is per owner.
+        expect((await store.createMode(modeInput('smart'), OWNER_B)).name).toBe('smart')
+        const second = await store.createMode(modeInput('fast'), OWNER_A)
+        const rename = await thrownBy(() =>
+          store.updateMode(second.id, { name: 'smart' }, { ownerId: OWNER_A }),
+        )
+        expect(rename).toBeInstanceOf(DuplicateModeNameError)
+        // The refusal left both rows as they were.
+        expect(await store.getMode(first.id, { ownerId: OWNER_A })).toEqual(first)
+        expect((await store.getMode(second.id, { ownerId: OWNER_A }))?.name).toBe('fast')
+      })
+
+      it('caps a user at MAX_MODES_PER_USER modes however many creates race for the last one', async () => {
+        // The cap is a count followed by an insert, so the store has to make the two one
+        // critical section — a transaction alone does not, and two creates at the limit would
+        // each read a count below it and both insert (the Postgres store takes a per-owner
+        // advisory lock first, and the in-memory store is serial by construction). Fired at
+        // once and past the cap, exactly the cap succeed and the rest are refused.
+        const { store } = await setup()
+        const attempts = MAX_MODES_PER_USER + 5
+        const results = await Promise.allSettled(
+          // Deferred to a microtask: the in-memory store refuses synchronously (its whole
+          // body runs before it answers), so a bare call would throw while the array is being
+          // built rather than settling as a rejection.
+          Array.from({ length: attempts }, (_, index) =>
+            Promise.resolve().then(() => store.createMode(modeInput(`raced ${index}`), OWNER_A)),
+          ),
+        )
+
+        const created = results.filter((result) => result.status === 'fulfilled')
+        const refused = results.filter((result) => result.status === 'rejected')
+        expect(created).toHaveLength(MAX_MODES_PER_USER)
+        expect(refused).toHaveLength(attempts - MAX_MODES_PER_USER)
+        for (const result of refused) {
+          expect(result.reason).toBeInstanceOf(ModeLimitReachedError)
+        }
+        expect(await store.listModes({ ownerId: OWNER_A })).toHaveLength(MAX_MODES_PER_USER)
+      })
+
+      it('caps a user at MAX_MODES_PER_USER modes', async () => {
+        const { store } = await setup()
+        for (let index = 0; index < MAX_MODES_PER_USER; index += 1) {
+          await store.createMode(modeInput(`mode ${index}`), OWNER_A)
+        }
+        const error = await thrownBy(() => store.createMode(modeInput('one too many'), OWNER_A))
+        expect(error).toBeInstanceOf(ModeLimitReachedError)
+        expectErrorIdentity(error, 'ModeLimitReachedError', MODE_LIMIT_REACHED_ERROR_CODE)
+        expect(await store.listModes({ ownerId: OWNER_A })).toHaveLength(MAX_MODES_PER_USER)
+        // Another user is not at the limit.
+        expect((await store.createMode(modeInput('mine'), OWNER_B)).name).toBe('mine')
+      })
+
+      it('deletes a mode, and leaves the chats that followed it an ordinary chat', async () => {
+        const { store } = await setup()
+        const mode = await store.createMode(modeInput('smart'), OWNER_A)
+        const session = await store.createSession(null, {
+          ownerId: OWNER_A,
+          model: { id: 'openai/gpt-5-mini' },
+          mode: mode.id,
+        })
+        expect(session.mode).toBe(mode.id)
+        expect(await store.deleteMode(mode.id, { ownerId: OWNER_A })).toBe(true)
+        expect(await store.getMode(mode.id, { ownerId: OWNER_A })).toBeNull()
+        // The chat keeps running the model it last ran, as a chat without a mode.
+        const after = await store.getSessionUnscoped(session.id)
+        expect(after?.mode).toBeNull()
+        expect(after?.model).toEqual({ id: 'openai/gpt-5-mini' })
+        expect(await store.deleteMode(mode.id, { ownerId: OWNER_A })).toBe(false)
       })
     })
 
@@ -900,6 +1070,67 @@ export function runSessionStoreConformance(
         expect((await store.getSession(session.id, { ownerId: OWNER_A }))?.model).toEqual({
           id: 'openai/gpt-5-mini',
         })
+      })
+    })
+
+    describe('the mode projection (user.message.mode, #245, M6)', () => {
+      it('sets the session’s mode to the one a user.message carries, and detaches on a model', async () => {
+        const { store } = await setup()
+        const mode = await store.createMode(modeInput('smart'), OWNER_A)
+        const { session } = await seed(store)
+        await append(store, session.id, [userMessageWithMode('go deep', mode.id)])
+        expect((await store.getSessionUnscoped(session.id))?.mode).toBe(mode.id)
+        // A plain model switch detaches: a chat follows a mode or a model, never both.
+        await append(store, session.id, [userMessageWith('plain', 'openai/gpt-5-mini')])
+        expect((await store.getSessionUnscoped(session.id))?.mode).toBeNull()
+        // ...and a message that carries neither leaves the mode alone.
+        await append(store, session.id, [userMessageWithMode('back', mode.id)])
+        await append(store, session.id, [userMessage('just talking')])
+        expect((await store.getSessionUnscoped(session.id))?.mode).toBe(mode.id)
+      })
+
+      it('detaches an explicit null mode, and stores the message as written', async () => {
+        const { store } = await setup()
+        const mode = await store.createMode(modeInput('smart'), OWNER_A)
+        const { session } = await seed(store)
+        await append(store, session.id, [userMessageWithMode('go deep', mode.id)])
+        await append(store, session.id, [
+          {
+            type: EVENT_TYPES.userMessage,
+            content: [{ type: 'text', text: 'no mode' }],
+            mode: null,
+          },
+        ])
+        expect((await store.getSessionUnscoped(session.id))?.mode).toBeNull()
+        const events = (await store.listEventsUnscoped(session.id)).data
+        expect(events.at(-1)).toMatchObject({ type: EVENT_TYPES.userMessage, mode: null })
+      })
+
+      it('projects the model a span ran onto the session, so a mode chat keeps a fresh model', async () => {
+        const { store } = await setup()
+        const mode = await store.createMode(modeInput('smart'), OWNER_A)
+        const { session } = await seed(store)
+        await append(store, session.id, [userMessageWithMode('go deep', mode.id)])
+        // The brain records the resolved model on the span; the session follows it, which is
+        // what the fallback is when the mode is later deleted.
+        await append(store, session.id, [
+          { type: EVENT_TYPES.modelRequestStart, model: 'openai/gpt-5-mini' },
+        ])
+        expect((await store.getSessionUnscoped(session.id))?.model).toEqual({
+          id: 'openai/gpt-5-mini',
+        })
+      })
+
+      it('stores the mode a createSession was given', async () => {
+        const { store } = await setup()
+        const mode = await store.createMode(modeInput('smart'), OWNER_A)
+        const session = await store.createSession(null, {
+          ownerId: OWNER_A,
+          model: { id: 'anthropic/claude-sonnet-5' },
+          mode: mode.id,
+        })
+        expect(session.mode).toBe(mode.id)
+        expect((await store.getSession(session.id, { ownerId: OWNER_A }))?.mode).toBe(mode.id)
       })
     })
 
@@ -2942,6 +3173,31 @@ async function seed(store: SessionStore): Promise<{ agent: Agent; session: Sessi
   const agent = await store.createAgent(agentInput(), OWNER_A)
   const session = await store.createSession(agent.id, { ownerId: OWNER_A })
   return { agent, session }
+}
+
+/** A `mode` create body, with the fields a test wants to override. */
+function modeInput(name: string, overrides: Partial<CreateModeRequest> = {}): CreateModeRequest {
+  return {
+    name,
+    model: 'anthropic/claude-sonnet-5',
+    reasoning_effort: 'high',
+    system_prompt_addition: 'Think step by step.',
+    ...overrides,
+  }
+}
+
+/** A `mode_` id no store has a mode for: well-formed, and never handed out. */
+function unknownModeId(): ModeId {
+  return 'mode_00000000000000000000000000' as ModeId
+}
+
+/** A `user.message` carrying a mode switch, as a client sends one (#245, M6). */
+function userMessageWithMode(text: string, modeId: ModeId): AppendableEvent {
+  return {
+    type: EVENT_TYPES.userMessage,
+    content: [{ type: 'text', text }],
+    mode: modeId,
+  }
 }
 
 /** An `agent_` id no store has an agent for: well-formed, and never handed out. */

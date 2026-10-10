@@ -41,6 +41,7 @@ repo.
 | `oh sessions`                           | list every session: id, title, status, updated                               |
 | `oh sessions delete <id>`               | delete a chat and everything in it (asks; `--yes` skips)                     |
 | `oh agents`                             | list the saved agents (optional presets): id, name                           |
+| `oh modes`                              | list your modes and what each resolves to (#245, M6)                         |
 | `oh providers`                          | list the stored model-provider keys: provider, last 4                        |
 | `oh providers add [name]`               | connect a provider or a named credential — answer its fields, secrets hidden |
 | `oh providers remove <provider>`        | forget a key (asks; `--yes` skips the question)                              |
@@ -53,7 +54,8 @@ repo.
 
 Global flags: `--server <url>`, `--debug`; `oh login` also takes `--no-browser`, and
 `oh sessions delete` / `oh providers remove` take `--yes`. The chat flags are `-s`/`-c`,
-`--agent` and `--model`; the other commands take none of them (and reject them loudly).
+`--agent`, `--model` and `--mode`; the other commands take none of them (and reject them
+loudly).
 
 Exit codes: `0` did what it was asked (including a chat the user ended, a chat that was
 deleted elsewhere, a delete or remove answer of "no", a `providers add` the user cancelled,
@@ -168,7 +170,12 @@ chat picks a model, not an agent, and usually picks it with no dialog at all. In
    opens on it immediately: the session is created with `{ model }` and no picker is drawn.
    The stored id wins even when the catalog is empty — it is the user's own choice, and
    free-text ids are allowed (the server validates the shape, not the catalog).
-4. Only with no default either is there a **model picker**, fed by `client.models.list()`:
+4. `--mode <name>` (#245, M6) names a mode a new chat follows instead of a model: it is matched
+   against the user's modes by name (exactly, then ignoring case; a `mode_` id is read
+   directly), ambiguity is an error, and the session is created with `{ mode }` — the server
+   resolves the mode's model from the user's own settings, which is what "my default model"
+   means. It is a usage error beside `--model`, because a chat follows one or the other.
+5. Only with no default either is there a **model picker**, fed by `client.models.list()`:
    the chat models the user's own provider keys can use, grouped by provider, each row
    showing the display name and the context window, and a last row, "Other model id…", that
    takes a free-text `provider/model` id. A **search line** at the top filters the list as it
@@ -185,7 +192,7 @@ chat picks a model, not an agent, and usually picks it with no dialog at all. In
    `oh` asks once — `Save <id> as your default model for new
 chats? [y/N]` — and a `y` writes it with `preferences.put`; the chat opens either way,
    and a save that failed says so and steps aside on the next Enter.
-5. With no provider keys at all — `client.models.list()` answers with no entries and there
+6. With no provider keys at all — `client.models.list()` answers with no entries and there
    is no default — there is nothing to chat with, and `oh` connects one in the terminal
    instead (the next section). An account that has keys but still no models gets the message
    that says so, and exits `1`.
@@ -197,6 +204,18 @@ server kept. The value is the one the web app's Settings show — it lives on th
 
 `--session` and `--continue` win over everything: they name the session to resume, whatever
 default, agents or models exist.
+
+### Modes in a chat (#245, M6)
+
+`/model` offers the user's **modes** as a `Modes` group above the providers, above every model
+row, and the search line filters them with the models. Picking one is **pending**, exactly as a
+model pick is: the next message carries it as `user.message.mode`, and the session follows the
+mode live from then on (the server resolves its model, effort and prompt addition per request).
+A mode whose model cannot be used is refused with the server's own sentence in the notice line,
+never silently swapped. A plain model pick and a mode pick are one choice: each clears the
+other, because a chat follows a mode or a model, never both. The status line names the mode
+first — `smart · claude-sonnet-5` — so what the chat follows and what it resolved to are on one
+line (`(next message)` while the pick is pending).
 
 ### Switching the model in a chat
 
@@ -568,7 +587,8 @@ about the screen and not about any one component.
 ### What the status line says
 
 `components/status-line.tsx` draws the input section: the rule that opens it, and one line —
-who is answering, the model, the session and the status. The model is named the way the catalog
+who is answering, the model, the session and the status. The mode the chat follows comes first when there is one
+(`smart · claude-sonnet-5`, #245, M6), then the model — named the way the catalog
 names it when the catalog is known, and by its `provider/model` id otherwise — a chat opened on
 `--model` or a stored default never _waits_ for the catalog, which is what makes it start
 immediately (a background read fills the names and the prices in, #247).
@@ -634,9 +654,11 @@ src/
   terminal.ts            restoreTerminal (raw mode off, cursor shown), and clearScreen
   version.ts             the version injected at build time
   paging.ts              listAll: walk next_page to the end of an agents/sessions list
+  modes.ts             modes: what a mode resolves to, the name a chat follows (#245, M6)
   chat/
     session.ts           the runtime: transcript + stream + send/interrupt/dispose,
-                         the pending `/model` pick, and the deleted-session end state
+                         the pending `/model` pick (a model or a mode), and the
+                         deleted-session end state
     screen.tsx           the chat screen (transcript, status line, prompt, the slash
                          commands), and the prompt slot's first flow
     commands.ts          the slash-command registry, `parseChatInput`, the "did you mean",
@@ -670,6 +692,7 @@ src/
     state.ts             update-state.json: the timestamp, the claim, the root, the outcome
     notice.ts            the one line the next run prints, once
   commands/list.ts       `oh sessions` / `oh agents` / `oh sessions delete`
+  commands/modes.ts      `oh modes` (#245, M6)
   commands/providers.tsx `oh providers` / `add` / `remove` (#210)
   commands/preferences.ts  `oh default-model`
   commands/io.ts         what a print-and-stop command writes, how it fails, and the
@@ -706,6 +729,13 @@ The auth commands run against the fake too: `oh login` asks it for the (determin
 polls it once, and stores its `FAKE_SESSION_TOKEN` in the real credentials file — point
 `XDG_CONFIG_HOME` at a scratch directory when you do that by hand. `oh logout` signs the fake
 out; `oh whoami` reads what the login stored.
+
+**No provider credential is seeded by default**, on purpose: a signed-in account with no
+credentials is exactly what the _first-run_ flow — the connect-a-provider screen — is for, and
+seeding a key per provider would make it unreachable in fake mode. `OPENHARNESS_FAKE_CREDENTIALS=1`
+(beside `OPENHARNESS_FAKE=1`) seeds one credential per provider the catalog lists **and** the
+`DEV_MODES` modes — the account that can actually run a mode, since a mode's model is usable
+only when its provider has a credential (#245, M6).
 
 `OPENHARNESS_FAKE_SIGNED_OUT=1` (beside `OPENHARNESS_FAKE=1`) makes the fake start **signed
 out**, which is how the sign-in a chat offers with no session — and the 401 a stale one gets —
@@ -797,6 +827,7 @@ denial, cancellation, revoke failures); `src/index.test.ts` drives `run()` all t
 | `src/components/secret-input.test.tsx`            | the hidden input: no echo, the mask's length, paste (newline and all), Enter/Esc, the character the flow claims before it is inserted, and an **optional** field submitting its empty value (#210, #249)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `src/components/provider-setup.test.tsx`          | the connect flow: the provider list and its free-tier hints, the key page and `o`, a save, a rejected key asking again, a stale session, Esc back and Esc out (#210) — the Azure form: its three fields one prompt at a time, the endpoint shown because it is not a secret, the name prompt a second credential gets, and a name already taken refused before the fields (#245 A3a) — the Bedrock form (#245 A3c): the region as a list whose cursor moves with ↑/↓, a save carrying the picked region, a token typed and a token **skipped**, no secret in any frame, and a second credential under its own name and region — and the custom form: a base URL and a keyless save, no key page, the name prompt saying `<name>/<model>` (#249, A3b) — and the Vertex form (#245 A3d): the key read from a path the reader gives and never put on the screen, the project prompt opened with the key document's own project, and a location outside Google's list refused rather than sent |
 | `src/commands/providers.test.tsx`                 | `oh providers`: the list's columns, the remove question, `--yes`, and the connect screen end to end (#210)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `src/commands/modes.test.ts`                      | `oh modes` (#245, M6): `formatModes`' words — how to create one when there are none, and each mode with what it resolves to — and `runModes`' listing and failure line                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `src/markdown/text.test.ts`                       | the wrapper: prose and pasted indentation, wide characters, long words, truncation and alignment (#205)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `src/markdown/theme.test.ts`                      | `COLORFGBG`, `NO_COLOR`, the colour level (`COLORTERM`, `-256color`, and nothing), the config's `theme`, the two syntax palettes, and the band and panel per level and background (#205, #231)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `src/markdown/highlight.test.ts`                  | highlight.js → spans: tokens, nested scopes, entities, a language it does not know, half a snippet (#205)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
@@ -824,6 +855,11 @@ denial, cancellation, revoke failures); `src/index.test.ts` drives `run()` all t
 | `src/update/check.test.ts`                        | the foreground decision: the gate, the throttle, the claim, and the spawn, against a fake runner                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `src/commands/update.test.ts`                     | `oh update`: up to date, installed, failed, and refused                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `src/dev/fake.test.ts`                            | the fake-mode gate and the seeded dev client                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+
+The modes suite (#245, M6) is tested here too: `src/modes.ts` and `src/commands/modes.ts` on
+their own, the `/model` picker's Modes group and the `--mode` flag in `src/args.test.ts` and
+`src/chat/target.test.ts`, the mode on the status line in `src/components/status-line.test.tsx`,
+and a whole chat that follows a mode from `src/chat/session.test.ts`.
 
 Every `run()` test gets its own `XDG_CONFIG_HOME` (`index.test.ts` creates one per test):
 without it the suite reads the developer's real `~/.config/openharness`, where a hand-written

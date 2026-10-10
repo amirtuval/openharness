@@ -32,6 +32,12 @@ const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504, 529])
  * that answers with bare HTML still produces a typed error: a 401 is an
  * `authentication_error` whether or not the body says so.
  *
+ * Two types share a status (#245 added `mode_unavailable_error` beside
+ * `invalid_provider_credential` at 422), so this answers the **first** type
+ * `API_ERROR_STATUS_BY_TYPE` declares for it. That is only ever a fallback: a response that
+ * is the protocol's envelope carries its own `error.type`, which is what an `ApiError` is
+ * built from, so the real type is never guessed.
+ *
  * @param status the HTTP status of the response
  */
 export function errorTypeForStatus(status: number): ApiErrorType {

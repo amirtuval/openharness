@@ -1,5 +1,5 @@
 import { providerName } from '@openharness/client'
-import type { Session } from '@openharness/protocol'
+import type { Mode, ModeId } from '@openharness/protocol'
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { ErrorBanner } from '../components/chat/error-banner'
@@ -9,15 +9,18 @@ import { useClient } from '../components/client-provider'
 import { AddProviderDialog } from '../components/providers/add-provider-dialog'
 import { Skeleton } from '../components/ui/skeleton'
 import { Button } from '../components/ui/button'
+import type { ModesView } from '../hooks/use-modes'
 import type { ModelsView } from '../hooks/use-models'
 import { usePreferences } from '../hooks/use-preferences'
 import { useSettings } from '../hooks/use-settings'
 import { describeError } from '../lib/errors'
 import { modelLabel } from '../lib/format'
 import { modelNameLookup } from '../lib/models'
+import { modeLabel } from '../lib/modes'
 import { showNotice } from '../lib/notice'
 import { chatHash, navigate, settingsHash } from '../lib/router'
 import { sessionRefresh } from '../lib/session-refresh'
+import type { CreateChatOptions, CreateChatResult } from '../hooks/use-sessions'
 import { SUGGESTED_PROMPTS } from '../lib/suggestions'
 
 /**
@@ -48,10 +51,13 @@ export const NEW_CHAT_GREETING = 'Hey! What are we building today?'
 export function NewChatScreen({
   createSession,
   catalog,
+  modes,
 }: {
-  /** Create the session, refresh the list, and return it (`null` on failure). */
-  createSession: (modelId: string) => Promise<Session | null>
+  /** Create the session — from a model, or from a mode (#245, M6) — and return it (`null` on failure). */
+  createSession: (options: CreateChatOptions) => Promise<CreateChatResult>
   catalog: ModelsView
+  /** The shell's modes: the presets the picker offers above the models. */
+  modes: ModesView
 }) {
   const client = useClient()
   const { preferences, loading, error, dismissError } = usePreferences(client)
@@ -60,13 +66,22 @@ export function NewChatScreen({
   const { serverUrl } = useSettings()
 
   const [chosen, setChosen] = useState<string | null>(null)
+  // A mode picked instead of a model (#245, M6). The two are one choice: picking one clears the
+  // other, because a chat follows a mode or a plain model, never both.
+  const [chosenMode, setChosenMode] = useState<Mode | null>(null)
   // The draft, owned here rather than by the composer (U10): a suggested prompt has to be able
   // to put text in the box, and reaching into the DOM behind React would fight the controlled
   // textarea the composer already is.
   const [draft, setDraft] = useState('')
   // The session this screen has already created, if a send failed after the create: the
-  // reader's retry goes to the chat that exists, not a second empty one.
-  const [created, setCreated] = useState<{ id: string; model: string } | null>(null)
+  // reader's retry goes to the chat that exists, not a second empty one. It remembers what it
+  // was created from — a model, or a mode — so a pick made after the create rides the message
+  // and an unchanged one does not.
+  const [created, setCreated] = useState<{
+    id: string
+    model: string | null
+    mode: ModeId | null
+  } | null>(null)
   const [sending, setSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
   // The Add-provider dialog (X5): open with the provider left to the reader.
@@ -82,7 +97,13 @@ export function NewChatScreen({
     defaultModel === null && error === null && catalog.models.length === 1
       ? (catalog.models[0]?.id ?? null)
       : null
-  const model = chosen ?? created?.model ?? defaultModel ?? onlyModel
+  // The model the session would be created with, or `null` when a mode is the choice instead.
+  const model = chosenMode === null ? (chosen ?? created?.model ?? defaultModel ?? onlyModel) : null
+  // Whether the reader has something to start a chat on: a model, or a mode.
+  const ready = chosenMode !== null || model !== null
+  // What a session would be created from, once there is something to create it with (#245, M6).
+  const start: CreateChatOptions | null =
+    chosenMode !== null ? { mode: chosenMode.id } : model === null ? null : { model }
 
   // A new chat opens with the cursor in the box, like any other chat.
   useEffect(() => {
@@ -93,35 +114,44 @@ export function NewChatScreen({
   }, [loading, model])
 
   const send = async (text: string): Promise<boolean> => {
-    // No model — no default and nothing picked yet (#146) — is a refusal, not a silent
+    // Nothing to run — no default and nothing picked yet (#146) — is a refusal, not a silent
     // ignore: `false` keeps the text in the box, and the hint above the composer says why.
-    if (model === null || sending) {
+    if (start === null || sending) {
       return false
     }
     setSending(true)
     setSendError(null)
 
     let sessionId = created?.id ?? null
+    let createdModel = created?.model ?? null
+    let createdMode = created?.mode ?? null
     if (sessionId === null) {
-      const session = await createSession(model)
-      if (session === null) {
+      const result = await createSession(start)
+      if (!result.ok) {
+        // The server's own message, not a generic one: for a mode whose model cannot be used
+        // (#245, M6) that sentence says exactly what to do about it.
         setSending(false)
-        setSendError('The chat could not be created.')
+        setSendError(result.message)
         return false
       }
-      sessionId = session.id
-      setCreated({ id: session.id, model })
+      sessionId = result.session.id
+      createdModel = model
+      createdMode = chosenMode?.id ?? null
+      setCreated({ id: result.session.id, model: createdModel, mode: createdMode })
     }
 
     try {
-      // The session was created with this model (or with the one in `created`); only a pick
-      // that came after a create rides the message, the way a mid-chat switch does (U3).
-      const existing = created?.model ?? model
-      await client.sendMessage(
-        sessionId,
-        text,
-        existing === model ? undefined : { model: { id: model } },
-      )
+      // The session was created from this model or mode; only a pick that came after a create
+      // rides the message, the way a mid-chat switch does (U3, #245).
+      const options =
+        chosenMode !== null
+          ? chosenMode.id === createdMode
+            ? undefined
+            : { mode: chosenMode.id }
+          : model !== null && model !== createdModel
+            ? { model: { id: model } }
+            : undefined
+      await client.sendMessage(sessionId, text, options)
     } catch (caught) {
       setSending(false)
       setSendError(describeError(caught, { serverUrl }))
@@ -188,9 +218,11 @@ export function NewChatScreen({
             <span data-slot="hero-title">{NEW_CHAT_GREETING}</span>
           </h1>
           <p className="text-sm text-muted-foreground">
-            {model === null
-              ? 'Pick a model below, and this chat starts with your first message.'
-              : `A new chat on ${modelLabel(model, nameOf)} — it starts with your first message.`}
+            {chosenMode !== null
+              ? `A new chat on the ${chosenMode.name} mode (${modeLabel(chosenMode)}) — it starts with your first message.`
+              : model === null
+                ? 'Pick a model or a mode below, and this chat starts with your first message.'
+                : `A new chat on ${modelLabel(model, nameOf)} — it starts with your first message.`}
           </p>
           <ul className="grid gap-2 sm:grid-cols-2">
             {SUGGESTED_PROMPTS.map((prompt) => (
@@ -198,7 +230,7 @@ export function NewChatScreen({
                 <Button
                   type="button"
                   variant="outline"
-                  disabled={model === null || sending}
+                  disabled={!ready || sending}
                   onClick={() => {
                     setDraft(prompt)
                     inputRef.current?.focus()
@@ -236,11 +268,11 @@ export function NewChatScreen({
               onDismiss={() => setSendError(null)}
             />
           )}
-          {model === null ? (
-            // No default and nothing picked: the send is refused (there is no model to create
+          {!ready ? (
+            // No default and nothing picked: the send is refused (there is nothing to create
             // the session with), so the screen says what is missing and where a default lives.
             <p className="text-xs text-muted-foreground">
-              Pick a model to start, or{' '}
+              Pick a model or a mode to start, or{' '}
               <a className="underline underline-offset-2" href={settingsHash()}>
                 set a default in Settings
               </a>
@@ -261,8 +293,17 @@ export function NewChatScreen({
                 placement="above"
                 models={catalog.models}
                 providers={catalog.providers}
+                modes={modes.modes}
+                selectedModeId={chosenMode?.id ?? null}
+                onSelectMode={(mode) => {
+                  setChosenMode(mode)
+                  setChosen(null)
+                }}
                 value={model}
-                onChange={setChosen}
+                onChange={(modelId) => {
+                  setChosen(modelId)
+                  setChosenMode(null)
+                }}
                 refreshing={catalog.refreshing}
                 onRefresh={catalog.refresh}
                 onAddProvider={() => setAddingProvider(true)}

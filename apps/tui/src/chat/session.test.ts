@@ -1,6 +1,7 @@
 import { ApiError, AuthenticationError, type Client } from '@openharness/client'
 import { createFakeClient, type FakeClient } from '@openharness/client/testing'
 import { EVENT_TYPES } from '@openharness/protocol'
+import { makeMode, makeModelEntry, makeProviderCredential } from '@openharness/protocol/fixtures'
 import { describe, expect, it } from 'vitest'
 
 import { failing } from '../test-support/fake'
@@ -221,6 +222,61 @@ describe('createChatSession', () => {
     // The transcript only tracks what a `user.message` said (U1); a session's own model
     // stands until a message names another, which is what the status line falls back to.
     expect(session.getState().transcript.model).toBeNull()
+    expect(session.getState().pendingModel).toBeNull()
+    session.dispose()
+  })
+
+  it('sends a mode picked with /model on the next message, and the chat follows it (#245, M6)', async () => {
+    const mode = makeMode({ name: 'smart', model: 'openai/gpt-4.1-mini' })
+    const fake = createFakeClient({
+      modes: [mode],
+      models: [makeModelEntry({ id: 'openai/gpt-4.1-mini' })],
+      credentials: [makeProviderCredential({ name: 'openai' })],
+    })
+    fake.respondWith('Following the mode.')
+    const session = createChatSession({ client: fake, session: fake.session })
+    await session.start()
+
+    session.setMode(mode.id)
+    expect(session.getState().pendingMode).toBe(mode.id)
+
+    await session.send('Go deep.')
+    await fake.waitForIdle()
+
+    const sent = fake.history(fake.session.id).find((event) => event.type === 'user.message')
+    expect(sent?.type === 'user.message' && sent.mode).toBe(mode.id)
+    // The chat follows it from here, and the tab remembers it for the status line (the
+    // transcript tracks models, not modes).
+    expect(session.getState().pendingMode).toBeNull()
+    expect(session.getState().modeId).toBe(mode.id)
+
+    session.dispose()
+  })
+
+  it('detaches from a mode when a plain model is picked, and the reverse (#245, M6)', async () => {
+    const mode = makeMode({ name: 'smart', model: 'openai/gpt-4.1-mini' })
+    const fake = createFakeClient({
+      modes: [mode],
+      models: [makeModelEntry({ id: 'openai/gpt-4.1-mini' })],
+      credentials: [makeProviderCredential({ name: 'openai' })],
+    })
+    fake.respondWith('Plain.')
+    const session = createChatSession({ client: fake, session: fake.session })
+    await session.start()
+
+    session.setMode(mode.id)
+    session.setModel('openai/gpt-4.1-mini')
+    // A model pick clears the pending mode: a chat follows a mode or a model, never both.
+    expect(session.getState().pendingMode).toBeNull()
+
+    await session.send('Plain model.')
+    await fake.waitForIdle()
+    const sent = fake.history(fake.session.id).find((event) => event.type === 'user.message')
+    expect(sent?.type === 'user.message' && sent.mode).toBeUndefined()
+    expect(session.getState().modeId).toBeNull()
+
+    session.setModel('openai/gpt-4.1-mini')
+    session.setMode(mode.id)
     expect(session.getState().pendingModel).toBeNull()
     session.dispose()
   })

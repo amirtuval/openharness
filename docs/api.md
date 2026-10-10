@@ -91,6 +91,11 @@ the only way an event is ever removed together with its session.
 | `GET`    | `/v1/me`                                  | the signed-in user                                                                              |
 | `GET`    | `/v1/me/preferences`                      | the caller's preferences — the default model and the web theme                                  |
 | `PUT`    | `/v1/me/preferences`                      | merge fields in; `default_model` is `provider/model` or `null`, `theme` one of four names       |
+| `POST`   | `/v1/me/modes`                            | create a mode; `409` for a duplicate name or the twenty-first mode                              |
+| `GET`    | `/v1/me/modes`                            | list the caller's modes, oldest first (no cursor: at most 20)                                   |
+| `GET`    | `/v1/me/modes/{mode_id}`                  | read one mode                                                                                   |
+| `POST`   | `/v1/me/modes/{mode_id}`                  | update a mode; omitted fields keep their value, `null` clears one                               |
+| `DELETE` | `/v1/me/modes/{mode_id}`                  | delete one; answers `204`, and the chats that followed it keep their last model                 |
 | `POST`   | `/v1/agents`                              | create an agent                                                                                 |
 | `GET`    | `/v1/agents`                              | list agents, oldest first                                                                       |
 | `GET`    | `/v1/agents/{agent_id}`                   | read one agent                                                                                  |
@@ -478,6 +483,42 @@ when none does) — an automatic pick is maintained this way, while a default th
 themselves is only cleared, because silently substituting another model for their choice is
 not a decision the server makes for them.
 
+#### Modes
+
+A **mode** (epic #245, decision M6) is a per-user named preset: a model, a reasoning effort
+(`low`/`medium`/`high`/`null`) and an optional system-prompt addition behind a stable name such
+as `smart`. A chat can follow one instead of a raw model, and it follows it **live** — every
+request resolves the mode as it is now — so retuning a mode changes every chat that runs it.
+
+The routes are `/v1/me/modes`, owner-scoped like the rest of `/v1/me` (another user's mode is
+a 404, never a 403, and it leaks nothing). A `name` is unique among the caller's modes and a
+caller holds at most `MAX_MODES_PER_USER` (20) of them; both refusals are the protocol's `409`
+`conflict_error` with a message saying which. `model` is a `provider/model` id or the sentinel
+`my-default-model`, which resolves to the caller's stored `default_model` at request time — so
+a mode on it follows a changed default, and one with no default set is unavailable. `PUT`-style
+merging is a `POST /v1/me/modes/{mode_id}` update: omitted fields keep their stored value and
+`null` clears a nullable one (`reasoning_effort`, `system_prompt_addition`).
+
+**A chat follows a mode or a plain model.** `Session.mode` is the mode a chat follows, or
+`null`; `POST /v1/sessions` takes a `mode` (the server stores the model it resolves to on the
+session's header), and a `user.message` carrying a `mode` switches the session to it from that
+message on. A `user.message` carrying a plain `model` with no `mode` **detaches** the chat, and
+so does `"mode": null`. Deleting a mode lands the chats that followed it on the model each last
+ran, as ordinary chats with no mode.
+
+**An unavailable mode is refused, never silently replaced.** If a mode's model cannot be used —
+no credential for its provider, or `my-default-model` with no default set — starting a chat on
+it (`POST /v1/sessions`) or continuing one (`POST …/events`) is the `422`
+`mode_unavailable_error`, with a message naming the mode and what to do about it, and nothing is
+stored. A mode is stored even when its model is not usable yet: the key may come later.
+
+**Every request records what it ran under.** `span.model_request_start.mode` is `{ id, name }`
+— the mode the request ran under and the name it had then — beside the `model` and
+`reasoning_effort` it resolved to, so a rename or an edit later does not rewrite history. The
+effort is the mode's unless a `user.message` asked for one explicitly, and the mode's
+`system_prompt_addition` is appended after the session's own system prompt (never in place of
+it).
+
 ### Provider credentials
 
 The server has no model-provider keys of its own — each user stores their own, and the API is
@@ -773,6 +814,8 @@ GET /v1/me/usage?from=&to=&tz=         -> { from, to, tz, totals, cost, unpriced
 | 401    | `authentication_error`        | not signed in, or the session or bearer token is invalid/expired                        |
 | 403    | `permission_error`            | a cookie-authenticated write from an untrusted origin (CSRF)                            |
 | 404    | `not_found_error`             | the id names nothing, the route does not exist, or the resource belongs to another user |
+| 409    | `conflict_error`              | a mode name the caller already has, or the twenty-first mode; a rewind while running    |
 | 422    | `invalid_provider_credential` | a provider credential failed validation on save                                         |
+| 422    | `mode_unavailable_error`      | a chat starting or continuing on a mode whose model cannot be used (M6)                 |
 | 429    | `rate_limit_error`            | a cache-bypassing refresh (`/v1/models?refresh=true`) more than once a minute per user  |
 | 500    | `api_error`                   | an unexpected server failure — never a stack trace                                      |

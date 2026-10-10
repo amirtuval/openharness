@@ -4,10 +4,13 @@ import {
   createDevClient,
   DEV_DEFAULT_MODEL,
   DEV_REPLIES,
+  DEV_MODES,
+  FAKE_CREDENTIALS_ENV,
   FAKE_MODE_ENV,
   FAKE_SIGNED_OUT_ENV,
   isFakeMode,
   isFakeSignedOut,
+  isFakeWithCredentials,
 } from './fake'
 
 describe('isFakeMode', () => {
@@ -33,7 +36,35 @@ describe('isFakeSignedOut (#210)', () => {
   })
 })
 
+describe('isFakeWithCredentials (#245, M6)', () => {
+  it('is off unless it is asked for, and on for the same values as the fake gate', () => {
+    expect(isFakeWithCredentials({})).toBe(false)
+    expect(isFakeWithCredentials({ [FAKE_CREDENTIALS_ENV]: '0' })).toBe(false)
+    expect(isFakeWithCredentials({ [FAKE_CREDENTIALS_ENV]: 'false' })).toBe(false)
+    expect(isFakeWithCredentials({ [FAKE_CREDENTIALS_ENV]: '1' })).toBe(true)
+    expect(isFakeWithCredentials({ [FAKE_CREDENTIALS_ENV]: 'yes' })).toBe(true)
+  })
+})
+
 describe('createDevClient', () => {
+  it('starts with no credentials and no modes, so the first-run flow is reachable', async () => {
+    const fake = await createDevClient()
+
+    expect((await fake.providerCredentials.list()).data).toEqual([])
+    expect((await fake.modes.list()).data).toEqual([])
+  })
+
+  it('seeds a credential per provider and the modes under OPENHARNESS_FAKE_CREDENTIALS', async () => {
+    const fake = await createDevClient({ [FAKE_CREDENTIALS_ENV]: '1' })
+
+    // Every provider the catalog lists, so a mode's model is usable.
+    const names = (await fake.providerCredentials.list()).data.map((entry) => entry.name).sort()
+    expect(names).toEqual(['anthropic', 'google', 'openai'])
+    expect((await fake.modes.list()).data.map((mode) => mode.name)).toEqual(
+      DEV_MODES.map((mode) => mode.name),
+    )
+  })
+
   it('is signed in unless OPENHARNESS_FAKE_SIGNED_OUT asks otherwise (#210)', async () => {
     const signedIn = await createDevClient()
     await expect(signedIn.me()).resolves.toMatchObject({ id: signedIn.user.id })

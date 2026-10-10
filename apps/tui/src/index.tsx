@@ -9,6 +9,7 @@ import { parseArgs, type ChatOptions } from './args'
 import { openBrowser } from './browser'
 import { offerSignIn, runLogin, runLogout, runWhoami, type AuthIo } from './commands/auth'
 import { runAgents, runSessionDelete, runSessions } from './commands/list'
+import { runModes } from './commands/modes'
 import { runDefaultModel } from './commands/preferences'
 import { mountProvidersAdd, runProvidersList, runProvidersRemove } from './commands/providers'
 import { createNpmPort, runUpdate } from './commands/update'
@@ -163,6 +164,8 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
         )
       case 'agents':
         return await runAgents(connected.client, { stdout: out, stderr: err, context })
+      case 'modes':
+        return await runModes(connected.client, { stdout: out, stderr: err, context })
       case 'providers':
         return await runProvidersList(connected.client, { stdout: out, stderr: err, context })
       case 'providers-add':

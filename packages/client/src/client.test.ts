@@ -9,6 +9,7 @@ import {
   makeAgent,
   makeAgentMessage,
   makeListModelsResponse,
+  makeMode,
   makeProviderCredential,
   makeSession,
   makeUser,
@@ -621,6 +622,73 @@ describe('the model catalog', () => {
       status: 429,
       type: 'rate_limit_error',
       retryable: true,
+    })
+  })
+})
+
+describe('modes (#245, M6)', () => {
+  it('creates a mode with POST /v1/me/modes and parses the response', async () => {
+    const mode = makeMode()
+    const { client, mock } = clientWith(() => jsonResponse(mode))
+
+    const created = await client.modes.create({ name: 'deep', model: 'anthropic/claude-sonnet-5' })
+
+    expect(created).toEqual(mode)
+    expect(mock.requests[0]?.init?.method).toBe('POST')
+    expect(mock.urlOf(0)).toBe(`${BASE_URL}/v1/me/modes`)
+    expect(bodyOf(mock.requests[0]?.init)).toEqual({
+      name: 'deep',
+      model: 'anthropic/claude-sonnet-5',
+    })
+  })
+
+  it('lists, reads, updates and deletes a mode', async () => {
+    const mode = makeMode()
+    const { client, mock } = clientWith((request, _call) =>
+      request.init?.method === 'DELETE'
+        ? new Response(null, { status: 204 })
+        : jsonResponse(request.url.endsWith('/me/modes') ? { data: [mode] } : mode),
+    )
+
+    expect(await client.modes.list()).toEqual({ data: [mode] })
+    expect(mock.urlOf(0)).toBe(`${BASE_URL}/v1/me/modes`)
+
+    expect(await client.modes.get(mode.id)).toEqual(mode)
+    expect(mock.requests[1]?.init?.method).toBe('GET')
+    expect(mock.urlOf(1)).toBe(`${BASE_URL}/v1/me/modes/${mode.id}`)
+
+    await client.modes.update(mode.id, { reasoning_effort: null })
+    expect(mock.requests[2]?.init?.method).toBe('POST')
+    expect(bodyOf(mock.requests[2]?.init)).toEqual({ reasoning_effort: null })
+
+    await client.modes.delete(mode.id)
+    expect(mock.requests[3]?.init?.method).toBe('DELETE')
+    expect(mock.urlOf(3)).toBe(`${BASE_URL}/v1/me/modes/${mode.id}`)
+  })
+
+  it('surfaces a refused write as the conflict the server answers', async () => {
+    const { client } = clientWith(() => errorResponse(409, 'conflict_error', 'already exists'))
+    const failure = client.modes.create({ name: 'deep', model: 'x/y' })
+    await expect(failure).rejects.toMatchObject({ status: 409, type: 'conflict_error' })
+  })
+
+  it('sendMessage posts the mode beside the text, and an explicit null to detach (#245, M6)', async () => {
+    const mode = makeMode()
+    const stored = makeUserMessage('go deep', { seq: 7, mode: mode.id })
+    const { client, mock } = clientWith(() => jsonResponse({ data: [stored] }))
+    const message = await client.sendMessage('sesn_1', 'go deep', { mode: mode.id })
+    expect(message).toEqual(stored)
+    expect(bodyOf(mock.requests[0]?.init)).toEqual({
+      events: [
+        { type: 'user.message', content: [{ type: 'text', text: 'go deep' }], mode: mode.id },
+      ],
+    })
+
+    const detached = makeUserMessage('plain', { seq: 8, mode: null })
+    const second = clientWith(() => jsonResponse({ data: [detached] }))
+    await second.client.sendMessage('sesn_1', 'plain', { mode: null })
+    expect(bodyOf(second.mock.requests[0]?.init)).toEqual({
+      events: [{ type: 'user.message', content: [{ type: 'text', text: 'plain' }], mode: null }],
     })
   })
 })

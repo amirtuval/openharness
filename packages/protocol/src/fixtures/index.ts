@@ -1,10 +1,11 @@
 import type { EventId } from '../ids'
-import { newAgentId, newEventId, newProviderCredentialId, newSessionId } from '../ids'
+import { newAgentId, newEventId, newModeId, newProviderCredentialId, newSessionId } from '../ids'
 import type {
   Agent,
   AgentMessageEvent,
   ContentDelta,
   ListModelsResponse,
+  Mode,
   ModelEntry,
   ModelRequestEndEvent,
   ModelRequestStartEvent,
@@ -118,6 +119,7 @@ export function makeSession(overrides: Partial<Session> = {}): Session {
     metadata: {},
     model: { id: 'anthropic/claude-sonnet-5' },
     system: 'You are a concise technical assistant.',
+    mode: null,
     agent: makeSessionAgent(),
     created_at: fixtureTimestamp(),
     updated_at: fixtureTimestamp(),
@@ -180,6 +182,27 @@ export function makeProviderCredential(
   // variant it means: a `type` and its own `details` are consistent by construction, so the
   // wide `ProviderCredentialMetadata` the spread builds is the union the caller asked for.
   return { ...credential, ...overrides } as ProviderCredential
+}
+
+/**
+ * A mode (#245, M6): a `deep` preset on `anthropic/claude-sonnet-5` at a `high` effort, with
+ * a one-line system-prompt addition.
+ *
+ * @param overrides fields to replace on the default mode
+ */
+export function makeMode(overrides: Partial<Mode> = {}): Mode {
+  const mode: Mode = {
+    id: newModeId(),
+    type: 'mode',
+    owner_id: makeUser().id,
+    name: 'deep',
+    model: 'anthropic/claude-sonnet-5',
+    reasoning_effort: 'high',
+    system_prompt_addition: 'Think step by step before answering.',
+    created_at: fixtureTimestamp(),
+    updated_at: fixtureTimestamp(),
+  }
+  return { ...mode, ...overrides }
 }
 
 /**
@@ -551,6 +574,13 @@ export function makeStoredEventDelta(
 /** A sample agent: an `anthropic/claude-sonnet-5` summarizer. */
 export const sampleAgent: Agent = makeAgent({
   id: newAgentId(1770000000000),
+  created_at: fixtureTimestamp(),
+  updated_at: fixtureTimestamp(),
+})
+
+/** A sample mode: a `deep` preset on `anthropic/claude-sonnet-5` at a `high` effort. */
+export const sampleMode: Mode = makeMode({
+  id: newModeId(1770000000000),
   created_at: fixtureTimestamp(),
   updated_at: fixtureTimestamp(),
 })

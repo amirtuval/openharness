@@ -1,10 +1,14 @@
 import {
   AgentSchema,
   CreateAgentRequestSchema,
+  CreateModeRequestSchema,
   EVENT_TYPES,
   CreateSessionRequestSchema,
   DEFAULT_USER_THEME,
   ListModelsResponseSchema,
+  MODE_DEFAULT_MODEL,
+  MAX_MODES_PER_USER,
+  ModeSchema,
   ProviderCredentialSchema,
   PutPreferencesRequestSchema,
   PutProviderCredentialRequestSchema,
@@ -13,12 +17,14 @@ import {
   SessionSchema,
   SessionUsageSchema,
   UpdateAgentRequestSchema,
+  UpdateModeRequestSchema,
   UserMessageEventInputSchema,
   UserPreferencesSchema,
   UserUsageSchema,
   credentialDetails,
   encodeKeyCursor,
   newAgentId,
+  newModeId,
   newProviderCredentialId,
   newSessionId,
   tryDecodePageCursor,
@@ -26,12 +32,16 @@ import {
 import { makeAgent, makeModelEntry, makeSession, makeUser } from '@openharness/protocol/fixtures'
 import type {
   Agent,
+  EventInput,
   GetPreferencesResponse,
   ListAgentsResponse,
   ListEventsResponse,
   ListModelsResponse,
+  ListModesResponse,
   ListProviderCredentialsResponse,
   ListSessionsResponse,
+  Mode,
+  ModeId,
   ModelEntry,
   ProviderCatalogStatus,
   PutProviderCredentialRequest,
@@ -170,6 +180,15 @@ export interface FakeClientOptions {
    * `put` cannot do synchronously.
    */
   credentials?: readonly ProviderCredential[]
+  /**
+   * The modes {@link Client.modes} starts with, over the default of none.
+   *
+   * Seeded rather than created, like {@link credentials}: a test of a picker or a chat that
+   * follows a mode needs one before the first render. A mode's availability follows the
+   * server's rule — the credential the model's provider would need, or the `default_model` a
+   * "my default model" resolves through.
+   */
+  modes?: readonly Mode[]
 }
 
 /** A device flow, as {@link FakeClient.scriptDeviceLogin} takes it. */
@@ -366,6 +385,10 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
   const credentials = new Map<string, ProviderCredential>(
     (options.credentials ?? []).map((credential) => [credential.name, credential]),
   )
+  // The caller's modes (#245, M6): one in-memory map behind `/v1/me/modes`, seeded by option
+  // the way the credentials are. The fake has one user, so ownership is only ever that user's
+  // — a mode the map does not hold is the 404 an unknown id gets.
+  const modes = new Map<string, Mode>((options.modes ?? []).map((mode) => [mode.id, mode]))
   const user = options.user ?? makeUser()
   const models: readonly ModelEntry[] = options.models ?? [makeModelEntry()]
   const providers: readonly ProviderCatalogStatus[] =
@@ -401,6 +424,62 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
     if (!authenticated) {
       throw new AuthenticationError('Not signed in.')
     }
+  }
+
+  /** The provider half of a `provider/model` id — the way `apps/server` reads it. */
+  function providerOf(modelId: string): string {
+    const separator = modelId.indexOf('/')
+    return separator <= 0 ? modelId : modelId.slice(0, separator)
+  }
+
+  /** The model a mode runs: its own id, or the caller's default model for the sentinel. */
+  function modeModelOf(mode: Mode): string | null {
+    return mode.model === MODE_DEFAULT_MODEL ? preferences.default_model : mode.model
+  }
+
+  /**
+   * The mode a chat may run, or the refusal the server would give: 404 for an id nothing has,
+   * 422 `mode_unavailable_error` for a mode whose model cannot be used. The fake mirrors the
+   * server's rule (`apps/server/src/modes.ts`): a credential for the model's provider, or a
+   * `default_model` for "my default model", and never a silent fallback.
+   */
+  function requireUsableMode(modeId: ModeId): { readonly mode: Mode; readonly model: string } {
+    const mode = modes.get(modeId)
+    if (mode === undefined) {
+      throw new ApiError(404, `no mode with id ${modeId}`, { type: 'not_found_error' })
+    }
+    const model = modeModelOf(mode)
+    if (model === null || !credentials.has(providerOf(model))) {
+      throw new ApiError(
+        422,
+        `the "${mode.name}" mode's model isn't available; ` +
+          'edit the mode or pick a model instead',
+        { type: 'mode_unavailable_error' },
+      )
+    }
+    return { mode, model }
+  }
+
+  /**
+   * The mode a batch leaves the session on (#245, M6): the last `user.message` that spoke
+   * about it — a `mode` sets or clears it, a `model` with no `mode` clears it — or the
+   * session's current mode when the batch says nothing. The store's projection, walked here so
+   * the refusal can happen before anything is stored, exactly as the events route does.
+   */
+  function resultingFakeMode(current: ModeId | null, inputs: readonly EventInput[]): ModeId | null {
+    let mode = current
+    for (const input of inputs) {
+      if (input.type !== EVENT_TYPES.userMessage) {
+        continue
+      }
+      if (input.model !== undefined && input.mode === undefined) {
+        mode = null
+      }
+      if (input.mode !== undefined) {
+        mode = input.mode
+      }
+    }
+    return mode
   }
 
   /** The scripted device flow, or a default one: one pending poll, then approval. */
@@ -579,9 +658,20 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
           throw rewindRefused(outcome.refusal)
         }
       }
+      // The mode the chat will be on after the batch, and its refusal (#245, M6): checked
+      // before anything is stored, exactly where the events route checks it — a batch that
+      // continues on a mode whose model cannot be used is refused with nothing stored.
+      const modeAfter = resultingFakeMode(brain.session.mode, request.data.events)
+      const resolvedMode = modeAfter === null ? null : requireUsableMode(modeAfter)
       const stored: UserEvent[] = request.data.events.flatMap((input) =>
         input.type === EVENT_TYPES.sessionRewind ? [] : [brain.appendUserEvent(input)],
       )
+      if (resolvedMode === null) {
+        brain.session.mode = null
+      } else {
+        brain.session.mode = resolvedMode.mode.id
+        brain.session.model = { id: resolvedMode.model }
+      }
       // A batch of just a rewind asks for no turn: the route signals the scheduler from the
       // user events it stored, and a rewind is not one (#238).
       if (stored.length > 0) {
@@ -658,6 +748,10 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       // The agent the session snapshots, when the request named one: an unknown id — or one
       // the fake's single user does not own — is the 404 an unknown agent gets.
       const agent = request.data.agent === undefined ? null : await requireAgent(request.data.agent)
+      // A mode stands in for a model (#245, M6), and an unusable one is refused here the way
+      // the route refuses it — before a session exists. The mode wins over an inline model.
+      const resolvedMode =
+        request.data.mode === undefined ? null : requireUsableMode(request.data.mode)
       // What the session runs (issue #93): the request's model and system, or the agent's when
       // the request named none — the protocol's refinement guarantees one of the two exists.
       const timestamp = now().toISOString()
@@ -669,10 +763,12 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
         status: 'idle',
         title: request.data.title ?? null,
         metadata: request.data.metadata ?? {},
-        // The schema's refinement says one of agent/model is always there, so this resolves:
-        // the request's model, or the one the agent it named contributes.
-        model: request.data.model ?? agent?.model,
+        // The schema's refinement says one of agent/model/mode is always there, so this
+        // resolves: the mode's resolved model, the request's model, or the agent's.
+        model:
+          resolvedMode === null ? (request.data.model ?? agent?.model) : { id: resolvedMode.model },
         system: request.data.system === undefined ? (agent?.system ?? null) : request.data.system,
+        mode: resolvedMode?.mode.id ?? null,
         agent:
           agent === null
             ? null
@@ -834,6 +930,144 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
     },
   }
 
+  const modesResource: Client['modes'] = {
+    create(body, requestOptions): Promise<Mode> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      const request = CreateModeRequestSchema.safeParse(body)
+      if (!request.success) {
+        return Promise.reject(badRequestFor(request.error.issues))
+      }
+      const owned = [...modes.values()].filter((mode) => mode.owner_id === user.id)
+      if (owned.some((mode) => mode.name === request.data.name)) {
+        return Promise.reject(
+          new ApiError(409, `a mode named ${JSON.stringify(request.data.name)} already exists`, {
+            type: 'conflict_error',
+          }),
+        )
+      }
+      if (owned.length >= MAX_MODES_PER_USER) {
+        return Promise.reject(
+          new ApiError(
+            409,
+            `cannot create a mode: the limit of ${MAX_MODES_PER_USER} modes is reached`,
+            { type: 'conflict_error' },
+          ),
+        )
+      }
+      const timestamp = now().toISOString()
+      const mode = ModeSchema.parse({
+        id: newModeId(),
+        type: 'mode',
+        owner_id: user.id,
+        name: request.data.name,
+        model: request.data.model,
+        reasoning_effort: request.data.reasoning_effort ?? null,
+        system_prompt_addition: request.data.system_prompt_addition ?? null,
+        created_at: timestamp,
+        updated_at: timestamp,
+      })
+      modes.set(mode.id, mode)
+      return Promise.resolve(mode)
+    },
+
+    get(modeId, requestOptions): Promise<Mode> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      const mode = modes.get(modeId)
+      if (mode === undefined || mode.owner_id !== user.id) {
+        return Promise.reject(notFoundMode(modeId))
+      }
+      return Promise.resolve(mode)
+    },
+
+    list(requestOptions): Promise<ListModesResponse> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      const data = [...modes.values()]
+        .filter((mode) => mode.owner_id === user.id)
+        .sort((left, right) =>
+          left.created_at === right.created_at
+            ? left.id < right.id
+              ? -1
+              : 1
+            : left.created_at < right.created_at
+              ? -1
+              : 1,
+        )
+      return Promise.resolve({ data })
+    },
+
+    update(modeId, body, requestOptions): Promise<Mode> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      const request = UpdateModeRequestSchema.safeParse(body)
+      if (!request.success) {
+        return Promise.reject(badRequestFor(request.error.issues))
+      }
+      const mode = modes.get(modeId)
+      if (mode === undefined || mode.owner_id !== user.id) {
+        return Promise.reject(notFoundMode(modeId))
+      }
+      const name = request.data.name ?? mode.name
+      if (
+        [...modes.values()].some(
+          (other) => other.id !== modeId && other.owner_id === mode.owner_id && other.name === name,
+        )
+      ) {
+        return Promise.reject(
+          new ApiError(409, `a mode named ${JSON.stringify(name)} already exists`, {
+            type: 'conflict_error',
+          }),
+        )
+      }
+      const updated = ModeSchema.parse({
+        ...mode,
+        name,
+        model: request.data.model ?? mode.model,
+        reasoning_effort:
+          request.data.reasoning_effort === undefined
+            ? mode.reasoning_effort
+            : request.data.reasoning_effort,
+        system_prompt_addition:
+          request.data.system_prompt_addition === undefined
+            ? mode.system_prompt_addition
+            : request.data.system_prompt_addition,
+        updated_at: now().toISOString(),
+      })
+      modes.set(modeId, updated)
+      return Promise.resolve(updated)
+    },
+
+    delete(modeId, requestOptions): Promise<void> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      const mode = modes.get(modeId)
+      if (mode === undefined || mode.owner_id !== user.id) {
+        return Promise.reject(notFoundMode(modeId))
+      }
+      modes.delete(modeId)
+      // The chats that followed it continue on the model they last ran, as a chat without a
+      // mode — the same landing the store's delete gives (#245, M6).
+      for (const brain of brains.values()) {
+        if (brain.session.mode === modeId) {
+          brain.session.mode = null
+        }
+      }
+      return Promise.resolve()
+    },
+  }
+
   const preferencesResource: Client['preferences'] = {
     get(requestOptions): Promise<GetPreferencesResponse> {
       throwIfAborted(requestOptions)
@@ -991,6 +1225,7 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
     sessions: sessionsResource,
     providerCredentials: providerCredentialsResource,
     models: modelsResource,
+    modes: modesResource,
     usage: usageResource,
     auth: authResource,
     preferences: preferencesResource,
@@ -1016,10 +1251,14 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
         type: 'user.message',
         content: [{ type: 'text', text }],
         ...(messageOptions?.model === undefined ? {} : { model: messageOptions.model }),
+        ...(messageOptions?.mode === undefined ? {} : { mode: messageOptions.mode }),
       })
       if (!input.success) {
         throw badRequestFor(input.error.issues)
       }
+      // The refusal comes before the append, as it does on the server (#245, M6).
+      const modeAfter = resultingFakeMode(brain.session.mode, [input.data])
+      const resolvedMode = modeAfter === null ? null : requireUsableMode(modeAfter)
       // "Edit and resend" (#238): the rewind rides the same request as the message and lands
       // first, the way the body the real client posts carries it — one batch, so an append
       // that stores either stores both, and a refusal stores neither.
@@ -1030,6 +1269,12 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
         }
       }
       const stored = brain.appendUserEvent(input.data) as UserMessageEvent
+      if (resolvedMode === null) {
+        brain.session.mode = null
+      } else {
+        brain.session.mode = resolvedMode.mode.id
+        brain.session.model = { id: resolvedMode.model }
+      }
       brain.startTurn()
       return stored
     },
@@ -1197,6 +1442,11 @@ function rewindRefused(refusal: RewindRefusal): ApiError {
     : new ApiError(400, 'the rewind names no message of this session that can be edited', {
         type: 'invalid_request_error',
       })
+}
+
+/** The 404 an unknown (or another user's) mode id gets — the server's `not_found_error`. */
+function notFoundMode(modeId: string): ApiError {
+  return new ApiError(404, `no mode with id ${modeId}`, { type: 'not_found_error' })
 }
 
 function badRequestFor(issues: readonly ValidationIssue[]): ApiError {

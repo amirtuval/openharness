@@ -1,10 +1,16 @@
-import { makeModelEntry } from '@openharness/protocol/fixtures'
-import type { ModelEntry } from '@openharness/protocol'
+import { makeMode, makeModelEntry } from '@openharness/protocol/fixtures'
+import type { Mode, ModelEntry } from '@openharness/protocol'
 import { cleanup, render } from 'ink-testing-library'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { frameOf, pressKey, typeText, waitFor, waitForScreen } from '../test-support/input'
-import { formatContextWindow, ModelPicker, OTHER_MODEL_LABEL, pickerRows } from './model-picker'
+import {
+  formatContextWindow,
+  MODES_HEADING,
+  ModelPicker,
+  OTHER_MODEL_LABEL,
+  pickerRows,
+} from './model-picker'
 
 /** A catalog as the server sorts it: by provider, then name. */
 const CATALOG: readonly ModelEntry[] = [
@@ -24,14 +30,19 @@ const CATALOG: readonly ModelEntry[] = [
 ]
 
 /** Render the picker and record what it answered. */
-function renderPicker(models: readonly ModelEntry[] = CATALOG) {
+function renderPicker(models: readonly ModelEntry[] = CATALOG, modes: readonly Mode[] = []) {
   const selected: string[] = []
+  const selectedModes: Mode[] = []
   let cancelled = false
   const instance = render(
     <ModelPicker
       models={models}
+      modes={modes}
       onSelect={(modelId) => {
         selected.push(modelId)
+      }}
+      onSelectMode={(mode) => {
+        selectedModes.push(mode)
       }}
       onCancel={() => {
         cancelled = true
@@ -42,6 +53,7 @@ function renderPicker(models: readonly ModelEntry[] = CATALOG) {
   return {
     ...instance,
     selected,
+    selectedModes,
     wasCancelled: () => cancelled,
   }
 }
@@ -400,5 +412,44 @@ describe('formatContextWindow', () => {
     expect(formatContextWindow(512)).toBe('512')
     expect(formatContextWindow(null)).toBeNull()
     expect(formatContextWindow(0)).toBeNull()
+  })
+})
+
+describe('ModelPicker with modes (#245, M6)', () => {
+  const MODE = makeMode({ name: 'smart', model: 'openai/gpt-4.1-mini', reasoning_effort: 'high' })
+
+  it('puts the modes above the providers, and picks one', async () => {
+    const picker = renderPicker(CATALOG, [MODE])
+    await waitForScreen(picker, 'Which model?')
+
+    // The Modes heading is the first thing under the prompt, above every provider.
+    const frame = frameOf(picker)
+    expect(frame.indexOf('Modes')).toBeGreaterThan(-1)
+    expect(frame.indexOf('Modes')).toBeLessThan(frame.indexOf('anthropic'))
+    expect(frame).toContain('smart · openai/gpt-4.1-mini · high')
+
+    pressKey(picker, 'enter')
+    await waitFor(() => picker.selectedModes.length === 1)
+    expect(picker.selectedModes[0]?.id).toBe(MODE.id)
+    expect(picker.selected).toEqual([])
+  })
+
+  it('filters the modes with the search line, and counts what is left', async () => {
+    const picker = renderPicker(CATALOG, [MODE, makeMode({ name: 'fast' })])
+    await waitForScreen(picker, 'Which model?')
+
+    typeText(picker, 'sma')
+    await waitFor(() => frameOf(picker).includes('Search: sma'))
+    const frame = frameOf(picker)
+    expect(frame).toContain('smart')
+    expect(frame).not.toContain('fast')
+    expect(frame).not.toContain('anthropic')
+  })
+
+  it('offers the mode rows through pickerRows, ahead of the models', () => {
+    const rows = pickerRows(CATALOG, '', [MODE])
+    expect(rows[0]?.id).toBe(MODE.id)
+    expect(rows[0]?.provider).toBe(MODES_HEADING)
+    expect(rows[0]?.mode).toBe(MODE)
   })
 })

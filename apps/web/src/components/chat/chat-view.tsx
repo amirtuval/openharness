@@ -1,14 +1,17 @@
 import { CREDENTIAL_TARGETS, sessionCost } from '@openharness/client'
 import type { CredentialTarget, ModelPriceLookup, TranscriptMessage } from '@openharness/client'
+import type { Mode } from '@openharness/protocol'
 import { Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { useClient } from '../client-provider'
 import type { DeleteSessionResult } from '../../hooks/use-sessions'
+import type { ModesView } from '../../hooks/use-modes'
 import { useSession } from '../../hooks/use-session'
 import type { ModelsView } from '../../hooks/use-models'
 import { formatCostTotal, shortId, sessionLabel, unpricedExplanation } from '../../lib/format'
 import { providerOf, type ModelNameLookup } from '../../lib/models'
+import { modeNameOf } from '../../lib/modes'
 import { showNotice } from '../../lib/notice'
 import { ModelPicker } from '../models/model-picker'
 import { AddProviderDialog } from '../providers/add-provider-dialog'
@@ -61,6 +64,7 @@ export function ChatView({
   nameOf,
   costOf,
   catalog,
+  modes,
   onDelete,
   onDeleted,
 }: {
@@ -75,6 +79,8 @@ export function ChatView({
   costOf?: ModelPriceLookup | undefined
   /** The shell's catalog: what the composer's model selector offers. */
   catalog: ModelsView
+  /** The shell's modes (#245, M6): the presets the composer's selector offers above the models. */
+  modes: ModesView
   /** Delete this chat; the shell navigates away when it was the open one. */
   onDelete: (sessionId: string) => Promise<DeleteSessionResult>
   /** This chat was deleted elsewhere: the shell drops its row and leaves it. */
@@ -101,9 +107,19 @@ export function ChatView({
   // its text (U10) — the composer is the box, not the thing that decides what is in it.
   const [draft, setDraft] = useState('')
 
-  // The model the session runs as the log last said it; a session created with a model shows
-  // it through the header resource until a message carries one (the transcript's `model`).
-  const sessionModel = model ?? session?.model.id ?? null
+  // The model the session runs: the log's last explicit switch (the transcript's `model`), the
+  // model the last request **ran** (`meta.model`, off its span — which for a chat on a mode is
+  // the mode's resolved model, so an edit to the mode shows here from the next reply on), or
+  // the session resource's, on a chat that has not made a request yet.
+  const lastReplyModel =
+    [...messages]
+      .reverse()
+      .find((message) => message.role === 'agent' && message.meta?.model !== undefined)?.meta
+      ?.model ?? null
+  const sessionModel = model ?? lastReplyModel ?? session?.model.id ?? null
+  // The mode the session resource says the chat follows, before this tab has sent a switch (#245,
+  // M6). The tab's own memory (above) wins once it has one.
+  const sessionModeId = session?.mode ?? null
   // What the session has spent, priced with the catalog's rates (#247) — computed here, never
   // stored. The total sums the requests that could be priced and counts the ones that could
   // not, and `—` is reserved for a session where nothing at all could be priced. Nothing to say
@@ -112,6 +128,15 @@ export function ChatView({
     usage.models.length === 0 ? null : sessionCost(usage, costOf ?? unknownPrices)
   // A pick that has not been sent yet (U3): the selector shows it, the next message carries it.
   const [chosen, setChosen] = useState<string | null>(null)
+  // A mode pick, held the same way (#245, M6): the next message carries it, and the chat then
+  // follows the mode live.
+  const [pendingMode, setPendingMode] = useState<Mode | null>(null)
+  // The mode this tab believes the chat follows, once a switch has been sent. `undefined` is
+  // "nothing sent yet, read the session"; `null` is "detached by a plain model switch".
+  const [modeInEffect, setModeInEffect] = useState<string | null | undefined>(undefined)
+  const currentModeId =
+    pendingMode?.id ?? (modeInEffect === undefined ? sessionModeId : modeInEffect)
+  const currentModeName = modeNameOf(modes.modes, currentModeId)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
@@ -169,24 +194,36 @@ export function ChatView({
       // Sending is the start of a new turn: whatever the last one was stopped short of is no
       // longer what the foot of the transcript is about.
       setInterrupted(false)
-      const switching = chosen !== null && chosen !== sessionModel
+      // A picked model is a switch when it differs from what the session runs — or when the
+      // session is on a **mode**: picking the very model the mode resolves to is still a switch
+      // away from the mode, and it is what detaches the chat (#245, M6).
+      const switching = chosen !== null && (chosen !== sessionModel || currentModeId !== null)
+      const switchingMode = pendingMode !== null && pendingMode.id !== sessionModeId
       const stored = await send(text, {
-        ...(switching && chosen !== null ? { model: chosen } : {}),
+        ...(switchingMode && pendingMode !== null ? { mode: pendingMode.id } : {}),
+        ...(!switchingMode && switching && chosen !== null ? { model: chosen } : {}),
         ...(editing === null ? {} : { rewindTo: editing.seq }),
       })
       if (stored) {
         // The edit has been sent (or the message was an ordinary one): either way this is no
         // longer an edit, and the next send must not rewind the session to the same message.
         setEditing(null)
-        if (switching) {
+        if (switchingMode) {
+          // The chat follows the mode from here; the tab remembers it because the transcript
+          // tracks models, not modes, and the header reads this rather than a stale session.
+          setModeInEffect(pendingMode?.id ?? null)
+          setPendingMode(null)
+        } else if (switching) {
           // The stored event moves the transcript's model to the pick; from here the selector
-          // reads the log, and the message carries the "Switched to …" marker.
+          // reads the log, and the message carries the "Switched to …" marker. A plain model
+          // switch also detaches the chat from any mode (#245, M6).
           setChosen(null)
+          setModeInEffect(null)
         }
       }
       return stored
     },
-    [chosen, editBlocked, editing, sessionModel, send],
+    [chosen, editBlocked, editing, pendingMode, sessionModeId, sessionModel, send],
   )
 
   // Stop, and the word for it (U10): the interrupt request goes out, and the row at the foot
@@ -254,7 +291,18 @@ export function ChatView({
             {session === null ? shortId(sessionId) : sessionLabel(session, nameOf)}
           </h1>
           <p className="truncate text-xs text-muted-foreground" data-slot="session-subtitle">
-            {session === null ? 'Loading…' : session.model.id}
+            {/* The mode the chat follows, and what it resolved to (#245, M6): the name, then
+                the model the log last ran. A chat without a mode shows the model alone. */}
+            {session === null ? (
+              'Loading…'
+            ) : (
+              <>
+                {currentModeName === null ? null : (
+                  <span data-slot="session-mode">{currentModeName} · </span>
+                )}
+                {sessionModel ?? session.model.id}
+              </>
+            )}
             {sessionCostTotal === null ? null : (
               <>
                 {' · '}
@@ -384,8 +432,21 @@ export function ChatView({
                 placement="above"
                 models={catalog.models}
                 providers={catalog.providers}
+                modes={modes.modes}
+                selectedModeId={currentModeId}
+                onSelectMode={(mode) => {
+                  // Picking a mode clears a pending plain model: the chat follows one or the
+                  // other, never both (#245, M6).
+                  setPendingMode(mode)
+                  setChosen(null)
+                }}
                 value={chosen ?? sessionModel}
-                onChange={setChosen}
+                onChange={(modelId) => {
+                  // A plain model detaches the chat from any mode, so a pending mode goes with
+                  // the pick.
+                  setChosen(modelId)
+                  setPendingMode(null)
+                }}
                 refreshing={catalog.refreshing}
                 onRefresh={catalog.refresh}
                 // From the picker the provider is the reader's to choose, so the dialog opens

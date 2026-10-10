@@ -347,19 +347,24 @@ function reasoningFor(
 }
 
 /**
- * The effort this log asks the next request to run with.
+ * The effort this log asks the next request to run with — or `undefined` when no message has
+ * ever named one.
  *
  * The newest `user.message` that carried one wins — the same "from this message on" reading as
  * the model switch of #111, and the same message an answer is made from, since the brain asks
  * this question at each request boundary. A message that carried an explicit `null` asks for the
- * provider's default again, and one that carried nothing leaves whatever was in effect alone; a
- * log no message of which ever named an effort answers `null`, which is what keeps a session
- * stored before #252 unchanged.
+ * provider's default again, and one that carried nothing leaves whatever was in effect alone.
+ *
+ * `undefined` (no message carried one) is kept apart from `null` (a message asked for the
+ * provider's default) because a mode supplies the default when the reader said nothing (#245,
+ * M6): the loop wants to know whether the log spoke at all, not only what it said.
  *
  * @param events the log, as `readLog` handed it over — the replay read, so a message an edit or
  *   a rewind took back is already gone
  */
-export function requestedReasoningEffort(events: readonly StoredEvent[]): ReasoningEffort | null {
+export function requestedReasoningEffort(
+  events: readonly StoredEvent[],
+): ReasoningEffort | null | undefined {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
     if (
@@ -370,5 +375,5 @@ export function requestedReasoningEffort(events: readonly StoredEvent[]): Reason
       return event.reasoning_effort
     }
   }
-  return null
+  return undefined
 }

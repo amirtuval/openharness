@@ -6,7 +6,7 @@ import {
   type TranscriptError,
   type TranscriptMessage,
 } from '@openharness/client'
-import type { Session, SessionStatus } from '@openharness/protocol'
+import type { ModeId, Session, SessionStatus } from '@openharness/protocol'
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 
 import { describeError } from '../lib/errors'
@@ -177,7 +177,10 @@ export function useSession(client: Client, sessionId: string): SessionView {
   }, [saidSomething, titled, refresh, sessionId])
 
   const send = useCallback(
-    async (text: string, options?: { model?: string; rewindTo?: number }): Promise<boolean> => {
+    async (
+      text: string,
+      options?: { model?: string; mode?: ModeId | null; rewindTo?: number },
+    ): Promise<boolean> => {
       const body = text.trim()
       if (body === '') {
         return false
@@ -186,6 +189,9 @@ export function useSession(client: Client, sessionId: string): SessionView {
       try {
         const stored = await client.sendMessage(sessionId, body, {
           ...(options?.model === undefined ? {} : { model: { id: options.model } }),
+          // A mode rides the message the way a model does (#245, M6): the log records the
+          // choice, and the session follows the mode from here on. `null` detaches.
+          ...(options?.mode === undefined ? {} : { mode: options.mode }),
           ...(options?.rewindTo === undefined ? {} : { rewindTo: options.rewindTo }),
         })
         // Show the message at once instead of waiting for the stream to echo it: the client

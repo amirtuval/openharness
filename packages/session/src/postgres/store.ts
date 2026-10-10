@@ -5,18 +5,23 @@ import {
   EVENT_TYPES,
   encodeKeyCursor,
   encodeSeqCursor,
+  MAX_MODES_PER_USER,
   newAgentId,
   newEventId,
+  newModeId,
   newSessionId,
   partitionOf,
   type Agent,
   type AgentId,
   type CreateAgentRequest,
+  type CreateModeRequest,
   type EventId,
   type KeyCursor,
   type ListAgentsResponse,
   type ListEventsResponse,
   type ListSessionsResponse,
+  type Mode,
+  type ModeId,
   type ModelConfig,
   type ModelRequestStartEvent,
   type Session,
@@ -25,6 +30,7 @@ import {
   type StoredEvent,
   type StreamEvent,
   type UpdateAgentRequest,
+  type UpdateModeRequest,
   type UserEvent,
   type UserId,
   type UserPreferences,
@@ -47,7 +53,9 @@ import {
   AgentNotFoundError,
   ClaimConflictError,
   DuplicateEventIdError,
+  DuplicateModeNameError,
   FencedError,
+  ModeLimitReachedError,
   SessionNotFoundError,
 } from '../errors'
 import {
@@ -110,6 +118,7 @@ import {
   encodeStoredNotification,
   eventFromRow,
   isPartitionChannel,
+  modeFromRow,
   modelRequestFromRow,
   partitionChannel,
   decodePartitionNotification,
@@ -121,6 +130,7 @@ import {
   type AgentRow,
   type EventsTable,
   type EventWithClaimRow,
+  type ModeRow,
   type PartitionLeaseRow,
   type PostgresSchema,
   type SessionRow,
@@ -302,6 +312,127 @@ export class PostgresSessionStore implements SessionStore {
     })
   }
 
+  // ------------------------------------------------------------------- modes
+
+  async createMode(input: CreateModeRequest, ownerId: UserId): Promise<Mode> {
+    const now = this.#clock()
+    const row: ModeRow = {
+      id: newModeId(now),
+      owner_id: ownerId,
+      name: input.name,
+      model: input.model,
+      reasoning_effort: input.reasoning_effort ?? null,
+      system_prompt_addition: input.system_prompt_addition ?? null,
+      created_at: instant(now),
+      updated_at: instant(now),
+    }
+    return this.#db.transaction().execute(async (trx) => {
+      // The per-owner lock first, so the count below and the insert it guards are one critical
+      // section: two creates at the cap cannot both read a count below it and both insert.
+      await sql`select pg_advisory_xact_lock(hashtext(${MODE_CREATE_LOCK + ownerId}))`.execute(trx)
+      const existing = await trx
+        .selectFrom('modes')
+        .select(({ fn }) => fn.countAll<string>().as('count'))
+        .where('owner_id', '=', ownerId)
+        .executeTakeFirstOrThrow()
+      if (Number(existing.count) >= MAX_MODES_PER_USER) {
+        throw new ModeLimitReachedError(ownerId, MAX_MODES_PER_USER)
+      }
+      try {
+        await trx.insertInto('modes').values(row).execute()
+      } catch (error) {
+        if (isUniqueViolation(error, MODE_NAME_CONSTRAINTS)) {
+          throw new DuplicateModeNameError(ownerId, input.name)
+        }
+        throw error
+      }
+      return modeFromRow(row)
+    })
+  }
+
+  async getMode(modeId: ModeId, options: OwnerScope): Promise<Mode | null> {
+    const row = await this.#db
+      .selectFrom('modes')
+      .selectAll()
+      .where('id', '=', modeId)
+      .where('owner_id', '=', options.ownerId)
+      .executeTakeFirst()
+    return row === undefined ? null : modeFromRow(row)
+  }
+
+  async listModes(options: OwnerScope): Promise<Mode[]> {
+    const rows = await this.#db
+      .selectFrom('modes')
+      .selectAll()
+      .where('owner_id', '=', options.ownerId)
+      .orderBy('created_at', 'asc')
+      .orderBy('id', 'asc')
+      .execute()
+    return rows.map(modeFromRow)
+  }
+
+  async updateMode(
+    modeId: ModeId,
+    update: UpdateModeRequest,
+    options: OwnerScope,
+  ): Promise<Mode | null> {
+    const now = this.#clock()
+    return this.#db.transaction().execute(async (trx) => {
+      // Read, patch and write in one transaction, like `updateAgent`: a partial update leaves
+      // alone what was stored when it started. The owner is part of the lookup, so another
+      // user's mode is null rather than edited (A4).
+      const row = await trx
+        .selectFrom('modes')
+        .selectAll()
+        .where('id', '=', modeId)
+        .where('owner_id', '=', options.ownerId)
+        .forUpdate()
+        .executeTakeFirst()
+      if (row === undefined) {
+        return null
+      }
+      const updated: ModeRow = {
+        ...row,
+        name: update.name ?? row.name,
+        model: update.model ?? row.model,
+        reasoning_effort:
+          update.reasoning_effort === undefined ? row.reasoning_effort : update.reasoning_effort,
+        system_prompt_addition:
+          update.system_prompt_addition === undefined
+            ? row.system_prompt_addition
+            : update.system_prompt_addition,
+        updated_at: instant(now),
+      }
+      try {
+        await trx.updateTable('modes').set(updated).where('id', '=', modeId).execute()
+      } catch (error) {
+        if (isUniqueViolation(error, MODE_NAME_CONSTRAINTS)) {
+          throw new DuplicateModeNameError(row.owner_id, updated.name)
+        }
+        throw error
+      }
+      return modeFromRow(updated)
+    })
+  }
+
+  async deleteMode(modeId: ModeId, options: OwnerScope): Promise<boolean> {
+    return this.#db.transaction().execute(async (trx) => {
+      const deleted = await trx
+        .deleteFrom('modes')
+        .where('id', '=', modeId)
+        .where('owner_id', '=', options.ownerId)
+        .executeTakeFirst()
+      if (Number(deleted.numDeletedRows) === 0) {
+        return false
+      }
+      // In the same transaction as the delete: a chat that followed the mode is left an
+      // ordinary chat with none, still running the model it last ran (#245, M6). The id is
+      // globally unique, so no owner filter is needed to find its chats.
+      await trx.updateTable('sessions').set({ mode: null }).where('mode', '=', modeId).execute()
+      return true
+    })
+  }
+
   // ---------------------------------------------------------------- sessions
 
   async createSession(agentId: AgentId | null, options: CreateSessionOptions): Promise<Session> {
@@ -339,6 +470,7 @@ export class PostgresSessionStore implements SessionStore {
         metadata: { ...options.metadata },
         model: config.model,
         system: config.system,
+        mode: options.mode ?? null,
         // The snapshot columns are written together: all four, or none for a model-first
         // session. What it runs lives in `model`/`system` above, never here.
         agent_id: agent?.id ?? null,
@@ -1115,16 +1247,17 @@ export class PostgresSessionStore implements SessionStore {
       await this.#recordSupersessions(trx, sessionId, supersessions, at)
     }
     const status = statusAfter(events)
-    const model = modelAfter(events)
+    const projection = projectionAfter(events)
     await trx
       .updateTable('sessions')
       .set({
         // The projections of the batch onto the session row, in the append's transaction: the
-        // status the last status event implies, and the model the last model-carrying
-        // `user.message` switches to (#111). Either is left alone when the batch does not
-        // speak about it.
+        // status the last status event implies, and the model and mode the batch speaks about
+        // (#111, #245). Each is left alone when the batch says nothing of it — `null` for the
+        // model, `undefined` for the mode, whose `null` means "detach".
         ...(status === null ? {} : { status }),
-        ...(model === null ? {} : { model }),
+        ...(projection.model === null ? {} : { model: projection.model }),
+        ...(projection.mode === undefined ? {} : { mode: projection.mode }),
         updated_at: at,
       })
       .where('id', '=', sessionId)
@@ -1696,22 +1829,43 @@ function statusAfter(events: readonly AppendableEvent[]): SessionStatus | null {
 }
 
 /**
- * The model a batch leaves on the session: the one its last model-carrying `user.message`
- * names, or `null` when the batch says nothing about the model at all (#111).
+ * What a batch leaves on the session row: the model and the mode, each as the batch's last
+ * word on it — or a value meaning "the batch says nothing" (#111, #245, M6).
  *
- * The projection is one value rather than a rewrite of history: the message's `model` is
- * stored on the event either way, and the session row follows the last one in the batch. A
- * message without a `model` contributes nothing, so a batch that carries none leaves the
- * session's current model alone.
+ * The projection is one value rather than a rewrite of history: the events' fields are stored
+ * on them either way, and the session row follows the last of each in the batch.
+ *
+ * - `model` is the last model a `user.message` carried, or the last model a
+ *   `span.model_request_start` **ran** — which for a chat on a mode is the mode's resolved
+ *   model, so the row keeps meaning "the model this chat last ran". It is `null` when the
+ *   batch says nothing about the model, which is read as "leave the stored model alone".
+ * - `mode` is the last mode a `user.message` carried; `null` means "detach" (the message
+ *   carried `mode: null`, or carried a plain `model` and no mode), and `undefined` means the
+ *   batch says nothing about the mode, which leaves it alone. A chat follows either a mode or
+ *   a plain model, never both, so a `model`-carrying message with no mode detaches.
  */
-function modelAfter(events: readonly AppendableEvent[]): ModelConfig | null {
+function projectionAfter(events: readonly AppendableEvent[]): {
+  readonly model: ModelConfig | null
+  readonly mode: string | null | undefined
+} {
   let model: ModelConfig | null = null
+  let mode: string | null | undefined = undefined
   for (const event of events) {
-    if (event.type === EVENT_TYPES.userMessage && event.model !== undefined) {
-      model = { id: event.model.id }
+    if (event.type === EVENT_TYPES.userMessage) {
+      if (event.model !== undefined) {
+        model = { id: event.model.id }
+        if (event.mode === undefined) {
+          mode = null
+        }
+      }
+      if (event.mode !== undefined) {
+        mode = event.mode
+      }
+    } else if (event.type === EVENT_TYPES.modelRequestStart && event.model !== undefined) {
+      model = { id: event.model }
     }
   }
-  return model
+  return { model, mode }
 }
 
 /** The final stream event a deleted session's subscribers receive (#111). */
@@ -1800,23 +1954,43 @@ const UNIQUE_VIOLATION = '23505'
  */
 const EVENT_ID_CONSTRAINTS = new Set(['events_pkey', 'events_id_key'])
 
+/** The constraint a duplicate mode name is reported under (`0024_modes.sql`). */
+const MODE_NAME_CONSTRAINTS = new Set(['modes_owner_name_key'])
+
 /**
- * Whether `error` is Postgres refusing a write because an event id is already taken.
+ * The advisory lock a mode creation takes, keyed by its owner (`0024_modes.sql`).
  *
- * Only the id's own constraints count: a violation of `events (session_id, seq)` is a
- * different bug — the append lock means it cannot happen — and it surfaces as itself.
- * `constraint` is an identifier, so this does not depend on the database's locale.
+ * The `MAX_MODES_PER_USER` cap is a count followed by an insert, and a transaction alone does
+ * not make that atomic: at the limit, two concurrent creates each read a count below it and
+ * both insert, so the user ends up with twenty-one. The transaction takes this lock **before**
+ * it counts, so the two serialize — the first counts nineteen and inserts the twentieth, the
+ * second counts twenty and is refused — and the lock is released when the transaction ends.
+ *
+ * The key is the owner, so two users' creates never wait on each other, and the name is
+ * prefixed so it cannot collide with the migrator's own advisory lock (`migrate.ts`); a hash
+ * collision between two owners would only make two of their creates serialize, which is
+ * correct, just slower.
  */
-function isEventIdUniqueViolation(error: unknown): boolean {
+const MODE_CREATE_LOCK = 'openharness:mode-create:'
+
+/**
+ * Whether `error` is Postgres refusing a write because one of `constraints` was violated.
+ *
+ * `constraint` is an identifier, so this does not depend on the database's locale. Naming the
+ * constraint matters: a violation of another constraint is a different bug — a `(session_id,
+ * seq)` collision the append lock means cannot happen, say — and it surfaces as itself.
+ */
+function isUniqueViolation(error: unknown, constraints: ReadonlySet<string>): boolean {
   if (typeof error !== 'object' || error === null) {
     return false
   }
   const { code, constraint } = error as { readonly code?: unknown; readonly constraint?: unknown }
-  return (
-    code === UNIQUE_VIOLATION &&
-    typeof constraint === 'string' &&
-    EVENT_ID_CONSTRAINTS.has(constraint)
-  )
+  return code === UNIQUE_VIOLATION && typeof constraint === 'string' && constraints.has(constraint)
+}
+
+/** Whether `error` is Postgres refusing a write because an event id is already taken. */
+function isEventIdUniqueViolation(error: unknown): boolean {
+  return isUniqueViolation(error, EVENT_ID_CONSTRAINTS)
 }
 
 /** A function that runs at most once, whatever it is called: an `Unsubscribe`. */

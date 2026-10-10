@@ -2,12 +2,15 @@ import type { Context, Hono } from 'hono'
 import {
   API_VERSION_PREFIX,
   EVENT_TYPES,
+  type EventInput,
+  type ModeId,
   type SessionId,
   LAST_EVENT_ID_HEADER,
   ListEventsQuerySchema,
   SendEventsRequestSchema,
   StreamEventsQuerySchema,
   type SendEventsResponse,
+  type Session,
   type StoredEvent,
   type StreamEventsQuery,
   type UserEvent,
@@ -17,10 +20,11 @@ import type { ListEventsOptions } from '@openharness/session'
 import type { AppEnv } from '../types'
 import { conflictError, notFoundError } from '../http/errors'
 import { parseBody, parseQuery, sessionIdParam } from '../http/request'
+import { requireUsableMode } from '../modes'
 import { SSE_HEADERS, createSessionEventStream } from '../sse'
 import { nameSessionFromFirstMessage } from '../titles'
 import type { RouteDeps } from './deps'
-import { requireEventModelIds } from './sessions'
+import { modeDeps, requireEventModelIds } from './sessions'
 import { signalKinds } from './signals'
 
 /** The `event_deltas[]` value that opts a connection into `agent.message` previews. */
@@ -50,12 +54,20 @@ export function registerEventRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
     const ownerId = c.get('user').id
     // Another user's session is answered 404 before anything is appended: the scoped read is
     // the ownership check (A4).
-    await requireOwnedSession(deps, c, sessionId)
+    const session = await requireOwnedSession(deps, c, sessionId)
     const body = await parseBody(c, SendEventsRequestSchema)
     // A `user.message` may carry a model to switch the session to (epic #116, U3); the id is
     // checked for the model id's shape here, so a value no provider could resolve is a 400
     // before anything is appended.
     requireEventModelIds(body.events)
+    // The mode the chat will be on *after* this batch: a message that carries one, or the
+    // session's current mode when the batch says nothing about it (#245, M6). Continuing on an
+    // unusable mode is refused here — before anything is stored — rather than silently running
+    // something else.
+    const modeAfter = resultingMode(session.mode, body.events)
+    if (modeAfter !== null) {
+      await requireUsableMode(modeDeps(deps), ownerId, modeAfter)
+    }
     // A rewind restarts the session from a message the reader edited (#238). It is accepted
     // only while the session is idle, and that is checked before anything is stored: the
     // rewind and the message that follows it are one append.
@@ -152,10 +164,37 @@ async function requireOwnedSession(
   deps: RouteDeps,
   c: Context<AppEnv>,
   sessionId: SessionId,
-): Promise<void> {
-  if ((await deps.store.getSession(sessionId, { ownerId: c.get('user').id })) === null) {
+): Promise<Session> {
+  const session = await deps.store.getSession(sessionId, { ownerId: c.get('user').id })
+  if (session === null) {
     throw notFoundError(`no session with id ${sessionId}`)
   }
+  return session
+}
+
+/**
+ * The mode a batch leaves the session on (#245, M6): the last `user.message` in it that spoke
+ * about the mode — a `mode` sets or clears it, and a `model` with no `mode` clears it — or the
+ * session's current mode when the batch says nothing.
+ *
+ * The store projects the same rule onto the session in the append's transaction; this is the
+ * read of *what that will be*, so the refusal can happen before the append rather than the
+ * chat running a request on a mode whose model is gone.
+ */
+function resultingMode(current: ModeId | null, events: readonly EventInput[]): ModeId | null {
+  let mode = current
+  for (const event of events) {
+    if (event.type !== EVENT_TYPES.userMessage) {
+      continue
+    }
+    if (event.model !== undefined && event.mode === undefined) {
+      mode = null
+    }
+    if (event.mode !== undefined) {
+      mode = event.mode
+    }
+  }
+  return mode
 }
 
 /** Whether this connection asked for `event_start` / `event_delta` previews. */

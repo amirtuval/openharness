@@ -1,4 +1,5 @@
 export * from './agent'
+export * from './mode'
 export * from './model'
 export * from './provider-credential'
 export * from './session'

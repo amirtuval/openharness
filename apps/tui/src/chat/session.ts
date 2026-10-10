@@ -1,7 +1,7 @@
 import { createTranscript } from '@openharness/client'
 import type { Client, Transcript, TranscriptState } from '@openharness/client'
 import { EVENT_TYPES } from '@openharness/protocol'
-import type { ModelEntry, Session, StreamEvent } from '@openharness/protocol'
+import type { Mode, ModeId, ModelEntry, Session, StreamEvent } from '@openharness/protocol'
 
 import { describeError, type ErrorContext } from '../errors'
 import { CTRL_C_WINDOW_MS, decideCtrlC, type CtrlCAction } from './ctrl-c'
@@ -34,6 +34,19 @@ export interface ChatViewState {
    * rides the next message, so the status line says so until then.
    */
   readonly pendingModel: string | null
+  /**
+   * A mode `/model` picked but that no message has carried yet (#245, M6): it rides the next
+   * message, exactly as {@link ChatViewState.pendingModel} does.
+   */
+  readonly pendingMode: ModeId | null
+  /**
+   * The mode the chat follows (#245, M6), or `null` for a chat without one.
+   *
+   * Seeded from the session and moved by a send that carried a mode (or a plain model, which
+   * detaches), because the transcript tracks models and not modes — the status line needs the
+   * mode's name, and the log is the only other place it could come from.
+   */
+  readonly modeId: ModeId | null
   /**
    * When the turn in progress began, in epoch milliseconds — `null` between turns (#208).
    *
@@ -111,8 +124,16 @@ export interface ChatSession {
    * next `user.message`, which is what makes the session run it from then on.
    */
   readonly setModel: (modelId: string) => void
+  /**
+   * Remember a mode for the next message (#245, M6): it rides the next `user.message`, which
+   * is what makes the session follow it from then on. A model pick and a mode pick are one
+   * choice, so this clears any pending model.
+   */
+  readonly setMode: (modeId: ModeId) => void
   /** The catalog, for the in-chat model picker. */
   readonly listModels: () => Promise<readonly ModelEntry[]>
+  /** The user's modes, for the in-chat picker and the status line (#245, M6). */
+  readonly listModes: () => Promise<readonly Mode[]>
   /** Show an error the screen hit itself, e.g. a catalog that would not load. */
   readonly reportError: (error: unknown) => void
   /**
@@ -147,6 +168,10 @@ export function createChatSession(options: ChatSessionOptions): ChatSession {
     phase: 'loading',
     notice: null,
     pendingModel: null,
+    pendingMode: null,
+    // The mode the session resource says the chat follows (#245, M6); a send that carries one
+    // (or a plain model, which detaches) moves it.
+    modeId: session.mode,
     runningSince: null,
     lastTextAt: null,
     awaitingMetaId: null,
@@ -270,28 +295,50 @@ export function createChatSession(options: ChatSessionOptions): ChatSession {
       // the turn the message starts, and it is cleared whether or not the send worked —
       // a failed send stored nothing, so there is nothing for the choice to have applied to.
       const pending = state.pendingModel
+      const pendingMode = state.pendingMode
       try {
         const stored = await client.sendMessage(sessionId, text, {
           signal: lifetime.signal,
-          ...(pending === null ? {} : { model: { id: pending } }),
+          ...(pendingMode === null ? {} : { mode: pendingMode }),
+          ...(pendingMode !== null || pending === null ? {} : { model: { id: pending } }),
         })
         // Fold the stored event in now rather than waiting for the stream: the message shows
-        // immediately, and the stream's copy of it is dropped as already seen.
+        // immediately, and the stream's copy of it is dropped as already seen. The mode the
+        // message carried is the mode the chat follows now — and a plain model switch detaches
+        // it, which is what a chat follows one or the other means (#245, M6).
         apply(stored)
-        setState({ notice: null, pendingModel: null, interrupted: false })
+        setState({
+          notice: null,
+          pendingModel: null,
+          pendingMode: null,
+          modeId: pendingMode !== null ? pendingMode : pending !== null ? null : state.modeId,
+          interrupted: false,
+        })
       } catch (error) {
-        if (!lifetime.signal.aborted) setState({ notice: noticeFor(error), pendingModel: null })
+        if (!lifetime.signal.aborted) {
+          setState({ notice: noticeFor(error), pendingModel: null, pendingMode: null })
+        }
       }
     },
 
     setModel(modelId) {
-      // Picking a model is activity: it dismisses the armed exit, like typing does.
+      // Picking a model is activity: it dismisses the armed exit, like typing does. It also
+      // clears a pending mode (#245, M6): a chat follows a mode or a plain model, never both.
       armedAt = null
-      setState({ pendingModel: modelId, notice: null })
+      setState({ pendingModel: modelId, pendingMode: null, notice: null })
+    },
+
+    setMode(modeId) {
+      armedAt = null
+      setState({ pendingMode: modeId, pendingModel: null, notice: null })
     },
 
     async listModels() {
       return (await client.models.list()).data
+    },
+
+    async listModes() {
+      return (await client.modes.list()).data
     },
 
     reportError(error) {

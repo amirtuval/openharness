@@ -61,6 +61,12 @@ export interface StatusLineProps {
    * `(next message)` after it, which is the model the *next* message will run (issue #208).
    */
   readonly model: string
+  /**
+   * The mode the chat follows (#245, M6), named — or that mode with `(next message)` after it
+   * while a `/model` pick is pending. Omitted for a chat without a mode, which shows its model
+   * alone.
+   */
+  readonly mode?: string | undefined
   /** The session's id, for `oh -s <id>`; shortened for the line by {@link shortSessionId}. */
   readonly sessionId: string
   /** What the transcript says the session is doing. */
@@ -346,7 +352,11 @@ function lineSegments(
   frame: string,
   compactCost: boolean,
 ): Segment[] {
-  const who = props.agentName === undefined ? props.model : `${props.agentName} · ${props.model}`
+  // The mode comes first when there is one — it is the coarser fact, and the model after it is
+  // what the mode resolved to (#245, M6) — then who is answering, then the model itself.
+  const who = [props.mode, props.agentName, props.model]
+    .filter((part): part is string => part !== undefined)
+    .join(' · ')
   const status = field.spinner ? `${frame} ${field.text}` : field.text
   const cost = compactCost ? (props.costCompact ?? props.cost) : props.cost
 

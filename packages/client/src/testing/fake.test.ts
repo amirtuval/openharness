@@ -7,13 +7,17 @@ import {
   StreamEventSchema,
   UpdateAgentRequestSchema,
   UserMessageEventInputSchema,
+  MODE_DEFAULT_MODEL,
   isStoredEvent,
   newAgentId,
+  newModeId,
 } from '@openharness/protocol'
 import type { StoredEvent, StreamEvent, UserEventInput } from '@openharness/protocol'
 import {
   fixtureTimestamp,
+  makeMode,
   makeModelEntry,
+  makeProviderCredential,
   makeSession,
   makeUserPreferences,
 } from '@openharness/protocol/fixtures'
@@ -1468,6 +1472,119 @@ describe("the fake's authentication", () => {
     await fake.providerCredentials.put('anthropic', { type: 'api_key', api_key: 'sk-ant-1234' })
 
     expect((await fake.preferences.get()).default_model).toBeNull()
+  })
+})
+
+describe('the fake’s modes (#245, M6)', () => {
+  const ANTHROPIC_KEY = makeProviderCredential({ name: 'anthropic' })
+
+  it('lists the seeded modes, and creates, updates and deletes one', async () => {
+    const seeded = makeMode({ name: 'deep' })
+    const fake = createFakeClient({ modes: [seeded] })
+
+    expect((await fake.modes.list()).data).toEqual([seeded])
+    expect(await fake.modes.get(seeded.id)).toEqual(seeded)
+
+    const created = await fake.modes.create({ name: 'fast', model: 'openai/gpt-4.1-mini' })
+    expect(created).toMatchObject({ name: 'fast', model: 'openai/gpt-4.1-mini' })
+
+    const updated = await fake.modes.update(created.id, { name: 'faster' })
+    expect(updated.name).toBe('faster')
+
+    await fake.modes.delete(created.id)
+    await expect(fake.modes.get(created.id)).rejects.toMatchObject({
+      status: 404,
+      type: 'not_found_error',
+    })
+    expect((await fake.modes.list()).data).toEqual([seeded])
+  })
+
+  it('refuses a duplicate name and the twenty-first mode the way the server does', async () => {
+    const fake = createFakeClient({ modes: [makeMode({ name: 'deep' })] })
+    await expect(fake.modes.create({ name: 'deep', model: 'x/y' })).rejects.toMatchObject({
+      status: 409,
+      type: 'conflict_error',
+    })
+
+    const many = createFakeClient({
+      modes: Array.from({ length: 20 }, (_unused, index) =>
+        makeMode({ name: `mode ${index}`, id: newModeId() }),
+      ),
+    })
+    await expect(many.modes.create({ name: 'one too many', model: 'x/y' })).rejects.toMatchObject({
+      status: 409,
+      type: 'conflict_error',
+    })
+  })
+
+  it('refuses a body the protocol does not accept, with the server’s 400', async () => {
+    const fake = createFakeClient()
+    await expect(fake.modes.create({ name: '', model: 'x/y' })).rejects.toMatchObject({
+      status: 400,
+      type: 'invalid_request_error',
+    })
+    await expect(fake.modes.create({ name: 'a', model: 'not-a-model' })).rejects.toMatchObject({
+      status: 400,
+      type: 'invalid_request_error',
+    })
+  })
+
+  it('creates a chat on a mode, resolving the mode’s model, and refuses an unusable one', async () => {
+    const mode = makeMode({ model: 'anthropic/claude-sonnet-5' })
+    // No credential for anthropic: the mode’s model cannot be used.
+    const withoutKey = createFakeClient({ modes: [mode] })
+    await expect(withoutKey.sessions.create({ mode: mode.id })).rejects.toMatchObject({
+      status: 422,
+      type: 'mode_unavailable_error',
+    })
+
+    const fake = createFakeClient({ modes: [mode], credentials: [ANTHROPIC_KEY] })
+    const session = await fake.sessions.create({ mode: mode.id })
+    expect(session.mode).toBe(mode.id)
+    expect(session.model).toEqual({ id: 'anthropic/claude-sonnet-5' })
+
+    // Continuing on the mode keeps following it, and the stored message carries it, exactly
+    // as the wire would.
+    await fake.sendMessage(session.id, 'go deeper', { mode: mode.id })
+    expect((await fake.sessions.get(session.id)).mode).toBe(mode.id)
+    const sent = fake.history(session.id).find((event) => event.type === 'user.message')
+    expect(sent?.type === 'user.message' && sent.mode).toBe(mode.id)
+
+    await fake.sendMessage(session.id, 'plain', { model: { id: 'openai/gpt-4.1-mini' } })
+    const detached = await fake.sessions.get(session.id)
+    expect(detached.mode).toBeNull()
+    expect(detached.model).toEqual({ id: 'openai/gpt-4.1-mini' })
+  })
+
+  it('resolves "my default model" through the caller’s default', async () => {
+    const mode = makeMode({ model: MODE_DEFAULT_MODEL })
+    const fake = createFakeClient({
+      modes: [mode],
+      credentials: [ANTHROPIC_KEY],
+      preferences: { default_model: 'anthropic/claude-sonnet-5' },
+    })
+    const session = await fake.sessions.create({ mode: mode.id })
+    expect(session.model).toEqual({ id: 'anthropic/claude-sonnet-5' })
+
+    // With no default set, the same mode is refused.
+    const noDefault = createFakeClient({ modes: [mode], credentials: [ANTHROPIC_KEY] })
+    await expect(noDefault.sessions.create({ mode: mode.id })).rejects.toMatchObject({
+      status: 422,
+      type: 'mode_unavailable_error',
+    })
+  })
+
+  it('lands the chats that followed a mode on their last model when it is deleted', async () => {
+    const mode = makeMode({ model: 'anthropic/claude-sonnet-5' })
+    const fake = createFakeClient({ modes: [mode], credentials: [ANTHROPIC_KEY] })
+    const session = await fake.sessions.create({ mode: mode.id })
+    expect(session.mode).toBe(mode.id)
+
+    await fake.modes.delete(mode.id)
+
+    const after = await fake.sessions.get(session.id)
+    expect(after.mode).toBeNull()
+    expect(after.model).toEqual({ id: 'anthropic/claude-sonnet-5' })
   })
 })
 

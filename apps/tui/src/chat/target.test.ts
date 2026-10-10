@@ -1,7 +1,12 @@
 import { ApiError, type Client } from '@openharness/client'
 import { createFakeClient } from '@openharness/client/testing'
 import { newAgentId, type Agent } from '@openharness/protocol'
-import { makeAgent, makeModelEntry } from '@openharness/protocol/fixtures'
+import {
+  makeAgent,
+  makeMode,
+  makeModelEntry,
+  makeProviderCredential,
+} from '@openharness/protocol/fixtures'
 import { describe, expect, it } from 'vitest'
 
 import { listingAgents, listingSessions, pagedAgents, seedAgents } from '../test-support/fake'
@@ -114,6 +119,41 @@ describe('resolveTarget', () => {
     const target = await resolveTarget(fake, { continue: false, model: 'openai/gpt-4.1-mini' })
 
     expect(target.kind === 'session' && target.session.model.id).toBe('openai/gpt-4.1-mini')
+  })
+
+  it('starts a new chat on --mode, resolving its model (#245, M6)', async () => {
+    const mode = makeMode({ name: 'smart', model: 'openai/gpt-4.1-mini' })
+    const fake = createFakeClient({
+      modes: [mode],
+      models: [makeModelEntry({ id: 'openai/gpt-4.1-mini' })],
+      credentials: [makeProviderCredential({ name: 'openai' })],
+      preferences: { default_model: 'anthropic/claude-sonnet-5' },
+    })
+
+    // By name, ignoring case, and the mode's model decides the session's header — the stored
+    // default never comes into it.
+    const target = await resolveTarget(fake, { continue: false, mode: 'SmArT' })
+
+    expect(target.kind === 'session' && target.session.mode).toBe(mode.id)
+    expect(target.kind === 'session' && target.session.model.id).toBe('openai/gpt-4.1-mini')
+  })
+
+  it('names the modes it has when --mode matches none', async () => {
+    const fake = createFakeClient({ modes: [makeMode({ name: 'smart' })] })
+
+    await expect(resolveTarget(fake, { continue: false, mode: 'nope' })).rejects.toThrow(
+      /no mode matches 'nope'.*smart/su,
+    )
+  })
+
+  it('refuses a mode whose model has no key, the way the server does (#245, M6)', async () => {
+    // No credential for the mode's provider: the fake refuses the create exactly as the route
+    // does, so `oh --mode` says the server's sentence rather than silently running something.
+    const fake = createFakeClient({ modes: [makeMode({ name: 'smart' })] })
+
+    await expect(resolveTarget(fake, { continue: false, mode: 'smart' })).rejects.toMatchObject({
+      type: 'mode_unavailable_error',
+    })
   })
 
   it('lets --agent ignore the stored default: the preset decides', async () => {

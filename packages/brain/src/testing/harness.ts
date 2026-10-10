@@ -1,5 +1,6 @@
 import type {
   AgentMessageEvent,
+  ModeId,
   ModelRequestEndEvent,
   ModelRequestStartEvent,
   ReasoningEffort,
@@ -58,6 +59,12 @@ export interface NewSessionOptions {
    * test that needs a store which refuses, records or paces something the turn appends.
    */
   readonly makeStore?: (now: Clock) => InMemorySessionStore
+  /**
+   * The mode the fixture session follows (#245, M6), or omitted for a chat without one. The
+   * fixture still creates the session from the agent — the mode is layered on top, as the
+   * server creates one.
+   */
+  readonly mode?: ModeId
 }
 
 /**
@@ -88,6 +95,7 @@ export async function newSession(
   const session = await store.createSession(agent.id, {
     ownerId: TEST_OWNER_ID,
     initial_events: initialEvents,
+    ...(options.mode === undefined ? {} : { mode: options.mode }),
   })
   return { store, sessionId: session.id, clock }
 }

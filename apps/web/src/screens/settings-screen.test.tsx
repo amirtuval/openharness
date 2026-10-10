@@ -24,16 +24,21 @@ describe('SettingsScreen', () => {
     const headings = await screen.findAllByRole('heading', { level: 1 })
     expect(headings.map((heading) => heading.textContent)).toEqual(['Settings'])
 
-    // The four sections, in the order a reader needs them (X5), and the provider key — the
-    // thing everyone needs — is no longer below a developer-only card.
-    const titles = (
-      await Promise.all(
-        ['Providers', 'Default model', 'Appearance', 'Usage', 'Advanced'].map((name) =>
-          screen.findByText(name),
-        ),
-      )
-    ).map((element) => element.textContent)
-    expect(titles).toEqual(['Providers', 'Default model', 'Appearance', 'Usage', 'Advanced'])
+    // The sections in the order a reader needs them (X5) — the provider key first, and Modes
+    // beside the default model it can defer to (#245, M6) — with Advanced last. Read off the
+    // document, not a list this test typed, so a section inserted in the wrong place fails.
+    await screen.findByText('Providers')
+    const titles = [...document.querySelectorAll<HTMLElement>('[data-slot="card-title"]')].map(
+      (title) => title.textContent,
+    )
+    expect(titles).toEqual([
+      'Providers',
+      'Default model',
+      'Modes',
+      'Appearance',
+      'Usage',
+      'Advanced',
+    ])
 
     // Collapsed by default: the trigger says so, and the section's own field is not in the DOM
     // at all — a collapsed section must not hold a focusable field.

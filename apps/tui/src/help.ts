@@ -21,6 +21,7 @@ Usage:
   oh sessions                  list sessions
   oh sessions delete <id>      delete a chat and everything in it
   oh agents                    list the saved agents (optional presets)
+  oh modes                     list your modes and what each resolves to
   oh providers                 list the model-provider keys you have stored
   oh providers add [provider]  connect a provider by pasting its key (hidden input)
   oh providers remove <p>      forget a provider's key (asks; --yes skips)
@@ -37,6 +38,7 @@ Options:
   -c, --continue               resume the most recent session
       --agent <id|name>        start from a saved agent instead of the default model
       --model <provider/model> the model to run, skipping the picker
+      --mode <name>            a mode to run, instead of a model
       --yes                    with \`oh sessions delete\` / \`oh providers remove\`:
                                do not ask to confirm
       --server <url>           server root (default https://app.oharness.dev)

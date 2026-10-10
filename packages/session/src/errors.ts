@@ -1,4 +1,4 @@
-import type { AgentId, EventId, SessionId } from '@openharness/protocol'
+import type { AgentId, EventId, SessionId, UserId } from '@openharness/protocol'
 
 /**
  * The errors a {@link SessionStore} throws.
@@ -27,6 +27,12 @@ export const DUPLICATE_EVENT_ID_ERROR_CODE = 'duplicate_event_id'
 
 /** The `code` of a {@link ClaimConflictError}. Stable across builds. */
 export const CLAIM_CONFLICT_ERROR_CODE = 'claim_conflict'
+
+/** The `code` of a {@link DuplicateModeNameError}. Stable across builds. */
+export const DUPLICATE_MODE_NAME_ERROR_CODE = 'duplicate_mode_name'
+
+/** The `code` of a {@link ModeLimitReachedError}. Stable across builds. */
+export const MODE_LIMIT_REACHED_ERROR_CODE = 'mode_limit_reached'
 
 /** What a {@link FencedError} reports: which write, which partition, and why it was refused. */
 export interface FencedErrorDetails {
@@ -190,5 +196,57 @@ export class ClaimConflictError extends Error {
     this.name = 'ClaimConflictError'
     this.sessionId = sessionId
     this.eventIds = [...eventIds]
+  }
+}
+
+/**
+ * A create was refused because the user already has a mode with that name (epic #245, M6).
+ *
+ * A mode's name is unique among its owner's modes — it is what a user types (`--mode smart`)
+ * and what a mode is picked by — and the uniqueness is enforced by the store (a unique
+ * constraint in Postgres), not only checked by the caller, so two concurrent creates cannot
+ * both take the same name. The update path raises this too, when a rename would collide.
+ */
+export class DuplicateModeNameError extends Error {
+  /** Stable, machine-readable code; see {@link DUPLICATE_MODE_NAME_ERROR_CODE}. */
+  readonly code = DUPLICATE_MODE_NAME_ERROR_CODE
+
+  /** The owner whose modes already include the name. */
+  readonly ownerId: UserId
+
+  /** The name that was already taken. */
+  readonly modeName: string
+
+  constructor(ownerId: UserId, name: string) {
+    super(`a mode named ${JSON.stringify(name)} already exists`)
+    this.name = 'DuplicateModeNameError'
+    this.ownerId = ownerId
+    this.modeName = name
+  }
+}
+
+/**
+ * A create was refused because the user is at {@link MAX_MODES_PER_USER} (epic #245, M6).
+ *
+ * The cap is a store rule rather than the caller's, because only the store can count a user's
+ * modes and insert one without a race between the two.
+ */
+export class ModeLimitReachedError extends Error {
+  /** Stable, machine-readable code; see {@link MODE_LIMIT_REACHED_ERROR_CODE}. */
+  readonly code = MODE_LIMIT_REACHED_ERROR_CODE
+
+  /** The owner who is at the limit. */
+  readonly ownerId: UserId
+
+  /** The limit that was reached. */
+  readonly limit: number
+
+  constructor(ownerId: UserId, limit: number) {
+    // The caller's own id is not in the message: it is noise to the person reading it, and it
+    // is the sort of thing that ends up pasted into a screenshot.
+    super(`cannot create a mode: the limit of ${limit} modes is reached`)
+    this.name = 'ModeLimitReachedError'
+    this.ownerId = ownerId
+    this.limit = limit
   }
 }

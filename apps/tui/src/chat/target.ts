@@ -1,5 +1,12 @@
 import { ApiError, type Client } from '@openharness/client'
-import { isAgentId, type Agent, type ModelEntry, type Session } from '@openharness/protocol'
+import {
+  isAgentId,
+  isModeId,
+  type Agent,
+  type Mode,
+  type ModelEntry,
+  type Session,
+} from '@openharness/protocol'
 
 import { listAllAgents } from '../paging'
 
@@ -22,6 +29,8 @@ export interface TargetOptions {
   readonly agent?: string | undefined
   /** `--model <provider/model>`. */
   readonly model?: string | undefined
+  /** `--mode <name>`: one of the user's modes a new chat follows (#245, M6). */
+  readonly mode?: string | undefined
 }
 
 /**
@@ -71,6 +80,13 @@ export async function resolveTarget(
 
 async function startNew(client: Client, options: TargetOptions): Promise<TargetResolution> {
   const model = options.model?.trim()
+  // `--mode` names a preset rather than a model (#245, M6), so it is resolved first and the
+  // session is created on it — the server resolves the mode's model from the user's own
+  // settings, which is exactly what "my default model" means.
+  if (options.mode !== undefined) {
+    const mode = await resolveMode(client, options.mode)
+    return { kind: 'session', session: await client.sessions.create({ mode: mode.id }) }
+  }
   const agent = options.agent === undefined ? undefined : await resolveAgent(client, options.agent)
 
   if (agent !== undefined) {
@@ -99,6 +115,41 @@ async function startNew(client: Client, options: TargetOptions): Promise<TargetR
   }
 
   return { kind: 'choose-model', models: catalog.data }
+}
+
+/**
+ * Resolve `--mode` against the user's modes, or fail with something to read (#245, M6).
+ *
+ * A `mode_` id is read straight from the server (one request), and anything else is matched
+ * against the user's modes by name — exactly, then ignoring case. Ambiguity is an error rather
+ * than a guess, the same rule `--agent` follows: naming a mode is how a user says which one.
+ */
+async function resolveMode(client: Client, query: string): Promise<Mode> {
+  const wanted = query.trim()
+  const modes = (await client.modes.list()).data
+
+  if (isModeId(wanted)) {
+    const direct = modes.find((mode) => mode.id === wanted)
+    if (direct !== undefined) return direct
+  }
+
+  const byName = modes.find((mode) => mode.name === wanted)
+  if (byName !== undefined) return byName
+
+  const folded = wanted.toLowerCase()
+  const caseInsensitive = modes.filter((mode) => mode.name.toLowerCase() === folded)
+  const match = caseInsensitive[0]
+  if (caseInsensitive.length === 1 && match !== undefined) return match
+
+  if (caseInsensitive.length > 1) {
+    throw new Error(`'${wanted}' matches ${caseInsensitive.length} modes. Use an id.`)
+  }
+
+  throw new Error(
+    modes.length === 0
+      ? `no mode matches '${wanted}': this account has no modes yet. Create one in the web app's Settings, then run \`oh\` again.`
+      : `no mode matches '${wanted}'. This account has: ${modes.map((mode) => mode.name).join(', ')}. Run \`oh modes\` to list them.`,
+  )
 }
 
 /** Resolve `--agent` against every agent the server has, or fail with something to read. */

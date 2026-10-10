@@ -4,6 +4,7 @@ import {
   AgentIdSchema,
   EventIdSchema,
   ID_PREFIXES,
+  ModeIdSchema,
   ProviderCredentialIdSchema,
   SessionIdSchema,
   ULID_LENGTH,
@@ -11,11 +12,13 @@ import {
   isAgentId,
   isEventId,
   isId,
+  isModeId,
   isProviderCredentialId,
   isSessionId,
   isUlid,
   newAgentId,
   newEventId,
+  newModeId,
   newProviderCredentialId,
   newSessionId,
   parseId,
@@ -91,6 +94,7 @@ describe('id generation', () => {
     expect(newSessionId()).toMatch(/^sesn_[0-9A-HJKMNP-TV-Z]{26}$/)
     expect(newEventId()).toMatch(/^sevt_[0-9A-HJKMNP-TV-Z]{26}$/)
     expect(newProviderCredentialId()).toMatch(/^pcred_[0-9A-HJKMNP-TV-Z]{26}$/)
+    expect(newModeId()).toMatch(/^mode_[0-9A-HJKMNP-TV-Z]{26}$/)
   })
 
   it('orders by the timestamp it was given, whatever the prefix', () => {
@@ -119,6 +123,7 @@ describe('parseId', () => {
     expect(parseId(`${ID_PREFIXES.providerCredential}${SAMPLE_ULID}`).type).toBe(
       'providerCredential',
     )
+    expect(parseId(`${ID_PREFIXES.mode}${SAMPLE_ULID}`).type).toBe('mode')
   })
 
   it('rejects an unknown prefix, a missing prefix and a malformed ULID', () => {
@@ -163,6 +168,9 @@ describe('id guards', () => {
     expect(isProviderCredentialId(newProviderCredentialId())).toBe(true)
     expect(isProviderCredentialId(newAgentId())).toBe(false)
     expect(isAgentId(newProviderCredentialId())).toBe(false)
+    expect(isModeId(newModeId())).toBe(true)
+    expect(isModeId(newAgentId())).toBe(false)
+    expect(isAgentId(newModeId())).toBe(false)
     expect(isId('agent_', undefined)).toBe(false)
   })
 })
@@ -175,11 +183,13 @@ describe('id schemas', () => {
     const session = `${ID_PREFIXES.session}${SAMPLE_ULID}`
     const event = `${ID_PREFIXES.event}${SAMPLE_ULID}`
     const credential = `${ID_PREFIXES.providerCredential}${SAMPLE_ULID}`
+    const mode = `${ID_PREFIXES.mode}${SAMPLE_ULID}`
 
     expect(AgentIdSchema.parse(agent)).toBe(agent)
     expect(SessionIdSchema.parse(session)).toBe(session)
     expect(EventIdSchema.parse(event)).toBe(event)
     expect(ProviderCredentialIdSchema.parse(credential)).toBe(credential)
+    expect(ModeIdSchema.parse(mode)).toBe(mode)
   })
 
   it('reject ids of another kind', () => {
@@ -190,5 +200,7 @@ describe('id schemas', () => {
     expect(
       ProviderCredentialIdSchema.safeParse(`${ID_PREFIXES.providerCredential}nope`).success,
     ).toBe(false)
+    expect(ModeIdSchema.safeParse(newAgentId()).success).toBe(false)
+    expect(ModeIdSchema.safeParse(`${ID_PREFIXES.mode}nope`).success).toBe(false)
   })
 })

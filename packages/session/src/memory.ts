@@ -6,20 +6,25 @@ import {
   StoredEventSchema,
   encodeKeyCursor,
   encodeSeqCursor,
+  MAX_MODES_PER_USER,
   newAgentId,
   newEventId,
+  newModeId,
   newProviderCredentialId,
   newSessionId,
   partitionOf,
   type Agent,
   type AgentId,
   type CreateAgentRequest,
+  type CreateModeRequest,
   type EventId,
   type KeyCursor,
   type KeyCursorPosition,
   type ListAgentsResponse,
   type ListEventsResponse,
   type ListSessionsResponse,
+  type Mode,
+  type ModeId,
   type ModelRequestStartEvent,
   type NextPage,
   type ProviderCredential,
@@ -29,6 +34,7 @@ import {
   type Supersedes,
   type Timestamp,
   type UpdateAgentRequest,
+  type UpdateModeRequest,
   type UserEvent,
   type UserId,
   type UserPreferences,
@@ -47,7 +53,9 @@ import {
   AgentNotFoundError,
   ClaimConflictError,
   DuplicateEventIdError,
+  DuplicateModeNameError,
   FencedError,
+  ModeLimitReachedError,
   SessionNotFoundError,
 } from './errors'
 import {
@@ -137,6 +145,13 @@ export class InMemorySessionStore implements SessionStore {
   readonly #partitionCount: number
 
   readonly #agents = new Map<string, Agent>()
+
+  /**
+   * Every user's modes, keyed by id — the in-memory `modes` table (epic #245, M6). The owner is
+   * on the mode itself, so a scoped read filters rather than indexing; a user holds at most
+   * `MAX_MODES_PER_USER` of them, which is why the map is not paginated.
+   */
+  readonly #modes = new Map<string, Mode>()
 
   readonly #sessions = new Map<string, SessionRecord>()
 
@@ -245,6 +260,93 @@ export class InMemorySessionStore implements SessionStore {
     return resolved(clone(updated))
   }
 
+  // ------------------------------------------------------------------- modes
+
+  createMode(input: CreateModeRequest, ownerId: UserId): Promise<Mode> {
+    const owned = [...this.#modes.values()].filter((mode) => mode.owner_id === ownerId)
+    if (owned.some((mode) => mode.name === input.name)) {
+      throw new DuplicateModeNameError(ownerId, input.name)
+    }
+    if (owned.length >= MAX_MODES_PER_USER) {
+      throw new ModeLimitReachedError(ownerId, MAX_MODES_PER_USER)
+    }
+    const now = this.#clock()
+    const at = timestampAt(now)
+    const mode: Mode = {
+      id: newModeId(now),
+      type: 'mode',
+      owner_id: ownerId,
+      name: input.name,
+      model: input.model,
+      reasoning_effort: input.reasoning_effort ?? null,
+      system_prompt_addition: input.system_prompt_addition ?? null,
+      created_at: at,
+      updated_at: at,
+    }
+    this.#modes.set(mode.id, mode)
+    return resolved(clone(mode))
+  }
+
+  getMode(modeId: ModeId, options: OwnerScope): Promise<Mode | null> {
+    const mode = this.#modes.get(modeId)
+    if (mode === undefined || !matchesOwner(mode, options)) {
+      return resolved(null)
+    }
+    return resolved(clone(mode))
+  }
+
+  listModes(options: OwnerScope): Promise<Mode[]> {
+    const modes = [...this.#modes.values()]
+      .filter((mode) => matchesOwner(mode, options))
+      .sort(compareKeys)
+    return resolved(modes.map(clone))
+  }
+
+  updateMode(modeId: ModeId, update: UpdateModeRequest, options: OwnerScope): Promise<Mode | null> {
+    const mode = this.#modes.get(modeId)
+    if (mode === undefined || !matchesOwner(mode, options)) {
+      return resolved(null)
+    }
+    const name = update.name ?? mode.name
+    const collides = [...this.#modes.values()].some(
+      (other) => other.id !== modeId && other.owner_id === mode.owner_id && other.name === name,
+    )
+    if (collides) {
+      throw new DuplicateModeNameError(mode.owner_id, name)
+    }
+    const updated: Mode = {
+      ...mode,
+      name,
+      model: update.model ?? mode.model,
+      reasoning_effort:
+        update.reasoning_effort === undefined ? mode.reasoning_effort : update.reasoning_effort,
+      system_prompt_addition:
+        update.system_prompt_addition === undefined
+          ? mode.system_prompt_addition
+          : update.system_prompt_addition,
+      updated_at: timestampAt(this.#clock()),
+    }
+    this.#modes.set(modeId, updated)
+    return resolved(clone(updated))
+  }
+
+  deleteMode(modeId: ModeId, options: OwnerScope): Promise<boolean> {
+    const mode = this.#modes.get(modeId)
+    if (mode === undefined || !matchesOwner(mode, options)) {
+      return resolved(false)
+    }
+    this.#modes.delete(modeId)
+    // A chat that followed the mode keeps running on the model it last ran: one transaction
+    // with the delete in Postgres, and here the same step on the record the delete already
+    // reached. The mode id is globally unique, so no owner filter is needed to find its chats.
+    for (const record of this.#sessions.values()) {
+      if (record.session.mode === modeId) {
+        record.session.mode = null
+      }
+    }
+    return resolved(true)
+  }
+
   // ---------------------------------------------------------------- sessions
 
   createSession(agentId: AgentId | null, options: CreateSessionOptions): Promise<Session> {
@@ -268,6 +370,7 @@ export class InMemorySessionStore implements SessionStore {
       metadata: { ...options.metadata },
       model: config.model,
       system: config.system,
+      mode: options.mode ?? null,
       agent:
         agent === null
           ? null
@@ -774,11 +877,28 @@ export class InMemorySessionStore implements SessionStore {
         record.session.status = 'running'
       } else if (event.type === EVENT_TYPES.sessionStatusIdle) {
         record.session.status = 'idle'
-      } else if (event.type === EVENT_TYPES.userMessage && event.model !== undefined) {
+      } else if (event.type === EVENT_TYPES.userMessage) {
         // The model projection (#111): a message that carries a model switches the session to
         // it, in the same append, and a message without one leaves the session's model alone.
         // Within a batch the later message wins, because this walks the events in order.
-        record.session.model = { id: event.model.id }
+        if (event.model !== undefined) {
+          record.session.model = { id: event.model.id }
+          // ...and a plain model detaches the chat from any mode: it follows one or the other
+          // (epic #245, M6).
+          if (event.mode === undefined) {
+            record.session.mode = null
+          }
+        }
+        // The mode projection (#245, M6): a message that carries a mode switches it, `null`
+        // detaches, and a message that carries neither leaves it alone.
+        if (event.mode !== undefined) {
+          record.session.mode = event.mode
+        }
+      } else if (event.type === EVENT_TYPES.modelRequestStart && event.model !== undefined) {
+        // The model a request *ran*, projected onto the session: for a chat on a mode this is
+        // the mode's resolved model, which is what makes `model` mean "the model this chat
+        // last ran" — and the fallback a chat continues on once its mode is deleted (#245, M6).
+        record.session.model = { id: event.model }
       }
     }
     if (stored.length > 0) {

@@ -20,6 +20,8 @@ export interface ChatOptions extends GlobalOptions {
   readonly agent?: string | undefined
   /** `--model <provider/model>`: the model a new chat runs, skipping the picker. */
   readonly model?: string | undefined
+  /** `--mode <name>`: a mode a new chat follows, instead of a model (#245, M6). */
+  readonly mode?: string | undefined
 }
 
 /** Flags `oh login` takes on top of the global ones. */
@@ -45,6 +47,7 @@ export type CliCommand =
       readonly options: GlobalOptions
     }
   | { readonly kind: 'agents'; readonly options: GlobalOptions }
+  | { readonly kind: 'modes'; readonly options: GlobalOptions }
   | { readonly kind: 'providers'; readonly options: GlobalOptions }
   | {
       readonly kind: 'providers-add'
@@ -83,6 +86,7 @@ export type ParseOutcome =
 const SUBCOMMANDS = [
   'sessions',
   'agents',
+  'modes',
   'providers',
   'default-model',
   'login',
@@ -97,6 +101,7 @@ type Subcommand = (typeof SUBCOMMANDS)[number]
 const SUBCOMMAND_BLURBS: Record<Subcommand, string> = {
   sessions: 'it lists what the server has, or deletes one with `delete <id>`',
   agents: 'it lists what the server has',
+  modes: 'it lists your modes and what each resolves to',
   providers: 'it lists the model-provider keys, or manages them with `add` and `remove <provider>`',
   'default-model': 'it gets or sets the default model',
   login: 'it signs you in through the browser',
@@ -112,6 +117,7 @@ const OPTIONS = {
   continue: { type: 'boolean', short: 'c' },
   agent: { type: 'string' },
   model: { type: 'string' },
+  mode: { type: 'string' },
   server: { type: 'string' },
   yes: { type: 'boolean' },
   'no-browser': { type: 'boolean' },
@@ -220,6 +226,20 @@ export function parseArgs(argv: readonly string[]): ParseOutcome {
     }
   }
 
+  if (values.mode !== undefined && values.mode.trim() === '') {
+    return {
+      ok: false,
+      error: '--mode needs a mode name, like --mode smart.',
+    }
+  }
+
+  if (values.model !== undefined && values.mode !== undefined) {
+    return {
+      ok: false,
+      error: 'use either --model or --mode, not both: a chat follows a model or a mode.',
+    }
+  }
+
   if (values.session !== undefined && values.continue === true) {
     return {
       ok: false,
@@ -237,6 +257,7 @@ export function parseArgs(argv: readonly string[]): ParseOutcome {
         continue: values.continue === true,
         agent: values.agent,
         model: values.model,
+        mode: values.mode,
       },
     },
   }
@@ -465,6 +486,7 @@ function wrongFlagFor(
   if (values.continue === true) return '--continue'
   if (values.agent !== undefined) return `--agent <id|name>`
   if (values.model !== undefined) return `--model <provider/model>`
+  if (values.mode !== undefined) return `--mode <name>`
   if (
     values.yes === true &&
     subcommand !== 'sessions' &&

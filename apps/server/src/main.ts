@@ -3,7 +3,12 @@ import { Kysely, PostgresDialect } from 'kysely'
 import { Pool } from 'pg'
 import type { Hono } from 'hono'
 import type { MemoryDB } from 'better-auth/adapters/memory'
-import type { ContextStrategy, ModelFactory, ReasoningSupportFor } from '@openharness/brain'
+import type {
+  ContextStrategy,
+  ModeResolver,
+  ModelFactory,
+  ReasoningSupportFor,
+} from '@openharness/brain'
 import { createContextStrategy } from '@openharness/brain'
 import type { SessionId } from '@openharness/protocol'
 import {
@@ -30,6 +35,7 @@ import { ModelCatalog } from './catalog/catalog'
 import { createTokenBudgetResolver } from './catalog/context-budget'
 import { createProviderFetch } from './catalog/provider-fetch'
 import { createReasoningSupportResolver } from './catalog/reasoning-support'
+import { createModeResolver } from './modes'
 import { createBundledRegistry, type ModelRegistry } from './catalog/registry'
 import { DeltaCompactor } from './compaction'
 import { ENV_VARS, type ServerConfig, describeConfig, readServerConfig } from './config'
@@ -228,6 +234,13 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   // model patterns, which rotted with every release; the model's own data is what decides now.
   const reasoningSupportFor = createReasoningSupportResolver(registry)
 
+  // The mode a chat follows (#245, M6): a mode lives in the database and its "my default model"
+  // in the user's preferences, so the resolver is the server's and the brain is handed it per
+  // request. The store holds the modes and the credentials decide availability; the routes
+  // refuse an unusable mode before a chat starts or continues (`modes.ts`), and the brain
+  // applies whatever this answers.
+  const resolveMode = createModeResolver({ store, credentials })
+
   const scheduler = createScheduler(
     config,
     store,
@@ -235,6 +248,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     resolveCredential,
     contextStrategy,
     reasoningSupportFor,
+    resolveMode,
     logger,
   )
   // Compaction is the store's, not a scheduler's: it deletes superseded chunks whoever ran the
@@ -420,6 +434,7 @@ function createScheduler(
   resolveCredential: ResolveSessionCredential,
   contextStrategy: ContextStrategy,
   reasoningSupportFor: ReasoningSupportFor,
+  resolveMode: ModeResolver,
   logger: Logger,
 ): SessionScheduler {
   const onError = (error: unknown, sessionId: SessionId | undefined): void => {
@@ -435,6 +450,7 @@ function createScheduler(
       resolveCredential,
       contextStrategy,
       reasoningSupportFor,
+      resolveMode,
       instanceId: config.instanceId,
       partitions: config.partitions,
       ttlMs: config.leaseTtlMs,
@@ -454,6 +470,7 @@ function createScheduler(
     resolveCredential,
     contextStrategy,
     reasoningSupportFor,
+    resolveMode,
     maxConcurrentSessions: config.maxConcurrentSessions,
     drainTimeoutMs: config.drainTimeoutMs,
     partitionCount: config.partitions,

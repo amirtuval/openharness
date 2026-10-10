@@ -75,6 +75,9 @@ const FAKE_SERVER = 'http://localhost:3000'
 /** Fake mode, pointed at {@link FAKE_SERVER} rather than at the default. */
 const FAKE_ENV = { OPENHARNESS_FAKE: '1', OPENHARNESS_URL: FAKE_SERVER }
 
+/** Fake mode with the seeded credentials — the account that can run a mode (#245, M6). */
+const FAKE_KEYED_ENV = { ...FAKE_ENV, OPENHARNESS_FAKE_CREDENTIALS: '1' }
+
 afterEach(() => {
   vi.restoreAllMocks()
 })
@@ -135,19 +138,28 @@ describe('run', () => {
     expect(out).toContain('A session with history')
   })
 
-  it('lists the provider keys of the dev fake — none, with how to add one (#210)', async () => {
-    const { code, out, err } = await runCaptured(['providers'], FAKE_ENV)
+  it('lists the provider keys of the dev fake, when they are seeded (#210)', async () => {
+    // Nothing is seeded by default (the first-run flow needs the empty account), so this is
+    // the keyed fake: `OPENHARNESS_FAKE_CREDENTIALS=1` gives it a key per catalog provider.
+    const { code, out, err } = await runCaptured(['providers'], FAKE_KEYED_ENV)
 
     expect(code).toBe(0)
     expect(err).toBe('')
-    expect(out).toContain('No credentials yet')
-    expect(out).toContain('oh providers add')
+    expect(out).toContain('Anthropic')
+    expect(out).not.toContain('No provider keys yet')
+  })
+
+  it('says there are no keys on the plain dev fake, which is the first-run account (#210)', async () => {
+    const { code, out } = await runCaptured(['providers'], FAKE_ENV)
+
+    expect(code).toBe(0)
+    expect(out).toContain('No credentials yet. Add one with `oh providers add`.')
   })
 
   it('removes a key from the dev fake without asking, with --yes (#210)', async () => {
     const { code, out } = await runCaptured(
       ['providers', 'remove', 'anthropic', '--yes'],
-      FAKE_ENV,
+      FAKE_KEYED_ENV,
       { stdin: PIPED_STDIN },
     )
 
@@ -156,7 +168,7 @@ describe('run', () => {
   })
 
   it('asks before removing, and a piped answer nobody wrote is a no (#210)', async () => {
-    const { code, out } = await runCaptured(['providers', 'remove', 'anthropic'], FAKE_ENV, {
+    const { code, out } = await runCaptured(['providers', 'remove', 'anthropic'], FAKE_KEYED_ENV, {
       // A pipe that closes: the question is asked, and end-of-input answers no.
       stdin: Readable.from([]) as unknown as NodeJS.ReadStream,
     })

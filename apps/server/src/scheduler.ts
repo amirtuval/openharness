@@ -1,5 +1,6 @@
 import type {
   ContextStrategy,
+  ModeResolver,
   ModelFactory,
   ReasoningSupportFor,
   RetryPolicy,
@@ -110,6 +111,8 @@ export interface LocalSchedulerOptions {
   readonly contextStrategy?: ContextStrategy
   /** Which reasoning efforts a model takes, passed to every turn (#252's follow-up). */
   readonly reasoningSupportFor?: ReasoningSupportFor
+  /** What a mode resolves to, passed to every turn (#245, M6). */
+  readonly resolveMode?: ModeResolver
   /**
    * How many partitions the server's sessions are spread over; the protocol's 64 by default.
    *
@@ -168,6 +171,7 @@ export class LocalScheduler implements SessionScheduler {
         ...(options.reasoningSupportFor === undefined
           ? {}
           : { reasoningSupportFor: options.reasoningSupportFor }),
+        ...(options.resolveMode === undefined ? {} : { resolveMode: options.resolveMode }),
       })
     this.#queue = new PassQueue({
       runner,

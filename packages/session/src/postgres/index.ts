@@ -32,6 +32,8 @@ export type {
   EventClaimsTable,
   EventsTable,
   EventSupersessionsTable,
+  ModeRow,
+  ModesTable,
   PartitionLeasesTable,
   PostgresSchema,
   ProviderCredentialMetadataRow,

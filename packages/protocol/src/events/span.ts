@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { EventIdSchema } from '../ids'
 import type { DeepReadonly } from '../readonly'
 import { ReasoningEffortRunSchema } from '../reasoning'
+import { ModeReferenceSchema } from '../resources/mode'
 import { EVENT_TYPES, EventSeqSchema, ProcessedAtSchema, SupersedesSchema } from './common'
 
 /**
@@ -105,6 +106,19 @@ export const ModelRequestStartEventSchema = z.object({
    * effort — a reader without the field reads the provider's default, exactly as before.
    */
   reasoning_effort: ReasoningEffortRunSchema.optional(),
+  /**
+   * // extension: the mode this request ran under, and the name it had then (#245, M6).
+   *
+   * Written when the session's mode was applied to the request: `id` is the mode the log
+   * points at and `name` is what it was called when the request ran, recorded per request
+   * like `model` so that a later rename or edit does not rewrite history. The resolved model
+   * the mode produced is in `model` and its effort in `reasoning_effort`, so the two fields
+   * beside this one say what the mode resolved to.
+   *
+   * Absent for a request that ran without a mode — a plain model chat, or one whose mode was
+   * gone by the time the request ran.
+   */
+  mode: ModeReferenceSchema.optional(),
 })
 
 /** A stored `span.model_request_start`, deep-readonly (D9, issue #46). */

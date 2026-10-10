@@ -1,6 +1,6 @@
 import { providerName, selectSessionUsage, sessionCost } from '@openharness/client'
 import type { Client, TranscriptError } from '@openharness/client'
-import type { ModelEntry } from '@openharness/protocol'
+import type { Mode, ModelEntry } from '@openharness/protocol'
 import { Box, Text, useApp, useInput, useStdout } from 'ink'
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 
@@ -13,6 +13,7 @@ import { formatCostTotal } from '../components/reply-meta'
 import { InputRule, modelLabel, modelPriceLookup, StatusLine } from '../components/status-line'
 import { lastDrawn, TranscriptView } from '../components/transcript-view'
 import type { PromptHistory } from '../history'
+import { modeNameOf } from '../modes'
 import type { ErrorContext } from '../errors'
 import { clearScreen } from '../terminal'
 import {
@@ -95,6 +96,11 @@ export function ChatScreen({
   // its own — a chat opened on `--model` or a stored default must not pay for a catalog it
   // does not need.
   const [catalog, setCatalog] = useState<readonly ModelEntry[] | null>(known ?? null)
+  // The user's modes (#245, M6), read once in the background for the same reason the catalog
+  // is: the status line names the mode a chat follows, and a mode-first chat starts before
+  // either list is in. `null` is "not read yet"; a failed read leaves it empty, so the line
+  // falls back to the model rather than to a name it does not have.
+  const [modeList, setModeList] = useState<readonly Mode[] | null>(null)
   const { stdout } = useStdout()
   const { suspendTerminal } = useApp()
   // A clear is in flight. A second Ctrl+L while the first is being handed over has nowhere
@@ -132,6 +138,22 @@ export function ChatScreen({
     }
   }, [session, known])
 
+  useEffect(() => {
+    if (modeList !== null) return undefined
+    let cancelled = false
+    void session
+      .listModes()
+      .then((modes) => {
+        if (!cancelled) setModeList(modes)
+      })
+      .catch(() => {
+        if (!cancelled) setModeList([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [session, modeList])
+
   // The catalog's prices: what every cost on screen — a reply's, the session's — is computed
   // with. A model the catalog does not carry has none, and its cost reads `—`; a catalog that
   // has not been read yet leaves the costs off entirely, because "—" would be a claim about a
@@ -156,6 +178,17 @@ export function ChatScreen({
     view.pendingModel === null
       ? modelLabel(currentModel, catalog ?? [])
       : `${modelLabel(view.pendingModel, catalog ?? [])} (next message)`
+
+  // The mode the chat follows (#245, M6), named the way the picker names it — or the one a
+  // `/model` pick is about to switch to, said so. Absent until the modes are read, or for a
+  // chat without one.
+  const knownModes = modeList ?? []
+  const pendingModeName =
+    view.pendingMode === null ? null : modeNameOf(knownModes, view.pendingMode)
+  const mode =
+    pendingModeName !== null
+      ? `${pendingModeName} (next message)`
+      : (modeNameOf(knownModes, view.modeId) ?? undefined)
 
   // What the session has spent (#247), priced from the transcript's own totals — the running
   // ones the log reported, or the ones derived from its replies for a session stored before
@@ -368,6 +401,7 @@ export function ChatScreen({
       <StatusLine
         agentName={agentName}
         model={model}
+        mode={mode}
         sessionId={session.session.id}
         status={view.transcript.status}
         phase={view.phase}
@@ -413,15 +447,22 @@ function ModelSlot({
   readonly onCatalog: (models: readonly ModelEntry[]) => void
 }) {
   const [models, setModels] = useState<readonly ModelEntry[] | null>(null)
+  const [modes, setModes] = useState<readonly Mode[]>([])
 
   useEffect(() => {
     let live = true
     void (async () => {
       try {
-        const catalog = await session.listModels()
+        // The modes go with the catalog (#245, M6). A modes read that fails is not fatal —
+        // the picker still offers the models — so it answers `[]` rather than reporting.
+        const [catalog, knownModes] = await Promise.all([
+          session.listModels(),
+          session.listModes().catch(() => [] as readonly Mode[]),
+        ])
         if (live) {
           onCatalog(catalog)
           setModels(catalog)
+          setModes(knownModes)
         }
       } catch (error) {
         if (live) {
@@ -439,7 +480,18 @@ function ModelSlot({
     return <Text dimColor>loading models…</Text>
   }
 
-  return <ModelPicker models={models} onSelect={settle} onCancel={() => settle(null)} />
+  return (
+    <ModelPicker
+      models={models}
+      modes={modes}
+      onSelectMode={(mode) => {
+        session.setMode(mode.id)
+        settle(null)
+      }}
+      onSelect={settle}
+      onCancel={() => settle(null)}
+    />
+  )
 }
 
 /**
