@@ -894,10 +894,18 @@ export class InMemorySessionStore implements SessionStore {
         if (event.mode !== undefined) {
           record.session.mode = event.mode
         }
-      } else if (event.type === EVENT_TYPES.modelRequestStart && event.model !== undefined) {
+      } else if (
+        event.type === EVENT_TYPES.modelRequestStart &&
+        event.model !== undefined &&
+        event.purpose !== 'summary'
+      ) {
         // The model a request *ran*, projected onto the session: for a chat on a mode this is
         // the mode's resolved model, which is what makes `model` mean "the model this chat
         // last ran" — and the fallback a chat continues on once its mode is deleted (#245, M6).
+        //
+        // A **summary** request is left out (epic #277, C2): its span start names the model that
+        // summarized, not the model the chat runs, and projecting it would move the chat onto
+        // the summarizer.
         record.session.model = { id: event.model }
       }
     }

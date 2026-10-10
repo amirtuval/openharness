@@ -1,6 +1,10 @@
 import type { Hono } from 'hono'
-import { createContextStrategy } from '@openharness/brain'
-import type { ModelFactory } from '@openharness/brain'
+import {
+  type ContextCompactionConfig,
+  createContextStrategy,
+  DEFAULT_COMPACTION_THRESHOLD,
+  type ModelFactory,
+} from '@openharness/brain'
 import {
   API_VERSION_PREFIX,
   DEFAULT_PARTITION_COUNT,
@@ -221,6 +225,18 @@ export interface TestOptions {
    */
   readonly registry?: ModelRegistry
   /**
+   * Context compaction (epic #277, C2; #279), passed to `runTurn` as-is. Omitted — the default —
+   * means off, so a test that does not want a summary is never surprised by one.
+   */
+  readonly compaction?: ContextCompactionConfig
+  /**
+   * `OPENHARNESS_COMPACTION_THRESHOLD` for {@link testConfig} — the trigger a test boots the
+   * whole server with. The default is the production one; the in-process harness leaves
+   * compaction off regardless (see {@link TestOptions.compaction}), so this only matters to a
+   * test that boots `startServer`.
+   */
+  readonly compactionThreshold?: number
+  /**
    * Where the app and Better Auth log. Silent by default; a test that asserts on a log line —
    * or on the absence of one — passes a logger that keeps them.
    */
@@ -305,6 +321,11 @@ export function createTestApp(options: TestOptions = {}): TestContext {
     // does not build one gets `applied: null` for every request — the same as the brain's own
     // no-resolver default, and a test that wants an applied effort passes a registry.
     reasoningSupportFor: createReasoningSupportResolver(options.registry ?? emptyRegistry),
+    // Context compaction (epic #277, C2; #279) only when a test asks for it: the harness keeps
+    // it off by default so every existing test sees exactly the prompt it saw before, and a
+    // test that wants a summary passes `compaction` (the production wiring is `main.ts`'s —
+    // the threshold from the config, the registry's budgets and output ceilings).
+    ...(options.compaction === undefined ? {} : { compaction: options.compaction }),
     // And the production mode wiring (#245, M6): the modes and the caller's credentials, the
     // same resolver `main.ts` builds, so a test drives modes through the real seam.
     resolveMode: createModeResolver({ store, credentials }),
@@ -646,6 +667,7 @@ export function testConfig(options: TestOptions = {}): ServerConfig {
     // Off unless a test asks: a compaction timer running under every test's feet would make
     // "the chunks are still there" assertions a race. The job's own suite turns it on.
     compactIntervalMs: options.compactIntervalMs ?? 0,
+    compactionThreshold: options.compactionThreshold ?? DEFAULT_COMPACTION_THRESHOLD,
     // Observability (#158) is off in a test by default: the readable log format, and no
     // exporter to load. The suites that assert on the JSON shape call `jsonLogger` directly.
     logFormat: options.logFormat ?? DEFAULT_LOG_FORMAT,

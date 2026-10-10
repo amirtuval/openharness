@@ -664,6 +664,31 @@ reach. It applies to the `openai_compatible` credential type alone — Azure Ope
 it — and the server says so loudly at startup when it is on
 (`custom provider URLs: PRIVATE ADDRESSES ALLOWED`).
 
+### Context compaction, and the one knob it has
+
+When a chat's context fills, the brain summarizes the older history instead of letting it be
+trimmed away (epic #277), and the only setting it has is where that starts:
+
+```
+OPENHARNESS_COMPACTION_THRESHOLD=0.7
+```
+
+It is the share of the **chat model's** context budget at which the engine summarizes before a
+request — the default 0.7 leaves a comfortable margin under a provider's window, and a
+deployment can lower it (summarize earlier, cheaper requests, more summaries) or raise it
+(summarize later, closer to the limit). The value is validated at boot: a fraction in `0..1`,
+anything else stops the server with a message naming the variable. Nothing here sets it — every
+environment takes the default — and it is a single global, not a per-user preference: the
+per-user choice is the follow-up work in epic #277 (C3). Nothing else about compaction is
+configurable: the summary model is the chat's own, and the pass limit, the verbatim tail and the
+summary's size cap are the brain's documented constants.
+
+Two things worth knowing when reading a bill: a summary is a **model request** (its tokens and
+cost appear in the session's usage like any other request), and it is charged to the model that
+wrote it, which by default is the model the chat is running. The compaction job the store runs
+on its own schedule (`OPENHARNESS_COMPACT_INTERVAL_MS`) is unrelated: it deletes the chunk rows
+replay already skips and never summarizes anything.
+
 ### What is deliberately off
 
 **Load-balancer request logging stays off.** It is the single most expensive thing in this

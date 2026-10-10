@@ -17,6 +17,8 @@ import { PACKAGE_NAME as SESSION_PACKAGE_NAME } from '@openharness/session'
  *   an oversized newest item is capped rather than dropped (K6).
  * - **{@link estimateNextRequestTokens}** (`./context`) — how big the next request will be, from
  *   the previous request's real prompt size plus an estimate for what is new (epic #277, K2).
+ * - **{@link summarizeContext}** (`./summarize`) — the compaction engine: at a request boundary,
+ *   older history is summarized so the chat fits its model's window (epic #277, C2; #279).
  * - **{@link PROVIDER_REASONING}** (`./reasoning`) — how `low | medium | high` is asked for from
  *   each provider, and what the log asked the next request to run with (#252).
  * - **{@link ModelFactory}** (`./model`) — how a `provider/model` id becomes a model to stream,
@@ -54,5 +56,6 @@ export * from './model'
 export * from './reasoning'
 export * from './redact'
 export * from './retry'
+export * from './summarize'
 export * from './turn'
 export * from './vertex'

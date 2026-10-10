@@ -79,16 +79,43 @@ export function createTokenBudgetResolver(
   registry: ModelRegistry,
 ): (modelId: string) => number | undefined {
   return (modelId) => {
-    const separator = modelId.indexOf('/')
-    if (separator <= 0 || separator === modelId.length - 1) {
-      return undefined
-    }
-    const provider = modelId.slice(0, separator)
-    const id = modelId.slice(separator + 1)
-    const model = registry.models(provider).find((entry) => entry.id === id)
+    const model = registryModel(registry, modelId)
     if (model?.contextWindow === undefined) {
       return undefined
     }
     return contextTokenBudget({ contextWindow: model.contextWindow, maxOutput: model.maxOutput })
   }
+}
+
+/**
+ * The per-model output ceiling resolver the server hands the brain as
+ * `ContextCompactionConfig.maxOutputFor` (epic #277, K5; C2).
+ *
+ * The compaction engine caps a summary by the smallest of three bounds, and the summary model's
+ * own output ceiling is one of them: a model that can answer with 4k tokens cannot be asked for
+ * a 12k-token summary, however much room the chat model's budget would leave. `undefined` is the
+ * same real answer the budget resolver gives — the registry knows nothing about this id — and it
+ * caps nothing: a summary model with no declared ceiling is bounded by the other two bounds
+ * instead, which is the honest reading rather than a guessed number.
+ *
+ * @param registry the same snapshot the budget resolver and the catalogue read
+ */
+export function createMaxOutputResolver(
+  registry: ModelRegistry,
+): (modelId: string) => number | undefined {
+  return (modelId) => registryModel(registry, modelId)?.maxOutput
+}
+
+/** The registry's entry for a `provider/model` id, or `undefined` when it knows none. */
+function registryModel(
+  registry: ModelRegistry,
+  modelId: string,
+): { readonly contextWindow?: number; readonly maxOutput?: number } | undefined {
+  const separator = modelId.indexOf('/')
+  if (separator <= 0 || separator === modelId.length - 1) {
+    return undefined
+  }
+  const provider = modelId.slice(0, separator)
+  const id = modelId.slice(separator + 1)
+  return registry.models(provider).find((entry) => entry.id === id)
 }

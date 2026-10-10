@@ -15,7 +15,7 @@ import { SessionNotFoundError } from '@openharness/session'
 import type { LanguageModel } from 'ai'
 
 import type { ContextStrategy } from './context'
-import { DEFAULT_CONTEXT_STRATEGY } from './context'
+import { DEFAULT_CONTEXT_STRATEGY, estimateContextSize } from './context'
 import {
   agentMessage,
   eventDelta,
@@ -55,6 +55,8 @@ import { planReasoning, type ReasoningSupportFor, requestedReasoningEffort } fro
 import { redactSecrets } from './redact'
 import type { RetryPolicy } from './retry'
 import { backoffDelay, resolveRetryPolicy } from './retry'
+import type { ContextCompactionConfig } from './summarize'
+import { resolveContextCompaction, summarizeContext } from './summarize'
 
 /**
  * The turn loop: read the log, call the model, append what happened.
@@ -229,6 +231,16 @@ export interface RunTurnOptions {
   readonly resolveMode?: ModeResolver
   /** How model failures are retried; see {@link RetryPolicy}. */
   readonly retry?: RetryPolicy
+  /**
+   * Context compaction (epic #277, C2; issue #279): summarize older history when its context
+   * fills, instead of letting the strategy trim it away.
+   *
+   * **Absent means off** — a host that wires none gets exactly the behaviour of #278, and the
+   * brain's own tests run no model calls they did not script. The server always passes one
+   * (`main.ts`, from `OPENHARNESS_COMPACTION_THRESHOLD` and the registry's limits), which is
+   * where the epic's 70% default applies. See {@link ContextCompactionConfig}.
+   */
+  readonly compaction?: ContextCompactionConfig
 }
 
 /**
@@ -429,6 +441,13 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
 
   // ---- Loop: one iteration per model request.
   let retriesUsed = 0
+  // The compaction engine's one overflow retry (K2, C2): a request a provider refused as too
+  // long is compacted with tighter caps and tried once more, and a second refusal ends the turn
+  // with a clear error rather than looping. Once **per turn**, not per request, is what bounds
+  // it however many requests the turn makes.
+  let overflowRetried = false
+  const compaction =
+    options.compaction === undefined ? null : resolveContextCompaction(options.compaction)
   for (;;) {
     // An interrupt that arrived before this request started — a queued user.interrupt covers
     // the one the user sent while no brain was running to abort.
@@ -516,6 +535,41 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       ])
       return { outcome: 'error' }
     }
+    // The system prompt this request is built with: the session's own, with the mode's addition
+    // appended after it (#245, M6). Computed once, because the compaction trigger measures the
+    // context the strategy will build and the two have to agree on what the prompt is.
+    const requestSystem = withModePrompt(current.system, mode?.systemPromptAddition ?? null)
+    let read = await readLog(store, sessionId)
+    if (compaction !== null) {
+      // The trigger (K2): the real size of the request this boundary is about to make, against
+      // the threshold share of the **chat** model's budget. Over it, older history is summarized
+      // before the request — which is what keeps the provider from refusing it — and the log is
+      // re-read so the prompt below is built from the summary, not the history it replaced.
+      const estimated = estimateContextSize(read, {
+        model: requestModel.id,
+        system: requestSystem,
+      })
+      const outcome = await summarizeContext({
+        chatModel: requestModel.id,
+        reason: 'threshold',
+        events: read,
+        system: requestSystem,
+        estimatedTokens: estimated,
+        config: compaction,
+        model,
+        resolveCredential,
+        append,
+        ...(signal === undefined ? {} : { signal }),
+      })
+      if (outcome.outcome === 'summarized') {
+        read = await readLog(store, sessionId)
+      } else if (outcome.outcome === 'failed') {
+        // Nothing to build the prompt differently from, but the failed passes wrote spans the
+        // running totals have to include (#247): the fold below reads the log again rather than
+        // reporting totals that a later event already moved past.
+        read = await readLog(store, sessionId)
+      }
+    }
     // The log as this request will see it, read once: the effort comes from it, the prompt is
     // built from it, and the running totals below are folded from it (#247). It is the read
     // *before* the claim, with the messages this request is about to claim admitted into the
@@ -541,7 +595,6 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     // bundles one, and that is what a chat on the mode runs unless a message overrides it.
     // `undefined` is "no message carried one", which is what lets the mode's effort through; an
     // explicit `null` is "the provider's default" and wins.
-    const read = await readLog(store, sessionId)
     const loggedEffort = requestedReasoningEffort(read)
     const requestedEffort =
       loggedEffort === undefined ? (mode?.reasoningEffort ?? null) : loggedEffort
@@ -554,7 +607,7 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     const answered = contextView(read, new Set(claims))
     const context = strategy(answered, {
       model: requestModel,
-      system: withModePrompt(current.system, mode?.systemPromptAddition ?? null),
+      system: requestSystem,
     })
     const [start] = await append([
       spanStart(claims, requestModel.id, {
@@ -617,6 +670,76 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
           supersedes: range,
         }),
       ])
+      // The provider refused the request for being too long (K2, C2). That is not a retry — the
+      // same request fails the same way — and not a plain terminal error either: the engine
+      // compacts with tighter caps and the turn tries once more. Once per turn, so a context
+      // that cannot be made to fit ends in a clear error rather than a loop.
+      if (classification.contextOverflow && compaction !== null) {
+        if (overflowRetried) {
+          // The retry was refused for the same reason: the turn ends with an error that says
+          // what was tried rather than trying the same request a third time.
+          await append([
+            sessionError({
+              type: classification.type,
+              message: `${message} (the context was compacted and the request still did not fit)`,
+              retry_status: { type: 'exhausted' },
+            }),
+            statusIdle(),
+          ])
+          return { outcome: 'error' }
+        }
+        overflowRetried = true
+        await append([
+          sessionError({
+            type: classification.type,
+            message,
+            retry_status: { type: 'retrying' },
+          }),
+          statusRescheduled(),
+        ])
+        const fresh = await readLog(store, sessionId)
+        const estimate = estimateContextSize(fresh, {
+          model: requestModel.id,
+          system: requestSystem,
+        })
+        const outcome = await summarizeContext({
+          chatModel: requestModel.id,
+          reason: 'overflow',
+          events: fresh,
+          system: requestSystem,
+          estimatedTokens: estimate,
+          config: compaction,
+          model,
+          resolveCredential,
+          append,
+          ...(signal === undefined ? {} : { signal }),
+        })
+        if (isAborted()) {
+          return await endInterrupted()
+        }
+        if (outcome.outcome === 'summarized') {
+          await append([statusRunning()])
+          continue
+        }
+        // The tighter compaction could not be made (K11's failure path, or the trigger found
+        // nowhere to cut): the retry would be the same request again, so the turn ends here
+        // with an error that says what was tried. It was **not** compacted — the summary was
+        // skipped or failed, which is why nothing was retried — so the message says which of
+        // the two it was rather than claiming a compaction that never happened.
+        const notCompacted =
+          outcome.outcome === 'failed'
+            ? 'summarizing the history failed'
+            : 'there was no older history to summarize'
+        await append([
+          sessionError({
+            type: classification.type,
+            message: `${message} (${notCompacted})`,
+            retry_status: { type: 'exhausted' },
+          }),
+          statusIdle(),
+        ])
+        return { outcome: 'error' }
+      }
       if (classification.retryable && retriesUsed < retry.maxRetries) {
         retriesUsed += 1
         await append([

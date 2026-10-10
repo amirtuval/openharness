@@ -5,6 +5,7 @@ import { DEFAULT_CONTEXT_TOKEN_BUDGET } from '@openharness/brain'
 import {
   OUTPUT_RESERVE_RATIO,
   contextTokenBudget,
+  createMaxOutputResolver,
   createTokenBudgetResolver,
 } from './context-budget'
 import { createBundledRegistry, type ModelRegistry } from './registry'
@@ -84,6 +85,21 @@ describe('createTokenBudgetResolver', () => {
     const tokenBudgetFor = createTokenBudgetResolver(registryOf({ openai: [{ id: 'gpt-5-mini' }] }))
 
     expect(tokenBudgetFor('openai/gpt-5-mini')).toBeUndefined()
+  })
+
+  it('answers the output ceiling the summary-size cap reads (epic #277, K5; C2)', () => {
+    const maxOutputFor = createMaxOutputResolver(
+      registryOf({
+        openai: [{ id: 'gpt-5-mini', contextWindow: 400_000, maxOutput: 128_000 }],
+        bare: [{ id: 'model', contextWindow: 8_000 }],
+      }),
+    )
+
+    expect(maxOutputFor('openai/gpt-5-mini')).toBe(128_000)
+    // No ceiling known is `undefined`, not a guess: the cap is then the other two bounds.
+    expect(maxOutputFor('bare/model')).toBeUndefined()
+    expect(maxOutputFor('nobody/nothing')).toBeUndefined()
+    expect(maxOutputFor('not-a-provider-model')).toBeUndefined()
   })
 
   it('reads the bundled registry, so a real model gets a real window', () => {

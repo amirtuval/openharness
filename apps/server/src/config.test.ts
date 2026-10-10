@@ -4,6 +4,7 @@ import { join } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
+import { DEFAULT_COMPACTION_THRESHOLD } from '@openharness/brain'
 import { DEFAULT_PARTITION_COUNT } from '@openharness/protocol'
 import { DEFAULT_KEY_CACHE_TTL_MS } from '@openharness/vault'
 
@@ -85,6 +86,7 @@ describe('readServerConfig', () => {
       sweepMs: DEFAULT_SWEEP_MS,
       deltaRetentionMs: DEFAULT_DELTA_RETENTION_MS,
       compactIntervalMs: DEFAULT_COMPACT_INTERVAL_MS,
+      compactionThreshold: DEFAULT_COMPACTION_THRESHOLD,
       logFormat: DEFAULT_LOG_FORMAT,
       tracing: DEFAULT_TRACING,
       traceSampleRate: DEFAULT_TRACE_SAMPLE_RATE,
@@ -164,6 +166,7 @@ describe('readServerConfig', () => {
       sweepMs: 450,
       deltaRetentionMs: 120_000,
       compactIntervalMs: 60_000,
+      compactionThreshold: 0.7,
       logFormat: 'json',
       tracing: 'cloud-trace',
       traceSampleRate: 0.5,
@@ -191,6 +194,30 @@ describe('readServerConfig', () => {
     expect(() => readServerConfig(env({ OPENHARNESS_COMPACT_INTERVAL_MS: 'soon' }))).toThrow(
       /OPENHARNESS_COMPACT_INTERVAL_MS/,
     )
+  })
+
+  it('refuses a compaction threshold outside the fraction it is', () => {
+    // The trigger is a share of the chat model's budget, so a value outside 0..1 is a setting
+    // nobody meant — a negative one would compact before every request, and one above 1 would
+    // never fire before the provider refuses the request itself (epic #277, K2).
+    expect(() => readServerConfig(env({ OPENHARNESS_COMPACTION_THRESHOLD: '-0.1' }))).toThrow(
+      /OPENHARNESS_COMPACTION_THRESHOLD/,
+    )
+    expect(() => readServerConfig(env({ OPENHARNESS_COMPACTION_THRESHOLD: '1.5' }))).toThrow(
+      /OPENHARNESS_COMPACTION_THRESHOLD/,
+    )
+    expect(() => readServerConfig(env({ OPENHARNESS_COMPACTION_THRESHOLD: 'most' }))).toThrow(
+      /OPENHARNESS_COMPACTION_THRESHOLD/,
+    )
+    // The two ends are legitimate: 0 compacts as soon as there is a context to summarize, and 1
+    // only once a request is already over the model's budget.
+    expect(
+      readServerConfig(env({ OPENHARNESS_COMPACTION_THRESHOLD: '0' })).compactionThreshold,
+    ).toBe(0)
+    expect(
+      readServerConfig(env({ OPENHARNESS_COMPACTION_THRESHOLD: '0.5' })).compactionThreshold,
+    ).toBe(0.5)
+    expect(readServerConfig(env({})).compactionThreshold).toBe(0.7)
   })
 
   it('refuses a scheduler it does not have', () => {

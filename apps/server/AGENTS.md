@@ -136,6 +136,7 @@ a `user.interrupt` signals `interrupt` — exactly what the same events would do
 | `OPENHARNESS_SWEEP_MS`                    | `60000`                          | how often owned partitions are re-scanned for missed work                                                                                             |
 | `OPENHARNESS_DELTA_RETENTION_MS`          | `3600000`                        | how long superseded chunks are kept before compaction deletes them                                                                                    |
 | `OPENHARNESS_COMPACT_INTERVAL_MS`         | `300000`                         | how often the compaction job runs; `0` disables it                                                                                                    |
+| `OPENHARNESS_COMPACTION_THRESHOLD`        | `0.7`                            | the share of the chat model's context budget at which older history is summarized (epic #277, K2; #279); a fraction in `0..1`                         |
 | `OPENHARNESS_LOG_FORMAT`                  | `text`                           | `text` (readable) or `json` (Cloud Logging): what stdout carries (#158)                                                                               |
 | `OPENHARNESS_TRACING`                     | `off`                            | `off`, or `cloud-trace` to export spans to Cloud Trace (#158)                                                                                         |
 | `OPENHARNESS_TRACE_SAMPLE_RATE`           | `0.1`                            | the fraction of root traces kept when tracing is on; `0` keeps none, `1` keeps all (#158)                                                             |
@@ -434,6 +435,20 @@ snapshot changed. `undefined` is a real answer — an unknown provider, a model 
 predates, a free-text id a host accepts (C5), or a model with no window — and the brain's
 `DEFAULT_CONTEXT_TOKEN_BUDGET` is what such a model gets; the fallback lives in one place rather
 than being repeated here.
+
+**Context compaction is the other half of the same wiring** (epic #277, C2; #279). The same
+registry-derived resolver is what `main.ts` hands the brain as `tokenBudgetFor` and, through
+`createMaxOutputResolver`, as `maxOutputFor`: the trigger compares the measured context against
+`config.compactionThreshold` × the **chat** model's budget, and the engine's passes are sized to
+the summary model's. `OPENHARNESS_COMPACTION_THRESHOLD` (default `0.7`) is where the trigger
+lives, and it is validated at boot: a fraction in `0..1`, anything else a failure naming the
+variable. The summary model is the chat's until a per-user preference exists (C3), so a
+deployment needs nothing else configured; a test at the route level is
+`context-compaction.test.ts` — the trigger firing on a small registry window, the summary event
+and its progress event in the log, the summary request's span marked `purpose: 'summary'`, and
+the chat still running the model it ran. The compaction the _store_ runs — `DeltaCompactor`, the
+periodic deletion of superseded chunks — is unrelated and unchanged: this one summarizes history
+for the model, that one deletes what replay already skips.
 
 `main.ts` builds one resolver from the same registry the catalogue and the automatic default
 (U4) use, and hands the strategy to whichever scheduler the config asks for. The brain re-reads
@@ -1498,6 +1513,13 @@ parallel with each other.
   from a wide model to a narrow one carries the whole conversation into the wide model's
   request and only the newest message into the narrow one's (read off the prompts the scripted
   model recorded).
+- `context-compaction.test.ts` — the compaction wiring end to end (#279): a session on a small
+  registry window whose first request carries a history over the threshold gets a
+  `session.context_summary` (reason `threshold`, the chat's own model as `summary_model`, one
+  pass), its `session.context_summary_progress` and its `purpose: 'summary'` span with no claims,
+  a request built from the summary with fewer messages than the history, and a session whose
+  model is still the one it ran; and a chat under the threshold writes none of that and carries
+  the prompt #278 built.
 - `reasoning-effort.test.ts` — #252 over HTTP: a `reasoning_effort` accepted on `POST …/events`
   and on a creation's `initial_events`, stored on the event, and run by the turn the message
   starts — the span recording `{ requested, applied }` off the bundled registry's data,
