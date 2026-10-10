@@ -203,8 +203,8 @@ describe('the first-run screen', () => {
   it('draws the tiles from the shared provider list', async () => {
     renderApp(makeFake({ models: [], providers: [] }), { hash: '#/' })
 
-    // One tile per provider `@openharness/client` carries, and no others: the list is the
-    // contract with the server (its `VALIDATABLE_PROVIDERS`), held together by the e2e test.
+    // One tile per provider `@openharness/client` carries, and no others: that list is built
+    // from `@openharness/protocol`'s provider list (#245), so it is the server's set too.
     await screen.findByRole('heading', { name: new RegExp(FIRST_RUN_HEADING) })
     for (const provider of PROVIDERS) {
       expect(

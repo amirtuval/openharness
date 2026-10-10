@@ -10,6 +10,8 @@
  * - **errors** — the Anthropic error envelope and its status codes (`./errors`)
  * - **ids and constants** — id generation and parsing, page cursors, header names, and the
  *   session → partition hash (`./ids`, `./pagination`, `./constants`)
+ * - **providers** — the model providers openharness knows, the one list every side references
+ *   (`./providers`, epic #245)
  *
  * Everything here is pure: schemas, types and a few helpers, with `zod` as the only runtime
  * dependency and no I/O anywhere.
@@ -30,5 +32,6 @@ export * from './errors'
 export * from './events'
 export * from './ids'
 export * from './pagination'
+export * from './providers'
 export * from './readonly'
 export * from './resources'

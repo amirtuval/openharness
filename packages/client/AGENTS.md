@@ -56,8 +56,9 @@ src/
   http.ts               request building, response parsing, error mapping, FetchLike
   errors.ts             ApiError, AuthenticationError, ResponseValidationError, status → type
   transcript.ts         TranscriptState, reduceTranscript, selectors, createTranscript
-  providers.ts          PROVIDERS: the model providers the frontends offer — name, key URL,
-                        free-tier hint, credential type (#209)
+  providers.ts          PROVIDERS: the frontends' view of the shared provider list — the
+                        protocol's id/name/key URL/credential type, plus free-tier and
+                        key-format hints (#209, #245)
   resources/agents.ts   agents.create/get/list/update
   resources/auth.ts     auth.startDeviceLogin/pollDeviceLogin/signOut, DeviceLoginError
   resources/models.ts   models.list: the model catalog (epic #92)
@@ -102,7 +103,7 @@ src/
 | `MessagePart`, `TextPart`, `TranscriptMessageMeta`, `TranscriptUsage`, `PendingModelRequest`    | a message's typed parts, a reply's metadata, and its bookkeeping (#201)                  |
 | `SessionUsage`, `SessionModelUsage`, `SessionUsageTotals`, `ModelPriceLookup`                   | the session's totals as the transcript keeps them, and how a frontend prices them (#247) |
 | `selectSessionUsage()`, `sessionUsageOf()`, `sessionCost()`, `replyCost()`                      | what a session and a reply cost, from the log's tokens and the catalog's rates (#247)    |
-| `PROVIDERS`, `providerInfo()`, `providerName()`, `ProviderInfo`                                 | the model providers a form or a tile needs (#209)                                        |
+| `PROVIDERS`, `providerInfo()`, `providerName()`, `ProviderInfo`                                 | the model providers a form or a tile needs (#209; built from the shared list, #245)      |
 | `PACKAGE_NAME`                                                                                  | the package name; a dependent's cheap proof that the import resolved                     |
 
 ### `@openharness/client/testing`
@@ -500,7 +501,7 @@ true`, keyed by the id of the event it previews; `event_delta`s extend it (per c
   is not a change (`state.model` starts at `null`), so it sets the state silently, and a
   message naming the model already in effect changes nothing.
 
-## Provider metadata (#209)
+## Provider metadata (#209, #245)
 
 `src/providers.ts` is the list both frontends offer: one `ProviderInfo` per provider — the
 **provider id** (the `provider` half of a `provider/model` string), the display name, the
@@ -508,12 +509,12 @@ true`, keyed by the id of the event it previews; `event_delta`s extend it (per c
 free-tier hint (X8) and an optional key-format hint for an input's placeholder.
 
 It is presentation metadata, not a capability list: authorization is still the server's
-(`PUT /v1/provider-credentials/{provider}`). The one rule it has to keep is that it describes
-providers the server will accept a key for — `apps/server`'s `VALIDATABLE_PROVIDERS` — and the
-two have to be **exactly** the same set, because a tile that leads to a key the server refuses
-is worse than no tile. That invariant lives in `e2e/src/provider-metadata.test.ts`: the server
-may not depend on this package, so neither side can hold the assertion, and `e2e` is the one
-place that already depends on both.
+(`PUT /v1/provider-credentials/{provider}`). Since #245 it is **built from** the shared provider
+list (`@openharness/protocol`'s `PROVIDERS`, epic #245, A0) rather than restated: the id, the
+name, the credential type and the key URL come from that list, and `PRESENTATION` — a
+`Record<ProviderId, …>` — adds the two hints only a form or a tile needs. That is what makes "it
+describes providers the server will accept a key for" a compile-time property: there is one
+list, so there is nothing left for `e2e`'s removed `provider-metadata.test.ts` to hold together.
 
 `providerName(id)` answers the display name and falls back to the id — the credentials API takes
 any router provider, so a reader who typed an id this list does not carry sees what they typed,

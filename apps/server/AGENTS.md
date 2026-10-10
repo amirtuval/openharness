@@ -346,9 +346,13 @@ parses the query and maps the one error it can raise.
 
   Regenerate it with `yarn workspace @openharness/server catalog:refresh`
   (`scripts/refresh-models-dev.mjs`), which fetches https://models.dev/api.json, maps the
-  provider keys and writes the file; the snapshot's date is in the file (`SNAPSHOT_DATE`). It
-  is a source file like any other — nothing fetches at build, test or boot time, and a sandbox
-  with no network still builds. The data is only as fresh as a commit.
+  provider keys and writes the file; the snapshot's date is in the file (`SNAPSHOT_DATE`). The
+  providers and their models.dev keys are no longer restated there: since #245 the script reads
+  `PROVIDERS` from `@openharness/protocol`'s build output — the same list the validating and
+  model-list tables are keyed by — so build the workspace (`yarn build` at the root, or
+  `yarn build:deps` here) before refreshing. It is a source file like any other — nothing
+  fetches at build, test or boot time, and a sandbox with no network still builds. The data is
+  only as fresh as a commit.
 
 - **C3 — fallback is visible, never silent.** A provider that times out (5 s), fails (non-2xx,
   an unreadable body, a transport error), cannot have its credential opened, or has no adapter
@@ -373,8 +377,10 @@ parses the query and maps the one error it can raise.
   plaintext. Anything the provider said is scrubbed with `redactSecret` (the brain's redaction:
   the whole key, minus four leading or trailing characters) before it reaches a `message` or a
   log line. `provider-validation.ts` gained the family's providers (Mistral, Together, xAI,
-  Cerebras) so a key that can be stored can also be listed — `model-catalog.test.ts` pins the
-  invariant that every `VALIDATABLE_PROVIDERS` entry has an adapter.
+  Cerebras) so a key that can be stored can also be listed. Since #245 both tables — the
+  validating requests and the model-list adapters — are `Record<ProviderId, …>` over the
+  protocol's provider list, so "every validatable provider has an adapter" is a compile error
+  rather than an assertion.
 - **The egress proxy.** Provider calls go through `catalog/provider-fetch.ts`: Node's `fetch`
   over undici's `EnvHttpProxyAgent`, which reads `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` —
   the documented egress-proxy variables (`e2e/AGENTS.md`) — so a deployment behind a proxy
@@ -983,54 +989,54 @@ before the instance stops serving it (#151).
 
 ## Public API
 
-| `@openharness/server`                                                                                                            | what it is                                                                                |
-| -------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `createApp(options)`                                                                                                             | the Hono app: routes, auth, errors, static assets — against any store/scheduler/auth      |
-| `startServer(options)`                                                                                                           | store, migrations, model, scheduler, listener and a `shutdown()`                          |
-| `main(env, options)`                                                                                                             | `startServer` from the environment, plus the signal handlers                              |
-| `DeltaCompactor`                                                                                                                 | the periodic compaction of superseded chunks (D9)                                         |
-| `DEFAULT_DELTA_RETENTION_MS`, `DEFAULT_COMPACT_INTERVAL_MS`                                                                      | `3600000`, `300000` — the compaction defaults                                             |
-| `LocalScheduler`                                                                                                                 | the single-process `SessionScheduler`                                                     |
-| `PostgresPartitionScheduler`                                                                                                     | the multi-instance `SessionScheduler`: partition leases, epochs, recovery (#11)           |
-| `PassQueue`                                                                                                                      | the pass queue and concurrency limit both schedulers share                                |
-| `SessionRunner`                                                                                                                  | the per-session turn loop, reusable: what both schedulers run passes with                 |
-| `createAuth(config, database, logger)`                                                                                           | Better Auth configured for this server (A1/A2/A3/A7), plus `Auth`, `AuthConfig`           |
-| `createSessionCredentialResolver(deps)`                                                                                          | the session owner's sealed key, opened per model request (A5)                             |
-| `sealApiKey` / `openApiKey` / `credentialAad` / `credentialUpsert`                                                               | the credential sealing helpers (A5)                                                       |
-| `createAuthGuard(options)`                                                                                                       | the `/v1` session + CSRF middleware (A2)                                                  |
-| `createSessionRevocations(options)`                                                                                              | the registry of open responses a revocation closes, subscribed to the store (#76)         |
-| `startSessionRecheck(options)`, `DEFAULT_SESSION_RECHECK_MS`                                                                     | the periodic session re-check of a long-lived response (#76)                              |
-| `SESSION_INVALID_MESSAGE`, `SSE_SESSION_INVALID`                                                                                 | what a stream says when its session is revoked or expires (#76)                           |
-| `validateProviderApiKey`, `VALIDATABLE_PROVIDERS`                                                                                | the one cheap provider call a saved key is checked with                                   |
-| `ModelCatalog`, `ModelCatalogOptions`, `CatalogRefreshLimitedError`                                                              | the model catalogue: provider lists, registry join, cache, fallback (#90)                 |
-| `createBundledRegistry()`, `emptyRegistry`, `SNAPSHOT_DATE`, `ModelRegistry`, `RegistryModel`                                    | the registry join's seam, over the bundled models.dev snapshot                            |
-| `contextTokenBudget`, `createTokenBudgetResolver`, `OUTPUT_RESERVE_RATIO`                                                        | the per-model context budget: `contextWindow − min(maxOutput, 25%)`, per request (#246)   |
-| `createProviderFetch()`, `ProviderFetch`, `DEFAULT_PROVIDER_TIMEOUT_MS`                                                          | the provider HTTP client: egress-proxy aware, 5 s deadline                                |
-| `CatalogCache`, `RefreshLimiter`, `DEFAULT_CATALOG_TTL_MS`, `DEFAULT_REFRESH_INTERVAL_MS`                                        | the in-memory per-(user, provider) cache and the refresh rate limit (C4)                  |
-| `adapterFor()`, `adaptedProviders()`, `isChatModel()`, `isNonChatFamily()`                                                       | the fixed endpoint table and the chat filter (C1/C2)                                      |
-| `DefaultModelPicker`, `DefaultModelPickerOptions`, `RECOMMENDED_DEFAULT_MODELS`                                                  | the automatic default model: the picker, and the curated table it picks from (U4)         |
-| `isEverydayModel()`, `isExpensiveModel()`, `isReasoningModel()`, `newestModelId()`                                               | the registry fallback's rule: everyday chat models, newest first (U4)                     |
-| `DEV_LOGIN_EMAIL`, `DEV_LOGIN_PASSWORD`, `DEV_LOGIN_STORED_EMAIL`                                                                | the documented dev user (A7)                                                              |
-| `OPENHARNESS_CLI_CLIENT_ID`, `DEVICE_CODE_EXPIRES_IN`                                                                            | the device flow's client id and code lifetime (A6)                                        |
-| `deviceVerificationUri`, `deviceVerificationUriComplete`                                                                         | the approval URL the device flow answers with: `#/device` and its `?user_code=` (A6)      |
-| `SOCIAL_PROVIDERS`, `providerOptions`, `microsoftEmailVerified`, `githubVerifiedPrimaryEmail`, `googleEmailVerified`             | the A3 identity rules                                                                     |
-| `affirmativeClaim`                                                                                                               | the boolean-shaped claim parser: `true`/`1`/`"true"`/`"1"`, and nothing else (A3)         |
-| `microsoftRefusalDetail`, `microsoftClaimType`, `xmsEdovLogValue`, `MICROSOFT_REFUSAL_LOG`, `MicrosoftRefusalDetail`             | what a refused Microsoft sign-in logs — names, types, and the `xms_edov` flag             |
-| `createDevLoginUser`, `rewriteDevLoginRequest`, `refuseUnverifiedUser`                                                           | the dev-login seeding and shim, and the verified-email hook                               |
-| `createMockModelFactory()`                                                                                                       | the deterministic test model, for a host that wires its own                               |
-| `defaultInstanceId()`                                                                                                            | hostname + pid + random suffix: the id a server leases partitions under                   |
-| `readServerConfig(env)`, `ServerConfig`, `ENV_VARS`, `readSecret`, `secretFileVar`                                               | the environment, parsed; a secret from `<NAME>` or its `<NAME>_FILE` (#154)               |
-| `createConfigVault(config)`, `KeyProviderKind`                                                                                   | the vault the config asks for: the env key or Cloud KMS (#150)                            |
-| `HttpError`, `rateLimitError`, `PACKAGE_NAME`, `Logger`                                                                          | the error types, the package name and the logging seam                                    |
-| `resolveClientIp`, `withClientIpHeader`, `CLIENT_IP_HEADER`, `FORWARDED_FOR_HEADER`                                              | the client IP behind a proxy: one resolution, one header (#151)                           |
-| `Readiness`, `alwaysReady`                                                                                                       | what `GET /ready` asks, and the no-database answer (#151)                                 |
-| `checkDatabase`, `READINESS_QUERY_TIMEOUT_MS`                                                                                    | the Postgres side of `/ready`: `select 1` inside about 2 s (#151)                         |
-| `DEFAULT_TRUSTED_PROXY_HOPS`                                                                                                     | `0` — no forwarding header trusted (#151)                                                 |
-| `loggerFor`, `jsonLogger`, `redact`, `redactError`, `isSensitiveKey`, `detailFields`, `REDACTED`                                 | the Cloud Logging JSON logger and its redaction (#158)                                    |
-| `parseTraceContext`, `parseTraceparent`, `parseCloudTraceContext`, `activeTraceContext`, `runWithTraceContext`, `TraceContext`   | the request's trace, and the async context the logger reads (#158)                        |
-| `initTracing`, `noopTracer`, `Tracer`, `Span`, `StartSpanOptions`, `TracingMode`, `TracingOptions`, `AttributeValue`, `SpanKind` | the tracer seam, its no-op, and the lazy Cloud Trace implementation (#158)                |
-| `SessionTraces`, `withSessionTraces`                                                                                             | the session log as turn and model-request spans, and the store proxy that feeds it (#158) |
-| `DEFAULT_LOG_FORMAT`, `DEFAULT_TRACING`, `DEFAULT_TRACE_SAMPLE_RATE`, `LogFormat`                                                | `text`, `off`, `0.1` — the observability defaults (#158)                                  |
+| `@openharness/server`                                                                                                            | what it is                                                                                  |
+| -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `createApp(options)`                                                                                                             | the Hono app: routes, auth, errors, static assets — against any store/scheduler/auth        |
+| `startServer(options)`                                                                                                           | store, migrations, model, scheduler, listener and a `shutdown()`                            |
+| `main(env, options)`                                                                                                             | `startServer` from the environment, plus the signal handlers                                |
+| `DeltaCompactor`                                                                                                                 | the periodic compaction of superseded chunks (D9)                                           |
+| `DEFAULT_DELTA_RETENTION_MS`, `DEFAULT_COMPACT_INTERVAL_MS`                                                                      | `3600000`, `300000` — the compaction defaults                                               |
+| `LocalScheduler`                                                                                                                 | the single-process `SessionScheduler`                                                       |
+| `PostgresPartitionScheduler`                                                                                                     | the multi-instance `SessionScheduler`: partition leases, epochs, recovery (#11)             |
+| `PassQueue`                                                                                                                      | the pass queue and concurrency limit both schedulers share                                  |
+| `SessionRunner`                                                                                                                  | the per-session turn loop, reusable: what both schedulers run passes with                   |
+| `createAuth(config, database, logger)`                                                                                           | Better Auth configured for this server (A1/A2/A3/A7), plus `Auth`, `AuthConfig`             |
+| `createSessionCredentialResolver(deps)`                                                                                          | the session owner's sealed key, opened per model request (A5)                               |
+| `sealApiKey` / `openApiKey` / `credentialAad` / `credentialUpsert`                                                               | the credential sealing helpers (A5)                                                         |
+| `createAuthGuard(options)`                                                                                                       | the `/v1` session + CSRF middleware (A2)                                                    |
+| `createSessionRevocations(options)`                                                                                              | the registry of open responses a revocation closes, subscribed to the store (#76)           |
+| `startSessionRecheck(options)`, `DEFAULT_SESSION_RECHECK_MS`                                                                     | the periodic session re-check of a long-lived response (#76)                                |
+| `SESSION_INVALID_MESSAGE`, `SSE_SESSION_INVALID`                                                                                 | what a stream says when its session is revoked or expires (#76)                             |
+| `validateProviderApiKey`, `VALIDATABLE_PROVIDERS`                                                                                | the one cheap provider call a saved key is checked with (#245: the protocol's provider ids) |
+| `ModelCatalog`, `ModelCatalogOptions`, `CatalogRefreshLimitedError`                                                              | the model catalogue: provider lists, registry join, cache, fallback (#90)                   |
+| `createBundledRegistry()`, `emptyRegistry`, `SNAPSHOT_DATE`, `ModelRegistry`, `RegistryModel`                                    | the registry join's seam, over the bundled models.dev snapshot                              |
+| `contextTokenBudget`, `createTokenBudgetResolver`, `OUTPUT_RESERVE_RATIO`                                                        | the per-model context budget: `contextWindow − min(maxOutput, 25%)`, per request (#246)     |
+| `createProviderFetch()`, `ProviderFetch`, `DEFAULT_PROVIDER_TIMEOUT_MS`                                                          | the provider HTTP client: egress-proxy aware, 5 s deadline                                  |
+| `CatalogCache`, `RefreshLimiter`, `DEFAULT_CATALOG_TTL_MS`, `DEFAULT_REFRESH_INTERVAL_MS`                                        | the in-memory per-(user, provider) cache and the refresh rate limit (C4)                    |
+| `adapterFor()`, `adaptedProviders()`, `isChatModel()`, `isNonChatFamily()`                                                       | the fixed endpoint table and the chat filter (C1/C2)                                        |
+| `DefaultModelPicker`, `DefaultModelPickerOptions`, `RECOMMENDED_DEFAULT_MODELS`                                                  | the automatic default model: the picker, and the curated table it picks from (U4)           |
+| `isEverydayModel()`, `isExpensiveModel()`, `isReasoningModel()`, `newestModelId()`                                               | the registry fallback's rule: everyday chat models, newest first (U4)                       |
+| `DEV_LOGIN_EMAIL`, `DEV_LOGIN_PASSWORD`, `DEV_LOGIN_STORED_EMAIL`                                                                | the documented dev user (A7)                                                                |
+| `OPENHARNESS_CLI_CLIENT_ID`, `DEVICE_CODE_EXPIRES_IN`                                                                            | the device flow's client id and code lifetime (A6)                                          |
+| `deviceVerificationUri`, `deviceVerificationUriComplete`                                                                         | the approval URL the device flow answers with: `#/device` and its `?user_code=` (A6)        |
+| `SOCIAL_PROVIDERS`, `providerOptions`, `microsoftEmailVerified`, `githubVerifiedPrimaryEmail`, `googleEmailVerified`             | the A3 identity rules                                                                       |
+| `affirmativeClaim`                                                                                                               | the boolean-shaped claim parser: `true`/`1`/`"true"`/`"1"`, and nothing else (A3)           |
+| `microsoftRefusalDetail`, `microsoftClaimType`, `xmsEdovLogValue`, `MICROSOFT_REFUSAL_LOG`, `MicrosoftRefusalDetail`             | what a refused Microsoft sign-in logs — names, types, and the `xms_edov` flag               |
+| `createDevLoginUser`, `rewriteDevLoginRequest`, `refuseUnverifiedUser`                                                           | the dev-login seeding and shim, and the verified-email hook                                 |
+| `createMockModelFactory()`                                                                                                       | the deterministic test model, for a host that wires its own                                 |
+| `defaultInstanceId()`                                                                                                            | hostname + pid + random suffix: the id a server leases partitions under                     |
+| `readServerConfig(env)`, `ServerConfig`, `ENV_VARS`, `readSecret`, `secretFileVar`                                               | the environment, parsed; a secret from `<NAME>` or its `<NAME>_FILE` (#154)                 |
+| `createConfigVault(config)`, `KeyProviderKind`                                                                                   | the vault the config asks for: the env key or Cloud KMS (#150)                              |
+| `HttpError`, `rateLimitError`, `PACKAGE_NAME`, `Logger`                                                                          | the error types, the package name and the logging seam                                      |
+| `resolveClientIp`, `withClientIpHeader`, `CLIENT_IP_HEADER`, `FORWARDED_FOR_HEADER`                                              | the client IP behind a proxy: one resolution, one header (#151)                             |
+| `Readiness`, `alwaysReady`                                                                                                       | what `GET /ready` asks, and the no-database answer (#151)                                   |
+| `checkDatabase`, `READINESS_QUERY_TIMEOUT_MS`                                                                                    | the Postgres side of `/ready`: `select 1` inside about 2 s (#151)                           |
+| `DEFAULT_TRUSTED_PROXY_HOPS`                                                                                                     | `0` — no forwarding header trusted (#151)                                                   |
+| `loggerFor`, `jsonLogger`, `redact`, `redactError`, `isSensitiveKey`, `detailFields`, `REDACTED`                                 | the Cloud Logging JSON logger and its redaction (#158)                                      |
+| `parseTraceContext`, `parseTraceparent`, `parseCloudTraceContext`, `activeTraceContext`, `runWithTraceContext`, `TraceContext`   | the request's trace, and the async context the logger reads (#158)                          |
+| `initTracing`, `noopTracer`, `Tracer`, `Span`, `StartSpanOptions`, `TracingMode`, `TracingOptions`, `AttributeValue`, `SpanKind` | the tracer seam, its no-op, and the lazy Cloud Trace implementation (#158)                  |
+| `SessionTraces`, `withSessionTraces`                                                                                             | the session log as turn and model-request spans, and the store proxy that feeds it (#158)   |
+| `DEFAULT_LOG_FORMAT`, `DEFAULT_TRACING`, `DEFAULT_TRACE_SAMPLE_RATE`, `LogFormat`                                                | `text`, `off`, `0.1` — the observability defaults (#158)                                    |
 
 `node dist/index.js` runs `main()`, which reads the environment and starts the server.
 
@@ -1258,7 +1264,7 @@ parallel with each other.
 - `catalog/filter.test.ts`, `catalog/adapters.test.ts`, `catalog/registry.test.ts`,
   `catalog/cache.test.ts` — the pieces on their own: the name families and the verdict
   precedence, the endpoint table (constant URLs, each provider's header and payload shape,
-  the `VALIDATABLE_PROVIDERS` ⊆ adapters invariant), the bundled registry read through
+  every provider id sat under its own row), the bundled registry read through
   the bundled models.dev snapshot (including that it carries no chat flag), and the TTL /
   invalidation / rate-limit rules on an injected clock.
 - `catalog/context-budget.test.ts` (#246) — the budget rule on its own: the model's own output
