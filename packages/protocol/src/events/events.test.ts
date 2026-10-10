@@ -276,12 +276,18 @@ describe('stored event schemas', () => {
     )
   })
 
-  it('accepts the span fields a capped or summarizing request adds (epic #277)', () => {
-    // Both optional, so a session that never overflowed and never summarized keeps the span
-    // shape it always had — and one that did carries the record.
+  it('accepts the span fields a capped, cleared or summarizing request adds (#277; #303)', () => {
+    // All optional, so a session that never overflowed, never capped a tool result and never
+    // summarized keeps the span shape it always had — and one that did carries the record.
     const start = {
       ...storedSamples['span.model_request_start'],
-      truncated: { seq: 3, tokens_before: 40_000, tokens_after: 30_000 },
+      truncated: {
+        seq: 3,
+        tokens_before: 40_000,
+        tokens_after: 30_000,
+        results: [{ seq: 6, tool: 'web_fetch', tokens_before: 9_000, tokens_after: 2_000 }],
+      },
+      cleared: { results: 2, tokens: 12_000 },
       purpose: 'summary',
     }
     expect(StoredEventSchema.safeParse(start).success).toBe(true)
@@ -289,6 +295,25 @@ describe('stored event schemas', () => {
       StoredEventSchema.safeParse({
         ...storedSamples['span.model_request_start'],
         purpose: 'something-else',
+      }).success,
+    ).toBe(false)
+    // A capped tool result without a tool to name, or a count that is not a count, is refused:
+    // the record is what a client shows the user, and it has to say which result it was.
+    expect(
+      StoredEventSchema.safeParse({
+        ...storedSamples['span.model_request_start'],
+        truncated: {
+          seq: 3,
+          tokens_before: 40_000,
+          tokens_after: 30_000,
+          results: [{ seq: 6, tokens_before: 9_000, tokens_after: 2_000 }],
+        },
+      }).success,
+    ).toBe(false)
+    expect(
+      StoredEventSchema.safeParse({
+        ...storedSamples['span.model_request_start'],
+        cleared: { results: -1, tokens: 12_000 },
       }).success,
     ).toBe(false)
   })

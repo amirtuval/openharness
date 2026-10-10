@@ -1,9 +1,19 @@
+import type { LanguageModelV4CallOptions } from '@ai-sdk/provider'
+import { createToolRegistry, textResult } from '@openharness/hands'
+import type { ToolRegistry } from '@openharness/hands'
 import type { ModelRequestPurpose } from '@openharness/protocol'
 import { APICallError } from 'ai'
 import { describe, expect, it } from 'vitest'
+import { z } from 'zod'
 
-import { createContextStrategy } from './context'
-import { contextSummary } from './events'
+import {
+  conversationItems,
+  createContextStrategy,
+  cutAtUserBoundary,
+  toolResultCap,
+} from './context'
+import type { ContextCutItem } from './context'
+import { agentToolResult, agentToolUse, contextSummary } from './events'
 import type { ModelFactory, ResolveCredential } from './model'
 import type { ContextCompactionConfig } from './summarize'
 import { resolveContextCompaction, SUMMARY_PROMPT_VERSION, summarizeContext } from './summarize'
@@ -780,5 +790,306 @@ describe('runTurn — the summary the model is told about', () => {
     expect(prompt[1]?.text).toContain('Earlier messages in this conversation were summarized')
     expect(prompt.slice(2).map((entry) => entry.text)).toEqual(kept.map((event) => textOf(event)))
     expect(prompt.slice(2)).toHaveLength(5)
+  })
+})
+
+/** A tool call and its answer appended to a session's log the way the loop stores them. */
+async function seedToolStep(
+  session: Awaited<ReturnType<typeof newSession>>,
+  input: Record<string, unknown>,
+  result: string,
+  between: readonly ReturnType<typeof message>[] = [],
+): Promise<void> {
+  const [call] = await session.store.appendEvents(session.sessionId, [
+    agentToolUse('fetch', input as never, 'allow'),
+  ])
+  if (call === undefined) {
+    throw new Error('the store did not return the call it was asked to append')
+  }
+  // `between` is the steering of the log: what arrived while the call ran, between the call and
+  // the answer that follows it.
+  if (between.length > 0) {
+    await session.store.appendEvents(session.sessionId, [...between])
+  }
+  await session.store.appendEvents(session.sessionId, [
+    agentToolResult(call.id, [{ type: 'text', text: result }], false),
+  ])
+}
+
+/** A registry holding one tool, with the result cap a test declares for it (X9). */
+function toolsWith(name: string, maxResultTokens?: number): ToolRegistry {
+  return createToolRegistry([
+    {
+      name,
+      description: 'A test tool.',
+      inputSchema: z.object({}),
+      permission: 'allow',
+      ...(maxResultTokens === undefined ? {} : { maxResultTokens }),
+      run: () => textResult(''),
+    },
+  ])
+}
+
+/** One cut item, as the cut rule sees it (X9: an answer names the call it belongs to). */
+function cutItem(
+  seq: number,
+  role: 'user' | 'assistant' | 'tool',
+  tokens: number,
+  pairSeq?: number,
+): ContextCutItem {
+  return { seq, role, text: text(tokens), tokens, ...(pairSeq === undefined ? {} : { pairSeq }) }
+}
+
+/** The text every tool result of a recorded request carries, in order (X9). */
+function toolResultValues(call: LanguageModelV4CallOptions): string[] {
+  return call.prompt.flatMap((entry) =>
+    typeof entry.content === 'string'
+      ? []
+      : entry.content.flatMap((part) =>
+          part.type === 'tool-result' && part.output.type === 'text' ? [part.output.value] : [],
+        ),
+  )
+}
+
+/** The content-part types of a recorded request, in order. */
+function partTypes(call: LanguageModelV4CallOptions): string[] {
+  return call.prompt.flatMap((entry) =>
+    typeof entry.content === 'string' ? [] : entry.content.map((part) => part.type),
+  )
+}
+
+/** The text a stored event's blocks carry. */
+function textOfEvent(
+  event: { readonly content: readonly { readonly text: string }[] } | undefined,
+): string {
+  return event === undefined ? '' : event.content.map((block) => block.text).join('')
+}
+
+describe('tool pairs at a cut (epic #303, X9; #306)', () => {
+  it('widens past a steering message rather than cut between a call and its answer', () => {
+    // The log: a turn that called a tool, then a turn whose call was interrupted by a steering
+    // message — so the call and its answer have the reader's message between them.
+    const items = [
+      cutItem(1, 'user', 100),
+      cutItem(2, 'assistant', 5),
+      cutItem(3, 'tool', 5, 2),
+      cutItem(4, 'user', 100),
+      cutItem(5, 'assistant', 5),
+      cutItem(6, 'user', 100),
+      cutItem(7, 'tool', 5, 5),
+      cutItem(8, 'user', 100),
+    ]
+
+    // A 150-token tail walked back from the newest item stops at the steering message (6) —
+    // which would leave the answer at 7 without the call at 5 — so the cut widens back to the
+    // user message that opens the call's turn.
+    expect(cutAtUserBoundary(items, 150)).toBe(3)
+    // The tail it keeps holds both halves of the pair that is in it.
+    const kept = items.slice(3)
+    expect(kept.some((item) => item.seq === 5)).toBe(true)
+    expect(kept.some((item) => item.seq === 7)).toBe(true)
+    // Without the pair rule the walk's own answer, 6, would have been the cut — leaving the
+    // answer at 7 without its call.
+    expect(items[6]?.pairSeq).toBe(5)
+  })
+
+  it('answers nowhere to cut when the only boundary would split a pair', () => {
+    // Two turns, the second answering a call the first made, with a steering message between
+    // the call and its answer: the only boundary after the answer's turn would separate them,
+    // so the rule answers 0 — history the engine cannot compress rather than one it splits.
+    const items = [
+      cutItem(1, 'user', 100),
+      cutItem(2, 'assistant', 5),
+      cutItem(3, 'user', 5),
+      cutItem(4, 'tool', 5, 2),
+    ]
+
+    expect(cutAtUserBoundary(items, 1)).toBe(0)
+  })
+
+  it('measures a result in the log at its cap, not at what the store holds', async () => {
+    const session = await newSession([message('go')])
+    await seedToolStep(session, { url: 'https://example.test/' }, text(5_000))
+    const events = await logOf(session.store, session.sessionId)
+
+    const items = conversationItems(events, 0, toolResultCap(toolsWith('fetch', 800), 4_000))
+    const call = items.find(
+      (item) => item.role === 'assistant' && item.text.startsWith('Tool call'),
+    )
+    const answer = items.find((item) => item.role === 'tool')!
+
+    expect(answer.tokens).toBe(800)
+    expect(answer.pairSeq).toBe(call?.seq)
+  })
+
+  it('does not stretch the tail walk with a result the request would cap', () => {
+    // A 1,000-token tail and an enormous answer in the newest turn. Measured as the request
+    // carries it, the newest items do not reach the tail, so the walk continues into the first
+    // turn and there is nowhere to cut — which is right: the request is inside its budget
+    // already. Measured at what the store holds, the same walk crosses the whole target at the
+    // answer and cuts the history for a size no request ever has.
+    const items = [
+      cutItem(1, 'user', 500),
+      cutItem(2, 'assistant', 5),
+      cutItem(3, 'tool', 20, 2),
+      cutItem(4, 'user', 20),
+      cutItem(5, 'assistant', 5),
+      cutItem(6, 'tool', 800, 5),
+      cutItem(7, 'user', 20),
+    ]
+    const stored = items.map((item) => (item.seq === 6 ? { ...item, tokens: 5_000 } : item))
+
+    expect(cutAtUserBoundary(items, 1_000)).toBe(0)
+    expect(cutAtUserBoundary(stored, 1_000)).toBe(3)
+  })
+
+  it('summarizes a history whose tail answers every call it carries', async () => {
+    // A 6,000-token budget: the context is over the trigger's share, and the tail the engine
+    // would keep reaches back to the steering message that arrived while the newest tool call
+    // ran — the one boundary a cut could land on that would separate the call from its answer.
+    // The cut widens to the user message before the call, so the pair is carried whole.
+    const tokenBudgetFor = () => 6_000
+    const session = await newSession(messages(4, 1_000))
+    await seedToolStep(session, { url: 'https://example.test/' }, text(5), messages(1, 1_000))
+    await session.store.appendEvents(session.sessionId, [...messages(1, 1_000)])
+    const scripts = scriptedModels([{ text: ['the reply'] }])
+
+    const outcome = await runTurn(session.sessionId, {
+      store: session.store,
+      model: scripts.factory,
+      resolveCredential: () => Promise.resolve(TEST_CREDENTIAL),
+      contextStrategy: createContextStrategy({ tokenBudgetFor }),
+      compaction: { summaryModel: SUMMARY_MODEL, tokenBudgetFor },
+      tools: toolsWith('fetch'),
+    })
+
+    expect(outcome.outcome).toBe('idle')
+    const events = await logOf(session.store, session.sessionId)
+    const summary = contextSummaryOf(events)!
+    const calls = events.filter((event) => event.type === 'agent.tool_use')
+    expect(calls).toHaveLength(1)
+    // The call is in the tail, not in what the summary replaced: a cut at the steering message
+    // — where the walk's own answer would put it — would have covered the call and kept only
+    // its answer.
+    expect(summary.covers.to_seq).toBeLessThan(calls[0]?.seq ?? 0)
+    for (const call of calls.filter((event) => event.seq > summary.covers.to_seq)) {
+      const answer = events.find(
+        (event) => event.type === 'agent.tool_result' && event.tool_use_id === call.id,
+      )
+      expect(answer?.seq).toBeGreaterThan(summary.covers.to_seq)
+    }
+    // And the request the summary bought carries the pair it kept.
+    expect(partTypes(scripts.chat.calls[0]!)).toEqual(
+      expect.arrayContaining(['tool-call', 'tool-result']),
+    )
+  })
+
+  it('folds a call and its answer in the same pass, whatever the slice budget', async () => {
+    // A covered history folded in more than one pass, with a call, the steering message that
+    // arrived while it ran, and the answer at a slice boundary: both halves reach the
+    // summarizer together, so its tool-work section can say what a call was for and what came
+    // of it.
+    const session = await newSession(messages(2, 1_000))
+    await seedToolStep(
+      session,
+      { url: 'CALLLABEL' },
+      `RESULTLABEL${text(2_000)}`,
+      messages(1, 2_000),
+    )
+    await session.store.appendEvents(session.sessionId, [...messages(5, 1_000)])
+    const scripts = scriptedModels([{ text: ['## Goal\nsummarized'] }])
+
+    const result = await runEngine(session, {
+      scripts,
+      config: budgets(20_000, 8_000, SUMMARY_MODEL),
+    })
+
+    expect(result.outcome).toBe('summarized')
+    expect(scripts.summary.calls.length).toBeGreaterThan(1)
+    const passes = scripts.summary.calls.map((call) =>
+      readPrompt(call)
+        .map((entry) => entry.text)
+        .join('\n'),
+    )
+    expect(passes.some((pass) => pass.includes('CALLLABEL'))).toBe(true)
+    for (const pass of passes) {
+      expect(pass.includes('CALLLABEL')).toBe(pass.includes('RESULTLABEL'))
+    }
+  })
+})
+
+describe('clearing old results before summarizing (epic #303, X9; #306)', () => {
+  it('writes no summary when clearing the old results is enough', async () => {
+    // A 2,000-token budget with a 1,400 threshold: without clearing, the answer the session
+    // fetched would put the context over it. Clearing replaces its body, the request comes back
+    // under the share, and no summary is paid for.
+    const tokenBudgetFor = () => 2_000
+    const session = await newSession(messages(2, 200))
+    await seedToolStep(session, { url: 'https://example.test/' }, text(1_000))
+    await session.store.appendEvents(session.sessionId, [...messages(4, 200)])
+    const scripts = scriptedModels([{ text: ['the reply'] }])
+
+    const outcome = await runTurn(session.sessionId, {
+      store: session.store,
+      model: scripts.factory,
+      resolveCredential: () => Promise.resolve(TEST_CREDENTIAL),
+      contextStrategy: createContextStrategy({ tokenBudgetFor }),
+      compaction: { tokenBudgetFor },
+      tools: toolsWith('fetch'),
+    })
+
+    expect(outcome.outcome).toBe('idle')
+    expect(scripts.summary.calls).toEqual([])
+    const events = await logOf(session.store, session.sessionId)
+    expect(contextSummaryOf(events)).toBeNull()
+    expect(eventTypes(events)).not.toContain('session.context_summary_progress')
+
+    // The request carries the placeholder where the answer was, and the request's span records
+    // what was cleared — the one place a reader learns the model did not get the body.
+    expect(toolResultValues(scripts.chat.calls[0]!)).toEqual(['result cleared, 1000 tokens'])
+    const spans = events.filter((event) => event.type === 'span.model_request_start')
+    expect(spans[0]).toMatchObject({
+      model: CHAT_MODEL,
+      cleared: { results: 1, tokens: 1_000 },
+      tools: [{ name: 'fetch', source: 'builtin' }],
+    })
+    // The stored answer is untouched: replay, the transcript and a later summary still read it.
+    const stored = events.find((event) => event.type === 'agent.tool_result')
+    expect(textOfEvent(stored)).toHaveLength(4_000)
+  })
+
+  it('summarizes when clearing the old results is not enough', async () => {
+    // The same shape with 300-token messages: clearing the answer brings the request down, but
+    // not under the threshold, so the engine summarizes the history clearing left behind.
+    const tokenBudgetFor = () => 2_000
+    const session = await newSession(messages(2, 300))
+    await seedToolStep(session, { url: 'https://example.test/' }, text(1_000))
+    await session.store.appendEvents(session.sessionId, [...messages(4, 300)])
+    const scripts = scriptedModels([{ text: ['the reply'] }])
+
+    const outcome = await runTurn(session.sessionId, {
+      store: session.store,
+      model: scripts.factory,
+      resolveCredential: () => Promise.resolve(TEST_CREDENTIAL),
+      contextStrategy: createContextStrategy({ tokenBudgetFor }),
+      compaction: { tokenBudgetFor },
+      tools: toolsWith('fetch'),
+    })
+
+    expect(outcome.outcome).toBe('idle')
+    const events = await logOf(session.store, session.sessionId)
+    const summary = contextSummaryOf(events)!
+    expect(summary.reason).toBe('threshold')
+    // The prompt a summary is written with has the tool-work section, and the history the
+    // summarizer was handed carries the call and what it answered.
+    expect(summary.prompt_version).toBe('context-summary-v2')
+    // The summarizer wrote it in several passes (its own budget is small), so the tool work is
+    // in the prompt of whichever pass folded it — the section asking for it is in every one.
+    const sent = scripts.chat.calls
+      .flatMap((call) => readPrompt(call).map((entry) => entry.text))
+      .join('\n')
+    expect(sent).toContain('## Tool work')
+    expect(sent).toContain('Tool call fetch:')
+    expect(sent).toContain('Tool result from fetch:')
   })
 })
