@@ -1,0 +1,43 @@
+Integration with C3/C4 — the `oh` (terminal) captures of the same states, as text.
+Taken against a local server (see the PR body for the stack), on a 120x40 tmux pane.
+
+1. "Compacting…" — a manual compaction waiting for the brain (#283)
+
+   The turn is held open by a slow reply and `/compact` has been posted, so the request is
+   stored and folded into the transcript while the turn runs. The status field says what the
+   reader is waiting for; the row it will be replaced by ("Summarizing… N of M") arrives with
+   the engine's first progress event.
+
+   ─────────────────────────────────────────────────────────────────────────────────────────────
+   mock/echo · sesn_…XCH03Z · ⠏ Compacting…
+   ❯
+
+2. The outcome notice — `nothing_to_summarize` (#283)
+
+   The brain's stored `session.compaction` reaches the transcript, and the line is drawn under
+   it with the other notices, ahead of the rule. The words are `manualCompactionNotice`'s in
+   `@openharness/client`, so the web app shows the same sentence.
+
+   One short line, so there is nothing older to fold.
+   One short line, so there is nothing older to fold.
+   106ms · 59 tokens · —
+   There was no older history to summarize.
+   ─────────────────────────────────────────────────────────────────────────────────────────────
+   mock/echo · sesn_…Y4NVV4 · — · 0% of context used · idle
+   ❯
+
+3. The manual divider — NOT drawn by `oh` when the history under it is already on screen.
+
+   The compaction did summarize by hand: the log holds
+
+     seq 87  session.context_summary  { covers: { to_seq: 48 }, reason: "manual",
+                                        summary_model: "mock/echo", passes: 3 }
+     seq 88  session.compaction       { outcome: "summarized", summary_seq: 87 }
+
+   and the web app draws the divider for the same session ("Conversation summarized —
+   manual · mock/echo · 3 passes"). `oh` does not: its transcript goes through Ink's <Static>,
+   which writes a settled block once and never redraws it, and a summary's divider is by
+   definition inserted *before* blocks the history already settled — so the divider is dropped
+   rather than drawn. This is C5's existing divider behaviour, found by this run and left
+   alone: it is not part of the `session.compaction` outcome work, and fixing it means the TUI
+   transcript committing blocks in a way that can be re-cut rather than appended.
