@@ -6,7 +6,7 @@ import type {
   TranscriptSummary,
 } from '@openharness/client'
 import { Static, Text } from 'ink'
-import { Fragment } from 'react'
+import { Fragment, useRef } from 'react'
 
 import { draws, MessageView } from './message-view'
 import { replyMetaLines } from './reply-meta'
@@ -56,6 +56,16 @@ import { SummaryDivider } from './summary-divider'
  * here — and the one the input section owes the transcript — are about the blocks on screen:
  * drawn around a message nobody can see, they are a blank line after nothing, and one more than
  * the one the transcript is supposed to have.
+ *
+ * **The settled list is append-only, and a summary divider is written where it can be**
+ * (epic #277, K10; #280). `<Static>` renders the *tail* of its list (Ink's `items.slice(index)`),
+ * so a block inserted before the end shifts everything after it: the tail is written twice and
+ * the block itself is never drawn. Messages never do that — a message settles at the frontier —
+ * but a divider for a compaction that ran at the start of the turn does, because it covers
+ * history already in the scrollback. {@link committedSettled} therefore keeps what is written and
+ * appends the rest; a divider whose true position is inside the written prefix is drawn at the
+ * frontier, just above the live area, with the history it covers still above it. It is written
+ * once and never moves again; a later reload draws it at its position in the log, like the web.
  */
 export function TranscriptView({
   messages,
@@ -88,6 +98,12 @@ export function TranscriptView({
    */
   readonly holdAll?: boolean | undefined
 }) {
+  // The scrollback's write position: what a previous render handed `<Static>`. A cache, not
+  // state — what is committed is a pure function of the blocks and what has already been
+  // written, so re-running a render (React strict mode, a reconciler pass) leaves it where it
+  // was. See {@link committedSettled} for why the list has to be built this way.
+  const committed = useRef<readonly TranscriptEntry[]>([])
+
   // Only the messages that draw something are laid out as blocks. A reply that has been
   // announced but has not produced a token yet draws nothing at all (`message-view.tsx`), so
   // it is not one — and the blank lines the transcript draws *between* blocks, and the one
@@ -103,35 +119,78 @@ export function TranscriptView({
     holdAll === true
       ? 0
       : blocks.findIndex((entry) => entry.kind === 'message' && isLive(entry.message, holdLive))
-  const settled = firstLive === -1 ? blocks : blocks.slice(0, firstLive)
+  const settled = committedSettled(committed.current, blocks, firstLive)
+  committed.current = settled
   const live = firstLive === -1 ? [] : blocks.slice(firstLive)
   const metaLines = replyMetaLines(messages, currentModel, costOf)
 
-  /** The block at `index`, framed by the blank line the transcript owes it, if any. */
-  const draw = (entry: TranscriptEntry, index: number) =>
+  /** The block, framed by the blank line the transcript owes it after `previous`, if any. */
+  const draw = (entry: TranscriptEntry, previous: TranscriptEntry | undefined) =>
     entry.kind === 'summary' ? (
       <Fragment key={entry.summary.id}>
-        {setsOffDivider(blocks[index - 1]) && <Text> </Text>}
+        {setsOffDivider(previous) && <Text> </Text>}
         <SummaryDivider summary={entry.summary} width={width} />
       </Fragment>
     ) : (
       <Fragment key={entry.message.id}>
-        {separates(blocks[index - 1], entry) && <Text> </Text>}
+        {separates(previous, entry) && <Text> </Text>}
         <MessageView
           message={entry.message}
           width={width}
           metaLine={metaLines.get(entry.message.id)}
-          blankAbove={blankAbove(blocks[index - 1])}
+          blankAbove={blankAbove(previous)}
         />
       </Fragment>
     )
 
   return (
     <>
-      <Static items={[...settled]}>{draw}</Static>
-      {live.map((entry, index) => draw(entry, firstLive + index))}
+      <Static items={[...settled]}>{(entry, index) => draw(entry, settled[index - 1])}</Static>
+      {live.map((entry, index) => draw(entry, index === 0 ? settled.at(-1) : live[index - 1]))}
     </>
   )
+}
+
+/**
+ * What the scrollback has been written with, and what is due to be appended to it.
+ *
+ * Ink's `<Static>` is **append-only**: it renders `items.slice(index)`, where `index` is the
+ * length it last saw, so a list that grows in the middle is rendered wrong — the items after
+ * the insertion shift, the tail is written a second time, and the inserted block is never
+ * drawn. A message only ever appends to the settled prefix (it settles at the frontier), so it
+ * cannot break that; a **summary divider** can, because a compaction runs at the start of a
+ * turn and covers history the terminal committed to the scrollback long ago (epic #277, K10;
+ * #280). Its true position is inside the written prefix, and inserting it there is exactly what
+ * Ink cannot do.
+ *
+ * So the settled list is built the one way `<Static>` accepts — `{@link committedSettled}`
+ * keeps the entries already written (dropping only what a `session.rewind` took back) and
+ * **appends** the rest in their own order. A divider whose position is before the frontier
+ * therefore lands at the frontier rather than in the middle: it is drawn with the history it
+ * covers still above it, which is what it says, and nothing already on screen is rewritten.
+ * The live area keeps its place below it, and the divider is written into the scrollback and
+ * never moves again.
+ */
+function committedSettled(
+  previous: readonly TranscriptEntry[],
+  blocks: readonly TranscriptEntry[],
+  firstLive: number,
+): readonly TranscriptEntry[] {
+  const candidates = firstLive === -1 ? blocks : blocks.slice(0, firstLive)
+  const settledIds = new Set(candidates.map(entryId))
+  const kept = previous.filter((entry) => settledIds.has(entryId(entry)))
+  const written = new Set(kept.map(entryId))
+  const appended = candidates.filter((entry) => !written.has(entryId(entry)))
+  if (appended.length === 0) {
+    // Nothing new: hand back the same array, so `<Static>` does not think the list changed.
+    return kept.length === previous.length ? previous : kept
+  }
+  return [...kept, ...appended]
+}
+
+/** The id a block is written under: its message's, or its summary's (its `<Static>` key). */
+function entryId(entry: TranscriptEntry): string {
+  return entry.kind === 'summary' ? entry.summary.id : entry.message.id
 }
 
 /**
