@@ -3,6 +3,7 @@ import {
   type ContextCompactionOption,
   createContextStrategy,
   DEFAULT_COMPACTION_THRESHOLD,
+  DEFAULT_MAX_TOOL_STEPS,
   type ModelFactory,
 } from '@openharness/brain'
 import {
@@ -247,6 +248,11 @@ export interface TestOptions {
    * `startServer`.
    */
   readonly compactionThreshold?: number
+  /**
+   * `OPENHARNESS_MAX_TOOL_STEPS` for {@link testConfig} — the tool loop's budget (epic #303).
+   * The production default unless a test wants a turn cut short early.
+   */
+  readonly maxToolSteps?: number
   /**
    * Where the app and Better Auth log. Silent by default; a test that asserts on a log line —
    * or on the absence of one — passes a logger that keeps them.
@@ -694,6 +700,7 @@ export function testConfig(options: TestOptions = {}): ServerConfig {
     // "the chunks are still there" assertions a race. The job's own suite turns it on.
     compactIntervalMs: options.compactIntervalMs ?? 0,
     compactionThreshold: options.compactionThreshold ?? DEFAULT_COMPACTION_THRESHOLD,
+    maxToolSteps: options.maxToolSteps ?? DEFAULT_MAX_TOOL_STEPS,
     // Observability (#158) is off in a test by default: the readable log format, and no
     // exporter to load. The suites that assert on the JSON shape call `jsonLogger` directly.
     logFormat: options.logFormat ?? DEFAULT_LOG_FORMAT,

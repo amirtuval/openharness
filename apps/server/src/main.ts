@@ -50,6 +50,7 @@ import {
   type ProviderCredentialValidator,
 } from './provider-validation'
 import { LocalScheduler, type SessionScheduler } from './scheduler'
+import { createTurnTools, type TurnToolOptions } from './tools'
 
 /**
  * Starting the server: the environment, the store, sign-in, the scheduler, the app, and the
@@ -257,6 +258,12 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   // applies whatever this answers.
   const resolveMode = createModeResolver({ store, credentials })
 
+  // The tools a turn may offer (epic #303, X4). This build registers one — the test `echo` tool
+  // — and only behind `OPENHARNESS_TEST_MODEL=mock`, so a deployment on a provider model runs
+  // exactly the chat it ran before #304; #305's built-ins are what changes that. Which models
+  // may call tools at all comes from the same registry, as `models.dev`'s `tool_call`.
+  const turnTools = createTurnTools(config, resolvedModel.kind, registry)
+
   const scheduler = createScheduler(
     config,
     store,
@@ -266,6 +273,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     contextCompaction,
     reasoningSupportFor,
     resolveMode,
+    turnTools,
     logger,
   )
   // Compaction is the store's, not a scheduler's: it deletes superseded chunks whoever ran the
@@ -459,6 +467,7 @@ function createScheduler(
   contextCompaction: ContextCompactionOption,
   reasoningSupportFor: ReasoningSupportFor,
   resolveMode: ModeResolver,
+  tools: TurnToolOptions | undefined,
   logger: Logger,
 ): SessionScheduler {
   const onError = (error: unknown, sessionId: SessionId | undefined): void => {
@@ -476,6 +485,7 @@ function createScheduler(
       compaction: contextCompaction,
       reasoningSupportFor,
       resolveMode,
+      ...(tools === undefined ? {} : { tools }),
       instanceId: config.instanceId,
       partitions: config.partitions,
       ttlMs: config.leaseTtlMs,
@@ -497,6 +507,7 @@ function createScheduler(
     compaction: contextCompaction,
     reasoningSupportFor,
     resolveMode,
+    ...(tools === undefined ? {} : { tools }),
     maxConcurrentSessions: config.maxConcurrentSessions,
     drainTimeoutMs: config.drainTimeoutMs,
     partitionCount: config.partitions,

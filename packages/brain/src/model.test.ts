@@ -233,7 +233,13 @@ describe('streamModelRequest', () => {
       messages,
     })
 
-    expect(result).toEqual({ text: '', usage: ZERO_MODEL_USAGE, error: failure, aborted: false })
+    expect(result).toEqual({
+      text: '',
+      toolCalls: [],
+      usage: ZERO_MODEL_USAGE,
+      error: failure,
+      aborted: false,
+    })
   })
 
   it('reports a failure that arrives mid-stream', async () => {

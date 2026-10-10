@@ -159,8 +159,8 @@ describe('ListEventsQuerySchema', () => {
   })
 
   it('rejects an unknown event type in the filter', () => {
-    // `agent.tool_use` is a real Anthropic event type; v1 does not store it.
-    expect(ListEventsQuerySchema.safeParse({ types: ['agent.tool_use'] }).success).toBe(false)
+    // `session.terminated` is a real Anthropic event type; v1 does not store it.
+    expect(ListEventsQuerySchema.safeParse({ types: ['session.terminated'] }).success).toBe(false)
     expect(ListEventsQuerySchema.safeParse({ types: [] }).success).toBe(true)
   })
 

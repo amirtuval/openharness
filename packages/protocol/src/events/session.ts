@@ -152,6 +152,21 @@ export const SessionErrorTypeSchema = z.enum([
    * any other retry status. A new prompt after the credential is added works.
    */
   'missing_provider_credential',
+  /**
+   * // extension: the turn reached its model-request budget without finishing (epic #303, X2).
+   *
+   * A turn runs one model request per step of the tool loop, and a loop the model keeps going —
+   * calls whose results only prompt more calls — is bounded by the deployment's
+   * `OPENHARNESS_MAX_TOOL_STEPS` (the brain's `DEFAULT_MAX_TOOL_STEPS` when it is unset). Over
+   * it the turn ends here rather than erroring: the notice says how many requests ran, the
+   * session goes idle, and nothing is retried. `session.error` is the one event in the protocol
+   * that carries a sentence for the user, and `StopReason` has no member for it (it stays
+   * `end_turn`, X1) — so this is where a turn that ran out of steps says so.
+   *
+   * **Non-retryable**: `session.status_idle` follows, and `retry_status.type` is `terminal` —
+   * the same request again would run out of steps again.
+   */
+  'tool_steps_exhausted_error',
 ])
 
 export type SessionErrorType = z.infer<typeof SessionErrorTypeSchema>

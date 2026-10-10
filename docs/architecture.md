@@ -32,8 +32,10 @@ ideas carry the design:
   is the same machinery over a wider range: a `session.rewind` supersedes everything from the
   edited `user.message` on, and the edited text is appended after it as a new message.
 
-- **Hands** — the things that actually act on the world (sandboxes, tools) behind a single
-  `execute(name, input)` shape, so they can be swapped without touching the brain.
+- **Hands** — the things that actually act on the world (tools, and later sandboxes) behind a
+  single `execute(name, input)` shape, so they can be swapped without touching the brain. What a
+  tool may reach, and what the model is allowed to make of what came back, is
+  [`docs/threat-model.md`](./threat-model.md).
 
 Everything else — the HTTP server, the web app, the TUI, the client — is a way in or out of
 that core. This document stays at that level; package details live in each package's
@@ -46,7 +48,8 @@ chat server with a web UI and a TUI. Authentication
 ([epic #65](https://github.com/amirtuval/openharness/issues/65)) is built — sign-in, ownership
 and per-user provider keys — and so are the model catalog and model-first chat
 ([epic #92](https://github.com/amirtuval/openharness/issues/92)). What works end to end today:
-agents and sessions, a chat turn whose streamed chunks are stored events, steering a turn in
+agents and sessions, a chat turn whose streamed chunks are stored events, a turn whose model
+calls a tool — the call, the execution and the result are all events — steering a turn in
 flight, interrupting it,
 automatic retries of a failed model request, and sessions that survive the process that was
 running them — a turn a dead server left open is closed as `brain_lost` and run again by the
@@ -120,8 +123,12 @@ The TUI is the one workspace published to npm — as **`@openh/cli`**, its bundl
 (#152; the name is scoped because npm refuses the unscoped `openharness`, #194) — which is why
 its name is not `@openharness/cli`; the other workspaces are private to the repo.
 
-`@openharness/hands` is a placeholder today — the tools phase builds it, and the seam is
-`execute(name, input)` ([`docs/ROADMAP.md`](./ROADMAP.md), "Tools").
+`@openharness/hands` holds the tool registry behind `execute(name, input)` today — a tool's
+name, description, input schema, default permission and timeout, and one place to run it
+([#304](https://github.com/amirtuval/openharness/issues/304)). The built-in tools arrive with
+[#305](https://github.com/amirtuval/openharness/issues/305) and the MCP client with
+[#312](https://github.com/amirtuval/openharness/issues/312); the loop they run in is the brain's,
+and what they may reach is [`docs/threat-model.md`](./threat-model.md).
 
 ## Allowed dependency graph
 

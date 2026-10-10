@@ -12,6 +12,7 @@ import type { SessionId } from '@openharness/protocol'
 import { SessionNotFoundError, type PartitionFence, type SessionStore } from '@openharness/session'
 
 import type { ResolveSessionCredential } from './credentials'
+import type { TurnToolOptions } from './tools'
 
 /**
  * The piece of scheduling that is the same however a session is owned: run its turns, one at
@@ -73,6 +74,12 @@ export interface SessionRunnerOptions {
    * the mode owner's preferences and their credentials — see `modes.ts`.
    */
   readonly resolveMode?: ModeResolver
+  /**
+   * The tools a turn may offer, and the loop's decisions about them (epic #303, X4); omitted
+   * means a chat with no tools, which is what every deployment on a real provider model runs
+   * until #305's built-ins land. See {@link TurnToolOptions}.
+   */
+  readonly tools?: TurnToolOptions
 }
 
 /** What one call to {@link SessionRunner.run} adds to the runner's configuration. */
@@ -153,6 +160,9 @@ export class SessionRunner {
 
   readonly #resolveMode: ModeResolver | undefined
 
+  /** The tools every turn may offer (epic #303), or `undefined` for a chat with none. */
+  readonly #tools: TurnToolOptions | undefined
+
   readonly #turns = new Map<SessionId, TurnHandle>()
 
   #stopped = false
@@ -166,6 +176,7 @@ export class SessionRunner {
     this.#compaction = options.compaction
     this.#reasoningSupportFor = options.reasoningSupportFor
     this.#resolveMode = options.resolveMode
+    this.#tools = options.tools
   }
 
   /** Whether the runner has been told to stop and no longer starts passes. */
@@ -378,6 +389,8 @@ export class SessionRunner {
               ? {}
               : { reasoningSupportFor: this.#reasoningSupportFor }),
             ...(this.#resolveMode === undefined ? {} : { resolveMode: this.#resolveMode }),
+            // The field names are `RunTurnOptions`' own, so the whole group goes over as it is.
+            ...(this.#tools === undefined ? {} : this.#tools),
           })
         } catch (error) {
           if (error instanceof SessionNotFoundError) {

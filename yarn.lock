@@ -1430,6 +1430,7 @@ __metadata:
     undici: "npm:8.11.2"
     vite: "npm:8.3.1"
     vitest: "npm:5.0.2"
+    zod: "npm:4.6.5"
   languageName: unknown
   linkType: soft
 

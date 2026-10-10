@@ -4,6 +4,8 @@ import { MockLanguageModelV4 } from 'ai/test'
 
 import type { ModelFactory } from '@openharness/brain'
 
+import { TEST_TOOL_NAME } from './tools'
+
 /**
  * The deterministic test model: what the server streams from when
  * `OPENHARNESS_TEST_MODEL=mock` is set.
@@ -77,6 +79,17 @@ export const MOCK_RETRYABLE_MARKER = '__fail_retryable__'
 /** The marker that fails every attempt with a 400. */
 export const MOCK_TERMINAL_MARKER = '__fail_terminal__'
 
+/**
+ * The marker that makes the model call the test `echo` tool (epic #303).
+ *
+ * The model calls it on the request that carries the marker and answers the result on the next
+ * one, which is what makes a whole tool turn — the call stored, the tool run, the result stored,
+ * the follow-up request — observable through the real server in an e2e test. The marker is
+ * matched at the start of the message, like the others, and the text after it is what the tool
+ * is called with.
+ */
+export const MOCK_TOOL_MARKER = '__tool__'
+
 /** The token counts every request of this model reports. Fixed, so tests can assert them. */
 export const MOCK_MODEL_USAGE: ModelUsage = {
   input_tokens: 42,
@@ -104,7 +117,13 @@ export function createMockModelFactory(): ModelFactory {
     supportedUrls: {},
     doStream: (options) => {
       const message = lastUserText(options.prompt)
-      const plan = planFor(message, attempts.record(message))
+      // A prompt that already carries a tool result is a request the tool loop made after a
+      // call: the model answers what the tool said rather than calling it again.
+      const result = lastToolResult(options.prompt)
+      const plan =
+        result === undefined
+          ? planFor(message, attempts.record(message))
+          : { chunks: chunkText(`the tool said: ${result}`, MOCK_ECHO_CHUNKS), delayMs: 0 }
       if (plan.error !== undefined) {
         return Promise.reject(plan.error)
       }
@@ -127,6 +146,11 @@ interface ModelPlan {
    * instead of closing itself and reporting usage.
    */
   readonly hold?: boolean
+  /**
+   * The tool calls the step makes, in order, after the chunks (epic #303). Their arguments
+   * travel as JSON text, the way a provider sends them.
+   */
+  readonly toolCalls?: readonly { readonly name: string; readonly input: unknown }[]
 }
 
 /**
@@ -153,6 +177,18 @@ export function planFor(message: string, attempt: number): ModelPlan {
   }
   if (message.startsWith(MOCK_HOLD_MARKER)) {
     return { chunks: [MOCK_HOLD_TEXT], delayMs: 0, hold: true }
+  }
+  if (message.startsWith(MOCK_TOOL_MARKER)) {
+    // The text after the marker, or the marker-less message when the caller wrote none: either
+    // way the tool is called with something the test can predict from its own prompt.
+    const argument = message.slice(MOCK_TOOL_MARKER.length).trim()
+    return {
+      chunks: [],
+      delayMs: 0,
+      toolCalls: [
+        { name: TEST_TOOL_NAME, input: { text: argument.length > 0 ? argument : message } },
+      ],
+    }
   }
   return { chunks: chunkText(message, MOCK_ECHO_CHUNKS), delayMs: MOCK_ECHO_CHUNK_DELAY_MS }
 }
@@ -228,6 +264,30 @@ function lastUserText(prompt: readonly PromptMessage[]): string {
   return ''
 }
 
+/**
+ * The text of the last tool result in a provider-level prompt, or `undefined` when it holds none.
+ *
+ * This is how the mock knows it is being asked *after* a tool ran rather than before: the loop
+ * puts the calls and their answers in the next request's prompt, and the `tool` message's parts
+ * carry the text the tool produced.
+ */
+function lastToolResult(prompt: readonly PromptMessage[]): string | undefined {
+  for (let index = prompt.length - 1; index >= 0; index -= 1) {
+    const message = prompt[index]
+    if (message === undefined || message.role !== 'tool' || typeof message.content === 'string') {
+      continue
+    }
+    const text = message.content.flatMap((part) => {
+      const output = (part as { readonly output?: { readonly value?: unknown } }).output
+      return typeof output?.value === 'string' ? [output.value] : []
+    })
+    if (text.length > 0) {
+      return text.join('')
+    }
+  }
+  return undefined
+}
+
 /** One message of a provider-level prompt: what `streamText` sends the model. */
 interface PromptMessage {
   readonly role: string
@@ -260,7 +320,8 @@ function streamOf(
       await delay(plan.delayMs)
       return { type: 'text-delta', id: TEXT_ID, delta: chunk }
     }),
-    ...(plan.hold === true ? [] : [closing, finishing]),
+    ...toolSteps(plan.toolCalls ?? []),
+    ...(plan.hold === true ? [] : [closing, () => finishing(plan)]),
   ]
   let step = 0
   return new ReadableStream<LanguageModelV4StreamPart>({
@@ -284,16 +345,40 @@ function streamOf(
   })
 }
 
+/** The provider-level parts one tool call is streamed as: its input arrives as JSON text. */
+function toolSteps(
+  calls: readonly { readonly name: string; readonly input: unknown }[],
+): (() => Promise<LanguageModelV4StreamPart>)[] {
+  return calls.flatMap((call, index) => {
+    const id = `mock-tool-call-${index + 1}`
+    const input = JSON.stringify(call.input)
+    return [
+      () => Promise.resolve({ type: 'tool-input-start', id, toolName: call.name }),
+      () => Promise.resolve({ type: 'tool-input-delta', id, delta: input }),
+      () => Promise.resolve({ type: 'tool-input-end', id }),
+      () => Promise.resolve({ type: 'tool-call', toolCallId: id, toolName: call.name, input }),
+    ]
+  })
+}
+
 /** The `text-end` a reply that ran to completion closes its text block with. */
 function closing(): Promise<LanguageModelV4StreamPart> {
   return Promise.resolve({ type: 'text-end', id: TEXT_ID })
 }
 
-/** The `finish` a reply that ran to completion ends with, carrying the fixed usage. */
-function finishing(): Promise<LanguageModelV4StreamPart> {
+/**
+ * The `finish` a reply that ran to completion ends with, carrying the fixed usage.
+ *
+ * The finish reason is `tool-calls` for a step that called something, which is what a provider
+ * reports and what the SDK keeps on the step.
+ */
+function finishing(plan: ModelPlan): Promise<LanguageModelV4StreamPart> {
   return Promise.resolve({
     type: 'finish',
-    finishReason: { unified: 'stop', raw: undefined },
+    finishReason: {
+      unified: (plan.toolCalls?.length ?? 0) > 0 ? 'tool-calls' : 'stop',
+      raw: undefined,
+    },
     usage: {
       inputTokens: {
         // `MOCK_MODEL_USAGE.input_tokens` is the cache-inclusive total, the way an
