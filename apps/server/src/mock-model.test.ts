@@ -13,6 +13,8 @@ import type { RetryPolicy } from '@openharness/brain'
 import { LocalScheduler } from './scheduler'
 import {
   MOCK_ECHO_CHUNKS,
+  MOCK_HOLD_MARKER,
+  MOCK_HOLD_TEXT,
   MOCK_MODEL_ENV_VALUE,
   MOCK_MODEL_USAGE,
   MOCK_RETRYABLE_MARKER,
@@ -31,6 +33,7 @@ import {
   readHistory,
   resolveTestSessionCredential,
   testConfig,
+  waitFor,
   waitForIdle,
 } from './test-support'
 
@@ -126,6 +129,49 @@ describe('__slow__', () => {
 
   it('is the same text on every run', () => {
     expect(slowReplyText()).toBe(slowReplyText())
+  })
+})
+
+describe('__hold__', () => {
+  it('streams one chunk and then holds the turn open until an interrupt ends it', async () => {
+    const store = new InMemorySessionStore()
+    const scheduler = new LocalScheduler({
+      store,
+      model: createMockModelFactory(),
+      resolveCredential: resolveTestSessionCredential,
+      onError: () => {},
+    })
+    await scheduler.start()
+    const agent = await store.createAgent(
+      { name: 'Agent', model: { id: 'openharness-test/x' } },
+      TEST_OWNER_ID,
+    )
+    const session = await store.createSession(agent.id, { ownerId: TEST_OWNER_ID })
+
+    await store.appendEvents(session.id, [
+      { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: MOCK_HOLD_MARKER }] },
+    ])
+    scheduler.signal(session.id, 'work')
+
+    // The request opens — its span start is in the log, so the session is `running` — and then
+    // it stays open: nothing about a held reply ever closes the turn by itself.
+    await waitFor(async () => (await store.getTurnState(session.id)).openSpan !== null, {
+      message: 'the held request never opened',
+    })
+
+    // The test's own move ends it, exactly as a user's interrupt ends any reply in flight.
+    await store.appendEvents(session.id, [{ type: EVENT_TYPES.userInterrupt }])
+    scheduler.signal(session.id, 'interrupt')
+    await waitForIdle(store, session.id, 30_000)
+    await scheduler.stop()
+
+    const history = await readHistory(store, session.id)
+    const spanEnd = history.find(
+      (event): event is ModelRequestEndEvent => event.type === EVENT_TYPES.modelRequestEnd,
+    )
+    expect(spanEnd?.error?.type).toBe('interrupted')
+    expect(replies(history)).toEqual([MOCK_HOLD_TEXT])
+    expect(history.at(-1)?.type).toBe(EVENT_TYPES.sessionStatusIdle)
   })
 })
 

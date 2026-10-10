@@ -10,6 +10,7 @@ import {
   type UserEvent,
 } from '@openharness/protocol'
 import { isFencedError, type SessionStore } from '@openharness/session'
+import { createTestClock } from '@openharness/session/testing'
 import { PostgresSessionStore } from '@openharness/session/postgres'
 
 import { TEST_OWNER_ID } from './test-support'
@@ -50,9 +51,12 @@ import {
  *
  * Every wait is a `waitFor` with a bounded timeout, never a fixed sleep, and the leases are
  * short (a few hundred milliseconds) with heartbeats a tenth of that, so a takeover happens in
- * the time a test is willing to wait. The one place time is asserted at all is the shutdown
- * test, and it asserts the opposite: that the handover is quick because the lease was
- * released, not slow because the TTL ran out.
+ * the time a test is willing to wait. A test about a window — a membership that ages out, a
+ * lease that lapses — hands its stores a `TestClock` and moves that itself, so the window is
+ * one the test opened rather than one a loaded runner has to stay inside (#262); everything
+ * else waits on real heartbeats and asserts no timing. The shutdown test is the one that
+ * asserts the opposite of a window: that a handover is quick because the lease was released,
+ * not slow because the TTL ran out.
  */
 
 /** The partition space the tests use; small, so a session can be aimed at a partition. */
@@ -414,9 +418,14 @@ if (SOURCE === null) {
     })
 
     it('drops a membership that stops heartbeating, and takes its share over within a TTL', async () => {
-      const first = instance('first', { ttlMs: TTL_MS })
-      const second = instance('second', { ttlMs: TTL_MS })
-      const store = db.store()
+      // Both windows this test is about — a membership's and a lease's — are read from the
+      // stores' clock, so the test moves time itself instead of hoping a loaded runner lets a
+      // heartbeat through in time (#262). Pausing the victim expires nothing on its own: until
+      // the advance below, its membership is as live as the survivor's.
+      const clock = createTestClock()
+      const reader = db.store({ now: clock.now })
+      const first = instance('first', { ttlMs: TTL_MS, store: db.store({ now: clock.now }) })
+      const second = instance('second', { ttlMs: TTL_MS, store: db.store({ now: clock.now }) })
       await Promise.all([first.scheduler.start(), second.scheduler.start()])
       await waitFor(
         () =>
@@ -425,20 +434,30 @@ if (SOURCE === null) {
         { timeoutMs: WAIT_MS, message: 'the two instances never settled at half each' },
       )
 
-      // The victim stops heartbeating, exactly as a crash does: nothing announces it any more,
-      // its membership ages out after one TTL, and its leases expire on the same clock — so
-      // the survivor's share grows back to the whole space and it takes what the victim held.
-      const pausedAt = Date.now()
+      // The victim stops heartbeating, exactly as a crash does: nothing announces it any more.
       first.scheduler.pause()
+
+      // One TTL later its membership has aged out — the same clock its leases expire on — so
+      // the survivor's share grows back to the whole space and it takes what the victim held:
+      // advancing exactly one TTL and requiring the takeover at that instant is the old claim —
+      // a TTL-scale window, not a restart and not "never" — stated in the clock's own terms.
+      clock.advance(TTL_MS)
       await waitFor(() => second.scheduler.heldPartitions().length === PARTITIONS, {
         timeoutMs: WAIT_MS,
         message: 'the dead member’s share was never taken over',
       })
 
-      // One TTL-scale window, not a restart and not "never" — and the row is gone from the
-      // membership too, not merely ignored.
-      expect(Date.now() - pausedAt).toBeLessThan(4 * TTL_MS)
-      expect(await store.listLiveInstances(TTL_MS)).toEqual(['second'])
+      // The row is gone from the membership too, not merely ignored — read through the same
+      // clock, and through a connection that is neither instance's own. The survivor's presence
+      // in that window is *seen* rather than assumed: an advance can land between the two store
+      // calls of an announcement already in flight, and a heartbeat issued before it can still
+      // commit after one issued later — the survivor announces itself again a heartbeat later,
+      // the victim never does, so the window is waited for and then asserted exactly.
+      await waitFor(async () => (await reader.listLiveInstances(TTL_MS)).length === 1, {
+        timeoutMs: WAIT_MS,
+        message: 'the survivor was never the only member after the advance',
+      })
+      expect(await reader.listLiveInstances(TTL_MS)).toEqual(['second'])
     })
 
     it('removes its membership row on stop, and a restart joins again', async () => {

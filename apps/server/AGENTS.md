@@ -1044,6 +1044,7 @@ the only thing that constructs it, and it only does so when the variable says `m
 | -------------------- | --------------------------------------------------------------------------- |
 | anything else        | echoed back in 4 chunks, 25 ms apart                                        |
 | `__slow__`           | 40 chunks, 250 ms apart — about 10 seconds, for interrupt and restart tests |
+| `__hold__`           | one chunk, then nothing: the request stays open until it is aborted         |
 | `__fail_retryable__` | HTTP 503 (`model_overloaded_error`) on the **first** attempt, then the echo |
 | `__fail_terminal__`  | HTTP 400 (`model_request_failed_error`) on every attempt                    |
 
@@ -1051,6 +1052,12 @@ A marker matches the _start_ of the message, so `__slow__ tell me something` sti
 slowly. Usage is fixed (`MOCK_MODEL_USAGE`: 42 input, 17 output, no cache) so a test can assert
 the exact numbers a `span.model_request_end` carries. The retry marker counts attempts per
 prompt, which is what lets it fail once and succeed on the retry inside one turn.
+
+`__hold__` is the latch a test that needs a turn to be _running_ uses: the reply is endless
+rather than long, so the session stays `running` for as long as the test needs instead of for as
+long as a fixed reply lasts — the `user.interrupt` that ends it is the test's own move, and it
+ends the turn the way an interrupt ends any request in flight (#261). It cannot be used without
+an abort signal: nothing else could end it.
 
 The mock needs no credential and ignores whatever it is handed, but the brain asks for one
 before every request, so the mock path runs with `resolveMockCredential`, which answers a
@@ -1452,7 +1459,9 @@ parallel with each other.
   instances settling at theirs), a single idle instance releasing nothing over several TTLs
   (#122) and keeping every partition through a heartbeat cycle that outlives its lease (#185,
   deterministically, with a store whose first renewal is delayed past the TTL), a member that
-  stops heartbeating dropped after about a TTL, `stop()` deleting the
+  stops heartbeating dropped after exactly one TTL the test moves itself — its stores are
+  handed a `TestClock`, so that window is a fact the test states rather than one a loaded
+  runner has to stay inside (#262) — `stop()` deleting the
   membership row and a restart re-joining, one turn per session, a crash mid-turn and the
   recovery that finishes it, a zombie that cannot write, a lease that cannot be renewed,
   interrupts routed across instances, the sweep, the fences a turn writes with, and shutdown
@@ -1462,8 +1471,9 @@ parallel with each other.
   keep the short TTL. `DATABASE_URL` when it is set, otherwise a container, otherwise the
   suite is skipped with a note.
 - `ai-sdk.test.ts` — the adapter through `DefaultChatTransport` and `readUIMessageStream`.
-- `mock-model.test.ts` — the echo, `__slow__`, both failure markers, fixed usage, and that the
-  hook cannot activate without the variable.
+- `mock-model.test.ts` — the echo, `__slow__`, `__hold__` (a held turn ending on the
+  interrupt that aborts it), both failure markers, fixed usage, and that the hook cannot
+  activate without the variable.
 - `auth.test.ts` — the front door: the 401 sweep over every route, cookie and bearer, the
   CSRf rule, the device flow end to end (code, approve, token, bearer request), sign-out
   revoking, the dev login and its guard, the rate limiter refusing the fourth sign-in, and
