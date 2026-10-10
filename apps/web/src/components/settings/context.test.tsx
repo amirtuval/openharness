@@ -17,13 +17,21 @@ import { makeFake, renderApp } from '../../test-support/render-app'
  * (`summaryModelFallback`), so the fixture's windows are chosen to make the count exact.
  */
 
-/** The Context card, so a query cannot reach another card's control. */
+/**
+ * The Context card, so a query cannot reach another card's control.
+ *
+ * The card's title is painted with the card; its three controls appear once the stored
+ * preferences and the catalog have loaded, which is a request later — so the card is not
+ * returned until they are there. Waiting only for the title left the queries below racing a
+ * request that resolves a tick later, which a loaded runner loses.
+ */
 async function card(): Promise<HTMLElement> {
   const title = await screen.findByText('Context')
   const element = title.closest('[data-slot="card"]')
   if (element === null) {
     throw new Error('the Context card is not in the document')
   }
+  await within(element as HTMLElement).findByLabelText('Summarize at')
   return element as HTMLElement
 }
 

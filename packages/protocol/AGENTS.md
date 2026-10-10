@@ -62,6 +62,8 @@ src/
   providers.ts          the model providers openharness knows: the one list every side uses
   reasoning.ts          how much thinking a request asks for, and what it ran with (#252)
   tools.ts              the tool vocabulary: a call's permission, its source, and its input
+  todo.ts               the `todo_write` tool's vocabulary and `readTodoList`, the one reading
+                        of the list a log holds (#305)
   resources/
     agent.ts            the agent resource + its endpoints
     mode.ts             the per-user mode resource + its endpoints (#245, M6)
@@ -192,6 +194,9 @@ provider, or "my default model" with no default set. It ends in `_error`, unlike
 | `ReasoningEffortSchema` / `ReasoningEffort`, `REASONING_EFFORTS`, `ReasoningEffortRunSchema` / `ReasoningEffortRun` | `low \| medium \| high`, and what a request was asked for and ran with (#252) |
 | `ToolPermissionSchema` / `ToolPermission`, `ToolSourceSchema` / `ToolSource`, `ToolReferenceSchema` / `ToolReference` | the tool vocabulary (epic #303, X1): what the policy said about a call (`allow \| ask \| deny`), where a tool comes from (`builtin \| mcp`), and the `{ name, source }` a request's span records per offered tool |
 | `JsonValueSchema` / `JsonValue`, `ToolInputSchema` / `ToolInput` | what a tool call's input may hold: JSON, and nothing else — the narrowness is what keeps `agent.tool_use.input` readable by every reader of the log |
+| `TODO_WRITE_TOOL_NAME`, `TodoStatusSchema` / `TodoStatus`, `TodoItemSchema` / `TodoItem`, `TodoListSchema` / `TodoList`, `TodoWriteInputSchema` / `TodoWriteInput` | the `todo_write` tool's vocabulary (#305): the three states, one item, the whole list, and the object a call carries it in |
+| `readTodoList(events)` | the list a log holds — the newest successful `todo_write` call's own input — or `null` when none has taken effect. The one reading the brain and the frontends share (#308) |
+| `UsageSearchesSchema` / `UsageSearches` | how many searches a usage answer covers (#305): a count, never a price |
 | `TimestampSchema`, `MetadataSchema`, `PageLimitSchema`, `ListOrderSchema`, `DEFAULT_PAGE_LIMIT`, `MAX_PAGE_LIMIT`, `METADATA_MAX_PAIRS`, `METADATA_MAX_KEY_LENGTH`, `METADATA_MAX_VALUE_LENGTH` | shared scalars and limits |
 | `PACKAGE_NAME` | the package name; lets a dependent prove the import resolved |
 
@@ -691,6 +696,12 @@ client gets its rates); `SessionModelUsage` (`events/session.ts`) carries the pe
 count beside its tokens, which is what lets a reader of the running `session.usage` totals count
 unpriced requests the way the routes do without storing any money.
 
+**Searches are counted, not priced** (#305). Every usage shape carries `searches`: how many
+`web_search` calls the covered log holds. The operator pays the search provider, no rate for
+that is in this repository, and inventing one would be the estimate the rest of this surface
+refuses to make — so it is a sibling of the totals rather than a member of them, and a day's
+entry carries its own.
+
 **The four `ModelUsage` counters are disjoint** — no token is counted twice — which is what makes
 `usageCost`'s arithmetic (each counter at its own rate) correct. `input_tokens` is the **uncached**
 input, the way Anthropic's own `input_tokens` reads, and the two cache counters are the cached
@@ -745,8 +756,10 @@ The semantics — local days, ownership, what a rewind does to a bill — are in
 
 ## Testing
 
-`src/**/*.test.ts` with Vitest (node environment). One file per module, plus
-`events/events.test.ts` for the unions — it drives a table of one valid wire sample per stored
+`src/**/*.test.ts` with Vitest (node environment). One file per module — `todo.test.ts` is the
+list's vocabulary and `readTodoList` (the newest successful call winning, a cleared list read as
+empty and not as none, a failed call and one nothing answered ignored, an input the schema
+refuses ignored) — plus `events/events.test.ts` for the unions — it drives a table of one valid wire sample per stored
 event type, so a schema change that breaks the wire format fails a named test rather than a
 type.
 

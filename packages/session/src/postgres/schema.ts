@@ -21,7 +21,7 @@ import { timestampAt } from '../clock'
 import type { SealedProviderCredential } from '../credentials'
 import { isUserEventType } from '../events'
 import { deepFreeze } from '../freeze'
-import type { AppendableEvent, ModelRequestUsage, PartitionSignal } from '../store'
+import type { AppendableEvent, ModelRequestUsage, PartitionSignal, ToolUseRecord } from '../store'
 
 /**
  * How the Postgres store's tables look to Kysely, and how a row becomes a protocol value.
@@ -531,6 +531,27 @@ export function modelRequestFromRow(row: ModelRequestRow): ModelRequestUsage {
     usage: row.model_usage as ModelUsage,
     processed_at: timestampOf(row.processed_at),
   })
+}
+
+/**
+ * A row of the per-user tool-call read (epic #303, #305): one `agent.tool_use` inside the
+ * caller's window that its `agent.tool_result` answered without an error.
+ *
+ * Two columns and nothing else — the name the call carried, and the instant the call was
+ * stored — which is what a usage report of searches counts and groups.
+ */
+export interface ToolUseRow {
+  /** The tool's name, out of the call event's payload. */
+  readonly name: string
+  /** The call event's `processed_at`: when the call was made. */
+  readonly processed_at: Date
+}
+
+/**
+ * The tool call a row carries, deep-frozen like every other answer this package hands out.
+ */
+export function toolUseFromRow(row: ToolUseRow): ToolUseRecord {
+  return deepFreeze({ name: row.name, processed_at: timestampOf(row.processed_at) })
 }
 
 // --------------------------------------------------------------------- channels

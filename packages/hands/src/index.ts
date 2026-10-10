@@ -9,7 +9,7 @@ import { PACKAGE_NAME as PROTOCOL_PACKAGE_NAME } from '@openharness/protocol'
  * runs one call of one, turning every outcome — a result, a refusal, a timeout, an interrupt —
  * into the `ToolResult` the brain stores. The conformance a real tool needs (a guarded fetch
  * for a user-supplied URL) is {@link safeFetch} (epic #245, A3a, decision M1); the built-in
- * tools themselves arrive with #305 and live here.
+ * tools of #305 — `web_fetch`, `web_search` and `todo_write` — live here.
  */
 
 /** This package's name. */
@@ -38,6 +38,50 @@ export {
   type ToolResult,
 } from './tool'
 
+export { htmlToMarkdown } from './markdown'
+export {
+  DEFAULT_MAX_FETCH_CHARS,
+  WEB_FETCH_MAX_BYTES,
+  WEB_FETCH_MAX_REDIRECTS,
+  WEB_FETCH_TIMEOUT_MS,
+  WEB_FETCH_TOOL_NAME,
+  WebFetchInputSchema,
+  createWebFetchTool,
+  safePageFetch,
+  type PageFetch,
+  type WebFetchInput,
+  type WebFetchOptions,
+} from './web-fetch'
+export {
+  BRAVE_MAX_COUNT,
+  BRAVE_SEARCH_ENDPOINT,
+  BRAVE_SEARCH_PROVIDER,
+  BRAVE_TIMEOUT_MS,
+  SUPPORTED_SEARCH_PROVIDERS,
+  SearchResultSchema,
+  createBraveSearchProvider,
+  type BraveSearchOptions,
+  type SearchProvider,
+  type SearchProviderName,
+  type SearchRequest,
+  type SearchRequestInit,
+  type SearchResponse,
+  type SearchResult,
+  type SearchTransport,
+} from './search'
+export {
+  DEFAULT_SEARCH_COUNT,
+  MAX_SEARCH_COUNT,
+  WEB_SEARCH_API_KEY,
+  WEB_SEARCH_TIMEOUT_MS,
+  WEB_SEARCH_TOOL_NAME,
+  WebSearchInputSchema,
+  createWebSearchTool,
+  type WebSearchInput,
+  type WebSearchToolOptions,
+} from './web-search'
+export { todoWriteTool } from './todo'
+
 export {
   DEFAULT_MAX_BYTES,
   DEFAULT_MAX_REDIRECTS,
@@ -48,10 +92,12 @@ export {
   SafeFetchError,
   isSafeFetchError,
   safeFetch,
+  safeFetchResult,
   type AddressResolver,
   type SafeFetchErrorCode,
   type SafeFetchOptions,
   type SafeFetchRequest,
+  type SafeFetchResult,
   type SafeFetchTransport,
 } from './safe-fetch'
 export {

@@ -220,6 +220,19 @@ what came back:
   `tool_call`, and a model whose registry entry says `false` chats exactly as it did before
   tools existed.
 
+The tools this build offers (epic #303, [#305](https://github.com/amirtuval/openharness/issues/305))
+are `builtin` ones — a call's `input` is the JSON object below, and the result is text:
+
+| tool         | input                                                    | what it does                                                                                                                                                                                                                          |
+| ------------ | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `web_fetch`  | `{ "url": "https://…" }`                                 | GETs one `http`/`https` URL through the SSRF guard (every redirect hop re-checked) and answers its main content as Markdown. Text and JSON pass through; anything else is an error.                                                   |
+| `web_search` | `{ "query": "…", "count": 5 }`                           | One search of the deployment's search API, as titles, URLs and snippets. **Offered only where an operator configured a provider**; each user has a daily allowance of searches, and a call over it is an `is_error` result saying so. |
+| `todo_write` | `{ "todos": [{ "content": "…", "status": "pending" }] }` | Replaces the model's whole task list. The list is the newest successful call's own input — nothing is stored beside it — and `readTodoList` in `@openharness/protocol` reads it back out of a log.                                    |
+
+A `web_fetch` result **leads with the address it finally came from** and says the content is
+untrusted data from the web, not instructions: it is the one tool whose text arrives from a
+place nobody in this deployment chose, and the log records that the model was told so.
+
 `session.usage` is the session's **running** totals, written by the brain in the same append as
 the `span.model_request_end` that closes a request which reported usage — so a client watching
 a turn reads the session's cost off the stream instead of adding the spans up itself:
@@ -1036,8 +1049,8 @@ prices when the request is answered, and nothing about cost is ever written down
 session does not have to ask.
 
 ```
-GET /v1/sessions/{session_id}/usage    -> { session_id, totals, cost, unpriced_requests, by_model }
-GET /v1/me/usage?from=&to=&tz=         -> { from, to, tz, totals, cost, unpriced_requests, by_model, by_day }
+GET /v1/sessions/{session_id}/usage    -> { session_id, totals, cost, unpriced_requests, by_model, searches }
+GET /v1/me/usage?from=&to=&tz=         -> { from, to, tz, totals, cost, unpriced_requests, by_model, by_day, searches }
 ```
 
 ```json
@@ -1051,6 +1064,7 @@ GET /v1/me/usage?from=&to=&tz=         -> { from, to, tz, totals, cost, unpriced
   },
   "cost": 0.002792,
   "unpriced_requests": 0,
+  "searches": 1,
   "by_model": [
     {
       "model": "anthropic/claude-sonnet-5",
@@ -1080,6 +1094,12 @@ GET /v1/me/usage?from=&to=&tz=         -> { from, to, tz, totals, cost, unpriced
   million tokens, from the vendored models.dev snapshot (see `apps/server/AGENTS.md`).
 - **Cache tokens are priced separately.** `cache_read` and `cache_write` are their own rates at
   every provider that publishes them, not a fraction of the input rate.
+- **Searches are counted, and never priced** (epic #303, #305). `searches` is how many
+  `web_search` calls the covered log holds — the call and its successful result, so a refused,
+  failed or never-answered call is not one — and it is a **count**: the operator pays the search
+  provider, no rate for that is in this repository, and inventing one would be the estimate the
+  rest of this surface refuses to make. It is a sibling of the totals rather than a member of
+  them, and every per-day entry of `by_day` carries its own.
 - **Usage is broken down by model, never by mode.** A session may switch models mid-conversation
   (U3), so `by_model` is what separates the cheap requests from the expensive ones. The per-user
   route adds `by_day`; there is no third axis.

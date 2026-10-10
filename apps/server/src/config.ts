@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs'
 import { hostname } from 'node:os'
 
 import { DEFAULT_COMPACTION_THRESHOLD, DEFAULT_MAX_TOOL_STEPS } from '@openharness/brain'
+import { BRAVE_SEARCH_PROVIDER, SUPPORTED_SEARCH_PROVIDERS } from '@openharness/hands'
+import type { SearchProviderName } from '@openharness/hands'
 import { DEFAULT_PARTITION_COUNT } from '@openharness/protocol'
 import { DEFAULT_KEY_CACHE_TTL_MS, envKeyProvider, gcpKmsKeyProvider } from '@openharness/vault'
 
@@ -111,11 +113,24 @@ export const ENV_VARS = {
   compactIntervalMs: 'OPENHARNESS_COMPACT_INTERVAL_MS',
   compactionThreshold: 'OPENHARNESS_COMPACTION_THRESHOLD',
   maxToolSteps: 'OPENHARNESS_MAX_TOOL_STEPS',
+  searchProvider: 'OPENHARNESS_SEARCH_PROVIDER',
+  searchApiKey: 'OPENHARNESS_SEARCH_API_KEY',
+  searchDailyLimit: 'OPENHARNESS_SEARCH_DAILY_LIMIT',
   logFormat: 'OPENHARNESS_LOG_FORMAT',
   tracing: 'OPENHARNESS_TRACING',
   traceSampleRate: 'OPENHARNESS_TRACE_SAMPLE_RATE',
   gcpProjectId: 'GOOGLE_CLOUD_PROJECT',
 } as const
+
+/** The search API `web_search` is served by: whose adapter, whose key, and what a user gets. */
+export interface SearchConfig {
+  /** The provider the adapter is built for; `brave` is the one this build has. */
+  readonly provider: SearchProviderName
+  /** The operator's key for that provider. Never stored, never logged, never in a result. */
+  readonly apiKey: string
+  /** How many searches one user gets per day; see {@link DEFAULT_SEARCH_DAILY_LIMIT}. */
+  readonly dailyLimit: number
+}
 
 /** A social provider's configured OAuth client. */
 export interface ProviderCredentialsConfig {
@@ -212,6 +227,18 @@ export interface ServerConfig {
    * short of a runaway — and a value below 1 fails the boot.
    */
   readonly maxToolSteps: number
+  /**
+   * `OPENHARNESS_SEARCH_PROVIDER` / `OPENHARNESS_SEARCH_API_KEY` /
+   * `OPENHARNESS_SEARCH_DAILY_LIMIT`: the search API `web_search` is served by (epic #303,
+   * #305), or `null` when the deployment offers the tool nowhere.
+   *
+   * The key is the **operator's**, not a user's: the deployment pays for the searches, which
+   * is why each user has a daily allowance and why the key never leaves the server — the tool
+   * is handed it per step through the turn's per-user values, and the registry scrubs it out of
+   * anything a tool returns. `null` means no `web_search` is registered at all, which is a
+   * deployment without a search API rather than a degraded one.
+   */
+  readonly search: SearchConfig | null
   /** `OPENHARNESS_LOG_FORMAT`: the readable one-line format, or Cloud Logging JSON (#158). */
   readonly logFormat: LogFormat
   /** `OPENHARNESS_TRACING`: where spans go — nowhere, or Cloud Trace (#158). */
@@ -425,6 +452,7 @@ export function readServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
     // The tool loop's budget (epic #303, X2): how many model requests one turn may make. At
     // least one — a turn that may make no request could not answer a message at all.
     maxToolSteps: readInteger(env, ENV_VARS.maxToolSteps, DEFAULT_MAX_TOOL_STEPS, { min: 1 }),
+    search: readSearch(env),
     // Observability (#158). The log format and the trace mode are a choice each, so an
     // unknown value is a boot failure naming the variable rather than a silent default; the
     // sample rate is a fraction, and 0 is meaningful (trace nothing while keeping the
@@ -469,6 +497,15 @@ export function describeConfig(config: ServerConfig): string[] {
       : `vault keys: local (${ENV_VARS.secretsKey}; value never printed)`,
   )
   lines.push(`public URL: ${config.betterAuthUrl}`)
+  // Which built-in tools a deployment's chats can call (epic #303, #305): `web_fetch` and
+  // `todo_write` always, `web_search` only where an operator key was configured. The key's
+  // value is never printed — only that there is one.
+  lines.push(
+    config.search === null
+      ? 'tools: web_fetch, todo_write (no search provider configured)'
+      : `tools: web_fetch, todo_write, web_search (${config.search.provider}, ` +
+          `${config.search.dailyLimit} searches/user/day, key not printed)`,
+  )
   const providers = [
     ...(config.google === undefined ? [] : ['google']),
     ...(config.github === undefined ? [] : ['github']),
@@ -544,6 +581,56 @@ function requireString(env: NodeJS.ProcessEnv, name: string): string {
   }
   return value
 }
+
+/**
+ * The search API this deployment offers `web_search` through (epic #303, #305), or `null`.
+ *
+ * `OPENHARNESS_SEARCH_API_KEY` is what turns the tool on: with no key there is no provider to
+ * call, so no tool is registered and the model is offered none. A **provider named without a
+ * key** is a boot failure rather than a silent no-search — the operator asked for search and
+ * gave no way to authenticate — and a provider name outside
+ * {@link SUPPORTED_SEARCH_PROVIDERS} is refused too, because a name this build has no adapter
+ * for could not be served. Naming no provider with a key set means `brave`, the one this build
+ * has an adapter for.
+ */
+export function readSearch(env: NodeJS.ProcessEnv): SearchConfig | null {
+  const apiKey = readString(env, ENV_VARS.searchApiKey)
+  const providerName = readChoice(
+    env,
+    ENV_VARS.searchProvider,
+    SUPPORTED_SEARCH_PROVIDERS,
+    BRAVE_SEARCH_PROVIDER,
+  )
+  if (apiKey === undefined) {
+    if (readString(env, ENV_VARS.searchProvider) !== undefined) {
+      throw new Error(
+        `${ENV_VARS.searchProvider} is set but ${ENV_VARS.searchApiKey} is not: web_search ` +
+          'needs the operator key, and a deployment with no key offers no search tool at all. ' +
+          'Set both, or neither.',
+      )
+    }
+    return null
+  }
+  return {
+    provider: providerName,
+    apiKey,
+    // Zero is meaningful: the tool stays registered and every call answers with the limit
+    // notice, which is how a deployment turns search off without dropping its key's
+    // configuration.
+    dailyLimit: readInteger(env, ENV_VARS.searchDailyLimit, DEFAULT_SEARCH_DAILY_LIMIT, { min: 0 }),
+  }
+}
+
+/**
+ * `OPENHARNESS_SEARCH_DAILY_LIMIT`'s default: 50 searches per user per day.
+ *
+ * A research-shaped day of chat is a handful of searches — the model reaches for one when it
+ * needs a fact it does not have, not for every turn — so fifty covers heavy honest use while
+ * bounding what one account can spend of the operator's plan. It is per **user** and per day,
+ * so a second user cannot exhaust a first one's, and the whole deployment's worst case is
+ * `users × 50` rather than "as many as the model asks for".
+ */
+export const DEFAULT_SEARCH_DAILY_LIMIT = 50
 
 /**
  * A variable's value as an integer, or `fallback` when it is unset.
