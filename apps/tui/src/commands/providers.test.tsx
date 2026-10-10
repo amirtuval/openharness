@@ -62,6 +62,16 @@ describe('formatCredentials', () => {
     const [line] = formatCredentials([makeProviderCredential({ name: 'acme' })])
     expect(line).toContain('acme')
   })
+
+  it('says a keyless custom credential carries no key, rather than an empty ellipsis', () => {
+    // #249: a custom endpoint may take no key; an empty `last4` is that fact, not a lost one.
+    const [line] = formatCredentials([
+      makeProviderCredential({ name: 'custom', type: 'openai_compatible', last4: '' }),
+    ])
+    // The name column is a fixed width, so the display name is truncated like any other.
+    expect(line).toContain('Custom (OpenAI-')
+    expect(line).toContain('no key')
+  })
 })
 
 describe('runProvidersList', () => {

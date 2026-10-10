@@ -85,6 +85,9 @@ export class PostgresCredentialStore implements CredentialStore {
       // predates the field, and `local` is what the vault reads a `null` back as.
       key_provider: input.sealed.keyProvider ?? null,
       last4: input.last4,
+      // The public facts the type publishes, or `null` for a type with none (#249, A3b). The
+      // store does not interpret them; they are written and read back as JSON.
+      details: input.details ?? null,
       created_at: at,
       updated_at: at,
       validated_at: instant(Date.parse(input.validatedAt)),
@@ -104,6 +107,7 @@ export class PostgresCredentialStore implements CredentialStore {
           kek_version: row.kek_version,
           key_provider: row.key_provider,
           last4: row.last4,
+          details: row.details,
           updated_at: row.updated_at,
           validated_at: row.validated_at,
         }),
@@ -129,7 +133,16 @@ export class PostgresCredentialStore implements CredentialStore {
     // the in-memory store sorts by.
     const rows = await this.#db
       .selectFrom('provider_credentials')
-      .select(['id', 'type', 'name', 'last4', 'created_at', 'updated_at', 'validated_at'])
+      .select([
+        'id',
+        'type',
+        'name',
+        'last4',
+        'details',
+        'created_at',
+        'updated_at',
+        'validated_at',
+      ])
       .where('user_id', '=', options.userId)
       .orderBy('name', 'asc')
       .execute()

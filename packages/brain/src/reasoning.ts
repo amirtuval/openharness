@@ -167,6 +167,17 @@ export const CREDENTIAL_TYPE_REASONING: Readonly<Record<NamedCredentialType, Pro
     // OpenAI model is, and the option its client actually reads is the OpenAI one.
     options: (effort) => ({ openai: { reasoningEffort: effort } }),
   },
+  openai_compatible: {
+    // `createOpenAICompatible(...).chatModel(id)` reads its options from the canonical
+    // `openaiCompatible` key — and, for compatibility, the deprecated `openai-compatible` and
+    // the provider's own name — checked against `@ai-sdk/openai-compatible@3.0.64`. Its
+    // `reasoningEffort` is the request body's `reasoning_effort`, the field the whole
+    // OpenAI-compatible family carries, so one option covers every custom endpoint. Whether a
+    // given endpoint's model takes one is the resolver's question and not this table's: a
+    // custom URL has no models.dev entry, so an unknown deployment gets nothing (the safe
+    // default), and a level is sent only where a host's resolver grants one.
+    options: (effort) => ({ openaiCompatible: { reasoningEffort: effort } }),
+  },
 }
 
 /** What one model request does with the effort the log asked for. */

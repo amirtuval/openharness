@@ -59,16 +59,21 @@ describe('CREDENTIAL_TARGETS', () => {
     expect(CREDENTIAL_TARGETS.map((target) => target.name)).toEqual([
       ...PROVIDERS.map((provider) => provider.id),
       'azure',
+      'custom',
     ])
     expect(
       CREDENTIAL_TARGETS.filter((target) => target.named).map((target) => target.credential),
-    ).toEqual(['azure_openai'])
+    ).toEqual(['azure_openai', 'openai_compatible'])
   })
 
   it('gives every target what a tile and a form need', () => {
     for (const target of CREDENTIAL_TARGETS) {
       expect(target.displayName, target.name).not.toBe('')
-      expect(target.keyUrl, target.name).toMatch(/^https:\/\/[^/]+/)
+      // A fixed provider always links to its key page; a named type links only when it has a
+      // console to send the reader to (a custom endpoint is the user's own, #249).
+      if (target.keyUrl !== undefined) {
+        expect(target.keyUrl, target.name).toMatch(/^https:\/\/[^/]+/)
+      }
       // The credential type is what selects the form, so it has to be one the protocol's
       // request union parses — for a named target with a representative payload.
       const body =
@@ -79,9 +84,17 @@ describe('CREDENTIAL_TARGETS', () => {
               api_key: 'k',
               deployments: ['d'],
             }
-          : { type: 'api_key', api_key: 'k' }
+          : target.credential === 'openai_compatible'
+            ? { type: 'openai_compatible', base_url: 'https://x.example.com/v1', api_key: 'k' }
+            : { type: 'api_key', api_key: 'k' }
       expect(PutProviderCredentialRequestSchema.safeParse(body).success, target.name).toBe(true)
     }
+  })
+
+  it('gives a custom endpoint no key page, and the form no link to draw', () => {
+    const custom = CREDENTIAL_TARGETS.find((target) => target.credential === 'openai_compatible')
+    expect(custom).toMatchObject({ name: 'custom', named: true })
+    expect(custom?.keyUrl).toBeUndefined()
   })
 })
 

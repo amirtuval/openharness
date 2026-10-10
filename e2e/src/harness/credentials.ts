@@ -63,6 +63,45 @@ export async function seedProviderCredential(
 }
 
 /**
+ * Store a sealed **custom OpenAI-compatible** credential, the way a `PUT` of that payload
+ * would (epic #245, A3b).
+ *
+ * A `PUT` of this type validates against the endpoint the reader typed — which a test can
+ * point at a local stub, but only when the server's self-host flag is on. This is for the
+ * tests that need such a credential to exist with the flag **off** — the "refused at request
+ * time" path — where the save-time check would have to reach a private address the server is
+ * told not to.
+ */
+export async function seedOpenAICompatibleCredential(
+  database: E2eDatabase,
+  input: {
+    readonly userId: string
+    readonly name: string
+    readonly baseUrl: string
+    readonly apiKey?: string
+  },
+): Promise<ProviderCredential> {
+  const body = {
+    type: 'openai_compatible' as const,
+    base_url: input.baseUrl,
+    ...(input.apiKey === undefined ? {} : { api_key: input.apiKey }),
+  }
+  const sealed = await sealCredential(e2eVault(), { userId: input.userId, name: input.name, body })
+  const store = createPostgresCredentialStore({ connectionString: database.url })
+  try {
+    return await store.upsert(
+      credentialUpsert(
+        { userId: input.userId, name: input.name, body },
+        sealed,
+        new Date().toISOString(),
+      ),
+    )
+  } finally {
+    await store.close()
+  }
+}
+
+/**
  * Store a sealed **Azure OpenAI** credential, the way a `PUT` of that payload would.
  *
  * The suite's own refusal paths (a bad key, a private endpoint) go through the route, because

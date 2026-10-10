@@ -151,8 +151,13 @@ function reduceModel(model) {
 const SOURCES = [
   ...PROVIDERS.map(({ id, modelsDevKey }) => ({ id, modelsDevKey })),
   // A credential type's entries are filed under its models.dev key — `azure`, not
-  // `azure_openai` — because the catalogue looks a deployment up by that same key.
-  ...CREDENTIAL_TYPES.map(({ modelsDevKey }) => ({ id: modelsDevKey, modelsDevKey })),
+  // `azure_openai` — because the catalogue looks a deployment up by that same key. A type with
+  // no key names no single models.dev provider (a custom OpenAI-compatible base URL is the
+  // user's), so it contributes no entry and the catalogue borrows a model's metadata only on
+  // an exact, unambiguous id match.
+  ...CREDENTIAL_TYPES.flatMap(({ modelsDevKey }) =>
+    modelsDevKey === undefined ? [] : [{ id: modelsDevKey, modelsDevKey }],
+  ),
 ]
 
 /** The whole snapshot: the date, the source, and one entry per provider, in the list's order. */

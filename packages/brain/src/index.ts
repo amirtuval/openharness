@@ -43,6 +43,8 @@ export const DEPENDENCIES = [
 export * from './context'
 export * from './errors'
 export * from './azure-fetch'
+export * from './openai-compatible-fetch'
+export * from './provider-fetch'
 export * from './model'
 export * from './reasoning'
 export * from './redact'

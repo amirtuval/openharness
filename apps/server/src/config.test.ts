@@ -73,6 +73,7 @@ describe('readServerConfig', () => {
       microsoft: undefined,
       testModel: undefined,
       webDir: undefined,
+      allowPrivateProviderUrls: false,
       trustedProxyHops: DEFAULT_TRUSTED_PROXY_HOPS,
       corsOrigins: [],
       maxConcurrentSessions: DEFAULT_MAX_CONCURRENT_SESSIONS,
@@ -113,6 +114,7 @@ describe('readServerConfig', () => {
         MICROSOFT_CLIENT_SECRET: 'ms-secret',
         MICROSOFT_TENANT_ID: 'contoso',
         OPENHARNESS_WEB_DIR: '/srv/web',
+        OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS: '1',
         OPENHARNESS_TRUSTED_PROXY_HOPS: '2',
         OPENHARNESS_CORS_ORIGINS: 'http://a.test, http://b.test',
         OPENHARNESS_MAX_CONCURRENT_SESSIONS: '12',
@@ -150,6 +152,7 @@ describe('readServerConfig', () => {
       microsoft: { clientId: 'ms-id', clientSecret: 'ms-secret', tenantId: 'contoso' },
       testModel: 'mock',
       webDir: '/srv/web',
+      allowPrivateProviderUrls: true,
       trustedProxyHops: 2,
       corsOrigins: ['http://a.test', 'http://b.test'],
       maxConcurrentSessions: 12,
@@ -221,6 +224,24 @@ describe('readServerConfig', () => {
     expect(() => readServerConfig(env({ OPENHARNESS_PARTITIONS: '0' }))).toThrow(
       /OPENHARNESS_PARTITIONS/,
     )
+  })
+
+  it('refuses private custom-provider URLs by default, and allows them when told (#249, M4)', () => {
+    expect(readServerConfig(env()).allowPrivateProviderUrls).toBe(false)
+    // Reached only for the custom OpenAI-compatible credential type; off unless set.
+    expect(
+      readServerConfig(env({ OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS: '1' }))
+        .allowPrivateProviderUrls,
+    ).toBe(true)
+    expect(
+      readServerConfig(env({ OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS: 'true' }))
+        .allowPrivateProviderUrls,
+    ).toBe(true)
+    for (const value of ['yes', '0', 'on']) {
+      expect(() =>
+        readServerConfig(env({ OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS: value })),
+      ).toThrow(/OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS/)
+    }
   })
 
   it('trusts no forwarding headers by default, and as many proxies as it is told (#151)', () => {

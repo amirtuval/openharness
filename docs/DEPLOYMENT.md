@@ -640,6 +640,30 @@ deployment. Override one by adding it to the `monitoring` module call.
   GCP's own (load balancer, Cloud SQL, GKE), which need no agent and are not billed as custom
   metrics.
 
+### Private addresses for custom provider URLs, and why they stay off
+
+A **custom OpenAI-compatible** credential is a base URL a user typed, and every request to it
+goes through the SSRF guard (`safeFetch`): loopback, private, link-local and cloud-metadata
+addresses are refused, on save and on every model call and `/models` listing afterwards. A
+**self-hosted** deployment whose users point that credential type at a server on its own
+network — an Ollama or vLLM beside the app, a gateway on a private subnet — can turn the
+refusal off for that one credential type with:
+
+```
+OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS=1
+```
+
+It is deliberately **not set anywhere in this infrastructure**: `charts/openharness/values.yaml`
+does not carry it, `charts/openharness/ci/staging-values.yaml` does not, and
+`infra/modules/app/locals.tf` does not set it for any environment. Staging and production run
+behind a public load balancer with sign-in to the open internet, where the guard is doing
+exactly the job it exists for: a private address in a credential can only be a mistake or an
+attack. The flag is for a single-tenant, self-hosted install whose operator knows the network;
+turning it on here would let any signed-in user make the service connect anywhere it can
+reach. It applies to the `openai_compatible` credential type alone — Azure OpenAI never reads
+it — and the server says so loudly at startup when it is on
+(`custom provider URLs: PRIVATE ADDRESSES ALLOWED`).
+
 ### What is deliberately off
 
 **Load-balancer request logging stays off.** It is the single most expensive thing in this

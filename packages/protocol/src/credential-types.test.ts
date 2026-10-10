@@ -40,6 +40,18 @@ describe('CREDENTIAL_TYPES', () => {
     expect(defaultCredentialName('azure_openai')).toBe('azure')
   })
 
+  it('carries openai_compatible, with no models.dev key and no key page', () => {
+    // A custom base URL names no single models.dev provider and no single console, so both
+    // facts are absent rather than guessed — the forms render without a link.
+    expect(credentialTypeInfo('openai_compatible')).toEqual({
+      type: 'openai_compatible',
+      name: 'Custom (OpenAI-compatible)',
+      defaultName: 'custom',
+    })
+    expect(credentialTypeName('openai_compatible')).toBe('Custom (OpenAI-compatible)')
+    expect(defaultCredentialName('openai_compatible')).toBe('custom')
+  })
+
   it('has no facts for api_key — its name is always the fixed provider id', () => {
     expect(credentialTypeInfo('api_key')).toBeUndefined()
     expect(credentialTypeName('api_key')).toBeUndefined()
@@ -53,15 +65,23 @@ describe('CREDENTIAL_TYPES', () => {
     }
   })
 
-  it('sends every reader to an https page to create the secret', () => {
+  it('sends every reader that has a key page to an https one', () => {
     for (const entry of CREDENTIAL_TYPES) {
-      expect(entry.keyUrl, entry.type).toMatch(/^https:\/\/[^/]+/)
+      if (entry.keyUrl !== undefined) {
+        expect(entry.keyUrl, entry.type).toMatch(/^https:\/\/[^/]+/)
+      }
     }
+    // A type with no console to link to omits it; only a custom endpoint does today.
+    expect(credentialTypeInfo('openai_compatible')?.keyUrl).toBeUndefined()
+    expect(credentialTypeInfo('azure_openai')?.keyUrl).toBe('https://portal.azure.com/')
   })
 
-  it('files each type under its own models.dev key', () => {
-    const keys = CREDENTIAL_TYPES.map((entry) => entry.modelsDevKey)
+  it('files each type that has one under its own models.dev key', () => {
+    const keys = CREDENTIAL_TYPES.flatMap((entry) =>
+      entry.modelsDevKey === undefined ? [] : [entry.modelsDevKey],
+    )
     expect(new Set(keys).size).toBe(keys.length)
+    expect(credentialTypeInfo('openai_compatible')?.modelsDevKey).toBeUndefined()
   })
 })
 

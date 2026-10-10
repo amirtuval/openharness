@@ -328,3 +328,62 @@ describe('ProviderSetup — the azure form (#245, A3a)', () => {
     expect(frameOf(setup)).toContain('Name (its models will be')
   })
 })
+
+describe('ProviderSetup — the custom OpenAI-compatible form (#249, A3b)', () => {
+  it('asks a base URL and an optional key, and saves a keyless endpoint', async () => {
+    const setup = renderSetup()
+
+    await waitForScreen(setup, 'No provider key yet')
+    await waitForFrame(setup, 'Custom (OpenAI-compatible)')
+
+    // Walk to the custom row (the last one — after the eleven providers and Azure) and open it.
+    for (let step = 0; step < 12; step += 1) pressKey(setup, 'down')
+    pressKey(setup, 'enter')
+
+    await waitForScreen(setup, 'Base URL')
+    // A custom endpoint is the reader's own: there is no key page to print.
+    expect(frameOf(setup)).not.toContain('Get a key:')
+
+    typeText(setup, 'http://127.0.0.1:11434/v1')
+    // The base URL is not a secret: what was typed is on screen.
+    await waitForFrame(setup, 'http://127.0.0.1:11434/v1')
+    pressKey(setup, 'enter')
+
+    await waitForScreen(setup, 'API key (optional)')
+    // The key is optional: Enter on the empty box moves on and saves.
+    pressKey(setup, 'enter')
+
+    await waitFor(() => setup.saved.length === 1)
+    expect(setup.saved).toEqual(['custom'])
+    const { data } = await setup.fake.providerCredentials.list()
+    expect(data).toEqual([
+      expect.objectContaining({
+        type: 'openai_compatible',
+        name: 'custom',
+        last4: '',
+        details: { base_url_host: '127.0.0.1:11434' },
+      }),
+    ])
+  })
+
+  it('asks for a name when one custom credential is already stored, and saves under it', async () => {
+    const setup = renderSetup({ provider: 'custom', stored: ['custom'] })
+
+    // A custom credential's models are `<name>/<model>`, not `<name>/<deployment>`.
+    await waitForScreen(setup, 'Name (its models will be custom/<model>)')
+
+    typeText(setup, 'my-local')
+    pressKey(setup, 'enter')
+    await waitForScreen(setup, 'Base URL')
+    typeText(setup, 'https://api.example.com/v1')
+    pressKey(setup, 'enter')
+    await waitForScreen(setup, 'API key (optional)')
+    typeText(setup, 'sk-custom-4242')
+    pressKey(setup, 'enter')
+
+    await waitFor(() => setup.saved.length === 1)
+    expect(setup.saved).toEqual(['my-local'])
+    const { data } = await setup.fake.providerCredentials.list()
+    expect(data.map((credential) => credential.name).sort()).toEqual(['custom', 'my-local'])
+  })
+})

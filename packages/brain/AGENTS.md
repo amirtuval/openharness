@@ -53,6 +53,8 @@ src/
   model.ts              ModelFactory, credentials, and streaming one request through the AI SDK
   azure-fetch.ts        the Azure endpoint's base URL, and the safeFetch guard a model call goes through
   reasoning.ts          the reasoning effort: per provider, gated by the injected resolver
+  provider-fetch.ts     the one guarded `fetch` (safeFetch + a limits preset + allowPrivate) both types build from
+  openai-compatible-fetch.ts  a custom endpoint's base URL, and the safeFetch guard its model call goes through (#249)
   redact.ts             redactSecret: scrubbing a provider key out of error text
   errors.ts             classifyModelError: retryable or terminal, and which session.error
   retry.ts              RetryPolicy, backoff, and the injectable sleep
@@ -79,11 +81,13 @@ emits what that reaches.
 | `createContextStrategy(config?)`, `ContextStrategyConfig`                                                                              | the default strategy: the conversation, trimmed to a token budget resolved per model                                                                              |
 | `DEFAULT_CONTEXT_STRATEGY`, `DEFAULT_CONTEXT_TOKEN_BUDGET`, `CHARS_PER_TOKEN`                                                          | its defaults                                                                                                                                                      |
 | `estimateTokens(text)`                                                                                                                 | the chars/4 estimate the budget is measured in                                                                                                                    |
-| `ModelCredential`                                                                                                                      | `{ type: 'api_key', apiKey }` or `{ type: 'azure_openai', apiKey, endpoint }` — one request's credential                                                          |
+| `ModelCredential`                                                                                                                      | `{ type: 'api_key', apiKey }`, `{ type: 'azure_openai', apiKey, endpoint }` or `{ type: 'openai_compatible', apiKey, baseUrl }` — one request's credential        |
 | `ResolveCredential`                                                                                                                    | `(name) => Promise<ModelCredential \| null>` — where it comes from                                                                                                |
 | `ModelFactory`                                                                                                                         | `(modelId, credential) => LanguageModel` — how a `provider/model` becomes a model                                                                                 |
 | `providerModelFactory`, `createProviderModelFactory(options)`                                                                          | the `ModelFactory` hosts normally pass: the official AI SDK providers, the key passed explicitly                                                                  |
 | `azureFetch`, `createAzureFetch(options)`, `azureBaseUrl(endpoint)`                                                                    | the Azure `fetch` (safeFetch under the streaming-safe limits) and the base URL it builds                                                                          |
+| `openAICompatibleFetch`, `createOpenAICompatibleFetch(options)`, `openAICompatibleBaseUrl(baseUrl)`                                    | the custom endpoint's `fetch` (safeFetch under the streaming-safe limits, with the self-host `allowPrivate` option, #249) and the base URL it normalizes          |
+| `SafeFetch`, `ProviderFetch`, `SafeProviderFetchOptions`, `createSafeProviderFetch(options)`                                           | the one guarded `fetch` the two URL-typed types are built from                                                                                                    |
 | `providerOf(modelId)`                                                                                                                  | the provider of a `provider/model` id: the part before the first slash                                                                                            |
 | `isUsableCredential(credential)`                                                                                                       | whether a resolved credential is a key at all (a blank one is not)                                                                                                |
 | `missingCredentialMessage(provider)`                                                                                                   | the `session.error` sentence for a provider with no key                                                                                                           |
@@ -399,23 +403,25 @@ than eight characters is left alone, as is a trimmed variant that falls below ei
 whole, so the log still says what the provider said. The brain itself never logs; the tests
 capture the console anyway, because the libraries on this path could.
 
-### Named credentials, and Azure OpenAI (epic #245, A3a)
+### Named credentials, Azure OpenAI and custom OpenAI-compatible endpoints (epic #245, A3a/A3b)
 
 The first half of a `provider/model` id is not always one of the eleven provider ids. A
-**named credential** — an Azure OpenAI credential stored under `azure` or `azure-eu` — takes
-the model ids `<name>/<deployment>`, and the credential's `type` is what decides which client
-builds it:
+**named credential** — an Azure OpenAI credential stored under `azure` or `azure-eu`, or a
+custom endpoint stored under `custom` — takes the model ids `<name>/<deployment>` (Azure) or
+`<name>/<model>` (custom), and the credential's `type` is what decides which client builds it:
 
 ```
-providerOf('azure/gpt-4o') → 'azure'   → not one of the eleven → the credential's type decides
-                                       → azure_openai → createAzure(...).chat('gpt-4o')
+providerOf('azure/gpt-4o')  → 'azure'  → not one of the eleven → the credential's type decides
+                                        → azure_openai → createAzure(...).chat('gpt-4o')
+providerOf('custom/llama3') → 'custom' → not one of the eleven → openai_compatible
+                                        → createOpenAICompatible(...).chatModel('llama3')
 ```
 
 - **The type is the discriminant, and it is checked.** For a first half that _is_ one of the
   eleven, the request is built from `credential.apiKey` as it always was. For any other first
-  half, the credential must be an `azure_openai` one; an `api_key` credential under a name no
-  provider carries is still an `UnsupportedProviderError`, which ends a turn with no span and
-  no request, exactly as before.
+  half, the credential must be an `azure_openai` or `openai_compatible` one; an `api_key`
+  credential under a name no provider carries is still an `UnsupportedProviderError`, which ends
+  a turn with no span and no request, exactly as before.
 - **`createAzure` gets the key and a base URL, both explicit.** `azureBaseUrl(endpoint)` turns
   the resource endpoint a user saved (`https://my-resource.openai.azure.com`) into the base URL
   `@ai-sdk/azure` appends `/v1` to — deriving and normalizing the `/openai` segment, so the
@@ -428,8 +434,23 @@ providerOf('azure/gpt-4o') → 'azure'   → not one of the eleven → the crede
   `STREAMING_LIMITS` — no total deadline and no size cap, because a model streams a long reply,
   and an idle timeout instead, because a stream that stops producing is hung rather than slow.
   Private addresses are **always** refused: the `allowPrivate` option safeFetch has is for the
-  later custom-URL credential type and is never passed here. The endpoint is a URL a user typed,
-  so the guard runs on the model call exactly as it does on the save-time check (in the server).
+  custom-URL credential type and is never passed here. The endpoint is a URL a user typed, so the
+  guard runs on the model call exactly as it does on the save-time check (in the server).
+- **The custom client is `@ai-sdk/openai-compatible` at the base URL the user saved.**
+  `openAICompatibleBaseUrl(baseUrl)` normalizes the trailing slash (nothing else is derived —
+  the family serves `<base>/models` and `<base>/chat/completions`, and the user pasted that
+  root), `apiKey` is a constructor argument (an empty one sends no `Authorization` header —
+  `createOpenAICompatible` has no environment fallback), and `.chatModel(id)` is used rather
+  than the provider's default for the same reason Azure uses `.chat`. `isUsableCredential`
+  checks this type's **base URL**, not its key: the key is optional (`apiKey` may be `''`), so a
+  missing base URL is the only unusable shape.
+- **The custom `fetch` honours the self-host setting, and only for this type.**
+  `createOpenAICompatibleFetch({ allowPrivate })` — the server passes its
+  `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS` flag — spreads `allowPrivate: true` into safeFetch's
+  options **only when the flag is on**; when it is off the option is absent, so the guard's own
+  refusal applies. `azureFetch` never passes it. Both are built by the one
+  `createSafeProviderFetch` (`provider-fetch.ts`), which is where the AI SDK's `Request`-or-URL
+  shape and the `STREAMING_LIMITS` preset meet.
 
 ### Usage
 
@@ -584,6 +605,12 @@ retries run on an injected `sleep`, the clock is a `TestClock` from
   `azure/gpt-4o` request is sent to (the deployment from the id, the endpoint from the
   credential), the key in the `api-key` header with `AZURE_API_KEY` set to a decoy, and that
   the real `azureFetch` refuses a loopback, metadata or `http:` endpoint before any request.
+- `openai-compatible-model.test.ts` — the custom-endpoint path (#249): `openAICompatibleBaseUrl`'s
+  normalization, the URL a `custom/llama3.3` request is sent to, the key as `Authorization:
+Bearer` with a decoy environment, **no** `Authorization` header for a keyless endpoint, a
+  streamed SSE reply end to end, the self-host `allowPrivate` option reaching the guard only when
+  it is on (and the streaming preset in every case), and that the real `openAICompatibleFetch`
+  refuses a loopback, metadata or `ftp:` endpoint before any request.
 - `src/testing/harness.ts` builds the session and reads the log back; `src/testing/mock-model.ts`
   scripts what each model request answers with, records the prompts, and can act mid-stream
   (abort, append a steering message) between two chunks. Its `apiCallError` is the failure

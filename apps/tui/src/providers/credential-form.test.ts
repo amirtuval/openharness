@@ -5,9 +5,13 @@ import { CREDENTIAL_FORMS, formForCredential, nameErrorMessage } from './credent
 
 describe('CREDENTIAL_FORMS', () => {
   it('has a form for every credential type the protocol knows (X6)', () => {
-    // The protocol's union has one member today; the assertion is that the two lists are the
-    // same list, so a new member with no form fails here rather than at a reader's prompt.
-    expect(Object.keys(CREDENTIAL_FORMS).sort()).toEqual(['api_key', 'azure_openai'])
+    // The assertion is that this table and the protocol's union are the same list, so a new
+    // member with no form fails here rather than at a reader's prompt.
+    expect(Object.keys(CREDENTIAL_FORMS).sort()).toEqual([
+      'api_key',
+      'azure_openai',
+      'openai_compatible',
+    ])
   })
 
   it('builds a body the protocol accepts', () => {
@@ -75,6 +79,51 @@ describe('the azure_openai form', () => {
       api_key: '',
       deployments: [],
     })
+    expect(PutProviderCredentialRequestSchema.safeParse(body).success).toBe(false)
+  })
+})
+
+describe('the openai_compatible form', () => {
+  it('collects a base URL and an optional key', () => {
+    const form = CREDENTIAL_FORMS.openai_compatible
+    expect(form.fields.map((field) => field.name)).toEqual(['base_url', 'api_key'])
+    // Only the key is masked; the base URL is shown so a typo is visible, and it is optional.
+    expect(form.fields.filter((field) => field.secret).map((field) => field.name)).toEqual([
+      'api_key',
+    ])
+    expect(form.fields.find((field) => field.name === 'api_key')?.optional).toBe(true)
+    expect(form.fields.find((field) => field.name === 'base_url')?.optional).toBeUndefined()
+  })
+
+  it('builds a body the protocol accepts, with the URL trimmed', () => {
+    const body = CREDENTIAL_FORMS.openai_compatible.build({
+      base_url: '  https://api.example.com/v1  ',
+      api_key: 'sk-custom-4242',
+    })
+    expect(body).toEqual({
+      type: 'openai_compatible',
+      base_url: 'https://api.example.com/v1',
+      api_key: 'sk-custom-4242',
+    })
+    expect(PutProviderCredentialRequestSchema.safeParse(body).success).toBe(true)
+  })
+
+  it('omits the key when it is empty, which a keyless endpoint needs', () => {
+    // The schema accepts a missing key but not an empty string, so the body must not carry one.
+    const body = CREDENTIAL_FORMS.openai_compatible.build({
+      base_url: 'http://127.0.0.1:11434/v1',
+      api_key: '   ',
+    })
+    expect(body).toEqual({
+      type: 'openai_compatible',
+      base_url: 'http://127.0.0.1:11434/v1',
+    })
+    expect(PutProviderCredentialRequestSchema.safeParse(body).success).toBe(true)
+  })
+
+  it('sends an empty URL the protocol refuses rather than a body it half-fills', () => {
+    const body = CREDENTIAL_FORMS.openai_compatible.build({})
+    expect(body).toEqual({ type: 'openai_compatible', base_url: '' })
     expect(PutProviderCredentialRequestSchema.safeParse(body).success).toBe(false)
   })
 })

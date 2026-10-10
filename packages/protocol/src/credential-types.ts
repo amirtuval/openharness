@@ -31,24 +31,33 @@ export interface CredentialTypeDefinition {
    * The key this type's models are filed under in the models.dev registry payload. Distinct
    * from {@link defaultName}: it names the *registry* entry, not the user's credential, so a
    * `azure-eu` credential still reads models.dev's single `azure` entry.
+   *
+   * Absent for a type whose endpoints the user chooses — a custom OpenAI-compatible base URL
+   * names no single models.dev provider, so there is no entry to file its models under. Such a
+   * type may still borrow a model's metadata when the raw id matches exactly one registry
+   * model, and gets none otherwise.
    */
-  readonly modelsDevKey: string
+  readonly modelsDevKey?: string
   /**
    * Where a reader creates the secret. Opened in a new tab, and never a page whose path is a
    * guess — the same rule the provider list's `keyUrl` follows. A named type talks to a
    * service the reader reaches through its own console, so this is that console's entry page.
+   *
+   * Absent for a type with no single console — a self-hosted endpoint the user's own operator
+   * runs has no page to send a reader to, and the form simply offers no link.
    */
-  readonly keyUrl: string
+  readonly keyUrl?: string
 }
 
 /**
- * The named credential types, in the order every side lists them. Today: Azure OpenAI.
+ * The named credential types, in the order every side lists them. Today: Azure OpenAI and a
+ * custom OpenAI-compatible endpoint.
  *
  * `credential-types.test.ts` holds this list against the request union's members, so a type
  * added to the schema without its facts here — or the reverse — fails a named test rather than
  * reaching a form with nothing to render.
  */
-export const CREDENTIAL_TYPES = [
+const CREDENTIAL_TYPE_DEFINITIONS = [
   {
     type: 'azure_openai',
     name: 'Azure OpenAI',
@@ -59,10 +68,24 @@ export const CREDENTIAL_TYPES = [
     // group, so its path is a guess and the portal root is the honest link.
     keyUrl: 'https://portal.azure.com/',
   },
+  {
+    type: 'openai_compatible',
+    name: 'Custom (OpenAI-compatible)',
+    defaultName: 'custom',
+    // No `modelsDevKey`: the base URL is the user's, so there is no single models.dev provider
+    // to file its models under. No `keyUrl`: a self-hosted endpoint has no console to link to.
+  },
 ] as const satisfies readonly CredentialTypeDefinition[]
 
+/**
+ * The named credential types, in the order every side lists them — the list above, widened to
+ * {@link CredentialTypeDefinition} so a caller reads an optional fact (`keyUrl`, `modelsDevKey`)
+ * without the literal union refusing the member that omits it.
+ */
+export const CREDENTIAL_TYPES: readonly CredentialTypeDefinition[] = CREDENTIAL_TYPE_DEFINITIONS
+
 /** A credential type that is not one of the eleven fixed provider ids. */
-export type NamedCredentialType = (typeof CREDENTIAL_TYPES)[number]['type']
+export type NamedCredentialType = (typeof CREDENTIAL_TYPE_DEFINITIONS)[number]['type']
 
 /**
  * The character shape a credential name must have: lowercase letters, digits and single dashes.

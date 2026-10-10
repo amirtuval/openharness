@@ -237,7 +237,10 @@ export function formatCredentials(credentials: readonly ProviderCredential[]): r
     [
       pad(credentialDisplayName(credential), NAME_WIDTH),
       pad(credential.type, TYPE_WIDTH),
-      pad(`…${credential.last4}`, LAST4_WIDTH),
+      // A custom OpenAI-compatible credential may carry no key at all (#249); its `last4` is
+      // empty, and `…` alone would read as a key that failed to load rather than one a local
+      // endpoint does not need.
+      pad(credential.last4 === '' ? 'no key' : `…${credential.last4}`, LAST4_WIDTH),
       credential.created_at,
     ].join('  '),
   )

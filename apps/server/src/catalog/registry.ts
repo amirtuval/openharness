@@ -95,6 +95,21 @@ export interface ModelRegistry {
    * A read, never a fetch: an implementation must not reach the network (C2).
    */
   models(provider: string): readonly RegistryModel[]
+
+  /**
+   * Every model the registry files under one **raw model id**, across every provider it knows
+   * (epic #245, A3b).
+   *
+   * This is what a credential whose endpoints a user chose — a custom OpenAI-compatible base
+   * URL — joins against: it names no single provider, so a model's metadata may be borrowed
+   * only when the raw id matches **exactly one** provider's entry, and a caller that gets back
+   * zero or two-or-more borrows nothing (a guessed window or price would be wrong on the
+   * screen). A provider-keyed registry cannot answer this, which is why the method is
+   * **optional**: a registry that leaves it out simply lends no metadata to such a credential.
+   *
+   * A read, never a fetch.
+   */
+  exact?(id: string): readonly RegistryModel[]
 }
 
 /** A registry that knows nothing: what a host (or a test) gets when it wants no data at all. */
@@ -171,6 +186,27 @@ const MODELS_BY_PROVIDER: ReadonlyMap<string, readonly RegistryModel[]> = new Ma
 )
 
 /**
+ * The same models keyed by raw id, across every provider — what {@link ModelRegistry.exact}
+ * reads. A models.dev id is not globally unique (`gpt-4o` is filed under both `openai` and
+ * `azure`), so the value is a list and the caller decides whether one entry is an unambiguous
+ * match.
+ */
+const MODELS_BY_ID: ReadonlyMap<string, readonly RegistryModel[]> = (() => {
+  const byId = new Map<string, RegistryModel[]>()
+  for (const models of MODELS_BY_PROVIDER.values()) {
+    for (const model of models) {
+      const existing = byId.get(model.id)
+      if (existing === undefined) {
+        byId.set(model.id, [model])
+      } else {
+        existing.push(model)
+      }
+    }
+  }
+  return byId
+})()
+
+/**
  * A snapshot price as the protocol spells it: the two cache rates are `null` when models.dev
  * has none for them, which is the protocol's way of saying "a rate nobody published" — see
  * `ModelCost`. A price stays absent when the snapshot has none at all.
@@ -202,5 +238,6 @@ export const SNAPSHOT_DATE: string = SNAPSHOT.snapshot_date
 export function createBundledRegistry(): ModelRegistry {
   return {
     models: (provider) => MODELS_BY_PROVIDER.get(provider) ?? [],
+    exact: (id) => MODELS_BY_ID.get(id) ?? [],
   }
 }

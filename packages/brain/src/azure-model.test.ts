@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { azureBaseUrl, azureFetch, createAzureFetch, type SafeFetch } from './azure-fetch'
+import { azureBaseUrl, azureFetch, createAzureFetch } from './azure-fetch'
+import type { SafeFetch } from './provider-fetch'
 import {
   createProviderModelFactory,
   isUnsupportedProviderError,

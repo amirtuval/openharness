@@ -163,6 +163,11 @@ export interface TestOptions {
   readonly vault?: Vault
   /** Serve a built web app from this directory. */
   readonly webDir?: string
+  /**
+   * `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS`: whether a custom OpenAI-compatible credential
+   * may reach a private address (epic #245, M4). Off by default.
+   */
+  readonly allowPrivateProviderUrls?: boolean
   /** Origins allowed to call the API from a browser; none (no CORS) by default. */
   readonly corsOrigins?: readonly string[]
   /** How many proxies append to `x-forwarded-for`; `0` (the default) trusts no header (#151). */
@@ -619,6 +624,7 @@ export function testConfig(options: TestOptions = {}): ServerConfig {
           },
     testModel: undefined,
     webDir: options.webDir,
+    allowPrivateProviderUrls: options.allowPrivateProviderUrls ?? false,
     trustedProxyHops: options.trustedProxyHops ?? DEFAULT_TRUSTED_PROXY_HOPS,
     corsOrigins: [...(options.corsOrigins ?? [])],
     maxConcurrentSessions: options.maxConcurrentSessions ?? 4,

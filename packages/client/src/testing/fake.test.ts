@@ -1348,6 +1348,43 @@ describe("the fake's authentication", () => {
     ).rejects.toMatchObject({ status: 400, type: 'invalid_request_error' })
   })
 
+  it('keeps a custom credential, keyed or keyless, publishing the base URL host only (#249)', async () => {
+    const fake = createFakeClient()
+
+    const keyed = await fake.providerCredentials.put('custom', {
+      type: 'openai_compatible',
+      base_url: 'https://api.example.com/v1',
+      api_key: 'sk-custom-4242',
+    })
+    expect(keyed).toMatchObject({
+      name: 'custom',
+      type: 'openai_compatible',
+      last4: '4242',
+      details: { base_url_host: 'api.example.com' },
+    })
+
+    // A keyless local endpoint is accepted — its key is optional — and publishes its host with
+    // an empty last4, which is how a list tells "no key" from a key.
+    const keyless = await fake.providerCredentials.put('my-local', {
+      type: 'openai_compatible',
+      base_url: 'http://127.0.0.1:11434/v1',
+    })
+    expect(keyless).toMatchObject({
+      name: 'my-local',
+      last4: '',
+      details: { base_url_host: '127.0.0.1:11434' },
+    })
+
+    expect((await fake.providerCredentials.list()).data.map((entry) => entry.name)).toEqual([
+      'custom',
+      'my-local',
+    ])
+    // The whole URL never comes back: only the host is public.
+    expect(JSON.stringify(await fake.providerCredentials.list())).not.toContain(
+      'api.example.com/v1',
+    )
+  })
+
   it('picks a default model for the first key, and never replaces one (#116, U4)', async () => {
     const fake = createFakeClient({
       models: [

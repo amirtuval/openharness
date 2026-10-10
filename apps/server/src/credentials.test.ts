@@ -139,7 +139,7 @@ describe('the provider-credential API', () => {
     const calls: { name: string; apiKey: string }[] = []
     const test = createTestApp({
       validateProviderCredential: (name, body) => {
-        calls.push({ name, apiKey: body.api_key })
+        calls.push({ name, apiKey: body.api_key ?? '' })
         if (body.api_key !== SECRET) {
           return Promise.reject(
             new Error('openai answered 401 for the validating request; the key was rejected'),

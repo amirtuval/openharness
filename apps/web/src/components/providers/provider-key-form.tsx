@@ -46,6 +46,16 @@ interface CredentialField {
   readonly placeholder: string
   /** The line under the input. Says what happens to what was typed. */
   readonly help: string
+  /**
+   * Whether the value is a secret, rendered as a masked input. False for a URL a reader can see
+   * — hiding an endpoint would make a typo invisible (#249).
+   */
+  readonly secret: boolean
+  /**
+   * Whether the field may be left empty. False for every secret but a custom endpoint's key,
+   * which is optional (#249): a local server may take none, and the save must not wait for one.
+   */
+  readonly optional?: boolean
 }
 
 /** One credential type's form: the fields, and how they become a request body. */
@@ -72,7 +82,8 @@ function splitDeployments(value: string): string[] {
  * `api_key` is one secret, and it is the only place a single key is read in this app.
  * `azure_openai` (#245, A3a) collects the resource endpoint, the key and the deployment names —
  * Azure offers no endpoint that lists deployments, so the reader types them and each becomes a
- * model.
+ * model. `openai_compatible` (#249, A3b) collects a base URL and an **optional** key: the
+ * endpoint's own `/models` list is what becomes the models, so there is nothing else to type.
  */
 const CREDENTIAL_FORMS: Record<ProviderCredentialType, CredentialForm> = {
   api_key: {
@@ -82,6 +93,7 @@ const CREDENTIAL_FORMS: Record<ProviderCredentialType, CredentialForm> = {
         label: 'API key',
         placeholder: 'sk-…',
         help: 'Sent once, stored encrypted on the server, never shown again. Saving replaces the key stored for this provider.',
+        secret: true,
       },
     ],
     build: (values) => ({ type: 'api_key', api_key: values.api_key ?? '' }),
@@ -93,18 +105,21 @@ const CREDENTIAL_FORMS: Record<ProviderCredentialType, CredentialForm> = {
         label: 'Endpoint',
         placeholder: 'https://my-resource.openai.azure.com',
         help: 'The Azure OpenAI resource endpoint from the portal, over https.',
+        secret: false,
       },
       {
         name: 'api_key',
         label: 'API key',
         placeholder: '…',
         help: 'Sent once, stored encrypted on the server, never shown again. Saving replaces the key stored under this name.',
+        secret: true,
       },
       {
         name: 'deployments',
         label: 'Deployments',
         placeholder: 'gpt-4o, gpt-4o-mini',
         help: 'The deployment names your resource serves, separated by commas. Each becomes a model you can pick.',
+        secret: false,
       },
     ],
     build: (values) => ({
@@ -113,6 +128,35 @@ const CREDENTIAL_FORMS: Record<ProviderCredentialType, CredentialForm> = {
       api_key: values.api_key ?? '',
       deployments: splitDeployments(values.deployments ?? ''),
     }),
+  },
+  openai_compatible: {
+    fields: [
+      {
+        name: 'base_url',
+        label: 'Base URL',
+        placeholder: 'http://localhost:11434/v1',
+        help: 'The OpenAI-compatible API root — the address its /models endpoint lives under. It is checked on save, and only http and https are accepted.',
+        secret: false,
+      },
+      {
+        name: 'api_key',
+        label: 'API key (optional)',
+        placeholder: '…',
+        help: 'Sent once, stored encrypted on the server, never shown again. Leave it empty for an endpoint that takes no key, such as a local server.',
+        secret: true,
+        optional: true,
+      },
+    ],
+    // The key is omitted entirely when it is empty: the schema accepts a missing key but not an
+    // empty string, and an endpoint that takes none must send no `Authorization` header.
+    build: (values) => {
+      const apiKey = (values.api_key ?? '').trim()
+      return {
+        type: 'openai_compatible',
+        base_url: (values.base_url ?? '').trim(),
+        ...(apiKey === '' ? {} : { api_key: apiKey }),
+      }
+    },
   },
 }
 
@@ -209,7 +253,9 @@ export function ProviderKeyForm({
   // asks for counts as filled only when it has been answered, and it is not one of `form.fields`.
   const filled =
     (!asksForName || typedName !== '') &&
-    form.fields.every((field) => (values[field.name] ?? '').trim() !== '') &&
+    form.fields.every(
+      (field) => field.optional === true || (values[field.name] ?? '').trim() !== '',
+    ) &&
     nameError === null
   const replacing = name !== '' && storedNames.includes(name)
 
@@ -268,17 +314,19 @@ export function ProviderKeyForm({
 
       <div className="flex items-center justify-between gap-2">
         <p className="text-sm font-medium">{target.displayName}</p>
-        <a
-          className="inline-flex items-center gap-0.5 text-xs underline underline-offset-2"
-          href={target.keyUrl}
-          target="_blank"
-          rel="noreferrer"
-        >
-          Get a key
-          {/* The mark that this leaves the app, as an icon rather than a `↗` character:
-              a literal arrow is a font's to draw, and the headless stack draws it as a box. */}
-          <ArrowUpRight aria-hidden="true" className="size-3" />
-        </a>
+        {target.keyUrl === undefined ? null : (
+          <a
+            className="inline-flex items-center gap-0.5 text-xs underline underline-offset-2"
+            href={target.keyUrl}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Get a key
+            {/* The mark that this leaves the app, as an icon rather than a `↗` character:
+                a literal arrow is a font's to draw, and the headless stack draws it as a box. */}
+            <ArrowUpRight aria-hidden="true" className="size-3" />
+          </a>
+        )}
       </div>
       {target.freeTier === undefined ? null : <FreeTierChip hint={target.freeTier} />}
 
@@ -301,7 +349,7 @@ export function ProviderKeyForm({
             {nameError ??
               `What this credential is called. Its models are named after it — ${
                 typedName === '' ? target.name : typedName
-              }/<deployment>.`}
+              }/${target.credential === 'azure_openai' ? '<deployment>' : '<model>'}.`}
           </p>
         </div>
       ) : null}
@@ -312,7 +360,7 @@ export function ProviderKeyForm({
           <Input
             id={`provider-${field.name}`}
             ref={index === 0 && !asksForName ? inputRef : undefined}
-            type={field.name === 'endpoint' || field.name === 'deployments' ? 'text' : 'password'}
+            type={field.secret ? 'password' : 'text'}
             value={values[field.name] ?? ''}
             autoComplete="off"
             spellCheck={false}

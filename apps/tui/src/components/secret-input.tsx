@@ -53,6 +53,14 @@ export interface SecretInputProps {
    * lives in a ref, and only a masked field's frame is free of it by construction.
    */
   readonly mask?: boolean | undefined
+  /**
+   * Whether an empty answer is a value.
+   *
+   * A required field — every secret but a custom endpoint's key (#249) — refuses a blank
+   * submission: Enter on an empty box is not a save of "". An **optional** one submits its empty
+   * value, so the flow can move on and simply omit the field from the body.
+   */
+  readonly optional?: boolean | undefined
 }
 
 /** The character a typed key is drawn as. Never the character itself. */
@@ -65,6 +73,7 @@ export function SecretInput({
   busy = false,
   onChar,
   mask = true,
+  optional = false,
 }: SecretInputProps) {
   // What was typed lives here and only here; the render knows how many characters it holds,
   // never which ones. A frame can therefore not contain the secret, and neither can a
@@ -89,8 +98,9 @@ export function SecretInput({
     if (key.return) {
       const entered = value.current.trim()
       // An empty submission is nothing to validate and nothing to send; Enter on an empty box
-      // is not a save of "".
-      if (entered !== '') onSubmit(entered)
+      // is not a save of "". An optional field is the exception (#249): its empty answer is a
+      // value the flow omits from the body, so Enter moves on with "".
+      if (optional || entered !== '') onSubmit(entered)
       return
     }
 

@@ -39,6 +39,7 @@ import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
  * | `PORT`                              | the port to listen on; `3000` by default                         |
  * | `OPENHARNESS_TEST_MODEL`            | `mock` swaps in the deterministic test model (see `mock-model.ts`) |
  * | `OPENHARNESS_WEB_DIR`               | a built web app to serve at `/`                                  |
+ * | `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS` | `1` lets a **custom OpenAI-compatible** credential reach a private address (e.g. Ollama on localhost); off by default, never Azure (#249, M4) |
  * | `OPENHARNESS_TRUSTED_PROXY_HOPS`    | how many proxies append to `x-forwarded-for`; `0` trusts none (#151) |
  * | `OPENHARNESS_CORS_ORIGINS`          | comma-separated origins to allow; unset means no CORS at all     |
  * | `OPENHARNESS_MAX_CONCURRENT_SESSIONS` | how many sessions may run at once; `4` by default               |
@@ -94,6 +95,7 @@ export const ENV_VARS = {
   port: 'PORT',
   testModel: 'OPENHARNESS_TEST_MODEL',
   webDir: 'OPENHARNESS_WEB_DIR',
+  allowPrivateProviderUrls: 'OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS',
   trustedProxyHops: 'OPENHARNESS_TRUSTED_PROXY_HOPS',
   corsOrigins: 'OPENHARNESS_CORS_ORIGINS',
   maxConcurrentSessions: 'OPENHARNESS_MAX_CONCURRENT_SESSIONS',
@@ -154,6 +156,13 @@ export interface ServerConfig {
   readonly testModel: string | undefined
   /** A directory of built web assets to serve at `/`. */
   readonly webDir: string | undefined
+  /**
+   * `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS`: whether a **custom OpenAI-compatible**
+   * credential may reach a private, loopback or link-local address (epic #245, M4). Off by
+   * default; staging and production stay off. It applies to that one credential type — Azure
+   * OpenAI, whose endpoint is a public hosted service, never reads it.
+   */
+  readonly allowPrivateProviderUrls: boolean
   /**
    * `OPENHARNESS_TRUSTED_PROXY_HOPS`: how many proxies append to `x-forwarded-for` before
    * this server — `0` (the default) means forwarding headers are not trusted (#151).
@@ -352,6 +361,7 @@ export function readServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
     microsoft,
     testModel: readString(env, ENV_VARS.testModel),
     webDir: readString(env, ENV_VARS.webDir),
+    allowPrivateProviderUrls: readFlag(env, ENV_VARS.allowPrivateProviderUrls),
     // Zero is meaningful — forwarding headers not trusted at all — so the bound is what
     // refuses a negative count, not a falsy check.
     trustedProxyHops: readInteger(env, ENV_VARS.trustedProxyHops, DEFAULT_TRUSTED_PROXY_HOPS, {
@@ -451,6 +461,14 @@ export function describeConfig(config: ServerConfig): string[] {
           `retaining superseded chunks ${config.deltaRetentionMs}ms`,
   )
   lines.push(config.webDir === undefined ? 'web assets: none' : `web assets: ${config.webDir}`)
+  if (config.allowPrivateProviderUrls) {
+    // Only when it is on: this is a self-host opt-in that weakens the SSRF guard for one
+    // credential type, so a deployment that set it should see that it did (#249, M4).
+    lines.push(
+      `custom provider URLs: PRIVATE ADDRESSES ALLOWED ` +
+        `(${ENV_VARS.allowPrivateProviderUrls}=1; custom OpenAI-compatible credentials only)`,
+    )
+  }
   // Observability (#158): which shape the output is in, and whether spans are exported — the
   // two things a person checking a deployment wants to confirm.
   lines.push(

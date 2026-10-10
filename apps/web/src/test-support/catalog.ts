@@ -57,7 +57,11 @@ export const OPENAI: ModelEntry = modelEntry({
  * first-run check (#209) — so a fixture that means "this account can run chats" seeds these
  * rather than putting them, which a synchronous `makeFake` cannot do.
  */
-export function credential(name: string, last4 = 'ab12'): ProviderCredential {
+export function credential(
+  name: string,
+  last4 = 'ab12',
+  overrides: Partial<ProviderCredential> = {},
+): ProviderCredential {
   return {
     // A real `pcred_` id: the schemas that parse a credential back (the fake's own `put`)
     // reject anything that is not a ULID, and a fixture that cannot round-trip is a trap.
@@ -68,6 +72,7 @@ export function credential(name: string, last4 = 'ab12'): ProviderCredential {
     created_at: '2026-10-01T10:00:00.000Z',
     updated_at: '2026-10-01T10:00:00.000Z',
     validated_at: '2026-10-01T10:00:00.000Z',
+    ...overrides,
   }
 }
 

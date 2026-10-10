@@ -31,10 +31,10 @@ import { ProviderCredentialIdSchema } from '../ids'
  * `api_key` is one secret, for the providers the model factory authenticates that way (OpenAI,
  * Anthropic, Google AI Studio, OpenRouter, Groq, …) — the eleven fixed provider ids. The record
  * is a discriminated union on `type`, so `aws` and `gcp_service_account` later become new types
- * with their own payload fields rather than a new design; `azure_openai` is the first such
- * type (epic #245, A3a).
+ * with their own payload fields rather than a new design; `azure_openai` (epic #245, A3a) and
+ * `openai_compatible` (epic #245, A3b) are the first two such types.
  */
-export const ProviderCredentialTypeSchema = z.enum(['api_key', 'azure_openai'])
+export const ProviderCredentialTypeSchema = z.enum(['api_key', 'azure_openai', 'openai_compatible'])
 
 export type ProviderCredentialType = z.infer<typeof ProviderCredentialTypeSchema>
 
@@ -43,15 +43,42 @@ export const PROVIDER_CREDENTIAL_TYPES: readonly ProviderCredentialType[] =
   ProviderCredentialTypeSchema.options
 
 /**
- * A stored provider credential, as the API returns it: **metadata only**.
+ * The public, non-secret facts a custom OpenAI-compatible credential publishes (epic #245, A3b).
  *
- * The secret itself never appears here or anywhere else in a response — `last4` is what a UI
- * shows so a user can tell one key from another. A credential is keyed by its owner and its
- * `name`, so there is at most one per name per user: `PUT` replaces it.
+ * A credential's wire form is the same fields whatever its type, and a type that has a fact a
+ * settings screen should show publishes it as **its own** `details` object rather than as a new
+ * top-level field — {@link ProviderCredentialSchema} is where each type says what it publishes,
+ * so Bedrock's `{ region }` and Vertex's `{ project }` arrive as their own variants rather than
+ * as keys this one grows. It is **not** the credential's payload — the payload is sealed and
+ * comes back open only on the model-call path — and nothing secret may ever be put in it. The
+ * whole point of a dedicated object is that the values are chosen for display: a base URL's
+ * *host*, never the URL (whose path is the user's and may name a resource), and never any part
+ * of a key.
  */
-export const ProviderCredentialSchema = z.object({
+export const OpenAICompatibleCredentialDetailsSchema = z.object({
+  /**
+   * The host of a custom credential's base URL, e.g. `api.example.com` or `127.0.0.1:11434` (a
+   * port is part of the host). The scheme and the path are dropped: the host is what tells one
+   * custom endpoint from another in a list.
+   */
+  base_url_host: z.string().min(1),
+})
+
+export type OpenAICompatibleCredentialDetails = z.infer<
+  typeof OpenAICompatibleCredentialDetailsSchema
+>
+
+/**
+ * Every type's published details, as one union: what a credential store persists and hands back
+ * (`UpsertCredentialInput.details`), where which type a value belongs to is the credential's own
+ * `type` beside it. The wire — {@link ProviderCredentialSchema} — is where the union is keyed
+ * per type; this is the storage-level spelling of the same values.
+ */
+export type ProviderCredentialDetails = OpenAICompatibleCredentialDetails
+
+/** The fields every credential's metadata carries, whatever its type. */
+const ProviderCredentialMetadataBaseSchema = z.object({
   id: ProviderCredentialIdSchema,
-  type: ProviderCredentialTypeSchema,
   /**
    * The credential's name: the `provider` half of every model id it serves, e.g. `anthropic`
    * or `azure-eu`. Unique per user; for the eleven fixed providers it is the provider id.
@@ -69,7 +96,59 @@ export const ProviderCredentialSchema = z.object({
   validated_at: TimestampSchema.optional(),
 })
 
+/**
+ * The `api_key` metadata: the fixed providers. It publishes no type-specific facts, so it has no
+ * `details` — its metadata is byte-for-byte what it was before the field existed.
+ */
+export const ApiKeyProviderCredentialMetadataSchema = ProviderCredentialMetadataBaseSchema.extend({
+  type: z.literal('api_key'),
+})
+
+/**
+ * The `azure_openai` metadata: it publishes none either. The resource endpoint is part of the
+ * sealed payload, and one whose path may name a resource is not a list's to show.
+ */
+export const AzureOpenAIProviderCredentialMetadataSchema =
+  ProviderCredentialMetadataBaseSchema.extend({
+    type: z.literal('azure_openai'),
+  })
+
+/** The `openai_compatible` metadata, with the base URL's host a list may show (#245, A3b). */
+export const OpenAICompatibleProviderCredentialMetadataSchema =
+  ProviderCredentialMetadataBaseSchema.extend({
+    type: z.literal('openai_compatible'),
+    details: OpenAICompatibleCredentialDetailsSchema.optional(),
+  })
+
+/**
+ * A stored provider credential, as the API returns it: **metadata only**.
+ *
+ * The secret itself never appears here or anywhere else in a response — `last4` is what a UI
+ * shows so a user can tell one key from another. A credential is keyed by its owner and its
+ * `name`, so there is at most one per name per user: `PUT` replaces it.
+ *
+ * A **discriminated union on `type`**: each type carries exactly the public facts it publishes,
+ * so `details` is typed for the type that has it — a base-URL host on a custom credential, a
+ * region on a Bedrock one later — and a type with none carries no `details` key at all. That is
+ * what keeps the JSON of the types that existed before this field byte-for-byte unchanged.
+ */
+export const ProviderCredentialSchema = z.discriminatedUnion('type', [
+  ApiKeyProviderCredentialMetadataSchema,
+  AzureOpenAIProviderCredentialMetadataSchema,
+  OpenAICompatibleProviderCredentialMetadataSchema,
+])
+
 export type ProviderCredential = z.infer<typeof ProviderCredentialSchema>
+
+/**
+ * A credential's metadata with its `type` and `details` left wide: every field a variant has,
+ * before a credential's type narrows which of them apply. It is the shape a store builds from a
+ * row or an argument and what {@link ProviderCredential} is narrowed from.
+ */
+export type ProviderCredentialMetadata = z.infer<typeof ProviderCredentialMetadataBaseSchema> & {
+  readonly type: ProviderCredentialType
+  readonly details?: ProviderCredentialDetails
+}
 
 /**
  * The `api_key` form of {@link PutProviderCredentialRequestSchema}: a single secret.
@@ -127,6 +206,49 @@ export const AzureOpenAICredentialSchema = z.object({
 export type AzureOpenAICredential = z.infer<typeof AzureOpenAICredentialSchema>
 
 /**
+ * Whether `value` is an absolute `http:` or `https:` URL — the schemes a custom base URL may
+ * use. `http` is allowed on purpose (a self-hosted endpoint on a private network is the case
+ * this type exists for); the SSRF guard, not the scheme, is what refuses an address a request
+ * must not reach.
+ */
+function isHttpUrl(value: string): boolean {
+  try {
+    const protocol = new URL(value).protocol
+    return protocol === 'http:' || protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The `openai_compatible` form of {@link PutProviderCredentialRequestSchema} (epic #245, A3b).
+ *
+ * Any server that speaks the OpenAI chat-completions API — a self-hosted Ollama or vLLM, a
+ * gateway, a proxy — is addressed by a base URL the user supplies, and its model ids are
+ * whatever its `/models` endpoint lists. The fields are what a request needs besides the name
+ * the credential is stored under:
+ *
+ * - `base_url` — the OpenAI-compatible API root, e.g. `https://api.example.com/v1` or
+ *   `http://127.0.0.1:11434/v1`. It must be an absolute `http`/`https` URL; the server
+ *   additionally refuses one that resolves to a private address unless the self-host setting
+ *   allows it (the SSRF guard), and it checks the endpoint on save with `GET {base_url}/models`.
+ * - `api_key` — write-only when the endpoint wants one, and **optional**: a local server may
+ *   take no key at all. Exactly like the `api_key` form's, it is accepted on this request and
+ *   never returned.
+ */
+export const OpenAICompatibleCredentialSchema = z.object({
+  type: z.literal('openai_compatible'),
+  /** The OpenAI-compatible API root; an absolute `http`/`https` URL. */
+  base_url: z
+    .string()
+    .refine(isHttpUrl, { message: 'the base URL must be an absolute http or https URL' }),
+  /** The secret, when the endpoint wants one. Sent once, stored encrypted, never returned. */
+  api_key: z.string().min(1).optional(),
+})
+
+export type OpenAICompatibleCredential = z.infer<typeof OpenAICompatibleCredentialSchema>
+
+/**
  * Body of `PUT /v1/provider-credentials/{name}`. Response: {@link ProviderCredentialSchema}.
  *
  * A discriminated union on `type`. The path's `name` is the credential's name — the provider
@@ -140,9 +262,30 @@ export type AzureOpenAICredential = z.infer<typeof AzureOpenAICredentialSchema>
 export const PutProviderCredentialRequestSchema = z.discriminatedUnion('type', [
   ApiKeyProviderCredentialSchema,
   AzureOpenAICredentialSchema,
+  OpenAICompatibleCredentialSchema,
 ])
 
 export type PutProviderCredentialRequest = z.infer<typeof PutProviderCredentialRequestSchema>
+
+/**
+ * The {@link ProviderCredentialDetails} a PUT body's type publishes, or `undefined` for a type
+ * with none (#249, A3b).
+ *
+ * This is the whole mapping from "what a user saved" to "what the metadata may show", and it
+ * lives here — beside the schemas — because two sides must agree on it: the server derives a
+ * credential's stored `details` from the body it seals, and a client that fakes the server
+ * (the web app's and the TUI's `@openharness/client/testing`) must produce the same answer.
+ * Only facts safe to publish are read out — a custom base URL's **host**, never its path and
+ * never any part of a key.
+ */
+export function credentialDetails(
+  body: PutProviderCredentialRequest,
+): ProviderCredentialDetails | undefined {
+  if (body.type === 'openai_compatible') {
+    return { base_url_host: new URL(body.base_url).host }
+  }
+  return undefined
+}
 
 /**
  * Response of `GET /v1/provider-credentials`: every credential the caller owns, metadata

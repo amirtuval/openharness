@@ -1,5 +1,6 @@
 import {
   PutProviderCredentialRequestSchema,
+  credentialDetails,
   type ProviderCredential,
   type PutProviderCredentialRequest,
   type SessionId,
@@ -66,19 +67,27 @@ export function credentialUpsert(
   sealed: SealedSecret,
   validatedAt: string,
 ): UpsertCredentialInput {
+  const details = credentialDetails(input.body)
   return {
     userId: input.userId,
     name: input.name,
     type: input.body.type,
     sealed: { ...sealed },
     last4: lastFour(secretOf(input.body)),
+    ...(details === undefined ? {} : { details }),
     validatedAt,
   }
 }
 
-/** The secret a payload carries — what `last4` is the last four characters of. */
+/**
+ * The secret a payload carries — what `last4` is the last four characters of.
+ *
+ * A custom OpenAI-compatible credential's key is optional (#249, A3b), so a keyless one stores
+ * an empty `last4`: the settings list tells "no key" from a key by exactly that, and nothing
+ * else about the secret is kept.
+ */
 function secretOf(body: PutProviderCredentialRequest): string {
-  return body.api_key
+  return body.api_key ?? ''
 }
 
 /**
@@ -121,6 +130,11 @@ export async function openCredential(
 export function modelCredential(body: PutProviderCredentialRequest): ModelCredential {
   if (body.type === 'azure_openai') {
     return { type: 'azure_openai', apiKey: body.api_key, endpoint: body.endpoint }
+  }
+  if (body.type === 'openai_compatible') {
+    // The key is optional (#249, A3b); a keyless endpoint is authenticated by nothing, and
+    // the brain's `isUsableCredential` asks this type for a base URL rather than a key.
+    return { type: 'openai_compatible', apiKey: body.api_key ?? '', baseUrl: body.base_url }
   }
   return { type: 'api_key', apiKey: body.api_key }
 }

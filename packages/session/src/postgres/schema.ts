@@ -6,6 +6,7 @@ import type {
   ModelConfig,
   ModelUsage,
   ProviderCredential,
+  ProviderCredentialDetails,
   Session,
   SessionAgent,
   SessionId,
@@ -214,6 +215,13 @@ export interface ProviderCredentialsTable {
   key_provider: string | null
   /** The last four characters of the plaintext, for recognition only. */
   last4: string
+  /**
+   * The public, type-specific facts the credential's type publishes (#249, A3b) — today a
+   * custom OpenAI-compatible base URL's host. `null` when the type has none, which is every
+   * `api_key` and `azure_openai` row and every row written before the column existed. Never a
+   * secret: a metadata read returns it as-is.
+   */
+  details: ProviderCredentialDetails | null
   created_at: Date
   updated_at: Date
   validated_at: Date
@@ -280,7 +288,7 @@ export type UserPreferencesRow = UserPreferencesTable
 /** The columns a metadata read selects: every `provider_credentials` column but the sealed blob. */
 export type ProviderCredentialMetadataRow = Pick<
   ProviderCredentialRow,
-  'id' | 'type' | 'name' | 'last4' | 'created_at' | 'updated_at' | 'validated_at'
+  'id' | 'type' | 'name' | 'last4' | 'details' | 'created_at' | 'updated_at' | 'validated_at'
 >
 
 /**
@@ -368,11 +376,18 @@ function sessionAgentFromRow(row: SessionRow): Session['agent'] {
  * SQL and not only of the mapping.
  */
 export function credentialMetadataFromRow(row: ProviderCredentialMetadataRow): ProviderCredential {
+  // The row's columns are the union's fields, and which variant it is is the stored `type`
+  // column — `text` in the table, and `details` is `jsonb`, so its shape is the writer's. The
+  // two casts are the unchecked part: the id column is a plain string, and the type column is
+  // the discriminant the metadata's own schema is the only spelling of.
   return deepFreeze({
     id: row.id as ProviderCredential['id'],
     type: row.type as ProviderCredential['type'],
     name: row.name,
     last4: row.last4,
+    // Absent, not `null`: a credential whose type publishes no facts has no `details` key, so
+    // its metadata is byte-for-byte what it was before the field existed (#249, A3b).
+    ...(row.details === null ? {} : { details: row.details }),
     created_at: timestampOf(row.created_at),
     updated_at: timestampOf(row.updated_at),
     validated_at: timestampOf(row.validated_at),

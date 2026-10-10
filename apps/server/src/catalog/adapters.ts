@@ -6,7 +6,9 @@
  * is the security boundary: **no part of a request ever supplies a URL** — the only URL a
  * provider call uses is one of the constants here — so there is no SSRF surface, and a
  * credential for a provider outside the table is served from the registry (C3) rather than
- * dialing something a caller chose.
+ * dialing something a caller chose. (The one exception is the custom OpenAI-compatible
+ * credential type, #249 A3b, whose base URL **is** the user's: it never goes through this
+ * table — the catalogue lists it through `safeFetch`, the guard built for exactly that case.)
  *
  * An adapter answers raw model ids plus whatever capability or limit data the provider's own
  * payload carries: Gemini's `supportedGenerationMethods` and token limits, OpenRouter's
@@ -125,10 +127,20 @@ function openAiCompatible(input: {
     provider: input.provider,
     url: () => `${input.baseUrl}/models`,
     headers: (apiKey) => ({ authorization: `Bearer ${apiKey}` }),
-    // OpenAI returns `{ object: 'list', data: [{ id, … }] }`; a few providers in the family
-    // return the array alone, so both are read.
-    parse: (body) => ({ models: arrayOfModels(body).map(openAiCompatibleModel), next: null }),
+    parse: (body) => ({ models: parseOpenAICompatibleModelList(body), next: null }),
   }
+}
+
+/**
+ * One page of an OpenAI-compatible `GET <base>/models` payload, as raw models.
+ *
+ * OpenAI returns `{ object: 'list', data: [{ id, … }] }`; a few servers in the family return
+ * the array alone, so both are read. Exported because a credential whose base URL the user
+ * chose (#249, A3b) lists its models through the same shape without one of the fixed adapters
+ * above — the catalogue calls this directly, over a URL `safeFetch` guards.
+ */
+export function parseOpenAICompatibleModelList(body: unknown): readonly ProviderModel[] {
+  return arrayOfModels(body).map(openAiCompatibleModel)
 }
 
 /** One entry of an OpenAI-style model list: `id` always, with common extensions read too. */
