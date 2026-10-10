@@ -13,7 +13,7 @@ import type { RetryPolicy } from '@openharness/brain'
 
 import { createBundledRegistry } from './catalog/registry'
 import { LocalScheduler } from './scheduler'
-import { createTurnTools, TEST_TOOL_NAME } from './tools'
+import { createTurnRegistry, createTurnTools, TEST_TOOL_NAME } from './tools'
 import {
   MOCK_ECHO_CHUNKS,
   MOCK_HOLD_MARKER,
@@ -62,7 +62,14 @@ async function runTurn(
     // The tools as `main.ts` wires them: the test registry for the mock model, and the support
     // gate over the registry (epic #303).
     ...(options.tools === true
-      ? { tools: createTurnTools(config, 'mock', createBundledRegistry()) }
+      ? {
+          tools: createTurnTools({
+            config,
+            tools: createTurnRegistry('mock'),
+            store,
+            registry: createBundledRegistry(),
+          }),
+        }
       : {}),
   })
   await scheduler.start()

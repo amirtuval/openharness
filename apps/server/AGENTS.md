@@ -46,6 +46,8 @@ protocol's schemas, so the shapes are not repeated here — see
 | `GET`    | `/v1/me`                                  | —                                           | the signed-in `User`                                                                                                                                                   |
 | `GET`    | `/v1/me/preferences`                      | —                                           | the caller's `UserPreferences` plus the `defaults` its `null`s mean (#282), unwrapped                                                                                  |
 | `PUT`    | `/v1/me/preferences`                      | `PutPreferencesRequestSchema`               | the stored preferences, merged; 400 for a malformed id or an out-of-range number                                                                                       |
+| `GET`    | `/v1/me/tools`                            | `ListToolSettingsQuerySchema` (`mode_id`)   | `{ data: ToolSettingEntry[] }` — the effective settings, as a chat on `mode_id` would see them (#307)                                                                  |
+| `PUT`    | `/v1/me/tools`                            | `PutToolSettingsRequestSchema`              | the stored settings, merged per tool; 400 for a permission or shape the schema refuses                                                                                 |
 | `POST`   | `/v1/me/modes`                            | `CreateModeRequestSchema`                   | 201, the `Mode`; 409 for a duplicate name (per user) or the twentieth-plus-one mode (#245, M6)                                                                         |
 | `GET`    | `/v1/me/modes`                            | —                                           | `{ data: Mode[] }`, the caller's own; no pagination (a user holds at most 20)                                                                                          |
 | `GET`    | `/v1/me/modes/{mode_id}`                  | —                                           | the `Mode`, or 404 for another user's or an unknown id                                                                                                                 |
@@ -583,19 +585,19 @@ CRUD, and the store's mode methods (`@openharness/session`) hold the rows.
   `mode_` ULID, so a malformed one in a path is the 400 every bad id gets, and in a body it is
   the protocol's own 400.
 
-## Tools (epic #303; #304)
+## Tools and their settings (epic #303; #304; the per-user settings: #307)
 
 The brain's tool loop — the model asks for a tool, the brain runs it and sends the result back —
 is `@openharness/brain`'s (`packages/brain/AGENTS.md` has the loop itself) and the tools
-themselves are `@openharness/hands`'. The server's half is small and is the whole of `tools.ts`:
-which tools a process registers, which models may be offered them, and how many requests a turn
-may make.
+themselves are `@openharness/hands`'. The server's half is two modules: `tools.ts` — which tools
+a process registers, which models may be offered them, and how many requests a turn may make —
+and `tool-settings.ts`, the per-user choices over them (#307).
 
 - **No built-in tool ships yet.** The real ones — `web_fetch`, `web_search`, `todo_write` —
   arrive with [#305](https://github.com/amirtuval/openharness/issues/305), so a deployment on a
-  provider model registers **nothing**: `createTurnTools` answers `undefined`, the brain offers
-  no tools and a chat runs exactly as it did before #304. That is not a degraded mode; it is the
-  behaviour every process had until now.
+  provider model registers **nothing**: `createTurnRegistry` answers `undefined`,
+  `createTurnTools` answers `undefined`, the brain offers no tools and a chat runs exactly as it
+  did before #304. That is not a degraded mode; it is the behaviour every process had until now.
 - **The one tool this build registers is a test one, behind the test model.** An `echo` tool
   (its input echoed back) is registered when `OPENHARNESS_TEST_MODEL=mock`, which is what lets
   the e2e suite drive a whole tool turn through the real server, scheduler, brain, store and log.
@@ -622,9 +624,45 @@ may make.
   through, and which nothing sets today — and `@openharness/hands` scrubs whatever it resolved
   out of everything a tool returns before it is stored.
 
-The tools are wired in `main.ts` (`createTurnTools`) and reach a turn through the scheduler and
-`SessionRunner` as one `TurnToolOptions` object whose field names are `RunTurnOptions`' own, so
-the runner spreads it over unchanged.
+The tools are wired in `main.ts` — `createTurnRegistry(kind)` builds the one registry, and
+`createTurnTools({ config, tools, store, registry })` turns it into the turn's options — and
+reach a turn through the scheduler and `SessionRunner` as one `TurnToolOptions` object whose
+field names are `RunTurnOptions`' own, so the runner spreads it over unchanged. The same
+registry goes into `createApp` as `tools`, which is what the settings routes read: a tool the
+settings screen calls available is one a chat can really call.
+
+### The per-user tool settings (#307)
+
+`tool-settings.ts` is the one place the per-user choices and the tools meet, and its whole point
+is that three readers get **one** answer: `GET`/`PUT /v1/me/tools` and the brain's resolver. The
+answer is the **effective** state of each tool:
+
+- the tools this process registers, in registry order, with the declaration each carries;
+- plus any tool a user has a stored setting for that this process does not register — listed as
+  `available: false`, with `default_policy: null`, rather than hidden, so a user can see why a
+  tool they switched on is not working;
+- `enabled` from the user's choice, overridden per tool by the mode the read (or the request)
+  names, falling back to `true`;
+- `policy` from the user's choice, falling back to the tool's own declared permission — a
+  **mode never touches it** (E6): a mode decides the tool set, and a permission is the user's,
+  because "always allow" (#309) is remembered per tool.
+
+- **`GET /v1/me/tools` is the effective list**, and `?mode_id=` answers it as a chat on that
+  mode would see it — the mode's override applied over the user's choices, which is what a
+  composer shows. A mode the caller does not own is the 404 every other mode read gives, through
+  the same `requireOwnedMode` the mode routes use.
+- **`PUT /v1/me/tools` merges per tool**, the rule the preferences route follows: a tool the
+  body names is replaced whole, and every other tool keeps what is stored, so flipping one
+  switch never clears another. The route reads, merges and writes the stored value whole, which
+  is the store's contract.
+- **The brain reads the same answer through `createToolSettingsResolver`**, asked once per
+  request with the session's owner and the tool override of the mode that request resolved to
+  (`resolveMode` carries it, `modes.ts`). A tool turned off is left out of the request's offer
+  entirely — so `span.model_request_start.tools` records what was really offered — and an edit
+  applies from the next request on, exactly as a model switch does.
+- **Called once per process, and read twice.** `main.ts` builds the registry once and hands the
+  same instance to the turn options and to the app, so "available" and "a chat can call it" are
+  one fact rather than two that could drift.
 
 ## Usage and cost (epic #245, A2; issue #247)
 
@@ -1429,7 +1467,8 @@ before the instance stops serving it (#151).
 | `contextTokenBudget`, `createTokenBudgetResolver`, `OUTPUT_RESERVE_RATIO`                                                                                                                                                                                                         | the per-model context budget: `contextWindow − min(maxOutput, 25%)`, per request (#246)                                                                                                                                                                                                                                                     |
 | `createContextCompactionResolver`, `ContextCompactionDeps`                                                                                                                                                                                                                        | the per-owner compaction resolver (epic #277 C3; #282): the session owner's stored threshold, summary model and pass limit, resolved per request over `OPENHARNESS_COMPACTION_THRESHOLD` and the registry's budgets                                                                                                                         |
 | `createReasoningSupportResolver`                                                                                                                                                                                                                                                  | the per-model reasoning gate: the `low \| medium \| high` a model takes, per request (#252)                                                                                                                                                                                                                                                 |
-| `createTurnTools`, `TurnToolOptions`                                                                                                                                                                                                                                              | the tools a turn is handed and the loop's decisions about them (epic #303, X4): the test registry under `OPENHARNESS_TEST_MODEL=mock`, nothing at all otherwise                                                                                                                                                                             |
+| `createTurnRegistry`, `createTurnTools`, `TurnToolDeps`, `TurnToolOptions`                                                                                                                                                                                                        | the registry a process runs with — the test one under `OPENHARNESS_TEST_MODEL=mock`, nothing at all otherwise — and the tools a turn is handed: the registry, the settings resolver (#307), the support gate and the step budget                                                                                                            |
+| `effectiveTools`, `toolSettingEntries`, `toolDecisions`, `createToolSettingsResolver`, `listToolSettings`, `ToolSettingsDeps`                                                                                                                                                     | the per-user tool settings (epic #303, X4; #307): the effective answer, as the wire's entries, as the brain's decisions, the resolver `runTurn` is handed, and the listing a route makes (a mode's override included)                                                                                                                       |
 | `createTestToolRegistry`, `testEchoTool`, `TEST_TOOL_NAME`, `TEST_TOOL_DESCRIPTION`                                                                                                                                                                                               | the test `echo` tool, and the registry that holds it — test-only, behind the mock model                                                                                                                                                                                                                                                     |
 | `createToolSupportResolver`                                                                                                                                                                                                                                                       | the per-model tool gate: whether a model can call tools, read from models.dev's `tool_call` (epic #303, X2)                                                                                                                                                                                                                                 |
 | `createProviderFetch()`, `ProviderFetch`, `DEFAULT_PROVIDER_TIMEOUT_MS`                                                                                                                                                                                                           | the provider HTTP client: egress-proxy aware, 5 s deadline (catalogue + credential checks)                                                                                                                                                                                                                                                  |
@@ -1503,8 +1542,13 @@ src/
   modes.ts              modes resolved for a request, and refused when unusable (#245, M6)
   model.ts              which model factory the process runs (the router, or the mock)
   mock-model.ts         the deterministic test model and its markers
-  tools.ts              the tools a turn may offer (epic #303): the one this build registers —
-                        the test `echo` tool, behind the mock — and the support gate
+  tools.ts              the tools a turn may offer (epic #303): the registry this build
+                        registers — the test `echo` tool, behind the mock — the support gate
+                        and the turn's options
+  tool-settings.ts      the per-user tool settings (epic #303, X4; #307): the effective answer
+                        a settings screen and the brain both read, and the resolver the loop
+                        is handed
+  routes/tool-settings.ts  GET/PUT /v1/me/tools
   runner.ts             SessionRunner: one turn per session, re-run while there is work
   compaction.ts         DeltaCompactor: the periodic deletion of superseded chunks (D9)
   scheduler.ts          SessionScheduler, LocalScheduler, partition helpers
@@ -1523,10 +1567,11 @@ src/
     errors.ts           HttpError and the protocol's error envelope
     request.ts          body/query/path reading, through the protocol's schemas
   routes/               agents.ts, sessions.ts, events.ts, ai-sdk.ts, me.ts, modes.ts, models.ts,
-                        usage.ts, provider-credentials.ts, plus deps.ts (RouteDeps) and signals.ts
-                        (what a stored user event tells the scheduler)
-  test-support/         test-only: scripted model, SSE reader, the server harness, Postgres,
-                        and the AWS event-stream frames a mocked Bedrock reply is made of
+                        usage.ts, provider-credentials.ts, tool-settings.ts, plus deps.ts
+                        (RouteDeps) and signals.ts (what a stored user event tells the scheduler)
+  test-support/         test-only: scripted model (text and tool calls), SSE reader, the server
+                        harness, Postgres, and the AWS event-stream frames a mocked Bedrock
+                        reply is made of
 docs/scheduling.md      the multi-instance scheduler: partitions, leases, epochs, recovery
 ```
 
@@ -1805,7 +1850,20 @@ parallel with each other.
 - `tools.test.ts` (epic #303, #304) — the server's half of the tool loop: that the mock model
   is the only kind that gets a registry at all (a provider model gets `undefined`, and a chat
   then offers nothing), that the test `echo` tool is the one registered and that it echoes while
-  refusing an input its schema rejects, and that the gate is wired to the registry.
+  refusing an input its schema rejects, that the gate is wired to the registry, and that the
+  settings resolver reads the owner's stored choices through the store (#307).
+- `tool-settings.test.ts` (epic #303, X4; #307) — the per-user tool settings over HTTP, with a
+  registry of the test's own: the effective list under the declared defaults, a declared `ask`
+  reported rather than assumed `allow`, a stored setting for a tool the process does not
+  register listed as `available: false` with no `default_policy`, the per-tool merge of a write
+  (and an empty body as a no-op), the 400s a bad permission, an empty name and a non-JSON body
+  get with nothing stored, one user's settings never reaching another's, a mode's override
+  answered by `?mode_id=` (its own 404 for another user's mode, 400 for a malformed id), and a
+  mode body the protocol refuses. Then the chat: the tools a user has on are the ones the span
+  records, every tool off is an offer of nothing, a message that switches the mode changes the
+  tools **from the next request**, a `deny` is recorded on the call and answered without running
+  the tool, and an `ask` is answered with the sentence saying the approval of #309 is not here
+  yet — the model being the scripted one, extended for this issue to emit tool calls.
 - `catalog/tool-support.test.ts` (epic #303, X2) — the tool gate on its own: `false` only for the
   model the registry marks unable to call tools, `undefined` for one it knows is callable and for
   one it does not know at all, an id it cannot read, a named credential reading its type's

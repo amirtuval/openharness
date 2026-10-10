@@ -16,6 +16,7 @@ import {
   type StoredEvent,
   type UserId,
 } from '@openharness/protocol'
+import type { ToolRegistry } from '@openharness/hands'
 import {
   InMemoryCredentialStore,
   InMemorySessionStore,
@@ -46,6 +47,7 @@ import { createReasoningSupportResolver } from '../catalog/reasoning-support'
 import { createContextCompactionResolver } from '../context-compaction'
 import { createModeResolver } from '../modes'
 import { emptyRegistry, type ModelRegistry } from '../catalog/registry'
+import { createTurnTools } from '../tools'
 import { DEFAULT_DELTA_RETENTION_MS } from '../compaction'
 import {
   DEFAULT_LOG_FORMAT,
@@ -313,6 +315,16 @@ export interface TestOptions {
    * asserts on a server span passes a recorder. `createTestApp` only.
    */
   readonly tracer?: Tracer
+  /**
+   * The tools this process registers (epic #303, X4; issue #307). Omitted — the default — is a
+   * chat with no tools at all, exactly as `main.ts` wires a deployment on a provider model.
+   *
+   * A test that passes one gets the production wiring over it: the `/v1/me/tools` routes read
+   * it, and every turn is handed the settings resolver built from this harness's store. That is
+   * what lets a route test drive "the user turned this tool off and the next request offered
+   * nothing" in-process, with a registry of the test's own rather than #305's built-ins.
+   */
+  readonly tools?: ToolRegistry
 }
 
 /** Build an app, a store and a scheduler in-process; nothing listens. */
@@ -325,6 +337,17 @@ export function createTestApp(options: TestOptions = {}): TestContext {
   const registry = options.registry ?? emptyRegistry
   const tokenBudgetFor = createTokenBudgetResolver(registry)
   const compactionThreshold = options.compactionThreshold ?? DEFAULT_COMPACTION_THRESHOLD
+  // The tools and their settings (epic #303, X4; #307), wired as `main.ts` wires them: one
+  // registry, read by the turn options and by the `/v1/me/tools` routes.
+  const turnTools =
+    options.tools === undefined
+      ? undefined
+      : createTurnTools({
+          config: testConfig(options),
+          tools: options.tools,
+          store,
+          registry,
+        })
   const scheduler = new LocalScheduler({
     store,
     model: options.model ?? model.factory,
@@ -345,6 +368,7 @@ export function createTestApp(options: TestOptions = {}): TestContext {
     // the threshold from the config, the registry's budgets and output ceilings). A test of the
     // per-user controls (C3, #282) asks for `resolveCompaction`, which builds that same resolver
     // against this harness's store and registry.
+    ...(turnTools === undefined ? {} : { tools: turnTools }),
     ...(options.compaction === undefined ? {} : { compaction: options.compaction }),
     ...(options.resolveCompaction === true
       ? {
@@ -384,6 +408,7 @@ export function createTestApp(options: TestOptions = {}): TestContext {
       validate: options.validateProviderCredential ?? acceptAnyCredential,
     },
     catalog,
+    ...(options.tools === undefined ? {} : { tools: options.tools }),
     // What `GET /v1/me/preferences` reports as the default trigger share (C3, #282).
     compactionThreshold,
     ...(options.registry === undefined ? {} : { registry: options.registry }),

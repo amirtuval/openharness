@@ -1,11 +1,13 @@
-import type { ToolPolicyResolver, ToolSecretResolver, ToolSupportFor } from '@openharness/brain'
+import type { ToolSecretResolver, ToolSettingsResolver, ToolSupportFor } from '@openharness/brain'
 import { createToolRegistry, textResult } from '@openharness/hands'
 import type { ToolDefinition, ToolRegistry } from '@openharness/hands'
+import type { SessionStore } from '@openharness/session'
 import { z } from 'zod'
 
 import type { ModelRegistry } from './catalog/registry'
 import { createToolSupportResolver } from './catalog/tool-support'
 import type { ResolvedModel } from './model'
+import { createToolSettingsResolver } from './tool-settings'
 
 /**
  * The tools a turn may offer (epic #303, X4), and the one this build registers.
@@ -47,16 +49,37 @@ export function createTestToolRegistry(): ToolRegistry {
 }
 
 /**
- * The tools a turn is handed, and the loop's decisions about them.
+ * The tools this process registers, or `undefined` for a deployment that registers none.
+ *
+ * `undefined` is every deployment on a real provider model, and is not a degraded mode: it is a
+ * chat with no tools, which is what this server was before #304 and what it will keep being
+ * until #305's built-ins land. The test model gets {@link createTestToolRegistry} because it is
+ * the model the tests speak to, so a tool turn — and a tool **setting** — can be driven through
+ * the real server.
+ *
+ * One function, called once, because two readers need the same answer: the turn's options and
+ * the `/v1/me/tools` routes both build from this registry, and a tool listed as available must
+ * be one a chat can really call.
+ *
+ * @param kind which factory the process runs — `mock` is what turns the test registry on
+ */
+export function createTurnRegistry(kind: ResolvedModel['kind']): ToolRegistry | undefined {
+  return kind === 'mock' ? createTestToolRegistry() : undefined
+}
+
+/**
+ * The tools a turn is handed, and the loop's decisions about them (epic #303, X4; #307).
  *
  * The field names are `RunTurnOptions`' own, so `SessionRunner` spreads this object straight
- * into a turn's options and there is nothing to keep in step by hand.
+ * into a turn's options and there is nothing to keep in step by hand. The settings resolver is
+ * the one #307 adds: the session owner's stored choices, with the mode's override applied, read
+ * per request.
  */
 export interface TurnToolOptions {
-  /** The tools a request may offer. */
+  /** The tools a request may offer — its offer, before the settings take any of them out. */
   readonly tools: ToolRegistry
-  /** What the policy in force says per call; each tool's own permission when absent (#307). */
-  readonly toolPolicy?: ToolPolicyResolver
+  /** The settings in force per request; each tool's own declaration when absent (#307). */
+  readonly toolSettings?: ToolSettingsResolver
   /** Whether a model can call tools; the registry's `tool_call` when absent. */
   readonly toolSupportFor?: ToolSupportFor
   /** Where a step's per-user values come from (#311). */
@@ -65,30 +88,33 @@ export interface TurnToolOptions {
   readonly maxToolSteps?: number
 }
 
+/** What {@link createTurnTools} builds its answer from. */
+export interface TurnToolDeps {
+  /** The parsed environment: how many requests a turn may make. */
+  readonly config: { readonly maxToolSteps: number }
+  /** The tools this process registers ({@link createTurnRegistry}), or `undefined` for none. */
+  readonly tools: ToolRegistry | undefined
+  /** The store the settings resolver reads a user's choices from. */
+  readonly store: Pick<SessionStore, 'getToolSettings' | 'getMode' | 'getPreferences'>
+  /** The model registry, which answers which models can call tools at all. */
+  readonly registry: ModelRegistry
+}
+
 /**
- * Resolve the tools this process runs with.
+ * Resolve the tools a turn runs with, or `undefined` when this process registers none.
  *
- * `undefined` — no registry at all — is the answer for every deployment on a real provider
- * model, and is not a degraded mode: it is a chat with no tools, which is what this server was
- * before #304 and what it will keep being until #305's built-ins land. The test model gets
- * {@link createTestToolRegistry} because it is the model the tests speak to, and a tool turn
- * through the real server is what the e2e suite is for.
- *
- * @param config the parsed environment: how many requests a turn may make
- * @param kind which factory the process runs — `mock` is what turns the test registry on
- * @param registry the model registry, which answers which models can call tools at all
+ * A deployment with no registry has nothing to offer and is never asked for a user's settings:
+ * there is nothing a setting could turn on.
  */
-export function createTurnTools(
-  config: { readonly maxToolSteps: number },
-  kind: ResolvedModel['kind'],
-  registry: ModelRegistry,
-): TurnToolOptions | undefined {
-  if (kind !== 'mock') {
+export function createTurnTools(deps: TurnToolDeps): TurnToolOptions | undefined {
+  const { tools } = deps
+  if (tools === undefined) {
     return undefined
   }
   return {
-    tools: createTestToolRegistry(),
-    toolSupportFor: createToolSupportResolver(registry),
-    maxToolSteps: config.maxToolSteps,
+    tools,
+    toolSettings: createToolSettingsResolver({ store: deps.store, tools }),
+    toolSupportFor: createToolSupportResolver(deps.registry),
+    maxToolSteps: deps.config.maxToolSteps,
   }
 }

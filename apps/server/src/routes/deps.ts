@@ -1,3 +1,4 @@
+import type { ToolRegistry } from '@openharness/hands'
 import type { SessionStore } from '@openharness/session'
 
 import type { SocialProviderName } from '../auth-profile'
@@ -47,6 +48,14 @@ export interface RouteDeps {
    * a client cannot know either value on its own.
    */
   readonly preferenceDefaults: PreferenceDefaults
+  /**
+   * The tools this process registers (epic #303, X4; issue #307), or `undefined` for a
+   * deployment that registers none. `GET`/`PUT /v1/me/tools` read it: the listing is the
+   * registered tools with a user's choices over them, and a stored setting for a tool that is
+   * not here is listed as unavailable. It is the same registry a turn is handed
+   * (`createTurnRegistry`), so "available" and "a chat can call it" are the same fact.
+   */
+  readonly tools: ToolRegistry | undefined
   /** The SSE keepalive interval; tests shorten it. */
   readonly sseKeepaliveMs?: number
   /** The re-check interval of the long-lived routes (A2/#76); tests shorten it. */
