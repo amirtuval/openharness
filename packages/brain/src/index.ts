@@ -12,6 +12,8 @@ import { PACKAGE_NAME as SESSION_PACKAGE_NAME } from '@openharness/session'
  * package; the brain only sees a `SessionStore`, a model and an abort signal.
  *
  * - **{@link runTurn}** (`./turn`) — the loop, and the lifecycle it writes.
+ * - **{@link runToolStep}** (`./tools`) — one step's tool calls: stored, run through
+ *   `@openharness/hands`, and answered in call order (epic #303, X2).
  * - **{@link ContextStrategy}** (`./context`) — how the log becomes model messages: the latest
  *   non-superseded `session.context_summary` replaces the history it covers (epic #277, K1), and
  *   an oversized newest item is capped rather than dropped (K6).
@@ -57,6 +59,7 @@ export * from './reasoning'
 export * from './redact'
 export * from './retry'
 export * from './manual'
+export * from './tools'
 export * from './summarize'
 export * from './turn'
 export * from './vertex'

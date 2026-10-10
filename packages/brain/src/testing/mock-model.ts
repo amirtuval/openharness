@@ -21,6 +21,15 @@ export interface MockModelScript {
   /** The text chunks to stream, in order. Default: no text at all. */
   readonly text?: readonly string[]
   /**
+   * The tool calls this step makes, in order, after the text (epic #303).
+   *
+   * `input` is an object here; the wire carries it as JSON text, which is what the mock streams
+   * — `tool-input-start`/`delta`/`end` and then the call — so the SDK parses it exactly as it
+   * parses a provider's. `id` defaults to a deterministic per-index one, because the brain does
+   * not keep the provider's id: the stored call's `sevt_` id is the call's identity.
+   */
+  readonly toolCalls?: readonly MockToolCall[]
+  /**
    * Reject the request outright, as a provider failing before the stream opens. A test about
    * retries passes an {@link apiCallError}, so the SDK's own classifier can see the failure.
    */
@@ -31,6 +40,16 @@ export interface MockModelScript {
   readonly usage?: Partial<ModelUsage>
   /** Called as each text chunk is about to be served — a test can abort or append here. */
   readonly onChunk?: (chunk: string, index: number) => Promise<void> | void
+}
+
+/** One tool call a scripted model makes (epic #303). */
+export interface MockToolCall {
+  /** The tool's name, as it was offered to the model. */
+  readonly name: string
+  /** The arguments; streamed as JSON, as a provider sends them. */
+  readonly input?: unknown
+  /** The provider's id for the call; a deterministic default when omitted. */
+  readonly id?: string
 }
 
 /** The scripted model factory, and what the loop sent it. */
@@ -135,6 +154,7 @@ export function mockModel(...scripts: MockModelScript[]): MockModel {
  */
 function streamOf(script: MockModelScript): ReadableStream<LanguageModelV4StreamPart> {
   const usage = { ...FIXTURE_MODEL_USAGE, ...script.usage }
+  const calls = script.toolCalls ?? []
   const steps: (() => Promise<LanguageModelV4StreamPart>)[] = [
     () => Promise.resolve({ type: 'stream-start', warnings: [] }),
     () => Promise.resolve({ type: 'text-start', id: TEXT_ID }),
@@ -148,10 +168,33 @@ function streamOf(script: MockModelScript): ReadableStream<LanguageModelV4Stream
           ? { type: 'text-end', id: TEXT_ID }
           : { type: 'error', error: script.failAfterText },
       ),
+    // The arguments travel as JSON text, the way a provider sends them, so the SDK's own parse
+    // is what the loop sees — a mock that handed over an object would test the mock instead.
+    ...calls.flatMap((call, index) => {
+      const id = call.id ?? `mock-tool-call-${index + 1}`
+      return [
+        (): Promise<LanguageModelV4StreamPart> =>
+          Promise.resolve({ type: 'tool-input-start', id, toolName: call.name }),
+        (): Promise<LanguageModelV4StreamPart> =>
+          Promise.resolve({
+            type: 'tool-input-delta',
+            id,
+            delta: JSON.stringify(call.input ?? {}),
+          }),
+        (): Promise<LanguageModelV4StreamPart> => Promise.resolve({ type: 'tool-input-end', id }),
+        (): Promise<LanguageModelV4StreamPart> =>
+          Promise.resolve({
+            type: 'tool-call',
+            toolCallId: id,
+            toolName: call.name,
+            input: JSON.stringify(call.input ?? {}),
+          }),
+      ]
+    }),
     () =>
       Promise.resolve<LanguageModelV4StreamPart>({
         type: 'finish',
-        finishReason: { unified: 'stop', raw: undefined },
+        finishReason: { unified: calls.length > 0 ? 'tool-calls' : 'stop', raw: undefined },
         usage: {
           inputTokens: {
             total: usage.input_tokens,
