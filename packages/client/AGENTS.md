@@ -831,6 +831,12 @@ the mode on the model they last ran. The one difference from the server: the fak
 mode when it is picked rather than per request, so an edit to a mode a chat already follows is
 not picked up by the fake's next turn.
 
+A mode carries the **tool override** of #307 (`tools`) like any other mode field: the fake
+stores what a create or update carries, defaults it to `null`, and keeps it when an update
+omits it — the resource is the protocol's, so there is nothing else for the fake to do with it.
+There is **no `client.tools` resource yet**: `/v1/me/tools` is reached by the API only, and the
+screen that asks for it is #308.
+
 The credentials are configurable too: `createFakeClient({ credentials })` seeds the store with
 metadata-only rows, which is what a screen that behaves differently for an account **with** a key
 needs — the first-run check is the one that made this an option (#209) — because `put` cannot run
