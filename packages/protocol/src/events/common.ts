@@ -20,6 +20,24 @@ export const EVENT_TYPES = {
   userInterrupt: 'user.interrupt',
   /** The agent's reply, as text blocks. */
   agentMessage: 'agent.message',
+  /**
+   * The agent asked for a tool.
+   *
+   * The event's own `id` is the call's id — the same identity trick `agent.message` uses for
+   * the chunks it replaces — and the `agent.tool_result` that answers it names that id in its
+   * `tool_use_id`. Written by the brain, never by a client: a tool is something the model
+   * asked for, and only the brain talks to the model. See {@link AgentToolUseEventSchema}.
+   */
+  agentToolUse: 'agent.tool_use',
+  /**
+   * What a tool call produced.
+   *
+   * Written by the brain, whatever came of the call — a result, a refusal, a timeout, a
+   * crash that lost the execution. A client never writes one (epic #303, X1): the loop owns
+   * the log, and a tool result is the loop's report of what it ran. See
+   * {@link AgentToolResultEventSchema}.
+   */
+  agentToolResult: 'agent.tool_result',
   /** The agent started working. */
   sessionStatusRunning: 'session.status_running',
   /** The agent finished its turn and is waiting for input. */
@@ -126,6 +144,8 @@ export const STORED_EVENT_TYPES = [
   EVENT_TYPES.userMessage,
   EVENT_TYPES.userInterrupt,
   EVENT_TYPES.agentMessage,
+  EVENT_TYPES.agentToolUse,
+  EVENT_TYPES.agentToolResult,
   EVENT_TYPES.sessionStatusRunning,
   EVENT_TYPES.sessionStatusIdle,
   EVENT_TYPES.sessionStatusRescheduled,

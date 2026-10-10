@@ -134,6 +134,8 @@ session. It is also the SSE `id` and the resume position, so a client that recon
 | `user.message`                     | the client    | a message, until the brain claims it                                                    |
 | `user.interrupt`                   | the client    | stop the turn in flight                                                                 |
 | `agent.message`                    | the brain     | a reply, under the `sevt_` id its chunks announced                                      |
+| `agent.tool_use`                   | the brain     | the model asked for a tool — its own id is the call's id (#304)                         |
+| `agent.tool_result`                | the brain     | what the call produced, or why it did not — always written by the brain (#304)          |
 | `session.status_running`           | the brain     | a turn started (also after a retry)                                                     |
 | `session.status_idle`              | the brain     | the turn ended; the session is waiting for input                                        |
 | `session.status_rescheduled`       | the brain     | a transient failure; it is retrying                                                     |
@@ -179,6 +181,45 @@ the request's `span.model_request_start` records what it was asked for and what 
 `applied` is `null` when the model took none — an effort asked for and not applied — and the
 field is absent entirely for a session that never set one, which is every session stored
 before #252.
+
+### Tools (epic #303)
+
+A model request may be given tools. When it asks for one, the model's call is an event of its
+own and so is the loop's answer, so a replay shows exactly what was asked for, what ran, and
+what came back:
+
+```json
+{ "type": "agent.tool_use",    "id": "sevt_…", "seq": 4, "processed_at": "…",
+  "name": "web_fetch", "input": { "url": "https://example.com" },
+  "evaluated_permission": "allow" }
+{ "type": "agent.tool_result", "id": "sevt_…", "seq": 5, "processed_at": "…",
+  "tool_use_id": "sevt_…", "content": [{ "type": "text", "text": "…" }], "is_error": false }
+```
+
+- **The call's id is the event's id.** `agent.tool_result.tool_use_id` names the
+  `agent.tool_use` it answers, and a turn that finds a call with no result knows exactly which
+  execution was lost.
+- **Only the brain writes a result.** A client never does — a call the model made is answered
+  once, by the loop that ran it: with what the tool produced, or with an `is_error` result
+  saying why it did not run or did not finish (`Permission to use … has been denied.`,
+  `Tool … timed out`, `Interrupted by the user.`, or `execution lost` for a call a crashed turn
+  never ran).
+- **`evaluated_permission` is what the policy said about that call** — `allow`, `ask` or
+  `deny`, the same vocabulary Anthropic uses. `deny` refuses the call without running it;
+  `ask` is the pausing half, which arrives with #309, so nothing produces it yet.
+- **The tools a request offered are recorded on its span.** `span.model_request_start.tools`
+  is a `{ name, source }` per offered tool — `builtin` today, `mcp` with #312 — so the log says
+  what the model could have called, not only what it did. A request with no tools writes none.
+- **Input is not streamed and a result's content is text.** The call is stored when it is
+  complete, and a result carries text blocks. The loop itself is bounded: at most
+  `OPENHARNESS_MAX_TOOL_STEPS` model requests per turn (50 by default), after which the turn
+  ends with a `session.error` of type `tool_steps_exhausted_error` rather than retrying.
+- **A tool is never re-run.** A brain that inherits a call with no result writes an `is_error`
+  result for it and lets the model decide what to do next.
+- **A model that cannot call tools is offered none.** `GET /v1/models` reports each model's
+  `tool_call`, and a model whose registry entry says `false` chats exactly as it did before
+  tools existed.
+
 
 `session.usage` is the session's **running** totals, written by the brain in the same append as
 the `span.model_request_end` that closes a request which reported usage — so a client watching
@@ -827,6 +868,7 @@ is the usual one; the optional `refresh=true` query parameter bypasses the serve
       "max_output_tokens": 65536,
       "cost": { "input": 0.3, "output": 2.5, "cache_read": 0.075, "cache_write": null },
       "context_budget": 983040,
+      "tool_call": true,
       "source": "provider"
     },
     {
@@ -837,6 +879,7 @@ is the usual one; the optional `refresh=true` query parameter bypasses the serve
       "max_output_tokens": null,
       "cost": null,
       "context_budget": 32768,
+      "tool_call": true,
       "source": "provider"
     },
     {
@@ -846,6 +889,7 @@ is the usual one; the optional `refresh=true` query parameter bypasses the serve
       "context_window": null,
       "max_output_tokens": null,
       "context_budget": 32768,
+      "tool_call": true,
       "source": "registry"
     }
   ],
@@ -865,6 +909,10 @@ is the usual one; the optional `refresh=true` query parameter bypasses the serve
   neither a key nor any part of one appears in a response, an error or a log. `data` is sorted
   by provider, then name; the form stays free text regardless — the router accepts
   `provider/model` ids the catalog does not know yet.
+- **`tool_call` says whether the model can call tools** (epic #303, X2): models.dev's own flag,
+  read off the server's bundled snapshot, and `true` for a model the registry does not know. A
+  model marked `false` is offered no tools at all and chats exactly as it did before tools
+  existed; a client uses the field to say so before a chat starts (#308).
 - **`context_budget` is the budget the brain will trim a request to** (epic #277, K10; #246).
   Every entry carries it, resolved by the server with the very resolver the scheduler is handed
   — the model's `context_window` less room for the reply (`min(max_output_tokens, 25% of the

@@ -99,11 +99,30 @@ const storedSamples = {
       retry_status: { type: 'retrying' },
     },
   },
+  'agent.tool_use': {
+    id: eventId(),
+    type: 'agent.tool_use',
+    seq: 3,
+    processed_at: '2026-03-15T10:00:00Z',
+    name: 'echo',
+    input: { text: 'hi' },
+    evaluated_permission: 'allow',
+  },
+  'agent.tool_result': {
+    id: eventId(),
+    type: 'agent.tool_result',
+    seq: 4,
+    processed_at: '2026-03-15T10:00:00Z',
+    tool_use_id: eventId(),
+    content: text('hi'),
+    is_error: false,
+  },
   'span.model_request_start': {
     id: eventId(),
     type: 'span.model_request_start',
     seq: 8,
     processed_at: '2026-03-15T10:00:00Z',
+    tools: [{ name: 'echo', source: 'builtin' }],
   },
   'span.model_request_end': {
     id: eventId(),
@@ -230,8 +249,8 @@ describe('stored event schemas', () => {
   })
 
   it('rejects an unknown event type', () => {
-    // `agent.tool_use` is a real Anthropic event that v1 does not implement.
-    const unknown = { ...storedSamples['agent.message'], type: 'agent.tool_use' }
+    // `system.message` is a real Anthropic event that v1 does not implement.
+    const unknown = { ...storedSamples['agent.message'], type: 'system.message' }
     const parsed = StoredEventSchema.safeParse(unknown)
     expect(parsed.success).toBe(false)
     expect(parsed.error?.issues[0]?.code).toBe('invalid_union')
