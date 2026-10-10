@@ -257,7 +257,7 @@ export function personFor(server: ServerProcess, signedIn: SignedIn): Person {
   return { signedIn, client: clientFor(server, signedIn) }
 }
 
-export { seedProviderCredential } from './credentials'
+export { seedAzureCredential, seedProviderCredential } from './credentials'
 export { createE2eDatabase, withDatabaseClient, type E2eDatabase } from './database'
 export { errorOf } from './errors'
 export {

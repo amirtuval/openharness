@@ -1,10 +1,12 @@
 import {
   PROVIDERS as SHARED_PROVIDERS,
   PROVIDER_IDS,
+  CREDENTIAL_TYPES,
   type ModelUsage,
   type ProviderId,
 } from '@openharness/protocol'
 import { createAnthropic } from '@ai-sdk/anthropic'
+import { createAzure } from '@ai-sdk/azure'
 import { createCerebras } from '@ai-sdk/cerebras'
 import { createDeepSeek } from '@ai-sdk/deepseek'
 import { createFireworks } from '@ai-sdk/fireworks'
@@ -18,6 +20,7 @@ import { createXai } from '@ai-sdk/xai'
 import type { LanguageModel, ModelMessage } from 'ai'
 import { streamText } from 'ai'
 
+import { azureBaseUrl, azureFetch, type ProviderFetch } from './azure-fetch'
 import { isOwnershipError } from './errors'
 
 /**
@@ -32,15 +35,40 @@ import { isOwnershipError } from './errors'
  */
 
 /**
- * The credential one model request is made with — the session owner's own provider key.
+ * The credential one model request is made with — the session owner's own provider credential.
  *
- * A model authenticates with a single API key, which is all {@link providerModelFactory}
- * passes to the provider. It is held for exactly one request: the turn resolves it before the
- * request, builds the model with it, and lets it go when the request ends.
+ * It is held for exactly one request: the turn resolves it before the request, builds the
+ * model with it, and lets it go when the request ends. The `type` says which shape the rest of
+ * it has, and it is what lets a `provider/model` id name either one of the eleven fixed
+ * providers or a named credential of a different type (epic #245, A3a) — the server resolves
+ * the model id's first half to a stored credential, and its type is what the factory builds
+ * with.
  */
-export interface ModelCredential {
+export type ModelCredential = ApiKeyModelCredential | AzureOpenAIModelCredential
+
+/** An `api_key` credential: a single secret, passed to one of the eleven provider clients. */
+export interface ApiKeyModelCredential {
+  readonly type: 'api_key'
   /** The provider's API key. Passed to the provider explicitly; never read from the environment. */
   readonly apiKey: string
+}
+
+/**
+ * An `azure_openai` credential: the resource endpoint and the key that authenticates it.
+ *
+ * The deployment is not here — it is the model id's second half (`azure/gpt-4o` names the
+ * deployment `gpt-4o` on the `azure` credential) — because one credential serves every
+ * deployment it was saved with.
+ */
+export interface AzureOpenAIModelCredential {
+  readonly type: 'azure_openai'
+  /** The Azure OpenAI API key. Passed to the provider explicitly; never read from the environment. */
+  readonly apiKey: string
+  /**
+   * The resource endpoint the user saved, e.g. `https://my-resource.openai.azure.com`. The
+   * base URL `@ai-sdk/azure` needs is derived from it by {@link azureBaseUrl}.
+   */
+  readonly endpoint: string
 }
 
 /**
@@ -209,6 +237,19 @@ export function isUnsupportedProviderError(value: unknown): value is Unsupported
 }
 
 /**
+ * What {@link createProviderModelFactory} takes: the seams a test replaces.
+ *
+ * The `fetch` an Azure model is built with is the SSRF guard (`@openharness/hands`'
+ * `safeFetch`, `./azure-fetch.ts`). A host that injects its own factory — the server puts this
+ * one behind its mock switch — does not need to override it; a test that wants to watch the
+ * request the guard allows does.
+ */
+export interface ProviderModelFactoryOptions {
+  /** The `fetch` every Azure OpenAI request goes through. Defaults to the safeFetch guard. */
+  readonly azureFetch?: ProviderFetch
+}
+
+/**
  * The default {@link ModelFactory}: one official AI SDK provider per `provider/model` prefix.
  *
  * `provider/model` is what the protocol documents for a session's `model.id`, and the part
@@ -224,25 +265,53 @@ export function isUnsupportedProviderError(value: unknown): value is Unsupported
  * router these replace resolved for them: OpenAI (`openai.responses(id)`) and xAI
  * (`xai.responses(id)`). Every other provider is a chat-completions client.
  *
+ * A first half that is **not** one of the eleven provider ids names a *named credential*
+ * instead (epic #245, A3a): an `azure` credential's model ids are `azure/<deployment>`, and
+ * the credential's type decides the client. The credential's type is the discriminant, so a
+ * name nothing stores a credential for is still an `UnsupportedProviderError` — the same
+ * ending as before, and the turn writes no span for it.
+ *
  * No `maxRetries`/`streamRetries` is configured here, because a provider client has neither:
  * both options live on the `streamText` call in {@link streamModelRequest}, which is the only
  * thing this package streams through (issue #117).
  *
- * @param modelId a model id, `provider/model`
- * @param credential the key this one request authenticates with
+ * @param modelId a model id, `provider/model` — or `<credential name>/<deployment>`
+ * @param credential the credential this one request authenticates with
  * @throws UnsupportedProviderError when the id names a provider with no client here
  */
-export const providerModelFactory: ModelFactory = (modelId, credential) => {
-  const provider = providerOf(modelId)
-  const client = providerClientFor(provider)
-  if (client === undefined) {
+export function createProviderModelFactory(
+  options: ProviderModelFactoryOptions = {},
+): ModelFactory {
+  const fetch = options.azureFetch ?? azureFetch
+  return (modelId, credential) => {
+    const provider = providerOf(modelId)
+    // Everything after the first slash: the provider's own id for the model. A fireworks,
+    // OpenRouter or Azure id carries slashes of its own, which is why this is not
+    // `split('/')[1]`.
+    const id = modelId.slice(provider.length + 1)
+    const client = providerClientFor(provider)
+    if (client !== undefined) {
+      return client.model({ apiKey: credential.apiKey, baseURL: client.baseURL })(id)
+    }
+    if (credential.type === 'azure_openai') {
+      // `chat`, not the provider's default: the default is the Responses API, which newer
+      // deployments support and older ones (an `gpt-35-turbo` deployment someone still runs) do
+      // not — and the deployment name is a string the user typed, so the factory cannot know.
+      // The chat-completions API is the one every Azure deployment answers.
+      return createAzure({
+        apiKey: credential.apiKey,
+        baseURL: azureBaseUrl(credential.endpoint),
+        // The user's endpoint is a URL a user typed, so every request to it is guarded: private
+        // addresses are refused on the model call exactly as they are on the save-time check.
+        fetch,
+      }).chat(id)
+    }
     throw new UnsupportedProviderError(provider)
   }
-  // Everything after the first slash: the provider's own id for the model. A fireworks or
-  // OpenRouter id carries slashes of its own, which is why this is not `split('/')[1]`.
-  const id = modelId.slice(provider.length + 1)
-  return client.model({ apiKey: credential.apiKey, baseURL: client.baseURL })(id)
 }
+
+/** The factory a host runs unless it has a reason to inject one. */
+export const providerModelFactory: ModelFactory = createProviderModelFactory()
 
 /**
  * The provider of a `provider/model` id: the part before the first slash.
@@ -273,7 +342,16 @@ export function providerOf(modelId: string): string {
 export function isUsableCredential(
   credential: ModelCredential | null,
 ): credential is ModelCredential {
-  return credential !== null && credential.apiKey.trim().length > 0
+  if (credential === null || credential.apiKey.trim().length === 0) {
+    return false
+  }
+  // An Azure credential with no endpoint could not build a request at all. It is refused here
+  // rather than at the factory, so the turn ends with `missing_provider_credential` — the
+  // ending that says "save one" — instead of a span that fails on a malformed URL.
+  if (credential.type === 'azure_openai' && credential.endpoint.trim().length === 0) {
+    return false
+  }
+  return true
 }
 
 /**
@@ -281,13 +359,17 @@ export function isUsableCredential(
  * the provider so a client can point at the right Settings entry (epic #65, A5).
  *
  * The name is the shared list's (`@openharness/protocol`), so it is the same words a frontend
- * puts on a provider's tile; a provider the list does not carry — a session whose `model.id`
- * names something nobody configured — falls back to its capitalised id.
+ * puts on a provider's tile; a first half that names a named credential's default — `azure` —
+ * reads as that type's display name, and anything else — a session whose `model.id` names
+ * something nobody configured — falls back to its capitalised id.
  *
  * @param provider the provider id, as {@link providerOf} read it
  */
 export function missingCredentialMessage(provider: string): string {
-  const name = SHARED_PROVIDERS.find((entry) => entry.id === provider)?.name ?? capitalize(provider)
+  const name =
+    SHARED_PROVIDERS.find((entry) => entry.id === provider)?.name ??
+    CREDENTIAL_TYPES.find((entry) => entry.defaultName === provider)?.name ??
+    capitalize(provider)
   return `No ${name} key is set. Add one in Settings → Model providers.`
 }
 

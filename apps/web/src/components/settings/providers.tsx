@@ -1,4 +1,8 @@
-import { providerName } from '@openharness/client'
+import {
+  credentialDisplayName,
+  credentialTargetFor,
+  type CredentialTarget,
+} from '@openharness/client'
 import type { ProviderCredential } from '@openharness/protocol'
 import { useState } from 'react'
 
@@ -32,8 +36,8 @@ export function ProvidersCard() {
   const { credentials, loading, error, remove, reload, dismissError } =
     useProviderCredentials(client)
 
-  // The dialog to open: `{}` for "pick one", `{ provider }` for a row's Replace.
-  const [adding, setAdding] = useState<{ provider?: string } | null>(null)
+  // The dialog to open: `{}` for "pick one", `{ target, name }` for a row's Replace.
+  const [adding, setAdding] = useState<{ target?: CredentialTarget; name?: string } | null>(null)
   const [confirming, setConfirming] = useState<string | null>(null)
   const [deleting, setDeleting] = useState<string | null>(null)
   const [failure, setFailure] = useState<CredentialResult | null>(null)
@@ -50,7 +54,7 @@ export function ProvidersCard() {
       setFailure(result)
       return
     }
-    setNotice(`Deleted the ${providerName(target)} key.`)
+    setNotice(`Deleted the ${target} credential.`)
   }
 
   return (
@@ -58,15 +62,15 @@ export function ProvidersCard() {
       <CardHeader>
         <CardTitle className="text-sm">Providers</CardTitle>
         <CardDescription>
-          The keys your chats run on. Each is validated against its provider when you save it,
-          stored encrypted on the server, and never shown again — a list entry shows the provider,
-          the last four characters and when it was validated.
+          The credentials your chats run on. Each is validated against its provider when you save
+          it, stored encrypted on the server, and never shown again — a list entry shows what it is
+          called, the last four characters and when it was validated.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-5">
         {error === null ? null : (
           <ErrorBanner
-            title="Could not load your provider keys"
+            title="Could not load your credentials"
             message={error}
             onDismiss={dismissError}
           />
@@ -97,24 +101,24 @@ export function ProvidersCard() {
           />
         ) : null}
 
-        <section aria-label="Saved provider keys" className="space-y-2">
+        <section aria-label="Saved credentials" className="space-y-2">
           {loading ? <p className="text-sm text-muted-foreground">Loading your keys…</p> : null}
           {!loading && credentials.length === 0 ? (
             <p className="text-sm text-muted-foreground">
-              No provider keys yet. Add one below — a chat cannot run a model whose provider has no
-              key here.
+              No credentials yet. Add one below — a chat cannot run a model whose provider has no
+              credential here.
             </p>
           ) : null}
           <ul className="flex flex-col gap-2">
             {credentials.map((credential) => (
               <li
-                key={credential.provider}
+                key={credential.name}
                 data-slot="provider-credential"
                 className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"
               >
                 <div className="min-w-0">
                   <p className="truncate text-sm">
-                    <span className="font-medium">{providerName(credential.provider)}</span>{' '}
+                    <span className="font-medium">{credentialDisplayName(credential)}</span>{' '}
                     <span className="font-mono text-muted-foreground">…{credential.last4}</span>
                   </p>
                   <p className="truncate text-xs text-muted-foreground">
@@ -122,7 +126,7 @@ export function ProvidersCard() {
                   </p>
                 </div>
 
-                {confirming === credential.provider ? (
+                {confirming === credential.name ? (
                   <div className="flex shrink-0 items-center gap-2">
                     <span className="text-xs text-muted-foreground">Delete this key?</span>
                     <Button
@@ -130,9 +134,9 @@ export function ProvidersCard() {
                       variant="destructive"
                       size="sm"
                       disabled={deleting !== null}
-                      onClick={() => void confirmDelete(credential.provider)}
+                      onClick={() => void confirmDelete(credential.name)}
                     >
-                      {deleting === credential.provider ? 'Deleting…' : 'Delete'}
+                      {deleting === credential.name ? 'Deleting…' : 'Delete'}
                     </Button>
                     <Button
                       type="button"
@@ -150,9 +154,12 @@ export function ProvidersCard() {
                       type="button"
                       variant="outline"
                       size="sm"
-                      aria-label={`Replace the ${credential.provider} key`}
+                      aria-label={`Replace the ${credential.name} credential`}
                       onClick={() => {
-                        setAdding({ provider: credential.provider })
+                        setAdding({
+                          target: credentialTargetFor(credential),
+                          name: credential.name,
+                        })
                         setNotice(null)
                       }}
                     >
@@ -162,9 +169,9 @@ export function ProvidersCard() {
                       type="button"
                       variant="outline"
                       size="sm"
-                      aria-label={`Delete the ${credential.provider} key`}
+                      aria-label={`Delete the ${credential.name} credential`}
                       onClick={() => {
-                        setConfirming(credential.provider)
+                        setConfirming(credential.name)
                         setNotice(null)
                       }}
                     >
@@ -192,11 +199,12 @@ export function ProvidersCard() {
 
       <AddProviderDialog
         open={adding !== null}
-        initialProvider={adding?.provider}
-        onSaved={(provider) => {
+        initialTarget={adding?.target}
+        replacingName={adding?.name}
+        onSaved={(name) => {
           setAdding(null)
           setFailure(null)
-          setNotice(`Saved the ${providerName(provider)} key.`)
+          setNotice(`Saved the ${name} credential.`)
           // The dialog holds its own list; this card's copy is one read behind it.
           void reload()
         }}

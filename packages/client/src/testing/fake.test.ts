@@ -1292,7 +1292,7 @@ describe("the fake's authentication", () => {
       type: 'api_key',
       api_key: 'sk-ant-secret-k9Z2',
     })
-    expect(stored).toMatchObject({ provider: 'anthropic', type: 'api_key', last4: 'k9Z2' })
+    expect(stored).toMatchObject({ name: 'anthropic', type: 'api_key', last4: 'k9Z2' })
     expect(JSON.stringify(stored)).not.toContain('sk-ant-secret')
 
     const replaced = await fake.providerCredentials.put('anthropic', {
@@ -1316,6 +1316,36 @@ describe("the fake's authentication", () => {
     await expect(
       fake.providerCredentials.put('anthropic', { type: 'api_key', api_key: '  ' }),
     ).rejects.toMatchObject({ status: 422, type: 'invalid_provider_credential' })
+  })
+
+  it('keeps two azure credentials under the names the reader chose (#245, A3a)', async () => {
+    const fake = createFakeClient()
+    const azure = {
+      type: 'azure_openai' as const,
+      endpoint: 'https://my-resource.openai.azure.com',
+      api_key: 'az-key-4242',
+      deployments: ['gpt-4o'],
+    }
+
+    const first = await fake.providerCredentials.put('azure', azure)
+    const second = await fake.providerCredentials.put('azure-eu', {
+      ...azure,
+      api_key: 'az-eu-7777',
+    })
+
+    expect(first).toMatchObject({ name: 'azure', type: 'azure_openai', last4: '4242' })
+    expect(second).toMatchObject({ name: 'azure-eu', last4: '7777' })
+    expect((await fake.providerCredentials.list()).data.map((entry) => entry.name)).toEqual([
+      'azure',
+      'azure-eu',
+    ])
+    // The endpoint never comes back: a credential's answer is metadata only.
+    expect(JSON.stringify(await fake.providerCredentials.list())).not.toContain('openai.azure.com')
+
+    // The body goes through the route's schema, so a non-https endpoint is the server's 400.
+    await expect(
+      fake.providerCredentials.put('azure', { ...azure, endpoint: 'http://x.azure.com' }),
+    ).rejects.toMatchObject({ status: 400, type: 'invalid_request_error' })
   })
 
   it('picks a default model for the first key, and never replaces one (#116, U4)', async () => {

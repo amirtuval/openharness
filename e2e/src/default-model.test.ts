@@ -57,11 +57,11 @@ const SECOND_PROVIDER = 'acme-second'
 const EXPLICIT_DEFAULT = `${FIRST_PROVIDER}/everyday-model`
 
 /** Store a key for a provider, the way the `PUT` route stores one once it has validated it. */
-async function seedKey(userId: string, provider: string): Promise<void> {
+async function seedKey(userId: string, name: string): Promise<void> {
   await seedProviderCredential(await harness.database(), {
     userId,
-    provider,
-    apiKey: `sk-${provider}-must-not-leak-3f1c`,
+    name,
+    apiKey: `sk-${name}-must-not-leak-3f1c`,
   })
 }
 
@@ -269,7 +269,7 @@ describe('the automatic default model (U4)', () => {
         type: 'api_key',
         api_key: FAKE_KEY,
       })
-      expect(credential.provider).toBe('anthropic')
+      expect(credential.name).toBe('anthropic')
       expect(JSON.stringify(credential)).not.toContain(FAKE_KEY)
 
       // The pick: `<provider>/<recommended>` — the table's first entry, which the live

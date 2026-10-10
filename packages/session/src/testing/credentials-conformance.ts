@@ -12,7 +12,7 @@ import { OWNER_A, OWNER_B } from './conformance'
  * It is the contract's executable form: `InMemoryCredentialStore` passes it today, and
  * `PostgresCredentialStore` must pass the same suite unchanged. That is why it only asks for
  * what the contract promises — upsert and replace, the metadata a list returns with no sealed
- * field in it, owner scoping, delete, uniqueness per `(user, provider)`, and hand-outs that
+ * field in it, owner scoping, delete, uniqueness per `(user, name)`, and hand-outs that
  * cannot be written to — and never reaches into an implementation.
  *
  * ## Writing the factory
@@ -55,7 +55,7 @@ export function runCredentialStoreConformance(
         const { store, clock } = await setup()
         const metadata = await store.upsert({
           userId: OWNER_A,
-          provider: 'anthropic',
+          name: 'anthropic',
           type: 'api_key',
           sealed: sealedSecret('one'),
           last4: 'cdef',
@@ -64,7 +64,7 @@ export function runCredentialStoreConformance(
         expect(metadata.id).toMatch(/^pcred_/)
         expect(metadata).toMatchObject({
           type: 'api_key',
-          provider: 'anthropic',
+          name: 'anthropic',
           last4: 'cdef',
           created_at: timestampAt(clock.currentMs),
           updated_at: timestampAt(clock.currentMs),
@@ -73,7 +73,7 @@ export function runCredentialStoreConformance(
         // The answer is the protocol's metadata, exactly — and never a sealed field.
         expectExact(ProviderCredentialSchema, metadata, 'credential metadata')
 
-        const record = await store.get({ userId: OWNER_A, provider: 'anthropic' })
+        const record = await store.get({ userId: OWNER_A, name: 'anthropic' })
         expect(record).toMatchObject({ id: metadata.id, sealed: sealedSecret('one') })
       })
 
@@ -84,23 +84,23 @@ export function runCredentialStoreConformance(
         const { store, clock } = await setup()
         await store.upsert({
           userId: OWNER_A,
-          provider: 'anthropic',
+          name: 'anthropic',
           type: 'api_key',
           sealed: legacySealedSecret('legacy'),
           last4: 'cdef',
           validatedAt: timestampAt(clock.currentMs),
         })
 
-        const record = await store.get({ userId: OWNER_A, provider: 'anthropic' })
+        const record = await store.get({ userId: OWNER_A, name: 'anthropic' })
         expect(record?.sealed).toStrictEqual(legacySealedSecret('legacy'))
         expect(record?.sealed).not.toHaveProperty('keyProvider')
       })
 
-      it('replaces the credential for the same user and provider, keeping its id and created_at', async () => {
+      it('replaces the credential for the same user and name, keeping its id and created_at', async () => {
         const { store, clock } = await setup()
         const first = await store.upsert({
           userId: OWNER_A,
-          provider: 'anthropic',
+          name: 'anthropic',
           type: 'api_key',
           sealed: sealedSecret('old'),
           last4: 'old1',
@@ -109,29 +109,29 @@ export function runCredentialStoreConformance(
         clock.advance(5 * SECOND)
         const replaced = await store.upsert({
           userId: OWNER_A,
-          provider: 'anthropic',
+          name: 'anthropic',
           type: 'api_key',
           sealed: sealedSecret('new'),
           last4: 'new1',
           validatedAt: timestampAt(clock.currentMs),
         })
-        // One credential per `(user, provider)`: the replacement is the same credential with
+        // One credential per `(user, name)`: the replacement is the same credential with
         // a new secret, not a second one.
         expect(replaced.id).toBe(first.id)
         expect(replaced.created_at).toBe(first.created_at)
         expect(replaced.updated_at).toBe(timestampAt(clock.currentMs))
         expect(replaced.last4).toBe('new1')
         expect((await store.list({ userId: OWNER_A })).map((entry) => entry.id)).toEqual([first.id])
-        const record = await store.get({ userId: OWNER_A, provider: 'anthropic' })
+        const record = await store.get({ userId: OWNER_A, name: 'anthropic' })
         expect(record?.sealed).toEqual(sealedSecret('new'))
         expect(record?.validated_at).toBe(timestampAt(clock.currentMs))
       })
 
-      it('keeps a user’s providers apart, and two users’ copies of one provider apart', async () => {
+      it('keeps a user’s credentials apart, and two users’ copies of one name apart', async () => {
         const { store, clock } = await setup()
         const anthropic = await store.upsert({
           userId: OWNER_A,
-          provider: 'anthropic',
+          name: 'anthropic',
           type: 'api_key',
           sealed: sealedSecret('a-anthropic'),
           last4: 'aaaa',
@@ -139,7 +139,7 @@ export function runCredentialStoreConformance(
         })
         const openai = await store.upsert({
           userId: OWNER_A,
-          provider: 'openai',
+          name: 'openai',
           type: 'api_key',
           sealed: sealedSecret('a-openai'),
           last4: 'bbbb',
@@ -147,43 +147,85 @@ export function runCredentialStoreConformance(
         })
         await store.upsert({
           userId: OWNER_B,
-          provider: 'anthropic',
+          name: 'anthropic',
           type: 'api_key',
           sealed: sealedSecret('b-anthropic'),
           last4: 'cccc',
           validatedAt: timestampAt(clock.currentMs),
         })
-        // `list` is ordered by provider, byte order.
+        // `list` is ordered by name, byte order.
         expect((await store.list({ userId: OWNER_A })).map((entry) => entry.id)).toEqual([
           anthropic.id,
           openai.id,
         ])
-        expect((await store.get({ userId: OWNER_A, provider: 'openai' }))?.sealed).toEqual(
+        expect((await store.get({ userId: OWNER_A, name: 'openai' }))?.sealed).toEqual(
           sealedSecret('a-openai'),
         )
-        expect((await store.get({ userId: OWNER_B, provider: 'anthropic' }))?.sealed).toEqual(
+        expect((await store.get({ userId: OWNER_B, name: 'anthropic' }))?.sealed).toEqual(
           sealedSecret('b-anthropic'),
         )
+      })
+
+      it('keeps two named credentials of one type apart, under the names the user chose', async () => {
+        // The point of the name column (epic #245, A3a): a user may hold more than one
+        // credential of a type — `azure` and `azure-eu` here — and each is its own row, its
+        // own sealed blob and its own name. Under the old `(user, provider)` rule the second
+        // save replaced the first; it must not any more.
+        const { store, clock } = await setup()
+        const azure = await store.upsert({
+          userId: OWNER_A,
+          name: 'azure',
+          type: 'azure_openai',
+          sealed: sealedSecret('a-azure'),
+          last4: 'az01',
+          validatedAt: timestampAt(clock.currentMs),
+        })
+        const azureEu = await store.upsert({
+          userId: OWNER_A,
+          name: 'azure-eu',
+          type: 'azure_openai',
+          sealed: sealedSecret('a-azure-eu'),
+          last4: 'az02',
+          validatedAt: timestampAt(clock.currentMs),
+        })
+
+        expect(azureEu.id).not.toBe(azure.id)
+        expect((await store.list({ userId: OWNER_A })).map((entry) => entry.name)).toEqual([
+          'azure',
+          'azure-eu',
+        ])
+        expect((await store.get({ userId: OWNER_A, name: 'azure' }))?.sealed).toEqual(
+          sealedSecret('a-azure'),
+        )
+        expect((await store.get({ userId: OWNER_A, name: 'azure-eu' }))?.sealed).toEqual(
+          sealedSecret('a-azure-eu'),
+        )
+        // Deleting one leaves the other: the rows are keyed by name, not by type.
+        expect(await store.delete({ userId: OWNER_A, name: 'azure' })).toBe(true)
+        expect(await store.get({ userId: OWNER_A, name: 'azure-eu' })).not.toBeNull()
+        expect((await store.list({ userId: OWNER_A })).map((entry) => entry.name)).toEqual([
+          'azure-eu',
+        ])
       })
     })
 
     describe('get', () => {
-      it('answers null for a provider the user has no credential for', async () => {
+      it('answers null for a name the user has no credential for', async () => {
         const { store } = await setup()
-        expect(await store.get({ userId: OWNER_A, provider: 'anthropic' })).toBeNull()
+        expect(await store.get({ userId: OWNER_A, name: 'anthropic' })).toBeNull()
       })
 
       it('answers null for another user’s credential', async () => {
         const { store, clock } = await setup()
         await store.upsert({
           userId: OWNER_A,
-          provider: 'anthropic',
+          name: 'anthropic',
           type: 'api_key',
           sealed: sealedSecret('theirs'),
           last4: '0000',
           validatedAt: timestampAt(clock.currentMs),
         })
-        expect(await store.get({ userId: OWNER_B, provider: 'anthropic' })).toBeNull()
+        expect(await store.get({ userId: OWNER_B, name: 'anthropic' })).toBeNull()
       })
     })
 
@@ -198,7 +240,7 @@ export function runCredentialStoreConformance(
         const sealed = sealedSecret('secret')
         await store.upsert({
           userId: OWNER_A,
-          provider: 'anthropic',
+          name: 'anthropic',
           type: 'api_key',
           sealed,
           last4: 'zzzz',
@@ -207,7 +249,7 @@ export function runCredentialStoreConformance(
         const [metadata] = await store.list({ userId: OWNER_A })
         expect(metadata).toBeDefined()
         expect(Object.keys(metadata ?? {}).sort()).toEqual(
-          ['created_at', 'id', 'last4', 'provider', 'type', 'updated_at', 'validated_at'].sort(),
+          ['created_at', 'id', 'last4', 'name', 'type', 'updated_at', 'validated_at'].sort(),
         )
         // Nothing in the answer is any of the sealed values, under any name.
         const serialized = JSON.stringify(metadata)
@@ -220,7 +262,7 @@ export function runCredentialStoreConformance(
         const { store, clock } = await setup()
         await store.upsert({
           userId: OWNER_A,
-          provider: 'anthropic',
+          name: 'anthropic',
           type: 'api_key',
           sealed: sealedSecret('a'),
           last4: '1111',
@@ -235,25 +277,25 @@ export function runCredentialStoreConformance(
         const { store, clock } = await setup()
         await store.upsert({
           userId: OWNER_A,
-          provider: 'anthropic',
+          name: 'anthropic',
           type: 'api_key',
           sealed: sealedSecret('bye'),
           last4: '2222',
           validatedAt: timestampAt(clock.currentMs),
         })
-        expect(await store.delete({ userId: OWNER_A, provider: 'anthropic' })).toBe(true)
-        expect(await store.get({ userId: OWNER_A, provider: 'anthropic' })).toBeNull()
+        expect(await store.delete({ userId: OWNER_A, name: 'anthropic' })).toBe(true)
+        expect(await store.get({ userId: OWNER_A, name: 'anthropic' })).toBeNull()
         expect(await store.list({ userId: OWNER_A })).toEqual([])
         // Deleting what is not there is not an error; deleting another user's is a no-op.
-        expect(await store.delete({ userId: OWNER_A, provider: 'anthropic' })).toBe(false)
-        expect(await store.delete({ userId: OWNER_B, provider: 'anthropic' })).toBe(false)
+        expect(await store.delete({ userId: OWNER_A, name: 'anthropic' })).toBe(false)
+        expect(await store.delete({ userId: OWNER_B, name: 'anthropic' })).toBe(false)
       })
 
-      it('leaves another user’s credential alone when the same provider is deleted', async () => {
+      it('leaves another user’s credential alone when the same name is deleted', async () => {
         const { store, clock } = await setup()
         await store.upsert({
           userId: OWNER_A,
-          provider: 'anthropic',
+          name: 'anthropic',
           type: 'api_key',
           sealed: sealedSecret('a'),
           last4: '3333',
@@ -261,14 +303,14 @@ export function runCredentialStoreConformance(
         })
         await store.upsert({
           userId: OWNER_B,
-          provider: 'anthropic',
+          name: 'anthropic',
           type: 'api_key',
           sealed: sealedSecret('b'),
           last4: '4444',
           validatedAt: timestampAt(clock.currentMs),
         })
-        expect(await store.delete({ userId: OWNER_A, provider: 'anthropic' })).toBe(true)
-        expect((await store.get({ userId: OWNER_B, provider: 'anthropic' }))?.sealed).toEqual(
+        expect(await store.delete({ userId: OWNER_A, name: 'anthropic' })).toBe(true)
+        expect((await store.get({ userId: OWNER_B, name: 'anthropic' }))?.sealed).toEqual(
           sealedSecret('b'),
         )
       })
@@ -279,14 +321,14 @@ export function runCredentialStoreConformance(
         const { store, clock } = await setup()
         await store.upsert({
           userId: OWNER_A,
-          provider: 'anthropic',
+          name: 'anthropic',
           type: 'api_key',
           sealed: sealedSecret('frozen'),
           last4: '5555',
           validatedAt: timestampAt(clock.currentMs),
         })
         const [metadata] = await store.list({ userId: OWNER_A })
-        const record = await store.get({ userId: OWNER_A, provider: 'anthropic' })
+        const record = await store.get({ userId: OWNER_A, name: 'anthropic' })
         expect(metadata).toBeDefined()
         expect(Object.isFrozen(metadata)).toBe(true)
         expect(record).not.toBeNull()
@@ -296,7 +338,7 @@ export function runCredentialStoreConformance(
         expect(() => Object.assign(record ?? {}, { last4: '9999' })).toThrow(TypeError)
         expect(() => Object.assign(record?.sealed ?? {}, { ciphertext: 'no' })).toThrow(TypeError)
         // None of it reached the store.
-        expect((await store.get({ userId: OWNER_A, provider: 'anthropic' }))?.last4).toBe('5555')
+        expect((await store.get({ userId: OWNER_A, name: 'anthropic' }))?.last4).toBe('5555')
       })
     })
   })

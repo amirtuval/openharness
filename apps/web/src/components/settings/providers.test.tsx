@@ -16,7 +16,7 @@ describe('the Providers card', () => {
     const fake = makeFake({ credentials: TWO_PROVIDERS.credentials })
     renderApp(fake, { hash: '#/settings' })
 
-    const list = within(await screen.findByRole('region', { name: 'Saved provider keys' }))
+    const list = within(await screen.findByRole('region', { name: 'Saved credentials' }))
 
     // The display name from the shared metadata, and the last four characters — never the id
     // alone and never the key.
@@ -31,7 +31,7 @@ describe('the Providers card', () => {
     const fake = makeFake({ models: [], providers: [] })
     renderApp(fake, { hash: '#/settings' })
 
-    expect(await screen.findByText(/No provider keys yet/)).toBeInTheDocument()
+    expect(await screen.findByText(/No credentials yet/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Add provider' })).toBeInTheDocument()
   })
 
@@ -51,7 +51,7 @@ describe('the Providers card', () => {
     const fake = makeFake({ credentials: TWO_PROVIDERS.credentials })
     renderApp(fake, { hash: '#/settings' })
 
-    await user.click(await screen.findByRole('button', { name: 'Replace the openai key' }))
+    await user.click(await screen.findByRole('button', { name: 'Replace the openai credential' }))
     const dialog = await screen.findByRole('dialog')
     expect(within(dialog).getByText('Connect OpenAI')).toBeInTheDocument()
 
@@ -61,9 +61,9 @@ describe('the Providers card', () => {
     await waitFor(() => {
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     })
-    expect(await screen.findByText('Saved the OpenAI key.')).toBeInTheDocument()
+    expect(await screen.findByText('Saved the openai credential.')).toBeInTheDocument()
     // One credential per provider: the row is the same row, with the new last four.
-    const list = within(screen.getByRole('region', { name: 'Saved provider keys' }))
+    const list = within(screen.getByRole('region', { name: 'Saved credentials' }))
     expect(await list.findByText('…9999')).toBeInTheDocument()
     await waitFor(() => {
       expect(list.queryByText('…2222')).not.toBeInTheDocument()
@@ -76,8 +76,8 @@ describe('the Providers card', () => {
     const fake = makeFake({ credentials: TWO_PROVIDERS.credentials })
     renderApp(fake, { hash: '#/settings' })
 
-    const list = within(await screen.findByRole('region', { name: 'Saved provider keys' }))
-    await user.click(await list.findByRole('button', { name: 'Delete the openai key' }))
+    const list = within(await screen.findByRole('region', { name: 'Saved credentials' }))
+    await user.click(await list.findByRole('button', { name: 'Delete the openai credential' }))
 
     // The confirmation is in the page: the key is still there, and Delete/Cancel are too.
     expect(list.getByText('Delete this key?')).toBeInTheDocument()
@@ -87,12 +87,12 @@ describe('the Providers card', () => {
       expect((await fake.providerCredentials.list()).data).toHaveLength(2)
     })
 
-    await user.click(list.getByRole('button', { name: 'Delete the openai key' }))
+    await user.click(list.getByRole('button', { name: 'Delete the openai credential' }))
     await user.click(list.getByRole('button', { name: 'Delete' }))
 
-    expect(await screen.findByText('Deleted the OpenAI key.')).toBeInTheDocument()
+    expect(await screen.findByText('Deleted the openai credential.')).toBeInTheDocument()
     await waitFor(async () => {
-      expect((await fake.providerCredentials.list()).data.map((entry) => entry.provider)).toEqual([
+      expect((await fake.providerCredentials.list()).data.map((entry) => entry.name)).toEqual([
         'anthropic',
       ])
     })
@@ -106,8 +106,8 @@ describe('the Providers card', () => {
       Promise.reject(new ApiError(500, 'The key store is down.'))
     renderApp(fake, { hash: '#/settings' })
 
-    const list = within(await screen.findByRole('region', { name: 'Saved provider keys' }))
-    await user.click(await list.findByRole('button', { name: 'Delete the anthropic key' }))
+    const list = within(await screen.findByRole('region', { name: 'Saved credentials' }))
+    await user.click(await list.findByRole('button', { name: 'Delete the anthropic credential' }))
     await user.click(list.getByRole('button', { name: 'Delete' }))
 
     const alert = await screen.findByRole('alert')
@@ -126,8 +126,8 @@ describe('the Providers card', () => {
       Promise.reject(new AuthenticationError('Not signed in.'))
     renderApp(fake, { hash: '#/settings' })
 
-    const list = within(await screen.findByRole('region', { name: 'Saved provider keys' }))
-    await user.click(await list.findByRole('button', { name: 'Delete the anthropic key' }))
+    const list = within(await screen.findByRole('region', { name: 'Saved credentials' }))
+    await user.click(await list.findByRole('button', { name: 'Delete the anthropic credential' }))
     await user.click(list.getByRole('button', { name: 'Delete' }))
 
     const alert = await screen.findByRole('alert')
@@ -146,7 +146,7 @@ describe('the Providers card', () => {
       Promise.reject(new ApiError(500, 'The key store is down.'))
     renderApp(fake, { hash: '#/settings' })
 
-    const title = await screen.findByText('Could not load your provider keys')
+    const title = await screen.findByText('Could not load your credentials')
     expect(title.closest('[role="alert"]')).toHaveTextContent('The key store is down.')
   })
 })

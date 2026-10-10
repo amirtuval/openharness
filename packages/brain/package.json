@@ -31,6 +31,7 @@
   },
   "dependencies": {
     "@ai-sdk/anthropic": "4.0.73",
+    "@ai-sdk/azure": "4.0.97",
     "@ai-sdk/cerebras": "3.0.64",
     "@ai-sdk/deepseek": "3.0.60",
     "@ai-sdk/fireworks": "3.0.67",

@@ -47,7 +47,7 @@ describe('GET /v1/models over the wire', () => {
     const apiKey = 'sk-acme-catalogue-must-not-leak-9d2f'
     await seedProviderCredential(await harness.database(), {
       userId: a.signedIn.user.id,
-      provider: UNKNOWN_PROVIDER,
+      name: UNKNOWN_PROVIDER,
       apiKey,
     })
 

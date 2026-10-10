@@ -21,15 +21,17 @@
 
 import {
   ListModelsResponseSchema,
+  credentialTypeInfo,
   type ListModelsResponse,
   type ModelEntry,
   type ProviderCatalogStatus,
+  type ProviderCredential,
 } from '@openharness/protocol'
 import type { CredentialStore } from '@openharness/session'
 import type { Vault } from '@openharness/vault'
 import { redactSecret } from '@openharness/brain'
 
-import { openApiKey } from '../credentials'
+import { openCredential } from '../credentials'
 import type { Logger } from '../types'
 import { adapterFor, type ProviderAdapter, type ProviderModel } from './adapters'
 import { CatalogCache, RefreshLimiter, type CachedProviderCatalog } from './cache'
@@ -134,17 +136,16 @@ export class ModelCatalog {
     }
 
     const credentials = await this.credentials.list({ userId })
-    const providers = [...new Set(credentials.map((credential) => credential.provider))]
     const catalogs = await Promise.all(
-      providers.map(async (provider) => ({
-        provider,
-        catalog: await this.forProvider({ userId, provider, refresh, now }),
+      credentials.map(async (credential) => ({
+        name: credential.name,
+        catalog: await this.forCredential({ userId, credential, refresh, now }),
       })),
     )
 
     const data = catalogs.flatMap(({ catalog }) => [...catalog.models]).sort(compareModelEntries)
     const statuses = catalogs
-      .map(({ provider, catalog }) => statusOf(provider, catalog))
+      .map(({ name, catalog }) => statusOf(name, catalog))
       .sort((a, b) => compareStrings(a.provider, b.provider))
 
     // The response is built from typed pieces, so this parse only ever fails on a bug here —
@@ -154,30 +155,89 @@ export class ModelCatalog {
   }
 
   /**
-   * Forget one provider's cached answer for one user — what the credential PUT/DELETE routes
+   * Forget one credential's cached answer for one user — what the credential PUT/DELETE routes
    * call. Only this instance's copy; other instances expire by TTL (C4).
    */
-  invalidate(userId: string, provider: string): void {
-    this.cache.invalidate(userId, provider)
+  invalidate(userId: string, name: string): void {
+    this.cache.invalidate(userId, name)
   }
 
-  /** One provider's answer: from the cache, or a fresh provider call (or its fallback). */
-  private async forProvider(input: {
+  /**
+   * One credential's answer: from the cache, or made fresh (or its fallback).
+   *
+   * The cache is keyed by the credential's **name** — what a model id's first half is — which
+   * is the provider id for the eleven fixed providers and the user's chosen name for a named
+   * one. Which of the two ways the models are found is the credential's *type*: a provider
+   * list for an `api_key`, the deployments the user typed for an Azure credential.
+   */
+  private async forCredential(input: {
     readonly userId: string
-    readonly provider: string
+    readonly credential: ProviderCredential
     readonly refresh: boolean
     readonly now: Date
   }): Promise<CachedProviderCatalog> {
-    const key = { userId: input.userId, provider: input.provider }
+    const key = { userId: input.userId, provider: input.credential.name }
     if (!input.refresh) {
       const cached = this.cache.get(key, input.now)
       if (cached !== null) {
         return cached
       }
     }
-    const catalog = await this.fetchProvider(input.userId, input.provider)
+    const catalog =
+      input.credential.type === 'azure_openai'
+        ? await this.azureCatalog(input.userId, input.credential.name)
+        : await this.fetchProvider(input.userId, input.credential.name)
     this.cache.set(key, catalog, input.now)
     return catalog
+  }
+
+  /**
+   * An Azure credential's models: one per deployment name the user typed (epic #245, A3a).
+   *
+   * Azure OpenAI is addressed by deployment and offers no endpoint that lists them, so the
+   * deployment names the credential was saved with **are** the models. Nothing is invented:
+   * a deployment models.dev's `azure` entry knows carries that model's context window and
+   * output limit, and one it does not know gets `null` for both — a guessed window would be a
+   * wrong budget for every turn on that model.
+   *
+   * The status is `ok`, not `fallback`: reading the credential succeeded, and the deployment
+   * list is the answer rather than a stand-in for one. `fetched_at` is when it was read.
+   */
+  private async azureCatalog(userId: string, name: string): Promise<CachedProviderCatalog> {
+    const stored = await this.credentials.get({ userId, name })
+    if (stored === null) {
+      return this.registryFallbackFor(name, `the stored ${name} credential could not be read`)
+    }
+    const body = await openCredential(this.vault, { userId, name, sealed: stored.sealed })
+    if (body === null || body.type !== 'azure_openai') {
+      return this.registryFallbackFor(name, `the stored ${name} credential could not be opened`)
+    }
+    const models = dedupe(
+      body.deployments
+        .filter((deployment) => isChatModel({ rawId: deployment, registryChat: undefined }))
+        .map((deployment) => {
+          const registry = this.azureRegistry().get(deployment)
+          return {
+            id: `${name}/${deployment}`,
+            provider: name,
+            name: registry?.name ?? deployment,
+            context_window: registry?.contextWindow ?? null,
+            max_output_tokens: registry?.maxOutput ?? null,
+            // The registry's list price where it knows the deployment, and nothing where it
+            // does not: Azure bills the resource, and a rate invented here would be a wrong
+            // number on the screen (A2, #247).
+            cost: registry?.cost ?? null,
+            source: 'provider' as const,
+          }
+        }),
+    )
+    return { status: 'ok', fetchedAt: this.now().toISOString(), message: null, models }
+  }
+
+  /** The registry's azure entries, by deployment name: what a matching deployment inherits. */
+  private azureRegistry(): ReadonlyMap<string, RegistryModel> {
+    const key = credentialTypeInfo('azure_openai')?.modelsDevKey
+    return key === undefined ? new Map() : this.registryIndex(key)
   }
 
   /**
@@ -193,17 +253,22 @@ export class ModelCatalog {
     if (adapter === null) {
       return this.registryFallback(provider, `no known model-list endpoint for ${provider}`)
     }
-    const stored = await this.credentials.get({ userId, provider })
+    const stored = await this.credentials.get({ userId, name: provider })
     if (stored === null) {
       return this.registryFallback(provider, `the stored ${provider} credential could not be read`)
     }
-    const apiKey = await openApiKey(this.vault, { userId, provider, sealed: stored.sealed })
-    if (apiKey === null) {
+    const body = await openCredential(this.vault, {
+      userId,
+      name: provider,
+      sealed: stored.sealed,
+    })
+    if (body === null) {
       return this.registryFallback(
         provider,
         `the stored ${provider} credential could not be opened`,
       )
     }
+    const apiKey = body.api_key
     try {
       const listed = await this.fetchFromProvider(adapter, apiKey)
       return {
@@ -295,6 +360,14 @@ export class ModelCatalog {
         .map((model) => entryOf(provider, { id: model.id }, model, 'registry')),
     )
     return { status: 'fallback', fetchedAt: null, message, models }
+  }
+
+  /**
+   * The registry's chat models for a credential whose own list could not be read, labelled
+   * with the credential's name rather than a provider id (a named credential has no id).
+   */
+  private registryFallbackFor(name: string, message: string): CachedProviderCatalog {
+    return { status: 'fallback', fetchedAt: null, message, models: [] }
   }
 
   /** The registry's entries for one provider, by raw id, for the join. */

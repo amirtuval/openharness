@@ -1,7 +1,13 @@
 import { PutProviderCredentialRequestSchema } from '@openharness/protocol'
 import { describe, expect, it } from 'vitest'
 
-import { PROVIDERS, providerInfo, providerName } from './providers'
+import {
+  CREDENTIAL_TARGETS,
+  PROVIDERS,
+  credentialDisplayName,
+  providerInfo,
+  providerName,
+} from './providers'
 
 /**
  * The provider metadata both frontends offer (#209).
@@ -45,5 +51,47 @@ describe('PROVIDERS', () => {
     // An unrecognized provider is not an error — the credentials API takes any provider id, so
     // the id is what the reader typed and what they see.
     expect(providerName('made-up-provider')).toBe('made-up-provider')
+  })
+})
+
+describe('CREDENTIAL_TARGETS', () => {
+  it('offers the eleven providers and then the named credential types', () => {
+    expect(CREDENTIAL_TARGETS.map((target) => target.name)).toEqual([
+      ...PROVIDERS.map((provider) => provider.id),
+      'azure',
+    ])
+    expect(
+      CREDENTIAL_TARGETS.filter((target) => target.named).map((target) => target.credential),
+    ).toEqual(['azure_openai'])
+  })
+
+  it('gives every target what a tile and a form need', () => {
+    for (const target of CREDENTIAL_TARGETS) {
+      expect(target.displayName, target.name).not.toBe('')
+      expect(target.keyUrl, target.name).toMatch(/^https:\/\/[^/]+/)
+      // The credential type is what selects the form, so it has to be one the protocol's
+      // request union parses — for a named target with a representative payload.
+      const body =
+        target.credential === 'azure_openai'
+          ? {
+              type: 'azure_openai',
+              endpoint: 'https://x.openai.azure.com',
+              api_key: 'k',
+              deployments: ['d'],
+            }
+          : { type: 'api_key', api_key: 'k' }
+      expect(PutProviderCredentialRequestSchema.safeParse(body).success, target.name).toBe(true)
+    }
+  })
+})
+
+describe('credentialDisplayName', () => {
+  it('names a provider by its display name, and a named credential by its own name', () => {
+    expect(credentialDisplayName({ name: 'anthropic', type: 'api_key' })).toBe('Anthropic')
+    // The default name reads as the type's display name; the reader's own label stays theirs.
+    expect(credentialDisplayName({ name: 'azure', type: 'azure_openai' })).toBe('Azure OpenAI')
+    expect(credentialDisplayName({ name: 'azure-eu', type: 'azure_openai' })).toBe('azure-eu')
+    // A string this list has never heard of reads as itself, never as a blank.
+    expect(credentialDisplayName({ name: 'acme', type: 'api_key' })).toBe('acme')
   })
 })

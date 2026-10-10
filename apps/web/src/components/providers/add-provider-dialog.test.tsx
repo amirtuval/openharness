@@ -27,7 +27,7 @@ describe('the Add-provider dialog', () => {
     // The tiles, because the reader has not said which provider: a dialog opened by hand
     // cannot guess one.
     expect(within(dialog).getByRole('button', { name: /Anthropic/ })).toBeInTheDocument()
-    expect(within(dialog).getByRole('button', { name: /OpenAI/ })).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'OpenAI' })).toBeInTheDocument()
     // The picker closed behind it — a popover under a modal is a trap for the focus the
     // dialog just took.
     expect(screen.queryByRole('listbox', { name: 'Models' })).not.toBeInTheDocument()
@@ -69,7 +69,7 @@ describe('the Add-provider dialog', () => {
       expect(fake.modelListCalls.map((call) => call.refresh)).toEqual([false, false])
     })
     // The shell says what happened, since the dialog is gone.
-    expect(await screen.findByText('Saved the Groq key.')).toBeInTheDocument()
+    expect(await screen.findByText('Saved the groq credential.')).toBeInTheDocument()
   })
 
   it('opens on the provider that was preselected, and cancels out of it', async () => {
@@ -78,7 +78,7 @@ describe('the Add-provider dialog', () => {
     renderApp(fake, { hash: '#/settings' })
 
     // Settings → Providers → Replace, which is the same dialog with the provider already known.
-    await user.click(await screen.findByRole('button', { name: 'Replace the openai key' }))
+    await user.click(await screen.findByRole('button', { name: 'Replace the openai credential' }))
 
     const dialog = await screen.findByRole('dialog')
     expect(within(dialog).getByText('Connect OpenAI')).toBeInTheDocument()

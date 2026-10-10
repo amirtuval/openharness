@@ -14,6 +14,7 @@ import {
   isStoredIdle,
   personFor,
   readLog,
+  seedAzureCredential,
   seedProviderCredential,
   waitForTurnEnd,
   withDatabaseClient,
@@ -109,14 +110,14 @@ describe('provider credentials (A5)', () => {
     const me = await person(server, 'reader')
     await seedProviderCredential(await harness.database(), {
       userId: me.signedIn.user.id,
-      provider: 'anthropic',
+      name: 'anthropic',
       apiKey: PLAINTEXT,
     })
 
     // The API's own answer: metadata only — the provider, the last four characters for
     // recognition, the timestamps. Nothing else, in any spelling.
     const listed = await me.client.providerCredentials.list()
-    expect(listed.data.map((credential: ProviderCredential) => credential.provider)).toEqual([
+    expect(listed.data.map((credential: ProviderCredential) => credential.name)).toEqual([
       'anthropic',
     ])
     expect(listed.data[0]?.last4).toBe(LAST_FOUR)
@@ -157,7 +158,7 @@ describe('provider credentials (A5)', () => {
     const me = await person(server, 'sealed')
     await seedProviderCredential(database, {
       userId: me.signedIn.user.id,
-      provider: 'anthropic',
+      name: 'anthropic',
       apiKey: PLAINTEXT,
     })
 
@@ -263,11 +264,11 @@ describe('provider credentials (A5)', () => {
     const me = await person(server, 'deleter')
     await seedProviderCredential(database, {
       userId: me.signedIn.user.id,
-      provider: 'anthropic',
+      name: 'anthropic',
       apiKey: PLAINTEXT,
     })
     await expect(me.client.providerCredentials.list()).resolves.toMatchObject({
-      data: [{ provider: 'anthropic', last4: LAST_FOUR }],
+      data: [{ name: 'anthropic', last4: LAST_FOUR }],
     })
 
     await me.client.providerCredentials.delete('anthropic')
@@ -280,6 +281,91 @@ describe('provider credentials (A5)', () => {
     // provider either way — the seeded key was never a real one — so this stays offline.)
     const errors = sessionErrors(await runTurn(me, 'no key any more'))
     expect(errors.map((event) => event.error.type)).toEqual(['missing_provider_credential'])
+  })
+
+  it('refuses an azure endpoint inside the network, and a name a provider owns (#245, A3a)', async () => {
+    const server = await harness.server()
+    const database = await harness.database()
+    const me = await person(server, 'azure-refusals')
+    const azure = (endpoint: string) => ({
+      type: 'azure_openai' as const,
+      endpoint,
+      api_key: 'az-key-4242',
+      deployments: ['gpt-4o'],
+    })
+
+    // The SSRF guard runs **on save**: a loopback, link-local or metadata endpoint is refused
+    // before any request is made, so a credential like this can never be stored at all — and
+    // therefore never reached by a model call later.
+    for (const endpoint of [
+      'https://127.0.0.1',
+      'https://localhost',
+      'https://169.254.169.254',
+      'https://metadata.google.internal',
+    ]) {
+      const refused = await errorOf(() =>
+        me.client.providerCredentials.put('azure', azure(endpoint)),
+      )
+      expect([endpoint, refused.status]).toEqual([endpoint, 422])
+      expect([endpoint, refused.type]).toEqual([endpoint, 'invalid_provider_credential'])
+      expect([endpoint, refused.message.includes('az-key-4242')]).toEqual([endpoint, false])
+    }
+
+    // The endpoint has to be https (the schema's 400, before the guard is reached at all).
+    const insecure = await errorOf(() =>
+      me.client.providerCredentials.put('azure', azure('http://x.openai.azure.com')),
+    )
+    expect([insecure.status, insecure.type]).toEqual([400, 'invalid_request_error'])
+
+    // A named credential may not take a fixed provider id: it would make `openai/gpt-5`
+    // ambiguous between the provider and an Azure credential that called itself openai.
+    const taken = await errorOf(() =>
+      me.client.providerCredentials.put('openai', azure('https://x.openai.azure.com')),
+    )
+    expect([taken.status, taken.type]).toEqual([400, 'invalid_request_error'])
+
+    // Nothing was stored by any of them.
+    await expect(me.client.providerCredentials.list()).resolves.toEqual({ data: [] })
+    const rows = await withDatabaseClient(
+      async (client) =>
+        client.query('select 1 from provider_credentials where user_id = $1', [
+          me.signedIn.user.id,
+        ]),
+      { database: database.name },
+    )
+    expect(rows.rowCount).toBe(0)
+  })
+
+  it('lists one model per azure deployment, from the stored credential (A3a)', async () => {
+    const server = await harness.server()
+    const me = await person(server, 'azure-catalog')
+    await seedAzureCredential(await harness.database(), {
+      userId: me.signedIn.user.id,
+      name: 'azure',
+      endpoint: 'https://my-resource.openai.azure.com',
+      apiKey: PLAINTEXT,
+      deployments: ['gpt-4o', 'my-private-deployment'],
+    })
+
+    const catalog = await me.client.models.list()
+    expect(catalog.data.map((entry) => entry.id)).toEqual([
+      'azure/gpt-4o',
+      'azure/my-private-deployment',
+    ])
+    // The deployment models.dev knows carries its context window; the one it does not gets
+    // `null` rather than a guessed number.
+    expect(catalog.data[0]).toMatchObject({
+      provider: 'azure',
+      name: 'GPT-4o',
+      context_window: 128000,
+    })
+    expect(catalog.data[1]).toMatchObject({ context_window: null, max_output_tokens: null })
+    expect(catalog.providers).toEqual([
+      expect.objectContaining({ provider: 'azure', status: 'ok', message: null }),
+    ])
+    // Nothing about the credential leaks into the catalog: not the key, not the endpoint.
+    expect(JSON.stringify(catalog)).not.toContain('openai.azure.com')
+    expect(JSON.stringify(catalog)).not.toContain(MIDDLE)
   })
 
   it('answers 404 in the envelope for a route that does not exist', async () => {

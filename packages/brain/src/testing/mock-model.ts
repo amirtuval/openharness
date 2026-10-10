@@ -74,7 +74,7 @@ const TEXT_ID = 'mock-text-1'
 export const TEST_API_KEY = 'oh-test-api-key-0000'
 
 /** {@link TEST_API_KEY} as one request's credential. */
-export const TEST_CREDENTIAL: ModelCredential = { apiKey: TEST_API_KEY }
+export const TEST_CREDENTIAL: ModelCredential = { type: 'api_key', apiKey: TEST_API_KEY }
 
 /**
  * The credential resolver a test hands `runTurn`: every provider has {@link TEST_CREDENTIAL}.

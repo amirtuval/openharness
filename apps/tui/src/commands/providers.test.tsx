@@ -39,15 +39,13 @@ afterEach(() => {
 
 describe('formatCredentials', () => {
   it('says where a key comes from when there are none', () => {
-    expect(formatCredentials([])).toEqual([
-      'No provider keys yet. Add one with `oh providers add`.',
-    ])
+    expect(formatCredentials([])).toEqual(['No credentials yet. Add one with `oh providers add`.'])
   })
 
   it('names each key by display name, type, last four and when it was added', () => {
     const lines = formatCredentials([
-      makeProviderCredential({ provider: 'anthropic', last4: 'a1b2' }),
-      makeProviderCredential({ provider: 'openai', type: 'api_key', last4: 'z9y8' }),
+      makeProviderCredential({ name: 'anthropic', last4: 'a1b2' }),
+      makeProviderCredential({ name: 'openai', type: 'api_key', last4: 'z9y8' }),
     ])
 
     expect(lines[0]).toContain('Anthropic')
@@ -61,7 +59,7 @@ describe('formatCredentials', () => {
   })
 
   it('falls back to the router id for a provider the metadata list does not carry', () => {
-    const [line] = formatCredentials([makeProviderCredential({ provider: 'acme' })])
+    const [line] = formatCredentials([makeProviderCredential({ name: 'acme' })])
     expect(line).toContain('acme')
   })
 })
@@ -69,7 +67,7 @@ describe('formatCredentials', () => {
 describe('runProvidersList', () => {
   it('prints the stored keys, oldest first', async () => {
     const fake = createFakeClient({
-      credentials: [makeProviderCredential({ provider: 'anthropic', last4: '1234' })],
+      credentials: [makeProviderCredential({ name: 'anthropic', last4: '1234' })],
     })
     const { io, out, err } = recorder()
 
@@ -107,19 +105,19 @@ describe('runProvidersRemove', () => {
 
   it('asks first, and removes the key on a yes', async () => {
     const fake = createFakeClient({
-      credentials: [makeProviderCredential({ provider: 'anthropic' })],
+      credentials: [makeProviderCredential({ name: 'anthropic' })],
     })
     const { io, out, asked } = removeIo('y\n')
 
     expect(await runProvidersRemove(fake, io, 'anthropic', { yes: false })).toBe(0)
-    expect(asked[0]).toBe('Remove the Anthropic key? [y/N] ')
-    expect(out).toEqual(['Removed the Anthropic key.'])
+    expect(asked[0]).toBe('Remove the anthropic credential? [y/N] ')
+    expect(out).toEqual(['Removed the anthropic credential.'])
     expect((await fake.providerCredentials.list()).data).toEqual([])
   })
 
   it('removes nothing when the answer is not a yes', async () => {
     const fake = createFakeClient({
-      credentials: [makeProviderCredential({ provider: 'anthropic' })],
+      credentials: [makeProviderCredential({ name: 'anthropic' })],
     })
     const { io, out } = removeIo('\n')
 
@@ -130,19 +128,19 @@ describe('runProvidersRemove', () => {
 
   it('skips the question with --yes', async () => {
     const fake = createFakeClient({
-      credentials: [makeProviderCredential({ provider: 'anthropic' })],
+      credentials: [makeProviderCredential({ name: 'anthropic' })],
     })
     const { io, out, asked } = removeIo('')
 
     expect(await runProvidersRemove(fake, io, 'anthropic', { yes: true })).toBe(0)
     expect(asked).toEqual([])
-    expect(out).toEqual(['Removed the Anthropic key.'])
+    expect(out).toEqual(['Removed the anthropic credential.'])
   })
 
   it('is not an error to remove a key that is not there', async () => {
     const { io, out } = removeIo('')
     expect(await runProvidersRemove(createFakeClient(), io, 'anthropic', { yes: true })).toBe(0)
-    expect(out).toEqual(['Removed the Anthropic key.'])
+    expect(out).toEqual(['Removed the anthropic credential.'])
   })
 })
 
@@ -180,7 +178,7 @@ describe('ProvidersAddApp', () => {
     // The screen leaves as soon as the write answers, so the store is the thing to wait on.
     await vi.waitFor(async () => {
       const { data } = await fake.providerCredentials.list()
-      expect(data).toEqual([expect.objectContaining({ provider: 'anthropic', last4: '0000' })])
+      expect(data).toEqual([expect.objectContaining({ name: 'anthropic', last4: '0000' })])
     })
   })
 
@@ -196,9 +194,9 @@ describe('ProvidersAddApp', () => {
       ...fake,
       providerCredentials: {
         ...fake.providerCredentials,
-        put: (provider: string) =>
+        put: (name: string) =>
           Promise.reject(
-            new ApiError(422, `The ${provider} credential was rejected by the provider.`, {
+            new ApiError(422, `The ${name} credential was rejected by the provider.`, {
               type: 'invalid_provider_credential',
             }),
           ),
@@ -217,7 +215,7 @@ describe('ProvidersAddApp', () => {
     typeText(app, KEY)
     pressKey(app, 'enter')
 
-    await waitForFrame(app, 'The key was rejected')
+    await waitForFrame(app, 'It was rejected')
     expect(frameOf(app)).not.toContain(KEY)
   })
 

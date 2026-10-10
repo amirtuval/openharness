@@ -183,18 +183,23 @@ export interface SchedulerInstancesTable {
 }
 
 /**
- * `provider_credentials`: one user's sealed model-provider key, per provider (epic #65, A5).
+ * `provider_credentials`: one user's sealed model-provider key, per name (epic #65, A5;
+ * named credentials: epic #245 A3a).
  *
  * The row is a sealed blob and the metadata around it — there is no plaintext column, and
- * none may ever be added (see `0013_provider_credentials.sql`). `unique (user_id, provider)`
- * is what makes `upsert` an upsert and what `list` seeks by; `on delete cascade` from
- * `"user"` takes a user's credentials with the user.
+ * none may ever be added (see `0013_provider_credentials.sql`). `unique (user_id, name)` is
+ * what makes `upsert` an upsert and what `list` seeks by; `on delete cascade` from `"user"`
+ * takes a user's credentials with the user. The `name` column (renamed from `provider` by
+ * `0022_credential_name.sql`) is the `provider` half of the model ids the credential serves:
+ * a fixed provider id for the eleven API-key providers, or a short name a user chose for a
+ * named type.
  */
 export interface ProviderCredentialsTable {
   /** A `pcred_` id; kept across a replacement of the same `(user_id, provider)`. */
   id: string
   user_id: string
-  provider: string
+  /** The credential's name: the `provider` half of the model ids it serves. */
+  name: string
   type: string
   /** The sealed secret, field for field as the vault produced it. Opaque here. */
   ciphertext: string
@@ -275,7 +280,7 @@ export type UserPreferencesRow = UserPreferencesTable
 /** The columns a metadata read selects: every `provider_credentials` column but the sealed blob. */
 export type ProviderCredentialMetadataRow = Pick<
   ProviderCredentialRow,
-  'id' | 'type' | 'provider' | 'last4' | 'created_at' | 'updated_at' | 'validated_at'
+  'id' | 'type' | 'name' | 'last4' | 'created_at' | 'updated_at' | 'validated_at'
 >
 
 /**
@@ -354,7 +359,7 @@ function sessionAgentFromRow(row: SessionRow): Session['agent'] {
 }
 
 /**
- * The credential metadata a row carries: the `pcred_` id, the type and provider, the last
+ * The credential metadata a row carries: the `pcred_` id, the type and name, the last
  * four characters and the timestamps — and never the sealed columns.
  *
  * The store deep-freezes what it hands out (see the `CredentialStore` contract), so this is
@@ -366,7 +371,7 @@ export function credentialMetadataFromRow(row: ProviderCredentialMetadataRow): P
   return deepFreeze({
     id: row.id as ProviderCredential['id'],
     type: row.type as ProviderCredential['type'],
-    provider: row.provider,
+    name: row.name,
     last4: row.last4,
     created_at: timestampOf(row.created_at),
     updated_at: timestampOf(row.updated_at),

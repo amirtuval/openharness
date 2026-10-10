@@ -84,13 +84,14 @@ export {
   type ClientIpInput,
 } from './client-ip'
 export {
-  apiKeyPayload,
   createSessionCredentialResolver,
   credentialAad,
+  credentialPayload,
   credentialUpsert,
   lastFour,
-  openApiKey,
-  sealApiKey,
+  modelCredential,
+  openCredential,
+  sealCredential,
   type CredentialResolverDeps,
   type ResolveSessionCredential,
 } from './credentials'
@@ -225,8 +226,11 @@ export {
 } from './default-model'
 export {
   VALIDATABLE_PROVIDERS,
-  validateProviderApiKey,
+  createProviderCredentialValidator,
+  validateProviderCredential,
+  type AzureValidatorFetch,
   type ProviderCredentialValidator,
+  type ProviderCredentialValidatorOptions,
   type ValidatableProvider,
 } from './provider-validation'
 export {

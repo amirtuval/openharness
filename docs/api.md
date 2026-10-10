@@ -103,9 +103,9 @@ the only way an event is ever removed together with its session.
 | `GET`    | `/v1/sessions/{session_id}/events`        | read the log, with `types[]`, `after_seq`, `limit` and `page`                                   |
 | `GET`    | `/v1/sessions/{session_id}/events/stream` | follow it live over SSE; `event_deltas[]` opts into a reply's chunks                            |
 | `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`   | AI SDK `useChat` compatibility — an extension, not the protocol                                 |
-| `PUT`    | `/v1/provider-credentials/{provider}`     | add or replace the caller's credential for a provider (write-only)                              |
+| `PUT`    | `/v1/provider-credentials/{name}`         | add or replace one of the caller's credentials, under that name (write-only)                    |
 | `GET`    | `/v1/provider-credentials`                | list the caller's credential metadata; never the secrets                                        |
-| `DELETE` | `/v1/provider-credentials/{provider}`     | delete one; answers `204` with no body                                                          |
+| `DELETE` | `/v1/provider-credentials/{name}`         | delete one; answers `204` with no body                                                          |
 | `GET`    | `/v1/models`                              | the chat models the caller's own keys can use, with per-provider status                         |
 | `GET`    | `/v1/sessions/{session_id}/usage`         | what one session spent: totals, cost, and the per-model breakdown                               |
 | `GET`    | `/v1/me/usage`                            | what the caller spent between two local days (`from`, `to`, `tz`): by model and by day          |
@@ -464,27 +464,45 @@ back:
 curl -X PUT localhost:3000/v1/provider-credentials/anthropic \
   -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{"type":"api_key","api_key":"sk-ant-…"}'
-# → 200 {"id":"pcred_01J…","type":"api_key","provider":"anthropic","last4":"…xYz9",
+# → 200 {"id":"pcred_01J…","type":"api_key","name":"anthropic","last4":"…xYz9",
 #        "created_at":"…","updated_at":"…","validated_at":"…"}
 
-curl localhost:3000/v1/provider-credentials -H "Authorization: Bearer $TOKEN"
-# → {"data":[ …the same metadata… ]}
+curl -X PUT localhost:3000/v1/provider-credentials/azure-eu \
+  -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"type":"azure_openai","endpoint":"https://my-resource.openai.azure.com",
+       "api_key":"…","deployments":["gpt-4o","gpt-4o-mini"]}'
+# → 200 {"id":"pcred_01J…","type":"azure_openai","name":"azure-eu","last4":"…4242", …}
 
-curl -X DELETE localhost:3000/v1/provider-credentials/anthropic \
+curl localhost:3000/v1/provider-credentials -H "Authorization: Bearer $TOKEN"
+# → {"data":[ …the metadata of both… ]}
+
+curl -X DELETE localhost:3000/v1/provider-credentials/azure-eu \
   -H "Authorization: Bearer $TOKEN"
 # → 204
 ```
 
-- **Write-only.** `api_key` is accepted on the `PUT` and never returned, logged, put in an
-  event or repeated in an error. `last4` exists so a settings screen can tell two keys apart.
-- **Validated on save** with one cheap provider call; a key the provider rejects is an
-  `invalid_provider_credential` with status `422`, and nothing is stored.
-- One credential per provider per user; `PUT` replaces it. Deletion is immediate.
-- `type` is a discriminated union that has only `api_key` today (Bedrock, Vertex and Azure
-  credentials come later); the provider is the provider id (`anthropic`, `openai`, …).
-- A turn whose model's provider has no stored credential fails with a `session.error` whose
-  type is `missing_provider_credential` — non-retryable, the message names the provider. The
-  server never falls back to provider keys from the environment.
+- **Write-only.** The secret is accepted on the `PUT` and never returned, logged, put in an
+  event or repeated in an error. `last4` exists so a settings screen can tell two apart.
+- **Validated on save** with one cheap call. An `api_key` is checked against the provider's own
+  model list; an `azure_openai` credential is checked with one chat request to its **first
+  deployment**, sent through the SSRF guard — so an endpoint that resolves inside the network
+  (loopback, private, link-local, the cloud metadata service) is refused before it can be
+  stored. A credential the provider rejects is an `invalid_provider_credential` with status
+  `422`, and nothing is stored.
+- **A credential is keyed by its `name`**, which is the `provider` half of the model ids it
+  serves — and that is also the path parameter, which is why the route's shape did not change
+  when names arrived. `PUT` replaces the credential with that name; deletion is immediate.
+- **The eleven fixed providers keep their ids as names**, one each: an `api_key` credential may
+  only be stored under `anthropic`, `openai`, … A **named credential type** — `azure_openai`
+  today — may be stored under any short, lowercase name (`[a-z0-9-]`, at most 32 characters)
+  that is not one of those ids, which is how a user keeps `azure` _and_ `azure-eu`. Only the
+  first credential of a type defaults to the type's name (`azure`); the frontends ask for a
+  name for a second one. Anything else is a `400 invalid_request_error`.
+- `type` is a discriminated union: `api_key` (`api_key`) and `azure_openai` (`endpoint`, an
+  `https` URL; `api_key`; `deployments`, at least one). Bedrock and Vertex come later.
+- A turn whose model's provider half names no stored credential fails with a `session.error`
+  whose type is `missing_provider_credential` — non-retryable, the message names the provider.
+  The server never falls back to provider keys from the environment.
 
 ## The model catalog
 
@@ -535,10 +553,17 @@ is the usual one; the optional `refresh=true` query parameter bypasses the serve
 }
 ```
 
-- **Only providers the caller has a credential for are listed.** No environment key is ever
-  used, and neither a key nor any part of one appears in a response, an error or a log.
-  `data` is sorted by provider, then name; the form stays free text regardless — the router
-  accepts `provider/model` ids the catalog does not know yet.
+- **Only credentials the caller has are listed.** No environment key is ever used, and
+  neither a key nor any part of one appears in a response, an error or a log. `data` is sorted
+  by provider, then name; the form stays free text regardless — the router accepts
+  `provider/model` ids the catalog does not know yet.
+- **A named credential contributes its deployments.** Azure OpenAI offers no endpoint that
+  lists deployments, so an `azure_openai` credential contributes one model per name the user
+  typed — `azure/gpt-4o`, `azure-eu/gpt-4o-mini` — with `source: "provider"` (the credential's
+  own list is the deployment names), and its per-provider status is `ok` with the time the
+  credential was read. A deployment whose name is one models.dev's `azure` entry knows carries
+  that model's context window; one it does not know gets `null` for both limits rather than a
+  guessed number.
 - **Where the list comes from.** Per provider, the server calls that provider's own
   list-models endpoint with the caller's credential (`GET /v1/models` for OpenAI and
   Anthropic, `GET /v1beta/models` for Gemini, `GET /api/v1/models` for OpenRouter,

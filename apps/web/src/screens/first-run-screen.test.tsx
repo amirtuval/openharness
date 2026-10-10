@@ -52,8 +52,11 @@ describe('the first-run screen', () => {
     expect(screen.getByRole('button', { name: /Google/ })).toHaveTextContent(
       'Free tier in Google AI Studio',
     )
-    expect(screen.getByRole('button', { name: /OpenAI/ })).toHaveTextContent('OpenAI')
-    expect(screen.getByRole('button', { name: /OpenAI/ })).not.toHaveTextContent('Free tier')
+    expect(screen.getByRole('button', { name: 'OpenAI' })).toHaveTextContent('OpenAI')
+    expect(screen.getByRole('button', { name: 'OpenAI' })).not.toHaveTextContent('Free tier')
+    // The named credential type is a tile too (#245, A3a): an exact name, because "Azure
+    // OpenAI" also matches a loose /OpenAI/.
+    expect(screen.getByRole('button', { name: 'Azure OpenAI' })).toBeInTheDocument()
   })
 
   it('saves a key, names the default model, and starts chatting with the cursor in the box', async () => {
@@ -128,14 +131,14 @@ describe('the first-run screen', () => {
           type: 'invalid_provider_credential',
         }),
       )
-    await user.click(await screen.findByRole('button', { name: /OpenAI/ }))
+    await user.click(await screen.findByRole('button', { name: 'OpenAI' }))
     await user.type(screen.getByLabelText('API key'), 'sk-openai-nope')
     await user.click(screen.getByRole('button', { name: 'Save key' }))
 
     const alert = await screen.findByRole('alert')
     // Warm, and still the server's own sentence underneath: the provider is named in the
     // title, and the 422's message is the body (U12, #227).
-    expect(alert).toHaveTextContent("Hmm, OpenAI didn't accept that key")
+    expect(alert).toHaveTextContent("Hmm, OpenAI didn't accept that")
     expect(alert).toHaveTextContent('rejected by the provider')
     // Still on the form, and nothing was stored.
     expect(screen.getByLabelText('API key')).toBeInTheDocument()

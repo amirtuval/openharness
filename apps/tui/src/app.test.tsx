@@ -439,7 +439,7 @@ describe('App', () => {
     expect(userTexts(fake, fake.session.id)).toEqual([])
 
     const { data } = await fake.providerCredentials.list()
-    expect(data).toEqual([expect.objectContaining({ provider: 'anthropic', last4: '0000' })])
+    expect(data).toEqual([expect.objectContaining({ name: 'anthropic', last4: '0000' })])
   })
 
   it('leaves the chat unchanged when /providers is cancelled', async () => {
@@ -628,7 +628,7 @@ describe('App', () => {
 
     const { data } = await fake.providerCredentials.list()
     expect(data).toHaveLength(1)
-    expect(data[0]).toMatchObject({ provider: 'anthropic', last4: '0000' })
+    expect(data[0]).toMatchObject({ name: 'anthropic', last4: '0000' })
   })
 
   it('keeps a saved key out of the prompt history and the config directory (#210)', async () => {
@@ -677,7 +677,7 @@ describe('App', () => {
     typeText(app, key)
     pressKey(app, 'enter')
 
-    await waitForFrame(app, 'The key was rejected: The anthropic credential was rejected')
+    await waitForFrame(app, 'It was rejected: The anthropic credential was rejected')
     // The error is the server's, and the key is not in it, in the frame, or anywhere else.
     expect(frameOf(app)).not.toContain(key)
     expect(frameOf(app)).not.toContain('sk-test')
@@ -687,7 +687,7 @@ describe('App', () => {
     const fake = createFakeClient({
       models: [],
       providers: [],
-      credentials: [makeProviderCredential({ provider: 'anthropic' })],
+      credentials: [makeProviderCredential({ name: 'anthropic' })],
     })
     const app = renderApp(fake)
 

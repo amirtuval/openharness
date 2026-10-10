@@ -917,7 +917,7 @@ export interface InMemorySessionStoreOptions {
  * The in-memory `CredentialStore` (epic #65, A5): the test fake for the contract in
  * `credentials.ts`, and the reference behaviour for the Postgres one.
  *
- * It holds the sealed blobs in nested `Map`s — one per user, keyed by provider — and follows
+ * It holds the sealed blobs in nested `Map`s — one per user, keyed by name — and follows
  * the same three choices {@link InMemorySessionStore} makes:
  *
  * - **Time is injectable** ({@link InMemoryCredentialStoreOptions.now}): `created_at` and
@@ -932,7 +932,7 @@ export interface InMemorySessionStoreOptions {
 export class InMemoryCredentialStore implements CredentialStore {
   readonly #clock: Clock
 
-  /** One entry per user, holding that user's credentials keyed by provider. */
+  /** One entry per user, holding that user's credentials keyed by name. */
   readonly #credentials = new Map<UserId, Map<string, StoredCredential>>()
 
   constructor(options: InMemoryCredentialStoreOptions = {}) {
@@ -943,25 +943,25 @@ export class InMemoryCredentialStore implements CredentialStore {
     const now = this.#clock()
     const at = timestampAt(now)
     const stored = this.#forUser(input.userId)
-    const existing = stored.get(input.provider)
+    const existing = stored.get(input.name)
     // A replacement keeps the id and `created_at` it is replacing — one credential per
-    // `(user, provider)`, so a second save is the same credential with a new secret.
+    // `(user, name)`, so a second save is the same credential with a new secret.
     const record: StoredCredential = {
       id: existing?.id ?? newProviderCredentialId(now),
       type: input.type,
-      provider: input.provider,
+      name: input.name,
       last4: input.last4,
       created_at: existing?.created_at ?? at,
       updated_at: at,
       validated_at: input.validatedAt,
       sealed: { ...input.sealed },
     }
-    stored.set(input.provider, record)
+    stored.set(input.name, record)
     return resolved(deepFreeze(metadataOf(record)))
   }
 
   get(key: CredentialKey): Promise<SealedProviderCredential | null> {
-    const record = this.#credentials.get(key.userId)?.get(key.provider)
+    const record = this.#credentials.get(key.userId)?.get(key.name)
     return resolved(record === undefined ? null : deepFreeze(structuredClone(record)))
   }
 
@@ -971,7 +971,7 @@ export class InMemoryCredentialStore implements CredentialStore {
       return resolved([])
     }
     const metadata = [...stored.values()]
-      .sort((left, right) => compareIds(left.provider, right.provider))
+      .sort((left, right) => compareIds(left.name, right.name))
       .map((record) => deepFreeze(metadataOf(record)))
     return resolved(metadata)
   }
@@ -981,7 +981,7 @@ export class InMemoryCredentialStore implements CredentialStore {
     if (stored === undefined) {
       return resolved(false)
     }
-    const deleted = stored.delete(key.provider)
+    const deleted = stored.delete(key.name)
     if (stored.size === 0) {
       this.#credentials.delete(key.userId)
     }
@@ -1020,7 +1020,7 @@ function metadataOf(record: SealedProviderCredential): ProviderCredential {
 /**
  * Byte order for two ids — the `C` collation the SQL orders by.
  *
- * The `provider` ordering the credential `list` promises, and the session ordering
+ * The `name` ordering the credential `list` promises, and the session ordering
  * `listModelRequests` reads a user's requests in: in both places the in-memory store has to
  * answer in the order the Postgres store's `order by` does, and the two agree on this one
  * comparison.

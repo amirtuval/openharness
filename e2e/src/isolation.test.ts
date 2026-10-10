@@ -136,12 +136,12 @@ describe('two people on one server (A4)', () => {
     // not a PUT here).
     await seedProviderCredential(await harness.database(), {
       userId: a.signedIn.user.id,
-      provider: 'anthropic',
+      name: 'anthropic',
       apiKey: 'sk-ant-a-private-key-a1b2',
     })
 
     const mine = await a.client.providerCredentials.list()
-    expect(mine.data.map((credential) => credential.provider)).toEqual(['anthropic'])
+    expect(mine.data.map((credential) => credential.name)).toEqual(['anthropic'])
     expect(mine.data[0]?.last4).toBe('a1b2')
     expect(JSON.stringify(mine)).not.toContain('sk-ant-a-private-key-a1b2')
 
@@ -150,7 +150,7 @@ describe('two people on one server (A4)', () => {
     await expect(b.client.providerCredentials.delete('anthropic')).resolves.toBeUndefined()
 
     const stillThere = await a.client.providerCredentials.list()
-    expect(stillThere.data.map((credential) => credential.provider)).toEqual(['anthropic'])
+    expect(stillThere.data.map((credential) => credential.name)).toEqual(['anthropic'])
     expect(stillThere.data[0]?.last4).toBe('a1b2')
   })
 

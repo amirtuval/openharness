@@ -88,26 +88,26 @@ Two entry points, named in `package.json`'s `exports`. Both resolve to built out
 
 **Resources**
 
-| export                                                                                                     | what it is                                                                                                          |
-| ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `AgentSchema` / `Agent`                                                                                    | the `agent` resource (carries a read-only `owner_id`)                                                               |
-| `CreateAgentRequestSchema`, `UpdateAgentRequestSchema`                                                     | bodies of `POST /v1/agents`, `POST /v1/agents/{agent_id}`                                                           |
-| `ListAgentsQuerySchema`, `ListAgentsResponseSchema`                                                        | `GET /v1/agents`                                                                                                    |
-| `ModelConfigSchema` / `ModelConfig`                                                                        | `{ id }`, where `id` is a model id `provider/model`                                                                 |
-| `ModelEntrySchema` / `ModelEntry`, `ProviderCatalogStatusSchema` / `ProviderCatalogStatus`                 | one `GET /v1/models` entry — with its list price (`ModelCost`) — and one provider's catalog status (epic #92; #247) |
-| `ModelCostSchema` / `ModelCost`                                                                            | a model's price: USD per million tokens, input/output required and the two cache rates nullable (#247)              |
-| `ListModelsResponseSchema` / `ListModelsResponse`, `ListModelsQuerySchema` / `ListModelsQuery`             | `GET /v1/models`; `refresh` bypasses the cache (C4)                                                                 |
-| `SessionSchema` / `Session`, `SessionAgentSchema` / `SessionAgent`                                         | the `session` resource (read-only `owner_id`), its effective config and its optional snapshot                       |
-| `SessionStatusSchema`, `StopReasonSchema`                                                                  | `idle`/`running`; `{ type: 'end_turn' }`                                                                            |
-| `CreateSessionRequestSchema`, `ListSessionsQuerySchema`, `ListSessionsResponseSchema`                      | the sessions endpoints                                                                                              |
-| `UserSchema` / `User`, `GetMeResponseSchema` / `GetMeResponse`                                             | the signed-in user; `GET /v1/me`                                                                                    |
-| `UserIdSchema` / `UserId`                                                                                  | an opaque Better Auth user id; what `owner_id` holds                                                                |
-| `UserPreferencesSchema` / `UserPreferences`, `GetPreferencesResponseSchema`, `PutPreferencesRequestSchema` | the per-user default model; `GET`/`PUT /v1/me/preferences` (#111)                                                   |
-| `DEFAULT_MODEL_PATTERN`                                                                                    | the `provider/model` shape a `default_model` must have                                                              |
-| `ProviderCredentialSchema` / `ProviderCredential`, `ProviderCredentialTypeSchema`                          | credential metadata (`api_key` only today); never the secret                                                        |
-| `ApiKeyProviderCredentialSchema`, `PutProviderCredentialRequestSchema` / `PutProviderCredentialRequest`    | body of `PUT /v1/provider-credentials/{provider}` (write-only)                                                      |
-| `ListProviderCredentialsResponseSchema` / `ListProviderCredentialsResponse`                                | `GET /v1/provider-credentials`                                                                                      |
-| `AGENT_NAME_MAX_LENGTH`, `AGENT_DESCRIPTION_MAX_LENGTH`, `SESSION_TITLE_MAX_LENGTH`, `MAX_INITIAL_EVENTS`  | limits Anthropic documents                                                                                          |
+| export                                                                                                                                                          | what it is                                                                                                          |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `AgentSchema` / `Agent`                                                                                                                                         | the `agent` resource (carries a read-only `owner_id`)                                                               |
+| `CreateAgentRequestSchema`, `UpdateAgentRequestSchema`                                                                                                          | bodies of `POST /v1/agents`, `POST /v1/agents/{agent_id}`                                                           |
+| `ListAgentsQuerySchema`, `ListAgentsResponseSchema`                                                                                                             | `GET /v1/agents`                                                                                                    |
+| `ModelConfigSchema` / `ModelConfig`                                                                                                                             | `{ id }`, where `id` is a model id `provider/model`                                                                 |
+| `ModelEntrySchema` / `ModelEntry`, `ProviderCatalogStatusSchema` / `ProviderCatalogStatus`                                                                      | one `GET /v1/models` entry — with its list price (`ModelCost`) — and one provider's catalog status (epic #92; #247) |
+| `ModelCostSchema` / `ModelCost`                                                                                                                                 | a model's price: USD per million tokens, input/output required and the two cache rates nullable (#247)              |
+| `ListModelsResponseSchema` / `ListModelsResponse`, `ListModelsQuerySchema` / `ListModelsQuery`                                                                  | `GET /v1/models`; `refresh` bypasses the cache (C4)                                                                 |
+| `SessionSchema` / `Session`, `SessionAgentSchema` / `SessionAgent`                                                                                              | the `session` resource (read-only `owner_id`), its effective config and its optional snapshot                       |
+| `SessionStatusSchema`, `StopReasonSchema`                                                                                                                       | `idle`/`running`; `{ type: 'end_turn' }`                                                                            |
+| `CreateSessionRequestSchema`, `ListSessionsQuerySchema`, `ListSessionsResponseSchema`                                                                           | the sessions endpoints                                                                                              |
+| `UserSchema` / `User`, `GetMeResponseSchema` / `GetMeResponse`                                                                                                  | the signed-in user; `GET /v1/me`                                                                                    |
+| `UserIdSchema` / `UserId`                                                                                                                                       | an opaque Better Auth user id; what `owner_id` holds                                                                |
+| `UserPreferencesSchema` / `UserPreferences`, `GetPreferencesResponseSchema`, `PutPreferencesRequestSchema`                                                      | the per-user default model; `GET`/`PUT /v1/me/preferences` (#111)                                                   |
+| `DEFAULT_MODEL_PATTERN`                                                                                                                                         | the `provider/model` shape a `default_model` must have                                                              |
+| `ProviderCredentialSchema` / `ProviderCredential`, `ProviderCredentialTypeSchema`, `PROVIDER_CREDENTIAL_TYPES`                                                  | credential metadata (`api_key` and `azure_openai`); never the secret                                                |
+| `ApiKeyProviderCredentialSchema`, `AzureOpenAICredentialSchema`, `MAX_AZURE_DEPLOYMENTS`, `PutProviderCredentialRequestSchema` / `PutProviderCredentialRequest` | body of `PUT /v1/provider-credentials/{name}` (write-only)                                                          |
+| `ListProviderCredentialsResponseSchema` / `ListProviderCredentialsResponse`                                                                                     | `GET /v1/provider-credentials`                                                                                      |
+| `AGENT_NAME_MAX_LENGTH`, `AGENT_DESCRIPTION_MAX_LENGTH`, `SESSION_TITLE_MAX_LENGTH`, `MAX_INITIAL_EVENTS`                                                       | limits Anthropic documents                                                                                          |
 
 **Events**
 
@@ -163,6 +163,8 @@ save. It is the one API error type that does not end in `_error`.
 
 | `DEFAULT_PARTITION_COUNT`, `partitionOf()` | session → partition ownership hash |
 | `PROVIDERS` / `ProviderDefinition`, `PROVIDER_IDS`, `ProviderId` | the model providers openharness knows: the provider ids and the facts every side shares (#245) |
+| `CREDENTIAL_TYPES` / `CredentialTypeDefinition`, `NamedCredentialType` | the credential types that are not one of those ids (#245 A3a) |
+| `credentialTypeInfo()`, `credentialTypeName()`, `defaultCredentialName()`, `isValidCredentialName()`, `isReservedCredentialName()`, `CREDENTIAL_NAME_PATTERN`, `CREDENTIAL_NAME_MAX_LENGTH` | naming a named credential: its facts, and the rules a name must satisfy |
 | `TimestampSchema`, `MetadataSchema`, `PageLimitSchema`, `ListOrderSchema`, `DEFAULT_PAGE_LIMIT`, `MAX_PAGE_LIMIT`, `METADATA_MAX_PAIRS`, `METADATA_MAX_KEY_LENGTH`, `METADATA_MAX_VALUE_LENGTH` | shared scalars and limits |
 | `PACKAGE_NAME` | the package name; lets a dependent prove the import resolved |
 
@@ -211,15 +213,20 @@ part of this protocol, and no schema here names a cookie, a token or an auth hea
   so its existence does not leak (A4). Required since #61: the server sets it on every agent
   and session it creates, so a response without one fails these schemas rather than passing as
   unowned.
-- **Provider credentials:** write-only. `PUT /v1/provider-credentials/{provider}` takes
-  `PutProviderCredentialRequestSchema` — a discriminated union on `type` with the single
-  member `api_key` today, so `aws`, `gcp_service_account` and `azure` land later as new
-  members — and answers `ProviderCredentialSchema`: metadata only, never the secret.
+- **Provider credentials:** write-only. `PUT /v1/provider-credentials/{name}` takes
+  `PutProviderCredentialRequestSchema` — a discriminated union on `type` with `api_key` and
+  `azure_openai` today, so `aws` and `gcp_service_account` land later as new members — and
+  answers `ProviderCredentialSchema`: metadata only, never the secret.
   `GET /v1/provider-credentials` lists that metadata for the caller's own credentials, and
-  `DELETE /v1/provider-credentials/{provider}` answers 204. A credential that fails its
+  `DELETE /v1/provider-credentials/{name}` answers 204. A credential that fails its
   validation call on save is a 422 `invalid_provider_credential`. A model request for a
   provider the owner has no credential for ends the turn with the non-retryable
   `missing_provider_credential` session error, whose message names the provider.
+
+  The path parameter is the credential's **name** (§ below): a provider id for an `api_key`,
+  a name the user chose for a named type — which is why the route is spelled `{name}` and its
+  shape did not change when named credentials arrived.
+
 - **Ids:** a credential's `pcred_` id is this package's, so it is a ULID like the rest
   (`newProviderCredentialId()`); a user's id is Better Auth's — opaque, with no prefix of
   ours — and that is exactly what `owner_id` holds.
@@ -272,6 +279,42 @@ from one is a **compile error**, not a test failure, and the agreement tests are
   without being a new id here, which is why the two are kept apart.
 - **The order is the contract.** A frontend draws its tiles in `PROVIDERS` order and the
   vendored models.dev snapshot is keyed in it, so reordering the list reorders the snapshot.
+
+## Named credentials and the credential types (epic #245, A3a)
+
+`src/credential-types.ts` is the list of credential types that are **not** one of the eleven
+fixed provider ids, and the rules for naming one.
+
+- **A credential's name is the `provider` half of its model ids.** For the eleven fixed
+  providers the name is the provider id, one each; a _named_ type takes as many credentials as
+  a user wants, each under a short name they choose. `azure/gpt-4o` and `azure-eu/gpt-4o` are
+  model ids of two different Azure OpenAI credentials. The distinction the whole design rests
+  on is that a **provider id/name** is what a model id's first half is, while a **credential
+  type** says how a credential authenticates — A0 keeps them apart, and a named credential is
+  where that pays off: `azure_openai` is a type, `azure` is a name, and neither is the other.
+- **`CREDENTIAL_TYPES`** carries the four facts every side shares about a named type: its
+  `type` discriminant, its display name (`Azure OpenAI`), the `defaultName` a first credential
+  takes (`azure`) and the `keyUrl` a reader creates the secret at — plus the `modelsDevKey`
+  (`azure`) the registry snapshot files its models under, which is _not_ the credential name: a
+  `azure-eu` credential still reads models.dev's single `azure` entry.
+- **A name must be short and lowercase**: `CREDENTIAL_NAME_PATTERN` is
+  `^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`, capped at `CREDENTIAL_NAME_MAX_LENGTH` (32, because the
+  name prefixes every model id). `isValidCredentialName()` checks the shape;
+  `isReservedCredentialName()` checks the other half — a named credential may not take one of
+  the eleven fixed ids, which would make `openai/gpt-5` ambiguous between the provider and an
+  Azure credential that called itself `openai`. The server enforces both on save; the
+  frontends enforce them inline so a reader sees it next to the field.
+- **`PutProviderCredentialRequestSchema` is the union the two types live in.**
+  `azure_openai` carries `endpoint` (an absolute `https:` URL — the resource endpoint, e.g.
+  `https://my-resource.openai.azure.com`), `api_key` (write-only, exactly like the `api_key`
+  form's) and `deployments` (at least one, at most `MAX_AZURE_DEPLOYMENTS` = 64). Azure offers
+  no endpoint that lists deployments, so the user types them and each becomes a model;
+  `credential-types.test.ts` holds `CREDENTIAL_TYPES` against this union's non-`api_key`
+  members, so a type in one list and not the other fails a named test.
+
+Model ids for a named credential are `<name>/<deployment>`; nothing else in this package knows
+that — the catalog and the brain resolve the name to a credential and the type decides what to
+build.
 
 ## Model-first sessions (epic #92, issue #93)
 

@@ -1196,7 +1196,11 @@ describe('runTurn', () => {
     )
     vi.stubGlobal('fetch', fetchSpy)
     try {
-      for (const credential of [null, { apiKey: '' }, { apiKey: '   ' }]) {
+      for (const credential of [
+        null,
+        { type: 'api_key' as const, apiKey: '' },
+        { type: 'api_key' as const, apiKey: '   ' },
+      ]) {
         const { store, sessionId } = await newSession([message('Hello')])
 
         const outcome = await runTurn(sessionId, {
@@ -1228,7 +1232,9 @@ describe('runTurn', () => {
       seen.push({ modelId, apiKey: credential.apiKey })
       return factory(modelId, credential)
     }
-    const resolveCredential = vi.fn(() => Promise.resolve({ apiKey: 'the-owners-own-key' }))
+    const resolveCredential = vi.fn(() =>
+      Promise.resolve({ type: 'api_key' as const, apiKey: 'the-owners-own-key' }),
+    )
 
     const outcome = await runTurn(sessionId, { store, model, resolveCredential, retry: { sleep } })
 
@@ -1245,7 +1251,8 @@ describe('runTurn', () => {
 
   it('never stores or logs the credential, even when a provider echoes it back', async () => {
     const apiKey = 'sk-live-oh-2f81c9a4d7e6b305'
-    const resolve = (): Promise<{ apiKey: string }> => Promise.resolve({ apiKey })
+    const resolve = (): Promise<{ type: 'api_key'; apiKey: string }> =>
+      Promise.resolve({ type: 'api_key', apiKey })
     const logs: StoredEvent[][] = []
 
     const captured = await captureConsole(async () => {

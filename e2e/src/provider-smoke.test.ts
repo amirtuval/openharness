@@ -131,13 +131,13 @@ describe.skipIf(smoke === undefined && !smokeRequired)('a real model provider', 
       type: 'api_key',
       api_key: target.apiKey,
     })
-    expect(credential.provider).toBe(target.provider)
+    expect(credential.name).toBe(target.provider)
     expect(credential.last4).toBe(target.apiKey.slice(-4))
     expect(JSON.stringify(credential)).not.toContain(target.apiKey)
 
     // And it is listed, metadata only.
     const listed = await client.providerCredentials.list()
-    expect(listed.data.filter((entry) => entry.provider === target.provider)).toHaveLength(1)
+    expect(listed.data.filter((entry) => entry.name === target.provider)).toHaveLength(1)
     expect(JSON.stringify(listed)).not.toContain(target.apiKey)
 
     // The turn runs on the stored key — A5: the server resolves it from the vault, not from

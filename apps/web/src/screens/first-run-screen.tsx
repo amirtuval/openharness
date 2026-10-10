@@ -1,9 +1,10 @@
-import { providerInfo } from '@openharness/client'
+import { credentialDisplayName, type CredentialTarget } from '@openharness/client'
 import { ArrowRight } from 'lucide-react'
 import { useState } from 'react'
 
 import { ErrorBanner } from '../components/chat/error-banner'
 import { useClient } from '../components/client-provider'
+import type { ProviderCredential } from '@openharness/protocol'
 import { ModelPicker } from '../components/models/model-picker'
 import { ProviderKeyForm } from '../components/providers/provider-key-form'
 import { ProviderTiles } from '../components/providers/provider-tiles'
@@ -53,8 +54,8 @@ export function FirstRunScreen({
   const { credentials, put } = useProviderCredentials(client)
   const { preferences, save, reload } = usePreferences(client)
 
-  const [provider, setProvider] = useState<string | null>(null)
-  const [connected, setConnected] = useState<string | null>(null)
+  const [target, setTarget] = useState<CredentialTarget | null>(null)
+  const [connected, setConnected] = useState<ProviderCredential | null>(null)
   const [changeError, setChangeError] = useState<string | null>(null)
 
   const nameOf = modelNameLookup(catalog.models)
@@ -63,7 +64,7 @@ export function FirstRunScreen({
   // The key is stored: the server has just picked a default model for this account (U4), so
   // both the preferences and the catalog are re-read — the catalog because a key that was not
   // there a moment ago is a provider's models that were not there either.
-  const onSaved = (saved: string): void => {
+  const onSaved = (saved: ProviderCredential): void => {
     setConnected(saved)
     void reload()
     void catalog.reload()
@@ -95,9 +96,9 @@ export function FirstRunScreen({
               </p>
             </div>
 
-            {provider === null ? (
+            {target === null ? (
               <>
-                <ProviderTiles onPick={setProvider} />
+                <ProviderTiles onPick={setTarget} />
                 <div className="flex items-center justify-between gap-3">
                   <p className="text-xs text-muted-foreground">
                     {credentials.length === 0
@@ -112,13 +113,13 @@ export function FirstRunScreen({
             ) : (
               <div className="space-y-3">
                 <ProviderKeyForm
-                  provider={provider}
-                  replacing={credentials.some((credential) => credential.provider === provider)}
+                  target={target}
+                  storedNames={credentials.map((credential) => credential.name)}
                   save={put}
                   returnHash="#/new"
                   autoFocus
-                  onCancel={() => setProvider(null)}
-                  onSaved={(credential) => onSaved(credential.provider)}
+                  onCancel={() => setTarget(null)}
+                  onSaved={onSaved}
                 />
                 <Button type="button" variant="ghost" onClick={onLeave}>
                   Skip for now
@@ -133,7 +134,7 @@ export function FirstRunScreen({
                 <span data-slot="hero-title">You&apos;re all set!</span> 🎉
               </h1>
               <p className="text-sm text-muted-foreground">
-                Saved the {providerInfo(connected)?.name ?? connected} key.{' '}
+                Saved the {credentialDisplayName(connected)} credential.{' '}
                 {defaultModel === null ? (
                   'Pick a default model below and you are ready to go.'
                 ) : (

@@ -9,7 +9,7 @@ import { useSettings } from './use-settings'
 /**
  * Why a save or a delete did not happen.
  *
- * - `invalid` — the provider refused the key (422 `invalid_provider_credential`): the message
+ * - `invalid` — the provider refused the credential (422 `invalid_provider_credential`): the message
  *   belongs next to the form, because a different key fixes it.
  * - `session` — the server wants a **fresh** session for credential writes (epic #65, A2):
  *   the reader has to sign in again, and the message says so and links there.
@@ -41,20 +41,15 @@ export interface ProviderCredentialsView {
   /** A failed list, as shown inline. */
   readonly error: string | null
   /**
-   * Add or replace one provider's credential, from a whole request body.
+   * Add or replace one credential, from a whole request body.
    *
    * A body rather than an api key because the fields a form collects are decided by the
    * provider's **credential type** (epic #201, X6): {@link ProviderKeyForm} builds it, and it
    * is the only thing here that knows how many fields that type has.
    */
-  readonly put: (
-    provider: string,
-    body: PutProviderCredentialRequest,
-  ) => Promise<CredentialWriteResult>
-  /** Add or replace one provider's api key. The `api_key` shorthand over {@link put}. */
-  readonly save: (provider: string, apiKey: string) => Promise<CredentialResult>
-  /** Delete one provider's key; deleting what is not there is not a failure. */
-  readonly remove: (provider: string) => Promise<CredentialResult>
+  readonly put: (name: string, body: PutProviderCredentialRequest) => Promise<CredentialWriteResult>
+  /** Delete one credential; deleting what is not there is not a failure. */
+  readonly remove: (name: string) => Promise<CredentialResult>
   /**
    * Read the list again.
    *
@@ -126,8 +121,7 @@ export function useProviderCredentials(client: Client): ProviderCredentialsView 
         return {
           ok: false,
           kind: 'session',
-          message:
-            'Changing provider keys needs a fresh sign-in. Sign in again, then try once more.',
+          message: 'Changing credentials needs a fresh sign-in. Sign in again, then try once more.',
         }
       }
       if (caught instanceof ApiError && caught.type === 'invalid_provider_credential') {
@@ -139,16 +133,13 @@ export function useProviderCredentials(client: Client): ProviderCredentialsView 
   )
 
   const put = useCallback(
-    async (
-      provider: string,
-      body: PutProviderCredentialRequest,
-    ): Promise<CredentialWriteResult> => {
+    async (name: string, body: PutProviderCredentialRequest): Promise<CredentialWriteResult> => {
       try {
-        const credential = await client.providerCredentials.put(provider, body)
-        // Replace in place: the list is one entry per provider, so `put` is both "add" and
+        const credential = await client.providerCredentials.put(name, body)
+        // Replace in place: the list is one entry per name, so `put` is both "add" and
         // "replace" and the row keeps its position.
         setCredentials((current) => [
-          ...current.filter((stored) => stored.provider !== credential.provider),
+          ...current.filter((stored) => stored.name !== credential.name),
           credential,
         ])
         return { ok: true, credential }
@@ -159,21 +150,11 @@ export function useProviderCredentials(client: Client): ProviderCredentialsView 
     [client, failureOf],
   )
 
-  const save = useCallback(
-    async (provider: string, apiKey: string): Promise<CredentialResult> => {
-      const result = await put(provider, { type: 'api_key', api_key: apiKey })
-      return result.ok ? { ok: true } : result
-    },
-    [put],
-  )
-
   const remove = useCallback(
-    async (provider: string): Promise<CredentialResult> => {
+    async (name: string): Promise<CredentialResult> => {
       try {
-        await client.providerCredentials.delete(provider)
-        setCredentials((current) =>
-          current.filter((credential) => credential.provider !== provider),
-        )
+        await client.providerCredentials.delete(name)
+        setCredentials((current) => current.filter((credential) => credential.name !== name))
         return { ok: true }
       } catch (caught) {
         return failureOf(caught)
@@ -186,5 +167,5 @@ export function useProviderCredentials(client: Client): ProviderCredentialsView 
     setError(null)
   }, [])
 
-  return { credentials, loading, error, put, save, remove, reload, dismissError }
+  return { credentials, loading, error, put, remove, reload, dismissError }
 }

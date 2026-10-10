@@ -1,0 +1,101 @@
+import { describe, expect, it } from 'vitest'
+
+import {
+  CREDENTIAL_NAME_MAX_LENGTH,
+  CREDENTIAL_TYPES,
+  credentialTypeInfo,
+  credentialTypeName,
+  defaultCredentialName,
+  isReservedCredentialName,
+  isValidCredentialName,
+} from './credential-types'
+import { PROVIDER_IDS } from './providers'
+import { PROVIDER_CREDENTIAL_TYPES } from './resources/provider-credential'
+
+/**
+ * The named credential types (epic #245, A3a).
+ *
+ * `CREDENTIAL_TYPES` is the facts every side reads about a type that is not a fixed provider
+ * id: its display name, its default credential name and its models.dev key. It has to agree
+ * with the credential schema's union, so the two lists are held together here rather than in a
+ * form that would simply not compile.
+ */
+describe('CREDENTIAL_TYPES', () => {
+  it('covers exactly the credential types that are not api_key', () => {
+    const named = CREDENTIAL_TYPES.map((entry) => entry.type).sort()
+    const nonApiKey = PROVIDER_CREDENTIAL_TYPES.filter((type) => type !== 'api_key').sort()
+
+    expect(named).toEqual(nonApiKey)
+  })
+
+  it('carries azure_openai with a display name, a default name and a models.dev key', () => {
+    expect(credentialTypeInfo('azure_openai')).toEqual({
+      type: 'azure_openai',
+      name: 'Azure OpenAI',
+      defaultName: 'azure',
+      modelsDevKey: 'azure',
+      keyUrl: 'https://portal.azure.com/',
+    })
+    expect(credentialTypeName('azure_openai')).toBe('Azure OpenAI')
+    expect(defaultCredentialName('azure_openai')).toBe('azure')
+  })
+
+  it('has no facts for api_key — its name is always the fixed provider id', () => {
+    expect(credentialTypeInfo('api_key')).toBeUndefined()
+    expect(credentialTypeName('api_key')).toBeUndefined()
+    expect(defaultCredentialName('api_key')).toBeUndefined()
+  })
+
+  it('gives every default name a legal, unreserved credential name', () => {
+    for (const entry of CREDENTIAL_TYPES) {
+      expect(isValidCredentialName(entry.defaultName), entry.defaultName).toBe(true)
+      expect(isReservedCredentialName(entry.defaultName), entry.defaultName).toBe(false)
+    }
+  })
+
+  it('sends every reader to an https page to create the secret', () => {
+    for (const entry of CREDENTIAL_TYPES) {
+      expect(entry.keyUrl, entry.type).toMatch(/^https:\/\/[^/]+/)
+    }
+  })
+
+  it('files each type under its own models.dev key', () => {
+    const keys = CREDENTIAL_TYPES.map((entry) => entry.modelsDevKey)
+    expect(new Set(keys).size).toBe(keys.length)
+  })
+})
+
+describe('credential names', () => {
+  it('accepts short lowercase dash-separated names', () => {
+    for (const name of ['azure', 'azure-eu', 'a', 'my-azure-2', 'a1-b2-c3']) {
+      expect(isValidCredentialName(name), name).toBe(true)
+    }
+  })
+
+  it('refuses an empty, over-long, uppercase, spaced or leading-dash name', () => {
+    for (const name of [
+      '',
+      'Azure',
+      'azure_eu',
+      'azure eu',
+      '-azure',
+      'azure-',
+      'azure.openai',
+      'a'.repeat(CREDENTIAL_NAME_MAX_LENGTH + 1),
+    ]) {
+      expect(isValidCredentialName(name), name).toBe(false)
+    }
+  })
+
+  it('accepts a name at exactly the length cap', () => {
+    expect(isValidCredentialName('a'.repeat(CREDENTIAL_NAME_MAX_LENGTH))).toBe(true)
+  })
+
+  it('reserves every fixed provider id', () => {
+    for (const id of PROVIDER_IDS) {
+      expect(isReservedCredentialName(id), id).toBe(true)
+    }
+    expect(isReservedCredentialName('azure')).toBe(false)
+    expect(isReservedCredentialName('azure-eu')).toBe(false)
+  })
+})

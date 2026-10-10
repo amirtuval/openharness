@@ -7,6 +7,7 @@ import {
   ListModelsResponseSchema,
   ProviderCredentialSchema,
   PutPreferencesRequestSchema,
+  PutProviderCredentialRequestSchema,
   SendEventsRequestSchema,
   SessionSchema,
   SessionUsageSchema,
@@ -360,7 +361,7 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
   const agents = new Map<string, Agent>()
   const brains = new Map<string, FakeBrain>()
   const credentials = new Map<string, ProviderCredential>(
-    (options.credentials ?? []).map((credential) => [credential.provider, credential]),
+    (options.credentials ?? []).map((credential) => [credential.name, credential]),
   )
   const user = options.user ?? makeUser()
   const models: readonly ModelEntry[] = options.models ?? [makeModelEntry()]
@@ -746,55 +747,64 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       if (!authenticated) {
         return unauthenticated()
       }
-      const all = [...credentials.values()].sort(byCreatedAtThenId)
+      // By name, which is what the server's store orders by: the fake answers a list the way
+      // `GET /v1/provider-credentials` does, not in the insertion order a `Map` happens to hold.
+      const all = [...credentials.values()].sort((left, right) =>
+        left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
+      )
       return Promise.resolve({ data: all })
     },
 
-    async put(provider, body, requestOptions): Promise<ProviderCredential> {
+    async put(name, body, requestOptions): Promise<ProviderCredential> {
       throwIfAborted(requestOptions)
       if (!authenticated) {
         return unauthenticated()
       }
-      // The server validates a new key with one cheap provider call and answers 422 when the
-      // provider refuses it; a key with no characters in it fails that call every time, which
-      // is the one rejection a test can spell without a provider.
-      if (body.api_key.trim() === '') {
-        throw new ApiError(422, `The ${provider} credential was rejected by the provider.`, {
+      // The body goes through the same schema the route parses it with, so an endpoint that is
+      // not https or a deployment list that is empty is the server's 400 (#245, A3a).
+      const parsed = PutProviderCredentialRequestSchema.safeParse(body)
+      if (!parsed.success) {
+        throw badRequestFor(parsed.error.issues)
+      }
+      // The server validates the credential with one cheap call and answers 422 when the
+      // provider refuses it; a secret with no characters in it fails that call every time,
+      // which is the one rejection a test can spell without a provider.
+      if (parsed.data.api_key.trim() === '') {
+        throw new ApiError(422, `The ${name} credential was rejected by the provider.`, {
           type: 'invalid_provider_credential',
         })
       }
-      const existing = credentials.get(provider)
+      const existing = credentials.get(name)
       const timestamp = now().toISOString()
       const stored = ProviderCredentialSchema.parse({
         id: existing?.id ?? newProviderCredentialId(),
-        type: body.type,
-        provider,
-        last4: body.api_key.slice(-4),
+        type: parsed.data.type,
+        name,
+        last4: parsed.data.api_key.slice(-4),
         created_at: existing?.created_at ?? timestamp,
         updated_at: timestamp,
         validated_at: timestamp,
       })
-      credentials.set(provider, stored)
+      credentials.set(name, stored)
       // The server picks a default model for an account that has none when its first key is
       // saved (epic #116, U4), which is the model the onboarding screens name back to the
       // reader (#209). The fake restates the rule without the recommendation table the server
-      // keeps: the saved provider's first catalog model, else the catalog's first. A default
+      // keeps: the saved credential's first catalog model, else the catalog's first. A default
       // that is already stored — the reader's own, or an earlier pick — is never replaced.
       if (preferences.default_model === null) {
-        const picked =
-          models.find((entry) => entry.provider === provider)?.id ?? models[0]?.id ?? null
+        const picked = models.find((entry) => entry.provider === name)?.id ?? models[0]?.id ?? null
         preferences = UserPreferencesSchema.parse({ ...preferences, default_model: picked })
       }
       return stored
     },
 
-    async delete(provider, requestOptions): Promise<void> {
+    async delete(name, requestOptions): Promise<void> {
       throwIfAborted(requestOptions)
       if (!authenticated) {
         return unauthenticated()
       }
       // Idempotent, like the server's 204: deleting what is not there is not an error.
-      credentials.delete(provider)
+      credentials.delete(name)
     },
   }
 

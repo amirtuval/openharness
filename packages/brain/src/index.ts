@@ -40,6 +40,7 @@ export const DEPENDENCIES = [
 
 export * from './context'
 export * from './errors'
+export * from './azure-fetch'
 export * from './model'
 export * from './redact'
 export * from './retry'

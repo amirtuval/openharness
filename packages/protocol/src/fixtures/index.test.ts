@@ -93,8 +93,8 @@ describe('fixture builders', () => {
 
   it('builds a provider credential that parses, metadata only', () => {
     expect(ProviderCredentialSchema.safeParse(makeProviderCredential()).success).toBe(true)
-    expect(makeProviderCredential({ provider: 'openai', last4: 'wxyz' })).toMatchObject({
-      provider: 'openai',
+    expect(makeProviderCredential({ name: 'openai', last4: 'wxyz' })).toMatchObject({
+      name: 'openai',
       last4: 'wxyz',
     })
     // No secret is part of a credential's metadata, fixture or not.

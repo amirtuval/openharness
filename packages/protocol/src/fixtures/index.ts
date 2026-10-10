@@ -169,7 +169,7 @@ export function makeProviderCredential(
   const credential: ProviderCredential = {
     id: newProviderCredentialId(),
     type: 'api_key',
-    provider: 'anthropic',
+    name: 'anthropic',
     last4: 'cdef',
     created_at: fixtureTimestamp(),
     updated_at: fixtureTimestamp(),

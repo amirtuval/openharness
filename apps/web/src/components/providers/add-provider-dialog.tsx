@@ -1,4 +1,4 @@
-import { providerName } from '@openharness/client'
+import type { CredentialTarget } from '@openharness/client'
 import { useEffect, useRef, useState } from 'react'
 
 import { useProviderCredentials } from '../../hooks/use-provider-credentials'
@@ -28,16 +28,19 @@ import { ProviderTiles } from './provider-tiles'
  */
 export function AddProviderDialog({
   open,
-  /** The provider to open on; without one the dialog starts on the tiles. */
-  initialProvider,
+  /** The tile to open on; without one the dialog starts on the list. */
+  initialTarget,
+  /** The credential name to replace, for a row's Replace on an existing credential. */
+  replacingName,
   /** The credential was stored. The caller refreshes the catalog and closes the dialog. */
   onSaved,
   /** The dialog was dismissed without saving. */
   onClose,
 }: {
   open: boolean
-  initialProvider?: string | undefined
-  onSaved: (provider: string) => void
+  initialTarget?: CredentialTarget | undefined
+  replacingName?: string | undefined
+  onSaved: (name: string) => void
   onClose: () => void
 }) {
   // Where focus goes when the dialog closes. Radix restores it to its own `DialogTrigger`, and
@@ -77,7 +80,12 @@ export function AddProviderDialog({
           openerRef.current?.focus()
         }}
       >
-        <AddProviderBody initialProvider={initialProvider} onSaved={onSaved} onCancel={onClose} />
+        <AddProviderBody
+          initialTarget={initialTarget}
+          replacingName={replacingName}
+          onSaved={onSaved}
+          onCancel={onClose}
+        />
       </DialogContent>
     </Dialog>
   )
@@ -85,26 +93,27 @@ export function AddProviderDialog({
 
 /** The dialog's contents, mounted only while it is open. */
 function AddProviderBody({
-  initialProvider,
+  initialTarget,
+  replacingName,
   onSaved,
   onCancel,
 }: {
-  initialProvider?: string | undefined
-  onSaved: (provider: string) => void
+  initialTarget?: CredentialTarget | undefined
+  replacingName?: string | undefined
+  onSaved: (name: string) => void
   onCancel: () => void
 }) {
   const client = useClient()
   const { credentials, put } = useProviderCredentials(client)
-  const [provider, setProvider] = useState<string | null>(initialProvider ?? null)
+  const [target, setTarget] = useState<CredentialTarget | null>(initialTarget ?? null)
 
-  const replacing =
-    provider !== null && credentials.some((credential) => credential.provider === provider)
+  const storedNames = credentials.map((credential) => credential.name)
 
   return (
     <>
       <DialogHeader>
         <DialogTitle>
-          {provider === null ? 'Add a provider' : `Connect ${providerName(provider)}`}
+          {target === null ? 'Add a provider' : `Connect ${target.displayName}`}
         </DialogTitle>
         <DialogDescription>
           A chat runs on a model from a provider you have a key for. The key is validated against
@@ -112,20 +121,21 @@ function AddProviderBody({
         </DialogDescription>
       </DialogHeader>
 
-      {provider === null ? (
-        <ProviderTiles onPick={setProvider} />
+      {target === null ? (
+        <ProviderTiles onPick={setTarget} />
       ) : (
         <ProviderKeyForm
-          provider={provider}
-          replacing={replacing}
+          target={target}
+          storedNames={storedNames}
+          {...(replacingName === undefined ? {} : { initialName: replacingName })}
           save={put}
           returnHash={window.location.hash}
           autoFocus
-          // Back to the list, unless the provider was the one the caller named: there is
+          // Back to the list, unless the target was the one the caller named: there is
           // nothing to go back to, and the dialog's own close is the way out.
-          onCancel={initialProvider === undefined ? () => setProvider(null) : onCancel}
-          cancelLabel={initialProvider === undefined ? 'Back to the list' : 'Cancel'}
-          onSaved={(credential) => onSaved(credential.provider)}
+          onCancel={initialTarget === undefined ? () => setTarget(null) : onCancel}
+          cancelLabel={initialTarget === undefined ? 'Back to the list' : 'Cancel'}
+          onSaved={(credential) => onSaved(credential.name)}
         />
       )}
     </>

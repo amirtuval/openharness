@@ -83,7 +83,8 @@ migrations/             the SQL the Postgres stores need, applied by `migrate()`
                         0018 the credential key provider (#150),
                         0019 the theme on the per-user preferences (#203),
                         0020 what a supersession range covers — chunks or a rewind (#238),
-                        0021 the index behind the per-user usage read (#247)
+                        0021 the index behind the per-user usage read (#247),
+                        0022 the credential's name — unique per user per name (#248)
 docs/postgres.md        the Postgres stores: schema, migrations, delivery, local setup
 ```
 
@@ -475,19 +476,26 @@ wrapped the data key (`local` or `gcp-kms`, #150) and is **optional**: a blob st
 the field existed simply does not have it, and the vault is what reads an absent provider as
 `local`. The store writes and reads it faithfully either way — it knows no provider names.
 
-| method                         | what it does                                                                                                                                |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `upsert(input)`                | writes `{ userId, provider, type, sealed, last4, validatedAt }` and answers the metadata; replaces in place for the same `(user, provider)` |
-| `get({ userId, provider })`    | the record **including the sealed form**, or `null` — the one read the server's model path uses, and the only one that hands a blob back    |
-| `list({ userId })`             | metadata only, ordered by `provider`; the sealed columns are not even selected                                                              |
-| `delete({ userId, provider })` | `true` when one was deleted, `false` when there was none                                                                                    |
+| method                     | what it does                                                                                                                             |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `upsert(input)`            | writes `{ userId, name, type, sealed, last4, validatedAt }` and answers the metadata; replaces in place for the same `(user, name)`      |
+| `get({ userId, name })`    | the record **including the sealed form**, or `null` — the one read the server's model path uses, and the only one that hands a blob back |
+| `list({ userId })`         | metadata only, ordered by `name`; the sealed columns are not even selected                                                               |
+| `delete({ userId, name })` | `true` when one was deleted, `false` when there was none                                                                                 |
 
-The answers are the protocol's `ProviderCredential` metadata (`pcred_` id, `type`, `provider`,
+The answers are the protocol's `ProviderCredential` metadata (`pcred_` id, `type`, `name`,
 `last4`, `created_at`, `updated_at`, `validated_at`); `get` adds `sealed`, as a
 `SealedProviderCredential`. Every method is keyed by `userId` — there is no unscoped read of a
 credential — and implementations deep-freeze what they return, because a sealed blob is a
-value. One credential per `(user, provider)`, and two users may each hold the same provider:
-the upsert replaces (keeping the stored `id` and `created_at`) rather than accumulating rows.
+value. One credential per `(user, name)`, and two users may each hold the same name: the upsert
+replaces (keeping the stored `id` and `created_at`) rather than accumulating rows.
+
+**The key is the `name`, not the provider** (epic #245, A3a). A credential's name is the
+`provider` half of the model ids it serves: a fixed provider id (`anthropic`) for the eleven
+API-key providers, one each, and a short name the user chose (`azure`, `azure-eu`) for a
+**named type**, where one user may hold several. `src/credentials.ts` documents what
+implementations must guarantee; the conformance suite has the case a second credential of one
+type is its own row rather than a replacement.
 
 Both implementations pass `runCredentialStoreConformance`: `InMemoryCredentialStore` (in
 `memory.ts`, for tests) and `PostgresCredentialStore`
@@ -522,7 +530,7 @@ key, `by_seq`, and `check`s that the range is well-formed and lies before the ev
 carries it), `partition_leases` (`partition`, `owner`, `epoch`, `expires_at`),
 `scheduler_instances` (one row per live scheduler instance: `instance_id` primary key and the
 `last_seen` of its last heartbeat; see `0017`), `provider_credentials` (a sealed credential per
-`(user_id, provider)`, with the key provider that wrapped its data key — NULL meaning `local`;
+`(user_id, name)`, with the key provider that wrapped its data key — NULL meaning `local`;
 see `0013` and `0018`) and
 `user_preferences` (one row per user: the stored `default_model`, or NULL, and the `theme`,
 `system` by default; `on delete cascade` from `"user"`; see `0016` and `0019`). Five are
@@ -595,7 +603,7 @@ and `0013_provider_credentials`:
 - **`0013_provider_credentials.sql` — the sealed credential table** (decision A5): id
   (`pcred_`), user, provider, type, the four sealed fields, `last4`, the timestamps and
   `validated_at`, unique on `(user_id, provider)` and `on delete cascade` from `"user"`. There
-  is no plaintext column, and none may ever be added.
+  is no plaintext column, and none may ever be added. (`0022` renames `provider` to `name`.)
 - **`0014_auth_session_revocation.sql` — the revocation trigger** (A2; issue #76): an
   `after delete … for each row` trigger on `"session"` that `pg_notify`s the deleted session's
   **id** (never its token) on the `ohr_auth_session_revoked` channel
@@ -670,6 +678,18 @@ The web theme (issue #203, chat-UX epic #201 decision X3) added one more:
   "NULL means the default" rule of `0018`, because a write always supplies it — an absent theme
   would be a bug, not a legitimate older shape. The reader is total anyway: a name outside the
   four reads as `system`, so a hand-edited row cannot break a preferences read.
+
+The named credentials of epic #245 (A3a) added one:
+
+- **`0022_credential_name.sql` — the credential's `name`, and uniqueness per name** (#248): the
+  `provider` column is renamed to `name`, and the unique constraint becomes
+  `unique (user_id, name)`. The rename is a no-op for every existing row — a credential stored
+  before the change was keyed by its provider id, and that id is exactly the name such a
+  credential takes — so there is nothing to backfill and no value changes. The sealed blobs are
+  untouched, and their associated data is unaffected: the server seals with `userId|name`, which
+  for a pre-existing row is the same string it sealed with before. `alter table … rename` has no
+  `if exists`, so each rename is guarded by a catalogue check (the runner re-runs every file on
+  every `migrate()`).
 
 The vault's key provider (issue #150, deployment epic #148 decision D6) added one before it:
 

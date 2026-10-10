@@ -153,7 +153,7 @@ describe('SettingsScreen', () => {
     fake.preferences.get = () => Promise.reject(new ApiError(500, 'The preferences store is down.'))
     renderApp(fake, { hash: '#/settings' })
 
-    const keys = await screen.findByText('Could not load your provider keys')
+    const keys = await screen.findByText('Could not load your credentials')
     expect(keys.closest('[role="alert"]')).toHaveTextContent('The key store is down.')
     const model = await screen.findByText('Could not load your default model')
     expect(model.closest('[role="alert"]')).toHaveTextContent('The preferences store is down.')

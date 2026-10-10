@@ -234,7 +234,7 @@ describe('InMemoryCredentialStore', () => {
     const store = new InMemoryCredentialStore({ now: clock.now })
     const created = await store.upsert({
       userId: OWNER,
-      provider: 'anthropic',
+      name: 'anthropic',
       type: 'api_key',
       sealed,
       last4: 'abcd',
@@ -244,7 +244,7 @@ describe('InMemoryCredentialStore', () => {
     clock.advance(1000)
     const replaced = await store.upsert({
       userId: OWNER,
-      provider: 'anthropic',
+      name: 'anthropic',
       type: 'api_key',
       sealed,
       last4: 'efgh',
@@ -259,13 +259,13 @@ describe('InMemoryCredentialStore', () => {
     const second = new InMemoryCredentialStore()
     await first.upsert({
       userId: OWNER,
-      provider: 'anthropic',
+      name: 'anthropic',
       type: 'api_key',
       sealed,
       last4: 'abcd',
       validatedAt: timestampAt(Date.now()),
     })
-    expect(await second.get({ userId: OWNER, provider: 'anthropic' })).toBeNull()
+    expect(await second.get({ userId: OWNER, name: 'anthropic' })).toBeNull()
     expect(await second.list({ userId: OWNER })).toEqual([])
   })
 })

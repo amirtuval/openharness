@@ -30,7 +30,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@openharness/protocol": "workspace:*"
+    "@openharness/protocol": "workspace:*",
+    "undici": "8.11.2"
   },
   "devDependencies": {
     "@openharness/config": "workspace:*",
