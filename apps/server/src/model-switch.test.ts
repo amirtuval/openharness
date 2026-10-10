@@ -7,7 +7,8 @@ import {
   type StoredEvent,
 } from '@openharness/protocol'
 
-import { createTestApp, httpSendMessage, postJson } from './test-support'
+import type { ModelRegistry } from './catalog/registry'
+import { createTestApp, httpSendMessage, postJson, waitForIdle } from './test-support'
 
 /**
  * The model switch over HTTP (epic #116, U3): `POST …/events` (and `initial_events`) accept a
@@ -91,5 +92,59 @@ describe('a user.message carrying a model', () => {
 
     const read = await test.request(`${SESSIONS}/${session.id}`)
     expect(((await read.json()) as Session).model).toEqual({ id: 'anthropic/claude-sonnet-5' })
+  })
+})
+
+describe('the context budget follows the model switch (#246)', () => {
+  /** Two windows a test can tell apart: `wide` keeps everything, `narrow` only the newest. */
+  const registry: ModelRegistry = {
+    models: (provider) => {
+      if (provider === 'wide') {
+        return [{ id: 'model', contextWindow: 1_000_000, maxOutput: 100_000 }]
+      }
+      if (provider === 'narrow') {
+        return [{ id: 'model', contextWindow: 200, maxOutput: 50 }]
+      }
+      return []
+    },
+  }
+
+  it('trims the request after a switch to the new model’s budget', async () => {
+    const test = createTestApp({ registry, replies: [{ text: ['ok'] }] })
+    const created = await postJson(test, SESSIONS, { model: { id: 'wide/model' } })
+    const session = (await created.json()) as Session
+
+    // Two long turns on the wide model: ~100 tokens of history each, far under its budget.
+    const first = 'a'.repeat(400)
+    const second = 'b'.repeat(400)
+    await httpSendMessage(test, session.id, first)
+    await waitForIdle(test.store, session.id)
+    await httpSendMessage(test, session.id, second)
+    await waitForIdle(test.store, session.id)
+
+    // The third message carries the switch; the request it starts runs `narrow/model`.
+    const third = 'c'.repeat(400)
+    await postJson(test, `${SESSIONS}/${session.id}/events`, {
+      events: [
+        {
+          type: EVENT_TYPES.userMessage,
+          content: [{ type: 'text', text: third }],
+          model: { id: 'narrow/model' },
+        },
+      ],
+    })
+    await waitForIdle(test.store, session.id)
+
+    // One request per message, and each prompt the context strategy built is visible.
+    expect(test.model.histories).toHaveLength(3)
+    // The wide model's request carried the whole conversation.
+    expect(test.model.histories[1]).toEqual([
+      { role: 'user', text: first },
+      { role: 'assistant', text: 'ok' },
+      { role: 'user', text: second },
+    ])
+    // The narrow one — a 200-token window with 50 reserved, so 150 tokens of history — could
+    // not fit the whole thing and was trimmed oldest-first to the newest message alone.
+    expect(test.model.histories[2]).toEqual([{ role: 'user', text: third }])
   })
 })

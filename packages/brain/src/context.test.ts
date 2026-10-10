@@ -200,10 +200,10 @@ describe('createContextStrategy', () => {
     ])
   })
 
-  it('budgets per model, with the default as the fallback', () => {
+  it('budgets per model through the resolver, with the default as the fallback', () => {
     const strategy = createContextStrategy({
       tokenBudget: 20,
-      tokenBudgetByModel: { 'small/one': 4 },
+      tokenBudgetFor: (modelId) => (modelId === 'tiny/one' ? 4 : undefined),
     })
     const events = [
       userMessage(1, 'a'.repeat(40)),
@@ -212,11 +212,31 @@ describe('createContextStrategy', () => {
       agentMessage(4, 'd'.repeat(40)),
     ]
 
-    expect(strategy(events, { model: { id: 'small/one' }, system: null })).toEqual([
+    // `tiny/one` gets 4 tokens — only the newest turn survives.
+    expect(strategy(events, { model: { id: 'tiny/one' }, system: null })).toEqual([
       { role: 'user', content: 'c'.repeat(40) },
       { role: 'assistant', content: 'd'.repeat(40) },
     ])
+    // `large/two` is not one the resolver knows, so the default 20-token budget applies.
     expect(strategy(events, { model: { id: 'large/two' }, system: null })).toHaveLength(2)
+  })
+
+  it('asks the resolver for the model of the request it is building', () => {
+    // The resolver is a seam for the per-request budget (#246): the strategy asks once per
+    // call, with the id the request runs, so a switch between two calls trims differently.
+    const asked: string[] = []
+    const strategy = createContextStrategy({
+      tokenBudgetFor: (modelId) => {
+        asked.push(modelId)
+        return undefined
+      },
+    })
+    const events = [userMessage(1, 'hi')]
+
+    strategy(events, { model: { id: 'one/a' }, system: null })
+    strategy(events, { model: { id: 'two/b' }, system: null })
+
+    expect(asked).toEqual(['one/a', 'two/b'])
   })
 })
 

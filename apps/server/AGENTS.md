@@ -287,9 +287,9 @@ Better Auth's own schema check passes on the migrated database.
 
 `GET /v1/models` answers **the chat models the caller's own provider credentials can use**,
 one entry per model and one status per provider — the list the clients' model pickers offer
-(#91/#92, model-first chat), and the context windows the per-model context budget will use
-later. `catalog/` is the whole of it; the route (`routes/models.ts`) only parses the query and
-maps the one error it can raise.
+(#91/#92, model-first chat), and the context windows the per-model context budget resolves
+against (#246, below). `catalog/` is the whole of it; the route (`routes/models.ts`) only
+parses the query and maps the one error it can raise.
 
 - **C1 — the list comes from the provider, with the caller's key.** Per provider the server
   calls that provider's own list endpoint with the credential stored for the caller, decrypted
@@ -376,6 +376,45 @@ maps the one error it can raise.
   a saved key is checked with) goes through the same client: one outbound path for the whole
   server. `ProviderFetch` is the one seam the tests replace: no test reaches a provider, and
   the harness's default catalogue is inert (an empty registry and a fetch that refuses).
+
+## The context budget, per model (#246)
+
+Every model request is trimmed to a history budget, and the budget is the request's **model's**
+— not one number for every model, and not the session's. Before #246 the brain trimmed
+everything to `DEFAULT_CONTEXT_TOKEN_BUDGET` (32,768): a 200k-token model forgot a long chat
+early, and a model smaller than the default could be handed more than it can take. The rule is
+
+```
+budget = contextWindow − min(maxOutput, 25% of contextWindow)
+```
+
+— what is subtracted is room for the reply: the model's own output ceiling when the registry has
+one, and 25% of the window when it does not. The numbers come from the bundled models.dev
+registry (`catalog/registry.ts`, the same snapshot the catalogue joins for its model pickers),
+so this costs no network call. The trimming itself is the brain's, unchanged: oldest complete
+turns dropped first, never the newest turn.
+
+`catalog/context-budget.ts` is the whole of it: `contextTokenBudget` is the rule, and
+`createTokenBudgetResolver(registry)` answers `(modelId) => budget | undefined` — a `find` over
+the registry's list for the id's provider. It is a **resolver rather than a record** because the
+registry holds hundreds of models and the snapshot is refreshed wholesale: a record would mean
+enumerating all of it to answer for the one id a request runs, and rebuilding it whenever the
+snapshot changed. `undefined` is a real answer — an unknown provider, a model the snapshot
+predates, a free-text id a host accepts (C5), or a model with no window — and the brain's
+`DEFAULT_CONTEXT_TOKEN_BUDGET` is what such a model gets; the fallback lives in one place rather
+than being repeated here.
+
+`main.ts` builds one resolver from the same registry the catalogue and the automatic default
+(U4) use, and hands the strategy to whichever scheduler the config asks for. The brain re-reads
+the session at every request boundary (`span.model_request_start.model` is that request's
+model), so the lookup is per request and a **mid-session model switch trims to the new model
+from the next request on** — `model-switch.test.ts` pins it end to end. Nothing stores the
+resolved budget: it is not on the span, and it does not need to be, the prompt a request was
+built with being the observable — `test-support/model.ts`'s scripted model records each
+request's whole prompt (`ScriptedModel.histories`) for the tests that read it. The harness
+(`createTestApp`) wires the same strategy as `main.ts`, against the injected registry, so a test
+with none gets the brain's 32,768-token fallback, exactly as it did before the budget was per
+model.
 
 ## Errors
 
@@ -914,6 +953,7 @@ before the instance stops serving it (#151).
 | `validateProviderApiKey`, `VALIDATABLE_PROVIDERS`                                                                                | the one cheap provider call a saved key is checked with                                   |
 | `ModelCatalog`, `ModelCatalogOptions`, `CatalogRefreshLimitedError`                                                              | the model catalogue: provider lists, registry join, cache, fallback (#90)                 |
 | `createBundledRegistry()`, `emptyRegistry`, `SNAPSHOT_DATE`, `ModelRegistry`, `RegistryModel`                                    | the registry join's seam, over the bundled models.dev snapshot                            |
+| `contextTokenBudget`, `createTokenBudgetResolver`, `OUTPUT_RESERVE_RATIO`                                                        | the per-model context budget: `contextWindow − min(maxOutput, 25%)`, per request (#246)   |
 | `createProviderFetch()`, `ProviderFetch`, `DEFAULT_PROVIDER_TIMEOUT_MS`                                                          | the provider HTTP client: egress-proxy aware, 5 s deadline                                |
 | `CatalogCache`, `RefreshLimiter`, `DEFAULT_CATALOG_TTL_MS`, `DEFAULT_REFRESH_INTERVAL_MS`                                        | the in-memory per-(user, provider) cache and the refresh rate limit (C4)                  |
 | `adapterFor()`, `adaptedProviders()`, `isChatModel()`, `isNonChatFamily()`                                                       | the fixed endpoint table and the chat filter (C1/C2)                                      |
@@ -961,6 +1001,7 @@ src/
     catalog.ts          ModelCatalog: per-provider fetch, join, filter, cache, fallback (#90)
     adapters.ts         the fixed provider endpoint table and each provider's payload shape
     registry.ts         ModelRegistry over the bundled models.dev snapshot (C2)
+    context-budget.ts   the per-model context budget: the rule, and the resolver (#246)
     filter.ts           isChatModel: the never-hide/never-show rule, and the name families
     cache.ts            CatalogCache (one hour per user+provider) and RefreshLimiter (C4)
     provider-fetch.ts   ProviderFetch: fetch over the egress-proxy env, and the 5 s deadline
@@ -1067,7 +1108,10 @@ parallel with each other.
 - `model-switch.test.ts` — U3 over HTTP: `user.message.model` stored on the event and
   projected onto the session, a 400 for a malformed id in `POST …/events` and in a creation's
   `initial_events` (nothing appended, no session created), and a message without a model
-  leaving the session's model alone.
+  leaving the session's model alone — plus the context budget of #246: a session that switches
+  from a wide model to a narrow one carries the whole conversation into the wide model's
+  request and only the newest message into the narrow one's (read off the prompts the scripted
+  model recorded).
 - `scheduler.test.ts` — one turn per session, steering, interrupts (running and idle), a
   message queued behind an interrupt, recovery on start, concurrency, stopping, and the fence
   reaching the store.
@@ -1163,6 +1207,12 @@ parallel with each other.
   the `VALIDATABLE_PROVIDERS` ⊆ adapters invariant), the bundled registry read through
   the bundled models.dev snapshot (including that it carries no chat flag), and the TTL /
   invalidation / rate-limit rules on an injected clock.
+- `catalog/context-budget.test.ts` (#246) — the budget rule on its own: the model's own output
+  ceiling when it is under a quarter of the window, a quarter when none is declared, and the
+  quarter as a ceiling however large the declared one is; and the resolver: a known window with
+  and without `maxOutput`, a tiny model, a model id with a slash of its own, an unknown model
+  and a known model with no window (both `undefined`, the brain's 32,768-token fallback), and
+  the bundled snapshot answering a real window for a real model.
 
 ## Rules
 

@@ -38,7 +38,7 @@ export interface ContextStrategyOptions {
 export const CHARS_PER_TOKEN = 4
 
 /**
- * The history budget {@link createContextStrategy} trims to when a model has no entry of its
+ * The history budget {@link createContextStrategy} trims to when a model has no budget of its
  * own. Conservative for a chat agent: it leaves room under a modern model's window for the
  * system prompt, the reply and the estimate's own error.
  */
@@ -46,10 +46,17 @@ export const DEFAULT_CONTEXT_TOKEN_BUDGET = 32_768
 
 /** How {@link createContextStrategy} budgets, per model and overall. */
 export interface ContextStrategyConfig {
-  /** Tokens of history every model gets, when `tokenBudgetByModel` has no entry for it. */
+  /** Tokens of history every model gets, when `tokenBudgetFor` answers nothing for it. */
   readonly tokenBudget?: number
-  /** Tokens of history per model id, `provider/model`, overriding `tokenBudget`. */
-  readonly tokenBudgetByModel?: Readonly<Record<string, number>>
+  /**
+   * The budget for one model id, `provider/model`, overriding `tokenBudget`.
+   *
+   * A function rather than a record because the model space is not a handful of ids: the
+   * server's registry holds hundreds (the bundled models.dev snapshot), and a record would
+   * have to be built from all of them to answer for the one a request runs. The strategy asks
+   * for that one id, and `undefined` means "budget it like every other model".
+   */
+  readonly tokenBudgetFor?: (modelId: string) => number | undefined
 }
 
 /**
@@ -78,9 +85,11 @@ export interface ContextStrategyConfig {
  */
 export function createContextStrategy(config: ContextStrategyConfig = {}): ContextStrategy {
   const defaultBudget = config.tokenBudget ?? DEFAULT_CONTEXT_TOKEN_BUDGET
-  const budgets = config.tokenBudgetByModel ?? {}
+  const budgetFor = config.tokenBudgetFor
   return (events, options) => {
-    const budget = budgets[options.model.id] ?? defaultBudget
+    // Per request, from the model that request runs: the loop re-reads the session at every
+    // request boundary, so a switch applies to the next request's budget as well as its model.
+    const budget = budgetFor?.(options.model.id) ?? defaultBudget
     return trimToBudget(messagesFromEvents(events, options.system), budget)
   }
 }
