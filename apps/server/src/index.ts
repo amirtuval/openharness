@@ -195,6 +195,7 @@ export {
   MOCK_SLOW_MARKER,
   MOCK_SLOW_TOTAL_MS,
   MOCK_TERMINAL_MARKER,
+  MOCK_TOOL_MARKER,
   planFor,
 } from './mock-model'
 export {

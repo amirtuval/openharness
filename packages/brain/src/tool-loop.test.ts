@@ -372,6 +372,43 @@ describe('the tool loop', () => {
     expect(of(log, EVENT_TYPES.modelRequestStart)).toHaveLength(2)
   })
 
+  it('answers a call for a tool nothing carries, and a call whose input is wrong', async () => {
+    const { store, sessionId } = await newSession([message('bad calls')])
+    const { tool, run } = echo()
+    const { factory, calls } = mockModel(
+      {
+        toolCalls: [
+          { name: 'nope', input: { text: 'x' } },
+          { name: 'echo', input: { text: 42 } },
+        ],
+      },
+      { text: ['Noted.'] },
+    )
+
+    await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+      tools: createToolRegistry([tool]),
+    })
+
+    // Nothing was run: one call named a tool that does not exist, the other arguments the
+    // tool's own schema refuses. Both are `is_error` results the model reads, and the turn
+    // carries on — a bad call is information, not the end of anything.
+    expect(run).not.toHaveBeenCalled()
+    expect(calls).toHaveLength(2)
+    const log = await logOf(store, sessionId)
+    const results = of(log, EVENT_TYPES.agentToolResult)
+    expect(textOfEvent(results[0])).toBe('No tool named "nope" is registered.')
+    expect(textOfEvent(results[1])).toMatch(/^Invalid input for echo: /)
+    expect(results.map((result) => result.is_error)).toEqual([true, true])
+    // Both are recorded as denied: a call nothing may run is what `deny` says.
+    expect(of(log, EVENT_TYPES.agentToolUse).map((event) => event.evaluated_permission)).toEqual([
+      'deny',
+      'allow',
+    ])
+  })
+
   it('treats an unhonoured `ask` as a refusal rather than running the call', async () => {
     const { store, sessionId } = await newSession([message('maybe')])
     const { tool, run } = echo()

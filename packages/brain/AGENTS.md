@@ -427,7 +427,9 @@ the transcript, usage and compaction see tools as one more thing the log holds.
 - **`evaluated_permission` is decided before the call is stored.** The host's resolver is asked
   once per call with the session's owner (`toolPolicy`), and the answer is recorded on the
   event — so a setting changed later does not rewrite what a call ran under. `deny` refuses the
-  call without running it (`Permission to use <name> has been denied.`); `ask` is the pause of
+  call without running it (`Permission to use <name> has been denied.`) — unless the name is one
+  no tool carries, which is not a policy question at all and gets the registry's own
+  `No tool named <name> is registered.`; `ask` is the pause of
   [#309](https://github.com/amirtuval/openharness/issues/309) and is treated as a refusal until
   pausing exists, so a policy nobody can honour never quietly becomes "run it". A host that
   injects no resolver gets each tool's own `permission`, which for every built-in is `allow`
@@ -490,6 +492,13 @@ message whose parts name the calls they answer by id.
 - **A log that never held a tool builds exactly the request it always did** — no parts, no tool
   messages, the same strings — which is what keeps every session stored before #304 replaying
   unchanged.
+- **The compaction engine is untouched, and cannot split a pair either.** Its item list is user
+  and agent messages, so a tool call is not an item at all and its cut — at a user-message
+  boundary — always lands between turns. The consequence is that a summary does not yet cover
+  what the tools said: `session.context_summary`'s `covers.to_seq` reaches the turns it replaces,
+  and the tail that follows carries their calls and results in full. Covering tool work in a
+  summary, and capping what a result may cost, is
+  [#306](https://github.com/amirtuval/openharness/issues/306)'s.
 
 ### The seams the rest of the epic plugs into
 

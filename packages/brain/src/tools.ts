@@ -154,7 +154,8 @@ export interface ToolStepOptions {
  *
  * A call the policy refuses is never run: it is answered with `Permission to use <name> has
  * been denied.` as an `is_error` result, so the model learns why rather than being left to
- * guess. An interrupt during the step is not special here — every call gets an answer, those
+ * guess. A call naming a tool nothing carries is the exception — there is no policy question to
+ * answer, so the registry answers it (`No tool named <name> is registered.`). An interrupt during the step is not special here — every call gets an answer, those
  * cut short with `Interrupted by the user.` — and the loop ends the turn on it afterwards.
  */
 export async function runToolStep(options: ToolStepOptions): Promise<void> {
@@ -182,7 +183,7 @@ export async function runToolStep(options: ToolStepOptions): Promise<void> {
   }
   const results = await Promise.all(
     calls.map((call, index) =>
-      (permissions[index] ?? 'deny') === 'allow'
+      runs(registry, call.name, permissions[index] ?? 'deny')
         ? registry.execute(call.name, inputs[index] ?? {}, context)
         : Promise.resolve(errorResult(`Permission to use ${call.name} has been denied.`)),
     ),
@@ -262,6 +263,19 @@ export function pendingToolUse(events: readonly StoredEvent[]): AgentToolUseEven
 /** What the policy says by default: the tool's own permission, or a refusal for a name none has. */
 function defaultPermission(registry: ToolRegistry, name: string): ToolPermission {
   return registry.get(name)?.permission ?? 'deny'
+}
+
+/**
+ * Whether a call is handed to the registry — which is what runs it, or answers that nothing of
+ * that name exists.
+ *
+ * A policy refuses a call only where there is a tool to refuse: a name no tool carries is not a
+ * policy question, and the registry's own answer (`No tool named … is registered.`) is the one
+ * a model can act on. It is still recorded as `deny`, because a call nothing may run is
+ * precisely what `deny` says — the reason travels in the result, where a reader looks for it.
+ */
+function runs(registry: ToolRegistry, name: string, permission: ToolPermission): boolean {
+  return permission === 'allow' || registry.get(name) === undefined
 }
 
 /** How deep {@link asToolInput} walks before it stops believing a value is JSON. */
