@@ -277,7 +277,7 @@ rewind has superseded, then every event after `covers.to_seq`.
   "reason": "threshold",
   "tokens_before": 51200,
   "summary_model": "anthropic/claude-sonnet-5",
-  "prompt_version": "compact-v1",
+  "prompt_version": "context-summary-v2",
   "passes": 1
 }
 ```
@@ -285,7 +285,9 @@ rewind has superseded, then every event after `covers.to_seq`.
 `reason` is `threshold` (the context reached the share of the model's budget that triggers a
 summary), `overflow` (the provider refused a request as too long) or `manual` (the user asked
 for it). `tokens_before` is how full the context was, and `summary_model`, `prompt_version` and
-`passes` record what wrote the summary and how — with an optional `fallback_reason` when the
+`passes` record what wrote the summary and how — `prompt_version` is `context-summary-v2`, the
+prompt whose tool-work section accounts for the pages fetched, the searches made, the actions
+taken and the tool errors (#306) — — with an optional `fallback_reason` when the
 chat's own model summarized instead of the summary model the user chose (no credential for it,
 or it would have needed more passes than the limit allows). A `session.rewind` that reaches back
 before a summary supersedes it along with the rest of the tail it covered, so it disappears from
@@ -297,7 +299,10 @@ boundary, before the request: it measures the context the request is about to ma
 previous request's real prompt size plus an estimate of what is new, and compares it against
 `OPENHARNESS_COMPACTION_THRESHOLD` (default `0.7`) of the **chat** model's context budget. Over
 it, the older history is summarized with the recent quarter of the budget kept verbatim, cut at a
-`user.message` boundary so no turn is split. A provider that still refuses a request as too long
+`user.message` boundary so no turn is split — and never between a tool call and the result that
+answers it (X9), whatever arrived in between. A summarizer is never paid for on a context the old
+tool results' clearing brings back under the share: what it measures is the request the context
+strategy will build (#306). A provider that still refuses a request as too long
 gets one more attempt after a tighter compaction; if that fails too the turn ends with
 `session.error { retry_status: "exhausted" }` rather than looping — and the message says which
 of the three things happened, so an error never claims a compaction that the engine, finding
@@ -378,7 +383,8 @@ stored.
 **A message too big to send is shortened, never dropped.** If the newest message alone is over
 the chat model's budget, summarizing cannot help — that message has to stay verbatim — so the
 request carries it capped to a head and a tail with an `[… N tokens omitted …]` marker, and the
-request's `span.model_request_start` records it:
+request's `span.model_request_start` records it — together with the tool results the request
+capped (epic #303, X9) and the old ones it cleared:
 
 ```json
 {
@@ -388,13 +394,26 @@ request's `span.model_request_start` records it:
   "processed_at": "…",
   "consumes": ["sevt_…"],
   "model": "anthropic/claude-sonnet-5",
-  "truncated": { "seq": 41, "tokens_before": 40000, "tokens_after": 30000 }
+  "truncated": {
+    "seq": 41,
+    "tokens_before": 40000,
+    "tokens_after": 30000,
+    "results": [{ "seq": 38, "tool": "web_fetch", "tokens_before": 9000, "tokens_after": 2000 }]
+  },
+  "cleared": { "results": 2, "tokens": 12000 }
 }
 ```
 
-`seq` names the event whose text was cut, and the two counts bracket what it cost before and
-after — so a client can tell the user their message was shortened rather than let it silently
-disappear. The field is absent for every request whose newest message fits.
+`seq` names the newest event whose text was cut, and the two counts bracket what it cost before
+and after — so a client can tell the user their message was shortened rather than let it
+silently disappear. `results` lists every tool result the request capped: a result is cut to the
+smaller of what its tool declares and a fifth of the chat model's budget, and the log keeps the
+whole of it. `cleared` says how many old tool results — those older than the recent quarter of
+the budget the summary engine keeps verbatim — had their bodies replaced by
+`result cleared, N tokens`: clearing them is what the brain tries **before** summarizing, so a
+context that clearing alone brings back under the threshold needs no summary at all. All three
+fields are absent for a request that had to shorten and clear nothing, which is every session
+stored before #277 and #306.
 
 **The token counters are disjoint, and that is what `usage` prices.** `ModelUsage.input_tokens`
 is the **uncached** input (the way Anthropic's own `input_tokens` reads) and the two cache
