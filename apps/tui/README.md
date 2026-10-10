@@ -60,6 +60,8 @@ builds the CLI and runs it against `http://localhost:3000` (`yarn oh:staging` an
 | `oh providers add [provider]`          | connect a provider — paste its key into a hidden prompt                |
 | `oh providers remove <provider>`       | forget a key (asks first; `--yes` skips the question)                  |
 | `oh default-model [provider/model]`    | print or set the model a new chat starts on                            |
+| `oh modes`                             | list your modes; start a chat on one with `--mode <name>`              |
+| `oh settings`                          | show or set when a long chat is summarized, and by which model         |
 | `oh login` / `oh logout` / `oh whoami` | sign in (browser device flow), revoke, who am I                        |
 | `oh update`                            | install the newest published version now                               |
 | `oh --help`, `oh --version`            | print and stop                                                         |
@@ -67,10 +69,18 @@ builds the CLI and runs it against `http://localhost:3000` (`yarn oh:staging` an
 Inside a chat: Enter sends (a message sent mid-reply steers it), and Ctrl+J or Alt+Enter
 inserts a newline. Type `/` for the command menu — ↑/↓ choose, Tab completes, Enter runs, Esc
 closes — which holds `/model` (switch models), `/providers` (connect a provider without leaving
-the chat), `/new` (start a new chat on the current model),
+the chat), `/new` (start a new chat on the current model), `/compact [instructions]`
+(summarize the older history now, with optional guidance for the summary),
 `/clear` (clear the screen, keeping the session), `/help`, and `/exit`. A message that starts
 with `//` sends a literal `/`. Ctrl+C interrupts the reply; pressed again when idle, it leaves.
 On the way out, `oh` prints the `oh -s <id>` line that resumes the chat.
+
+When a chat's context fills up, the server summarizes the older history and the chat carries on
+from the summary and the recent messages; the transcript keeps the whole conversation, with a
+"Conversation summarized" divider. The status line shows how full the context is ("62% of
+context used") and "Summarizing… 2 of 3" while a summary is being made. `oh settings` changes
+when this happens (a share of the model's context), which model writes the summary, and how many
+passes it may take — the same settings as the web app's Settings → Context.
 
 The session token is stored per server in `~/.config/openharness/credentials.json` (mode
 `0600`). `oh logout` revokes it server-side and forgets it locally.
