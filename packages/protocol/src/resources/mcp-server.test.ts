@@ -19,7 +19,7 @@ import {
 } from './mcp-server'
 
 /** A minimal valid resource, so a test can override exactly the field it is about. */
-function server(overrides: Record<string, unknown> = {}): unknown {
+function server(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id: newMcpServerId(1_700_000_000_000),
     type: 'mcp_server',
@@ -126,9 +126,7 @@ describe('MCP tool definitions and their token estimate', () => {
 
   it('counts a tool with no description the same way, null description included', () => {
     const bare = { name: 'ping', description: null, input_schema: {} }
-    expect(estimateToolDefinitionTokens(bare)).toBe(
-      Math.ceil(JSON.stringify(bare).length / 4),
-    )
+    expect(estimateToolDefinitionTokens(bare)).toBe(Math.ceil(JSON.stringify(bare).length / 4))
   })
 })
 
