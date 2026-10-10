@@ -1,4 +1,5 @@
 import {
+  type ContextCompactionConfig,
   type ContextStrategy,
   type ModeResolver,
   type ModelFactory,
@@ -54,6 +55,12 @@ export interface SessionRunnerOptions {
   readonly retry?: RetryPolicy
   /** How the log becomes model messages; `runTurn`'s own default when omitted. */
   readonly contextStrategy?: ContextStrategy
+  /**
+   * Context compaction (epic #277, C2; #279), passed to every turn; omitted means off, as in
+   * `runTurn`. `main.ts` wires it from `OPENHARNESS_COMPACTION_THRESHOLD` and the same registry
+   * the context budget comes from.
+   */
+  readonly compaction?: ContextCompactionConfig
   /**
    * Which reasoning efforts a model takes, asked per request (#252's follow-up); `runTurn`'s own
    * default when omitted, which is "no model is known to take one".
@@ -139,6 +146,8 @@ export class SessionRunner {
 
   readonly #contextStrategy: ContextStrategy | undefined
 
+  readonly #compaction: ContextCompactionConfig | undefined
+
   readonly #reasoningSupportFor: ReasoningSupportFor | undefined
 
   readonly #resolveMode: ModeResolver | undefined
@@ -153,6 +162,7 @@ export class SessionRunner {
     this.#resolveCredential = options.resolveCredential
     this.#retry = options.retry
     this.#contextStrategy = options.contextStrategy
+    this.#compaction = options.compaction
     this.#reasoningSupportFor = options.reasoningSupportFor
     this.#resolveMode = options.resolveMode
   }
@@ -362,6 +372,7 @@ export class SessionRunner {
             ...(this.#contextStrategy === undefined
               ? {}
               : { contextStrategy: this.#contextStrategy }),
+            ...(this.#compaction === undefined ? {} : { compaction: this.#compaction }),
             ...(this.#reasoningSupportFor === undefined
               ? {}
               : { reasoningSupportFor: this.#reasoningSupportFor }),

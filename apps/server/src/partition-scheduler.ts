@@ -1,4 +1,5 @@
 import type {
+  ContextCompactionConfig,
   ContextStrategy,
   ModeResolver,
   ModelFactory,
@@ -140,6 +141,8 @@ export interface PostgresPartitionSchedulerOptions {
   readonly retry?: RetryPolicy
   /** How the log becomes model messages, passed to every turn. */
   readonly contextStrategy?: ContextStrategy
+  /** Context compaction (epic #277, C2; #279), passed to every turn. */
+  readonly compaction?: ContextCompactionConfig
   /** Which reasoning efforts a model takes, passed to every turn (#252's follow-up). */
   readonly reasoningSupportFor?: ReasoningSupportFor
   /** What a mode resolves to, passed to every turn (#245, M6). */
@@ -263,6 +266,7 @@ export class PostgresPartitionScheduler implements SessionScheduler {
           ...(options.contextStrategy === undefined
             ? {}
             : { contextStrategy: options.contextStrategy }),
+          ...(options.compaction === undefined ? {} : { compaction: options.compaction }),
           ...(options.reasoningSupportFor === undefined
             ? {}
             : { reasoningSupportFor: options.reasoningSupportFor }),

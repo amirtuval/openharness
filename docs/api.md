@@ -128,23 +128,24 @@ The log is the source of truth, and `seq` is the order it happened in: `1`, `2`,
 session. It is also the SSE `id` and the resume position, so a client that reconnects with
 `last-event-id: 7` gets `8` next — never `7` twice, never a gap.
 
-| event                        | who writes it | what it means                                                                        |
-| ---------------------------- | ------------- | ------------------------------------------------------------------------------------ |
-| `user.message`               | the client    | a message, until the brain claims it                                                 |
-| `user.interrupt`             | the client    | stop the turn in flight                                                              |
-| `agent.message`              | the brain     | a reply, under the `sevt_` id its chunks announced                                   |
-| `session.status_running`     | the brain     | a turn started (also after a retry)                                                  |
-| `session.status_idle`        | the brain     | the turn ended; the session is waiting for input                                     |
-| `session.status_rescheduled` | the brain     | a transient failure; it is retrying                                                  |
-| `session.error`              | the brain     | what went wrong, and whether it is retrying — `missing_provider_credential` never is |
-| `span.model_request_start`   | the brain     | a model request began, the messages it claims, and the effort it ran at              |
-| `span.model_request_end`     | the brain     | it finished — usage, any error, the interrupts it ends                               |
-| `event_start`                | the brain     | a reply started streaming — a stored chunk since D9                                  |
-| `event_delta`                | the brain     | a streamed fragment of it — a stored chunk since D9                                  |
-| `session.usage`              | the brain     | the session's running token totals, per model, after a request that reported usage   |
-| `session.context_summary`    | the brain     | // extension: older history replaced for the model by a summary (epic #277, #278)    |
-| `session.rewind`             | the server    | // extension: the session restarts from an earlier `user.message` (#238)             |
-| `session.deleted`            | the server    | stream-only: the session was deleted; sent last, then the stream closes (#111)       |
+| event                              | who writes it | what it means                                                                        |
+| ---------------------------------- | ------------- | ------------------------------------------------------------------------------------ |
+| `user.message`                     | the client    | a message, until the brain claims it                                                 |
+| `user.interrupt`                   | the client    | stop the turn in flight                                                              |
+| `agent.message`                    | the brain     | a reply, under the `sevt_` id its chunks announced                                   |
+| `session.status_running`           | the brain     | a turn started (also after a retry)                                                  |
+| `session.status_idle`              | the brain     | the turn ended; the session is waiting for input                                     |
+| `session.status_rescheduled`       | the brain     | a transient failure; it is retrying                                                  |
+| `session.error`                    | the brain     | what went wrong, and whether it is retrying — `missing_provider_credential` never is |
+| `span.model_request_start`         | the brain     | a model request began, the messages it claims, and the effort it ran at              |
+| `span.model_request_end`           | the brain     | it finished — usage, any error, the interrupts it ends                               |
+| `event_start`                      | the brain     | a reply started streaming — a stored chunk since D9                                  |
+| `event_delta`                      | the brain     | a streamed fragment of it — a stored chunk since D9                                  |
+| `session.usage`                    | the brain     | the session's running token totals, per model, after a request that reported usage   |
+| `session.context_summary`          | the brain     | // extension: older history replaced for the model by a summary (epic #277, #278)    |
+| `session.context_summary_progress` | the brain     | // extension: a summary is being written — which pass is running (#279)              |
+| `session.rewind`                   | the server    | // extension: the session restarts from an earlier `user.message` (#238)             |
+| `session.deleted`                  | the server    | stream-only: the session was deleted; sent last, then the stream closes (#111)       |
 
 A `user.message` may also carry a `model` (`{ "id": "provider/model" }`): it switches the
 model the session runs from that message on, and the session keeps running it until another
@@ -247,6 +248,40 @@ or it would have needed more passes than the limit allows). A `session.rewind` t
 before a summary supersedes it along with the rest of the tail it covered, so it disappears from
 what the model sees the same way the messages it replaced do — while the transcript, which never
 read the summary in the first place, is unchanged.
+
+**Where the trigger is, and how big the tail is.** The engine runs in the brain at each request
+boundary, before the request: it measures the context the request is about to make from the
+previous request's real prompt size plus an estimate of what is new, and compares it against
+`OPENHARNESS_COMPACTION_THRESHOLD` (default `0.7`) of the **chat** model's context budget. Over
+it, the older history is summarized with the recent quarter of the budget kept verbatim, cut at a
+`user.message` boundary so no turn is split. A provider that still refuses a request as too long
+gets one more attempt after a tighter compaction; if that fails too the turn ends with
+`session.error { retry_status: "exhausted" }` rather than looping. A summarizer that fails ends
+nothing: the failure is recorded on its own span and the request goes out with the usual trimming
+as the safety net.
+
+**The summary is written in passes, and each one is a model request.** A long history is folded
+in slices sized to the summary model's budget, each pass updating the one before, and every pass
+is recorded as a `span.model_request_start`/`span.model_request_end` pair with
+`purpose: "summary"` — so the tokens and cost of summarizing appear in the session's
+`session.usage` like any other request, while the size accounting refuses such a span as the
+baseline for the chat's own context. Because everything a client is shown lives in the log, each
+pass starts with a stored progress event:
+
+```json
+{
+  "type": "session.context_summary_progress",
+  "id": "sevt_…",
+  "seq": 43,
+  "processed_at": "…",
+  "pass": 2,
+  "passes": 3
+}
+```
+
+`pass` is the pass starting (from 1) and `passes` how many the plan holds, so a client can show
+"summarizing (2/3)". The event is the brain's bookkeeping like the summary itself: it is never
+claimed, the transcript and replay do not show it, and the context strategy ignores it.
 
 **A message too big to send is shortened, never dropped.** If the newest message alone is over
 the chat model's budget, summarizing cannot help — that message has to stay verbatim — so the

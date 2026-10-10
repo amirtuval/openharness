@@ -155,6 +155,14 @@ const storedSamples = {
     passes: 2,
     fallback_reason: 'the summary model had no credential',
   },
+  'session.context_summary_progress': {
+    id: eventId(),
+    type: 'session.context_summary_progress',
+    seq: 13,
+    processed_at: '2026-03-15T10:00:00Z',
+    pass: 2,
+    passes: 3,
+  },
   'session.usage': {
     id: eventId(),
     type: 'session.usage',

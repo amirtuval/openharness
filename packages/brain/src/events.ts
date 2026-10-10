@@ -1,7 +1,10 @@
 import type { AppendableEvent } from '@openharness/session'
 import type {
+  ContextSummaryCovers,
+  ContextSummaryReason,
   EventId,
   ModeReference,
+  ModelRequestPurpose,
   ModelUsage,
   ReasoningEffortRun,
   SessionError,
@@ -98,7 +101,7 @@ export function spanStart(
   model: string,
   options: SpanStartOptions = {},
 ): AppendableEvent {
-  const { reasoningEffort, mode, truncated } = options
+  const { reasoningEffort, mode, truncated, purpose } = options
   return {
     type: EVENT_TYPES.modelRequestStart,
     consumes: [...consumes],
@@ -106,6 +109,7 @@ export function spanStart(
     ...(reasoningEffort === undefined ? {} : { reasoning_effort: reasoningEffort }),
     ...(mode === undefined ? {} : { mode: { id: mode.id, name: mode.name } }),
     ...(truncated === undefined ? {} : { truncated }),
+    ...(purpose === undefined ? {} : { purpose }),
   }
 }
 
@@ -127,6 +131,73 @@ export interface SpanStartOptions {
    * can write it, which is why it travels here rather than being written by the strategy.
    */
   readonly truncated?: Truncation
+  /**
+   * Why this request was made, when it is not the chat's own (epic #277, C2): `'summary'` marks
+   * a request the compaction engine made. Omitted for every ordinary request, and the field the
+   * size accounting reads to refuse a summary request as a baseline (K2).
+   */
+  readonly purpose?: ModelRequestPurpose
+}
+
+/**
+ * The compaction engine started a pass: how many are done and how many the plan holds (C2,
+ * #279).
+ *
+ * Stored, not stream-only — everything a client is shown goes in the log (D9) — so a client that
+ * reconnects mid-compaction sees the same progress as one that was watching, and a reader of the
+ * session later can tell that a summary took more than one call.
+ *
+ * @param pass the pass that is starting, counting from 1
+ * @param passes how many passes the plan holds for the model doing the work
+ */
+export function contextSummaryProgress(pass: number, passes: number): AppendableEvent {
+  return { type: EVENT_TYPES.sessionContextSummaryProgress, pass, passes }
+}
+
+/**
+ * The older history, summarized (epic #277, K1; C2).
+ *
+ * Supersedes nothing: the log, transcript and replay stay whole, and the only reader is the
+ * context strategy. `covers.to_seq` is the last event the summary replaces **for the model**, so
+ * the next request is built from the summary and the events after it. See the protocol's
+ * `ContextSummaryEventSchema` for what each field records.
+ *
+ * @param summary the summary text
+ * @param covers the last event the summary replaces for the model, inclusive
+ * @param reason why it was made — the trigger, or the provider's refusal (K2)
+ * @param record the model, prompt version, pass count and fallback the engine produced it with
+ */
+export function contextSummary(
+  summary: string,
+  covers: ContextSummaryCovers,
+  reason: ContextSummaryReason,
+  record: ContextSummaryRecord,
+): AppendableEvent {
+  return {
+    type: EVENT_TYPES.sessionContextSummary,
+    summary,
+    covers,
+    reason,
+    tokens_before: record.tokensBefore,
+    summary_model: record.summaryModel,
+    prompt_version: record.promptVersion,
+    passes: record.passes,
+    ...(record.fallbackReason === undefined ? {} : { fallback_reason: record.fallbackReason }),
+  }
+}
+
+/** What {@link contextSummary} carries beside the text: how and by whom it was written. */
+export interface ContextSummaryRecord {
+  /** The context size when the summary was made, on the chat model (K10). */
+  readonly tokensBefore: number
+  /** The `provider/model` that wrote the summary — the summary model, or the fallback. */
+  readonly summaryModel: string
+  /** The version of the prompt that produced it (K7). */
+  readonly promptVersion: string
+  /** How many passes it took (K5). */
+  readonly passes: number
+  /** Why the chat model summarized instead of the chosen summary model, if it did (K3/K5). */
+  readonly fallbackReason?: string
 }
 
 /** What {@link spanEnd} carries beyond the request it closes. */

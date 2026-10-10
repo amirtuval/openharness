@@ -3,13 +3,14 @@ import { Kysely, PostgresDialect } from 'kysely'
 import { Pool } from 'pg'
 import type { Hono } from 'hono'
 import type { MemoryDB } from 'better-auth/adapters/memory'
-import type {
-  ContextStrategy,
-  ModeResolver,
-  ModelFactory,
-  ReasoningSupportFor,
+import {
+  type ContextCompactionConfig,
+  type ContextStrategy,
+  createContextStrategy,
+  type ModeResolver,
+  type ModelFactory,
+  type ReasoningSupportFor,
 } from '@openharness/brain'
-import { createContextStrategy } from '@openharness/brain'
 import type { SessionId } from '@openharness/protocol'
 import {
   InMemoryCredentialStore,
@@ -32,7 +33,7 @@ import { SessionTraces, withSessionTraces } from './observability/session-traces
 import { initTracing, type Tracer } from './observability/tracing'
 import { createAuth, createDevLoginUser, type Auth, type AuthDatabase } from './auth'
 import { ModelCatalog } from './catalog/catalog'
-import { createTokenBudgetResolver } from './catalog/context-budget'
+import { createMaxOutputResolver, createTokenBudgetResolver } from './catalog/context-budget'
 import { createProviderFetch } from './catalog/provider-fetch'
 import { createReasoningSupportResolver } from './catalog/reasoning-support'
 import { createModeResolver } from './modes'
@@ -225,9 +226,20 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   // next request on. One registry instance serves the resolver, the catalogue and the
   // automatic default's fallback (U4).
   const registry = options.registry ?? createBundledRegistry()
-  const contextStrategy = createContextStrategy({
-    tokenBudgetFor: createTokenBudgetResolver(registry),
-  })
+  const tokenBudgetFor = createTokenBudgetResolver(registry)
+  const contextStrategy = createContextStrategy({ tokenBudgetFor })
+
+  // Context compaction (epic #277, C2; #279): when the context a request is about to make is
+  // over `OPENHARNESS_COMPACTION_THRESHOLD` of the chat model's budget, older history is
+  // summarized instead of being trimmed away. The trigger and the tail come from the chat
+  // model's budget, and the passes from the summary model's — both the same registry-derived
+  // resolver the strategy trims with (#246), plus the output ceiling the summary-size cap needs
+  // (K5). The summary model is the chat's until a per-user preference exists (C3).
+  const contextCompaction: ContextCompactionConfig = {
+    threshold: config.compactionThreshold,
+    tokenBudgetFor,
+    maxOutputFor: createMaxOutputResolver(registry),
+  }
 
   // The reasoning effort (#252's follow-up): which `low | medium | high` levels a model takes,
   // read from the same registry, and asked per request. Before this the brain carried hand-written
@@ -247,6 +259,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     model,
     resolveCredential,
     contextStrategy,
+    contextCompaction,
     reasoningSupportFor,
     resolveMode,
     logger,
@@ -433,6 +446,7 @@ function createScheduler(
   model: ModelFactory,
   resolveCredential: ResolveSessionCredential,
   contextStrategy: ContextStrategy,
+  contextCompaction: ContextCompactionConfig,
   reasoningSupportFor: ReasoningSupportFor,
   resolveMode: ModeResolver,
   logger: Logger,
@@ -449,6 +463,7 @@ function createScheduler(
       model,
       resolveCredential,
       contextStrategy,
+      compaction: contextCompaction,
       reasoningSupportFor,
       resolveMode,
       instanceId: config.instanceId,
@@ -469,6 +484,7 @@ function createScheduler(
     model,
     resolveCredential,
     contextStrategy,
+    compaction: contextCompaction,
     reasoningSupportFor,
     resolveMode,
     maxConcurrentSessions: config.maxConcurrentSessions,

@@ -48,6 +48,17 @@ export const EVENT_TYPES = {
    * what it carries and why.
    */
   sessionContextSummary: 'session.context_summary',
+  /**
+   * // extension: a summary is being written, one pass at a time (epic #277, C2; #279).
+   *
+   * The brain writes it before each pass of the compaction engine, in the same log the summary
+   * itself lands in, because everything a client is told goes in the log (D9): a client that
+   * reconnects mid-compaction — or loads a session it happened in — sees the same progress the
+   * live stream carried. It carries the pass being taken and how many the plan holds; a client
+   * shows "summarizing (2/3)" and reads nothing else out of it. Deleting old progress events is
+   * follow-up work (#285), not this event's job. See {@link ContextSummaryProgressEventSchema}.
+   */
+  sessionContextSummaryProgress: 'session.context_summary_progress',
   /** A previewed event started generating. A stored chunk since D9; stream-only before it. */
   eventStart: 'event_start',
   /** Incremental content for a previewed event. A stored chunk since D9; stream-only before it. */
@@ -99,6 +110,7 @@ export const STORED_EVENT_TYPES = [
   EVENT_TYPES.modelRequestEnd,
   EVENT_TYPES.sessionUsage,
   EVENT_TYPES.sessionContextSummary,
+  EVENT_TYPES.sessionContextSummaryProgress,
   EVENT_TYPES.eventStart,
   EVENT_TYPES.eventDelta,
   EVENT_TYPES.sessionRewind,

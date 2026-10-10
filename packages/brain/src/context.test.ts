@@ -6,7 +6,10 @@ import type {
   SessionRewindEvent,
   StoredEvent,
 } from '@openharness/protocol'
+import { FIXTURE_MODEL_USAGE } from '@openharness/protocol/fixtures'
 import { describe, expect, it } from 'vitest'
+
+import { TEST_MODEL_ID, TEST_SYSTEM } from './testing/harness'
 
 import type { ContextSizeBaseline } from './context'
 import {
@@ -14,6 +17,7 @@ import {
   DEFAULT_CONTEXT_TOKEN_BUDGET,
   OMISSION_MARKER,
   createContextStrategy,
+  estimateContextSize,
   estimateNextRequestTokens,
   estimateTokens,
   promptTokensOf,
@@ -578,5 +582,92 @@ describe('estimateNextRequestTokens (epic #277, K2)', () => {
 
   it('is zero for an empty context with no baseline', () => {
     expect(estimateNextRequestTokens({ model: 'anthropic/claude-sonnet-5', since: [] })).toBe(0)
+  })
+})
+
+describe('estimateContextSize (epic #277, K2; C2)', () => {
+  /** A `span.model_request_start`, as the log stores one. */
+  function spanStartEvent(seq: number, id: EventId, model: string): StoredEvent {
+    return {
+      id,
+      type: 'span.model_request_start',
+      seq,
+      processed_at: '2026-03-15T10:00:00.000Z',
+      consumes: [],
+      model,
+    }
+  }
+
+  /** The `span.model_request_end` that closes one, with the usage the size accounting reads. */
+  function spanEndEvent(seq: number, startId: EventId, inputTokens: number): StoredEvent {
+    return {
+      id: newEventId(),
+      type: 'span.model_request_end',
+      seq,
+      processed_at: '2026-03-15T10:00:00.000Z',
+      model_request_start_id: startId,
+      model_usage: { ...FIXTURE_MODEL_USAGE, input_tokens: inputTokens },
+      is_error: null,
+    }
+  }
+
+  /** One whole request in the log: the span pair, with the reply between them. */
+  function request(seq: number, model: string, inputTokens: number): StoredEvent[] {
+    const id = newEventId()
+    return [
+      spanStartEvent(seq, id, model),
+      agentMessage(seq + 1, 'the reply'),
+      spanEndEvent(seq + 2, id, inputTokens),
+    ]
+  }
+
+  it('measures the previous request plus what is new since it', () => {
+    const events = [
+      userMessage(1, 'first'),
+      ...request(2, TEST_MODEL_ID, 1_000),
+      userMessage(5, 'abcd'),
+    ]
+
+    // 1000 real prompt tokens plus the 1 token of the message that arrived afterwards. The
+    // system prompt is *not* added again: the baseline's prompt already carried it.
+    expect(estimateContextSize(events, { model: TEST_MODEL_ID, system: TEST_SYSTEM })).toBe(1_001)
+  })
+
+  it('measures the whole visible history when a summary has been written since', () => {
+    const summary: StoredEvent = {
+      id: newEventId(),
+      type: 'session.context_summary',
+      seq: 6,
+      processed_at: '2026-03-15T10:00:00.000Z',
+      summary: 'abcd',
+      covers: { to_seq: 5 },
+      reason: 'threshold',
+      tokens_before: 1_000,
+      summary_model: TEST_MODEL_ID,
+      prompt_version: 'context-summary-v1',
+      passes: 1,
+    }
+    const events = [
+      ...request(2, TEST_MODEL_ID, 1_000),
+      userMessage(5, 'abcd'),
+      summary,
+      userMessage(7, 'efgh'),
+    ]
+
+    // The baseline is refused — the summary replaced the context it measured — so the estimate
+    // is the chars/4 one over what the next request would really see: the system prompt, the
+    // summary (with the introduction the strategy wraps it in) and the message after it.
+    const introduction = estimateTokens(
+      `Earlier messages in this conversation were summarized to fit the model's context. Treat the summary below as the history so far, and continue from the messages that follow.\n\nabcd`,
+    )
+    expect(estimateContextSize(events, { model: TEST_MODEL_ID, system: TEST_SYSTEM })).toBe(
+      estimateTokens(TEST_SYSTEM) + introduction + 1,
+    )
+  })
+
+  it('measures everything for a session whose log holds no request yet', () => {
+    expect(
+      estimateContextSize([userMessage(1, 'abcd')], { model: TEST_MODEL_ID, system: TEST_SYSTEM }),
+    ).toBe(estimateTokens(TEST_SYSTEM) + 1)
   })
 })

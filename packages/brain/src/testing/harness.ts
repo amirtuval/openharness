@@ -1,5 +1,6 @@
 import type {
   AgentMessageEvent,
+  ContextSummaryEvent,
   ModeId,
   ModelRequestEndEvent,
   ModelRequestStartEvent,
@@ -249,4 +250,22 @@ export function deltaTextOf(event: StoredEventDelta): string {
 /** Let every queued microtask (a store's delivery, a listener) run before asserting. */
 export async function settle(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0))
+}
+
+/** The span starts whose request was a summary — `purpose: 'summary'` (epic #277, C2). */
+export function summaryRequestsOf(events: readonly StoredEvent[]): ModelRequestStartEvent[] {
+  return events.filter(
+    (event): event is ModelRequestStartEvent =>
+      event.type === 'span.model_request_start' && event.purpose === 'summary',
+  )
+}
+
+/** Every `session.context_summary` in a log, oldest first. */
+export function contextSummariesOf(events: readonly StoredEvent[]): ContextSummaryEvent[] {
+  return events.filter((event) => event.type === 'session.context_summary')
+}
+
+/** The newest `session.context_summary` in a log, or `null` when it holds none. */
+export function contextSummaryOf(events: readonly StoredEvent[]): ContextSummaryEvent | null {
+  return contextSummariesOf(events).at(-1) ?? null
 }
