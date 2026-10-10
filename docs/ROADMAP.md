@@ -197,6 +197,8 @@ Vertex are covered by automated tests and stub servers only; no real account has
 - Bedrock offers inference-profile models such as `us.anthropic.claude-…`, which many
   regions require for recent models ([#274](https://github.com/amirtuval/openharness/issues/274),
   PR #286).
+- Model requests to the fixed providers go through the egress proxy like every other provider
+  call ([#270](https://github.com/amirtuval/openharness/issues/270), PR #284).
 
 **Follow-ups:**
 
@@ -204,8 +206,6 @@ Vertex are covered by automated tests and stub servers only; no real account has
 - Usage budgets and limits, and an operator-wide usage view.
 - Bedrock profile models take the underlying model's price; prefer models.dev's profile-scoped
   price where it exists ([#290](https://github.com/amirtuval/openharness/issues/290)).
-- Model requests to the fixed providers ignore `HTTPS_PROXY`
-  ([#270](https://github.com/amirtuval/openharness/issues/270)).
 
 ## 6. Tools
 
