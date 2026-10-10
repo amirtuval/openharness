@@ -26,6 +26,7 @@ import type { AppendableEvent, AppendEventsOptions, SessionStore } from '@openha
 import { inspect } from 'node:util'
 import { describe, expect, it, vi } from 'vitest'
 
+import { createContextStrategy, estimateTokens } from './context'
 import { eventDelta, eventStart, spanStart } from './events'
 import { isClaimConflictError } from './errors'
 import type { ModelFactory } from './model'
@@ -421,7 +422,8 @@ describe('runTurn', () => {
       type: EVENT_TYPES.modelRequestEnd,
       is_error: null,
       model_usage: {
-        input_tokens: 9,
+        // The mock's OpenAI-shaped total is 9 with 2 cached, so the uncached counter is 7.
+        input_tokens: 7,
         output_tokens: 3,
         cache_read_input_tokens: 2,
         cache_creation_input_tokens: 0,
@@ -1780,13 +1782,14 @@ describe('runTurn', () => {
       store,
       model: factory,
       resolveCredential: resolveTestCredential,
-      contextStrategy: (events) =>
-        [
+      contextStrategy: (events) => ({
+        messages: [
           {
             role: 'user',
             content: `messages: ${events.filter((event) => event.type === EVENT_TYPES.userMessage).length}`,
           },
-        ] as never,
+        ],
+      }),
     })
 
     expect(readPrompt(calls[0]!)).toEqual([{ role: 'user', text: 'messages: 1' }])
@@ -1798,6 +1801,31 @@ describe('runTurn', () => {
         cache_creation_input_tokens: 0,
         cache_read_input_tokens: 0,
       },
+    })
+  })
+
+  it('caps the newest message and records it on the span (epic #277, K6)', async () => {
+    const { store, sessionId } = await newSession([message('x'.repeat(400))], { system: null })
+    const { factory, calls } = mockModel({ text: ['Hi'] })
+
+    await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+      contextStrategy: createContextStrategy({ tokenBudget: 20 }),
+    })
+
+    // The request carried the capped text, never the original, and never nothing.
+    const prompt = readPrompt(calls[0]!)
+    expect(prompt).toHaveLength(1)
+    expect(prompt[0]!.text).toContain('tokens omitted')
+    // The span says which event was cut and what it cost, so a client can show a notice.
+    const log = await rawLogOf(store, sessionId)
+    const start = spanStartOf(log.find((event) => event.type === EVENT_TYPES.modelRequestStart))
+    expect(start.truncated).toEqual({
+      seq: 1,
+      tokens_before: 100,
+      tokens_after: estimateTokens(prompt[0]!.text),
     })
   })
 

@@ -12,7 +12,11 @@ import { PACKAGE_NAME as SESSION_PACKAGE_NAME } from '@openharness/session'
  * package; the brain only sees a `SessionStore`, a model and an abort signal.
  *
  * - **{@link runTurn}** (`./turn`) — the loop, and the lifecycle it writes.
- * - **{@link ContextStrategy}** (`./context`) — how the log becomes model messages.
+ * - **{@link ContextStrategy}** (`./context`) — how the log becomes model messages: the latest
+ *   non-superseded `session.context_summary` replaces the history it covers (epic #277, K1), and
+ *   an oversized newest item is capped rather than dropped (K6).
+ * - **{@link estimateNextRequestTokens}** (`./context`) — how big the next request will be, from
+ *   the previous request's real prompt size plus an estimate for what is new (epic #277, K2).
  * - **{@link PROVIDER_REASONING}** (`./reasoning`) — how `low | medium | high` is asked for from
  *   each provider, and what the log asked the next request to run with (#252).
  * - **{@link ModelFactory}** (`./model`) — how a `provider/model` id becomes a model to stream,

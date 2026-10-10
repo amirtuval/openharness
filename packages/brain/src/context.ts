@@ -1,22 +1,41 @@
-import type { ModelConfig, StoredEvent } from '@openharness/protocol'
+import type {
+  ContextSummaryEvent,
+  ModelConfig,
+  ModelRequestPurpose,
+  ModelUsage,
+  StoredEvent,
+  Supersedes,
+  Truncation,
+} from '@openharness/protocol'
 import { EVENT_TYPES } from '@openharness/protocol'
 import type { ModelMessage } from 'ai'
 
 /**
- * Turning the session log into the messages a model request is made with.
+ * Turning the session log into the messages a model request is made with — and measuring how
+ * big that request is.
  *
  * The brain holds no conversation state: every turn rebuilds its context from the log it is
  * handed, which is what makes crash recovery and a second brain on a partition possible. How
- * that rebuild works — which events become messages, how long the history may get — is the one
- * part of the loop a host may want to change, so it is a strategy rather than a hardcoded
- * conversion.
+ * that rebuild works — which events become messages, how long the history may get, what happens
+ * when the context fills — is the one part of the loop a host may want to change, so it is a
+ * strategy rather than a hardcoded conversion.
+ *
+ * Since epic #277 the log may also carry a `session.context_summary`: the older history replaced
+ * *for the model* by a summary (K1). The strategy is the only reader of it — the transcript and
+ * replay still show the full history — and what it builds is the system prompt, then the latest
+ * summary that no rewind has superseded, then every event after the summary's `covers.to_seq`.
+ * Trimming stays as the last-resort safety net, and an item too big to send at all is capped
+ * rather than dropped (K6).
  */
 
 /**
  * Build the messages for one model request out of the session's log.
  *
- * Called once per model request, after the turn loop has claimed the pending user events, so
- * what it sees is the log as it will be answered — see {@link ContextStrategyOptions}.
+ * Called once per model request, with the log as that request will answer it — the pending user
+ * events the request is about to claim are already part of the view (see
+ * {@link ContextStrategyOptions}). It answers the messages to send **and** what it had to cut to
+ * fit: the truncation record cannot be written by the strategy (the store is the loop's), so the
+ * loop carries it onto the request's `span.model_request_start` (K6).
  *
  * Implementations must not write: the store is the loop's to append to, and a strategy that
  * published events would put the transcript out of step with the request that produced it.
@@ -24,7 +43,19 @@ import type { ModelMessage } from 'ai'
 export type ContextStrategy = (
   events: readonly StoredEvent[],
   options: ContextStrategyOptions,
-) => ModelMessage[]
+) => ContextStrategyResult
+
+/** What a {@link ContextStrategy} answers: the messages, and what it had to shorten. */
+export interface ContextStrategyResult {
+  /** The messages to send, system prompt first. */
+  readonly messages: ModelMessage[]
+  /**
+   * The newest message was over the model's budget and was capped to a head and a tail (K6), or
+   * absent when nothing had to be cut. The loop records it on the request's span so a client can
+   * tell the user their message was shortened rather than silently dropped.
+   */
+  readonly truncated?: Truncation
+}
 
 /** What a {@link ContextStrategy} is told about the session it is building a context for. */
 export interface ContextStrategyOptions {
@@ -60,7 +91,8 @@ export interface ContextStrategyConfig {
 }
 
 /**
- * The default strategy: the conversation so far, oldest first, trimmed to a token budget.
+ * The default strategy: the conversation, summarized where the log says so, trimmed to a token
+ * budget, and with an oversized newest message capped.
  *
  * `user.message` and `agent.message` become `user` and `assistant` messages in `seq` order —
  * which is the whole conversation the session has had, whatever happened to it in between:
@@ -73,6 +105,24 @@ export interface ContextStrategyConfig {
  * Messages with no text (an empty `content`, which is how a model that answered with nothing
  * is recorded) are left out rather than sent as empty turns.
  *
+ * ## The summary (K1)
+ *
+ * When the log's latest non-superseded `session.context_summary` is in `events`, the model is
+ * told the summary instead of the history it covers: the summary becomes a **system** message
+ * after the session's own system prompt, and only the events after its `covers.to_seq` become
+ * conversation messages. The role is deliberate. The summary is not something the *user* said —
+ * a `user` message would read as a fresh instruction from them, and an `assistant` one as
+ * something the model itself had said — and it must survive trimming: `trimToBudget` keeps every
+ * system message and drops the oldest turns first, so a system-role summary is the one message
+ * the safety net can never throw away, which is exactly what the summary is for. The AI SDK
+ * groups leading system messages ahead of the conversation, which is where K1 puts the summary,
+ * and the wording below marks it plainly as context rather than an instruction.
+ *
+ * A summary a later `session.rewind` covers is ignored — the edit took the branch it summarized
+ * back, so it must not be handed to the model (K1). The strategy reads that off the rewind's
+ * `supersedes` range, which the replay read the brain uses would normally have applied already;
+ * doing it here too keeps the rule true for a caller that hands the strategy a whole log.
+ *
  * ## Trimming
  *
  * The oldest complete turns are dropped until the history fits the budget, and never the newest
@@ -80,6 +130,13 @@ export interface ContextStrategyConfig {
  * over-budget one. A turn is two messages — one user, one assistant — so the cut lands on a
  * boundary a chat model can read, and a history that would start with an assistant message
  * loses that message too.
+ *
+ * ## The newest item (K6)
+ *
+ * Summarizing cannot help when the newest item alone is over the budget — it has to stay
+ * verbatim — so it is not dropped but **capped** to a head and a tail with an
+ * {@link OMISSION_MARKER} between them, and the record of what was cut is returned for the span.
+ * The newest user message is never dropped, so nothing is silently lost.
  *
  * @param config the per-model budgets; see {@link DEFAULT_CONTEXT_TOKEN_BUDGET}
  */
@@ -90,7 +147,8 @@ export function createContextStrategy(config: ContextStrategyConfig = {}): Conte
     // Per request, from the model that request runs: the loop re-reads the session at every
     // request boundary, so a switch applies to the next request's budget as well as its model.
     const budget = budgetFor?.(options.model.id) ?? defaultBudget
-    return trimToBudget(messagesFromEvents(events, options.system), budget)
+    const summary = latestSummary(events)
+    return planRequest(events, options.system, summary, budget)
   }
 }
 
@@ -110,22 +168,194 @@ export function estimateTokens(text: string): number {
   return Math.ceil(text.length / CHARS_PER_TOKEN)
 }
 
-/** The conversation the log holds, as model messages. */
-function messagesFromEvents(events: readonly StoredEvent[], system: string | null): ModelMessage[] {
-  const messages: ModelMessage[] = []
-  if (system !== null && system.length > 0) {
-    messages.push({ role: 'system', content: system })
+/**
+ * The real prompt size a request's stored counters describe (epic #277, K2).
+ *
+ * `span.model_request_end.model_usage` carries Anthropic's four **disjoint** counters, and the
+ * three input-side ones are the prompt: the uncached input plus both cache halves. That is the
+ * whole of "the request's actual size" — the tokens the provider really counted — and it is why
+ * the counters had to be normalized per provider on the way in (`toModelUsage` in `./model`
+ * reads the SDK's uncached half, so a provider whose raw `input_tokens` includes cached tokens
+ * does not count them twice here).
+ *
+ * @param usage one request's counters, as `span.model_request_end.model_usage` stored them
+ */
+export function promptTokensOf(usage: ModelUsage): number {
+  return usage.input_tokens + usage.cache_creation_input_tokens + usage.cache_read_input_tokens
+}
+
+/**
+ * The previous request, as the size accounting's baseline (epic #277, K2).
+ *
+ * Only a request that says something about the *next* one may be a baseline: it has to have run
+ * on the model the next request runs (each model counts tokens differently), it must not be a
+ * summary request (a summary measures the summarizer's prompt, not the chat's — the
+ * `purpose: 'summary'` span the compaction engine writes, C2), and its context must not have been
+ * superseded by a `session.rewind` since (the branch it measured is gone). Anything else is
+ * refused by {@link estimateNextRequestTokens} and the characters-per-token estimate stands in.
+ */
+export interface ContextSizeBaseline {
+  /** The `provider/model` that request ran — `span.model_request_start.model`, or `null`. */
+  readonly model: string | null
+  /** What it reported, `span.model_request_end.model_usage`. */
+  readonly usage: ModelUsage
+  /** Why it was made, when it was not the chat's own request (`purpose: 'summary'`). */
+  readonly purpose?: ModelRequestPurpose
+  /** Whether a `session.rewind` has replaced its context since it ran. */
+  readonly superseded?: boolean
+}
+
+/** How {@link estimateNextRequestTokens} is asked for a size. */
+export interface NextRequestSizeOptions {
+  /** The model the next request will run — the budget the size is measured against (K2). */
+  readonly model: string
+  /**
+   * The previous request, or `null` when there is none. A baseline the rules refuse (a summary
+   * request, another model, a superseded context) falls back to {@link estimateTokens} the same
+   * way `null` does.
+   */
+  readonly previous?: ContextSizeBaseline | null
+  /**
+   * The text of the events the next request will see **since** the baseline — or the whole
+   * visible history when there is none, which is what makes the fallback a real estimate rather
+   * than a lower bound.
+   */
+  readonly since: readonly string[]
+}
+
+/**
+ * Estimate how big the next request's context will be (epic #277, K2).
+ *
+ * The real measure where there is one: the previous request's actual prompt size
+ * ({@link promptTokensOf}) plus the characters-per-token estimate for what is new since. That is
+ * the number the compaction trigger compares against the threshold share of the model's budget,
+ * and it is deliberately *measured*, not guessed — a context that is really 60% full must not
+ * read as 40% because the guess is off.
+ *
+ * There is no real measure when there is no previous request, when the previous one cannot say
+ * anything about this one (see {@link ContextSizeBaseline}), or when the caller has none in hand
+ * — a session whose first request this is, or one stored before the spans carried usage. Then
+ * the whole estimate is the characters-per-token one over `since`, which must be the entire
+ * visible history in that case. The caller passes `previous: null` for one case beyond the ones
+ * the rules refuse: a summary written since the baseline, because it replaced the history that
+ * baseline measured, so its prompt size says nothing about the much smaller context the next
+ * request is built from.
+ *
+ * @param options the model, the baseline and the new text; see {@link NextRequestSizeOptions}
+ */
+export function estimateNextRequestTokens(options: NextRequestSizeOptions): number {
+  const since = options.since.reduce((total, text) => total + estimateTokens(text), 0)
+  const previous = options.previous
+  if (previous === undefined || previous === null || !isBaselineUsable(previous, options.model)) {
+    return since
   }
+  return promptTokensOf(previous.usage) + since
+}
+
+/**
+ * Whether a previous request may be the next one's baseline (K2).
+ *
+ * The refusals are the epic's: a request on another model counts tokens differently, a summary
+ * request measured the summarizer's prompt rather than the chat's, and a context a rewind has
+ * replaced is not the context the next request builds on. A span start from before D9 carries no
+ * `model`, and an unknown model is no model: the safer answer is the estimate, not a number
+ * attributed to the wrong window.
+ */
+function isBaselineUsable(previous: ContextSizeBaseline, model: string): boolean {
+  return (
+    previous.purpose !== 'summary' &&
+    previous.superseded !== true &&
+    previous.model !== null &&
+    previous.model === model
+  )
+}
+
+/** What the model is told about a summary. Kept next to the builder so the two cannot drift. */
+function summaryIntroduction(summary: string): string {
+  return `Earlier messages in this conversation were summarized to fit the model's context. Treat the summary below as the history so far, and continue from the messages that follow.\n\n${summary}`
+}
+
+/**
+ * The newest summary no rewind has superseded, or `null` when the log has none (K1).
+ *
+ * A rewind that reaches back before a summary replaces it along with the rest of the tail it
+ * covered, so the summary is not handed to the model. The range is read off the `session.rewind`
+ * events in `events`; the store's replay read would normally have removed the covered events
+ * already, and doing it here as well is what keeps the rule true whatever the caller passed.
+ */
+function latestSummary(events: readonly StoredEvent[]): ContextSummaryEvent | null {
+  const ranges: Supersedes[] = []
   for (const event of events) {
+    if (event.type === EVENT_TYPES.sessionRewind) {
+      ranges.push(event.supersedes)
+    }
+  }
+  let latest: ContextSummaryEvent | null = null
+  for (const event of events) {
+    if (event.type !== EVENT_TYPES.sessionContextSummary) {
+      continue
+    }
+    if (ranges.some((range) => event.seq >= range.from_seq && event.seq <= range.to_seq)) {
+      continue
+    }
+    if (latest === null || event.seq > latest.seq) {
+      latest = event
+    }
+  }
+  return latest
+}
+
+/** One conversation message, with the `seq` of the event it came from — for K6's record. */
+interface ConversationMessage {
+  readonly message: ModelMessage
+  readonly seq: number
+}
+
+/** Everything the strategy builds, before it is turned into the result. */
+function planRequest(
+  events: readonly StoredEvent[],
+  system: string | null,
+  summary: ContextSummaryEvent | null,
+  budget: number,
+): ContextStrategyResult {
+  const systemMessages: ModelMessage[] = []
+  if (system !== null && system.length > 0) {
+    systemMessages.push({ role: 'system', content: system })
+  }
+  if (summary !== null) {
+    systemMessages.push({ role: 'system', content: summaryIntroduction(summary.summary) })
+  }
+  // What the model is told about history it no longer sees, after the system prompt and before
+  // the messages that follow it.
+  const conversation = conversationAfter(events, summary === null ? 0 : summary.covers.to_seq)
+
+  const trimmed = trimToBudget(systemMessages, conversation, budget)
+  const capped = capNewest(trimmed, budget)
+  return {
+    messages: [...systemMessages, ...capped.messages.map((entry) => entry.message)],
+    ...(capped.truncated === null ? {} : { truncated: capped.truncated }),
+  }
+}
+
+/** The conversation the log holds after `afterSeq`, as model messages. */
+function conversationAfter(
+  events: readonly StoredEvent[],
+  afterSeq: number,
+): ConversationMessage[] {
+  const messages: ConversationMessage[] = []
+  for (const event of events) {
+    if (event.seq <= afterSeq) {
+      continue
+    }
     if (event.type === EVENT_TYPES.userMessage) {
       const text = textOf(event.content)
       if (text.length > 0) {
-        messages.push({ role: 'user', content: text })
+        messages.push({ message: { role: 'user', content: text }, seq: event.seq })
       }
     } else if (event.type === EVENT_TYPES.agentMessage) {
       const text = textOf(event.content)
       if (text.length > 0) {
-        messages.push({ role: 'assistant', content: text })
+        messages.push({ message: { role: 'assistant', content: text }, seq: event.seq })
       }
     }
   }
@@ -138,25 +368,42 @@ function textOf(content: readonly { readonly text: string }[]): string {
 }
 
 /**
- * Drop the oldest turns until the history fits `budget`, keeping the system message and the
- * newest message always. See {@link createContextStrategy}.
+ * Drop the oldest turns until the history fits `budget`, keeping every system message — the
+ * session prompt and the summary alike — and the newest message always. See
+ * {@link createContextStrategy}.
  */
-function trimToBudget(messages: readonly ModelMessage[], budget: number): ModelMessage[] {
-  const system = messages.filter((message) => message.role === 'system')
-  let history = messages.filter((message) => message.role !== 'system')
-  const tokensOf = (list: readonly ModelMessage[]): number =>
-    list.reduce((total, message) => total + estimateTokens(textOfMessage(message)), 0)
-  let total = tokensOf(system) + tokensOf(history)
+function trimToBudget(
+  system: readonly ModelMessage[],
+  conversation: readonly ConversationMessage[],
+  budget: number,
+): ConversationMessage[] {
+  const tokensOf = (list: readonly ConversationMessage[]): number =>
+    list.reduce((total, entry) => total + estimateTokens(textOfMessage(entry.message)), 0)
+  const systemTokens = system.reduce(
+    (total, message) => total + estimateTokens(textOfMessage(message)),
+    0,
+  )
+  let history: ConversationMessage[] = [...conversation]
+  let total = systemTokens + tokensOf(history)
   while (total > budget && history.length > 2) {
     // Two at a time: a turn is a user message and the assistant reply to it.
     history = history.slice(2)
-    total = tokensOf(system) + tokensOf(history)
+    total = systemTokens + tokensOf(history)
   }
-  if (history[0]?.role === 'assistant') {
+  if (history[0]?.message.role === 'assistant') {
     // A history that opens with a reply reads as an answer to nothing; drop it.
     history = history.slice(1)
   }
-  return [...system, ...history]
+  return history
+}
+
+/**
+ * The marker a capped item carries where its middle was: how many tokens are not there (K6).
+ *
+ * @param tokens the tokens the marker stands for
+ */
+export function OMISSION_MARKER(tokens: number): string {
+  return `[… ${tokens} tokens omitted …]`
 }
 
 /** The text of one message, whatever shape its content has. */
@@ -172,4 +419,76 @@ function textOfMessage(message: ModelMessage): string {
     }
   }
   return text
+}
+
+/** What capping the newest item produced: the messages, and the record (or `null`). */
+interface CappedNewest {
+  readonly messages: ConversationMessage[]
+  readonly truncated: Truncation | null
+}
+
+/**
+ * Cap the newest item to `budget` tokens when it alone is over it (K6).
+ *
+ * The newest message is the one item a request cannot do without — it is the question being
+ * asked, or the reply the next one follows — so it is never dropped, only shortened: a head and
+ * a tail of it, with {@link OMISSION_MARKER} between. The record says which event was cut and
+ * what it cost, which is what the loop puts on the span for a client to show the user.
+ *
+ * The item is capped to the same budget the history is trimmed to, so the cap cannot itself be
+ * what makes the request overflow.
+ */
+function capNewest(conversation: readonly ConversationMessage[], budget: number): CappedNewest {
+  const newest = conversation[conversation.length - 1]
+  if (newest === undefined) {
+    return { messages: [...conversation], truncated: null }
+  }
+  const text = textOfMessage(newest.message)
+  const tokensBefore = estimateTokens(text)
+  if (tokensBefore <= budget) {
+    return { messages: [...conversation], truncated: null }
+  }
+  const content = capText(text, budget, tokensBefore)
+  const messages = [...conversation]
+  messages[messages.length - 1] = {
+    // The conversation is only ever user and assistant messages (`conversationAfter`), so the
+    // capping preserves the one it found.
+    message:
+      newest.message.role === 'user' ? { role: 'user', content } : { role: 'assistant', content },
+    seq: newest.seq,
+  }
+  return {
+    messages,
+    truncated: {
+      seq: newest.seq,
+      tokens_before: tokensBefore,
+      tokens_after: estimateTokens(content),
+    },
+  }
+}
+
+/**
+ * `text` cut to a head and a tail that together cost at most `budget` tokens, with
+ * {@link OMISSION_MARKER} for the middle.
+ *
+ * The marker's own size is reserved first, at the widest the count it will carry could be, so the
+ * result is inside the budget whatever the omitted number turns out to be. A budget too small for
+ * the marker alone gives the marker by itself — it is the smallest honest statement that text was
+ * left out.
+ */
+function capText(text: string, budget: number, tokensBefore: number): string {
+  const reserved = estimateTokens(OMISSION_MARKER(tokensBefore))
+  const keepChars = Math.max(0, budget - reserved) * CHARS_PER_TOKEN
+  const headChars = Math.ceil(keepChars / 2)
+  const tailChars = Math.max(0, keepChars - headChars)
+  const head = text.slice(0, headChars)
+  const tail = tailChars === 0 ? '' : text.slice(text.length - tailChars)
+  // The count the marker reports is what the item cost minus what is left of it — the marker's
+  // own tokens included, since they are what replaced the middle. One pass is enough: the count's
+  // digit width is all the second pass could change, and it is bounded by `reserved`.
+  let omitted = Math.max(0, tokensBefore - estimateTokens(head + tail))
+  let content = head + OMISSION_MARKER(omitted) + tail
+  omitted = Math.max(0, tokensBefore - estimateTokens(content))
+  content = head + OMISSION_MARKER(omitted) + tail
+  return content
 }

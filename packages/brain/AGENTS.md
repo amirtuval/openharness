@@ -51,7 +51,9 @@ src/
   index.ts              the barrel: the loop, the context strategy, the model seam, retries
   turn.ts               runTurn: the loop, and the lifecycle it writes
   log.ts                reading the log, and the questions the loop asks of it
-  context.ts            ContextStrategy: the log as model messages, trimmed
+  context.ts            ContextStrategy: the log as model messages — the latest summary, the
+                        history it covers, the trimmed tail (K1), the capped newest item (K6) —
+                        and the real size of the next request (K2)
   model.ts              ModelFactory, credentials, and streaming one request through the AI SDK
   azure-fetch.ts        the Azure endpoint's base URL, and the safeFetch guard a model call goes through
   reasoning.ts          the reasoning effort: per provider, gated by the injected resolver
@@ -83,10 +85,12 @@ emits what that reaches.
 | `RunTurnOptions`                                                                                                                       | `{ store, model, resolveCredential, signal?, fence?, contextStrategy?, reasoningSupportFor?, resolveMode?, retry? }`                                                                                                                                                                            |
 | `TurnOutcome`, `TurnOutcomeKind`                                                                                                       | `{ outcome: 'idle' \| 'noop' \| 'interrupted' \| 'error' }`                                                                                                                                                                                                                                     |
 | `ResolvedMode`, `ModeResolver`                                                                                                         | a mode as the host resolved it — id, name, model, effort, prompt addition — and where a request's mode comes from (#245, M6)                                                                                                                                                                    |
-| `ContextStrategy`, `ContextStrategyOptions`                                                                                            | `(events, { model, system }) => ModelMessage[]`                                                                                                                                                                                                                                                 |
-| `createContextStrategy(config?)`, `ContextStrategyConfig`                                                                              | the default strategy: the conversation, trimmed to a token budget resolved per model                                                                                                                                                                                                            |
+| `ContextStrategy`, `ContextStrategyOptions`, `ContextStrategyResult`                                                                   | `(events, { model, system }) => { messages, truncated? }` — the messages, and what the strategy had to cap to fit (epic #277, K6)                                                                                                                                                               |
+| `createContextStrategy(config?)`, `ContextStrategyConfig`                                                                              | the default strategy: the conversation, summarized where the log says so (#277 K1), trimmed to a token budget resolved per model, with an oversized newest item capped (K6)                                                                                                                     |
 | `DEFAULT_CONTEXT_STRATEGY`, `DEFAULT_CONTEXT_TOKEN_BUDGET`, `CHARS_PER_TOKEN`                                                          | its defaults                                                                                                                                                                                                                                                                                    |
 | `estimateTokens(text)`                                                                                                                 | the chars/4 estimate the budget is measured in                                                                                                                                                                                                                                                  |
+| `OMISSION_MARKER(tokens)`                                                                                                              | the `[… N tokens omitted …]` a capped item carries where its middle was (K6)                                                                                                                                                                                                                    |
+| `estimateNextRequestTokens(options)`, `NextRequestSizeOptions`, `ContextSizeBaseline`, `promptTokensOf(usage)`                         | how big the next request will be (K2): the previous request's real prompt size plus an estimate for what is new, falling back to chars/4 when the previous request cannot be a baseline                                                                                                         |
 | `ModelCredential`                                                                                                                      | `{ type: 'api_key', apiKey }`, `{ type: 'azure_openai', apiKey, endpoint }`, `{ type: 'openai_compatible', apiKey, baseUrl }`, `{ type: 'bedrock', accessKeyId, secretAccessKey, sessionToken?, region }` or `{ type: 'vertex', project, location, serviceAccount }` — one request's credential |
 | `VertexModelCredential`                                                                                                                | the Vertex shape on its own: the project, the location, and the service-account key document as text                                                                                                                                                                                            |
 | `credentialSecrets(credential)`                                                                                                        | every secret a credential carries, for redaction — a Bedrock credential has three, a Vertex one its private key PEM                                                                                                                                                                             |
@@ -158,7 +162,9 @@ LOOP — once per model request
                                     reasoning_effort: what the newest effort-carrying
                                     user.message asked for — else the mode's — and what was
                                     applied,
-                                    mode: the mode the request ran under and its name then }
+                                    mode: the mode the request ran under and its name then,
+                                    truncated: what the newest item had to be capped to, when it
+                                    was over the model's budget (#277 K6) }
      (the append IS the claim: atomic, fenced, refused whole with ClaimConflictError)
   6. stream ............................................... stored event_start under a fresh
                                                              sevt_ id, then one stored
@@ -310,20 +316,26 @@ Notes on the corners:
 
 ## Extension points
 
-| what                                 | how                                                                                              |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------ |
-| how the log becomes messages         | `contextStrategy` on `runTurn`; the default trims to a token budget, per model                   |
-| how `provider/model` becomes a model | `model` on `runTurn` (required): a `ModelFactory`; the server passes `providerModelFactory`      |
-| where the key comes from             | `resolveCredential` on `runTurn`: the owner's credential per provider, resolved per request (A5) |
-| which models take a reasoning effort | which models take a reasoning effort                                                             | `reasoningSupportFor` on `runTurn`: the levels a model takes, asked per request (#252) |
-| what a mode resolves to              | `resolveMode` on `runTurn`: the mode a chat follows, resolved per request (#245, M6)             |
-| how failures are retried             | `retry` on `runTurn`: attempts, base delay, ceiling, and the `sleep` itself                      |
+| what                                 | how                                                                                                                                                       |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| how the log becomes messages         | `contextStrategy` on `runTurn`; the default reads the latest summary (#277 K1), trims to a token budget per model, and caps an oversized newest item (K6) |
+| how `provider/model` becomes a model | `model` on `runTurn` (required): a `ModelFactory`; the server passes `providerModelFactory`                                                               |
+| where the key comes from             | `resolveCredential` on `runTurn`: the owner's credential per provider, resolved per request (A5)                                                          |
+| which models take a reasoning effort | which models take a reasoning effort                                                                                                                      | `reasoningSupportFor` on `runTurn`: the levels a model takes, asked per request (#252) |
+| what a mode resolves to              | `resolveMode` on `runTurn`: the mode a chat follows, resolved per request (#245, M6)                                                                      |
+| how failures are retried             | `retry` on `runTurn`: attempts, base delay, ceiling, and the `sleep` itself                                                                               |
 
 `ContextStrategy` is called once per model request, with the log as that request sees it and the
 session's `{ model, system }`; it must be pure — the loop owns the store, and a strategy that
-wrote to it would put the transcript out of step with the request that produced it.
+wrote to it would put the transcript out of step with the request that produced it. It answers
+the messages **and** what it had to cap to fit (K6), because the store is the loop's: the loop
+records the truncation on the request's `span.model_request_start` rather than the strategy
+writing it. That is also why the loop builds the prompt _before_ it appends the span start that
+claims the pending messages — the span start carries the record, so the prompt has to exist
+first — admitting the messages it is about to claim into the log view (`contextView`'s second
+argument) rather than relying on the claim having landed.
 
-### The context budget (#246)
+### The context budget and the summary (#246; epic #277 K1/K6)
 
 The default strategy trims the history to a token budget, and how big that budget is per
 model is the host's to say. `ContextStrategyConfig` takes `tokenBudget` — one number for every
@@ -339,6 +351,41 @@ every request boundary, so a mid-chat model switch trims to the new model from t
 request on. The server's resolver (`apps/server/src/catalog/context-budget.ts`) turns the
 registry's limits into `contextWindow − min(maxOutput, 25% of contextWindow)`, and the
 trimming itself is unchanged — oldest complete turns first, never the newest turn.
+
+Since epic #277 the strategy also builds the request around the log's latest **summary** (K1).
+When a `session.context_summary` is in the events, what the model is sent is: the session's
+system prompt, then the summary as a second **system** message, then every event after the
+summary's `covers.to_seq`. The role is deliberate. A `user`-role summary would read as a fresh
+instruction from the reader and an `assistant` one as something the model itself had said; and
+`trimToBudget` keeps every system message while dropping the oldest turns, so a system-role
+summary is the one message the safety net can never throw away — which is the point of it. The
+wording marks it plainly as context (`Earlier messages in this conversation were summarized…`),
+and the AI SDK groups leading system messages ahead of the conversation, exactly where K1 puts
+the summary. A summary a later `session.rewind` covers is ignored: the edit took the branch it
+summarized back, so it must not reach the model (the replay read would normally have removed it
+already; the strategy applies the rule itself so it holds for a caller that hands it a whole
+log).
+
+An item too big to send at all is **capped, not dropped** (K6). If the newest message alone is
+over the budget, summarizing cannot help — it has to stay verbatim — so it is cut to a head and
+a tail with `OMISSION_MARKER` between them, and the strategy returns the
+`{ seq, tokens_before, tokens_after }` record the loop puts on the span. The newest user message
+is therefore never dropped, and a client can tell the user their message was shortened.
+
+### The real size of a context (epic #277 K2)
+
+`estimateNextRequestTokens` is the function the compaction trigger (C2, #279) will use to decide
+whether the context is full: it takes the model the next request will run, the previous
+request's `span.model_request_end.model_usage`, and the text of what is new since, and answers
+the previous request's real prompt size plus a chars/4 estimate for the new text.
+`promptTokensOf(usage)` is the first half: the three input-side counters of `ModelUsage` summed,
+which is the real prompt size because those counters are disjoint — see `toModelUsage` for how
+each provider family is normalized into them. The baseline is only used when it can say
+something about the next request: the previous request must not have been a summary request
+(`purpose: 'summary'`, C2), must have run on the same model, and must not have been superseded by
+a rewind. Otherwise — and when there is no previous request at all, the session's first — the
+whole estimate is the chars/4 one over `since`, which the caller passes as the entire visible
+history in that case.
 
 `ModelFactory` is what keeps the package testable without a key: tests return one of the AI SDK's
 mock models, and nothing else in the loop knows the difference — a mock ignores the credential
@@ -596,6 +643,16 @@ costs a `typeof` check and because a future pairing could disagree in the same w
   integers, and `0` for a count that cannot be recovered rather than a value the log would
   reject. Cache counters come from the breakdown when the shape has one and from inside the
   usage object when it does not.
+- `toModelUsage` is also where the provider families are **normalized apart** (epic #277, K2).
+  The protocol's `input_tokens` is the _uncached_ input — the four counters are disjoint, which
+  is what `usageCost` prices — while the SDK's `inputTokens` is the cache-inclusive total. So
+  the counter is the SDK's `noCacheTokens`, whose per-family value the provider packages compute
+  correctly for their own APIs: Anthropic's (and Bedrock's, and Vertex's Anthropic models')
+  raw `input_tokens` already leaves cached tokens out, so their uncached half is that number,
+  while OpenAI's and the OpenAI-compatible family's `prompt_tokens` already includes them, so
+  their uncached half is it minus the cached ones. Summing the three input-side counters of the
+  result is the real prompt size for every family, which is the measure the compaction trigger
+  reads.
 
 `model.test.ts` reads **real-shaped streams** for the two biggest providers — an OpenAI
 Responses body and an Anthropic Messages body, streamed through the real clients with `fetch`
@@ -753,9 +810,18 @@ retries run on an injected `sleep`, the clock is a `TestClock` from
   whole scenario — a normal turn, a 401, a retryable failure — whose provider errors quote a
   distinctive fake key, asserting neither the key nor a four-character-trimmed piece of it
   appears in the stored events or in captured console output.
-- `context.test.ts` pins the per-model budget resolver of #246 too: the strategy trims to what
+- `context.test.ts` pins the per-model budget resolver of #246: the strategy trims to what
   `tokenBudgetFor` answers for the request's own model, falls back to the default when it
-  answers nothing, and asks it once per call with the id the request runs.
+  answers nothing, and asks it once per call with the id the request runs. It also pins epic
+  #277's half: a log with no summary, one summary, several (the latest wins) and a summary a
+  rewind has superseded (ignored, including a summary before the rewind but not after it); the
+  summary kept through trimming; the newest item capped to a head and a tail with the marker and
+  the record of what was cut (a reply as well as a message, and nothing cut when it fits); and
+  the size accounting — `promptTokensOf`'s three counters, and
+  `estimateNextRequestTokens` with a usable baseline, with none, and with each refusal (a
+  summary request, another model, a superseded context). `turn.test.ts` holds the loop's half:
+  the capped newest message reaching the request, and the record landing on the request's
+  `span.model_request_start`.
 - `errors.test.ts`, `retry.test.ts`, `log.test.ts`, `model.test.ts`,
   `redact.test.ts`, `validate.test.ts` and `index.test.ts` cover the pieces on their own,
   including the branches the loop cannot reach. `errors.test.ts` also covers the wrappers the
