@@ -7,8 +7,9 @@ See [`docs/architecture.md`](./docs/architecture.md) for the package map and
 [`docs/api.md`](./docs/api.md) for the HTTP API.
 
 v1 (chat server, web UI, TUI), authentication (epic #65: sign-in, ownership, per-user provider
-keys), model-first chat (epic #92), deployment (epic #148) and Chat and TUI UX pass 1 (epic
-#201) are built; the next phase is model selection —
+keys), model-first chat (epic #92), deployment (epic #148), Chat and TUI UX pass 1 (epic
+#201), model selection (epic #245) and context compaction (epic #277) are built; the next phase
+is tools (epic #303) —
 [`docs/ROADMAP.md`](./docs/ROADMAP.md). Each package's `AGENTS.md` describes what that package
 implements today.
 

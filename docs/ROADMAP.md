@@ -53,7 +53,8 @@ _Last updated: 2026-10-10._
 4. Chat and TUI UX, pass 1 ([epic #201](https://github.com/amirtuval/openharness/issues/201)) — done
 5. Model selection and provider keys ([epic #245](https://github.com/amirtuval/openharness/issues/245)) — done,
    followed by context compaction ([epic #277](https://github.com/amirtuval/openharness/issues/277)) — done
-6. Tools
+6. Tools: the loop, pausing for the user and remote MCP ([epic #303](https://github.com/amirtuval/openharness/issues/303))
+7. Extensibility and multiple agents (skills, subagents and the like), then sandboxed tools
 
 **Why this order:** identity and a running deployment are the foundations. Every later feature
 needs to know who owns what. The features that cost money or can act on the world (paid model
@@ -130,7 +131,7 @@ is in [`DEPLOYMENT.md`](./DEPLOYMENT.md) and [`RELEASING.md`](./RELEASING.md).
 
 **Why now:** the tools phase is mostly UI (tool calls, approvals, `ask_user`), and production
 has real users. Pass 1 builds the foundation those features render on; **pass 2**, a finishing
-pass, comes after tools step 3.
+pass, comes after the tools epic (#303).
 
 **Scope** (the decisions and the 11 sub-issues are on the epic):
 
@@ -248,46 +249,38 @@ separate from #46's event-store compaction.
   ([#300](https://github.com/amirtuval/openharness/issues/300)).
 - Turning automatic compaction off per user.
 
-## 6. Tools
+## 6. Tools: the loop, pausing for the user, remote MCP ([epic #303](https://github.com/amirtuval/openharness/issues/303))
 
-The third pillar of the architecture (the "hands"), built in steps that are each useful on their
-own.
+The third pillar of the architecture (the "hands"), without a sandbox yet: everything here runs
+in-process on the server. **Status:** designed; the decisions and the 11 sub-issues are on the
+epic, delivered as one stack with a test plan at the end.
 
-1. **The tool loop, with server-side tools that need no sandbox.** The brain loops
-   `agent.tool_use` → execute → `agent.tool_result` → model until no tool is called. `hands`
-   gets its first real implementation, `execute(name, input, ctx)`, run in-process. Tools:
-   - `web_fetch`, with SSRF protection: block private and link-local ranges and metadata
-     endpoints, re-check on redirects, and limit size and time;
-   - `todo`, whose state is computed from the log (the latest result), with no mutable table;
-   - possibly `web_search` (it needs a search provider).
-2. **Remote MCP servers** (Streamable HTTP) as `agent.mcp_tool_use`:
-   - MCP servers are configured on the agent;
-   - each request records the tools it offered;
-   - credentials go in the encrypted per-user store from authentication (#65), never in the
-     agent config returned by the API.
-3. **Pausing for the user** (`session.status_idle {stop_reason: requires_action}`), which
-   covers three features with one mechanism:
-   - client-run tools (`agent.custom_tool_use` → `user.custom_tool_result`);
-   - approvals: a per-tool policy of allow, ask or deny, and `user.tool_confirmation`, with UI in
-     the web app and `oh`;
-   - **`ask_user`**: a built-in tool the model calls to ask the user a structured question in
-     the middle of a task (a question with optional choices, or free text), as Claude Code's
-     `AskUserQuestion` and Gemini CLI's `ask_user` do. The turn pauses until the answer
-     arrives, and the web app and `oh` render the question and collect the answer.
-4. **Sandboxed tools** (`bash`, files) behind the same `hands` interface. The sandbox
-   technology, and whether hands run in-process or as a separate worker, are decided then.
+1. **The tool loop.** The brain owns the loop, one model request per step: `agent.tool_use` →
+   execute through `hands` (`execute(name, input, ctx)`) → `agent.tool_result` → the next
+   request. Built-in tools: `web_fetch` (through `safeFetch`), `web_search` (one search API
+   with the operator's key, a daily cap per user, counted in usage) and `todo_write` (its state
+   is the latest result in the log). A turn has a step limit, an interrupt stops running tools,
+   and a tool is never re-run after a crash: the next brain records "execution lost".
+2. **Pausing for the user** (`session.status_idle {stop_reason: requires_action}`), answered by
+   one client event, `user.tool_confirmation`:
+   - approvals for tools whose policy is `ask`: allow once, for this chat, always, or deny with
+     a message;
+   - **`ask_user`**, a built-in tool for 1–4 structured questions (choice, text or yes/no).
+3. **Remote MCP servers** (Streamable HTTP) as `agent.mcp_tool_use`, per user, with secret
+   headers or **OAuth 2.1** (discovery, dynamic client registration, PKCE); secrets sealed with
+   `@openharness/vault`. MCP tools ask by default, and a broken server never blocks the chat.
 
-**Context management for tools** ([#276](https://github.com/amirtuval/openharness/issues/276),
-deferred from context compaction, epic #277): clear old tool results first, keep tool call/result
-pairs together when history is cut (the cut rule is one replaceable function for this), cap tool
-results, decide what to bring back after a compaction, and handle an oversized tool result.
+**Configuration:** per-user settings turn built-in tools and MCP servers on or off and give each
+tool a policy (`allow | ask | deny`); a mode may override which built-in tools and MCP servers
+are on. Agents stay deferred (#96).
 
-**Open:**
+**Context management for tools** ([#276](https://github.com/amirtuval/openharness/issues/276)):
+a tool call and its result are never split by a cut, results are capped, old results are
+cleared before summarizing, and the summary prompt covers tool work. What to re-inject after a
+compaction waits for sandboxed tools.
 
-- **Crash rule for tool calls.** The proposal: never re-run a tool automatically after a crash.
-  Store `agent.tool_result {is_error: true, "execution lost"}` and let the model decide. Tools
-  that declare themselves idempotent could opt in to a re-run later.
-- Whether `web_search` is in step 1, and with which provider.
+**Not in this phase:** client-defined custom tools (they wait for programmatic access), local
+(stdio) MCP servers, tool search, and an `auto` permission mode.
 
 ## Later: not ordered yet
 
@@ -312,6 +305,9 @@ results, decide what to bring back after a compaction, and handle an oversized t
   log), export and share.
 - **Extensibility:** slash commands, skills, custom agents, hooks, plugins.
 - **Multiple agents:** subagents, background and parallel agents.
+- **Sandboxed tools** (`bash`, files) behind the same `hands` interface, after extensibility and
+  multiple agents. The sandbox technology, and whether hands run in-process or as a separate
+  worker, are decided then; re-injecting files after a compaction (#276) comes with them.
 - **Smaller follow-ups:**
   - merge streamed deltas (e.g. every ~50 ms) to cut writes, when performance matters;
   - a tab watching a session started in another tab may not show the new title until reload;
@@ -382,19 +378,19 @@ Worth knowing when the phase they touch comes up; none of them is planned yet. F
 [harness survey](./research/harness-features.md) and a broader first pass; not re-verified
 against each tool's docs.
 
-- **ACP permission rules** (for tools step 3): approval choices of `allow_once`,
+- **ACP permission rules** (tools: pausing for the user): approval choices of `allow_once`,
   `allow_always`, `reject_once` and `reject_always`, and "an unknown outcome must not be treated
   as approval": a timeout or an unrecognized reply counts as a denial.
-- **Gemini CLI's policy engine** (tools step 3): layered rules (admin > project > user) that can
+- **Gemini CLI's policy engine** (tools: pausing for the user): layered rules (admin > project > user) that can
   match tool arguments by pattern; a reference for the shape of per-tool policies.
 - **An ACP adapter** (clients): the Agent Client Protocol is the cheapest route to IDE clients
   (Zed, JetBrains, Neovim). Goose serves it over HTTP+SSE, and its replay rules (an inclusive
   cursor, reusing message ids, never re-executing commands) match what #46 built.
-- **Shadow-git checkpoints** (tools step 4, from Gemini CLI): snapshot file changes in a hidden
+- **Shadow-git checkpoints** (sandboxed tools, from Gemini CLI): snapshot file changes in a hidden
   git repo so a rewind can restore the code and the conversation independently.
-- **Environment snapshots** (tools step 4, from Cursor): save a prepared environment and reuse
+- **Environment snapshots** (sandboxed tools, from Cursor): save a prepared environment and reuse
   it, so a session does not start from a blank container.
-- **A repo map** (tools step 4, from Aider): a token-budgeted, ranked map of a codebase's
+- **A repo map** (sandboxed tools, from Aider): a token-budgeted, ranked map of a codebase's
   symbols, for coding agents.
 - **Different models per role** (model selection, from Aider's architect/editor mode): one
   model plans and a cheaper one applies the edits.
