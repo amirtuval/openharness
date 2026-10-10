@@ -39,7 +39,11 @@ UI and a terminal UI. Authentication
 Google, GitHub or Microsoft, per-user ownership, and each user's own encrypted provider keys
 — and so are the model catalog and model-first chat
 ([epic #92](https://github.com/amirtuval/openharness/issues/92)): a new chat picks a model and
-needs no agent. Each package's `AGENTS.md` says what it currently implements;
+needs no agent. Model selection
+([epic #245](https://github.com/amirtuval/openharness/issues/245)) adds a context budget per
+model, usage and cost per reply, session and user, Azure OpenAI, custom OpenAI-compatible
+endpoints, Amazon Bedrock and Google Vertex credentials, reasoning effort, and per-user modes.
+Each package's `AGENTS.md` says what it currently implements;
 [`docs/ROADMAP.md`](./docs/ROADMAP.md) has what comes next.
 
 ## Quick start
@@ -63,10 +67,12 @@ cannot be read again.
 1. Open <http://localhost:3000> and **sign in as the dev user**: `dev@localhost` / `dev`.
    (That login exists only while `OPENHARNESS_DEV_LOGIN=1` and the public URL is localhost —
    the server refuses to start otherwise. It is for local use, e2e and QA.)
-2. **Settings → Model providers**: add a key for the provider you want to use (OpenAI,
-   Anthropic, Google AI Studio, OpenRouter, Groq, DeepSeek, Fireworks). It is validated with
-   one call to the provider, sealed with `OPENHARNESS_SECRETS_KEY`, and never shown again —
-   only its last four characters are. **Each user brings their own key**; the server reads no
+2. **Settings → Model providers**: add a credential for the provider you want to use: an API
+   key for OpenAI, Anthropic, Google AI Studio, OpenRouter, Groq, DeepSeek, Fireworks AI,
+   Mistral, Together AI, xAI or Cerebras, or the details for Azure OpenAI, a custom
+   OpenAI-compatible endpoint, Amazon Bedrock or Google Vertex. It is validated with one call
+   to the provider, sealed with `OPENHARNESS_SECRETS_KEY`, and never shown again — only a short
+   non-secret summary is, such as a key's last four characters or a Bedrock region. **Each user brings their own key**; the server reads no
    provider keys from the environment, not even as a fallback.
 3. **New chat**: pick a model — the list is read live from the providers your keys are for,
    with context windows — and send a message. The reply streams in as it is written, and
