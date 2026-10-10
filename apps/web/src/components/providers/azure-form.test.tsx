@@ -71,9 +71,12 @@ describe('the azure credential form', () => {
     const { data } = await fake.providerCredentials.list()
     expect(data).toHaveLength(1)
     expect(data[0]).toMatchObject({ type: 'azure_openai', name: 'azure', last4: '4242' })
-    // The list names it, shows the last four, and never the endpoint or the key.
+    // The row leads with the name it is typed under — `azure/<deployment>` is what its model
+    // ids start with — and the type's display name sits beside it (#271); the last four follow,
+    // and never the endpoint or the key.
     const list = within(screen.getByRole('region', { name: 'Saved credentials' }))
-    expect(await list.findByText('Azure OpenAI')).toBeInTheDocument()
+    expect(await list.findByText('azure')).toBeInTheDocument()
+    expect(list.getByText('(Azure OpenAI)')).toBeInTheDocument()
     expect(list.getByText('…4242')).toBeInTheDocument()
     expect(document.body.textContent ?? '').not.toContain('openai.azure.com')
     expect(document.body.textContent ?? '').not.toContain('az-key-4242')

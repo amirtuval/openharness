@@ -10,6 +10,7 @@ import {
   PROVIDERS,
   credentialFacts,
   credentialDisplayName,
+  credentialRowLabel,
   providerInfo,
   providerName,
 } from './providers'
@@ -183,5 +184,43 @@ describe('credentialDisplayName', () => {
     expect(credentialDisplayName({ name: 'azure-eu', type: 'azure_openai' })).toBe('azure-eu')
     // A string this list has never heard of reads as itself, never as a blank.
     expect(credentialDisplayName({ name: 'acme', type: 'api_key' })).toBe('acme')
+  })
+})
+
+/**
+ * What a list row leads with (#271). Both frontends read this, so the rule lives here rather
+ * than in either of them: a row may not lead with `Azure OpenAI`, because the reader typing
+ * `/model` types `azure`.
+ */
+describe('credentialRowLabel', () => {
+  it('names a fixed provider by its display name alone', () => {
+    // The `api_key` guard: a provider's display name differs from its id, and the id is not
+    // what the row shows.
+    expect(credentialRowLabel({ name: 'anthropic', type: 'api_key' })).toEqual({
+      primary: 'Anthropic',
+    })
+    expect(credentialRowLabel({ name: 'openai', type: 'api_key' })).toEqual({ primary: 'OpenAI' })
+  })
+
+  it('leads a default-named credential with the model-id prefix (#271)', () => {
+    // `azure/gpt-4o` is what the reader types, so `Azure OpenAI` alone would leave the
+    // `provider` half of every one of its model ids off the row.
+    expect(credentialRowLabel({ name: 'azure', type: 'azure_openai' })).toEqual({
+      primary: 'azure',
+      secondary: 'Azure OpenAI',
+    })
+    expect(credentialRowLabel({ name: 'bedrock', type: 'bedrock' })).toEqual({
+      primary: 'bedrock',
+      secondary: 'Amazon Bedrock',
+    })
+  })
+
+  it('leaves a reader-named credential reading as itself, with no second part (#271)', () => {
+    expect(credentialRowLabel({ name: 'azure-eu', type: 'azure_openai' })).toEqual({
+      primary: 'azure-eu',
+    })
+    expect(credentialRowLabel({ name: 'gpt-o-mine', type: 'openai_compatible' })).toEqual({
+      primary: 'gpt-o-mine',
+    })
   })
 })

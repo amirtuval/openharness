@@ -68,10 +68,12 @@ describe('the custom OpenAI-compatible form', () => {
       last4: '',
       details: { base_url_host: '127.0.0.1:11434' },
     })
-    // The list names it, shows that it carries no key and the host it points at — and never the
-    // whole URL, whose path is the reader's.
+    // The row leads with the name it is stored under and the type beside it (#271), shows that
+    // it carries no key and the host it points at — and never the whole URL, whose path is the
+    // reader's.
     const list = within(screen.getByRole('region', { name: 'Saved credentials' }))
-    expect(await list.findByText('Custom (OpenAI-compatible)')).toBeInTheDocument()
+    expect(await list.findByText('custom')).toBeInTheDocument()
+    expect(list.getByText('(Custom (OpenAI-compatible))')).toBeInTheDocument()
     expect(list.getByText('no key')).toBeInTheDocument()
     expect(list.getByText(/127\.0\.0\.1:11434/)).toBeInTheDocument()
     expect(document.body.textContent ?? '').not.toContain('127.0.0.1:11434/v1')

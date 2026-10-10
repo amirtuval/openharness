@@ -110,6 +110,25 @@ describe('formatCredentials', () => {
     expect(line).toContain('acme')
   })
 
+  it('leads a default-named credential with the model-id prefix (#271)', () => {
+    // A credential stored under the type's default name is typed as `azure/<deployment>` in
+    // every model id, so the row shows that name — "Azure OpenAI" alone would hide what
+    // `/model` expects.
+    const [line] = formatCredentials([
+      makeProviderCredential({ name: 'azure', type: 'azure_openai', last4: '1234' }),
+    ])
+    expect(line).toContain('azure (Azure OpenAI)')
+    expect(line).toContain('…1234')
+  })
+
+  it('leaves a reader-named credential reading as itself, with no second label (#271)', () => {
+    const [line] = formatCredentials([
+      makeProviderCredential({ name: 'azure-eu', type: 'azure_openai' }),
+    ])
+    expect(line).toContain('azure-eu')
+    expect(line).not.toContain('(Azure OpenAI)')
+  })
+
   it('says a keyless custom credential carries no key, rather than an empty ellipsis', () => {
     // #249: a custom endpoint may take no key; an empty `last4` is that fact, not a lost one.
     const [line] = formatCredentials([

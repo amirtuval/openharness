@@ -1,6 +1,6 @@
 import {
-  credentialDisplayName,
   credentialFacts,
+  credentialRowLabel,
   credentialTargetFor,
   type CredentialTarget,
 } from '@openharness/client'
@@ -122,10 +122,7 @@ export function ProvidersCard() {
               >
                 <div className="min-w-0">
                   <p className="truncate text-sm">
-                    <span className="font-medium">{credentialDisplayName(credential)}</span>{' '}
-                    <span className="font-mono text-muted-foreground">
-                      {credentialKeyLabel(credential)}
-                    </span>
+                    <CredentialName credential={credential} />
                   </p>
                   <p className="text-xs break-words text-muted-foreground">
                     {/* The non-secret facts that tell two credentials of one type apart — a
@@ -224,6 +221,30 @@ export function ProvidersCard() {
         onClose={() => setAdding(null)}
       />
     </Card>
+  )
+}
+
+/**
+ * The row's first line: what the credential is typed as, then its key's last four.
+ *
+ * A named credential leads with **its own name** — the `provider` half of the model ids it
+ * serves — with the type's display name beside it when that name would hide the prefix, so a
+ * credential called `azure` reads `azure (Azure OpenAI)` rather than a row that never says
+ * what the model picker expects (#271). The labels come from `credentialRowLabel`
+ * (`@openharness/client`), the same rule `oh providers` draws, so the two frontends cannot
+ * disagree; the type's display name is secondary text here, where the terminal parenthesizes
+ * it.
+ */
+function CredentialName({ credential }: { readonly credential: ProviderCredential }) {
+  const { primary, secondary } = credentialRowLabel(credential)
+  return (
+    <>
+      <span className="font-medium">{primary}</span>
+      {secondary === undefined ? null : (
+        <span className="text-muted-foreground"> ({secondary})</span>
+      )}{' '}
+      <span className="font-mono text-muted-foreground">{credentialKeyLabel(credential)}</span>
+    </>
   )
 }
 

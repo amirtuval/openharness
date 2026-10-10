@@ -223,8 +223,11 @@ line (`(next message)` while the pick is pending).
 **pending** rather than applied: the status line names it with `(next message)` after it, and
 the next message carries it as `user.message.model` (`sendMessage(..., { model })`, U3). From
 then on the session runs that model — later messages send no model — and the status line shows
-the model the log last said the session runs (`transcript.model`, falling back to the
-session's own), by its catalog name when the catalog is known and its id otherwise (#208).
+the model the log last said the session runs (`transcript.model`), then the model the last
+request **ran** (the last reply's span, `meta.model`), then the session's own, by its catalog
+name when the catalog is known and its id otherwise (#208). The span fallback is what keeps a
+**mode** switch right (#267): a mode-carrying message names no model, so only the reply says
+which model the mode resolved to — the same rule the web header uses (#253).
 Switching provider mid-chat is supported; the history is rebuilt per request. Ctrl+C in the
 picker closes it and changes nothing — as does Esc, once the search line is empty (with a
 query in it, Esc clears that first).
@@ -298,10 +301,15 @@ credential's region, a Vertex one's service-account email, project and location,
 part of a private key — because `last4` alone cannot tell two credentials of one type apart when
 they are two accounts or two regions of one account. They are the last field of the line rather
 than a fixed column: an email address is wider than any column worth reserving on every key's
-row. That is the whole of what the API can say — it is **write-only** (epic #65, A5). The
-display name is the provider's, the credential type's where the name is that type's default
-(`azure`, `bedrock`, `vertex`), or the reader's own label otherwise — so two Azure credentials
-are told apart by the names they were saved under.
+row. That is the whole of what the API can say — it is **write-only** (epic #65, A5). The first
+column is what the reader types as the `provider` half of a model id: the provider's display
+name for one of the eleven, and the credential's own name for a named credential — with the
+type's display name beside it when that name would hide the prefix, so a credential called
+`azure` reads `azure (Azure OpenAI)` rather than just `Azure OpenAI` (#271). The rule is
+`credentialRowLabel` (`@openharness/client`), so the web's Settings → Providers row draws the
+same one; only the parenthesizing is this command's. A
+reader-named credential already reads as itself (`azure-eu`), so two Azure credentials are told
+apart by the names they were saved under.
 `oh providers remove <name>` forgets a credential after a `[y/N]` question (`--yes` skips it); deleting one that is not
 there is not an error, because the route answers `204` either way.
 

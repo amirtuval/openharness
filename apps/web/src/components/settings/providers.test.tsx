@@ -3,7 +3,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 
-import { TWO_PROVIDERS } from '../../test-support/catalog'
+import { TWO_PROVIDERS, credential } from '../../test-support/catalog'
 import { makeFake, renderApp } from '../../test-support/render-app'
 
 /**
@@ -25,6 +25,39 @@ describe('the Providers card', () => {
     expect(list.getAllByText(/Validated/)).toHaveLength(2)
     expect(list.getByText('OpenAI')).toBeInTheDocument()
     expect(document.body.textContent ?? '').not.toContain('sk-ant')
+  })
+
+  it('leads a default-named credential with the model-id prefix (#271)', async () => {
+    // A credential stored under its type's default name is typed as `azure/<deployment>` in
+    // every model id, so the row shows that name with the type's display name beside it —
+    // `Azure OpenAI` alone would leave the `provider` half off the screen. The rule is
+    // `credentialRowLabel`'s, the same one `oh providers` draws.
+    const fake = makeFake({
+      credentials: [credential('azure', '1234', { type: 'azure_openai' })],
+    })
+    renderApp(fake, { hash: '#/settings' })
+
+    const list = within(await screen.findByRole('region', { name: 'Saved credentials' }))
+    expect(await list.findByText('azure')).toBeInTheDocument()
+    expect(list.getByText('(Azure OpenAI)')).toBeInTheDocument()
+    expect(list.getByText('…1234')).toBeInTheDocument()
+  })
+
+  it('leaves a fixed provider and a reader-named credential reading as themselves (#271)', async () => {
+    const fake = makeFake({
+      credentials: [
+        credential('anthropic', '1111'),
+        credential('azure-eu', '5678', { type: 'azure_openai' }),
+      ],
+    })
+    renderApp(fake, { hash: '#/settings' })
+
+    const list = within(await screen.findByRole('region', { name: 'Saved credentials' }))
+    // A fixed provider keeps its display name; a credential the reader named keeps its own
+    // name, with no second label — it already reads as the prefix of its model ids.
+    expect(await list.findByText('Anthropic')).toBeInTheDocument()
+    expect(list.getByText('azure-eu')).toBeInTheDocument()
+    expect(list.queryByText(/\(Azure OpenAI\)/)).not.toBeInTheDocument()
   })
 
   it('says there are no keys yet, and offers the way to add one', async () => {

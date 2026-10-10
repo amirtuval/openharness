@@ -1,3 +1,5 @@
+import type { TranscriptState } from '@openharness/client'
+
 import type { ChatSession, Notice } from './session'
 
 /**
@@ -320,14 +322,37 @@ export function unknownCommandNotice(name: string, suggestion: ChatCommand | und
 
 /**
  * The model a chat runs: a `/model` pick that no message has carried yet, then the model the
- * log last said the session runs, then the session's own (epic #116 U3).
+ * log last said the session runs, then the model the last request **ran**, then the session's
+ * own (epic #116 U3; #267).
+ *
+ * A mode switch carries no `model` — the message names the mode instead — so `transcript.model`
+ * does not move, and neither does the session resource. The model the last request ran (the
+ * last reply's span, `meta.model`) is the mode's resolved model, which is exactly what the web
+ * header falls back to (#253); without it the status line keeps the previous model until the
+ * chat is reopened.
  *
  * This is what the status line names and what `/new` starts the next chat on, so the two
  * cannot disagree about which model is "current".
  */
 export function currentModelOf(session: ChatSession): string {
   const state = session.getState()
-  return state.pendingModel ?? state.transcript.model ?? session.session.model.id
+  return (
+    state.pendingModel ??
+    state.transcript.model ??
+    lastReplyModelOf(state.transcript) ??
+    session.session.model.id
+  )
+}
+
+/** The model the last request ran, off the newest reply that named one — the web header's rule. */
+function lastReplyModelOf(transcript: TranscriptState): string | null {
+  for (let index = transcript.messages.length - 1; index >= 0; index -= 1) {
+    const message = transcript.messages[index]
+    if (message?.role === 'agent' && message.meta?.model !== undefined) {
+      return message.meta.model
+    }
+  }
+  return null
 }
 
 /**
