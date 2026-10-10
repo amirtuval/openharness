@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  BEDROCK_INFERENCE_PROFILES_PATH,
   BEDROCK_SERVICE,
   bedrockControlPlaneUrl,
   bedrockRuntimeBaseUrl,
@@ -134,6 +135,11 @@ describe('the Bedrock endpoints', () => {
     expect(bedrockControlPlaneUrl('eu-west-1', '/foundation-models')).toBe(
       'https://bedrock.eu-west-1.amazonaws.com/foundation-models',
     )
+    // The second control-plane read the catalogue makes, on the same host (issue #274).
+    expect(BEDROCK_INFERENCE_PROFILES_PATH).toBe('/inference-profiles')
+    expect(bedrockControlPlaneUrl('eu-west-1', BEDROCK_INFERENCE_PROFILES_PATH)).toBe(
+      'https://bedrock.eu-west-1.amazonaws.com/inference-profiles',
+    )
   })
 })
 
@@ -164,6 +170,31 @@ describe('createProviderModelFactory — the bedrock path', () => {
     // The model id keeps everything after the first slash, colon and all — percent-encoded by
     // the URL, as it is for every provider whose ids carry punctuation.
     expect(requests[0]?.url).toContain('/model/anthropic.claude-3-5-haiku-20241022-v1%3A0/converse')
+  })
+
+  it('passes an inference profile id through as the model id (issue #274)', async () => {
+    // A profile id is what AWS's Converse API takes in `modelId`, and the catalogue offers
+    // `<credential name>/<inferenceProfileId>`. The factory does nothing to the second half but
+    // URL-encode it, exactly as it does the on-demand id beside it.
+    const requests = await captureRequest('bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0')
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.url).toBe(
+      'https://bedrock-runtime.eu-west-1.amazonaws.com/model/' +
+        'us.anthropic.claude-sonnet-4-5-20250929-v1%3A0/converse-stream',
+    )
+  })
+
+  it('passes an inference profile ARN through as the model id (issue #274)', async () => {
+    // A profile may also be named by its ARN, which carries slashes and colons of its own: the
+    // id is everything after the credential name's slash, and the provider percent-encodes the
+    // whole of it into the Converse path — the shape AWS documents for an ARN.
+    const arn =
+      'arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-sonnet-5'
+    const requests = await captureRequest(`bedrock/${arn}`)
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.url).toBe(
+      `https://bedrock-runtime.eu-west-1.amazonaws.com/model/${encodeURIComponent(arn)}/converse-stream`,
+    )
   })
 
   it('signs with the stored access key, and reads nothing from the environment', async () => {

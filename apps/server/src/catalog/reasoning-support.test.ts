@@ -154,6 +154,44 @@ describe('createReasoningSupportResolver', () => {
     ])
   })
 
+  it('reads a cross-region inference profile through the model it wraps (issue #274)', () => {
+    // A profile's own id is geography-scoped (`us.…`), and an application profile's is
+    // account-scoped, so models.dev may not have filed it — but it has the foundation model
+    // underneath. The profile's reasoning knob is that model's, and the resolver is what turns
+    // the first id into the second.
+    const supportFor = createReasoningSupportResolver(
+      registryOf({
+        'amazon-bedrock': [
+          {
+            id: 'anthropic.claude-opus-4-7',
+            reasoning: true,
+            efforts: ['low', 'medium', 'high', 'xhigh'],
+          },
+        ],
+      }),
+    )
+
+    expect(supportFor('bedrock/us.anthropic.claude-opus-4-7', 'bedrock')).toEqual([
+      'low',
+      'medium',
+      'high',
+    ])
+    // Not a recognised geography prefix, and not a model the registry knows: unknown, so the
+    // request keeps the provider's default rather than being sent an invented level.
+    expect(supportFor('bedrock/my-claude-profile', 'bedrock')).toBeUndefined()
+  })
+
+  it('does not strip a geography-looking prefix off another credential type', () => {
+    // Only a Bedrock profile id is read through its wrapped model: the fallback is guarded to
+    // the credential type, because stripping `us.` off some other provider's id would be
+    // turning one model into another.
+    const supportFor = createReasoningSupportResolver(
+      registryOf({ openai: [{ id: 'gpt-4o', reasoning: true, efforts: ['low', 'high'] }] }),
+    )
+
+    expect(supportFor('openai/us.gpt-4o', 'api_key')).toBeUndefined()
+  })
+
   it('reads the bundled registry, so a real reasoning model gets its real levels', () => {
     // The acceptance case: the snapshot the catalogue joins for its model pickers is what the
     // answer comes from — `o4-mini` takes all three, `gpt-4o-mini` none.
@@ -168,6 +206,13 @@ describe('createReasoningSupportResolver', () => {
     expect(supportFor('azure/gpt-4o', 'azure_openai')).toEqual([])
     // And a Bedrock model id — the vendor's own spelling — from the same snapshot.
     expect(supportFor('bedrock/eu.anthropic.claude-fable-5', 'bedrock')).toEqual([
+      'low',
+      'medium',
+      'high',
+    ])
+    // A profile id the snapshot has not filed, read through the model it wraps: the real
+    // snapshot carries `anthropic.claude-fable-5` but no APAC profile for it (issue #274).
+    expect(supportFor('bedrock/apac.anthropic.claude-fable-5', 'bedrock')).toEqual([
       'low',
       'medium',
       'high',

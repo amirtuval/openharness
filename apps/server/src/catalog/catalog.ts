@@ -32,12 +32,14 @@ import type { CredentialStore } from '@openharness/session'
 import type { Vault } from '@openharness/vault'
 import {
   BEDROCK_FOUNDATION_MODELS_PATH,
+  BEDROCK_INFERENCE_PROFILES_PATH,
   bedrockControlPlaneUrl,
   isVertexModelId,
   openAICompatibleBaseUrl,
   redactSecret,
   redactSecrets,
   signBedrockRequest,
+  type BedrockModelCredential,
 } from '@openharness/brain'
 import { SAVE_TIME_LIMITS, safeFetch as defaultSafeFetch } from '@openharness/hands'
 
@@ -63,6 +65,11 @@ import {
   type ProviderModel,
 } from './adapters'
 import { CatalogCache, RefreshLimiter, type CachedProviderCatalog } from './cache'
+import {
+  bedrockInferenceProfilePage,
+  bedrockProfileDisplayName,
+  type BedrockInferenceProfile,
+} from './bedrock-profiles'
 import { isChatModel } from './filter'
 import type { ModelRegistry, RegistryModel } from './registry'
 import {
@@ -419,20 +426,34 @@ export class ModelCatalog {
   }
 
   /**
-   * A Bedrock credential's models: the region's on-demand text models, one entry each (epic
-   * #245, A3c).
+   * A Bedrock credential's models: the region's on-demand text models **and** the models it
+   * serves through inference profiles, one entry each (epic #245, A3c; issue #274).
    *
    * `ListFoundationModels` is AWS's own list, read with the user's keys — it needs no account
    * beyond them and no endpoint the user typed, because its host is derived from the region.
    * The list is filtered twice: AWS's `byOutputModality=TEXT` and `byInferenceType=ON_DEMAND`
    * query parameters, and then — because a query parameter is not a promise — the same two
    * conditions on each summary, plus the drop of a model AWS has marked `LEGACY`. What is left
-   * is a model a text request can be sent to with its own id, which is what makes an entry
-   * callable: an **inference profile** is deliberately not listed (see the method below).
+   * is a model a text request can be sent to with its own id.
    *
-   * The status is `ok` when AWS answered, and the registry's Bedrock models stand in with
-   * `fallback` when the call failed — the same visible degradation every other provider gets
-   * (C3) — with AWS's status and a bounded snippet of what it said, scrubbed of the keys.
+   * `ListInferenceProfiles` is the second read (issue #274). In many regions the newest Claude
+   * and Nova models are callable **only** through a cross-region inference profile
+   * (`us.anthropic.claude-…`, `eu.…`, `apac.…`, `global.…`), and `ListFoundationModels` does
+   * not return them — the on-demand query excludes them, and a profile-only model's bare id
+   * would fail on the first message. Each ACTIVE, text-capable profile is offered as
+   * `<name>/<inferenceProfileId>`, which is exactly the id a Converse request names, with the
+   * **underlying foundation model** (`models[].modelArn`) supplying the name, window and price
+   * from models.dev and the reasoning resolver its levels. A model offered on demand and wrapped
+   * by a profile is listed **both ways** — the two behave differently — and an id that appears
+   * twice is listed once.
+   *
+   * The two reads degrade independently. The foundation read failing is the registry `fallback`
+   * this credential has always had (C3). The profile read failing — the key may simply lack
+   * `bedrock:ListInferenceProfiles`, AWS may answer `AccessDeniedException`, or the shape may be
+   * one this build cannot read — logs a warning and leaves the on-demand list in place, still
+   * `status: 'ok'`: losing the profiles is a smaller loss than losing the whole catalogue to the
+   * registry, and the warning says so. Either message is scrubbed of every secret the credential
+   * carries before it is logged.
    */
   private async bedrockCatalog(userId: string, name: string): Promise<CachedProviderCatalog> {
     const stored = await this.credentials.get({ userId, name })
@@ -444,14 +465,9 @@ export class ModelCatalog {
       return this.registryFallbackFor(name, `the stored ${name} credential could not be opened`)
     }
     const registryKey = this.bedrockRegistryKey()
+    let listed: readonly ProviderModel[]
     try {
-      const listed = await this.listFoundationModels(body)
-      return {
-        status: 'ok',
-        fetchedAt: this.now().toISOString(),
-        message: null,
-        models: this.joinProviderList(name, listed, registryKey),
-      }
+      listed = await this.listFoundationModels(body)
     } catch (error) {
       // AWS's own words, scrubbed of every secret the credential carries before the message
       // reaches the response (C3): the access key ID, the secret and the session token.
@@ -461,6 +477,13 @@ export class ModelCatalog {
       )
       this.logger?.warn(`serving the registry's ${name} models: ${message}`)
       return this.registryFallback(name, message, registryKey)
+    }
+    const profiles = await this.listInferenceProfiles(name, body)
+    return {
+      status: 'ok',
+      fetchedAt: this.now().toISOString(),
+      message: null,
+      models: this.bedrockEntries(name, listed, profiles, registryKey),
     }
   }
 
@@ -478,13 +501,7 @@ export class ModelCatalog {
     body: Extract<PutProviderCredentialRequest, { type: 'bedrock' }>,
   ): Promise<ProviderModel[]> {
     const signed = await signBedrockRequest(
-      {
-        type: 'bedrock',
-        accessKeyId: body.access_key_id,
-        secretAccessKey: body.secret_access_key,
-        ...(body.session_token === undefined ? {} : { sessionToken: body.session_token }),
-        region: body.region,
-      },
+      bedrockSigningCredential(body),
       bedrockControlPlaneUrl(body.region, BEDROCK_FOUNDATION_MODELS_PATH),
     )
     const response = await this.fetch(signed.url, {
@@ -504,6 +521,104 @@ export class ModelCatalog {
       throw new CatalogProviderError(`the Bedrock model list in ${body.region} was not JSON`)
     }
     return bedrockModels(payload)
+  }
+
+  /**
+   * Every page of `ListInferenceProfiles`, inside the one deadline, as the catalogue's profiles
+   * (issue #274).
+   *
+   * **This never throws.** A failure — a non-2xx (an `AccessDeniedException` from a key without
+   * `bedrock:ListInferenceProfiles` included), an unreadable body, a transport error, a
+   * timeout — is logged as a warning, with AWS's own words scrubbed of the credential's three
+   * secrets, and answers an empty list, so the on-demand models the foundation read produced
+   * are still served with `status: 'ok'`. That is deliberately softer than the foundation
+   * read's failure, which turns the whole credential into the registry fallback: half a
+   * catalogue beats none, and which half was lost is what the warning says.
+   */
+  private async listInferenceProfiles(
+    name: string,
+    body: Extract<PutProviderCredentialRequest, { type: 'bedrock' }>,
+  ): Promise<BedrockInferenceProfile[]> {
+    try {
+      const credential = bedrockSigningCredential(body)
+      const signal = AbortSignal.timeout(this.timeoutMs)
+      const profiles: BedrockInferenceProfile[] = []
+      let token: string | null = null
+      for (let page = 0; page < MAX_PAGES; page += 1) {
+        const signed = await signBedrockRequest(
+          credential,
+          bedrockControlPlaneUrl(body.region, inferenceProfilesPath(token)),
+        )
+        const response = await this.fetch(signed.url, { headers: signed.headers, signal })
+        if (!response.ok) {
+          throw new CatalogProviderError(
+            `the Bedrock inference-profile list in ${body.region} answered ${response.status}` +
+              (await errorSnippet(response)),
+          )
+        }
+        let payload: unknown
+        try {
+          payload = await response.json()
+        } catch {
+          throw new CatalogProviderError(
+            `the Bedrock inference-profile list in ${body.region} was not JSON`,
+          )
+        }
+        const parsed = bedrockInferenceProfilePage(payload)
+        profiles.push(...parsed.profiles)
+        token = parsed.nextToken
+        if (token === null) {
+          break
+        }
+      }
+      return profiles
+    } catch (error) {
+      const message = redactSecrets(
+        describeFailure(`Bedrock (${body.region})`, error, this.timeoutMs),
+        [body.access_key_id, body.secret_access_key, body.session_token],
+      )
+      this.logger?.warn(
+        `serving the on-demand Bedrock models for ${name} without inference profiles: ${message}`,
+      )
+      return []
+    }
+  }
+
+  /**
+   * The credential's entries: the shared join over the on-demand models, then one entry per
+   * inference profile.
+   *
+   * A profile is joined by hand because its registry metadata is the **underlying foundation
+   * model's** (`profile.modelId`): that is the stable identity models.dev files a name, a
+   * window and a price under — the profile id itself is geography-scoped, and an application
+   * profile's is account-scoped, so models.dev may never have heard of it — and it is the id
+   * the reasoning resolver falls back to when a profile's own entry is missing. The entry the
+   * join produces is still keyed by the **profile id**, the id a request runs, and it is
+   * filtered by the same chat rule as everything else, against the model the profile wraps.
+   */
+  private bedrockEntries(
+    name: string,
+    onDemand: readonly ProviderModel[],
+    profiles: readonly BedrockInferenceProfile[],
+    registryKey: string,
+  ): ModelEntry[] {
+    const known = this.registryIndex(registryKey)
+    const entries = this.joinProviderList(name, onDemand, registryKey)
+    for (const profile of profiles) {
+      const registry = known.get(profile.modelId)
+      if (!isChatModel({ rawId: profile.modelId, registryChat: registry?.chat })) {
+        continue
+      }
+      entries.push(
+        entryOf(
+          name,
+          { id: profile.profileId, name: bedrockProfileDisplayName(profile, registry?.name) },
+          registry,
+          'provider',
+        ),
+      )
+    }
+    return dedupe(entries)
   }
 
   /** The snapshot key a Bedrock credential's models are filed under (models.dev's spelling). */
@@ -1007,6 +1122,39 @@ function statusOf(provider: string, catalog: CachedProviderCatalog): ProviderCat
 }
 
 // ------------------------------------------------------------------ bedrock
+
+/** How many inference profiles one page asks for — AWS's documented maximum (issue #274). */
+const BEDROCK_INFERENCE_PROFILES_PAGE_SIZE = 1000
+
+/**
+ * The credential `@openharness/brain`'s `signBedrockRequest` signs a control-plane read with:
+ * the stored keys, the session token only when there is one (an explicit `undefined` and an
+ * absent field mean the same thing to the signer, and passing it through keeps the two
+ * spellings from differing here).
+ */
+function bedrockSigningCredential(
+  body: Extract<PutProviderCredentialRequest, { type: 'bedrock' }>,
+): BedrockModelCredential {
+  return {
+    type: 'bedrock',
+    accessKeyId: body.access_key_id,
+    secretAccessKey: body.secret_access_key,
+    ...(body.session_token === undefined ? {} : { sessionToken: body.session_token }),
+    region: body.region,
+  }
+}
+
+/**
+ * The `/inference-profiles` path for one page: a page size always, and the cursor after the
+ * first page. `null` is the first page, and the only token AWS is not asked back for.
+ */
+function inferenceProfilesPath(token: string | null): string {
+  const params = new URLSearchParams({ maxResults: String(BEDROCK_INFERENCE_PROFILES_PAGE_SIZE) })
+  if (token !== null) {
+    params.set('nextToken', token)
+  }
+  return `${BEDROCK_INFERENCE_PROFILES_PATH}?${params.toString()}`
+}
 
 /** One model summary from `ListFoundationModels`, as far as the catalogue reads it. */
 interface FoundationModelSummary {

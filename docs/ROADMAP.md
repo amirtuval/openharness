@@ -192,8 +192,7 @@ Vertex are covered by automated tests and stub servers only; no real account has
 - Assume-role for Bedrock and workload identity federation for Vertex.
 - Usage budgets and limits, and an operator-wide usage view.
 - Vertex lists the snapshot's models rather than the project's
-  ([#273](https://github.com/amirtuval/openharness/issues/273)); Bedrock omits models reachable
-  only through inference profiles ([#274](https://github.com/amirtuval/openharness/issues/274)).
+  ([#273](https://github.com/amirtuval/openharness/issues/273)).
 - Model requests to the fixed providers ignore `HTTPS_PROXY`
   ([#270](https://github.com/amirtuval/openharness/issues/270)).
 

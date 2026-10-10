@@ -317,9 +317,9 @@ parses the query and maps the one error it can raise.
   `MAX_PAGES`. The two URL-less named types have calls of their own rather than entries in that
   table, because neither has a URL a user typed nor a bearer key: an `azure_openai` credential
   contributes the deployments the user named (nothing is fetched), and a `bedrock` one
-  contributes what a SigV4-signed `ListFoundationModels` answers in its own region (the host
-  comes from the region, which the protocol's list validated), so "no request ever supplies a
-  URL" holds for all three.
+  contributes what two SigV4-signed control-plane reads answer in its own region —
+  `ListFoundationModels` and `ListInferenceProfiles` (#274), the host coming from the region,
+  which the protocol's list validated — so "no request ever supplies a URL" holds for all three.
 - **C2 — the registry join and the filter.** `catalog/registry.ts` reads
   `apps/server/src/catalog/models-dev.json`, a snapshot of models.dev committed to this
   package and bundled into `dist/index.js` — never read from the network, and never from a
@@ -472,7 +472,11 @@ models are filed under the credential _type_'s models.dev key (`credentialTypeIn
 with (A3a). So `azure-eu/gpt-5.4` reads the snapshot's `azure` entry, and `undefined` — unknown,
 not sent — is what a deployment models.dev has no model for answers, and what an `api_key`
 credential under a name no provider carries answers, because `api_key` has no models.dev key of
-its own.
+its own. A Bedrock **cross-region inference profile** is the one id looked up twice: its own
+`us.anthropic.claude-…` / application-profile id may not be filed (it is geography- or
+account-scoped), so when the exact lookup finds nothing the resolver retries with the foundation
+model the profile wraps — `catalog/bedrock-profiles.ts`'s `bedrockUnderlyingModelId`, guarded to
+the `bedrock` credential type (#274).
 
 `main.ts` builds one resolver from the same registry the catalogue, the automatic default (U4)
 and the context budget (above) use, and hands it to whichever scheduler the config asks for; the
@@ -872,17 +876,35 @@ second Azure OpenAI credential.
   The registry snapshot gained that `azure` entry by the same refresh script
   (`scripts/refresh-models-dev.mjs` now walks `CREDENTIAL_TYPES` as well as `PROVIDERS`; a type
   with no `modelsDevKey` — a custom endpoint — contributes no entry).
-- **A Bedrock credential lists the region's on-demand text models.** `bedrockCatalog` reads
-  `ListFoundationModels` in the credential's region with the stored keys and enters each summary
-  as `<name>/<bedrock model id>` with `source: 'provider'`; names, context windows and prices
-  come from models.dev's `amazon-bedrock` entry where it has them. Two filters are deliberate:
-  a model whose `inferenceTypesSupported` names only `INFERENCE_PROFILE` is left out — its
-  cross-region profile id (or ARN) is account- and region-specific, so the bare model id would
-  be a model that fails on the first message — and a model AWS has marked `LEGACY` is left out
-  too. A read that fails is the same visible `fallback` every other provider gets: the
-  registry's Bedrock models, acknowledged to their model ids. Because a Bedrock credential's
-  registry key (`amazon-bedrock`) is not its name, `joinProviderList`/`registryFallback` take
-  the key as an argument rather than assuming the provider — the one place the two differ.
+- **A Bedrock credential lists the region's on-demand text models _and_ its inference
+  profiles.** `bedrockCatalog` makes two signed control-plane reads with the stored keys and
+  enters each result as `<name>/<id>` with `source: 'provider'`.
+  - **On demand.** `ListFoundationModels` (`byOutputModality=TEXT&byInferenceType=ON_DEMAND`)
+    contributes each summary as `<name>/<bedrock model id>`. Two filters are deliberate: a
+    model whose `inferenceTypesSupported` names only `INFERENCE_PROFILE` is left out — the bare
+    model id is not callable in the region — and a model AWS has marked `LEGACY` is left out
+    too.
+  - **Inference profiles (#274).** `ListInferenceProfiles` (paged by `nextToken`, system-defined
+    and application profiles alike) contributes each **ACTIVE** profile as
+    `<name>/<inferenceProfileId>` — `bedrock/us.anthropic.claude-…`, the id a Converse request
+    actually names — where the profile's underlying foundation model (`models[].modelArn`) is
+    the key models.dev's `amazon-bedrock` entry is read by for the name, context window, max
+    output and **price**, and the key the reasoning resolver falls back to. A profile the
+    catalogue cannot map to a foundation model, or one that is not text-capable, is skipped; a
+    model offered both on demand and through a profile is listed **both ways**, and identical
+    ids are listed once. The profile's display name is its wrapped model's name plus the
+    geography scope in parentheses (`Claude Sonnet 4.5 (US)`, `… (Global)`), so a reader can
+    tell it from the on-demand entry.
+  - **The two reads degrade independently.** A failed foundation read is the usual visible
+    `fallback` — the registry's Bedrock models, acknowledged to their model ids. A failed
+    **profile** read (a key without `bedrock:ListInferenceProfiles`, an `AccessDeniedException`,
+    an unexpected shape) logs a warning, scrubbed of the credential's three secrets, and leaves
+    the on-demand list in place with `status: 'ok'` — the credential is never turned into the
+    registry fallback over the profiles alone.
+  - Because a Bedrock credential's registry key (`amazon-bedrock`) is not its name,
+    `joinProviderList`/`registryFallback` take the key as an argument rather than assuming the
+    provider — the one place the two differ. The profile parser and its id/name helpers live in
+    `catalog/bedrock-profiles.ts`; `bedrockEntries` composes the two reads into one list.
 - **A Vertex credential's models are listed live from Model Garden (#273)** (`catalog.ts`'s
   `vertexCatalog`). Model Garden organizes its catalogue by **publisher**, so the listing is
   `GET https://{location}-aiplatform.googleapis.com/v1beta1/publishers/{publisher}/models` for
@@ -1350,6 +1372,8 @@ src/
     registry.ts         ModelRegistry over the bundled models.dev snapshot (C2)
     context-budget.ts   the per-model context budget: the rule, and the resolver (#246)
     reasoning-support.ts the per-model reasoning gate: which efforts a model takes (#252)
+    bedrock-profiles.ts Amazon Bedrock inference profiles: the ListInferenceProfiles shape,
+                        the wrapped-model mapping and the scope labels (#274)
     filter.ts           isChatModel: the never-hide/never-show rule, and the name families
     cache.ts            CatalogCache (one hour per user+provider) and RefreshLimiter (C4)
     provider-fetch.ts   ProviderFetch: fetch over the egress-proxy env, and the 5 s deadline
@@ -1549,13 +1573,24 @@ parallel with each other.
   scrubbed reason, a transport failure); the catalogue (the region's on-demand text models
   joined with a registry stub — an inference-profile-only model, a `LEGACY` one and an
   embeddings one all dropped; a second credential reading its own region; the fallback; a row
-  that cannot be opened); and a whole turn through the **real factory** with the global `fetch`
-  stubbed to answer with a hand-built AWS event stream — the reply streams, its tokens reach the
-  log's `session.usage`, the request goes to the region's runtime host signed with the stored
-  access key — plus the missing-credential ending. `src/test-support/bedrock-stream.ts` is what
-  builds those frames: length-prefixed, CRC-32 preluded and trailered, exactly as the provider's
-  decoder reads them, which is what makes a mocked happy path prove something rather than
-  nothing.
+  that cannot be opened; and, #274, the two reads joined — an ACTIVE text profile beside its
+  on-demand model, named after the wrapped model plus its scope, with an embeddings profile and
+  a not-yet-active one dropped, both-ways listing without a duplicate id, `nextToken` paging,
+  an unreadable profile payload, and `AccessDeniedException` leaving the on-demand list in
+  place with a scrubbed warning); and a whole turn through the **real factory** with the global
+  `fetch` stubbed to answer with a hand-built AWS event stream — the reply streams, its tokens
+  reach the log's `session.usage`, the request goes to the region's runtime host signed with the
+  stored access key — plus the missing-credential ending. `src/test-support/bedrock-stream.ts`
+  is what builds those frames: length-prefixed, CRC-32 preluded and trailered, exactly as the
+  provider's decoder reads them, which is what makes a mocked happy path prove something rather
+  than nothing.
+- `catalog/bedrock-profiles.test.ts` (#274) — the `ListInferenceProfiles` shape on its own,
+  written to the AWS Bedrock API reference and the `@aws-sdk/client-bedrock` types: the page
+  parser (id/ACTIVE/`models[].modelArn` mapping, the `nextToken` cursor, an unreadable payload
+  answering an empty page), the ARN → foundation model id reader, the geography-scope labels
+  (the four original groups plus `us-gov`/`jp`/`au`/`ca`/`in`), the id-stripping the reasoning
+  resolver falls back to, and the display name (wrapped model plus scope for a system profile,
+  the creator's own name for an application one).
 - `vertex-credentials.test.ts` (#245, A3d) — the Vertex route end to end: the metadata a save
   returns (the key id's tail, and `details` carrying the email, project and location, with no
   part of the private key anywhere), a second credential under `vertex-eu`, the 400s the schema
