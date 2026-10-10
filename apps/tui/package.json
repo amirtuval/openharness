@@ -1,6 +1,6 @@
 {
   "name": "@openh/cli",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "The openharness terminal UI: an Ink (React) chat client installed as the `oh` command.",
   "license": "MIT",
   "type": "module",
