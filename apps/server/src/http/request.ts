@@ -2,6 +2,8 @@ import type { Context } from 'hono'
 import {
   type AgentId,
   AgentIdSchema,
+  type McpServerId,
+  McpServerIdSchema,
   type ModeId,
   ModeIdSchema,
   type SessionId,
@@ -86,6 +88,11 @@ export function sessionIdParam(c: Context<AppEnv>, name: string): SessionId {
 /** Validate a path parameter that has to be a `mode_` id; see {@link agentIdParam}. */
 export function modeIdParam(c: Context<AppEnv>, name: string): ModeId {
   return idParam(c.req.param(name), ModeIdSchema, name)
+}
+
+/** Validate a path parameter that has to be an `mcps_` id; see {@link agentIdParam}. */
+export function mcpServerIdParam(c: Context<AppEnv>, name: string): McpServerId {
+  return idParam(c.req.param(name), McpServerIdSchema, name)
 }
 
 /** A query parameter name as the array its `[]` spelling collects. */

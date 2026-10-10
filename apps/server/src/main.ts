@@ -15,12 +15,15 @@ import type { SessionId } from '@openharness/protocol'
 import {
   InMemoryCredentialStore,
   InMemorySessionStore,
+  InMemoryMcpServerStore,
   type CredentialStore,
+  type McpServerStore,
   type SessionStore,
 } from '@openharness/session'
 import {
   type PostgresSchema,
   createPostgresCredentialStore,
+  createPostgresMcpServerStore,
   createPostgresSessionStore,
   migrate,
 } from '@openharness/session/postgres'
@@ -308,6 +311,14 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
       // The public URL is the one origin a cookie-authenticated write may come from (A2).
       trustedOrigins: [config.betterAuthUrl],
     },
+    // The remote-MCP-server resource (epic #303, X10): the durable store, and the OAuth
+    // callback this deployment's `BETTER_AUTH_URL` makes reachable. Its outbound requests go
+    // through the guarded fetch, honouring the same self-host setting a custom endpoint does.
+    mcpServers: {
+      store: opened.mcpServers,
+      callbackUrl: new URL('/v1/me/mcp_servers/oauth/callback', config.betterAuthUrl).href,
+      allowPrivateUrls: config.allowPrivateProviderUrls,
+    },
     credentialRoutes: {
       credentials,
       vault,
@@ -525,6 +536,7 @@ async function openStore(
 ): Promise<{
   store: SessionStore
   credentials: CredentialStore
+  mcpServers: McpServerStore
   authDatabase: AuthDatabase
   checkReady: () => Promise<boolean>
   close: () => Promise<void>
@@ -533,6 +545,7 @@ async function openStore(
     return {
       store: options.store,
       credentials: new InMemoryCredentialStore(),
+      mcpServers: new InMemoryMcpServerStore(),
       // A caller that supplies its own store is a test: sign-in runs on the memory adapter
       // unless the caller says otherwise (`authDatabase`), which is what a test against a
       // Postgres store has to do — its `user` rows are the foreign keys `owner_id` needs.
@@ -551,6 +564,7 @@ async function openStore(
     return {
       store: new InMemorySessionStore({ partitionCount: config.partitions }),
       credentials: new InMemoryCredentialStore(),
+      mcpServers: new InMemoryMcpServerStore(),
       authDatabase: { kind: 'memory', db: emptyAuthTables() },
       // Nothing to check: the in-memory store is this process, and it is up whenever the
       // process is (#151).
@@ -567,9 +581,11 @@ async function openStore(
   // the scheduler's: `findSessionsNeedingWork` and a signal's channel both name partitions.
   const store = createPostgresSessionStore({ pool }, { partitionCount: config.partitions })
   const credentials = createPostgresCredentialStore({ pool })
+  const mcpServers = createPostgresMcpServerStore({ pool })
   return {
     store,
     credentials,
+    mcpServers,
     authDatabase: { kind: 'postgres', db },
     checkReady: () => checkDatabase(pool),
     close: async () => {
@@ -577,6 +593,7 @@ async function openStore(
       // closed, in order: the stores first, so their connections go before the pool does.
       await store.close()
       await credentials.close()
+      await mcpServers.close()
       await db.destroy()
     },
   }

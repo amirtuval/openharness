@@ -28,7 +28,7 @@ import {
   type Vault,
 } from '@openharness/vault'
 
-import { alwaysReady, createApp, type Readiness } from '../app'
+import { alwaysReady, createApp, type McpServersAppOptions, type Readiness } from '../app'
 import {
   DEV_LOGIN_EMAIL,
   DEV_LOGIN_PASSWORD,
@@ -212,6 +212,12 @@ export interface TestOptions {
   /** The validator a `PUT /v1/provider-credentials` uses; a fake, by default. */
   readonly validateProviderCredential?: ProviderCredentialValidator
   /**
+   * How the remote-MCP-server routes are wired (epic #303, X10): the store, the guarded fetch,
+   * the callback URL and whether a private address is reachable. Omitted, they run over an
+   * in-memory store with the real guarded fetch and no private access.
+   */
+  readonly mcpServers?: McpServersAppOptions
+  /**
    * The model catalogue `GET /v1/models` serves. Defaults to an inert one — an empty registry
    * and a fetch that throws — so a test never reaches a provider by accident; a test of the
    * catalogue builds `new ModelCatalog({ …, registry, fetch })` over its own stubs.
@@ -378,6 +384,7 @@ export function createTestApp(options: TestOptions = {}): TestContext {
       validate: options.validateProviderCredential ?? acceptAnyCredential,
     },
     catalog,
+    ...(options.mcpServers === undefined ? {} : { mcpServers: options.mcpServers }),
     // What `GET /v1/me/preferences` reports as the default trigger share (C3, #282).
     compactionThreshold,
     ...(options.registry === undefined ? {} : { registry: options.registry }),

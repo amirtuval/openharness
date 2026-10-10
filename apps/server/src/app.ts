@@ -12,9 +12,13 @@ import { cors } from 'hono/cors'
 import { DEFAULT_COMPACTION_THRESHOLD, DEFAULT_MAX_SUMMARY_PASSES } from '@openharness/brain'
 import {
   AgentNotFoundError,
+  DuplicateMcpServerNameError,
   DuplicateModeNameError,
+  InMemoryMcpServerStore,
+  McpServerLimitReachedError,
   ModeLimitReachedError,
   SessionNotFoundError,
+  type McpServerStore,
   type SessionStore,
 } from '@openharness/session'
 
@@ -34,6 +38,9 @@ import { registerAiSdkRoutes } from './routes/ai-sdk'
 import { registerCompactRoutes } from './routes/compact'
 import type { AuthDeps, RouteDeps } from './routes/deps'
 import { registerEventRoutes } from './routes/events'
+import { createMcpFetch } from './mcp/fetch'
+import { createMcpServerService, type McpServerServiceOptions } from './mcp/service'
+import { registerMcpServerRoutes } from './routes/mcp-servers'
 import { registerMeRoutes } from './routes/me'
 import { registerModeRoutes } from './routes/modes'
 import { registerModelRoutes } from './routes/models'
@@ -95,6 +102,12 @@ export interface AppOptions {
   }
   /** Where sealed provider credentials live, and how a saved key is validated (A5). */
   readonly credentialRoutes: ProviderCredentialDeps
+  /**
+   * The remote-MCP-server resource (epic #303, X10). Omitted, the routes run over an in-memory
+   * store with the guarded fetch off — enough for tests that do not exercise them; `main.ts`
+   * passes the durable store and the deployment's callback URL.
+   */
+  readonly mcpServers?: McpServersAppOptions
   /**
    * The model catalogue (epic #92): what `GET /v1/models` answers, and the per-provider cache
    * entry the credential PUT/DELETE routes drop (C4). `main.ts` builds it with the real
@@ -165,6 +178,31 @@ export interface AppOptions {
    */
   readonly tracer?: Tracer
   /** Where the app logs unexpected failures; defaults to the console. */
+  readonly logger?: Logger
+}
+
+/**
+ * How the MCP server routes are wired (epic #303, X10).
+ *
+ * The service is built inside {@link createApp} from these, over the same vault the provider
+ * credentials use: the routes only need to be told where the servers live, where the OAuth
+ * callback is, and whether a private address is reachable.
+ */
+export interface McpServersAppOptions {
+  /** Where the servers and their sealed secrets live; an in-memory store when omitted. */
+  readonly store?: McpServerStore
+  /**
+   * The absolute URL of this server's OAuth callback route, registered at each authorization
+   * server. `main.ts` derives it from `BETTER_AUTH_URL`; tests pass their own.
+   */
+  readonly callbackUrl?: string
+  /** `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS`: whether an MCP server may live on a private address. */
+  readonly allowPrivateUrls?: boolean
+  /** The guarded fetch every MCP request goes through; overridden by a test with its own seams. */
+  readonly fetch?: McpServerServiceOptions['fetch']
+  /** The clock, for token expiry and timestamps; injectable for tests. */
+  readonly now?: () => Date
+  /** Where the service logs refresh failures; the app's logger by default. */
   readonly logger?: Logger
 }
 
@@ -386,6 +424,21 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
     scheduler: options.scheduler,
     auth: { enabledProviders: options.auth.enabledProviders, devLogin: options.auth.devLogin },
     credentialRoutes: options.credentialRoutes,
+    mcpServers: createMcpServerService({
+      store: options.mcpServers?.store ?? new InMemoryMcpServerStore(),
+      vault: options.credentialRoutes.vault,
+      fetch:
+        options.mcpServers?.fetch ??
+        createMcpFetch({ allowPrivate: options.mcpServers?.allowPrivateUrls === true }),
+      callbackUrl:
+        options.mcpServers?.callbackUrl ??
+        new URL(
+          '/v1/me/mcp_servers/oauth/callback',
+          options.auth.trustedOrigins[0] ?? 'http://localhost',
+        ).href,
+      ...(options.mcpServers?.now === undefined ? {} : { now: options.mcpServers.now }),
+      logger: options.mcpServers?.logger ?? logger,
+    }),
     catalog: options.catalog,
     // The automatic default model (epic #116, U4) is built here, per app: the record of who
     // the server has picked for lives as long as this app does (see `default-model.ts`).
@@ -434,6 +487,7 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
   registerCompactRoutes(app, deps)
   registerAiSdkRoutes(app, deps)
   registerProviderCredentialRoutes(app, deps)
+  registerMcpServerRoutes(app, deps)
   registerModelRoutes(app, deps)
   registerModeRoutes(app, deps)
 
@@ -444,10 +498,16 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
     if (error instanceof SessionNotFoundError || error instanceof AgentNotFoundError) {
       return errorResponse(c, 'not_found_error', error.message)
     }
-    if (error instanceof DuplicateModeNameError || error instanceof ModeLimitReachedError) {
-      // A mode write the store refused: a name the caller already has, or the cap (#245, M6).
-      // Both are conflicts with the resource's current state, and the store's messages say
-      // which — `conflict_error` is the protocol's type for exactly that.
+    if (
+      error instanceof DuplicateModeNameError ||
+      error instanceof ModeLimitReachedError ||
+      error instanceof DuplicateMcpServerNameError ||
+      error instanceof McpServerLimitReachedError
+    ) {
+      // A mode or MCP-server write the store refused: a name the caller already has, or the
+      // cap (#245, M6; #303, X10). Both are conflicts with the resource's current state, and
+      // the store's messages say which — `conflict_error` is the protocol's type for exactly
+      // that.
       return errorResponse(c, 'conflict_error', error.message)
     }
     if (error instanceof RangeError) {
