@@ -492,8 +492,10 @@ message whose parts name the calls they answer by id.
   and results included — so no cut can land between a call and its answer. Anything before the
   first user message (a summary cut, a rewind that took the question back) is an orphan and goes
   first. The item cap (K6) still shortens one block of text; a **tool result** is capped and
-  cleared by the rules below (X9) rather than by that rule, which is why a request is never over
-  budget because of one.
+  cleared by the rules below (X9) instead, so no single result can be what pushes a request over
+  its budget. A step of many capped results still can — the message that answers them is not one
+  block of text, and the safety net does not split it — and a provider that refuses such a request
+  ends the turn through the overflow path rather than with a request nobody can read.
 - **A log that never held a tool builds exactly the request it always did** — no parts, no tool
   messages, the same strings — which is what keeps every session stored before #304 replaying
   unchanged, and a log whose results are all inside their caps and inside the verbatim tail
