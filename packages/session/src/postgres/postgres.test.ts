@@ -515,6 +515,7 @@ if (target === null) {
       expect(files).toContain('0019_user_preferences_theme.sql')
       expect(files).toContain('0020_rewind_supersessions.sql')
       expect(files).toContain('0025_user_preferences_compaction.sql')
+      expect(files).toContain('0026_tool_settings.sql')
       expect(await migrate(db)).toEqual(files)
 
       const { store, session } = await seeded()
@@ -701,6 +702,9 @@ if (target === null) {
       const theirSession = await store.createSession(theirAgent.id, { ownerId: OWNER_B })
       await credentials.upsert({ ...credentialInput(OWNER_A, 'a'), last4: 'aaaa' })
       await credentials.upsert({ ...credentialInput(OWNER_B, 'b'), last4: 'bbbb' })
+      await store.putToolSettings(OWNER_A, {
+        builtin: { web_search: { enabled: false, policy: 'deny' } },
+      })
 
       await sql`delete from "user" where id = ${OWNER_A}`.execute(db)
 
@@ -710,6 +714,9 @@ if (target === null) {
       expect(await store.getSession(session.id, { ownerId: OWNER_A })).toBeNull()
       expect(await credentials.get({ userId: OWNER_A, name: 'anthropic' })).toBeNull()
       expect(await credentials.list({ userId: OWNER_A })).toEqual([])
+      // The tool settings went with the user too (`0026`'s `on delete cascade`), reading back
+      // as no choices rather than as a stale row.
+      expect(await store.getToolSettings(OWNER_A)).toEqual({ builtin: {} })
       expect(await eventRows(session.id)).toEqual(new Map())
       // The other user is untouched, down to their own credential for the same provider.
       expect(await store.getAgent(theirAgent.id, { ownerId: OWNER_B })).not.toBeNull()
@@ -807,11 +814,11 @@ if (target === null) {
     // `"account"`, `"verification"`, `"deviceCode"`) are *not* truncated: the only rows in
     // them are the ones `ensureUsers` inserts per test, and a `"user"` row carries the
     // `owner_id`s everything else references. `user_preferences` is here so one test's
-    // preferences cannot leak into the next (#111), and `scheduler_instances` so one test's
-    // memberships cannot (#122).
+    // preferences cannot leak into the next (#111), `user_tool_settings` so one test's tool
+    // choices cannot (#307), and `scheduler_instances` so one test's memberships cannot (#122).
     await sql`truncate table
       events, event_claims, event_supersessions, sessions, agents, modes, partition_leases,
-      scheduler_instances, provider_credentials, user_preferences`.execute(db)
+      scheduler_instances, provider_credentials, user_preferences, user_tool_settings`.execute(db)
   }
 }
 

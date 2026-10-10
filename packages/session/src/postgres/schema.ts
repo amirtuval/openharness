@@ -4,6 +4,7 @@ import type {
   Agent,
   Metadata,
   Mode,
+  ModeToolOverride,
   ModelConfig,
   ModelUsage,
   ProviderCredential,
@@ -14,6 +15,7 @@ import type {
   SessionStatus,
   StoredEvent,
   Timestamp,
+  UserToolSettings,
 } from '@openharness/protocol'
 import type { ColumnType, Selectable } from 'kysely'
 
@@ -49,8 +51,9 @@ export interface AgentsTable {
 }
 
 /**
- * `modes`: a user's own named presets (epic #245, M6) — a model, a reasoning effort and a
- * system-prompt addition behind a name a chat can follow.
+ * `modes`: a user's own named presets (epic #245, M6) — a model, a reasoning effort, a
+ * system-prompt addition and an optional override of which built-in tools are on (#307)
+ * behind a name a chat can follow.
  */
 export interface ModesTable {
   id: string
@@ -62,6 +65,12 @@ export interface ModesTable {
   /** `low`/`medium`/`high`, or `null` for the provider's default. */
   reasoning_effort: string | null
   system_prompt_addition: string | null
+  /**
+   * Which built-in tools a chat on this mode has on or off, or `null` for no override
+   * (`0026_tool_settings.sql`; epic #303, X4; #307). `jsonb`, so its shape is the writer's —
+   * the protocol's `ModeToolOverrideSchema` is the only spelling of it.
+   */
+  tools: ModeToolOverride | null
   created_at: Date
   updated_at: Date
 }
@@ -287,6 +296,29 @@ export interface UserPreferencesTable {
   updated_at: Date
 }
 
+/**
+ * `user_tool_settings`: which tools a user's chats may use, and under which permission
+ * (epic #303, X4; issue #307).
+ *
+ * One row per user — `user_id` is the primary key — holding the built-in tool choices as a
+ * `jsonb` map of tool name to `{ enabled, policy }`. A tool absent from the map follows **its
+ * own declared default**, so the map is a record of choices rather than a complete list, and a
+ * user who has never saved one has no row at all. `jsonb` rather than a column per tool, and
+ * rather than a row per tool: the tools a build registers are the host's and move with it (the
+ * built-ins of #305, an MCP tool of #312), and a row whose shape the protocol's
+ * `UserToolSettingsSchema` defines is the one place that shape is written. `putToolSettings`
+ * replaces the row whole (the store upserts it), so this is a value rather than a log, and
+ * `updated_at` is when that value last changed, from the injected clock. `on delete cascade`
+ * from `"user"` takes a user's tool settings with the user.
+ */
+export interface UserToolSettingsTable {
+  /** The `user.id` the settings belong to (Better Auth's opaque text). */
+  user_id: string
+  /** The built-in tool choices, keyed by tool name (`0026_tool_settings.sql`). */
+  builtin: UserToolSettings['builtin']
+  updated_at: Date
+}
+
 /** The database as this package sees it. */
 export interface PostgresSchema {
   agents: AgentsTable
@@ -299,6 +331,7 @@ export interface PostgresSchema {
   scheduler_instances: SchedulerInstancesTable
   provider_credentials: ProviderCredentialsTable
   user_preferences: UserPreferencesTable
+  user_tool_settings: UserToolSettingsTable
 }
 
 /** One row of `agents`. */
@@ -327,6 +360,9 @@ export type ProviderCredentialRow = ProviderCredentialsTable
 
 /** One row of `user_preferences`. */
 export type UserPreferencesRow = UserPreferencesTable
+
+/** One row of `user_tool_settings`. */
+export type UserToolSettingsRow = UserToolSettingsTable
 
 /** The columns a metadata read selects: every `provider_credentials` column but the sealed blob. */
 export type ProviderCredentialMetadataRow = Pick<
@@ -378,6 +414,9 @@ export function modeFromRow(row: ModeRow): Mode {
     model: row.model,
     reasoning_effort: row.reasoning_effort as Mode['reasoning_effort'],
     system_prompt_addition: row.system_prompt_addition,
+    // A `null` column is a mode with no override, so it reads as the protocol's `null` — never
+    // an invented `{ builtin: {} }`, which would say the mode decided the tool set is empty.
+    tools: row.tools === null ? null : { ...row.tools },
     created_at: timestampOf(row.created_at),
     updated_at: timestampOf(row.updated_at),
   }

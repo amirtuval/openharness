@@ -29,6 +29,8 @@ import {
   type StreamEvent,
   type UserId,
   type UserPreferences,
+  type UserToolSettings,
+  UserToolSettingsSchema,
 } from '@openharness/protocol'
 import { describe, expect, it } from 'vitest'
 
@@ -315,6 +317,45 @@ export function runSessionStoreConformance(
         const { store } = await setup()
         const mode = await store.createMode({ name: 'mine', model: 'my-default-model' }, OWNER_A)
         expect(mode.model).toBe('my-default-model')
+      })
+
+      it('carries the tool override a mode may set, and null when it sets none (#307)', async () => {
+        const { store } = await setup()
+        const override = { builtin: { web_search: true, todo_write: false } }
+        const withTools = await store.createMode(modeInput('deep', { tools: override }), OWNER_A)
+        expect(withTools.tools).toEqual(override)
+        expectExact(ModeSchema, withTools, 'a mode with a tool override')
+        // A mode that says nothing about tools has no override, not an empty one: the two mean
+        // different things, and only `null` means "follow the user's settings".
+        const plain = await store.createMode(
+          { name: 'plain', model: 'openai/gpt-4.1-mini' },
+          OWNER_A,
+        )
+        expect(plain.tools).toBeNull()
+        expect(await store.getMode(withTools.id, { ownerId: OWNER_A })).toEqual(withTools)
+
+        // An update that omits the override keeps it; one that sends `null` clears it; one
+        // that sends a map replaces it whole.
+        expect(
+          (await store.updateMode(withTools.id, { name: 'renamed' }, { ownerId: OWNER_A }))?.tools,
+        ).toEqual(override)
+        expect(
+          (
+            await store.updateMode(
+              withTools.id,
+              { tools: { builtin: { web_fetch: false } } },
+              {
+                ownerId: OWNER_A,
+              },
+            )
+          )?.tools,
+        ).toEqual({ builtin: { web_fetch: false } })
+        expect(
+          (await store.updateMode(withTools.id, { tools: null }, { ownerId: OWNER_A }))?.tools,
+        ).toBeNull()
+        expect(
+          await store.updateMode(plain.id, { tools: override }, { ownerId: OWNER_A }),
+        ).toMatchObject({ tools: override })
       })
 
       it('lists one owner’s modes oldest first, and nobody else’s', async () => {
@@ -941,6 +982,79 @@ export function runSessionStoreConformance(
         expect(await store.getPreferences(OWNER_A)).toEqual({
           ...defaults,
           default_model: 'anthropic/claude-sonnet-5',
+        })
+      })
+    })
+
+    // ---------------------------------------------------------- tool settings
+
+    describe('tool settings (epic #303, X4; #307)', () => {
+      /** No choice stored: every tool follows its own declared default. */
+      const defaults: UserToolSettings = { builtin: {} }
+
+      it('reads no choices for a user who has saved none', async () => {
+        const { store } = await setup()
+        // No row is the absence of a choice, not an error: one shape for a settings screen, and
+        // one that says nothing about any tool.
+        expect(await store.getToolSettings(OWNER_A)).toEqual(defaults)
+        expect(await store.getToolSettings(OWNER_B)).toEqual(defaults)
+      })
+
+      it('round-trips a put through the read, as written', async () => {
+        const { store } = await setup()
+        const value: UserToolSettings = {
+          builtin: {
+            web_search: { enabled: true, policy: 'allow' },
+            web_fetch: { enabled: false, policy: 'deny' },
+            todo_write: { enabled: true, policy: 'ask' },
+          },
+        }
+        const stored = await store.putToolSettings(OWNER_A, value)
+        expect(stored).toEqual(value)
+        expect(await store.getToolSettings(OWNER_A)).toEqual(stored)
+        expectExact(UserToolSettingsSchema, stored, 'tool settings')
+      })
+
+      it('replaces the stored value in place on a second put', async () => {
+        const { store } = await setup()
+        await store.putToolSettings(OWNER_A, {
+          builtin: { web_search: { enabled: false, policy: 'deny' } },
+        })
+        const replaced = await store.putToolSettings(OWNER_A, {
+          builtin: { web_fetch: { enabled: true, policy: 'ask' } },
+        })
+        // One value per user: the second put is the whole map, so a tool the second one does
+        // not name is back to following its own declaration.
+        expect(await store.getToolSettings(OWNER_A)).toEqual(replaced)
+        expect(replaced.builtin).toEqual({ web_fetch: { enabled: true, policy: 'ask' } })
+      })
+
+      it('keeps two users’ tool settings apart', async () => {
+        const { store } = await setup()
+        await store.putToolSettings(OWNER_A, {
+          builtin: { web_search: { enabled: false, policy: 'deny' } },
+        })
+        expect(await store.getToolSettings(OWNER_B)).toEqual(defaults)
+        await store.putToolSettings(OWNER_B, {
+          builtin: { web_search: { enabled: true, policy: 'allow' } },
+        })
+        expect(await store.getToolSettings(OWNER_A)).toEqual({
+          builtin: { web_search: { enabled: false, policy: 'deny' } },
+        })
+      })
+
+      it('hands out deep-frozen values, so writing to one throws', async () => {
+        const { store } = await setup()
+        const stored = await store.putToolSettings(OWNER_A, {
+          builtin: { web_search: { enabled: true, policy: 'allow' } },
+        })
+        const read = await store.getToolSettings(OWNER_A)
+        expect(Object.isFrozen(stored)).toBe(true)
+        expect(Object.isFrozen(read)).toBe(true)
+        expect(() => Object.assign(read, { builtin: {} })).toThrow(TypeError)
+        // None of it reached the store.
+        expect(await store.getToolSettings(OWNER_A)).toEqual({
+          builtin: { web_search: { enabled: true, policy: 'allow' } },
         })
       })
     })
