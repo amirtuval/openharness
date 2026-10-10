@@ -173,5 +173,14 @@ describe('createReasoningSupportResolver', () => {
       'high',
     ])
     expect(supportFor('bedrock/google.gemma-3-12b-it', 'bedrock')).toEqual([])
+    // And a Vertex credential's models, both families: models.dev files Google's and
+    // Anthropic's under `google-vertex`, so `claude-*` and `gemini-*` are one lookup (#245,
+    // A3d). A Gemini whose knob is a token budget carries no efforts and takes none of ours.
+    expect(supportFor('vertex/claude-opus-4-8@default', 'vertex')).toEqual([
+      'low',
+      'medium',
+      'high',
+    ])
+    expect(supportFor('vertex/gemini-2.5-pro', 'vertex')).toEqual([])
   })
 })

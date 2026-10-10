@@ -85,7 +85,7 @@ migrations/             the SQL the Postgres stores need, applied by `migrate()`
                         0020 what a supersession range covers — chunks or a rewind (#238),
                         0021 the index behind the per-user usage read (#247),
                         0022 the credential's name — unique per user per name (#248),
-                        0023 a credential's public, per-type details (#249, #250)
+                        0023 a credential's public, per-type details (#249, #250, #251)
 docs/postgres.md        the Postgres stores: schema, migrations, delivery, local setup
 ```
 
@@ -485,8 +485,8 @@ the field existed simply does not have it, and the vault is what reads an absent
 | `delete({ userId, name })` | `true` when one was deleted, `false` when there was none                                                                                     |
 
 The answers are the protocol's `ProviderCredential` metadata (`pcred_` id, `type`, `name`,
-`last4`, the optional `details` a type publishes — #249 — and `created_at`, `updated_at`,
-`validated_at`); `get` adds `sealed`, as a
+`last4`, the optional `details` a type publishes (#249, #250, #251) and `created_at`,
+`updated_at`, `validated_at`); `get` adds `sealed`, as a
 `SealedProviderCredential`. Every method is keyed by `userId` — there is no unscoped read of a
 credential — and implementations deep-freeze what they return, because a sealed blob is a
 value. One credential per `(user, name)`, and two users may each hold the same name: the upsert
@@ -495,9 +495,12 @@ replaces (keeping the stored `id` and `created_at`) rather than accumulating row
 **The key is the `name`, not the provider** (epic #245, A3a). A credential's name is the
 `provider` half of the model ids it serves: a fixed provider id (`anthropic`) for the eleven
 API-key providers, one each, and a short name the user chose (`azure`, `azure-eu`) for a
-**named type**, where one user may hold several. `src/credentials.ts` documents what
-implementations must guarantee; the conformance suite has the case a second credential of one
-type is its own row rather than a replacement.
+**named type**, where one user may hold several. `details` (#251) rides beside the metadata for
+the same reason the metadata is separate from the sealed blob: the store writes it, a `list`
+returns it, and neither ever touches a plaintext — a Vertex credential's `email`, `project` and
+`location` are the facts `last4` cannot carry, and none of them is key material.
+`src/credentials.ts` documents what implementations must guarantee; the conformance suite has
+the case a second credential of one type is its own row rather than a replacement.
 
 Both implementations pass `runCredentialStoreConformance`: `InMemoryCredentialStore` (in
 `memory.ts`, for tests) and `PostgresCredentialStore`
@@ -695,20 +698,22 @@ The named credentials of epic #245 (A3a) added one:
   `if exists`, so each rename is guarded by a catalogue check (the runner re-runs every file on
   every `migrate()`).
 
-The per-type credential details (epic #245, A3b/A3c) added one:
+The per-type credential details (epic #245, A3b/A3c/A3d) added one:
 
-- **`0023_credential_details.sql` — a credential's public, per-type details** (#249, #250): one
-  `add column if not exists details jsonb` on `provider_credentials`. It holds the facts a
-  credential's type chooses to publish — a custom endpoint's base URL **host** (#249) and a
-  Bedrock credential's `{ region }` (#250) — which a settings list can show without opening the
-  sealed payload (a metadata read must not). It is **not** a secret and never may be: the values
-  are a host and a region, the kind a `GET /v1/provider-credentials` response carries openly.
-  NULL is legitimate and means "this type has no such facts": every `api_key` and `azure_openai`
-  row takes it, and every row written before the column existed, so their metadata is unchanged
-  and there is nothing to backfill. The column round-trips through `upsert`/`get`/`list` exactly
-  as given (`UpsertCredentialInput.details`, `ProviderCredential.details`), and the conformance
-  suite pins that a credential with details gets them back while one without carries no `details`
-  key at all. A nullable JSON column rather than a column per type: the fields differ by type and
+- **`0023_credential_details.sql` — a credential's public, per-type details** (#249, #250, #251):
+  one `add column if not exists details jsonb` on `provider_credentials`. It holds the facts a
+  credential's type chooses to publish — a custom endpoint's base URL **host** (#249), a Bedrock
+  credential's `{ region }` (#250) and a Vertex credential's `{ email, project, location }`
+  (#251) — which a settings list can show without opening the sealed payload (a metadata read
+  must not). It is **not** a secret and never may be: the values are a host, a region, a service
+  account's address and a project, the kind a `GET /v1/provider-credentials` response carries
+  openly; the private key stays inside the sealed blob and nowhere else. NULL is legitimate and
+  means "this type has no such facts": every `api_key` and `azure_openai` row takes it, and every
+  row written before the column existed, so their metadata is unchanged and there is nothing to
+  backfill. The column round-trips through `upsert`/`get`/`list` exactly as given
+  (`UpsertCredentialInput.details`, `ProviderCredential.details`), and the conformance suite pins
+  that a credential with details gets them back while one without carries no `details` key at
+  all. A nullable JSON column rather than a column per type: the fields differ by type and
   nothing shares them, so each new credential type would otherwise be a schema change of its own.
 
 The vault's key provider (issue #150, deployment epic #148 decision D6) added one before it:

@@ -131,20 +131,24 @@ export interface CredentialKey {
 
 /** What {@link CredentialStore.upsert} writes. */
 export interface UpsertCredentialInput extends CredentialKey {
-  /** The credential's form; `api_key`, `azure_openai` and `bedrock` today. */
+  /** The credential's form; `api_key`, `azure_openai`, `openai_compatible`, `bedrock` and `vertex` today. */
   readonly type: ProviderCredentialType
   /** The sealed secret, as `@openharness/vault` produced it. Stored as given, never opened. */
   readonly sealed: SealedSecret
   /**
-   * The non-secret facts that identify the credential within its type (epic #245, A3c), as
-   * the protocol's `ProviderCredentialDetails` — a Bedrock credential's region, and nothing
-   * for an `api_key`. Metadata beside the secret rather than part of it: it is written to a
-   * plain column, it is what `list` reports, and no store opens the sealed blob to answer it.
-   * Absent for a type that has nothing to report, which is what keeps the API's `details`
-   * field absent rather than empty.
+   * The non-secret facts that identify the credential within its type (epic #245, A3c/A3d), as
+   * the protocol's `ProviderCredentialDetails` — a Bedrock credential's region, a Vertex
+   * credential's email, project and location, and nothing for an `api_key`. Metadata beside the
+   * secret rather than part of it: it is written to a plain column, it is what `list` reports,
+   * and no store opens the sealed blob to answer it. Absent for a type that has nothing to
+   * report, which is what keeps the API's `details` field absent rather than empty.
    */
   readonly details?: ProviderCredentialDetails
-  /** The last four characters of the plaintext secret, for recognition only. */
+  /**
+   * The last four characters a UI shows to tell two credentials apart — of the secret for an
+   * `api_key` credential, and of the **private key id** for a `vertex` one, which is an
+   * identifier and not key material. Never a piece of a private key. For recognition only.
+   */
   readonly last4: string
   /** When the server validated the credential against the provider, on save. */
   readonly validatedAt: Timestamp

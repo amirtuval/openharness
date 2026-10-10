@@ -84,9 +84,11 @@ export class PostgresCredentialStore implements CredentialStore {
       // The caller's sealed blob is written as given (#150); `undefined` means a caller that
       // predates the field, and `local` is what the vault reads a `null` back as.
       key_provider: input.sealed.keyProvider ?? null,
-      // A caller with nothing to report writes `null`, which reads back as an absent
-      // `details` rather than an empty object (epic #245, A3c).
-      details: input.details ?? null,
+      // The type's non-secret facts, or `null` for a type that adds none (epic #245,
+      // A3b/A3c/A3d): the column is the one a metadata read selects, so a listing can show
+      // them without ever opening the blob beside them. Copied rather than aliased, and a
+      // `null` column reads back as an absent `details` rather than an empty object.
+      details: input.details === undefined ? null : { ...input.details },
       last4: input.last4,
       created_at: at,
       updated_at: at,

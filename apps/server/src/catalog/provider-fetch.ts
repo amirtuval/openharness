@@ -61,3 +61,27 @@ export function createProviderFetch(): ProviderFetch {
     return response
   }
 }
+
+/** How much of a provider's error body a message may carry. */
+const ERROR_SNIPPET_LENGTH = 200
+
+/**
+ * `: <up to 200 characters of the body>` for a provider's error response, or nothing readable.
+ *
+ * What a provider said when it refused a call is often the whole diagnosis — Google naming the
+ * API a project has not enabled, a provider naming the region it does not serve — so the
+ * catalogue's fallback messages and the credential check's refusals both carry a bounded piece
+ * of it. Bounded and collapsed, because a provider's error body is not a place to read a whole
+ * page from, and never a place to look for a secret: nothing a request sent is echoed back by
+ * the provider into its own error text.
+ */
+export async function errorSnippet(response: ProviderResponse): Promise<string> {
+  let body: string
+  try {
+    body = await response.text()
+  } catch {
+    return ''
+  }
+  const snippet = body.trim().replace(/\s+/g, ' ').slice(0, ERROR_SNIPPET_LENGTH)
+  return snippet.length === 0 ? '' : `: ${snippet}`
+}

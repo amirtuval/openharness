@@ -31,7 +31,8 @@
  * a deployment sets, so saving a key works behind a proxy exactly as listing models does. An
  * Azure endpoint goes through `safeFetch`, which reads the same variables (see that module)
  * and additionally refuses every address a user-supplied URL must not reach. A Bedrock read
- * signs first and then goes through the same provider HTTP client as `api_key`.
+ * signs first and then goes through the same provider HTTP client as `api_key`, and a Vertex
+ * read signs its own token and does the same.
  */
 
 import {
@@ -55,9 +56,11 @@ import {
 
 import {
   createProviderFetch,
+  errorSnippet,
   type ProviderFetch,
   type ProviderResponse,
 } from './catalog/provider-fetch'
+import { vertexPublisherModelsUrl, vertexTokenProvider, type VertexTokenProvider } from './vertex'
 
 /** The provider HTTP client, built once: one outbound path for validation and listing. */
 const providerFetch: ProviderFetch = createProviderFetch()
@@ -103,9 +106,10 @@ export type ProviderValidatorFetch = (
   options?: SafeFetchOptions,
 ) => Promise<Response>
 
-/** What a validator needs: the two outbound paths, and the self-host address flag. */
+/** What a validator needs: the outbound paths, the self-host flag, and how a Vertex token is obtained. */
 export interface ProviderCredentialValidatorOptions {
-  /** The provider HTTP client the `api_key` read goes through. Defaults to the egress-proxy one. */
+  /** The provider HTTP client the `api_key`, Bedrock and Vertex reads go through. Defaults to the
+   * egress-proxy one. */
   readonly providerFetch?: ProviderFetch
   /** The guard an Azure or custom check goes through. Defaults to `@openharness/hands`' `safeFetch`. */
   readonly safeFetch?: ProviderValidatorFetch
@@ -117,6 +121,8 @@ export interface ProviderCredentialValidatorOptions {
    * stored and again on every request after. It never applies to an Azure endpoint.
    */
   readonly allowPrivateProviderUrls?: boolean
+  /** How a Vertex service account becomes an OAuth token. Defaults to the Google signing one. */
+  readonly vertexToken?: VertexTokenProvider
 }
 
 /**
@@ -132,6 +138,7 @@ export function createProviderCredentialValidator(
   const fetch = options.providerFetch ?? providerFetch
   const guard = options.safeFetch ?? defaultSafeFetch
   const allowPrivate = options.allowPrivateProviderUrls === true
+  const vertexToken = options.vertexToken ?? vertexTokenProvider
   return async (name, body) => {
     if (body.type === 'azure_openai') {
       return validateAzureCredential(name, body, guard)
@@ -141,6 +148,9 @@ export function createProviderCredentialValidator(
     }
     if (body.type === 'bedrock') {
       return validateBedrockCredential(name, body, fetch)
+    }
+    if (body.type === 'vertex') {
+      return validateVertexCredential(name, body, vertexToken, fetch)
     }
     return validateApiKey(name, body.api_key, fetch)
   }
@@ -374,6 +384,63 @@ async function awsReason(response: ProviderResponse): Promise<string> {
 
 /** The api-version the validating call uses: Azure's current `v1` API, what the model path uses. */
 const AZURE_API_VERSION = 'v1'
+
+/**
+ * One authenticated read of the project's publisher models, proving a Vertex credential.
+ *
+ * The token is obtained **from the stored service account** (see `vertex.ts`) and attached as
+ * a bearer, and the call is Google's own `publishers.google.models.list` for the credential's
+ * project and location: one page, one model. It is the smallest call that proves all three
+ * things a Vertex credential has to be right about — the key, the project, and the location —
+ * and it fails with Google's reason rather than a generic one when the Vertex AI API is not
+ * enabled for the project, which is the misconfiguration a perfectly good key usually meets.
+ *
+ * The endpoint is Google's, derived from the validated location, so unlike Azure's it needs no
+ * SSRF guard: there is no URL here a user typed. The call goes through the same egress-proxy
+ * HTTP client every other provider call does.
+ */
+async function validateVertexCredential(
+  name: string,
+  body: Extract<PutProviderCredentialRequest, { type: 'vertex' }>,
+  token: VertexTokenProvider,
+  fetch: ProviderFetch,
+): Promise<void> {
+  let accessToken: string
+  try {
+    accessToken = await token(body.service_account)
+  } catch (error) {
+    throw new Error(
+      `could not authenticate ${name} against Google: ` +
+        (error instanceof Error ? error.message : 'the token request failed'),
+      { cause: error },
+    )
+  }
+  const url = vertexPublisherModelsUrl({ project: body.project, location: body.location })
+  let response: ProviderResponse
+  try {
+    response = await fetch(url, {
+      headers: { authorization: `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(VALIDATION_TIMEOUT_MS),
+    })
+  } catch (error) {
+    throw new Error(
+      `could not reach Vertex to validate the credential: ` +
+        (error instanceof Error ? error.message : 'the request failed'),
+      { cause: error },
+    )
+  }
+  if (!response.ok) {
+    // Google's own sentence, kept (it names the API to enable, the project, the region), and
+    // bounded like the catalogue's fallback messages: a provider's error body is not a place
+    // to read a whole page from.
+    throw new Error(
+      `Vertex answered ${response.status} for the project ${body.project} in ` +
+        `${body.location}${await errorSnippet(response)}`,
+    )
+  }
+  // The body is drained so the connection can be reused; nothing in it is read or stored.
+  await response.text()
+}
 
 /** The host of an endpoint, for an error message that does not echo a whole URL. */
 function hostOf(endpoint: string): string {

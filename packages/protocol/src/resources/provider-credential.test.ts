@@ -13,7 +13,25 @@ import {
   ProviderCredentialSchema,
   ProviderCredentialTypeSchema,
   PutProviderCredentialRequestSchema,
+  VERTEX_LOCATIONS,
+  VertexCredentialDetailsSchema,
+  VertexCredentialSchema,
+  isServiceAccountKey,
+  parseServiceAccountKey,
 } from './provider-credential'
+
+/** A service-account key document, shaped exactly as Google's console issues one. */
+const SERVICE_ACCOUNT = {
+  type: 'service_account',
+  project_id: 'openharness-vertex',
+  private_key_id: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678',
+  private_key: '-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----\n',
+  client_email: 'vertex-runner@openharness-vertex.iam.gserviceaccount.com',
+  client_id: '118204773655879341057',
+  token_uri: 'https://oauth2.googleapis.com/token',
+}
+
+const SERVICE_ACCOUNT_JSON = JSON.stringify(SERVICE_ACCOUNT)
 
 const credential = {
   id: newProviderCredentialId(),
@@ -91,6 +109,34 @@ describe('ProviderCredentialSchema', () => {
     expect(parsed).toEqual(credential)
   })
 
+  it('carries a vertex credential’s email, project and location as its own details', () => {
+    // #251: `last4` is the private key id's last four characters, which tells two Vertex
+    // credentials apart only weakly; these three facts do, and none of them is key material.
+    const vertex = {
+      ...credential,
+      type: 'vertex',
+      name: 'vertex',
+      details: {
+        email: SERVICE_ACCOUNT.client_email,
+        project: SERVICE_ACCOUNT.project_id,
+        location: 'us-central1',
+      },
+    }
+    expect(ProviderCredentialSchema.parse(vertex)).toEqual(vertex)
+    // `details` is keyed by type: a key a Vertex credential does not publish is stripped, and a
+    // non-string value in one it does is refused.
+    expect(
+      ProviderCredentialSchema.parse({
+        ...vertex,
+        details: { ...vertex.details, private_key: '-----BEGIN…' },
+      }),
+    ).toEqual(vertex)
+    expect(
+      ProviderCredentialSchema.safeParse({ ...vertex, details: { ...vertex.details, email: 42 } })
+        .success,
+    ).toBe(false)
+  })
+
   it('rejects an unknown type, an empty name and a malformed timestamp', () => {
     expect(ProviderCredentialSchema.safeParse({ ...credential, type: 'aws' }).success).toBe(false)
     expect(ProviderCredentialSchema.safeParse({ ...credential, name: '' }).success).toBe(false)
@@ -127,11 +173,12 @@ describe('ProviderCredentialSchema', () => {
 })
 
 describe('ProviderCredentialTypeSchema', () => {
-  it('is api_key, azure_openai, openai_compatible and bedrock today and nothing else', () => {
+  it('is api_key, azure_openai, openai_compatible, bedrock and vertex today and nothing else', () => {
     expect(ProviderCredentialTypeSchema.parse('api_key')).toBe('api_key')
     expect(ProviderCredentialTypeSchema.parse('azure_openai')).toBe('azure_openai')
     expect(ProviderCredentialTypeSchema.parse('openai_compatible')).toBe('openai_compatible')
     expect(ProviderCredentialTypeSchema.parse('bedrock')).toBe('bedrock')
+    expect(ProviderCredentialTypeSchema.parse('vertex')).toBe('vertex')
     // The later types — gcp_service_account — are new members of this union, not new designs,
     // but until they land the schema stays closed.
     for (const type of ['gcp_service_account', 'aws', 'azure', 'oauth', 'custom']) {
@@ -174,6 +221,40 @@ describe('BedrockCredentialDetailsSchema', () => {
   })
 })
 
+describe('VertexCredentialDetailsSchema', () => {
+  const details = {
+    email: SERVICE_ACCOUNT.client_email,
+    project: SERVICE_ACCOUNT.project_id,
+    location: 'us-central1',
+  }
+
+  it('is a vertex credential’s email, project and location', () => {
+    // The three facts a list shows to tell two Vertex credentials apart, and none of them is
+    // key material: the private key stays inside the sealed payload.
+    expect(VertexCredentialDetailsSchema.parse(details)).toEqual(details)
+  })
+
+  it('requires all three, each a non-empty string', () => {
+    for (const field of ['email', 'project', 'location'] as const) {
+      const { [field]: _dropped, ...partial } = details
+      expect(VertexCredentialDetailsSchema.safeParse(partial).success, `without ${field}`).toBe(
+        false,
+      )
+      expect(
+        VertexCredentialDetailsSchema.safeParse({ ...details, [field]: '' }).success,
+        `empty ${field}`,
+      ).toBe(false)
+    }
+    expect(VertexCredentialDetailsSchema.safeParse({ ...details, email: 42 }).success).toBe(false)
+  })
+
+  it('strips a field it does not know — details is a closed, per-type shape', () => {
+    expect(VertexCredentialDetailsSchema.parse({ ...details, private_key: '-----BEGIN…' })).toEqual(
+      details,
+    )
+  })
+})
+
 describe('PutProviderCredentialRequestSchema', () => {
   it('parses the api_key form', () => {
     expect(
@@ -198,6 +279,16 @@ describe('PutProviderCredentialRequestSchema', () => {
       secret_access_key: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
       session_token: 'FwoGZXIvYXdzEBYa',
       region: 'eu-west-1',
+    }
+    expect(PutProviderCredentialRequestSchema.parse(body)).toEqual(body)
+  })
+
+  it('parses the vertex form', () => {
+    const body = {
+      type: 'vertex',
+      service_account: SERVICE_ACCOUNT_JSON,
+      project: 'openharness-vertex',
+      location: 'europe-west4',
     }
     expect(PutProviderCredentialRequestSchema.parse(body)).toEqual(body)
   })
@@ -378,6 +469,117 @@ describe('BedrockCredentialSchema', () => {
     const { type: _type, ...untyped } = bedrock
     expect(BedrockCredentialSchema.safeParse(untyped).success).toBe(false)
     expect(BedrockCredentialSchema.safeParse({ ...bedrock, access_key_id: 42 }).success).toBe(false)
+  })
+})
+
+describe('parseServiceAccountKey', () => {
+  it('reads the five fields a request needs out of a service-account key', () => {
+    expect(parseServiceAccountKey(SERVICE_ACCOUNT_JSON)).toEqual({
+      type: 'service_account',
+      project_id: SERVICE_ACCOUNT.project_id,
+      private_key_id: SERVICE_ACCOUNT.private_key_id,
+      private_key: SERVICE_ACCOUNT.private_key,
+      client_email: SERVICE_ACCOUNT.client_email,
+    })
+    expect(isServiceAccountKey(SERVICE_ACCOUNT_JSON)).toBe(true)
+  })
+
+  it('does not care about the fields it does not read', () => {
+    expect(isServiceAccountKey(JSON.stringify({ ...SERVICE_ACCOUNT, universe_domain: 'x' }))).toBe(
+      true,
+    )
+  })
+
+  it('refuses anything that is not a service-account key', () => {
+    for (const value of [
+      '',
+      'not json at all',
+      '[]',
+      '"a string"',
+      'null',
+      // The authorized-user document Google also hands out — the one a `gcloud auth
+      // application-default login` writes. It authenticates a *person*, not a service.
+      JSON.stringify({ ...SERVICE_ACCOUNT, type: 'authorized_user' }),
+      JSON.stringify({ ...SERVICE_ACCOUNT, type: undefined }),
+      JSON.stringify({ ...SERVICE_ACCOUNT, private_key: undefined }),
+      JSON.stringify({ ...SERVICE_ACCOUNT, private_key: '' }),
+      JSON.stringify({ ...SERVICE_ACCOUNT, client_email: 42 }),
+    ]) {
+      expect(parseServiceAccountKey(value), value).toBeNull()
+      expect(isServiceAccountKey(value), value).toBe(false)
+    }
+  })
+})
+
+describe('VertexCredentialSchema', () => {
+  const vertex = {
+    type: 'vertex',
+    service_account: SERVICE_ACCOUNT_JSON,
+    project: 'openharness-vertex',
+    location: 'us-central1',
+  }
+
+  it('accepts a service-account key, a project id and a known location', () => {
+    expect(VertexCredentialSchema.parse(vertex)).toEqual(vertex)
+  })
+
+  it('keeps the key text exactly as it was pasted', () => {
+    // The document is sealed whole, so nothing about it may be reformatted on the way in: the
+    // parser reads it, and the payload carries the string it was given.
+    const spaced = JSON.stringify(SERVICE_ACCOUNT, null, 4)
+    expect(
+      VertexCredentialSchema.parse({ ...vertex, service_account: spaced }).service_account,
+    ).toBe(spaced)
+  })
+
+  it('refuses a document that is not a service-account key', () => {
+    for (const service_account of [
+      '{}',
+      '{"type":"service_account"}',
+      JSON.stringify({ ...SERVICE_ACCOUNT, type: 'authorized_user' }),
+      'not json',
+    ]) {
+      expect(
+        VertexCredentialSchema.safeParse({ ...vertex, service_account }).success,
+        service_account,
+      ).toBe(false)
+    }
+  })
+
+  it('refuses a project that is not a Google Cloud project id', () => {
+    for (const project of [
+      '',
+      'Openharness',
+      'ab',
+      '1-openharness',
+      'openharness-',
+      'open harness',
+    ]) {
+      expect(VertexCredentialSchema.safeParse({ ...vertex, project }).success, project).toBe(false)
+    }
+    expect(
+      VertexCredentialSchema.safeParse({ ...vertex, project: 'my-project-123456' }).success,
+    ).toBe(true)
+  })
+
+  it('refuses a location it does not know, because the location is the host', () => {
+    for (const location of ['', 'us-central-1', 'mars-north1', 'US-CENTRAL1']) {
+      expect(VertexCredentialSchema.safeParse({ ...vertex, location }).success, location).toBe(
+        false,
+      )
+    }
+    for (const location of VERTEX_LOCATIONS) {
+      expect(VertexCredentialSchema.safeParse({ ...vertex, location }).success, location).toBe(true)
+    }
+  })
+
+  it('requires every field of the form', () => {
+    for (const field of ['service_account', 'project', 'location'] as const) {
+      const { [field]: _dropped, ...partial } = vertex
+      expect(VertexCredentialSchema.safeParse(partial).success, `without ${field}`).toBe(false)
+    }
+    const { type: _type, ...untyped } = vertex
+    expect(VertexCredentialSchema.safeParse(untyped).success).toBe(false)
   })
 })
 

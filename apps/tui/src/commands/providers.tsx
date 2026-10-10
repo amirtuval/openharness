@@ -30,8 +30,6 @@ import { pad } from './list'
 /** How wide the credential-name column gets before it is cut; the other columns are short. */
 const NAME_WIDTH = 18
 const TYPE_WIDTH = 8
-/** Wide enough for AWS's longest region id (`ap-southeast-2`, `mx-central-1`). */
-const FACTS_WIDTH = 15
 const LAST4_WIDTH = 6
 
 /** `oh providers list` — the caller's stored keys, oldest first. */
@@ -228,27 +226,34 @@ function isOutcome(result: unknown): result is ProvidersAddOutcome {
  * four, when it was added.
  *
  * The order is the server's (oldest first). The display name is the provider's, the credential
- * type's where the name is that type's default (`azure`), or the reader's own label otherwise —
- * so two Azure credentials are told apart by the names they were saved under. The extra column
- * is the per-type non-secret facts (#245, A3c) — a Bedrock credential's region — because
- * `last4` alone cannot tell two credentials of one type apart when they are two accounts or two
- * regions of one account.
+ * type's where the name is that type's default (`azure`, `bedrock`), or the reader's own label
+ * otherwise — so two Azure credentials are told apart by the names they were saved under. The
+ * facts at the end of the line are the per-type non-secret ones (#245, A3c/A3d) — a Bedrock
+ * credential's region, a Vertex one's email, project and location — because `last4` alone
+ * cannot tell two credentials of one type apart when they are two accounts or two regions of
+ * one account.
  */
 export function formatCredentials(credentials: readonly ProviderCredential[]): readonly string[] {
   if (credentials.length === 0) {
     return ['No credentials yet. Add one with `oh providers add`.']
   }
 
-  return credentials.map((credential) =>
-    [
+  return credentials.map((credential) => {
+    // What the credential's **type** knows about it, where it knows anything (#245,
+    // A3c/A3d): a Bedrock credential's region, a Vertex one's service-account email, its
+    // project and its location. Nothing of a private key is here, and never could be — it is
+    // not in the database's metadata. The facts go at the **end** rather than in a fixed
+    // column: an email address is wider than any column worth reserving on every key's row.
+    const facts = credentialFacts(credential).join(' · ')
+    return [
       pad(credentialDisplayName(credential), NAME_WIDTH),
       pad(credential.type, TYPE_WIDTH),
-      pad(credentialFacts(credential).join(', '), FACTS_WIDTH),
       // A custom OpenAI-compatible credential may carry no key at all (#249); its `last4` is
       // empty, and `…` alone would read as a key that failed to load rather than one a local
       // endpoint does not need.
       pad(credential.last4 === '' ? 'no key' : `…${credential.last4}`, LAST4_WIDTH),
       credential.created_at,
-    ].join('  '),
-  )
+      ...(facts === '' ? [] : [facts]),
+    ].join('  ')
+  })
 }

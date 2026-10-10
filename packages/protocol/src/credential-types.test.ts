@@ -68,6 +68,19 @@ describe('CREDENTIAL_TYPES', () => {
     expect(defaultCredentialName('bedrock')).toBe('bedrock')
   })
 
+  it('carries vertex with a display name, a default name and a models.dev key', () => {
+    expect(credentialTypeInfo('vertex')).toEqual({
+      type: 'vertex',
+      name: 'Google Vertex',
+      defaultName: 'vertex',
+      modelsDevKey: 'google-vertex',
+      keyUrl: 'https://console.cloud.google.com/iam-admin/serviceaccounts',
+      modelIdHint: 'model',
+    })
+    expect(credentialTypeName('vertex')).toBe('Google Vertex')
+    expect(defaultCredentialName('vertex')).toBe('vertex')
+  })
+
   it('has no facts for api_key — its name is always the fixed provider id', () => {
     expect(credentialTypeInfo('api_key')).toBeUndefined()
     expect(credentialTypeName('api_key')).toBeUndefined()

@@ -42,6 +42,29 @@ describe('formatCredentials', () => {
     expect(formatCredentials([])).toEqual(['No credentials yet. Add one with `oh providers add`.'])
   })
 
+  it('adds what a credential’s type knows about it, and nothing of the key', () => {
+    const [line] = formatCredentials([
+      makeProviderCredential({
+        name: 'vertex',
+        type: 'vertex',
+        last4: '5678',
+        details: {
+          email: 'vertex-runner@openharness-vertex.iam.gserviceaccount.com',
+          project: 'openharness-vertex',
+          location: 'europe-west4',
+        },
+      }),
+    ])
+
+    expect(line).toContain('Google Vertex')
+    expect(line).toContain('…5678')
+    // The three facts the listing may show (#245, A3d), in the order the type declares them —
+    // and never any part of the private key, which is not in the metadata at all.
+    expect(line).toContain(
+      'vertex-runner@openharness-vertex.iam.gserviceaccount.com · openharness-vertex · europe-west4',
+    )
+  })
+
   it('names each key by display name, type, last four and when it was added', () => {
     const lines = formatCredentials([
       makeProviderCredential({ name: 'anthropic', last4: 'a1b2' }),

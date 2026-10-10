@@ -253,6 +253,16 @@ const CREDENTIAL_FACT_RENDERERS: Readonly<
       details !== undefined && 'region' in details ? bedrockRegionOf(details) : undefined
     return region === undefined ? [] : [region]
   },
+  vertex: (credential) => {
+    // The three things that tell two Vertex credentials apart: whose key it is, which project
+    // and which region. Nothing of the private key is among them, ever — `last4` is the key
+    // id's tail, and these are the document's public facts (#251).
+    const details = credential.details
+    if (details === undefined || !('email' in details)) {
+      return []
+    }
+    return [details.email, details.project, details.location]
+  },
 }
 
 /** The facts one stored credential's row shows beside its name and `last4`. */

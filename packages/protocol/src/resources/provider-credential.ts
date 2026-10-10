@@ -33,13 +33,15 @@ import { ProviderCredentialIdSchema } from '../ids'
  * Anthropic, Google AI Studio, OpenRouter, Groq, …) — the eleven fixed provider ids. The record
  * is a discriminated union on `type`, so `gcp_service_account` later becomes a new type with its
  * own payload fields rather than a new design; `azure_openai` (epic #245, A3a),
- * `openai_compatible` (epic #245, A3b) and `bedrock` (epic #245, A3c) are the three such types.
+ * `openai_compatible` (epic #245, A3b), `bedrock` (epic #245, A3c) and `vertex` (epic #245,
+ * A3d) are the four such types.
  */
 export const ProviderCredentialTypeSchema = z.enum([
   'api_key',
   'azure_openai',
   'openai_compatible',
   'bedrock',
+  'vertex',
 ])
 
 export type ProviderCredentialType = z.infer<typeof ProviderCredentialTypeSchema>
@@ -54,12 +56,12 @@ export const PROVIDER_CREDENTIAL_TYPES: readonly ProviderCredentialType[] =
  * A credential's wire form is the same fields whatever its type, and a type that has a fact a
  * settings screen should show publishes it as **its own** `details` object rather than as a new
  * top-level field — {@link ProviderCredentialSchema} is where each type says what it publishes,
- * so Bedrock's `{ region }` and Vertex's `{ project }` arrive as their own variants rather than
- * as keys this one grows. It is **not** the credential's payload — the payload is sealed and
- * comes back open only on the model-call path — and nothing secret may ever be put in it. The
- * whole point of a dedicated object is that the values are chosen for display: a base URL's
- * *host*, never the URL (whose path is the user's and may name a resource), and never any part
- * of a key.
+ * so Bedrock's `{ region }`, Vertex's `{ email, project, location }` and this type's host arrive
+ * as their own variants rather than as keys one map grows. It is **not** the credential's
+ * payload — the payload is sealed and comes back open only on the model-call path — and nothing
+ * secret may ever be put in it. The whole point of a dedicated object is that the values are
+ * chosen for display: a base URL's *host*, never the URL (whose path is the user's and may name
+ * a resource), and never any part of a key.
  */
 export const OpenAICompatibleCredentialDetailsSchema = z.object({
   /**
@@ -75,13 +77,48 @@ export type OpenAICompatibleCredentialDetails = z.infer<
 >
 
 /**
+ * The public facts an Amazon Bedrock credential publishes (epic #245, A3c): its **region**.
+ *
+ * A Bedrock request is addressed by region, and one account's keys in one region is one
+ * credential — so `last4` alone leaves two Bedrock rows indistinguishable. The region is not a
+ * secret and is what a list shows (`BEDROCK_REGIONS` is the vocabulary the request validates
+ * against; a `details` read back is a string, the stored value).
+ */
+export const BedrockCredentialDetailsSchema = z.object({
+  region: z.string().min(1),
+})
+
+export type BedrockCredentialDetails = z.infer<typeof BedrockCredentialDetailsSchema>
+
+/**
+ * The public facts a Google Vertex credential publishes (epic #245, A3d): the service-account
+ * **email**, the **project** and the **location**.
+ *
+ * None of the three is a secret, and each is what tells two Vertex credentials apart — one
+ * service account may serve several projects, and one project several regions. `last4` is the
+ * private key **id**'s last four characters, an identifier Google prints beside the account, and
+ * never any part of the private key: the key itself stays inside the sealed payload.
+ */
+export const VertexCredentialDetailsSchema = z.object({
+  /** The service account's address, e.g. `vertex@my-project.iam.gserviceaccount.com`. */
+  email: z.string().min(1),
+  /** The Google Cloud project the models run in. */
+  project: z.string().min(1),
+  /** The Vertex AI location, one of {@link VERTEX_LOCATIONS}. */
+  location: z.string().min(1),
+})
+
+export type VertexCredentialDetails = z.infer<typeof VertexCredentialDetailsSchema>
+
+/**
  * Every type's published details, as one union: what a credential store persists and hands back
  * (`UpsertCredentialInput.details`), where which type a value belongs to is the credential's own
  * `type` beside it. The wire — {@link ProviderCredentialSchema} — is where the union is keyed
  * per type; this is the storage-level spelling of the same values. A new type adds its details
  * object to this union when it adds its variant there.
  */
-export type ProviderCredentialDetails = OpenAICompatibleCredentialDetails | BedrockCredentialDetails
+export type ProviderCredentialDetails =
+  OpenAICompatibleCredentialDetails | BedrockCredentialDetails | VertexCredentialDetails
 
 /** The fields every credential's metadata carries, whatever its type. */
 const ProviderCredentialMetadataBaseSchema = z.object({
@@ -127,24 +164,16 @@ export const OpenAICompatibleProviderCredentialMetadataSchema =
     details: OpenAICompatibleCredentialDetailsSchema.optional(),
   })
 
-/**
- * The public facts an Amazon Bedrock credential publishes (epic #245, A3c): its **region**.
- *
- * A Bedrock request is addressed by region, and one account's keys in one region is one
- * credential — so `last4` alone leaves two Bedrock rows indistinguishable. The region is not a
- * secret and is what a list shows (`BEDROCK_REGIONS` is the vocabulary the request validates
- * against; a `details` read back is a string, the stored value).
- */
-export const BedrockCredentialDetailsSchema = z.object({
-  region: z.string().min(1),
-})
-
-export type BedrockCredentialDetails = z.infer<typeof BedrockCredentialDetailsSchema>
-
 /** The `bedrock` metadata, with the region a list may show (#245, A3c). */
 export const BedrockProviderCredentialMetadataSchema = ProviderCredentialMetadataBaseSchema.extend({
   type: z.literal('bedrock'),
   details: BedrockCredentialDetailsSchema.optional(),
+})
+
+/** The `vertex` metadata, with the email, project and location a list may show (#245, A3d). */
+export const VertexProviderCredentialMetadataSchema = ProviderCredentialMetadataBaseSchema.extend({
+  type: z.literal('vertex'),
+  details: VertexCredentialDetailsSchema.optional(),
 })
 
 /**
@@ -156,14 +185,16 @@ export const BedrockProviderCredentialMetadataSchema = ProviderCredentialMetadat
  *
  * A **discriminated union on `type`**: each type carries exactly the public facts it publishes,
  * so `details` is typed for the type that has it — a base-URL host on a custom credential, a
- * region on a Bedrock one — and a type with none carries no `details` key at all. That is what
- * keeps the JSON of the types that existed before this field byte-for-byte unchanged.
+ * region on a Bedrock one, the email, project and location on a Vertex one — and a type with
+ * none carries no `details` key at all. That is what keeps the JSON of the types that existed
+ * before this field byte-for-byte unchanged.
  */
 export const ProviderCredentialSchema = z.discriminatedUnion('type', [
   ApiKeyProviderCredentialMetadataSchema,
   AzureOpenAIProviderCredentialMetadataSchema,
   OpenAICompatibleProviderCredentialMetadataSchema,
   BedrockProviderCredentialMetadataSchema,
+  VertexProviderCredentialMetadataSchema,
 ])
 
 export type ProviderCredential = z.infer<typeof ProviderCredentialSchema>
@@ -319,6 +350,182 @@ export const BedrockCredentialSchema = z.object({
 export type BedrockCredential = z.infer<typeof BedrockCredentialSchema>
 
 /**
+ * The service-account key a Google Vertex credential needs, as the JSON document Google hands
+ * out (epic #245, A3d, decision M4): a user downloads it from the service account's Keys page
+ * and pastes or uploads it whole. Workload identity federation is deliberately not supported.
+ *
+ * Only the five fields below are read — the ones that say what the document is and what a
+ * request needs — and the document is otherwise carried through untouched, so a field Google
+ * adds (or a user's own metadata) survives a save rather than being stripped by this schema.
+ */
+export interface ServiceAccountKey {
+  /** Always `service_account`; the check that rejects a document that is not one. */
+  readonly type: 'service_account'
+  /** The project the key belongs to. The credential's `project` defaults from this. */
+  readonly project_id: string
+  /** The key's own id. Not a secret, and what `last4` is taken from. */
+  readonly private_key_id: string
+  /** The PEM private key. Never returned, logged or echoed anywhere. */
+  readonly private_key: string
+  /** The service account's address, e.g. `vertex@my-project.iam.gserviceaccount.com`. */
+  readonly client_email: string
+}
+
+/** The fields {@link ServiceAccountKey} requires, in the order an error message lists them. */
+const SERVICE_ACCOUNT_FIELDS = [
+  'project_id',
+  'private_key_id',
+  'private_key',
+  'client_email',
+] as const
+
+/**
+ * The service-account key in `value` — the JSON text Google's console hands out — or `null`
+ * when it is not one.
+ *
+ * The check is a real one rather than a look at the file name: the document must parse, must
+ * say `type: service_account`, and must carry the fields a request needs. It is what the
+ * protocol validates a `vertex` payload with, and the server parses the same document again
+ * when it turns the payload into a credential; the one parser is what keeps the two from
+ * disagreeing about what a service-account key is.
+ */
+export function parseServiceAccountKey(value: string): ServiceAccountKey | null {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(value)
+  } catch {
+    return null
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return null
+  }
+  const document = parsed as Record<string, unknown>
+  if (document.type !== 'service_account') {
+    return null
+  }
+  for (const field of SERVICE_ACCOUNT_FIELDS) {
+    const value = document[field]
+    if (typeof value !== 'string' || value.trim().length === 0) {
+      return null
+    }
+  }
+  return {
+    type: 'service_account',
+    project_id: document.project_id as string,
+    private_key_id: document.private_key_id as string,
+    private_key: document.private_key as string,
+    client_email: document.client_email as string,
+  }
+}
+
+/** Whether `value` is a service-account key — what a `vertex` payload's JSON is checked with. */
+export function isServiceAccountKey(value: string): boolean {
+  return parseServiceAccountKey(value) !== null
+}
+
+/**
+ * The Google Cloud regions a Vertex credential may name.
+ *
+ * The location is not free text because it is not only a label: it is the **host** every
+ * request goes to (`<location>-aiplatform.googleapis.com`), so a typo or an invented region
+ * would be a credential that saves and then cannot make one request. The list is Google's
+ * published set of Vertex AI locations, `global` included — the endpoint for models that are
+ * served from a global host rather than a region.
+ */
+export const VERTEX_LOCATIONS = [
+  'global',
+  'us-central1',
+  'us-east1',
+  'us-east4',
+  'us-east5',
+  'us-south1',
+  'us-west1',
+  'us-west4',
+  'northamerica-northeast1',
+  'southamerica-east1',
+  'europe-central2',
+  'europe-north1',
+  'europe-southwest1',
+  'europe-west1',
+  'europe-west2',
+  'europe-west3',
+  'europe-west4',
+  'europe-west6',
+  'europe-west8',
+  'europe-west9',
+  'asia-east1',
+  'asia-east2',
+  'asia-northeast1',
+  'asia-northeast2',
+  'asia-northeast3',
+  'asia-south1',
+  'asia-south2',
+  'asia-southeast1',
+  'asia-southeast2',
+  'australia-southeast1',
+  'australia-southeast2',
+  'me-central1',
+  'me-central2',
+  'me-west1',
+  'africa-south1',
+] as const
+
+/** A region {@link VERTEX_LOCATIONS} knows. */
+export type VertexLocation = (typeof VERTEX_LOCATIONS)[number]
+
+/**
+ * A Google Cloud **project id**: lowercase, six to thirty characters with a letter at each end.
+ *
+ * Google's own rule, checked here so a typo is a 400 next to the field rather than a 403 from
+ * Vertex on save. A project *number* is not accepted: the key's own `project_id` is an id, and
+ * the document the reader pasted carries the one they mean.
+ */
+const GCP_PROJECT_ID_PATTERN = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/
+
+/**
+ * The `vertex` form of {@link PutProviderCredentialRequestSchema} (epic #245, A3d).
+ *
+ * Vertex AI authenticates with a Google Cloud **service-account key**: the JSON document the
+ * console hands out, which carries the private key that signs a short-lived OAuth token. The
+ * fields are:
+ *
+ * - `service_account` — that document, **as text**, exactly as it was pasted or uploaded. It is
+ *   sealed whole (the server never re-serialises it into a different shape) and handed whole to
+ *   the client library, which is why this is a string and not a modelled object: the document
+ *   is Google's, not this protocol's.
+ * - `project` — the project the models are run in, and the one the save-time check lists
+ *   publisher models from. It defaults, in the forms, to the document's own `project_id`; a
+ *   service account with access to several projects may name another.
+ * - `location` — one of {@link VERTEX_LOCATIONS}. Google has no endpoint that lists regions, so
+ *   the list above is the check, and the host is derived from the value rather than typed.
+ *
+ * `gcp_service_account` is deliberately **not** a type of its own: this one is a Vertex
+ * credential, and the key is the form its authentication takes. Workload identity federation,
+ * an ADC-only setup and a bare project id are all refused — decision M4, and the reason is the
+ * same one that makes this protocol carry the key rather than read it from the environment: the
+ * server runs on GCP, so an ADC fallback would silently run a user's chat on openharness's own
+ * service account.
+ */
+export const VertexCredentialSchema = z.object({
+  type: z.literal('vertex'),
+  /** The service-account key JSON, as text. Write-only: never returned, logged or echoed. */
+  service_account: z.string().refine(isServiceAccountKey, {
+    message:
+      'the service account must be the JSON key file Google Cloud issued for a service ' +
+      'account (its `type` is `service_account` and it carries the key); download one from ' +
+      "the service account's Keys page",
+  }),
+  /** The Google Cloud project the models run in. */
+  project: z.string().refine((value) => GCP_PROJECT_ID_PATTERN.test(value), {
+    message: 'the project must be a Google Cloud project id, e.g. `my-project-123456`',
+  }),
+  /** The Vertex AI location; the host every request goes to is derived from it. */
+  location: z.enum(VERTEX_LOCATIONS),
+})
+
+export type VertexCredential = z.infer<typeof VertexCredentialSchema>
+
+/**
  * Body of `PUT /v1/provider-credentials/{name}`. Response: {@link ProviderCredentialSchema}.
  *
  * A discriminated union on `type`. The path's `name` is the credential's name — the provider
@@ -334,21 +541,24 @@ export const PutProviderCredentialRequestSchema = z.discriminatedUnion('type', [
   AzureOpenAICredentialSchema,
   OpenAICompatibleCredentialSchema,
   BedrockCredentialSchema,
+  VertexCredentialSchema,
 ])
 
 export type PutProviderCredentialRequest = z.infer<typeof PutProviderCredentialRequestSchema>
 
 /**
  * The {@link ProviderCredentialDetails} a PUT body's type publishes, or `undefined` for a type
- * with none (#249, A3b).
+ * with none (epic #245, A3b).
  *
  * This is the whole mapping from "what a user saved" to "what the metadata may show", and it
  * lives here — beside the schemas — because two sides must agree on it: the server derives a
  * credential's stored `details` from the body it seals, and a client that fakes the server
  * (the web app's and the TUI's `@openharness/client/testing`) must produce the same answer.
  * Only facts safe to publish are read out — a custom base URL's **host**, never its path and
- * never any part of a key, and a Bedrock credential's **region**, which rides on the row's
- * `details` as `{ region }` and never the keys beside it.
+ * never any part of a key; a Bedrock credential's **region**; and a Vertex credential's
+ * service-account **email**, **project** and **location**, read through
+ * {@link parseServiceAccountKey} so the email comes from the document that was sealed and never
+ * from a second parse. No part of a private key is ever returned, logged or echoed.
  */
 export function credentialDetails(
   body: PutProviderCredentialRequest,
@@ -358,6 +568,15 @@ export function credentialDetails(
   }
   if (body.type === 'bedrock') {
     return { region: body.region }
+  }
+  if (body.type === 'vertex') {
+    // The schema refined `service_account` with `isServiceAccountKey`, so this parse succeeds;
+    // a body that somehow reached here without one contributes no facts rather than throwing.
+    const key = parseServiceAccountKey(body.service_account)
+    if (key === null) {
+      return undefined
+    }
+    return { email: key.client_email, project: body.project, location: body.location }
   }
   return undefined
 }

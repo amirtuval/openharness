@@ -1,7 +1,7 @@
 import { credentialUpsert, sealCredential } from '@openharness/server'
 import { createPostgresCredentialStore } from '@openharness/session/postgres'
 import { createVault, envKeyProvider } from '@openharness/vault'
-import type { BedrockRegion, ProviderCredential } from '@openharness/protocol'
+import type { BedrockRegion, ProviderCredential, VertexLocation } from '@openharness/protocol'
 
 import type { E2eDatabase } from './database'
 import { E2E_SECRETS_KEY } from './server'
@@ -166,12 +166,52 @@ export async function seedBedrockCredential(
     ...(input.sessionToken === undefined ? {} : { session_token: input.sessionToken }),
     region: input.region,
   }
-  const sealed = await sealCredential(e2eVault(), { userId: input.userId, name: input.name, body })
+  return await writeCredential(database, input, body)
+}
+
+/**
+ * Store a sealed **Google Vertex** credential, the way a `PUT` of that payload would.
+ *
+ * Same reasoning as {@link seedAzureCredential}: the save-time check is a real call to Google,
+ * so a suite that runs offline seeds the row instead — and the catalogue, which answers from
+ * the vendored models.dev snapshot and dials nothing, is what the tests using this drive.
+ */
+export async function seedVertexCredential(
+  database: E2eDatabase,
+  input: {
+    readonly userId: string
+    readonly name: string
+    readonly serviceAccount: string
+    readonly project: string
+    /** One of the protocol's `VERTEX_LOCATIONS`; the type is what the payload's union holds. */
+    readonly location: VertexLocation
+  },
+): Promise<ProviderCredential> {
+  const body = {
+    type: 'vertex' as const,
+    service_account: input.serviceAccount,
+    project: input.project,
+    location: input.location,
+  }
+  return await writeCredential(database, input, body)
+}
+
+/** Seal a body under its owner and name, and write the row the route would have written. */
+async function writeCredential(
+  database: E2eDatabase,
+  key: { readonly userId: string; readonly name: string },
+  body: Parameters<typeof sealCredential>[1]['body'],
+): Promise<ProviderCredential> {
+  const sealed = await sealCredential(e2eVault(), {
+    userId: key.userId,
+    name: key.name,
+    body,
+  })
   const store = createPostgresCredentialStore({ connectionString: database.url })
   try {
     return await store.upsert(
       credentialUpsert(
-        { userId: input.userId, name: input.name, body },
+        { userId: key.userId, name: key.name, body },
         sealed,
         new Date().toISOString(),
       ),

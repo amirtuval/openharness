@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest'
 import {
   CREDENTIAL_TARGETS,
   PROVIDERS,
+  credentialFacts,
   credentialDisplayName,
   providerInfo,
   providerName,
@@ -37,6 +38,18 @@ const REPRESENTATIVE_BODIES: Readonly<
     type: 'openai_compatible',
     base_url: 'https://x.example.com/v1',
     api_key: 'k',
+  },
+  vertex: {
+    type: 'vertex',
+    service_account: JSON.stringify({
+      type: 'service_account',
+      project_id: 'openharness-test',
+      private_key_id: 'k',
+      private_key: 'pem',
+      client_email: 'runner@openharness-test.iam.gserviceaccount.com',
+    }),
+    project: 'openharness-test',
+    location: 'us-central1',
   },
 }
 
@@ -92,10 +105,11 @@ describe('CREDENTIAL_TARGETS', () => {
       'azure',
       'custom',
       'bedrock',
+      'vertex',
     ])
     expect(
       CREDENTIAL_TARGETS.filter((target) => target.named).map((target) => target.credential),
-    ).toEqual(['azure_openai', 'openai_compatible', 'bedrock'])
+    ).toEqual(['azure_openai', 'openai_compatible', 'bedrock', 'vertex'])
   })
 
   it('gives every target what a tile and a form need', () => {
@@ -127,7 +141,37 @@ describe('CREDENTIAL_TARGETS', () => {
       'azure_openai',
       'bedrock',
       'openai_compatible',
+      'vertex',
     ])
+  })
+})
+
+describe('credentialFacts', () => {
+  it('answers a Bedrock credential’s region and a Vertex one’s email, project and location', () => {
+    expect(credentialFacts({ type: 'bedrock', details: { region: 'eu-west-1' } })).toEqual([
+      'eu-west-1',
+    ])
+    expect(
+      credentialFacts({
+        type: 'vertex',
+        details: {
+          email: 'vertex-runner@openharness-vertex.iam.gserviceaccount.com',
+          project: 'openharness-vertex',
+          location: 'europe-west4',
+        },
+      }),
+    ).toEqual([
+      'vertex-runner@openharness-vertex.iam.gserviceaccount.com',
+      'openharness-vertex',
+      'europe-west4',
+    ])
+  })
+
+  it('answers nothing for a type with none, and nothing for facts a credential does not carry', () => {
+    expect(credentialFacts({ type: 'api_key' })).toEqual([])
+    expect(credentialFacts({ type: 'azure_openai' })).toEqual([])
+    // A `details` the server filled in for another type's shape is not this type's listing.
+    expect(credentialFacts({ type: 'api_key', details: { region: 'eu-west-1' } })).toEqual([])
   })
 })
 

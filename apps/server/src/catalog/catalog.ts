@@ -33,6 +33,7 @@ import type { Vault } from '@openharness/vault'
 import {
   BEDROCK_FOUNDATION_MODELS_PATH,
   bedrockControlPlaneUrl,
+  isVertexModelId,
   openAICompatibleBaseUrl,
   redactSecret,
   redactSecrets,
@@ -222,7 +223,9 @@ export class ModelCatalog {
           ? await this.openAICompatibleCatalog(input.userId, input.credential.name)
           : input.credential.type === 'bedrock'
             ? await this.bedrockCatalog(input.userId, input.credential.name)
-            : await this.fetchProvider(input.userId, input.credential.name)
+            : input.credential.type === 'vertex'
+              ? await this.vertexCatalog(input.userId, input.credential.name)
+              : await this.fetchProvider(input.userId, input.credential.name)
     this.cache.set(key, catalog, input.now)
     return catalog
   }
@@ -483,6 +486,52 @@ export class ModelCatalog {
   /** The snapshot key a Bedrock credential's models are filed under (models.dev's spelling). */
   private bedrockRegistryKey(): string {
     return credentialTypeInfo('bedrock')?.modelsDevKey ?? 'bedrock'
+  }
+
+  /**
+   * A Vertex credential's models: the Vertex entries of the registry the brain can build
+   * (epic #245, A3d).
+   *
+   * Vertex serves Google's and Anthropic's models from the same credential, and models.dev
+   * files both under `google-vertex`, so the registry entries **are** the publisher catalogue —
+   * each addressed as `<name>/<model>`, which is the id a session runs. Listing them from the
+   * registry rather than from the project costs no network call, needs no OAuth token at
+   * catalogue time, and carries the price and the context window that models.dev publishes;
+   * the save-time check is what proved the credential can actually reach its project.
+   *
+   * The registry's Vertex entry carries more than a request can run — Gemini's image, speech
+   * and embedding models, and the MaaS models Google resells — so two rules narrow it, in the
+   * places each belongs: `isVertexModelId` (the brain's, and the same rule its factory builds
+   * clients by) keeps the models that have a client here, and the catalogue's own chat filter
+   * keeps the non-chat ones out, exactly as it does for every provider.
+   *
+   * The status is `ok`, as it is for Azure: reading the credential succeeded, and this list is
+   * the answer rather than a stand-in for a failed call. `fetched_at` is when it was read.
+   */
+  private async vertexCatalog(userId: string, name: string): Promise<CachedProviderCatalog> {
+    const stored = await this.credentials.get({ userId, name })
+    if (stored === null) {
+      return this.registryFallbackFor(name, `the stored ${name} credential could not be read`)
+    }
+    const body = await openCredential(this.vault, { userId, name, sealed: stored.sealed })
+    if (body === null || body.type !== 'vertex') {
+      return this.registryFallbackFor(name, `the stored ${name} credential could not be opened`)
+    }
+    const models = dedupe(
+      this.vertexRegistry()
+        .filter(
+          (model) =>
+            isVertexModelId(model.id) && isChatModel({ rawId: model.id, registryChat: model.chat }),
+        )
+        .map((model) => entryOf(name, { id: model.id }, model, 'registry')),
+    )
+    return { status: 'ok', fetchedAt: this.now().toISOString(), message: null, models }
+  }
+
+  /** The registry's Vertex entries: what models.dev files under the type's models.dev key. */
+  private vertexRegistry(): readonly RegistryModel[] {
+    const key = credentialTypeInfo('vertex')?.modelsDevKey
+    return key === undefined ? [] : this.registry.models(key)
   }
 
   /**

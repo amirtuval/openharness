@@ -3,12 +3,16 @@ import { ArrowUpRight } from 'lucide-react'
 import {
   BEDROCK_REGIONS,
   DEFAULT_BEDROCK_REGION,
+  VERTEX_LOCATIONS,
   isBedrockRegion,
   isReservedCredentialName,
+  isServiceAccountKey,
   isValidCredentialName,
+  parseServiceAccountKey,
   type ProviderCredential,
   type ProviderCredentialType,
   type PutProviderCredentialRequest,
+  type VertexLocation,
 } from '@openharness/protocol'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
@@ -18,6 +22,7 @@ import { ErrorBanner } from '../chat/error-banner'
 import { Button } from '../ui/button'
 import { Input } from '../ui/input'
 import { Label } from '../ui/label'
+import { Textarea } from '../ui/textarea'
 import { FreeTierChip } from './free-tier-chip'
 
 /**
@@ -65,6 +70,23 @@ interface CredentialField {
    * (Bedrock's session token) accept and an empty one does not.
    */
   readonly optional?: boolean
+  /** A field a reader pastes or uploads a whole document into: several lines, not one. */
+  readonly multiline?: boolean
+  /** Offer a file picker that reads a file into this field — a key document to upload. */
+  readonly upload?: boolean
+  /** Why what is typed cannot be used, or `null` — shown under the field, and it holds Save. */
+  readonly validate?: (value: string) => string | null
+  /**
+   * A field a whole service-account **key document** goes into (Vertex, #251).
+   *
+   * It is the one field this form draws unmasked on purpose — a reader has to be able to check
+   * what they pasted — so once what is in it parses as a service-account key the field is
+   * **replaced by a summary** of the document's public facts (the client email, the project id
+   * and the key id) and a Replace action that clears it. Nothing of the document, the private
+   * key above all, is ever drawn after it parses: a screen share or a screenshot of a filled
+   * form must not be able to carry key material.
+   */
+  readonly keyDocument?: boolean
 }
 
 /** One credential type's form: the fields, and how they become a request body. */
@@ -72,6 +94,18 @@ interface CredentialForm {
   readonly fields: readonly CredentialField[]
   /** The body `PUT /v1/provider-credentials/{name}` takes. */
   readonly build: (values: Readonly<Record<string, string>>) => PutProviderCredentialRequest
+  /**
+   * The fields a change to `changed` fills in, for a form where one field defaults another.
+   *
+   * A Vertex credential's project defaults from the key document the reader pasted, and this is
+   * where the form says so. It answers **only the fields it fills** — anything already typed is
+   * the reader's and is never overwritten — and it is applied when the named field changes, not
+   * on every keystroke, so clearing a field to retype it does not put the default back.
+   */
+  readonly derive?: (
+    changed: string,
+    values: Readonly<Record<string, string>>,
+  ) => Readonly<Record<string, string>>
 }
 
 /** The values key the credential-name input uses; not a field of any payload. */
@@ -102,7 +136,10 @@ function splitDeployments(value: string): string[] {
  * endpoint's own `/models` list is what becomes the models, so there is nothing else to type.
  * `bedrock` (#245, A3c) collects the region (a dropdown, because the region is spliced
  * into an AWS hostname and free text could only name a host that does not exist) and the two
- * IAM keys, plus the session token temporary credentials carry when there is one.
+ * IAM keys, plus the session token temporary credentials carry when there is one. `vertex`
+ * (#245, A3d) collects the service-account key document — pasted or uploaded — with the project
+ * and the location it runs in; the document collapses to a summary once it parses, so no part of
+ * a private key stays on screen.
  */
 const CREDENTIAL_FORMS: Record<ProviderCredentialType, CredentialForm> = {
   api_key: {
@@ -221,6 +258,58 @@ const CREDENTIAL_FORMS: Record<ProviderCredentialType, CredentialForm> = {
       }
     },
   },
+  vertex: {
+    fields: [
+      {
+        name: 'service_account',
+        label: 'Service account key',
+        placeholder: '{ "type": "service_account", … }',
+        help: 'The JSON key file Google Cloud issued for a service account, pasted or uploaded whole. It is sent once, stored encrypted on the server, and never shown again.',
+        multiline: true,
+        upload: true,
+        keyDocument: true,
+        validate: (value) =>
+          value.trim() === '' || isServiceAccountKey(value)
+            ? null
+            : 'That is not a service-account key file. Download one from the service account’s Keys page.',
+      },
+      {
+        name: 'project',
+        label: 'Project ID',
+        // Shown as typed: a project id is not a secret, and the reader has to be able to check
+        // what the document defaulted it to (and edit it) — the default for every field is a
+        // masked one, so the ones that are not secrets say so.
+        kind: 'text',
+        placeholder: 'my-project-123456',
+        // The document carries a project already, and `derive` fills this in from it — a
+        // service account with access to several projects may name another.
+        help: 'The Google Cloud project the models run in. Defaults to the project the key belongs to.',
+      },
+      {
+        name: 'location',
+        label: 'Location',
+        kind: 'select',
+        options: VERTEX_LOCATIONS,
+        placeholder: 'us-central1',
+        help: 'The Vertex AI region the models run in — the location is the host every request goes to. The key’s project page lists the regions it serves.',
+      },
+    ],
+    build: (values): PutProviderCredentialRequest => ({
+      type: 'vertex',
+      service_account: values.service_account ?? '',
+      project: (values.project ?? '').trim(),
+      // The select offers the protocol's locations and nothing else, so this is the only value
+      // it can hold; an empty one is refused before the request is made.
+      location: (values.location ?? '') as VertexLocation,
+    }),
+    derive: (changed, values): Record<string, string> => {
+      if (changed !== 'service_account' || (values.project ?? '').trim() !== '') {
+        return {}
+      }
+      const key = parseServiceAccountKey(values.service_account ?? '')
+      return key === null ? {} : { project: key.project_id }
+    },
+  },
 }
 
 /**
@@ -304,6 +393,28 @@ export function ProviderKeyForm({
   const firstFieldRef = useCallback((element: HTMLInputElement | HTMLSelectElement | null) => {
     inputRef.current = element
   }, [])
+  // A field that is a document (Vertex's key) is a textarea rather than an input, so the two
+  // elements keep a ref each rather than one union-typed one.
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+
+  /**
+   * Apply one field's new value, and then whatever the change defaults.
+   *
+   * `derive` is how a form says one field fills another in — Vertex's project, from the key
+   * document just pasted — and it runs here rather than on every render, so a field the reader
+   * clears stays cleared.
+   */
+  const change = (field: string, value: string): void => {
+    setValues((current) => {
+      const next = { ...current, [field]: value }
+      return { ...next, ...(form.derive?.(field, next) ?? {}) }
+    })
+  }
+
+  /** Read an uploaded file into a field: the same value pasting its contents would give. */
+  const readFile = async (file: File, field: string): Promise<void> => {
+    change(field, await file.text())
+  }
 
   // A form for another target — the dialog swaps it under the form — starts empty, so one
   // credential's secret can never be sent for another.
@@ -319,7 +430,7 @@ export function ProviderKeyForm({
 
   useEffect(() => {
     if (autoFocus) {
-      inputRef.current?.focus()
+      ;(inputRef.current ?? textareaRef.current)?.focus()
     }
   }, [autoFocus, target.name])
 
@@ -332,11 +443,14 @@ export function ProviderKeyForm({
   // filled before a save is offered, so the reader is not sent a request the provider will
   // refuse over a field the form could have shown as missing. A name the form asks for counts
   // as filled only when it has been answered, and it is not one of `form.fields`.
+  const fieldErrorOf = (field: CredentialField): string | null =>
+    field.validate?.(values[field.name] ?? '') ?? null
   const filled =
     (!asksForName || typedName !== '') &&
     form.fields.every(
       (field) => field.optional === true || (values[field.name] ?? '').trim() !== '',
     ) &&
+    form.fields.every((field) => fieldErrorOf(field) === null) &&
     nameError === null
   const replacing = name !== '' && storedNames.includes(name)
 
@@ -430,58 +544,132 @@ export function ProviderKeyForm({
             {nameError ??
               `What this credential is called. Its models are named after it — ${
                 typedName === '' ? target.name : typedName
-              }/${modelIdHint}.`}
+              }/<${modelIdHint}>.`}
           </p>
         </div>
       ) : null}
 
-      {form.fields.map((field, index) => (
-        <div key={field.name} className="flex flex-col gap-1.5">
-          <Label htmlFor={`provider-${field.name}`}>{field.label}</Label>
-          {field.kind === 'select' ? (
-            // A native `<select>`: the list is short and fixed, and `index.css` sets
-            // `color-scheme` per theme, so its popup follows Light/Dim/Dark like the rest of
-            // the page. (The model picker cannot be one — its list is long, searchable and
-            // live — which is why that one is the app's own listbox.)
-            <select
-              id={`provider-${field.name}`}
-              aria-label={field.label}
-              ref={index === 0 && !asksForName ? firstFieldRef : undefined}
-              className={SELECT_CLASS}
-              value={values[field.name] ?? ''}
-              onChange={(event) => {
-                setValues((current) => ({ ...current, [field.name]: event.target.value }))
-              }}
-            >
-              {(field.options ?? []).map((option) => (
-                <option key={option} value={option}>
-                  {option}
-                </option>
-              ))}
-            </select>
-          ) : (
-            <Input
-              id={`provider-${field.name}`}
-              ref={index === 0 && !asksForName ? firstFieldRef : undefined}
-              type={
-                field.kind === 'text' || field.name === 'endpoint' || field.name === 'deployments'
-                  ? 'text'
-                  : 'password'
-              }
-              value={values[field.name] ?? ''}
-              autoComplete="off"
-              spellCheck={false}
-              placeholder={
-                field.name === 'api_key' ? (target.keyHint ?? field.placeholder) : field.placeholder
-              }
-              onChange={(event) => {
-                setValues((current) => ({ ...current, [field.name]: event.target.value }))
-              }}
-            />
-          )}
-          <p className="text-xs text-muted-foreground">{field.help}</p>
-        </div>
-      ))}
+      {form.fields.map((field, index) => {
+        const fieldError = fieldErrorOf(field)
+        // A service-account document is replaced by its summary the moment it parses (#251):
+        // the field is the one thing drawn unmasked here, and a private key must not stay on a
+        // screen someone may be sharing. Only `keyDocument` fields do this, and they are the
+        // only ones whose value is a whole document.
+        const key =
+          field.keyDocument === true ? parseServiceAccountKey(values[field.name] ?? '') : null
+        return (
+          <div key={field.name} className="flex flex-col gap-1.5">
+            <Label htmlFor={`provider-${field.name}`}>{field.label}</Label>
+            {key !== null ? (
+              // The summary carries the document's **public** facts and nothing else. The
+              // private key, and the rest of the document, are not rendered, logged or kept
+              // by this component after the parse.
+              <div
+                data-slot="key-document-summary"
+                className="flex flex-col gap-1 rounded-md border bg-muted/40 px-3 py-2"
+              >
+                <p className="font-mono text-xs break-all">{key.client_email}</p>
+                <p className="text-xs text-muted-foreground">
+                  project {key.project_id} · key {key.private_key_id}
+                </p>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="self-start"
+                  onClick={() => {
+                    change(field.name, '')
+                  }}
+                >
+                  Replace
+                </Button>
+              </div>
+            ) : field.kind === 'select' ? (
+              // A native `<select>`: the list is short and fixed, and `index.css` sets
+              // `color-scheme` per theme, so its popup follows Light/Dim/Dark like the rest of
+              // the page. (The model picker cannot be one — its list is long, searchable and
+              // live — which is why that one is the app's own listbox.)
+              <select
+                id={`provider-${field.name}`}
+                aria-label={field.label}
+                ref={index === 0 && !asksForName ? firstFieldRef : undefined}
+                className={SELECT_CLASS}
+                value={values[field.name] ?? ''}
+                onChange={(event) => {
+                  change(field.name, event.target.value)
+                }}
+              >
+                {/* A field that may start empty — Vertex's location, unlike Bedrock's region,
+                    which is never empty — offers an unselected row so the reader must choose
+                    rather than silently saving the first option. */}
+                {field.defaultValue === undefined ? (
+                  <option value="">{`Choose ${field.label.toLowerCase()}…`}</option>
+                ) : null}
+                {(field.options ?? []).map((option) => (
+                  <option key={option} value={option}>
+                    {option}
+                  </option>
+                ))}
+              </select>
+            ) : field.multiline === true ? (
+              <Textarea
+                id={`provider-${field.name}`}
+                ref={index === 0 && !asksForName ? textareaRef : undefined}
+                aria-label={field.label}
+                // `field-sizing-fixed`, against the primitive's `field-sizing-content`: a pasted
+                // key document is one very long line (its PEM's newlines are escapes), and a box
+                // that grows to fit it would push the dialog wider than the screen. The box keeps
+                // its rows and scrolls instead.
+                className="field-sizing-fixed max-h-48 min-h-32 overflow-auto font-mono text-xs"
+                rows={6}
+                value={values[field.name] ?? ''}
+                autoComplete="off"
+                spellCheck={false}
+                placeholder={field.placeholder}
+                onChange={(event) => {
+                  change(field.name, event.target.value)
+                }}
+              />
+            ) : (
+              <Input
+                id={`provider-${field.name}`}
+                ref={index === 0 && !asksForName ? firstFieldRef : undefined}
+                type={
+                  field.kind === 'text' || field.name === 'endpoint' || field.name === 'deployments'
+                    ? 'text'
+                    : 'password'
+                }
+                value={values[field.name] ?? ''}
+                autoComplete="off"
+                spellCheck={false}
+                placeholder={
+                  field.name === 'api_key'
+                    ? (target.keyHint ?? field.placeholder)
+                    : field.placeholder
+                }
+                onChange={(event) => {
+                  change(field.name, event.target.value)
+                }}
+              />
+            )}
+            {field.upload === true && key === null ? (
+              <Input
+                type="file"
+                aria-label={`Upload ${field.label}`}
+                accept=".json,application/json"
+                className="text-xs"
+                onChange={(event) => {
+                  const file = event.target.files?.[0]
+                  if (file !== undefined) {
+                    void readFile(file, field.name)
+                  }
+                }}
+              />
+            ) : null}
+            <p className="text-xs text-muted-foreground">{fieldError ?? field.help}</p>
+          </div>
+        )
+      })}
 
       <div className="flex items-center gap-2">
         <Button type="submit" className="self-start" disabled={submitting || !filled}>

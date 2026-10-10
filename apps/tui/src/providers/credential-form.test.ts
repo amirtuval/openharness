@@ -17,6 +17,7 @@ describe('CREDENTIAL_FORMS', () => {
       'azure_openai',
       'bedrock',
       'openai_compatible',
+      'vertex',
     ])
   })
 
@@ -131,6 +132,97 @@ describe('the openai_compatible form', () => {
     const body = CREDENTIAL_FORMS.openai_compatible.build({})
     expect(body).toEqual({ type: 'openai_compatible', base_url: '' })
     expect(PutProviderCredentialRequestSchema.safeParse(body).success).toBe(false)
+  })
+})
+
+describe('the vertex form', () => {
+  it('asks for the key file’s path, the project and the location', () => {
+    const form = CREDENTIAL_FORMS.vertex
+    expect(form.fields.map((field) => field.name)).toEqual([
+      'service_account',
+      'project',
+      'location',
+    ])
+    // The document is read from the path the reader gives, so the flow — not the reader — puts
+    // a private key through a terminal.
+    expect(form.fields.filter((field) => field.file).map((field) => field.name)).toEqual([
+      'service_account',
+    ])
+    expect(form.fields.every((field) => !field.secret)).toBe(true)
+  })
+
+  it('opens the project prompt with the key document’s own project', () => {
+    const document = JSON.stringify({
+      type: 'service_account',
+      project_id: 'openharness-vertex',
+      private_key_id: 'k',
+      private_key: 'pem',
+      client_email: 'runner@openharness-vertex.iam.gserviceaccount.com',
+    })
+    const project = CREDENTIAL_FORMS.vertex.fields[1]
+
+    expect(project?.prefill?.({ service_account: document })).toBe('openharness-vertex')
+    // Nothing to read out of anything else: the prompt opens empty.
+    expect(project?.prefill?.({ service_account: 'not json' })).toBe('')
+    expect(project?.prefill?.({})).toBe('')
+  })
+
+  it('builds a vertex body from the answers, project and all', () => {
+    const document = JSON.stringify({
+      type: 'service_account',
+      project_id: 'openharness-vertex',
+      private_key_id: 'k',
+      private_key: 'pem',
+      client_email: 'runner@openharness-vertex.iam.gserviceaccount.com',
+    })
+    expect(
+      CREDENTIAL_FORMS.vertex.build({
+        service_account: document,
+        project: ' another-project-9f3a ',
+        location: 'us-central1',
+      }),
+    ).toEqual({
+      type: 'vertex',
+      service_account: document,
+      project: 'another-project-9f3a',
+      location: 'us-central1',
+    })
+  })
+
+  it('refuses a location outside Google’s list, before a request is made', () => {
+    const location = CREDENTIAL_FORMS.vertex.fields[2]
+    expect(location?.validate?.('us-central1')).toBeNull()
+    expect(location?.validate?.('global')).toBeNull()
+    expect(location?.validate?.('mars-north1')).toMatch(/Vertex location/)
+    expect(location?.validate?.('')).toMatch(/Vertex location/)
+  })
+
+  it('builds a body the protocol accepts, and one it refuses when nothing was filled in', () => {
+    const document = JSON.stringify({
+      type: 'service_account',
+      project_id: 'openharness-vertex',
+      private_key_id: 'k',
+      private_key: 'pem',
+      client_email: 'runner@openharness-vertex.iam.gserviceaccount.com',
+    })
+    const form = CREDENTIAL_FORMS.vertex
+    expect(
+      PutProviderCredentialRequestSchema.safeParse(
+        form.build({
+          service_account: document,
+          project: 'openharness-vertex',
+          location: 'europe-west4',
+        }),
+      ).success,
+    ).toBe(true)
+    // The project prompt opens prefilled, so an empty one is a reader who cleared it — a body
+    // the protocol refuses rather than one this form half-fills.
+    expect(
+      PutProviderCredentialRequestSchema.safeParse(
+        form.build({ service_account: document, location: 'europe-west4' }),
+      ).success,
+    ).toBe(false)
+    expect(PutProviderCredentialRequestSchema.safeParse(form.build({})).success).toBe(false)
   })
 })
 

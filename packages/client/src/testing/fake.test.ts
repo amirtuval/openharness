@@ -1385,6 +1385,48 @@ describe("the fake's authentication", () => {
     )
   })
 
+  it('answers a vertex credential’s metadata the way the server derives it (#245, A3d)', async () => {
+    const fake = createFakeClient()
+    const document = JSON.stringify({
+      type: 'service_account',
+      project_id: 'openharness-vertex',
+      private_key_id: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678',
+      private_key: '-----BEGIN PRIVATE KEY-----\nNOT-A-REAL-KEY\n-----END PRIVATE KEY-----\n',
+      client_email: 'vertex-runner@openharness-vertex.iam.gserviceaccount.com',
+    })
+
+    const stored = await fake.providerCredentials.put('vertex', {
+      type: 'vertex',
+      service_account: document,
+      project: 'openharness-vertex',
+      location: 'europe-west4',
+    })
+
+    // `last4` is the key **id**'s tail, and the listing carries the three facts a reader
+    // needs to tell two credentials apart — neither is any part of the private key.
+    expect(stored).toMatchObject({
+      name: 'vertex',
+      type: 'vertex',
+      last4: '5678',
+      details: {
+        email: 'vertex-runner@openharness-vertex.iam.gserviceaccount.com',
+        project: 'openharness-vertex',
+        location: 'europe-west4',
+      },
+    })
+    expect(JSON.stringify(stored)).not.toContain('NOT-A-REAL-KEY')
+
+    // A document that is not a service-account key is the route's 400, before it is stored.
+    await expect(
+      fake.providerCredentials.put('vertex', {
+        type: 'vertex',
+        service_account: '{}',
+        project: 'openharness-vertex',
+        location: 'europe-west4',
+      }),
+    ).rejects.toMatchObject({ status: 400, type: 'invalid_request_error' })
+  })
+
   it('picks a default model for the first key, and never replaces one (#116, U4)', async () => {
     const fake = createFakeClient({
       models: [

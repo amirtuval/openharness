@@ -8,6 +8,7 @@ import {
   ProviderCredentialSchema,
   PutPreferencesRequestSchema,
   PutProviderCredentialRequestSchema,
+  parseServiceAccountKey,
   SendEventsRequestSchema,
   SessionSchema,
   SessionUsageSchema,
@@ -772,7 +773,8 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       // provider refuses it; a secret with no characters in it fails that call every time,
       // which is the one rejection a test can spell without a provider. A custom
       // OpenAI-compatible credential's key is optional (#249), so an absent or empty one is
-      // **not** a rejection for it.
+      // **not** a rejection for it — and a `vertex` credential has no key field at all, its
+      // identifying half being the service-account key id `credentialSecret` reads.
       if (parsed.data.type !== 'openai_compatible' && credentialSecret(parsed.data).trim() === '') {
         throw new ApiError(422, `The ${name} credential was rejected by the provider.`, {
           type: 'invalid_provider_credential',
@@ -1254,12 +1256,20 @@ function isModelId(id: string): boolean {
  * of (#245, A3c).
  *
  * An `api_key` credential's secret is `api_key`; a Bedrock one's is its access key ID, which
- * is the half of an AWS credential a reader recognises and the only half that is safe to show.
+ * is the half of an AWS credential a reader recognises and the only half that is safe to show;
+ * a `vertex` one's is the service-account **key id**, which identifies the key without being
+ * any part of it (#251) — nothing of the private key is ever echoed, not even four characters.
  * The `api_key` form is the fallback rather than a branch on the literal, so a type this fake
  * does not know still reads as the one-field shape it almost certainly is.
  */
 function credentialSecret(body: PutProviderCredentialRequest): string {
-  return body.type === 'bedrock' ? body.access_key_id : (body.api_key ?? '')
+  if (body.type === 'bedrock') {
+    return body.access_key_id
+  }
+  if (body.type === 'vertex') {
+    return parseServiceAccountKey(body.service_account)?.private_key_id ?? ''
+  }
+  return body.api_key ?? ''
 }
 
 /** Reject the way `fetch` does when the caller has already aborted. */

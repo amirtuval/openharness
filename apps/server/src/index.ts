@@ -236,6 +236,12 @@ export {
   type ValidatableProvider,
 } from './provider-validation'
 export {
+  createVertexTokenProvider,
+  vertexPublisherModelsUrl,
+  vertexTokenProvider,
+  type VertexTokenProvider,
+} from './vertex'
+export {
   SESSION_INVALID_MESSAGE,
   SSE_KEEPALIVE,
   SSE_KEEPALIVE_MS,

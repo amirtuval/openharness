@@ -214,12 +214,13 @@ export interface ProviderCredentialsTable {
    */
   key_provider: string | null
   /**
-   * The non-secret facts that identify the credential within its type (epic #245, A3c), as
-   * the protocol's `ProviderCredentialDetails` — a Bedrock credential's `{ region }`, a custom
-   * endpoint's base-URL host (#249, A3b). `null` on a row written before the column existed
-   * (see `0023_credential_details.sql`) and for a type with nothing to report, which the API
-   * reads as an absent `details`. Never a secret: the sealed blob is the columns above, and
-   * nothing here may be recoverable from one.
+   * The non-secret facts that identify the credential within its type (epic #245, A3b/A3c/A3d),
+   * as the protocol's `ProviderCredentialDetails` — a custom endpoint's base-URL host (#249), a
+   * Bedrock credential's `{ region }` (#250), a Vertex credential's email, project and location
+   * (#251). `null` on a row written before the column existed (see
+   * `0023_credential_details.sql`) and for a type with nothing to report, which the API reads as
+   * an absent `details`. Never a secret: the sealed blob is the columns above, and nothing here
+   * may be recoverable from one.
    */
   details: ProviderCredentialDetails | null
   /** The last four characters of the plaintext, for recognition only. */
@@ -387,7 +388,9 @@ export function credentialMetadataFromRow(row: ProviderCredentialMetadataRow): P
     type: row.type as ProviderCredential['type'],
     name: row.name,
     // A `null` column is an absent `details`, not an empty object: the protocol's field is
-    // optional, and an `api_key` credential reports nothing about itself (epic #245, A3c).
+    // optional, and a credential whose type reports nothing carries no key at all (epic #245,
+    // A3b/A3c/A3d). Copied rather than aliased, so a caller cannot write into what the store
+    // holds — and the in-memory store keeps `undefined` here too, so the two agree.
     ...(row.details === null ? {} : { details: { ...row.details } }),
     last4: row.last4,
     created_at: timestampOf(row.created_at),
