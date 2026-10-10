@@ -18,6 +18,8 @@ import type {
   ProviderCredentialMetadata,
   Session,
   SessionAgent,
+  SessionCompactEvent,
+  SessionCompactionEvent,
   SessionDeletedEvent,
   SessionError,
   SessionErrorEvent,
@@ -592,6 +594,51 @@ export function makeContextSummaryProgress(
     processed_at: fixtureTimestamp(),
     pass: 2,
     passes: 3,
+  }
+  return { ...event, ...overrides }
+}
+
+/**
+ * A stored `session.compact`: the user's `/compact [instructions]` request (epic #277, K8; #283).
+ *
+ * The default carries guidance, which is the interesting shape — a plain `/compact` is the same
+ * builder with `instructions: undefined`. The stored request is followed, in a real log, by the
+ * `session.compaction` that answers it ({@link makeSessionCompaction}).
+ *
+ * @param overrides fields to replace on the event
+ */
+export function makeSessionCompact(
+  overrides: Partial<SessionCompactEvent> = {},
+): SessionCompactEvent {
+  const event: SessionCompactEvent = {
+    id: newEventId(),
+    type: 'session.compact',
+    seq: takeSeq(),
+    processed_at: fixtureTimestamp(),
+    instructions: 'keep the API decisions in detail',
+  }
+  return { ...event, ...overrides }
+}
+
+/**
+ * A stored `session.compaction`: the brain's answer to a manual request (epic #277, K8; #283).
+ *
+ * The default is a successful, guidance-carrying summary — the middle outcome a client shows a
+ * divider for. Override `outcome` for `nothing_to_summarize` (with a `message`) or `failed`.
+ *
+ * @param overrides fields to replace on the event
+ */
+export function makeSessionCompaction(
+  overrides: Partial<SessionCompactionEvent> = {},
+): SessionCompactionEvent {
+  const event: SessionCompactionEvent = {
+    id: newEventId(),
+    type: 'session.compaction',
+    seq: takeSeq(),
+    processed_at: fixtureTimestamp(),
+    outcome: 'summarized',
+    instructions: 'keep the API decisions in detail',
+    summary_seq: 8,
   }
   return { ...event, ...overrides }
 }

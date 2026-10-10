@@ -56,6 +56,8 @@ src/
                         and the real size of the next request (K2)
   summarize.ts          the compaction engine: the trigger, the cut rule, the chunked passes and
                         the summary event (epic #277, C2; #279)
+  manual.ts             the manual half: whether a `/compact [instructions]` request is still
+                        waiting for an answer, read off the log (epic #277, K8; #283)
   model.ts              ModelFactory, credentials, and streaming one request through the AI SDK
   azure-fetch.ts        the Azure endpoint's base URL, and the safeFetch guard a model call goes through
   reasoning.ts          the reasoning effort: per provider, gated by the injected resolver
@@ -94,6 +96,10 @@ emits what that reaches.
 | `OMISSION_MARKER(tokens)`                                                                                                                                                                                                                         | the `[… N tokens omitted …]` a capped item carries where its middle was (K6)                                                                                                                                                                                                                                               |
 | `estimateNextRequestTokens(options)`, `NextRequestSizeOptions`, `ContextSizeBaseline`, `promptTokensOf(usage)`                                                                                                                                    | how big the next request will be (K2): the previous request's real prompt size plus an estimate for what is new, falling back to chars/4 when the previous request cannot be a baseline                                                                                                                                    |
 | `estimateContextSize(events, options)`, `ContextSizeOptions`, `isUsableContextSizeBaseline`, `latestContextSummary(events)`, `capItemText(text, budget)`                                                                                          | the same measurement, taken off a whole log: the baseline request, the text new since it, and — when there is none — the visible history (epic #277, K2; C2). `latestContextSummary` is the summary in force (K1); `capItemText` is the head-and-tail cut K6 applies                                                       |
+| `summarizeContext(options)`, `SummarizeContextOptions`, `SummarizeResult`                                                                                                                                                                         | the compaction engine (epic #277, C2; #279): the trigger, the cut, the passes and the `session.context_summary` it writes — and the `guidance` a manual run folds into the prompt and the `summarySeq` a caller records (K8; #283)                                                                                         |
+| `pendingManualCompaction(events)`, `PendingCompaction`                                                                                                                                                                                            | the manual half (epic #277, K8; #283): the newest `session.compact` no `session.compaction` answers yet, read off the log — what makes `/compact` idempotent while one is pending and lets the turn loop pick one up                                                                                                       |
+| `compactionOutcome(outcome, record)`, `CompactionOutcomeRecord`                                                                                                                                                                                   | the brain's `session.compaction` event: what came of a manual request, echoing the guidance used (#283)                                                                                                                                                                                                                    |
+| `resolveContextCompaction(config)`, `ContextCompactionConfig`, `ResolvedContextCompaction`, `DEFAULT_COMPACTION_THRESHOLD`, `DEFAULT_MAX_SUMMARY_PASSES`                                                                                          | how the engine is configured and the defaults it fills in: the threshold (0.7), the summary model (`null` = the chat's), the pass limit (3), the per-model budgets and output ceilings, and the cut rule                                                                                                                   |
 | `summarizeContext(options)`, `SummarizeContextOptions`, `SummarizeResult`                                                                                                                                                                         | the compaction engine (epic #277, C2; #279): the trigger, the cut, the passes and the `session.context_summary` it writes                                                                                                                                                                                                  |
 | `resolveContextCompaction(config)`, `ContextCompactionConfig`, `ResolvedContextCompaction`, `ContextCompactionResolver`, `ContextCompactionOption`, `DEFAULT_COMPACTION_THRESHOLD`, `DEFAULT_MAX_SUMMARY_PASSES`                                  | how the engine is configured and the defaults it fills in: the threshold (0.7), the summary model (`null` = the chat's), the pass limit (3), the per-model budgets and output ceilings, and the cut rule — and the option a host passes: one config, or a resolver the loop asks per request with the session owner (#282) |
 | `cutAtUserBoundary(items, tailTokens)`, `ContextCutRule`, `ContextCutItem`                                                                                                                                                                        | K12's one replaceable function: where history may be cut — the default keeps a recent tail and never splits a turn (#276 replaces it)                                                                                                                                                                                      |
@@ -164,7 +170,16 @@ LOOP — once per model request
      throws SessionNotFoundError and the turn stops, writing nothing (U5)
   4. no credential for the model's provider ............... MISSING CREDENTIAL (below)
   4b. the id names a provider with no client here .......... UNSUPPORTED PROVIDER (below)
-  4c. the context is over the compaction threshold, and `compaction` is wired
+  4c. a manual compaction is pending, and `compaction` is wired (#283)
+     ...................................................... summarize the older history with
+                                                             `reason: 'manual'` and the request's
+                                                             guidance, at any size (K8), then write
+                                                             the `session.compaction` outcome; the
+                                                             log is re-read. On an idle session this
+                                                             is the whole turn — no model reply of
+                                                             its own, and nothing left to answer goes
+                                                             idle below
+  4d. the context is over the compaction threshold, and `compaction` is wired
      ...................................................... summarize the older history
                                                              (C2, #279): the summary's spans
                                                              and progress events, then the
@@ -449,6 +464,17 @@ compaction is this one, its event is a `session.context_summary`, and nothing is
   preferences (which is what the server passes), an edit applies from the next request on, and
   one user's choices never reach another's chat. What the resolver answers goes through
   `resolveContextCompaction` like any config, so it may leave a field out and take the default.
+- **A manual run is the second trigger** (K8; #283). `./manual`'s `pendingManualCompaction` reads
+  the log for the newest `session.compact` no `session.compaction` answers, and `runTurn` runs the
+  engine with `reason: 'manual'` **regardless of the threshold** — the user asked, so a short chat
+  is attempted too and answers `'skipped'` only when there is genuinely nowhere to cut. The
+  request's `instructions` become `SummarizeContextOptions.guidance`, folded into the
+  summarizer's instructions as the user's own; the base prompt is unchanged, so
+  `SUMMARY_PROMPT_VERSION` stays `context-summary-v1`. `runTurn` writes the `session.compaction`
+  outcome after the run — `summarized` (with `summary_seq`), `nothing_to_summarize` or `failed` —
+  which is both the clear outcome a client shows and what makes the request no longer pending. An
+  idle session is woken by the route's `signal`, runs a turn that answers the request and makes no
+  model reply, and goes idle.
 - **Where to cut is one replaceable function** (K4, K12). `ContextCutRule` answers "where may
   history be cut?", given the visible conversation and how many tokens the tail should keep;
   `cutAtUserBoundary` is the default — the smallest recent tail that reaches a quarter of the
@@ -969,6 +995,12 @@ retries run on an injected `sleep`, the clock is a `TestClock` from
   summarizer failure leaves the chat running with trimming, an overflow compacts and retries
   exactly once, a second overflow ends with the clear `exhausted` error and no third call, and an
   overflow with nowhere to cut fails without a second request.
+- `manual.test.ts` — manual compaction (#283): `pendingManualCompaction` as a rule (nothing,
+  a request pending, an outcome answering it, the newest of two that raced, a new request after
+  an outcome), and the loop's half through `runTurn` — a `/compact [instructions]` answered below
+  the threshold with the guidance in the summarizer's prompt and a `session.compaction
+{ outcome: 'summarized', summary_seq }` stored, a chat too short to cut answered with
+  `nothing_to_summarize` and no model call, and neither run making a chat reply of its own.
 - `errors.test.ts`, `retry.test.ts`, `log.test.ts`, `model.test.ts`,
   `redact.test.ts`, `validate.test.ts` and `index.test.ts` cover the pieces on their own,
   including the branches the loop cannot reach. `errors.test.ts` also covers the wrappers the

@@ -4,6 +4,7 @@ import type {
   ModeId,
   ModelConfig,
   ReasoningEffort,
+  SessionCompactionOutcome,
   SessionId,
   StoredEvent,
   Supersedes,
@@ -18,6 +19,7 @@ import type { ContextStrategy } from './context'
 import { DEFAULT_CONTEXT_STRATEGY, estimateContextSize } from './context'
 import {
   agentMessage,
+  compactionOutcome,
   eventDelta,
   eventStart,
   sessionError,
@@ -41,6 +43,7 @@ import {
   usageByModel,
   withRequestUsage,
 } from './log'
+import { pendingManualCompaction } from './manual'
 import type { ModelFactory, ResolveCredential } from './model'
 import {
   credentialSecrets,
@@ -55,7 +58,7 @@ import { planReasoning, type ReasoningSupportFor, requestedReasoningEffort } fro
 import { redactSecrets } from './redact'
 import type { RetryPolicy } from './retry'
 import { backoffDelay, resolveRetryPolicy } from './retry'
-import type { ContextCompactionOption } from './summarize'
+import type { ContextCompactionOption, SummarizeResult } from './summarize'
 import { resolveContextCompaction, summarizeContext } from './summarize'
 
 /**
@@ -338,7 +341,16 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
   const queued = await store.getPendingUserEvents(sessionId)
   const turnState = await store.getTurnState(sessionId)
   if (turnState.state === 'idle' && queued.length === 0) {
-    return { outcome: 'noop' }
+    // An idle session with nothing queued is a no-op — unless a manual compaction is waiting
+    // (K8; #283). A `/compact` is not a user event, so it never shows up in `queued`: the log
+    // is the only place it lives, and reading it here is what lets an idle session compact
+    // without a message to answer. A host that wired no compaction never looks.
+    if (
+      options.compaction === undefined ||
+      pendingManualCompaction(await readLog(store, sessionId)) === null
+    ) {
+      return { outcome: 'noop' }
+    }
   }
 
   // ---- Start: open a turn, or take one over.
@@ -469,15 +481,6 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     // after that append is not in its `consumes`, so it stays queued for the next request (and
     // `contextView` leaves it out of what this one answers).
     const claims = pending.filter(isUserMessage).map((event) => event.id)
-    if (claims.length === 0) {
-      const answered = contextView(await readLog(store, sessionId))
-      if (!needsModelRequest(answered)) {
-        // Recovery, with the reply already in the log: the request that produced it was answered
-        // before the brain died, and asking again would store a second reply.
-        await append([statusIdle()])
-        return { outcome: 'idle' }
-      }
-    }
     // Per request, not per turn (epic #116, U3): a `user.message` carrying a `model` switched
     // `session.model` in the append transaction, and re-reading here is what makes the switch
     // — including one that arrived while the previous request was streaming — apply from this
@@ -512,6 +515,67 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
         ? null
         : ((await options.resolveMode?.(current.owner_id, current.mode)) ?? null)
     const requestModel: ModelConfig = mode === null ? current.model : { id: mode.model }
+    // The system prompt this request is built with: the session's own, with the mode's addition
+    // appended after it (#245, M6). Computed here, before the compaction engine runs, because
+    // both the engine and the trigger measure the context the strategy will build from it and
+    // the two have to agree on what the prompt is.
+    const requestSystem = withModePrompt(current.system, mode?.systemPromptAddition ?? null)
+    let read = await readLog(store, sessionId)
+    // The manual request first (K8; #283). A `/compact [instructions]` is handled at a request
+    // boundary — this one — whether or not a message is waiting beside it, because a summary
+    // changes what every request after it is built from. `pendingManualCompaction` reads it off
+    // the log, where it lives as a `session.compact` (it is not a queued user event), and the
+    // `session.compaction` written here is what makes it no longer pending. An idle session
+    // reaches this too: the no-op guard above lets a session with a pending request open a turn
+    // that answers it and nothing else.
+    if (compaction !== null) {
+      const manual = pendingManualCompaction(read)
+      if (manual !== null) {
+        const sized = estimateContextSize(read, {
+          model: requestModel.id,
+          system: requestSystem,
+        })
+        const manualResult = await summarizeContext({
+          chatModel: requestModel.id,
+          reason: 'manual',
+          events: read,
+          system: requestSystem,
+          estimatedTokens: sized,
+          config: compaction,
+          guidance: manual.instructions,
+          model,
+          resolveCredential,
+          append,
+          ...(signal === undefined ? {} : { signal }),
+        })
+        // The outcome is written whatever came of the run — that is what "not a silent no-op"
+        // means, and it is also what stops the same request being answered twice.
+        const written = manualCompactionOutcome(manualResult)
+        await append([
+          compactionOutcome(written.outcome, {
+            ...(manual.instructions === null ? {} : { instructions: manual.instructions }),
+            ...(manualResult.summarySeq === undefined
+              ? {}
+              : { summarySeq: manualResult.summarySeq }),
+            ...(written.message === undefined ? {} : { message: written.message }),
+          }),
+        ])
+        if (isAborted()) {
+          return await endInterrupted()
+        }
+        read = await readLog(store, sessionId)
+      }
+    }
+    if (claims.length === 0) {
+      const answered = contextView(read)
+      if (!needsModelRequest(answered)) {
+        // Recovery, with the reply already in the log: the request that produced it was answered
+        // before the brain died, and asking again would store a second reply. An idle turn that
+        // ran only a manual compaction lands here too: it has nothing to answer, so it closes.
+        await append([statusIdle()])
+        return { outcome: 'idle' }
+      }
+    }
     // The credential this request is made with, asked for before anything is claimed. A
     // request that cannot be made opens no span — every span start is a real model request,
     // and this one has none — and streams nothing, so there is no chunk range to supersede.
@@ -554,11 +618,6 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       ])
       return { outcome: 'error' }
     }
-    // The system prompt this request is built with: the session's own, with the mode's addition
-    // appended after it (#245, M6). Computed once, because the compaction trigger measures the
-    // context the strategy will build and the two have to agree on what the prompt is.
-    const requestSystem = withModePrompt(current.system, mode?.systemPromptAddition ?? null)
-    let read = await readLog(store, sessionId)
     if (compaction !== null) {
       // The trigger (K2): the real size of the request this boundary is about to make, against
       // the threshold share of the **chat** model's budget. Over it, older history is summarized
@@ -844,4 +903,26 @@ function withModePrompt(system: string | null, addition: string | null): string 
     return base
   }
   return base === null ? extra : `${base}\n\n${extra}`
+}
+
+/**
+ * The `session.compaction` outcome a manual run's engine result becomes (epic #277, K8; #283).
+ *
+ * The engine answers `summarized | skipped | failed`; the log records those as
+ * `summarized | nothing_to_summarize | failed`, because "skipped" is the engine's word for "there
+ * was nowhere to cut" and the log owes the reader a sentence rather than an internal enum. A
+ * `failed` run already closed its span with the reason (K11); the message here is the one line a
+ * client shows, and the detail stays on the span for anyone who wants it.
+ */
+function manualCompactionOutcome(outcome: SummarizeResult): {
+  readonly outcome: SessionCompactionOutcome
+  readonly message?: string
+} {
+  if (outcome.outcome === 'summarized') {
+    return { outcome: 'summarized' }
+  }
+  if (outcome.outcome === 'failed') {
+    return { outcome: 'failed', message: 'The summary could not be written.' }
+  }
+  return { outcome: 'nothing_to_summarize', message: 'There was no older history to summarize.' }
 }

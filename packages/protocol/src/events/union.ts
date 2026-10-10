@@ -5,6 +5,8 @@ import { AgentMessageEventSchema } from './agent'
 import {
   ContextSummaryEventSchema,
   ContextSummaryProgressEventSchema,
+  SessionCompactEventSchema,
+  SessionCompactionEventSchema,
   SessionDeletedEventSchema,
   SessionErrorEventSchema,
   SessionRewindEventInputSchema,
@@ -58,6 +60,8 @@ const StoredEventCoreSchema = z.discriminatedUnion('type', [
   SessionUsageEventSchema,
   ContextSummaryEventSchema,
   ContextSummaryProgressEventSchema,
+  SessionCompactEventSchema,
+  SessionCompactionEventSchema,
 ])
 
 /**

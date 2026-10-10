@@ -12,6 +12,7 @@ import {
   makeMode,
   makeProviderCredential,
   makeSession,
+  makeSessionCompact,
   makeUser,
   makeUserMessage,
   makeGetPreferencesResponse,
@@ -257,6 +258,30 @@ describe('deleting a session (#111)', () => {
       status: 404,
       type: 'not_found_error',
     })
+  })
+})
+
+describe('manual compaction (#283)', () => {
+  it('posts the instructions to /compact and returns the stored session.compact', async () => {
+    const event = makeSessionCompact({ instructions: 'keep the API decisions' })
+    const { client, mock } = clientWith(() => jsonResponse({ data: event }))
+
+    const stored = await client.sessions.compact('sesn_1', {
+      instructions: 'keep the API decisions',
+    })
+
+    expect(stored).toEqual(event)
+    expect(mock.requests[0]?.init?.method).toBe('POST')
+    expect(mock.urlOf(0)).toBe(`${BASE_URL}/v1/sessions/sesn_1/compact`)
+    expect(bodyOf(mock.requests[0]?.init)).toEqual({ instructions: 'keep the API decisions' })
+  })
+
+  it('sends an empty body for a plain /compact', async () => {
+    const { client, mock } = clientWith(() => jsonResponse({ data: makeSessionCompact() }))
+
+    await client.sessions.compact('sesn_1')
+
+    expect(bodyOf(mock.requests[0]?.init)).toEqual({})
   })
 })
 

@@ -1644,6 +1644,48 @@ describe('the fake’s modes (#245, M6)', () => {
   })
 })
 
+describe('the fake’s manual compaction (#283)', () => {
+  it('records the request and answers it with a nothing-to-summarize outcome, as the route does', async () => {
+    const fake = createFakeClient()
+
+    const request = await fake.sessions.compact(fake.session.id, {
+      instructions: 'keep the API decisions',
+    })
+    expect(request).toMatchObject({
+      type: 'session.compact',
+      instructions: 'keep the API decisions',
+    })
+    expect(request.seq).toBeGreaterThan(0)
+
+    const log = fake.history(fake.session.id)
+    const outcome = log.find((event) => event.type === 'session.compaction')
+    expect(outcome).toMatchObject({
+      outcome: 'nothing_to_summarize',
+      instructions: 'keep the API decisions',
+    })
+    // The request is stored before the outcome that answers it.
+    expect(log.findIndex((event) => event.type === 'session.compact')).toBeLessThan(
+      log.findIndex((event) => event.type === 'session.compaction'),
+    )
+  })
+
+  it('refuses over-long instructions with the server’s 400, storing nothing', async () => {
+    const fake = createFakeClient()
+
+    await expect(
+      fake.sessions.compact(fake.session.id, { instructions: 'x'.repeat(2_001) }),
+    ).rejects.toMatchObject({ status: 400, type: 'invalid_request_error' })
+    expect(fake.history(fake.session.id).some((event) => event.type === 'session.compact')).toBe(
+      false,
+    )
+  })
+
+  it('is behind the 401 when the fake is signed out', async () => {
+    const fake = createFakeClient({ authenticated: false })
+    await expect(fake.sessions.compact(fake.session.id)).rejects.toBeInstanceOf(AuthenticationError)
+  })
+})
+
 describe('the fake and the real client agree', () => {
   it('produce the same transcript for the same scripted scenario', async () => {
     const fake = createFakeClient({ now: () => new Date('2026-03-15T10:00:00.000Z') })

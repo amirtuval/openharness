@@ -51,6 +51,7 @@ function fakeContext(session: ChatSession) {
     picked: 0,
     newChats: [] as string[],
     providers: [] as (string | undefined)[],
+    compactions: [] as string[],
     clears: 0,
     exits: 0,
     notices: [] as { readonly kind: string; readonly text: string }[],
@@ -65,6 +66,9 @@ function fakeContext(session: ChatSession) {
     },
     setupProviders: (provider) => {
       calls.providers.push(provider)
+    },
+    compact: (instructions) => {
+      calls.compactions.push(instructions)
     },
     clearScreen: () => {
       calls.clears += 1
@@ -306,6 +310,18 @@ describe('running a command', () => {
     // The name is trimmed and passed through; the flow rejects one nobody knows the same way
     // the credentials API does — by asking for a key and letting the server answer.
     expect(calls.providers).toEqual(['anthropic'])
+  })
+
+  it('/compact asks for a manual compaction, with the guidance it was given (#283)', async () => {
+    const { session } = chatSession()
+    const { context, calls } = fakeContext(session)
+
+    await run('compact', context)
+    await run('compact', context, 'keep the API decisions')
+
+    // Empty for a bare `/compact`, the rest of the line otherwise — the screen hands the
+    // session the raw arguments, and the session trims them.
+    expect(calls.compactions).toEqual(['', 'keep the API decisions'])
   })
 
   it('/help prints the commands and the keys', async () => {

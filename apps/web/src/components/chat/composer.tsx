@@ -1,6 +1,7 @@
 import { Pencil, SendHorizontal, Square } from 'lucide-react'
 import { useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
 
+import { commandHint } from '../../lib/commands'
 import { cn } from '../../lib/utils'
 import { Button } from '../ui/button'
 import { Label } from '../ui/label'
@@ -193,6 +194,7 @@ export function Composer({
       }}
     >
       {edit === undefined ? null : <EditBanner edit={edit} />}
+      <CommandHint text={text} />
       <Label htmlFor={COMPOSER_INPUT_ID} className="sr-only">
         Message
       </Label>
@@ -258,6 +260,30 @@ export function Composer({
         </div>
       </div>
     </form>
+  )
+}
+
+/**
+ * The slash-command hint (#283): what the command being typed does, above the box.
+ *
+ * Shown while the draft opens with a prefix of a command ({@link commandHint}), so a reader who
+ * types `/comp` is told what `/compact` is before they finish it. It is presentational and
+ * never blocks a send: a line that names no command is an ordinary message, and the hint simply
+ * does not appear for one. `data-slot` is the handle its tests read, like the edit row's.
+ */
+function CommandHint({ text }: { text: string }) {
+  const command = commandHint(text)
+  if (command === null) {
+    return null
+  }
+  return (
+    <div
+      data-slot="composer-hint"
+      className="flex items-baseline gap-control border-b px-3 py-1.5 text-xs text-muted-foreground"
+    >
+      <code className="shrink-0 font-mono text-foreground">{command.usage}</code>
+      <span className="min-w-0 truncate">{command.description}</span>
+    </div>
   )
 }
 

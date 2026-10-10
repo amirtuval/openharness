@@ -324,6 +324,7 @@ export function ChatScreen({
       pickModel: openModelPicker,
       newChat: onNewChat,
       setupProviders: openProviders,
+      compact: (instructions) => void session.compact(instructions),
       clearScreen: clear,
       exit: onExit,
       showNotice: session.showNotice,

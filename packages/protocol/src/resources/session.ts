@@ -1,6 +1,11 @@
 import { z } from 'zod'
 
 import { MetadataSchema, PageLimitSchema, TimestampSchema } from '../common'
+import {
+  COMPACT_INSTRUCTIONS_MAX_LENGTH,
+  SessionCompactEventSchema,
+  type SessionCompactEvent,
+} from '../events/session'
 import { UserEventInputSchema } from '../events/user'
 import { AgentIdSchema, ModeIdSchema, SessionIdSchema } from '../ids'
 import { NextPageSchema, PageCursorStringSchema } from '../pagination'
@@ -14,6 +19,7 @@ import { UserIdSchema } from './user'
  * - `GET    /v1/sessions`
  * - `GET    /v1/sessions/{session_id}`
  * - `DELETE /v1/sessions/{session_id}`
+ * - `POST   /v1/sessions/{session_id}/compact` (`/compact [instructions]`, epic #277 K8; #283)
  *
  * A session is a durable, append-only event log; the resource here is the header of that log.
  * Its `status` mirrors the last status event in the log, and its `model` and `system` are the
@@ -182,6 +188,37 @@ export const CreateSessionRequestSchema = z
   )
 
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequestSchema>
+
+/**
+ * Body of `POST /v1/sessions/{session_id}/compact` (epic #277, K8; #283).
+ *
+ * The user's optional guidance for the summary — "keep the API decisions in detail" — bounded by
+ * {@link COMPACT_INSTRUCTIONS_MAX_LENGTH}. The request always produces a stored `session.compact`
+ * event; the body has no `type` because the endpoint, not the caller, decides that. Omit it (or
+ * send `{}`) for a plain `/compact`.
+ */
+export const CompactSessionRequestSchema = z.object({
+  /** The user's guidance for the summary, or omitted for none. */
+  instructions: z.string().min(1).max(COMPACT_INSTRUCTIONS_MAX_LENGTH).optional(),
+})
+
+export type CompactSessionRequest = z.infer<typeof CompactSessionRequestSchema>
+
+/**
+ * Response of `POST /v1/sessions/{session_id}/compact`: the stored — or already pending —
+ * `session.compact` request, deep-readonly.
+ *
+ * The route is idempotent while a request is pending, so `data` is the request this call
+ * produced, or the one already waiting for an answer. A client reads the outcome, when there is
+ * one, from the log or the stream — a `session.compaction` after this event.
+ */
+export const CompactSessionResponseSchema = z.object({
+  data: SessionCompactEventSchema,
+})
+
+export interface CompactSessionResponse {
+  readonly data: SessionCompactEvent
+}
 
 /**
  * Query parameters of `GET /v1/sessions`.

@@ -18,7 +18,10 @@ import { ModelUsageSchema } from './span'
  * kind of statement: it changes nothing about the log or the transcript, and only says what the
  * *model* is told about the history it no longer sees. `session.context_summary_progress` is the
  * same statement while it is being made — one event per pass of the compaction engine — and says
- * nothing beyond which pass is starting.
+ * nothing beyond which pass is starting. A `session.compact` (#283) is the second member a client
+ * asks for rather than the brain writing it — `/compact [instructions]` — and the
+ * `session.compaction` that follows it is the brain's stored answer, whether or not a summary
+ * came of it.
  */
 
 /**
@@ -373,6 +376,106 @@ export type ContextSummaryProgressEvent = DeepReadonly<
 >
 
 /**
+ * The longest `instructions` string a manual compaction may carry (epic #277, K8; #283).
+ *
+ * Bounded like every free-text field a client may set (`SESSION_TITLE_MAX_LENGTH`,
+ * `METADATA_MAX_VALUE_LENGTH`): enough for the guidance the epic names — "keep the API decisions
+ * in detail" — with room for a paragraph or two of specifics, and short enough that it cannot be
+ * used to smuggle a second context into the summarizer's prompt or bloat the log. The route
+ * refuses anything longer with the protocol's 400, so the bound is checked once, before an event
+ * is written.
+ */
+export const COMPACT_INSTRUCTIONS_MAX_LENGTH = 2000
+
+/**
+ * // extension: the user asked for a manual compaction (`/compact [instructions]`; epic #277, K8; #283).
+ *
+ * The `instructions` are the reader's guidance for the summary — "keep the API decisions in
+ * detail" — or `null` when they asked for a plain compaction. The brain adds them to the
+ * summarizer's prompt as the user's own instruction and echoes them on the
+ * {@link SessionCompactionEvent} it answers with, so the log says what was asked and whether
+ * guidance was used. A request already waiting for an answer is not appended again: a second
+ * `POST …/compact` before the first is handled is the same request.
+ *
+ * Anthropic has no equivalent: it has no server-side brain and no user-triggered compaction.
+ */
+export const SessionCompactEventSchema = z.object({
+  id: EventIdSchema,
+  type: z.literal(EVENT_TYPES.sessionCompact),
+  seq: EventSeqSchema,
+  processed_at: ProcessedAtSchema,
+  /** The user's guidance for the summary, or absent for none. */
+  instructions: z.string().min(1).max(COMPACT_INSTRUCTIONS_MAX_LENGTH).optional(),
+})
+
+/** A stored `session.compact`, deep-readonly like every event (#283). */
+export type SessionCompactEvent = DeepReadonly<z.infer<typeof SessionCompactEventSchema>>
+
+/**
+ * A `session.compact` as a client sends it: just the optional instructions.
+ *
+ * The stored event's `id`, `seq` and `processed_at` are the server's, so the input carries only
+ * what the caller owns — the same split `session.rewind`'s input makes (#238).
+ */
+export const SessionCompactEventInputSchema = z.object({
+  type: z.literal(EVENT_TYPES.sessionCompact),
+  instructions: z.string().min(1).max(COMPACT_INSTRUCTIONS_MAX_LENGTH).optional(),
+})
+
+export type SessionCompactEventInput = z.infer<typeof SessionCompactEventInputSchema>
+
+/**
+ * What came of a manual compaction (epic #277, K8; #283).
+ *
+ * - `summarized` — a `session.context_summary` with reason `manual` was written; the chat
+ *   continues from the summary plus the recent history.
+ * - `nothing_to_summarize` — there was no older history the engine could cut away (a short
+ *   chat, or a history with nothing before the newest turn). A clear outcome rather than a
+ *   silent no-op.
+ * - `failed` — the summarizer failed (a model error, an interrupt, an empty answer). The chat
+ *   carries on with the strategy's trimming, exactly as K11 says.
+ */
+export const SessionCompactionOutcomeSchema = z.enum([
+  'summarized',
+  'nothing_to_summarize',
+  'failed',
+])
+
+export type SessionCompactionOutcome = z.infer<typeof SessionCompactionOutcomeSchema>
+
+/**
+ * // extension: the answer to a manual compaction request (epic #277, K8; #283).
+ *
+ * Written by the brain once it has handled the newest pending `session.compact`, whether or not
+ * a summary came of it. It is the "clear, stored outcome" the clients show, and — by being the
+ * event that follows the request — it is what makes the request no longer pending, so the log
+ * alone answers "is a manual compaction waiting?". `instructions` echoes the request's guidance
+ * when it had any, which is how the log records that the user's guidance was used; `summary_seq`
+ * points at the `session.context_summary` a `summarized` outcome wrote; `message` explains a
+ * `nothing_to_summarize` or `failed` outcome in the reader's terms.
+ *
+ * It supersedes nothing and is not queued: like `session.usage` it is the brain's own
+ * bookkeeping, and no part of the brain reads it back except the pending check above.
+ */
+export const SessionCompactionEventSchema = z.object({
+  id: EventIdSchema,
+  type: z.literal(EVENT_TYPES.sessionCompaction),
+  seq: EventSeqSchema,
+  processed_at: ProcessedAtSchema,
+  /** What came of the compaction. */
+  outcome: SessionCompactionOutcomeSchema,
+  /** The request's guidance, echoed when it carried any, so the log records it was used. */
+  instructions: z.string().min(1).max(COMPACT_INSTRUCTIONS_MAX_LENGTH).optional(),
+  /** For `summarized`, the `seq` of the `session.context_summary` that was written. */
+  summary_seq: EventSeqSchema.optional(),
+  /** For `nothing_to_summarize` or `failed`, a sentence a client can show. */
+  message: z.string().min(1).optional(),
+})
+
+/** A stored `session.compaction`, deep-readonly like every event (#283). */
+export type SessionCompactionEvent = DeepReadonly<z.infer<typeof SessionCompactionEventSchema>>
+
+/**
  * One model's running total for a session (epic #245, A2; issue #247).
  *
  * The tokens of every request that ran on this model, summed over the session so far. It carries
@@ -494,6 +597,8 @@ export const SessionEventSchema = z.discriminatedUnion('type', [
   SessionUsageEventSchema,
   ContextSummaryEventSchema,
   ContextSummaryProgressEventSchema,
+  SessionCompactEventSchema,
+  SessionCompactionEventSchema,
 ])
 
 /** Any stored session event, deep-readonly (D9, issue #46). */

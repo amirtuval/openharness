@@ -353,6 +353,25 @@ describe('createChatSession', () => {
     session.dispose()
   })
 
+  it('asks for a manual compaction and shows what came of it (#283)', async () => {
+    const fake = createFakeClient()
+    const session = createChatSession({ client: fake, session: fake.session })
+    await session.start()
+
+    await session.compact('keep the API decisions')
+
+    // The request is on the log with the guidance.
+    const request = fake.history().find((event) => event.type === EVENT_TYPES.sessionCompact)
+    expect(request).toMatchObject({ instructions: 'keep the API decisions' })
+
+    // The fake answers `nothing_to_summarize`, and the outcome reaches the notice line — the
+    // clear, stored outcome a `/compact` must never turn into a silent no-op.
+    await waitFor(
+      () => session.getState().notice?.text === 'There was no older history to summarize.',
+    )
+    session.dispose()
+  })
+
   it('stops following the log once disposed', async () => {
     const fake = createFakeClient()
     const session = createChatSession({ client: fake, session: fake.session })
