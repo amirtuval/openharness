@@ -1,3 +1,4 @@
+import { COMPACTING_LABEL } from '@openharness/client'
 import type { ModelPriceLookup } from '@openharness/client'
 import type { ModelEntry, SessionStatus } from '@openharness/protocol'
 import { Text, useStdout } from 'ink'
@@ -86,6 +87,25 @@ export interface StatusLineProps {
    * nothing to say.
    */
   readonly costCompact?: string | undefined
+  /**
+   * How full the context is (epic #277, K10; #280), already formatted — `62% of context used`,
+   * `~62% of context used` right after a summary. Omitted when nothing has measured a prompt:
+   * a chat that has not answered has nothing to say about its context.
+   */
+  readonly context?: string | undefined
+  /**
+   * The same meter in as few columns as it can be said in — `62%` — used only when the full line
+   * does not fit and the compact one does, the way {@link costCompact} is.
+   */
+  readonly contextCompact?: string | undefined
+  /**
+   * Whether the context has reached the share the chat compacts at (epic #277, K10; #280).
+   *
+   * The meter's one piece of state: a context near its budget is drawn in the alarm colour, so
+   * "the chat is about to summarize itself" is visible at a glance rather than by reading the
+   * number and multiplying.
+   */
+  readonly contextNearThreshold?: boolean | undefined
   /** Extra context, e.g. that this is the dev fake. */
   readonly banner?: string | undefined
   /** When the turn in progress started, in epoch milliseconds; `null` when none is running. */
@@ -94,6 +114,22 @@ export interface StatusLineProps {
   readonly lastTextAt?: number | null | undefined
   /** The reason a retrying turn gave, while the server is retrying it. */
   readonly retrying?: string | undefined
+  /**
+   * The summary being written right now, as the progress events report it (epic #277, C2; #280).
+   *
+   * `Summarizing… 3 of 7` takes the status field's place while it is set — the transcript clears
+   * it when the summary lands, when the chat's own request starts, on an error and on an idle,
+   * so it cannot outlive the compaction it describes.
+   */
+  readonly summarizing?: { readonly pass: number; readonly passes: number } | null | undefined
+  /**
+   * Whether a manual compaction is waiting for the brain (epic #277, K8; #283).
+   *
+   * `/compact` is stored and answered later, so the field says `Compacting…` until the engine
+   * reports a pass — which then takes its place, being the more precise statement about the same
+   * wait.
+   */
+  readonly compacting?: boolean | undefined
   /** The user cut the running turn short with Ctrl+C. */
   readonly interrupted?: boolean | undefined
   /**
@@ -133,6 +169,8 @@ export function StatusLine(props: StatusLineProps) {
     runningSince,
     lastTextAt: props.lastTextAt ?? null,
     retrying: props.retrying,
+    summarizing: props.summarizing ?? null,
+    compacting: props.compacting === true,
     interrupted: props.interrupted ?? false,
     now: now(),
   })
@@ -198,10 +236,12 @@ export function statusSpans(
   },
 ): Span[] {
   const full = lineSegments(props, options.field, options.frame, false)
-  // A cost that could not price every request carries a count the line may not have room for:
-  // try the compact spelling (`$1.23+`) before letting `fitSegments` drop the money whole, so a
-  // tight terminal shortens what it shows rather than losing it.
-  if (props.costCompact !== undefined && lineWidth(full) > options.columns) {
+  // Two parts of the line have a spelling the line may not have room for: a cost that could not
+  // price every request (`$1.23 + 4 unpriced`) and a context meter said in full (`62% of context
+  // used`). Both are tried in their shortest form (`$1.23+`, `62%`) before `fitSegments` drops
+  // them whole, so a tight terminal shortens what it shows rather than losing it.
+  const compactable = props.costCompact !== undefined || props.contextCompact !== undefined
+  if (compactable && lineWidth(full) > options.columns) {
     const compact = lineSegments(props, options.field, options.frame, true)
     if (lineWidth(compact) < lineWidth(full)) {
       return fitSegments(compact, options.columns, options.theme)
@@ -228,6 +268,16 @@ export interface StatusFieldInput {
   readonly lastTextAt: number | null
   /** The reason a retrying turn gave; `undefined` when the turn is not retrying. */
   readonly retrying: string | undefined
+  /** The summary being written right now; `null` when no compaction is running (epic #277; #280). */
+  readonly summarizing?: { readonly pass: number; readonly passes: number } | null | undefined
+  /**
+   * Whether a manual compaction is waiting for the brain (epic #277, K8; #283).
+   *
+   * `/compact` is stored and answered later, so the field says `Compacting…` until the engine
+   * reports a pass — which then takes its place, being the more precise statement about the
+   * same wait.
+   */
+  readonly compacting?: boolean | undefined
   readonly interrupted: boolean
   /** The clock, as epoch milliseconds. */
   readonly now: number
@@ -249,6 +299,24 @@ export function statusField(input: StatusFieldInput): StatusField {
   }
 
   const running = input.status === 'running' && input.runningSince !== null
+  const summarizing = input.summarizing ?? null
+  if (running && summarizing !== null) {
+    // A compaction is several model calls, so it says which pass it is on rather than leaving a
+    // spinner to say "something" (epic #277, K10). It outranks a retry: the summary being
+    // written is the newer statement about the same wait, and a summarizer's own failure ends it
+    // without a `session.error` at all.
+    return {
+      text: `Summarizing… ${String(summarizing.pass)} of ${String(summarizing.passes)}`,
+      spinner: true,
+      tone: 'busy',
+    }
+  }
+  if (running && input.compacting === true) {
+    // A manual compaction nobody has reported a pass for yet — the request is queued behind a
+    // turn, or the engine has not written its first progress event (#283). It outranks a retry
+    // for the same reason `Summarizing…` does.
+    return { text: COMPACTING_LABEL, spinner: true, tone: 'busy' }
+  }
   if (running && input.retrying !== undefined) {
     return { text: `Retrying… ${input.retrying}`, spinner: true, tone: 'busy' }
   }
@@ -339,18 +407,18 @@ interface Segment {
  * How much each part of the line is worth when there is not room for all of it.
  *
  * The status is the line's reason to exist; the model is what the chat *is*; what it has cost
- * so far is the next thing a reader looks for (#247) and goes when the line is tight; the
- * session is a handle nobody needs at a glance (and which the CLI prints in full on the way
- * out); and the banner is for whoever is developing the CLI.
+ * so far (#247) and how full the context is (#280) are the next things a reader looks for and
+ * go when the line is tight; the session is a handle nobody needs at a glance (and which the
+ * CLI prints in full on the way out); and the banner is for whoever is developing the CLI.
  */
-const PRIORITY = { banner: 1, session: 2, who: 3, cost: 3, status: 4 } as const
+const PRIORITY = { banner: 1, session: 2, who: 3, cost: 3, context: 3, status: 4 } as const
 
 /** The line's parts, in the order they are drawn and with the weight they carry. */
 function lineSegments(
   props: StatusLineProps,
   field: StatusField,
   frame: string,
-  compactCost: boolean,
+  compact: boolean,
 ): Segment[] {
   // The mode comes first when there is one — it is the coarser fact, and the model after it is
   // what the mode resolved to (#245, M6) — then who is answering, then the model itself.
@@ -358,12 +426,26 @@ function lineSegments(
     .filter((part): part is string => part !== undefined)
     .join(' · ')
   const status = field.spinner ? `${frame} ${field.text}` : field.text
-  const cost = compactCost ? (props.costCompact ?? props.cost) : props.cost
+  const cost = compact ? (props.costCompact ?? props.cost) : props.cost
+  const context = compact ? (props.contextCompact ?? props.context) : props.context
 
   const segments: Segment[] = [
     { span: chrome(who), priority: PRIORITY.who },
     { span: chrome(shortSessionId(props.sessionId)), priority: PRIORITY.session },
     ...(cost === undefined ? [] : [{ span: chrome(cost), priority: PRIORITY.cost }]),
+    // The meter is the one part of the line that can be a warning rather than chrome: a context
+    // at or past the share the chat compacts at is drawn in the alarm colour (#280).
+    ...(context === undefined
+      ? []
+      : [
+          {
+            span:
+              props.contextNearThreshold === true
+                ? { text: context, color: PALETTE.alarm, dim: false }
+                : chrome(context),
+            priority: PRIORITY.context,
+          },
+        ]),
     {
       span: { text: status, color: toneColor(field.tone), dim: field.tone === 'plain' },
       priority: PRIORITY.status,

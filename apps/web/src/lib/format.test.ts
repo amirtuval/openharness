@@ -36,6 +36,7 @@ const nameOf = modelNameLookup([
     name: 'Claude Sonnet 5',
     context_window: 200_000,
     max_output_tokens: 64_000,
+    context_budget: 150_000,
     cost: null,
     source: 'provider',
   },

@@ -1002,8 +1002,10 @@ describe('the bottom of the screen (issue #233)', () => {
       expect.stringMatching(/^\d+(?:\.\d+)?(?:ms|s) · 544 tokens · \$0\.\d+$/),
       '', // the input section's blank line (#233)
       RULE, // …and the rule that opens it, one column short of the terminal
-      // the status line: the session, what it has spent, and what it is doing (#247)
-      expect.stringMatching(/· sesn_…[0-9A-Z]{6} · \$0\.\d+ · idle$/),
+      // the status line: the session, what it has spent, how full the context is (#247, #280 —
+      // the request reported 512 uncached input tokens against the catalog model's 150k budget)
+      // and what it is doing
+      expect.stringMatching(/· sesn_…[0-9A-Z]{6} · \$0\.\d+ · 0% of context used · idle$/),
       '❯', // the prompt
     ])
   })
@@ -1027,6 +1029,28 @@ describe('the bottom of the screen (issue #233)', () => {
     // …and one blank line still, once the reply is the last message instead of the band.
     await waitForFrame(app, 'A slow reply.')
     expect(frameOf(app)).not.toContain('\n\n\n')
+  })
+
+  it('draws what a manual compaction came to, under the transcript (#283)', async () => {
+    // The notice is one of the lines the block under the transcript exists for, and it is the
+    // only one drawn from the transcript's own `manualCompaction` state rather than from a
+    // notice a command set — so a screen that forgot to count it in `hasNotice` would draw the
+    // outcome nowhere at all, which is exactly what this pins.
+    const fake = createFakeClient()
+    const app = renderApp(fake, chatOptions({ session: fake.session.id }))
+    await waitForChat(app, fake.session.id)
+
+    submit(app, 'Just one line.')
+    // Wait for the *reply*, not the message: the user's own text is on screen the moment it is
+    // submitted, and a `/compact` typed while the fake is still answering is a race the machine
+    // does not always win (it did not, in CI).
+    await waitForFrame(app, 'Fake reply: Just one line.')
+
+    submit(app, '/compact')
+    // The fake answers `nothing_to_summarize` on a chat with no older history, with the same
+    // sentence the brain sends (the words are `manualCompactionNotice`'s, in the client). The
+    // wait is generous on purpose: the answer crosses the fake's own queue.
+    await waitForFrame(app, 'There was no older history to summarize.', 5000)
   })
 
   it('sets a notice off from the conversation and from the console', async () => {

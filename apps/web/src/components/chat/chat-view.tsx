@@ -1,4 +1,9 @@
-import { CREDENTIAL_TARGETS, sessionCost } from '@openharness/client'
+import {
+  CREDENTIAL_TARGETS,
+  compactionThreshold,
+  contextMeter,
+  sessionCost,
+} from '@openharness/client'
 import type { CredentialTarget, ModelPriceLookup, TranscriptMessage } from '@openharness/client'
 import type { Mode } from '@openharness/protocol'
 import { Trash2 } from 'lucide-react'
@@ -9,6 +14,7 @@ import type { DeleteSessionResult } from '../../hooks/use-sessions'
 import type { ModesView } from '../../hooks/use-modes'
 import { useSession } from '../../hooks/use-session'
 import type { ModelsView } from '../../hooks/use-models'
+import { usePreferences } from '../../hooks/use-preferences'
 import { parseComposerInput } from '../../lib/commands'
 import { formatCostTotal, shortId, sessionLabel, unpricedExplanation } from '../../lib/format'
 import { providerOf, type ModelNameLookup } from '../../lib/models'
@@ -18,6 +24,7 @@ import { ModelPicker } from '../models/model-picker'
 import { AddProviderDialog } from '../providers/add-provider-dialog'
 import { Button } from '../ui/button'
 import { Composer, focusComposer } from './composer'
+import { ContextMeter } from './context-meter'
 import { ErrorBanner } from './error-banner'
 import { MessageList } from './message-list'
 import { StatusIndicator } from './status-indicator'
@@ -91,6 +98,11 @@ export function ChatView({
   const {
     session,
     messages,
+    summaries,
+    summarizing,
+    context,
+    truncation,
+    manualCompaction,
     usage,
     status,
     lastError,
@@ -103,6 +115,11 @@ export function ChatView({
     interrupt,
     dismissError,
   } = useSession(client, sessionId)
+  // The share of the budget a chat compacts at (epic #277, K10; #280), from the reader's stored
+  // preference: read here rather than threaded down the shell, because the one place the lookup
+  // lives is `compactionThreshold` in `@openharness/client` and a chat is where the meter is
+  // drawn. A server that predates the field — or a read that failed — leaves the default.
+  const { preferences } = usePreferences(client)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   // The draft, owned here rather than by the composer (#212): "Edit and resend" puts the
   // reader's own words back in the box, and a screen that wants to put words in the box owns
@@ -128,6 +145,14 @@ export function ChatView({
   // until a request has run.
   const sessionCostTotal =
     usage.models.length === 0 ? null : sessionCost(usage, costOf ?? unknownPrices)
+  // How full the context is (epic #277, K10; #280): the last real request's prompt size, measured
+  // against the budget of the model the session runs **now** — so a switch re-measures from the
+  // catalog's entry for the new model, and the meter moves with it. `null` until something has
+  // run, which is a chat with nothing to say about its context rather than one at 0%.
+  const meter = contextMeter(context, {
+    model: catalog.models.find((entry) => entry.id === sessionModel),
+    threshold: compactionThreshold(preferences),
+  })
   // A pick that has not been sent yet (U3): the selector shows it, the next message carries it.
   const [chosen, setChosen] = useState<string | null>(null)
   // A mode pick, held the same way (#245, M6): the next message carries it, and the chat then
@@ -281,6 +306,14 @@ export function ChatView({
     retryReason: lastError?.message,
     interrupted,
     hasReplyText: newest?.role === 'agent' && newest.text.trim() !== '',
+    // A compaction in flight is what the turn is doing (epic #277, K10): it outranks a plain
+    // "Working…" because it says how many passes are left, and a retry because it is the newer
+    // statement about the same wait.
+    summarizing,
+    // The ask is stored and answered later (#283), so between the two the row says what the
+    // reader is waiting for — unless the engine has already reported a pass, which is a more
+    // precise statement about the same wait.
+    compacting: manualCompaction?.pending === true,
   })
 
   const confirmDelete = async (): Promise<void> => {
@@ -337,6 +370,11 @@ export function ChatView({
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-1">
+          {/* How full the context is (#280), beside the state of the turn: it is the other thing
+              a reader checks here, and it is the one gauge in the header. It is `shrink-0`, so a
+              narrow header ellipsizes the title rather than the meter — and the meter itself
+              drops to its bar-less short form below `sm`. */}
+          {meter === null ? null : <ContextMeter meter={meter} />}
           <StatusIndicator status={status} retrying={lastError?.retryStatus === 'retrying'} />
           <Button
             type="button"
@@ -381,6 +419,9 @@ export function ChatView({
 
       <MessageList
         messages={messages}
+        summaries={summaries}
+        truncation={truncation}
+        compaction={manualCompaction}
         loading={loadingHistory}
         nameOf={nameOf}
         costOf={costOf}

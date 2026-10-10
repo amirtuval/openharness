@@ -27,6 +27,8 @@ const nameOf = modelNameLookup([
     context_window: 200_000,
     max_output_tokens: 64_000,
     cost: null,
+    // The budget a real server reports for these limits (#280).
+    context_budget: 150_000,
     source: 'provider',
   },
 ])
@@ -40,6 +42,7 @@ const costOf = modelPriceLookup([
     context_window: 200_000,
     max_output_tokens: 64_000,
     cost: { input: 2, output: 10, cache_read: 0.2, cache_write: 2.5 },
+    context_budget: 150_000,
     source: 'provider',
   },
 ])

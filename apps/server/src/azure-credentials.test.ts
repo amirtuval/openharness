@@ -18,6 +18,7 @@ import {
 
 import { createSessionCredentialResolver } from './credentials'
 import { ModelCatalog } from './catalog/catalog'
+import { DEFAULT_CONTEXT_TOKEN_BUDGET } from '@openharness/brain'
 import type { ModelRegistry } from './catalog/registry'
 import type { ProviderFetch } from './catalog/provider-fetch'
 import { createProviderCredentialValidator } from './provider-validation'
@@ -319,6 +320,10 @@ describe('the catalogue over azure credentials', () => {
       // The registry prices Azure the way it prices every provider (#247), so a deployment it
       // knows carries a cost and a client can show what a turn spent.
       cost: { input: 2.5, output: 10, cache_read: 1.25 },
+      // The budget the brain trims to (#280): the window less the 16k ceiling, which is under
+      // the quarter the rule reserves. The catalogue computes it with the very resolver the
+      // scheduler holds, so a context meter cannot disagree with what a request is trimmed to.
+      context_budget: 128_000 - 16_384,
     })
     // A deployment models.dev does not know gets no window rather than a guessed one.
     expect(body.data[1]).toMatchObject({
@@ -329,6 +334,9 @@ describe('the catalogue over azure credentials', () => {
       // A deployment models.dev does not know has no rate either: `null` is "not priced",
       // which a client shows as `—` rather than inventing a number.
       cost: null,
+      // And no budget to derive, so the resolver's `undefined` becomes the brain's own fallback
+      // — the number a chat on this deployment is really trimmed to (#280).
+      context_budget: DEFAULT_CONTEXT_TOKEN_BUDGET,
     })
     // The status is `ok` — the credential was read — not a fallback.
     const [status] = body.providers
@@ -350,6 +358,18 @@ describe('the catalogue over azure credentials', () => {
       'azure/my-private-deployment',
       'azure-eu/gpt-4o',
     ])
+
+    // The deployment the second credential serves is **described** by the registry — the
+    // catalogue borrows Azure's window for it, keyed by the credential *type* — while the
+    // budget the brain trims with is resolved from the model id's provider half, which is the
+    // credential's name (`azure-eu`, which the registry has never heard of). So the meter must
+    // read `context_budget` and not derive one from `context_window`: that is the whole point
+    // of exposing it (#280).
+    expect(body.data[2]).toMatchObject({
+      id: 'azure-eu/gpt-4o',
+      context_window: 128_000,
+      context_budget: DEFAULT_CONTEXT_TOKEN_BUDGET,
+    })
   })
 
   it('lists nothing for a credential whose row cannot be opened', async () => {

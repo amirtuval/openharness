@@ -1,4 +1,4 @@
-import type { TranscriptMessage } from '@openharness/client'
+import type { TranscriptMessage, TranscriptSummary } from '@openharness/client'
 import { cleanup, render } from 'ink-testing-library'
 import { afterEach, describe, expect, it } from 'vitest'
 
@@ -32,6 +32,7 @@ function viewOf(
     readonly currentModel?: string
     readonly holdLive?: string
     readonly holdAll?: boolean
+    readonly summaries?: readonly TranscriptSummary[]
     readonly costOf?: (modelId: string) => {
       input: number
       output: number
@@ -44,6 +45,7 @@ function viewOf(
     <ThemeProvider theme={{ background: 'dark', color: true, level: 3 }}>
       <TranscriptView
         messages={messages}
+        summaries={options.summaries}
         width={options.width ?? 40}
         currentModel={options.currentModel}
         holdLive={options.holdLive}
@@ -65,6 +67,7 @@ function frameOf(
   options: {
     readonly width?: number
     readonly currentModel?: string
+    readonly summaries?: readonly TranscriptSummary[]
     readonly costOf?: (modelId: string) => {
       input: number
       output: number
@@ -248,5 +251,73 @@ describe('holding the transcript until the prices are read (#247)', () => {
     const held = viewOf([withUsage], { holdAll: true }).lastFrame() ?? ''
     expect(held).toContain('Hello there.')
     expect(held).not.toContain('$')
+  })
+})
+
+/**
+ * The summary dividers in the transcript (epic #277, K10; #280).
+ *
+ * A divider is a block like a message: it is ordered among them by the client's
+ * `transcriptEntries`, and the blank lines the transcript draws between blocks are about it too.
+ * The history it covers stays exactly where it was — the divider is a mark *in* the
+ * conversation, not a replacement for any part of it.
+ */
+describe('the summary dividers (#280)', () => {
+  /** A divider, with the fields the transcript's layout does not read filled in. */
+  function divider(overrides: Partial<TranscriptSummary> = {}): TranscriptSummary {
+    return {
+      id: 'sevt_summary',
+      summary: 'They greeted each other.',
+      reason: 'threshold',
+      model: 'anthropic/claude-sonnet-5',
+      passes: 1,
+      tokensBefore: 51_200,
+      position: 2,
+      seq: 3,
+      ...overrides,
+    }
+  }
+
+  it('draws the divider between the messages it stands between', () => {
+    const frame = frameOf(
+      [message('sevt_1', 'hi', 'user'), message('sevt_5', 'and then', 'agent')],
+      { summaries: [divider({ position: 2 })], width: 60 },
+    )
+
+    // One blank line before the mark and one after it, and the messages it covers are still
+    // printed — a summary supersedes nothing.
+    expect(frame.split('\n')).toEqual([
+      'hi',
+      '',
+      expect.stringContaining('conversation summarized'),
+      'They greeted each other.',
+      '',
+      'and then',
+    ])
+  })
+
+  it('leaves the divider where the history it covers ends', () => {
+    const frame = frameOf(
+      [
+        message('sevt_1', 'first', 'agent'),
+        message('sevt_2', 'second', 'agent'),
+        message('sevt_9', 'third', 'agent'),
+      ],
+      // The divider covers the first two messages: it belongs after `second`, not after `third`.
+      { summaries: [divider({ position: 2 })], width: 60 },
+    )
+
+    expect(frame.split('\n')[4]).toContain('conversation summarized')
+  })
+
+  it('keeps a divider and the block above it one blank line apart', () => {
+    // A banded user message already ends in a blank line, so the divider must not add another.
+    const frame = frameOf([message('sevt_1', 'hi', 'user')], {
+      summaries: [divider({ position: 1 })],
+      width: 60,
+    })
+
+    expect(frame.split('\n')[1]).toBe('')
+    expect(frame.split('\n')[2]).toContain('conversation summarized')
   })
 })

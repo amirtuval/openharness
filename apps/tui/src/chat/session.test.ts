@@ -1,4 +1,9 @@
-import { ApiError, AuthenticationError, type Client } from '@openharness/client'
+import {
+  ApiError,
+  AuthenticationError,
+  selectManualCompaction,
+  type Client,
+} from '@openharness/client'
 import { createFakeClient, type FakeClient } from '@openharness/client/testing'
 import { EVENT_TYPES } from '@openharness/protocol'
 import { makeMode, makeModelEntry, makeProviderCredential } from '@openharness/protocol/fixtures'
@@ -364,11 +369,17 @@ describe('createChatSession', () => {
     const request = fake.history().find((event) => event.type === EVENT_TYPES.sessionCompact)
     expect(request).toMatchObject({ instructions: 'keep the API decisions' })
 
-    // The fake answers `nothing_to_summarize`, and the outcome reaches the notice line — the
-    // clear, stored outcome a `/compact` must never turn into a silent no-op.
+    // The fake answers `nothing_to_summarize`, and the outcome reaches the transcript — which is
+    // where both frontends draw the notice from — so a `/compact` is never a silent no-op. (The
+    // words themselves are the client's `manualCompactionNotice`, tested there.)
     await waitFor(
-      () => session.getState().notice?.text === 'There was no older history to summarize.',
+      () =>
+        selectManualCompaction(session.getState().transcript)?.outcome === 'nothing_to_summarize',
     )
+    expect(selectManualCompaction(session.getState().transcript)).toMatchObject({
+      pending: false,
+      outcome: 'nothing_to_summarize',
+    })
     session.dispose()
   })
 

@@ -36,8 +36,18 @@ export interface CachedProviderCatalog {
   /** Why it fell back — already scrubbed of any credential; `null` when it did not. */
   readonly message: string | null
   /** The chat models, with their `source`. */
-  readonly models: readonly ModelEntry[]
+  readonly models: readonly CatalogEntry[]
 }
+
+/**
+ * One catalog entry before the budget is stamped on it (epic #277, K10; #280).
+ *
+ * Everything a `ModelEntry` has but `context_budget`, which the catalogue resolves once per
+ * response for every entry, from the same resolver the brain trims with — so a cached
+ * per-provider list does not have to be rebuilt (or its entries re-derived) when the registry
+ * that answers the budget changes. {@link ModelCatalog.list} adds the field.
+ */
+export type CatalogEntry = Omit<ModelEntry, 'context_budget'>
 
 /** What one cache entry is keyed by: the caller and one of their providers. */
 export interface CatalogCacheKey {

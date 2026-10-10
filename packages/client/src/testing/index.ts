@@ -67,6 +67,7 @@ import type {
 import { ApiError, AuthenticationError } from '../errors'
 import type { Client, RequestOptions } from '../client'
 import type { StreamOptions } from '../events/stream'
+import { DEFAULT_CONTEXT_TOKEN_BUDGET, contextTokenBudget } from '../compaction'
 import { isEventList } from '../internal/events'
 import { sleep } from '../internal/async'
 import { DeviceLoginError, SLOW_DOWN_INCREMENT_SECONDS } from '../resources/auth'
@@ -128,6 +129,42 @@ export const FAKE_SESSION_TOKEN = 'fake_session_token'
  */
 
 /** Options for {@link createFakeClient}. */
+/**
+ * A catalog entry a caller hands {@link FakeClientOptions.models} (epic #277, K10; #280).
+ *
+ * Everything a `ModelEntry` has but `context_budget`, which the fake stamps on the way out —
+ * the same split `GET /v1/models` makes server-side, so a test writes the limits and the fake
+ * reports the budget a real server would. Pass `context_budget` to pin one instead.
+ */
+export type FakeModelEntry = Omit<ModelEntry, 'context_budget'> & {
+  /** The budget to report; the server's rule over the limits when absent. */
+  readonly context_budget?: number | undefined
+}
+
+/**
+ * The budget a fake server reports for one entry: the caller's own when it gave one, else the
+ * server's rule — `window − min(maxOutput, 25% of the window)` — and the brain's own
+ * `DEFAULT_CONTEXT_TOKEN_BUDGET` for a model with no window to derive one from, exactly as the
+ * real resolver answers `undefined` there and the brain falls back.
+ */
+function withContextBudget(entry: FakeModelEntry): ModelEntry {
+  if (entry.context_budget !== undefined) {
+    return { ...entry, context_budget: entry.context_budget }
+  }
+  const window = entry.context_window
+  if (window === null || window <= 0) {
+    return { ...entry, context_budget: DEFAULT_CONTEXT_TOKEN_BUDGET }
+  }
+  const maxOutput = entry.max_output_tokens
+  return {
+    ...entry,
+    context_budget: contextTokenBudget({
+      contextWindow: window,
+      ...(maxOutput === null ? {} : { maxOutput }),
+    }),
+  }
+}
+
 export interface FakeClientOptions {
   /** The one agent the fake starts with; a default agent when omitted. */
   agent?: Agent
@@ -159,7 +196,7 @@ export interface FakeClientOptions {
    * The model catalog {@link Client.models} lists, in place of the default one-entry catalog
    * (`makeModelEntry()`); served sorted by provider, then name, the way the server sorts it.
    */
-  models?: readonly ModelEntry[]
+  models?: readonly FakeModelEntry[]
   /**
    * The per-provider catalog statuses {@link Client.models} reports; defaults to an `ok`
    * status for every provider the configured {@link models} name.
@@ -401,7 +438,11 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
   // — a mode the map does not hold is the 404 an unknown id gets.
   const modes = new Map<string, Mode>((options.modes ?? []).map((mode) => [mode.id, mode]))
   const user = options.user ?? makeUser()
-  const models: readonly ModelEntry[] = options.models ?? [makeModelEntry()]
+  // The fake is a stand-in for `GET /v1/models`, so it stamps the budget a real server would on
+  // every entry it serves (epic #277, K10; #280) — a caller that passes one keeps it.
+  const models: readonly ModelEntry[] = (options.models ?? [makeModelEntry()]).map(
+    withContextBudget,
+  )
   const providers: readonly ProviderCatalogStatus[] =
     options.providers ??
     [...new Set(models.map((entry) => entry.provider))].map((provider) => ({

@@ -137,6 +137,9 @@ describe('runSettings', () => {
           provider: 'anthropic',
           name: 'Claude Sonnet 5',
           context_window: 200_000,
+          // The budget a server reports for the limits: the window less the quarter it reserves
+          // (the 64k ceiling is larger, so the quarter is what is reserved) — #280.
+          context_budget: 150_000,
         }),
         makeModelEntry({
           id: 'openai/gpt-4.1-mini',
@@ -144,6 +147,7 @@ describe('runSettings', () => {
           name: 'GPT-4.1 mini',
           context_window: 8_000,
           max_output_tokens: 2_000,
+          context_budget: 6_000,
         }),
       ],
       preferences: {

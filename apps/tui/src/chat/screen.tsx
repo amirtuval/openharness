@@ -1,9 +1,18 @@
-import { providerName, selectSessionUsage, sessionCost } from '@openharness/client'
+import {
+  compactionThreshold,
+  contextMeter,
+  manualCompactionNotice,
+  providerName,
+  selectManualCompaction,
+  selectSessionUsage,
+  sessionCost,
+} from '@openharness/client'
 import type { Client, TranscriptError } from '@openharness/client'
-import type { Mode, ModelEntry } from '@openharness/protocol'
+import type { GetPreferencesResponse, Mode, ModelEntry } from '@openharness/protocol'
 import { Box, Text, useApp, useInput, useStdout } from 'ink'
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 
+import { CompactionNotice } from '../components/compaction-notice'
 import { ModelPicker } from '../components/model-picker'
 import { NoticeView } from '../components/notice-view'
 import { PromptInput } from '../components/prompt-input'
@@ -12,6 +21,7 @@ import { ProviderSetup } from '../components/provider-setup'
 import { formatCostTotal } from '../components/reply-meta'
 import { InputRule, modelLabel, modelPriceLookup, StatusLine } from '../components/status-line'
 import { lastDrawn, TranscriptView } from '../components/transcript-view'
+import { TruncationNotice } from '../components/truncation-notice'
 import type { PromptHistory } from '../history'
 import { modeNameOf } from '../modes'
 import type { ErrorContext } from '../errors'
@@ -101,6 +111,11 @@ export function ChatScreen({
   // either list is in. `null` is "not read yet"; a failed read leaves it empty, so the line
   // falls back to the model rather than to a name it does not have.
   const [modeList, setModeList] = useState<readonly Mode[] | null>(null)
+  // The caller's stored preferences, read once in the background for one field of them: the
+  // share of the budget a chat compacts at (epic #277, K10; #280). It is the same read the other
+  // frontend makes, through the same `compactionThreshold`, and a failure — or a server that
+  // predates the field — leaves the 0.7 default in place.
+  const [preferences, setPreferences] = useState<GetPreferencesResponse | null>(null)
   const { stdout } = useStdout()
   const { suspendTerminal } = useApp()
   // A clear is in flight. A second Ctrl+L while the first is being handed over has nowhere
@@ -153,6 +168,25 @@ export function ChatScreen({
       cancelled = true
     }
   }, [session, modeList])
+
+  // The preferences go with the two lists above and for the same reason: the status line's meter
+  // needs one field of them, and a chat must not wait for a read to open. `null` is "not read
+  // yet", which is the same answer as a failed read here — the default threshold.
+  useEffect(() => {
+    let cancelled = false
+    void client.preferences
+      .get()
+      .then((loaded) => {
+        if (!cancelled) setPreferences(loaded)
+      })
+      .catch(() => {
+        // A read that failed is still an answered question: the meter is drawn against the
+        // default share rather than not drawn at all.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [client])
 
   // The catalog's prices: what every cost on screen — a reply's, the session's — is computed
   // with. A model the catalog does not carry has none, and its cost reads `—`; a catalog that
@@ -214,11 +248,36 @@ export function ChatScreen({
       ? view.transcript.lastError.message
       : undefined
 
-  // The two notices that sit under the transcript: what a command printed or a hint, and the
-  // turn's own error when the status line is not already saying it (#208).
+  // How full the context is (epic #277, K10; #280): the last real request's prompt size against
+  // the budget of the model the chat runs now — so after a switch it is measured against the new
+  // model — and the share this reader compacts at. `undefined` until something has measured one:
+  // a chat that has not answered says nothing about its context rather than drawing a zero. The
+  // truncated newest message's notice travels with it (#277, K6).
+  const meter = contextMeter(view.transcript.context, {
+    model: (catalog ?? []).find((entry) => entry.id === currentModel),
+    threshold: compactionThreshold(preferences),
+  })
+  const truncation = view.transcript.truncation
+  // The manual compaction the log last asked for (#283): its outcome notice, when it is one a
+  // reader has to be told (a failed or nothing-to-summarize run). The divider above is what a
+  // `summarized` outcome shows, and the status line carries the "Compacting…" wait.
+  const compaction = selectManualCompaction(view.transcript)
+  // `null` for a summary — the divider is that outcome — so this is also the test for whether a
+  // line is owed at all.
+  const manualCompactionNoticeDrawn =
+    compaction === null ? null : manualCompactionNotice(compaction)
+
+  // The lines that sit under the transcript: what a command printed or a hint, the turn's own
+  // error when the status line is not already saying it (#208), the newest message's shortening
+  // (#280) and what a manual compaction came to (#283). The flag is what draws the block at all,
+  // so every one of them has to be in it — a compaction notice on its own is a notice.
   const error = view.transcript.lastError
   const failure = error !== null && retrying === undefined ? turnErrorNotice(error) : null
-  const hasNotice = view.notice !== null || failure !== null
+  const hasNotice =
+    view.notice !== null ||
+    failure !== null ||
+    truncation !== null ||
+    manualCompactionNoticeDrawn !== null
 
   /**
    * Whether the transcript owes the block under it a blank line (issue #233).
@@ -378,6 +437,7 @@ export function ChatScreen({
     <Box flexDirection="column">
       <TranscriptView
         messages={view.transcript.messages}
+        summaries={view.transcript.summaries}
         currentModel={currentModel}
         costOf={costOf}
         // A reply settles into Ink's static output once and never redraws (#208, X2), so it is
@@ -391,6 +451,13 @@ export function ChatScreen({
       {hasNotice && (
         <>
           {owesBlank && <Text> </Text>}
+          {/* The truncation notice sits with the other lines under the transcript (#280): the
+              newest message was shortened for the model, which is news about the turn that just
+              went out rather than about a message's own text. */}
+          {truncation !== null && <TruncationNotice truncation={truncation} />}
+          {manualCompactionNoticeDrawn !== null && compaction !== null && (
+            <CompactionNotice compaction={compaction} />
+          )}
           {view.notice !== null && <NoticeView notice={view.notice} />}
           {failure !== null && <NoticeView notice={failure} />}
         </>
@@ -408,10 +475,15 @@ export function ChatScreen({
         phase={view.phase}
         cost={cost}
         costCompact={costCompact}
+        context={meter?.label}
+        contextCompact={meter?.shortLabel}
+        contextNearThreshold={meter?.nearThreshold}
         banner={banner}
         runningSince={view.runningSince}
         lastTextAt={view.lastTextAt}
         retrying={retrying}
+        summarizing={view.transcript.summarizing}
+        compacting={compaction?.pending === true}
         interrupted={view.interrupted}
       />
       {element ?? (

@@ -79,6 +79,19 @@ export const ModelEntrySchema = z.object({
    */
   cost: ModelCostSchema.nullable(),
   /**
+   * // extension: the history budget the server will trim this model's requests to, in tokens
+   * (epic #277, K10; #246, #280).
+   *
+   * The **one** number a context meter should compare a prompt size against: the budget the
+   * brain's own resolver answers for this id (`apps/server/src/catalog/context-budget.ts`),
+   * or the brain's fallback when the registry knows the model not at all — which is the case
+   * for a custom OpenAI-compatible endpoint and an Azure deployment, where `context_window`
+   * may still describe the deployment while the registry has nothing to derive a budget from.
+   * Deriving it here rather than in a client is what keeps a meter and the trimming that
+   * actually happens from disagreeing.
+   */
+  context_budget: z.number().int().positive(),
+  /**
    * // extension: where this entry's listing came from — `provider` when the provider's own
    * list carried it, `registry` when it came from the registry alone (C3).
    */

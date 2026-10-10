@@ -14,6 +14,10 @@ const entry = {
   context_window: 200_000,
   max_output_tokens: 64_000,
   cost: { input: 2, output: 10, cache_read: 0.2, cache_write: 2.5 },
+  // The budget the server would report for these limits: the window less the quarter it
+  // reserves (50,000 — the 64k ceiling is larger, so it never takes more room than the
+  // quarter): epic #277 K10; #280.
+  context_budget: 150_000,
   source: 'provider',
 }
 
@@ -52,6 +56,7 @@ describe('ModelEntrySchema', () => {
       'context_window',
       'max_output_tokens',
       'cost',
+      'context_budget',
       'source',
     ] as const) {
       const { [field]: _dropped, ...partial } = entry
@@ -65,6 +70,8 @@ describe('ModelEntrySchema', () => {
     expect(ModelEntrySchema.safeParse({ ...entry, name: '' }).success).toBe(false)
     expect(ModelEntrySchema.safeParse({ ...entry, context_window: '200k' }).success).toBe(false)
     expect(ModelEntrySchema.safeParse({ ...entry, max_output_tokens: -1 }).success).toBe(false)
+    expect(ModelEntrySchema.safeParse({ ...entry, context_budget: 0 }).success).toBe(false)
+    expect(ModelEntrySchema.safeParse({ ...entry, context_budget: -1 }).success).toBe(false)
     expect(ModelEntrySchema.safeParse({ ...entry, context_window: 1.5 }).success).toBe(false)
   })
 
