@@ -220,7 +220,6 @@ what came back:
   `tool_call`, and a model whose registry entry says `false` chats exactly as it did before
   tools existed.
 
-
 `session.usage` is the session's **running** totals, written by the brain in the same append as
 the `span.model_request_end` that closes a request which reported usage — so a client watching
 a turn reads the session's cost off the stream instead of adding the spans up itself:
