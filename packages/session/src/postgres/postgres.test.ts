@@ -527,9 +527,10 @@ if (target === null) {
       expect(files.length).toBeGreaterThan(0)
       // `0016_user_preferences.sql` and `0017_scheduler_instances.sql` are each one
       // `create table if not exists` (#111, #122), `0018_credential_key_provider.sql`,
-      // `0019_user_preferences_theme.sql`, `0025_user_preferences_compaction.sql` and
-      // `0027_tool_settings.sql` and `0030_mcp_oauth_state_client.sql` one or more
-      // `add column if not exists` (#150, #203, #282, #307, #311), and
+      // `0019_user_preferences_theme.sql`, `0025_user_preferences_compaction.sql`,
+      // `0027_tool_settings.sql`, `0030_mcp_oauth_state_client.sql` and
+      // `0031_mcp_tool_policies.sql` one or more
+      // `add column if not exists` (#150, #203, #282, #307, #311, #312), and
       // `0021_model_request_end_usage.sql`, `0026_agent_tool_use_usage.sql`,
       // `0027_tool_settings.sql`, `0028_paused_confirmation_work.sql` and
       // `0029_mcp_servers.sql` build an index or a table (#247, #305, #307, #309, #311): a
@@ -556,6 +557,9 @@ if (target === null) {
       // and the assertions below are what keeps the pair unique and ordered.
       expect(files).toContain('0029_mcp_servers.sql')
       expect(files).toContain('0030_mcp_oauth_state_client.sql')
+      // #312's file adds the remote tool policies to the settings table `0027` created, and is
+      // numbered after #311's pair for the same reason they follow `0028`.
+      expect(files).toContain('0031_mcp_tool_policies.sql')
       expect(files.indexOf('0026_agent_tool_use_usage.sql')).toBeLessThan(
         files.indexOf('0027_tool_settings.sql'),
       )
@@ -567,6 +571,9 @@ if (target === null) {
       )
       expect(files.indexOf('0029_mcp_servers.sql')).toBeLessThan(
         files.indexOf('0030_mcp_oauth_state_client.sql'),
+      )
+      expect(files.indexOf('0030_mcp_oauth_state_client.sql')).toBeLessThan(
+        files.indexOf('0031_mcp_tool_policies.sql'),
       )
       expect(await migrate(db)).toEqual(files)
 
@@ -756,6 +763,7 @@ if (target === null) {
       await credentials.upsert({ ...credentialInput(OWNER_B, 'b'), last4: 'bbbb' })
       await store.putToolSettings(OWNER_A, {
         builtin: { web_search: { enabled: false, policy: 'deny' } },
+        mcp: { notes__search: 'deny' },
       })
 
       await sql`delete from "user" where id = ${OWNER_A}`.execute(db)
@@ -766,9 +774,9 @@ if (target === null) {
       expect(await store.getSession(session.id, { ownerId: OWNER_A })).toBeNull()
       expect(await credentials.get({ userId: OWNER_A, name: 'anthropic' })).toBeNull()
       expect(await credentials.list({ userId: OWNER_A })).toEqual([])
-      // The tool settings went with the user too (`0026`'s `on delete cascade`), reading back
+      // The tool settings went with the user too (`0027`'s `on delete cascade`), reading back
       // as no choices rather than as a stale row.
-      expect(await store.getToolSettings(OWNER_A)).toEqual({ builtin: {} })
+      expect(await store.getToolSettings(OWNER_A)).toEqual({ builtin: {}, mcp: {} })
       expect(await eventRows(session.id)).toEqual(new Map())
       // The other user is untouched, down to their own credential for the same provider.
       expect(await store.getAgent(theirAgent.id, { ownerId: OWNER_B })).not.toBeNull()

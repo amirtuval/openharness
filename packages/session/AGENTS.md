@@ -98,7 +98,8 @@ migrations/             the SQL the Postgres stores need, applied by `migrate()`
                         0028 the index behind the paused-confirmation work scan (#309),
                         0029 a user's remote MCP servers and their pending OAuth states
                           (#303, X10),
-                        0030 where a pending OAuth flow was started — `web` or `cli` (#311)
+                        0030 where a pending OAuth flow was started — `web` or `cli` (#311),
+                        0031 the per-tool policies a user has for remote MCP tools (#312)
 docs/postgres.md        the Postgres stores: schema, migrations, delivery, local setup
 ```
 
@@ -482,14 +483,17 @@ screen always has a value. `putPreferences` writes the value whole (one row per 
 in place; `{ default_model: null }` clears it), stamps `updated_at` from the injected clock,
 and answers what was stored. Both answers are deep-frozen, like a credential's.
 
-**Tool settings** (epic #303, X4; issue #307). `getToolSettings(userId)` and
-`putToolSettings(userId, settings)` are the per-user tool choices beside the log, keyed by
-`userId` like the preferences are. `UserToolSettings` is one value, `{ builtin }` — a map of
-tool name to `{ enabled, policy }` — where `enabled` says whether the tool may be offered at
-all and `policy` is the permission a call to it is evaluated under (`allow | ask | deny`). A
-tool the map does not carry follows **its own declared default**, so the map is a record of
-choices rather than a complete list, and a user who has never saved one reads
-`{ builtin: {} }`: no `null` and no throw, so the settings screen always has a value.
+**Tool settings** (epic #303, X4; issue #307; the remote half: #312). `getToolSettings(userId)`
+and `putToolSettings(userId, settings)` are the per-user tool choices beside the log, keyed by
+`userId` like the preferences are. `UserToolSettings` is one value with a map per source of
+tool: `builtin` — tool name to `{ enabled, policy }`, where `enabled` says whether the tool may
+be offered at all and `policy` is the permission a call to it is evaluated under
+(`allow | ask | deny`) — and `mcp` — a remote MCP tool's model-facing offered name
+(`<server>__<tool>`) to a permission, and nothing else, because a remote tool has no on/off of
+its own (its whole server does, and a mode's `mcp_servers` override patches that). A tool the
+map does not carry follows **its own declared default**, so a map is a record of choices rather
+than a complete list, and a user who has never saved one reads `{ builtin: {}, mcp: {} }`: no
+`null` and no throw, so the settings screen always has a value.
 `putToolSettings` writes the value whole (one row per user, replaced in place), stamps
 `updated_at` from the injected clock, and answers what was stored; both answers are
 deep-frozen, like a credential's. A **mode's** override of which tools are on is stored on the

@@ -189,6 +189,7 @@ databases while applying to new ones. Add a new file instead.
 | `0026_agent_tool_use_usage.sql`        | the partial index behind `listToolUses`: `(session_id, processed_at)` where the type is a tool call (#305)              |
 | `0027_tool_settings.sql`               | `user_tool_settings`, one row per user's tool choices, and `modes.tools`, a mode's tool override (#307)                 |
 | `0028_paused_confirmation_work.sql`    | the partial index behind the paused-confirmation work scan: `(session_id)` where the type is a tool confirmation (#309) |
+| `0031_mcp_tool_policies.sql`           | `user_tool_settings.mcp`, the per-tool policies a user set for remote MCP tools (#312)                                  |
 
 To run them outside an application:
 

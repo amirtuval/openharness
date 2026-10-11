@@ -383,11 +383,12 @@ export interface McpOAuthStatesTable {
  * (epic #303, X4; issue #307).
  *
  * One row per user — `user_id` is the primary key — holding the built-in tool choices as a
- * `jsonb` map of tool name to `{ enabled, policy }`. A tool absent from the map follows **its
- * own declared default**, so the map is a record of choices rather than a complete list, and a
- * user who has never saved one has no row at all. `jsonb` rather than a column per tool, and
- * rather than a row per tool: the tools a build registers are the host's and move with it (the
- * built-ins of #305, an MCP tool of #312), and a row whose shape the protocol's
+ * `jsonb` map of tool name to `{ enabled, policy }`, and the remote MCP tool policies as a
+ * second `jsonb` map of offered name to permission (#312). A tool absent from either map
+ * follows **its own declared default**, so a map is a record of choices rather than a complete
+ * list, and a user who has never saved one has no row at all. `jsonb` rather than a column per
+ * tool, and rather than a row per tool: the tools a build registers are the host's and move
+ * with it (the built-ins of #305, an MCP tool of #312), and a row whose shape the protocol's
  * `UserToolSettingsSchema` defines is the one place that shape is written. `putToolSettings`
  * replaces the row whole (the store upserts it), so this is a value rather than a log, and
  * `updated_at` is when that value last changed, from the injected clock. `on delete cascade`
@@ -398,6 +399,8 @@ export interface UserToolSettingsTable {
   user_id: string
   /** The built-in tool choices, keyed by tool name (`0027_tool_settings.sql`). */
   builtin: UserToolSettings['builtin']
+  /** The remote MCP tools' policies, keyed by offered name (`0031_mcp_tool_policies.sql`). */
+  mcp: UserToolSettings['mcp']
   updated_at: Date
 }
 
