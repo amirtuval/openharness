@@ -751,8 +751,9 @@ The mechanism is one, and `./opaque` holds the only per-provider rules there are
 - **Capture.** `streamModelRequest` collects every `reasoning` block of the step — its text, and
   the metadata the provider attached to any of its fragments (Anthropic sends a `signature` on a
   fragment of its own, with no text), merged per block, in the order the provider opened them.
-  Every part of the step is collected, whether or not this build knows what to do with it: #335's
-  provider-executed tool calls and results join the same list.
+  `reasoning` is the only part type collected today, and the list is where #335's
+  provider-executed tool calls and results join it — the seam is the part type, not the
+  mechanism.
 - **Store.** The loop writes the parts that the request's **family** has a row for on an
   `agent.opaque_content` event of its own, beside the reply and before the span end — one event
   per step, written whether or not the step streamed text, because the step this exists for (a

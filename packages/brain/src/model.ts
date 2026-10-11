@@ -878,12 +878,12 @@ export interface ModelRequestResult {
    * // extension: the step's provider-opaque parts, in the order the provider streamed them
    * (epic #303, X13; #334), or `[]` when the step produced none.
    *
-   * Every part of the step the provider may need again is collected, whether or not this build
-   * knows what to do with it: which of them are *stored* is the family table's business
-   * (`./opaque`), and #335 adds the provider-executed tool calls and results to the same list.
-   * A request that was aborted or failed reports none: a step that is not stored stores no
-   * parts either, and a thinking block cut off mid-stream has no signature yet, so there would
-   * be nothing a provider could read back.
+   * What is collected is the part type a provider may need handed back — `reasoning` today, and
+   * #335's provider-executed tool calls and results join the same list. Which of them are
+   * *stored*, and for which client, is the family table's business (`./opaque`). A request that
+   * was aborted or failed reports none: a step that is not stored stores no parts either, and a
+   * thinking block cut off mid-stream has no signature yet, so there would be nothing a
+   * provider could read back.
    */
   readonly opaque: readonly ModelOpaquePart[]
   /** Token counts, or {@link ZERO_MODEL_USAGE} when the request never reported any. */
