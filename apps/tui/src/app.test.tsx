@@ -5,7 +5,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { makeModelEntry, makeProviderCredential } from '@openharness/protocol/fixtures'
+import {
+  makeMcpServer,
+  makeModelEntry,
+  makeProviderCredential,
+} from '@openharness/protocol/fixtures'
 
 import { App, type AppProps, type ExitPayload } from './app'
 import type { ChatOptions } from './args'
@@ -927,6 +931,45 @@ describe('App', () => {
     await waitForFrame(app, 'error: the model is overloaded')
     await waitForFrame(app, '· idle')
     expect(app.exits).toEqual([])
+  })
+
+  it('shows an MCP server a turn could not use as a notice, with the key that reconnects it (#313)', async () => {
+    const notes = makeMcpServer({ name: 'notes' })
+    // The server is signed out, so the reconnect really waits: a flow that completed before the
+    // test could look would prove nothing about the waiting.
+    const fake = createFakeClient({ mcpServers: [{ ...notes, status: 'needs_reconnect' }] })
+    fake.failWith({
+      type: 'mcp_authentication_failed_error',
+      message:
+        'The MCP server "notes" could not be used: the token was refused. ' +
+        'This chat continues without its tools.',
+      retryStatus: 'terminal',
+    })
+    const opened: string[] = []
+    const app = renderApp(fake, chatOptions({ session: fake.session.id }), undefined, {
+      openUrl: (url) => {
+        opened.push(url)
+        return true
+      },
+    })
+    await waitForChat(app, fake.session.id)
+
+    submit(app, 'Hello.')
+
+    // A notice, not a failed turn: the brain's own sentence, the chat carrying on, and the one
+    // thing a reader can do about it — spelled as a key, because a terminal has no buttons.
+    await waitForFrame(app, 'The MCP server "notes" could not be used')
+    await waitForFrame(app, 'Ctrl+R to reconnect')
+
+    pressKey(app, 'ctrlR')
+    await waitForFrame(app, 'Approve the sign-in for notes in your browser')
+    expect(fake.mcpConnects).toEqual([{ serverId: notes.id, client: 'cli' }])
+    expect(opened).toHaveLength(1)
+
+    // The browser comes back: the callback completes the flow, and the wait's own poll (two
+    // seconds, the client's default) reports it. The timeout is the poll's, not the frame's.
+    fake.completeMcpOAuth(notes.id)
+    await waitForFrame(app, 'notes is connected.', 6000)
   })
 
   it('says a retrying turn is retrying in the status line, and drops it once a reply lands', async () => {

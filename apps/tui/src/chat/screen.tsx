@@ -3,6 +3,9 @@ import {
   compactionThreshold,
   confirmationSummary,
   contextMeter,
+  mcpFailureNotice,
+  mcpServerByName,
+  waitForMcpConnection,
   manualCompactionNotice,
   modelSupportsTools,
   pendingCalls,
@@ -25,6 +28,7 @@ import { Box, Text, useApp, useInput, useStdout } from 'ink'
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 
 import { CompactionNotice } from '../components/compaction-notice'
+import { McpServersScreen } from '../components/mcp-servers'
 import { ModelPicker } from '../components/model-picker'
 import { NoticeView } from '../components/notice-view'
 import { PendingPromptView } from '../components/pending-prompt'
@@ -308,8 +312,20 @@ export function ChatScreen({
   // The step limit is a notice rather than a failure to retry (X2), so its own line replaces the
   // generic turn error for that one type — the reader is told once.
   const stepLimit = stepLimitNotice(error)
+  // An MCP server the turn could not use is a notice, not a failure (epic #303, X10; #313): the
+  // chat carries on without its tools, and the one thing a reader can do is reconnect it. The
+  // sentence and the server it names are the client's own reading, so the page and the terminal
+  // say the same thing — and the generic turn error is skipped for it, because saying it twice
+  // would be one line about a failed turn and another about a tool source that is missing.
+  const mcpFailure = mcpFailureNotice(error)
+  const mcpNotice: Notice | null =
+    mcpFailure === null
+      ? null
+      : { kind: 'error', text: mcpFailure.message, hints: ['Ctrl+R to reconnect'] }
   const failure =
-    error !== null && retrying === undefined && stepLimit === null ? turnErrorNotice(error) : null
+    error !== null && retrying === undefined && stepLimit === null && mcpFailure === null
+      ? turnErrorNotice(error)
+      : null
   // The other tool notices (epic #303, X5/X9; #308): a model that cannot call tools, and what the
   // newest request shortened or cleared. All of the words come from `@openharness/client`, so the
   // page says the same thing.
@@ -344,6 +360,7 @@ export function ChatScreen({
   const hasNotice =
     view.notice !== null ||
     failure !== null ||
+    mcpNotice !== null ||
     truncation !== null ||
     manualCompactionNoticeDrawn !== null ||
     hasToolNotices ||
@@ -454,6 +471,89 @@ export function ChatScreen({
   )
 
   /**
+   * Open the remote MCP servers in the prompt slot — `/mcp` (epic #303, X10; #313).
+   *
+   * The screen is the one `oh mcp` mounts, so a server is registered, connected, tested and
+   * deleted the same way whether the reader is in a chat or not. It settles when the reader
+   * leaves, and the prompt comes back: nothing here changes the conversation.
+   */
+  const openMcpServers = useCallback((): void => {
+    void request<void>((settle) => (
+      <McpServersScreen
+        client={client}
+        context={context}
+        openUrl={openUrl}
+        onDone={() => {
+          settle()
+        }}
+      />
+    ))
+  }, [client, context, openUrl, request])
+
+  /**
+   * Reconnect the server a turn's `mcp_*` failure named (epic #303, X10; #313).
+   *
+   * The log carries the server's **name** and nothing else — an error says a server failed, not
+   * which id it was — so the one read this makes is the caller's server list, matched by that
+   * name. An `oauth` server is then connected again: the authorization page opens in the system
+   * browser (the `cli` ending of decision X10 — the browser may never have signed in here) and
+   * the terminal waits for the server's status to change. A `none` or `headers` server has no
+   * flow to run, so the reader is pointed at `/mcp`, where Test and Edit live.
+   *
+   * Bound to **Ctrl+R** rather than `r`: a bare letter belongs to the prompt, and Ink delivers
+   * every key to every mounted handler.
+   */
+  const reconnectMcp = useCallback((): void => {
+    const failure = mcpFailureNotice(session.getState().transcript.lastError)
+    if (failure === null) return
+    void (async () => {
+      try {
+        const { data } = await client.mcpServers.list()
+        const server = mcpServerByName(data, failure.server ?? undefined)
+        if (server === null) {
+          session.showNotice({
+            kind: 'info',
+            text: 'That MCP server is no longer registered.',
+            hints: ['/mcp lists the ones you have'],
+          })
+          return
+        }
+        if (server.auth !== 'oauth') {
+          session.showNotice({
+            kind: 'info',
+            text: `${server.name} does not use OAuth.`,
+            hints: ['/mcp to test it or change it'],
+          })
+          return
+        }
+        const started = await client.mcpServers.connect(server.id, { client: 'cli' })
+        session.showNotice({
+          kind: 'info',
+          text: openUrl(started.authorization_url)
+            ? `Approve the sign-in for ${server.name} in your browser.`
+            : `Open this URL to finish: ${started.authorization_url}`,
+          hints: ['waiting for the sign-in…'],
+        })
+        const wait = await waitForMcpConnection({
+          get: async (options) => client.mcpServers.get(server.id, options),
+        })
+        session.showNotice({
+          kind: wait.outcome === 'connected' ? 'info' : 'hint',
+          text:
+            wait.outcome === 'connected'
+              ? `${server.name} is connected.`
+              : wait.outcome === 'failed'
+                ? `${server.name} could not be connected: ${wait.server.last_error ?? 'the sign-in failed'}.`
+                : `${server.name} is still not connected — test it with /mcp.`,
+          hints: [],
+        })
+      } catch (caught) {
+        session.reportError(caught)
+      }
+    })()
+  }, [client, openUrl, session])
+
+  /**
    * Answer the calls waiting on the reader (epic #303, X6; #310).
    *
    * The runtime owns the request and its failure; the list rebuilds itself from the log, so
@@ -494,6 +594,7 @@ export function ChatScreen({
       pickModel: openModelPicker,
       newChat: onNewChat,
       setupProviders: openProviders,
+      openMcpServers,
       compact: (instructions) => void session.compact(instructions),
       clearScreen: clear,
       exit: onExit,
@@ -528,6 +629,11 @@ export function ChatScreen({
   useInput((input, key) => {
     if (element !== null) return
     if (!key.ctrl) return
+
+    if (input === 'r') {
+      reconnectMcp()
+      return
+    }
 
     if (input === 'l') {
       clear()
@@ -580,6 +686,7 @@ export function ChatScreen({
           )}
           {view.notice !== null && <NoticeView notice={view.notice} />}
           {failure !== null && <NoticeView notice={failure} />}
+          {mcpNotice !== null && <NoticeView notice={mcpNotice} />}
           {hasToolNotices && (
             <ToolNoticesView
               stepLimit={stepLimit}

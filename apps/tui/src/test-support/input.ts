@@ -36,6 +36,7 @@ const KEYS = {
   ctrlE: '\u0005',
   ctrlK: '\u000B',
   ctrlL: '\u000C',
+  ctrlR: '\u0012',
   ctrlU: '\u0015',
   ctrlW: '\u0017',
   /** Alt+letter is `ESC` + the letter, which Ink reports with the meta flag. */

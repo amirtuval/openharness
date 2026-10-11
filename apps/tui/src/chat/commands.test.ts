@@ -54,6 +54,7 @@ function fakeContext(session: ChatSession) {
     compactions: [] as string[],
     clears: 0,
     exits: 0,
+    mcp: 0,
     notices: [] as { readonly kind: string; readonly text: string }[],
   }
   const context: CommandContext = {
@@ -66,6 +67,9 @@ function fakeContext(session: ChatSession) {
     },
     setupProviders: (provider) => {
       calls.providers.push(provider)
+    },
+    openMcpServers: () => {
+      calls.mcp += 1
     },
     compact: (instructions) => {
       calls.compactions.push(instructions)
@@ -310,6 +314,15 @@ describe('running a command', () => {
     // The name is trimmed and passed through; the flow rejects one nobody knows the same way
     // the credentials API does — by asking for a key and letting the server answer.
     expect(calls.providers).toEqual(['anthropic'])
+  })
+
+  it('/mcp opens the remote MCP servers (#303, X10; #313)', async () => {
+    const { session } = chatSession()
+    const { context, calls } = fakeContext(session)
+
+    await run('mcp', context)
+
+    expect(calls.mcp).toBe(1)
   })
 
   it('/compact asks for a manual compaction, with the guidance it was given (#283)', async () => {

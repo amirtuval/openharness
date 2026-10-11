@@ -12,6 +12,7 @@ import { runAgents, runSessionDelete, runSessions } from './commands/list'
 import { runModes } from './commands/modes'
 import { runDefaultModel } from './commands/preferences'
 import { mountProvidersAdd, runProvidersList, runProvidersRemove } from './commands/providers'
+import { runMcp } from './commands/mcp'
 import { runSettings } from './commands/settings'
 import { runTools } from './commands/tools'
 import { createNpmPort, runUpdate } from './commands/update'
@@ -212,6 +213,19 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
           connected.client,
           { stdout: out, stderr: err, context },
           command.patch,
+        )
+      case 'mcp':
+        // The servers screen, or — piped — the listing. `openUrl` is the same browser the
+        // login and the provider flow open, with the same rules about when not to.
+        return await runMcp(
+          connected.client,
+          { stdout: out, stderr: err, context },
+          {
+            stdin,
+            stdout,
+            stderr,
+            openUrl: (url) => openBrowser(url, { env }).opened,
+          },
         )
       case 'chat':
         return await runChat(connected, config, command.options, context, credentials.store, {
