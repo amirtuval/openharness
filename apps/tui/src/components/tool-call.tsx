@@ -1,4 +1,4 @@
-import { toolCallSummary, toolStatusLabel } from '@openharness/client'
+import { mcpServerMarker, toolCallSummary, toolStatusLabel } from '@openharness/client'
 import type { TranscriptToolCall, ToolCallStatus } from '@openharness/client'
 import { Box, Text, useStdout } from 'ink'
 
@@ -110,7 +110,10 @@ export function toolCallLines(
     { text: call.name, bold: true },
   ]
   if (call.source === 'mcp') {
-    head.push({ text: ' (mcp)', ...dimChrome(theme) })
+    // Which server a remote tool came from, after the marker — a terminal has no hover to hide
+    // it behind, and two servers' `search` are told apart by exactly this (#312). The words are
+    // the client's (`mcpServerMarker`), so the page's badge and this line agree.
+    head.push({ text: ` (${mcpServerMarker(call.server)})`, ...dimChrome(theme) })
   }
   if (summary !== null) {
     head.push({ text: ' ', ...dimChrome(theme) })

@@ -13,7 +13,8 @@ import { PACKAGE_NAME as SESSION_PACKAGE_NAME } from '@openharness/session'
  *
  * - **{@link runTurn}** (`./turn`) — the loop, and the lifecycle it writes.
  * - **{@link runToolStep}** (`./tools`) — one step's tool calls: stored, run through
- *   `@openharness/hands`, and answered in call order (epic #303, X2).
+ *   `@openharness/hands`, and answered in call order (epic #303, X2; the remote MCP pair and
+ *   the offered-name rules: #312, `./mcp`).
  * - **{@link ContextStrategy}** (`./context`) — how the log becomes model messages: the latest
  *   non-superseded `session.context_summary` replaces the history it covers (epic #277, K1), and
  *   an oversized newest item is capped rather than dropped (K6).
@@ -54,6 +55,7 @@ export * from './azure-fetch'
 export * from './openai-compatible-fetch'
 export * from './provider-fetch'
 export * from './bedrock'
+export * from './mcp'
 export * from './model'
 export * from './pausing'
 export * from './reasoning'

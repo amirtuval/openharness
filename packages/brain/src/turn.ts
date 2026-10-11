@@ -57,6 +57,8 @@ import {
   resolveWaiting,
   sessionApprovedTools,
 } from './pausing'
+import type { McpListingFailure, McpToolProvider } from './mcp'
+import { combineTools, resolveMcpTools } from './mcp'
 import { pendingManualCompaction } from './manual'
 import type { ModelFactory, ResolveCredential } from './model'
 import {
@@ -405,6 +407,23 @@ export interface RunTurnOptions {
    * goes idle rather than retrying.
    */
   readonly maxToolSteps?: number
+  /**
+   * Where this request's remote MCP tools come from (epic #303, X10; #312), asked once per
+   * request with the session's owner and the tool override of the mode the request resolved to
+   * — the same answer {@link RunTurnOptions.toolSettings} is asked with.
+   *
+   * A resolver rather than a registry, because MCP tools are not the deployment's: which servers
+   * are in force is the session owner's settings, their credentials live in the host's vault,
+   * and listing a server's tools is a network call nothing in this package makes. Asked per
+   * request so that a server switched off, removed or connected applies from the next request
+   * on; the host is expected to keep that cheap with a short cache, and the span records what
+   * each request really offered.
+   *
+   * A server that cannot be listed is a **failure**, not an error: the turn continues without
+   * its tools and the user is told through a `session.error`. Absent means this host has no MCP
+   * at all, which is a request that offers only the deployment's own tools.
+   */
+  readonly mcpTools?: McpToolProvider
 }
 
 /**
@@ -514,14 +533,17 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
    * A `user.tool_confirmation` is not a queued user event — the server writes it, processed —
    * so a session a user has just answered looks idle to everything that reads the store's
    * pending list. The newest tool event is the cheap test: between a confirmation and the turn
-   * it starts, nothing else writes one, so reading the newest of the three types answers it in
-   * one page instead of walking the log on every idle sweep.
+   * it starts, nothing else writes one, so reading the newest of the tool types answers it in
+   * one page instead of walking the log on every idle sweep. The MCP pair is here too (#312): a
+   * remote call is a call, and the confirmation that answers one is the same event.
    */
   const answeredWaiting = async (): Promise<boolean> => {
     const page = await store.listEventsUnscoped(sessionId, {
       types: [
         EVENT_TYPES.agentToolUse,
         EVENT_TYPES.agentToolResult,
+        EVENT_TYPES.agentMcpToolUse,
+        EVENT_TYPES.agentMcpToolResult,
         EVENT_TYPES.userToolConfirmation,
       ],
       order: 'desc',
@@ -674,6 +696,44 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
   // with a clear error rather than looping. Once **per turn**, not per request, is what bounds
   // it however many requests the turn makes.
   let overflowRetried = false
+  // The MCP servers this turn has already told the user about (epic #303, X10; #312). The
+  // listing is per request, so a server that is down would otherwise write the same
+  // `session.error` once per step; one notice per server per turn is what a reader wants, and
+  // the next turn reports again if it is still unreachable.
+  const reportedMcpFailures = new Set<string>()
+
+  /**
+   * Tell the user about the servers this request could not list, once each (epic #303, #312).
+   *
+   * A failure is a notice, never a stop: the turn carries on with the servers that did answer,
+   * and `session.error` is the one event in the protocol that carries a sentence for the user.
+   * `terminal` is the retry status for the same reason `tool_steps_exhausted_error` uses it —
+   * nothing will retry this on its own — and the message says the chat goes on without the
+   * server, so a client shows a warning rather than an ending.
+   */
+  const reportMcpFailures = async (failures: readonly McpListingFailure[]): Promise<void> => {
+    const fresh = failures.filter((failure) => !reportedMcpFailures.has(failure.serverName))
+    if (fresh.length === 0) {
+      return
+    }
+    for (const failure of fresh) {
+      reportedMcpFailures.add(failure.serverName)
+    }
+    await append(
+      fresh.map((failure) =>
+        sessionError({
+          type:
+            failure.kind === 'authentication'
+              ? 'mcp_authentication_failed_error'
+              : 'mcp_connection_failed_error',
+          message:
+            `The MCP server ${JSON.stringify(failure.serverName)} could not be used: ` +
+            `${failure.message} This chat continues without its tools.`,
+          retry_status: { type: 'terminal' },
+        }),
+      ),
+    )
+  }
   // The model requests this turn has made (epic #303, X2). A turn makes one per step — and a
   // step that called a tool owes the next one — so a model that keeps calling tools would
   // otherwise loop until it chose to stop. Counted per answered request: a retry is the same
@@ -737,6 +797,21 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     // both the engine and the trigger measure the context the strategy will build from it and
     // the two have to agree on what the prompt is.
     const requestSystem = withModePrompt(current.system, mode?.systemPromptAddition ?? null)
+    // The remote tools this boundary may offer (epic #303, X10; #312), listed once here — before
+    // the user's answers are acted on, because an approved remote call has to be runnable, and
+    // before the request is measured, because a remote tool's declaration is what caps its own
+    // result. A server that cannot be listed is a notice, never a failure: the turn goes on
+    // without its tools (`./mcp`).
+    const mcp = await resolveMcpTools(
+      options.mcpTools,
+      options.tools,
+      current.owner_id,
+      mode?.toolOverride ?? null,
+    )
+    await reportMcpFailures(mcp.failures)
+    // One registry for this request, this build's tools and the remote ones together: everything
+    // downstream is keyed by a tool's name and knows nothing about where it came from.
+    const available = combineTools(options.tools, mcp.registry)
     // How big the request this boundary is about to make is (K2/K6/X9), measured with the two
     // numbers the strategy's own caps are read against: the chat model's history budget, from the
     // same resolver the engine plans with (#246) — the strategy resolves its budget from the
@@ -752,7 +827,7 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
         model: requestModel.id,
         system: requestSystem,
         budget: contextBudget,
-        ...(options.tools === undefined ? {} : { tools: options.tools }),
+        ...(available === undefined ? {} : { tools: available }),
       })
     let read = await readLog(store, sessionId)
     // ---- The user's answers, and the calls still waiting on them (epic #303, X6; #309).
@@ -773,7 +848,10 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       await answerConfirmations({
         calls: answeredByUser,
         confirmations,
-        registry: options.tools,
+        // The whole offer this boundary resolved, remote tools included: an approved call to a
+        // remote tool is run through the registry that holds it (#312), and one whose server has
+        // since been removed is answered by the registry's own "not registered" result.
+        registry: available,
         ...(secrets === undefined ? {} : { secrets }),
         ...(signal === undefined ? {} : { signal }),
         recovered,
@@ -829,7 +907,7 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
           events: read,
           system: requestSystem,
           estimatedTokens: sized,
-          ...(options.tools === undefined ? {} : { tools: options.tools }),
+          ...(available === undefined ? {} : { tools: available }),
           config: compaction,
           guidance: manual.instructions,
           model,
@@ -936,7 +1014,7 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
         events: read,
         system: requestSystem,
         estimatedTokens: estimated,
-        ...(options.tools === undefined ? {} : { tools: options.tools }),
+        ...(available === undefined ? {} : { tools: available }),
         config: compaction,
         model,
         resolveCredential,
@@ -990,9 +1068,10 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     const context = strategy(answered, {
       model: requestModel,
       system: requestSystem,
-      // The registry, not `toolRegistry` below: a result an earlier step stored is capped and
-      // cleared by its tool's declaration whatever this request offers (X9).
-      ...(options.tools === undefined ? {} : { tools: options.tools }),
+      // Every tool the request may offer, not `toolRegistry` below: a result an earlier step
+      // stored is capped and cleared by its tool's declaration whatever this request offers
+      // (X9), and a remote tool declares its own cap (X9; #312).
+      ...(available === undefined ? {} : { tools: available }),
     })
     // The tools this request offers (epic #303, X2/X4; #307), if any: a deployment with no
     // registry has nothing to offer, a model the registry marks as tool-less gets none, and a
@@ -1002,11 +1081,11 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     // the mode the request follows rides along, since a mode may force tools on or off. A host
     // that wired no resolver, or no registry, is never asked.
     const toolSettings =
-      options.toolSettings === undefined || options.tools === undefined
+      options.toolSettings === undefined || available === undefined
         ? undefined
         : await options.toolSettings(current.owner_id, mode?.toolOverride ?? null)
     const toolRegistry = toolsFor(
-      options.tools,
+      available,
       options.toolSupportFor,
       toolSettings,
       requestModel.id,
@@ -1018,7 +1097,7 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
         ...(mode === null ? {} : { mode }),
         ...(context.truncated === undefined ? {} : { truncated: context.truncated }),
         ...(context.cleared === undefined ? {} : { cleared: context.cleared }),
-        ...(toolRegistry === undefined ? {} : { tools: offeredTools(toolRegistry) }),
+        ...(toolRegistry === undefined ? {} : { tools: offeredTools(toolRegistry, mcp.refs) }),
       }),
     ])
     if (start === undefined) {
@@ -1113,7 +1192,7 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
           events: fresh,
           system: requestSystem,
           estimatedTokens: estimate,
-          ...(options.tools === undefined ? {} : { tools: options.tools }),
+          ...(available === undefined ? {} : { tools: available }),
           config: compaction,
           model,
           resolveCredential,
@@ -1221,6 +1300,10 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
         calls: result.toolCalls,
         registry: toolRegistry,
         ...(toolSettings === undefined ? {} : { settings: toolSettings }),
+        // Which of this request's offered tools are remote, and which server and tool each
+        // stands for: what the call event is written from (#312). A name this map does not
+        // carry is a built-in, whose call is the `agent.tool_use` of #304.
+        ...(mcp.refs.size === 0 ? {} : { mcp: mcp.refs }),
         // The tools this chat has already agreed to (#309): a `remember: session` approval is
         // read back off the log it was written to, so a later call to that tool runs without
         // asking again. It comes from the same read the request was built from.

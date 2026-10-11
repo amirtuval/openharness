@@ -34,6 +34,12 @@ export const DUPLICATE_MODE_NAME_ERROR_CODE = 'duplicate_mode_name'
 /** The `code` of a {@link ModeLimitReachedError}. Stable across builds. */
 export const MODE_LIMIT_REACHED_ERROR_CODE = 'mode_limit_reached'
 
+/** The `code` of a {@link DuplicateMcpServerNameError}. Stable across builds. */
+export const DUPLICATE_MCP_SERVER_NAME_ERROR_CODE = 'duplicate_mcp_server_name'
+
+/** The `code` of a {@link McpServerLimitReachedError}. Stable across builds. */
+export const MCP_SERVER_LIMIT_REACHED_ERROR_CODE = 'mcp_server_limit_reached'
+
 /** What a {@link FencedError} reports: which write, which partition, and why it was refused. */
 export interface FencedErrorDetails {
   /** The partition the write carried a fence for. */
@@ -246,6 +252,59 @@ export class ModeLimitReachedError extends Error {
     // is the sort of thing that ends up pasted into a screenshot.
     super(`cannot create a mode: the limit of ${limit} modes is reached`)
     this.name = 'ModeLimitReachedError'
+    this.ownerId = ownerId
+    this.limit = limit
+  }
+}
+
+/**
+ * A create was refused because the user already has an MCP server with that name (epic #303,
+ * X10).
+ *
+ * A server's name is unique among its owner's servers — it is a tool-name prefix a model sees
+ * once tools land (#312) — and the uniqueness is enforced by the store (a unique constraint in
+ * Postgres), not only checked by the caller, so two concurrent creates cannot both take the
+ * name. The update path raises this too, when a rename would collide.
+ */
+export class DuplicateMcpServerNameError extends Error {
+  /** Stable, machine-readable code; see {@link DUPLICATE_MCP_SERVER_NAME_ERROR_CODE}. */
+  readonly code = DUPLICATE_MCP_SERVER_NAME_ERROR_CODE
+
+  /** The owner whose servers already include the name. */
+  readonly ownerId: UserId
+
+  /** The name that was already taken. */
+  readonly serverName: string
+
+  constructor(ownerId: UserId, name: string) {
+    super(`an MCP server named ${JSON.stringify(name)} already exists`)
+    this.name = 'DuplicateMcpServerNameError'
+    this.ownerId = ownerId
+    this.serverName = name
+  }
+}
+
+/**
+ * A create was refused because the user is at `MAX_MCP_SERVERS_PER_USER` (epic #303, X10).
+ *
+ * The cap is a store rule rather than the caller's, because only the store can count a user's
+ * servers and insert one without a race between the two.
+ */
+export class McpServerLimitReachedError extends Error {
+  /** Stable, machine-readable code; see {@link MCP_SERVER_LIMIT_REACHED_ERROR_CODE}. */
+  readonly code = MCP_SERVER_LIMIT_REACHED_ERROR_CODE
+
+  /** The owner who is at the limit. */
+  readonly ownerId: UserId
+
+  /** The limit that was reached. */
+  readonly limit: number
+
+  constructor(ownerId: UserId, limit: number) {
+    // The caller's own id is not in the message: it is noise to the person reading it, and it
+    // is the sort of thing that ends up pasted into a screenshot.
+    super(`cannot create an MCP server: the limit of ${limit} servers is reached`)
+    this.name = 'McpServerLimitReachedError'
     this.ownerId = ownerId
     this.limit = limit
   }

@@ -1,11 +1,11 @@
 import { errorResult } from '@openharness/hands'
 import type { ToolRegistry, ToolResult } from '@openharness/hands'
 import type {
-  AgentToolUseEvent,
   AskUserAnswer,
   EventId,
   StoredEvent,
   TextBlock,
+  ToolCallEvent,
   ToolInput,
   UserToolConfirmationEvent,
 } from '@openharness/protocol'
@@ -15,11 +15,17 @@ import {
   askUserAnswerProblems,
   askUserInputProblems,
   formatAskUserAnswers,
+  isToolCallEvent,
+  isToolResultEvent,
   parseAskUserInput,
+  toolCallInput,
+  toolCallOfferedName,
+  toolCallPermission,
+  toolResultCallId,
 } from '@openharness/protocol'
 import type { AppendableEvent } from '@openharness/session'
 
-import { agentToolResult } from './events'
+import { toolResultForCall } from './events'
 
 /**
  * The pause: the calls a turn waits on the user for, and what answers them (epic #303, X6;
@@ -62,21 +68,28 @@ export const RESOLVED_BY_MESSAGE = 'The user sent a message instead.'
  * waiting was a call the brain never got to run, and a brain that inherits it must not run it
  * now.
  *
+ * Built-in calls and remote MCP ones alike (#312): a remote tool's default policy is `ask`, so
+ * this is the read that a remote tool's pause is found by.
+ *
  * @param events the session's log, as the turn's replay read handed it over
  */
-export function awaitingUser(events: readonly StoredEvent[]): AgentToolUseEvent[] {
+export function awaitingUser(events: readonly StoredEvent[]): ToolCallEvent[] {
+  const answered = answeredCallIds(events)
+  return events.filter(
+    (event): event is ToolCallEvent =>
+      isToolCallEvent(event) && toolCallPermission(event) === 'ask' && !answered.has(event.id),
+  )
+}
+
+/** The ids of the calls the log answers, whichever pair each answer belongs to (#312). */
+function answeredCallIds(events: readonly StoredEvent[]): Set<EventId> {
   const answered = new Set<EventId>()
   for (const event of events) {
-    if (event.type === EVENT_TYPES.agentToolResult) {
-      answered.add(event.tool_use_id)
+    if (isToolResultEvent(event)) {
+      answered.add(toolResultCallId(event))
     }
   }
-  return events.filter(
-    (event): event is AgentToolUseEvent =>
-      event.type === EVENT_TYPES.agentToolUse &&
-      event.evaluated_permission === 'ask' &&
-      !answered.has(event.id),
-  )
+  return answered
 }
 
 /**
@@ -89,7 +102,7 @@ export function awaitingUser(events: readonly StoredEvent[]): AgentToolUseEvent[
  *
  * @param events the session's log, as the turn's replay read handed it over
  */
-export function answeredWaiting(events: readonly StoredEvent[]): AgentToolUseEvent[] {
+export function answeredWaiting(events: readonly StoredEvent[]): ToolCallEvent[] {
   const confirmations = confirmationsByCall(events)
   return awaitingUser(events).filter((call) => confirmations.has(call.id))
 }
@@ -130,8 +143,10 @@ export function confirmationsByCall(
 export function sessionApprovedTools(events: readonly StoredEvent[]): ReadonlySet<string> {
   const calls = new Map<EventId, string>()
   for (const event of events) {
-    if (event.type === EVENT_TYPES.agentToolUse) {
-      calls.set(event.id, event.name)
+    if (isToolCallEvent(event)) {
+      // Keyed by the name the model called the tool by — for a remote tool the offered name
+      // (#312), which is what a request's settings and registry are keyed by too.
+      calls.set(event.id, toolCallOfferedName(event))
     }
   }
   const approved = new Set<string>()
@@ -214,7 +229,7 @@ export type CallOutcome = ToolResult | null
  *   tool again, so an approval it finds unfinished is answered as lost (X3)
  */
 export function confirmationOutcome(
-  call: AgentToolUseEvent,
+  call: ToolCallEvent,
   confirmation: UserToolConfirmationEvent,
   recovered: boolean,
 ): CallOutcome {
@@ -225,7 +240,7 @@ export function confirmationOutcome(
   if (answers !== undefined) {
     return answersOutcome(call, answers)
   }
-  return recovered ? errorResult(executionLost(call.name)) : null
+  return recovered ? errorResult(executionLost(toolCallOfferedName(call))) : null
 }
 
 /** What a denial is answered with: the user's own words when they gave any. */
@@ -242,21 +257,22 @@ export function executionLost(name: string): string {
 }
 
 /** The answers a confirmation carried, as the result the call is owed. */
-function answersOutcome(call: AgentToolUseEvent, answers: readonly AskUserAnswer[]): ToolResult {
-  const input = parseAskUserInput(call.input)
+function answersOutcome(call: ToolCallEvent, answers: readonly AskUserAnswer[]): ToolResult {
+  const name = toolCallOfferedName(call)
+  const input = parseAskUserInput(toolCallInput(call))
   if (input === null) {
     // The call was stored paused, so its questions parsed when it was made — unless the tool it
     // names was called with something else entirely. Either way the answers cannot be written:
     // say so rather than storing a result nothing can read.
     return errorResult(
-      `Tool ${call.name} was not called with questions, so the answers to it cannot be stored.`,
+      `Tool ${name} was not called with questions, so the answers to it cannot be stored.`,
     )
   }
   const problems = askUserAnswerProblems(input, answers)
   if (problems.length > 0) {
     // The route refuses these before they are stored; a log assembled another way could still
     // hold them, and a result the model cannot act on is worse than one that says what is wrong.
-    return errorResult(`Invalid answers for ${call.name}: ${problems.join('; ')}`)
+    return errorResult(`Invalid answers for ${name}: ${problems.join('; ')}`)
   }
   return { content: [text(formatAskUserAnswers(input, answers))] }
 }
@@ -269,14 +285,16 @@ function text(value: string): TextBlock {
 /** What the loop tells {@link answerConfirmations} about the calls it is answering. */
 export interface AnswerConfirmationsOptions {
   /** The calls the user has answered, in call order. */
-  readonly calls: readonly AgentToolUseEvent[]
+  readonly calls: readonly ToolCallEvent[]
   /** The confirmations the log holds, keyed by the call each answers. */
   readonly confirmations: ReadonlyMap<EventId, UserToolConfirmationEvent>
   /**
-   * The tools a call may be run with — the deployment's registry, or `undefined` for a host
-   * that registers none. An approved call is run through **this** registry rather than a
-   * request's offer: the user has answered for that tool, and the offer decides what a model
-   * may ask for, not whether an answer the user gave is honoured.
+   * The tools a call may be run with — the deployment's registry with the request's remote MCP
+   * tools in it, or `undefined` for a host that registers none. An approved call is run through
+   * **this** registry rather than a request's offer: the user has answered for that tool, and
+   * the offer decides what a model may ask for, not whether an answer the user gave is honoured.
+   * It is the combined one because an approved remote call has to be runnable (#312) — and one
+   * whose server has since been removed is answered by this registry's own "not registered".
    */
   readonly registry: ToolRegistry | undefined
   /** The per-user values the host resolved for this turn (X4). */
@@ -308,6 +326,9 @@ export async function answerConfirmations(options: AnswerConfirmationsOptions): 
   }
   const outcomes = await Promise.all(
     calls.map(async (call): Promise<CallOutcome> => {
+      // The name the model called the tool by — for a remote MCP tool the offered name (#312),
+      // which is what this deployment's registry is keyed by.
+      const name = toolCallOfferedName(call)
       const confirmation = confirmations.get(call.id)
       const decided =
         confirmation === undefined
@@ -320,11 +341,11 @@ export async function answerConfirmations(options: AnswerConfirmationsOptions): 
       // registry answers a name it does not hold itself (`No tool named … is registered.`).
       if (registry === undefined) {
         return errorResult(
-          `Tool ${call.name}: the call was approved, but this deployment registers no tools ` +
+          `Tool ${name}: the call was approved, but this deployment registers no tools ` +
             'to run it with.',
         )
       }
-      return await registry.execute(call.name, call.input, {
+      return await registry.execute(name, toolCallInput(call), {
         ...(options.signal === undefined ? {} : { signal: options.signal }),
         ...(options.secrets === undefined ? {} : { secrets: options.secrets }),
       })
@@ -333,7 +354,9 @@ export async function answerConfirmations(options: AnswerConfirmationsOptions): 
   const stored = await append(
     calls.map((call, index) => {
       const result = outcomes[index]
-      return agentToolResult(call.id, result?.content ?? [], result?.isError === true)
+      // The result is written in the call's own pair: an approved remote tool is answered with
+      // an `agent.mcp_tool_result`, exactly as the step that called it would have (#312).
+      return toolResultForCall(call, result?.content ?? [], result?.isError === true)
     }),
   )
   if (stored.length !== calls.length) {
@@ -344,7 +367,7 @@ export async function answerConfirmations(options: AnswerConfirmationsOptions): 
 /** What the loop tells {@link resolveWaiting} about the calls it is giving up on. */
 export interface ResolveWaitingOptions {
   /** The calls that are still waiting on the user, in call order. */
-  readonly calls: readonly AgentToolUseEvent[]
+  readonly calls: readonly ToolCallEvent[]
   /** The turn's one write path. */
   readonly append: (events: AppendableEvent[]) => Promise<StoredEvent[]>
 }
@@ -363,5 +386,5 @@ export async function resolveWaiting(options: ResolveWaitingOptions): Promise<vo
   if (calls.length === 0) {
     return
   }
-  await append(calls.map((call) => agentToolResult(call.id, [text(RESOLVED_BY_MESSAGE)], true)))
+  await append(calls.map((call) => toolResultForCall(call, [text(RESOLVED_BY_MESSAGE)], true)))
 }

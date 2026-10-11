@@ -633,17 +633,22 @@ export class PostgresSessionStore implements SessionStore {
   async getToolSettings(userId: UserId): Promise<UserToolSettings> {
     const row = await this.#db
       .selectFrom('user_tool_settings')
-      .select('builtin')
+      .select(['builtin', 'mcp'])
       .where('user_id', '=', userId)
       .executeTakeFirst()
     // No row is "no choice stored", not an error and not a null: the protocol's one shape,
     // and every tool then follows its own declared default.
-    return deepFreeze({ builtin: row?.builtin ?? {} })
+    return deepFreeze({ builtin: row?.builtin ?? {}, mcp: row?.mcp ?? {} })
   }
 
   async putToolSettings(userId: UserId, settings: UserToolSettings): Promise<UserToolSettings> {
     const at = instant(this.#clock())
-    const value = { user_id: userId, builtin: settings.builtin, updated_at: at }
+    const value = {
+      user_id: userId,
+      builtin: settings.builtin,
+      mcp: settings.mcp,
+      updated_at: at,
+    }
     // One statement, like the preferences upsert: `user_id` is the primary key, so a second
     // put replaces the row rather than accumulating, and the replacement is atomic against a
     // concurrent one.
@@ -653,11 +658,12 @@ export class PostgresSessionStore implements SessionStore {
       .onConflict((conflict) =>
         conflict.column('user_id').doUpdateSet({
           builtin: value.builtin,
+          mcp: value.mcp,
           updated_at: value.updated_at,
         }),
       )
       .execute()
-    return deepFreeze({ builtin: settings.builtin })
+    return deepFreeze({ builtin: settings.builtin, mcp: settings.mcp })
   }
 
   async listSessions(options: ListSessionsOptions): Promise<ListSessionsResponse> {
@@ -2126,7 +2132,7 @@ const MODE_CREATE_LOCK = 'openharness:mode-create:'
  * constraint matters: a violation of another constraint is a different bug — a `(session_id,
  * seq)` collision the append lock means cannot happen, say — and it surfaces as itself.
  */
-function isUniqueViolation(error: unknown, constraints: ReadonlySet<string>): boolean {
+export function isUniqueViolation(error: unknown, constraints: ReadonlySet<string>): boolean {
   if (typeof error !== 'object' || error === null) {
     return false
   }

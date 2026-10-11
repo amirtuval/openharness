@@ -86,6 +86,19 @@ export function modeUnavailableError(message: string): HttpError {
 }
 
 /**
+ * An MCP server that could not be reached, discovered or registered as an OAuth client (epic
+ * #303, X10): 422 `mcp_connection_error`.
+ *
+ * Unprocessable rather than a conflict: the request is well-formed, but the server could not
+ * be brought into a usable state — a discovery document with no authorization server, an
+ * authorization server without dynamic registration, a token endpoint that refused the code.
+ * The message names the endpoint and never a secret.
+ */
+export function mcpConnectionError(message: string): HttpError {
+  return new HttpError('mcp_connection_error', message)
+}
+
+/**
  * The caller is over a rate limit — a `GET /v1/models?refresh=true` inside the once-a-minute
  * window (C4): 429 `rate_limit_error`.
  */

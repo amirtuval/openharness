@@ -6,9 +6,11 @@ import {
   type AskUserQuestion,
   type ToolConfirmationRemember,
   type ToolConfirmationResult,
+  type ToolSource,
   type UserToolConfirmationEventInput,
 } from '@openharness/protocol'
 
+import { mcpServerMarker } from './tools'
 import type { TranscriptToolCall } from './tools'
 
 /**
@@ -134,6 +136,27 @@ export const APPROVAL_CHOICES: readonly {
 /** The words for one approval choice, the same in both frontends (epic #303, #310). */
 export function approvalChoiceLabel(choice: ApprovalChoice): string {
   return APPROVAL_CHOICES.find((entry) => entry.choice === choice)?.label ?? choice
+}
+
+/**
+ * The sentence a prompt names the call it is about with (epic #303, #310; the MCP half, #312).
+ *
+ * A built-in is its own name — `web_fetch`. A remote tool is the name the model called it by
+ * **and the server it belongs to** (`notes__search (mcp: notes)`), because the decision in front
+ * of the reader is not only "which tool" but "whose": an MCP server is theirs, its answer is the
+ * server's, and two servers may both offer a `search`. {@link mcpServerMarker} is the one
+ * spelling of the second half, shared with the call line, so the prompt and the line above it
+ * say the same thing about the same call.
+ *
+ * @param call the waiting call — its name, where it comes from, and the server when it is a
+ *   remote one
+ */
+export function pendingCallHeading(call: {
+  readonly name: string
+  readonly source: ToolSource
+  readonly server?: string | undefined
+}): string {
+  return call.source === 'mcp' ? `${call.name} (${mcpServerMarker(call.server)})` : call.name
 }
 
 /**

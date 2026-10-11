@@ -44,3 +44,31 @@ describe('mode tool overrides (#307)', () => {
     })
   })
 })
+
+describe('a mode’s MCP server patch is carried through a save (#311, #312)', () => {
+  const PATCH = { builtin: { web_search: true }, mcp_servers: { mcps_notes: false } }
+
+  it('keeps the server patch when a built-in tool is set', () => {
+    expect(withModeToolChoice(PATCH, 'todo_write', 'on')).toEqual({
+      builtin: { web_search: true, todo_write: true },
+      mcp_servers: { mcps_notes: false },
+    })
+  })
+
+  it('keeps the server patch when every built-in tool goes back to following', () => {
+    // The patch is not empty while it names a server: dropping it here would silently undo a
+    // choice this editor does not offer yet (#313).
+    expect(withModeToolChoice(PATCH, 'web_search', 'follow')).toEqual({
+      builtin: {},
+      mcp_servers: { mcps_notes: false },
+    })
+  })
+
+  it('reads and writes no server patch when the mode carries none', () => {
+    expect(withModeToolChoice({ builtin: {} }, 'web_search', 'on')).toEqual({
+      builtin: { web_search: true },
+    })
+    // An empty server map is the same as none: the mode says nothing either way.
+    expect(withModeToolChoice({ builtin: {}, mcp_servers: {} }, 'web_search', 'follow')).toBeNull()
+  })
+})

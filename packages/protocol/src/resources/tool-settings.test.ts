@@ -47,19 +47,39 @@ describe('BuiltinToolSettingSchema', () => {
 })
 
 describe('UserToolSettingsSchema', () => {
-  it('holds the built-in map, empty for a user who has chosen nothing', () => {
-    expect(UserToolSettingsSchema.parse(DEFAULT_USER_TOOL_SETTINGS)).toEqual({ builtin: {} })
-    const settings = { builtin: { web_fetch: { enabled: true, policy: 'ask' } } }
+  it('holds both maps, empty for a user who has chosen nothing', () => {
+    expect(UserToolSettingsSchema.parse(DEFAULT_USER_TOOL_SETTINGS)).toEqual({
+      builtin: {},
+      mcp: {},
+    })
+    const settings = { builtin: { web_fetch: { enabled: true, policy: 'ask' } }, mcp: {} }
     expect(UserToolSettingsSchema.parse(settings)).toEqual(settings)
   })
 
-  it('refuses a name that is not one, and a setting that is not one', () => {
-    expect(UserToolSettingsSchema.safeParse({ builtin: { '': setting } }).success).toBe(false)
+  it('holds an MCP policy per offered tool name, and nothing else (#312)', () => {
+    const settings = { builtin: {}, mcp: { notes__search: 'allow' } }
+    expect(UserToolSettingsSchema.parse(settings)).toEqual(settings)
+    // A remote tool has no on/off of its own: only a permission is accepted.
     expect(
-      UserToolSettingsSchema.safeParse({ builtin: { web_fetch: { enabled: true } } }).success,
+      UserToolSettingsSchema.safeParse({ builtin: {}, mcp: { notes__search: { enabled: true } } })
+        .success,
     ).toBe(false)
-    // The map is required: a stored row always holds one, empty or not.
+    expect(
+      UserToolSettingsSchema.safeParse({ builtin: {}, mcp: { notes__search: 'maybe' } }).success,
+    ).toBe(false)
+  })
+
+  it('refuses a name that is not one, and a setting that is not one', () => {
+    expect(UserToolSettingsSchema.safeParse({ builtin: { '': setting }, mcp: {} }).success).toBe(
+      false,
+    )
+    expect(
+      UserToolSettingsSchema.safeParse({ builtin: { web_fetch: { enabled: true } }, mcp: {} })
+        .success,
+    ).toBe(false)
+    // The maps are required: a stored row always holds them, empty or not.
     expect(UserToolSettingsSchema.safeParse({}).success).toBe(false)
+    expect(UserToolSettingsSchema.safeParse({ builtin: {} }).success).toBe(false)
   })
 
   it('bounds a tool name, so a stored key cannot be a paragraph', () => {
@@ -75,6 +95,21 @@ describe('ToolSettingEntrySchema', () => {
     // An unavailable tool has no declaration to report, and is listed all the same.
     const unavailable = { ...entry, available: false, default_policy: null }
     expect(ToolSettingEntrySchema.parse(unavailable)).toEqual(unavailable)
+  })
+
+  it('names the server a remote tool belongs to, and no server for a built-in (#312)', () => {
+    const remote: ToolSettingEntry = {
+      name: 'notes__search',
+      source: 'mcp',
+      enabled: true,
+      policy: 'ask',
+      default_policy: 'ask',
+      available: true,
+      mcp_server: 'notes',
+    }
+    expect(ToolSettingEntrySchema.parse(remote)).toEqual(remote)
+    // A built-in carries no server: the field is how the two are told apart.
+    expect(ToolSettingEntrySchema.parse(entry).mcp_server).toBeUndefined()
   })
 
   it('refuses a missing field, a source outside the vocabulary and a bad permission', () => {
@@ -112,6 +147,13 @@ describe('the tools endpoints', () => {
     expect(
       PutToolSettingsRequestSchema.safeParse({ builtin: { web_search: { policy: 'allow' } } })
         .success,
+    ).toBe(false)
+    // A remote policy is a permission and nothing else, keyed by the offered name (#312).
+    expect(PutToolSettingsRequestSchema.parse({ mcp: { notes__search: 'deny' } })).toEqual({
+      mcp: { notes__search: 'deny' },
+    })
+    expect(
+      PutToolSettingsRequestSchema.safeParse({ mcp: { notes__search: 'maybe' } }).success,
     ).toBe(false)
   })
 })

@@ -5,6 +5,7 @@ import type {
   EventId,
   SessionId,
   StoredEvent,
+  ToolSource,
   UserId,
   UserToolConfirmationEventInput,
   UserToolSettings,
@@ -15,7 +16,11 @@ import {
   EVENT_TYPES,
   MAX_PAGE_LIMIT,
   askUserAnswerProblems,
+  isToolCallEvent,
+  isToolResultEvent,
   parseAskUserInput,
+  toolCallOfferedName,
+  toolResultCallId,
 } from '@openharness/protocol'
 import type { SessionStore } from '@openharness/session'
 
@@ -79,10 +84,11 @@ export interface PausingDeps {
  *
  * The rules, in one place:
  *
- * - the call it names has to be an `agent.tool_use` of this session, with no
- *   `agent.tool_result` answering it and `evaluated_permission: ask` — a call that is really
- *   waiting. A confirmation for anything else (a call that already ran, a call the settings
- *   allowed outright, a call of another session) is the 400, and nothing is stored.
+ * - the call it names has to be a tool call of this session — `agent.tool_use` or
+ *   `agent.mcp_tool_use` (#312) — with no result answering it and `evaluated_permission: ask`:
+ *   a call that is really waiting. A confirmation for anything else (a call that already ran, a
+ *   call the settings allowed outright, a call of another session) is the 400, and nothing is
+ *   stored.
  * - `answers` belong to an `ask_user` call and are required to *allow* one (a denial means the
  *   user would not answer); `remember` belongs to an approval, never to a question, which is
  *   what a client would otherwise use to silence a question forever.
@@ -94,7 +100,7 @@ export interface PausingDeps {
  * @param sessionId the session the batch was posted to
  * @param ownerId the caller, for the owner-scoped read (A4)
  * @param confirmations the confirmations in the batch, in order
- * @returns the tool names the batch approved for `always` — what the caller writes the user's
+ * @returns the tools the batch approved for `always` — what the caller writes the user's
  *   stored policy for, once the events are really stored
  * @throws HttpError the protocol's 400 for a confirmation that cannot be acted on
  */
@@ -103,17 +109,17 @@ export async function assertConfirmations(
   sessionId: SessionId,
   ownerId: UserId,
   confirmations: readonly UserToolConfirmationEventInput[],
-): Promise<string[]> {
+): Promise<AlwaysApproval[]> {
   if (confirmations.length === 0) {
     return []
   }
   const calls = await sessionCalls(deps, sessionId, ownerId)
-  const always: string[] = []
+  const always: AlwaysApproval[] = []
   for (const confirmation of confirmations) {
     const call = calls.get(confirmation.tool_use_id)
     if (call === undefined) {
       throw invalidRequest(
-        `no agent.tool_use of session ${sessionId} has the id ${confirmation.tool_use_id}, so there is nothing to confirm`,
+        `no tool call of session ${sessionId} has the id ${confirmation.tool_use_id}, so there is nothing to confirm`,
       )
     }
     if (call.answered || call.evaluated_permission !== 'ask') {
@@ -123,21 +129,40 @@ export async function assertConfirmations(
     }
     assertConfirmationFits(call, confirmation)
     if (confirmation.result === 'allow' && confirmation.remember === 'always') {
-      always.push(call.name)
+      always.push({ name: call.name, source: call.source })
     }
   }
   return always
 }
 
+/**
+ * A tool an `always` approval remembers: the name the user's settings are keyed by, and which
+ * half of the settings it is (epic #303, #309; #312).
+ *
+ * The name is the one the model called the tool by — a remote MCP tool's offered name, which is
+ * what `UserToolSettings.mcp` is keyed by — and the source says which map the write belongs in,
+ * because a remote tool has a policy and no on/off.
+ */
+export interface AlwaysApproval {
+  readonly name: string
+  readonly source: ToolSource
+}
+
 /** What a call in the log looks like to the checks. */
 interface CallInLog {
   readonly id: EventId
+  /**
+   * The name the model called the tool by: a built-in's own name, or a remote tool's offered
+   * name — the key its settings live under either way (`mcpToolOfferedName`, #312).
+   */
   readonly name: string
+  /** Which half of the settings a `remember: always` approval belongs in. */
+  readonly source: ToolSource
   /** The call's arguments, as stored. */
   readonly input: unknown
   /** What the policy in force said about it — `ask` is what makes it wait. */
   readonly evaluated_permission: string
-  /** Whether an `agent.tool_result` answers it. */
+  /** Whether a result answers it. */
   readonly answered: boolean
 }
 
@@ -147,7 +172,8 @@ interface CallInLog {
  * Read with a `types` filter, so the walk is over the tool events a session made and not its
  * whole conversation: a session that has never called a tool costs one empty page, and one that
  * has called a thousand pays for the calls alone. Replay skips what a supersession covers, so a
- * call an edit took back is not a call anybody can confirm.
+ * call an edit took back is not a call anybody can confirm. Both pairs are read (#312): a
+ * remote tool's call waits for the user the same way, and one confirmation answers it.
  */
 async function sessionCalls(
   deps: PausingDeps,
@@ -159,7 +185,12 @@ async function sessionCalls(
   for (;;) {
     const answer = await deps.store.listEvents(sessionId, {
       ownerId,
-      types: [EVENT_TYPES.agentToolUse, EVENT_TYPES.agentToolResult],
+      types: [
+        EVENT_TYPES.agentToolUse,
+        EVENT_TYPES.agentToolResult,
+        EVENT_TYPES.agentMcpToolUse,
+        EVENT_TYPES.agentMcpToolResult,
+      ],
       limit: MAX_PAGE_LIMIT,
       ...(page === undefined ? {} : { page }),
     })
@@ -173,20 +204,27 @@ async function sessionCalls(
   }
 }
 
-/** Fold one stored event into the map: a call starts one, a result marks it answered. */
+/**
+ * Fold one stored event into the map: a call starts one, a result marks it answered.
+ *
+ * The call's `name` is the one the model called it by ({@link toolCallOfferedName}) — for a
+ * remote tool the offered name, which is what its policy is keyed by — and `input` is the
+ * stored arguments, which is what an `ask_user` call's questions are read out of.
+ */
 function recordCall(calls: Map<string, CallInLog>, event: StoredEvent): void {
-  if (event.type === EVENT_TYPES.agentToolUse) {
+  if (isToolCallEvent(event)) {
     calls.set(event.id, {
       id: event.id,
-      name: event.name,
+      name: toolCallOfferedName(event),
+      source: event.type === EVENT_TYPES.agentToolUse ? 'builtin' : 'mcp',
       input: event.input,
       evaluated_permission: event.evaluated_permission,
       answered: false,
     })
     return
   }
-  if (event.type === EVENT_TYPES.agentToolResult) {
-    const call = calls.get(event.tool_use_id)
+  if (isToolResultEvent(event)) {
+    const call = calls.get(toolResultCallId(event))
     if (call !== undefined) {
       calls.set(call.id, { ...call, answered: true })
     }
@@ -233,17 +271,17 @@ function assertConfirmationFits(
 }
 
 /**
- * The tool names an `always` approval writes the user's stored policy for (epic #303, #309;
- * #307).
+ * The tools an `always` approval writes the user's stored policy for (epic #303, #309; #307).
  *
  * "Remember: always" means the *next* chat inherits it, which is the settings row and not the
  * log: the confirmation is this chat's record, and this is the user's choice about the tool
  * itself. Only an approval of a real tool is one — a question is never remembered (the route
- * refuses it) — and the row keeps whatever `enabled` the user had, so remembering an approval
- * never turns a tool on behind their back.
+ * refuses it) — and a built-in's row keeps whatever `enabled` the user had, so remembering an
+ * approval never turns a tool on behind their back. A **remote** tool has no `enabled` to keep:
+ * its policy is the whole of what a user chooses about it (#312).
  *
  * @param stored the user's current settings
- * @param approvals the tool names the batch approved for always
+ * @param approvals the tools the batch approved for always
  */
 export interface RememberDeps {
   /** The user's stored tool choices: the row an `always` approval writes. */
@@ -260,30 +298,41 @@ export interface RememberDeps {
  *
  * @param deps the store the settings live in
  * @param ownerId the user whose settings they are
- * @param toolNames the tools to remember, in the order they were approved
+ * @param approvals the tools to remember, in the order they were approved
  */
 export async function rememberAlwaysApprovals(
   deps: RememberDeps,
   ownerId: UserId,
-  toolNames: readonly string[],
+  approvals: readonly AlwaysApproval[],
 ): Promise<void> {
-  if (toolNames.length === 0) {
+  if (approvals.length === 0) {
     return
   }
   const stored = await deps.store.getToolSettings(ownerId)
-  await deps.store.putToolSettings(ownerId, withAlwaysApprovals(stored, toolNames))
+  await deps.store.putToolSettings(ownerId, withAlwaysApprovals(stored, approvals))
 }
 
+/**
+ * The settings with the given tools' policies set to `allow`.
+ *
+ * A built-in keeps its `enabled` — the user's on/off is not what they answered — and a remote
+ * tool is written to the `mcp` map, which holds a permission and nothing else.
+ */
 export function withAlwaysApprovals(
   stored: UserToolSettings,
-  approvals: readonly string[],
+  approvals: readonly AlwaysApproval[],
 ): UserToolSettings {
   const builtin: Record<string, { enabled: boolean; policy: 'allow' | 'ask' | 'deny' }> = {}
   for (const [name, setting] of Object.entries(stored.builtin)) {
     builtin[name] = { enabled: setting.enabled, policy: setting.policy }
   }
-  for (const name of approvals) {
-    builtin[name] = { enabled: builtin[name]?.enabled ?? true, policy: 'allow' }
+  const mcp: Record<string, 'allow' | 'ask' | 'deny'> = { ...stored.mcp }
+  for (const approval of approvals) {
+    if (approval.source === 'mcp') {
+      mcp[approval.name] = 'allow'
+    } else {
+      builtin[approval.name] = { enabled: builtin[approval.name]?.enabled ?? true, policy: 'allow' }
+    }
   }
-  return { builtin }
+  return { builtin, mcp }
 }

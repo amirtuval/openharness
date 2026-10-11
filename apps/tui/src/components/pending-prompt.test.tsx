@@ -148,6 +148,26 @@ describe('pendingRows and the lines they draw (#310)', () => {
     expect(rows.at(-1)?.kind).toBe('message')
   })
 
+  it('names the MCP server a remote call came from (#312)', () => {
+    const remote: PendingCall = {
+      call: {
+        ...approval('sevt_mcp', 'notes__search'),
+        source: 'mcp',
+        server: 'notes',
+      },
+      kind: 'approval',
+      questions: [],
+    }
+
+    const rows = pendingRows([remote], {})
+    // The same heading on every row of the call, and the server is in it: a terminal has no
+    // hover, and whose tool this is is the point of the decision.
+    expect(rows[0]?.group).toBe('notes__search (mcp: notes) is waiting on you')
+
+    const text = textOf(pendingPromptLines([remote], { drafts: {}, cursorId: null }, 80, DARK))
+    expect(text).toContain('notes__search (mcp: notes) is waiting on you')
+  })
+
   it('marks what is chosen, and names the question above its options', () => {
     const drafts: PendingDrafts = {
       sevt_ask: [

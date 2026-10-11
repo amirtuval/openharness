@@ -4,8 +4,9 @@ The durable, append-only session event log: the `SessionStore` contract the brai
 server code against, the in-memory implementation every other package tests against, the
 Postgres implementation production runs on, and the conformance suite all of them pass. It also
 owns the **Better Auth tables** the server signs users in against, the `CredentialStore` that
-holds users' sealed model-provider keys (epic #65, A1/A4/A5), and the SQL every one of those
-tables comes from.
+holds users' sealed model-provider keys (epic #65, A1/A4/A5), the `McpServerStore` that holds a
+user's remote MCP servers and their pending OAuth states (epic #303, X10), and the SQL every one
+of those tables comes from.
 
 A session is a log of events — the user's messages, the agent's replies, the status
 transitions that bracket a turn, and the spans around every model request. It is the source of
@@ -53,9 +54,11 @@ src/
   index.ts              the barrel: the contracts, the stores, clocks, errors
   store.ts              SessionStore, its vocabulary, and the semantics in TSDoc
   credentials.ts        CredentialStore: sealed blobs, metadata, and the semantics in TSDoc
-  memory.ts             InMemorySessionStore and InMemoryCredentialStore: the fakes, and the reference behaviour
+  mcp-servers.ts        McpServerStore: a user's remote MCP servers, their sealed secrets and
+                          their pending OAuth states (epic #303, X10)
+  memory.ts             InMemorySessionStore, InMemoryCredentialStore and InMemoryMcpServerStore: the fakes, and the reference behaviour
   clock.ts              Clock, systemClock, timestampAt()
-  errors.ts             FencedError, SessionNotFoundError, AgentNotFoundError, DuplicateEventIdError, ClaimConflictError, DuplicateModeNameError, ModeLimitReachedError
+  errors.ts             FencedError, SessionNotFoundError, AgentNotFoundError, DuplicateEventIdError, ClaimConflictError, DuplicateModeNameError, ModeLimitReachedError, DuplicateMcpServerNameError, McpServerLimitReachedError
   inputs.ts             the argument checks both stores share (limits, cursors, lease ttls)
   events.ts             the event rules both stores share (claims' types, supersession ranges)
   freeze.ts             deepFreeze(): how the immutability of the log is enforced at runtime
@@ -63,6 +66,7 @@ src/
     index.ts            the `@openharness/session/postgres` entry point
     store.ts            PostgresSessionStore and createPostgresSessionStore
     credentials.ts      PostgresCredentialStore and createPostgresCredentialStore
+    mcp-servers.ts      PostgresMcpServerStore and createPostgresMcpServerStore (#303, X10)
     schema.ts           the Kysely table types, row → protocol mapping, channel names
     listen.ts           the dedicated LISTEN connection, and its reconnection
     migrate.ts          migrate(): the SQL-file runner
@@ -73,6 +77,7 @@ src/
     index.ts            the subpath entry: re-exports, plus the suites and the test clock
     conformance.ts      runSessionStoreConformance(), and the suite's two owners
     credentials-conformance.ts  runCredentialStoreConformance()
+    mcp-servers-conformance.ts  runMcpServerStoreConformance() (#303, X10)
     clock.ts            createTestClock()
 migrations/             the SQL the Postgres stores need, applied by `migrate()`:
                         0001–0010 the log, 0011 Better Auth, 0012 ownership, 0013 credentials,
@@ -90,7 +95,11 @@ migrations/             the SQL the Postgres stores need, applied by `migrate()`
                         0025 the compaction controls on the per-user preferences (#282),
                         0026 the index behind the per-user tool-call read (#305),
                         0027 the per-user tool settings, and the tool override a mode carries (#307),
-                        0028 the index behind the paused-confirmation work scan (#309)
+                        0028 the index behind the paused-confirmation work scan (#309),
+                        0029 a user's remote MCP servers and their pending OAuth states
+                          (#303, X10),
+                        0030 where a pending OAuth flow was started — `web` or `cli` (#311),
+                        0031 the per-tool policies a user has for remote MCP tools (#312)
 docs/postgres.md        the Postgres stores: schema, migrations, delivery, local setup
 ```
 
@@ -132,11 +141,12 @@ docs/postgres.md        the Postgres stores: schema, migrations, delivery, local
 | `PostgresSessionStore`, `createPostgresSessionStore(config, options?)`                                                                                                                                                            | the durable implementation; `{ connectionString }` or `{ pool }`, plus options                                                       |
 | `PostgresSessionStoreOptions`, `PostgresSessionStoreConfig`                                                                                                                                                                       | its options (`now`, `partitionCount`, `onError`) and the two ways to reach a DB                                                      |
 | `PostgresCredentialStore`, `createPostgresCredentialStore(config, options?)`                                                                                                                                                      | the durable credential store; `{ connectionString }` or `{ pool }`, plus `now`                                                       |
+| `PostgresMcpServerStore`, `createPostgresMcpServerStore(config, options?)`                                                                                                                                                        | the durable MCP server store; `{ connectionString }` or `{ pool }`, plus `now` (#303, X10)                                           |
 | `PostgresCredentialStoreOptions`, `PostgresCredentialStoreConfig`                                                                                                                                                                 | its options, and the two ways to reach a DB                                                                                          |
 | `migrate(db, options?)`                                                                                                                                                                                                           | applies `migrations/` — the log, Better Auth and `provider_credentials` — idempotently, in one locked transaction; returns the files |
 | `MigrateOptions`                                                                                                                                                                                                                  | `{ migrationsDir? }`, for a migrations directory that is not this package's                                                          |
 | `PostgresSchema`, `AgentsTable`, `ModesTable`, `SessionsTable`, `EventsTable`, `EventClaimsTable`, `EventSupersessionsTable`, `PartitionLeasesTable`, `ProviderCredentialsTable`, `UserPreferencesTable`, `UserToolSettingsTable` | the Kysely table types, for a caller that wants to query alongside the stores                                                        |
-| `ProviderCredentialRow`, `ProviderCredentialMetadataRow`, `ModeRow`                                                                                                                                                               | the shapes a credential read has — with the sealed blob, and without — and one row of `modes`                                        |
+| `ProviderCredentialRow`, `ProviderCredentialMetadataRow`, `ModeRow`, `McpServerRow`, `McpServerMetadataRow`, `McpOAuthStateRow`                                                                                                   | the shapes a credential read has — with the sealed blob, and without — one row of `modes`, and the MCP server rows (#303, X10)       |
 
 This entry point is a separate subpath on purpose: it is the only module that depends on `pg`
 and `kysely`, and a consumer that only needs the contract, the fake or the suite must not load
@@ -145,15 +155,17 @@ opened it**. See [`docs/postgres.md`](./docs/postgres.md).
 
 ### `@openharness/session/testing`
 
-| export                                                     | what it is                                                    |
-| ---------------------------------------------------------- | ------------------------------------------------------------- |
-| `runSessionStoreConformance(makeStore, options?)`          | the suite every `SessionStore` implementation must pass       |
-| `runCredentialStoreConformance(makeStore, options?)`       | the suite every `CredentialStore` implementation must pass    |
-| `MakeSessionStore`, `SessionStoreConformanceOptions`       | the session factory, and how to name the suite                |
-| `MakeCredentialStore`, `CredentialStoreConformanceOptions` | the credential factory, and how to name the suite             |
-| `OWNER_A`, `OWNER_B`                                       | the two users everything in the session suite belongs to (A4) |
-| `createTestClock(startMs?)`, `TestClock`                   | a clock a test advances by hand                               |
-| everything from `@openharness/session`                     | re-exported, so a test imports a store and its suite together |
+| export                                                     | what it is                                                            |
+| ---------------------------------------------------------- | --------------------------------------------------------------------- |
+| `runSessionStoreConformance(makeStore, options?)`          | the suite every `SessionStore` implementation must pass               |
+| `runCredentialStoreConformance(makeStore, options?)`       | the suite every `CredentialStore` implementation must pass            |
+| `runMcpServerStoreConformance(makeStore, options?)`        | the suite every `McpServerStore` implementation must pass (#303, X10) |
+| `MakeSessionStore`, `SessionStoreConformanceOptions`       | the session factory, and how to name the suite                        |
+| `MakeCredentialStore`, `CredentialStoreConformanceOptions` | the credential factory, and how to name the suite                     |
+| `MakeMcpServerStore`, `McpServerStoreConformanceOptions`   | the MCP server factory, and how to name its suite (#303, X10)         |
+| `OWNER_A`, `OWNER_B`                                       | the two users everything in the session suite belongs to (A4)         |
+| `createTestClock(startMs?)`, `TestClock`                   | a clock a test advances by hand                                       |
+| everything from `@openharness/session`                     | re-exported, so a test imports a store and its suite together         |
 
 This entry point is for test code only: the suites call `describe`/`it` from `vitest`, which
 is therefore a devDependency of any package that uses it, and never a runtime dependency of
@@ -471,19 +483,26 @@ screen always has a value. `putPreferences` writes the value whole (one row per 
 in place; `{ default_model: null }` clears it), stamps `updated_at` from the injected clock,
 and answers what was stored. Both answers are deep-frozen, like a credential's.
 
-**Tool settings** (epic #303, X4; issue #307). `getToolSettings(userId)` and
-`putToolSettings(userId, settings)` are the per-user tool choices beside the log, keyed by
-`userId` like the preferences are. `UserToolSettings` is one value, `{ builtin }` — a map of
-tool name to `{ enabled, policy }` — where `enabled` says whether the tool may be offered at
-all and `policy` is the permission a call to it is evaluated under (`allow | ask | deny`). A
-tool the map does not carry follows **its own declared default**, so the map is a record of
-choices rather than a complete list, and a user who has never saved one reads
-`{ builtin: {} }`: no `null` and no throw, so the settings screen always has a value.
+**Tool settings** (epic #303, X4; issue #307; the remote half: #312). `getToolSettings(userId)`
+and `putToolSettings(userId, settings)` are the per-user tool choices beside the log, keyed by
+`userId` like the preferences are. `UserToolSettings` is one value with a map per source of
+tool: `builtin` — tool name to `{ enabled, policy }`, where `enabled` says whether the tool may
+be offered at all and `policy` is the permission a call to it is evaluated under
+(`allow | ask | deny`) — and `mcp` — a remote MCP tool's model-facing offered name
+(`<server>__<tool>`) to a permission, and nothing else, because a remote tool has no on/off of
+its own (its whole server does, and a mode's `mcp_servers` override patches that). A tool the
+map does not carry follows **its own declared default**, so a map is a record of choices rather
+than a complete list, and a user who has never saved one reads `{ builtin: {}, mcp: {} }`: no
+`null` and no throw, so the settings screen always has a value.
 `putToolSettings` writes the value whole (one row per user, replaced in place), stamps
 `updated_at` from the injected clock, and answers what was stored; both answers are
 deep-frozen, like a credential's. A **mode's** override of which tools are on is stored on the
 mode (`Mode.tools`) and is **not** this method's business: applying one over the other is the
-caller's — the server's resolver — and never the store's.
+caller's — the server's resolver — and never the store's. `Mode.tools` carries both halves of
+that override — the built-in tools by name, and the user's remote MCP servers by id (#311) — and
+this package stores it as the protocol's one object, whichever keys it holds; **no migration**
+was needed for the MCP half, because it is another key inside the `tools jsonb` column `0027`
+already added (`{ builtin: … }` written before it still parses, with no `mcp_servers` key).
 
 **Modes** (#245, M6). `createMode`, `getMode`, `listModes`, `updateMode` and `deleteMode` are
 the per-user presets beside the log, keyed by `mode_id` and scoped by owner like the
@@ -571,6 +590,44 @@ Both implementations pass `runCredentialStoreConformance`: `InMemoryCredentialSt
 sees the plaintext, so the credential's _validation_ — the one cheap provider call on save —
 and its decryption are the server's (`apps/server`, #61).
 
+## The McpServerStore (epic #303, X10)
+
+`McpServerStore` in `src/mcp-servers.ts` is the third contract: where a user's **remote MCP
+servers** and their pending OAuth authorizations live. Like the `CredentialStore`, it stores
+**only sealed blobs** for the secrets — the server seals a header map, OAuth tokens and the
+registered OAuth client with `@openharness/vault` and hands the store the `SealedSecret`, which
+it writes down as one JSON column each — so this package has no vault dependency either.
+
+| method                                 | what it does                                                                                                                                      |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `create(input)`                        | writes a server (the caller may mint its `mcps_` id, so a secret can be sealed under AAD naming it); a duplicate name or the cap is a typed error |
+| `get(serverId, { ownerId })`           | the record **including its sealed secrets**, or `null` — the one read the server's check, refresh and callback use                                |
+| `list({ ownerId })`                    | metadata only, oldest first (`(created_at, id)`); the sealed columns are not even selected                                                        |
+| `update(serverId, { ownerId }, patch)` | a patch: an omitted field keeps its value, and a `secrets` key that is omitted keeps its blob, a value replaces it and `null` clears it           |
+| `delete(serverId, { ownerId })`        | removes the server and its pending OAuth states (the Postgres cascade)                                                                            |
+| `createOAuthState(state)`              | records a pending flow, replacing any earlier one for the same `(user, server)`                                                                   |
+| `consumeOAuthState(state)`             | redeems it single-use and hands back `{ userId, serverId, codeVerifier, client }`, or `null` when unknown, expired or already used                |
+
+- **A name is unique per user and a user holds at most `MAX_MCP_SERVERS_PER_USER`** (20), both
+  enforced by the store — the Postgres create takes a per-owner `pg_advisory_xact_lock` before
+  it counts, the rule modes established — so two concurrent creates cannot both take a name or
+  the last slot.
+- **The OAuth state is single use and short-lived.** It is consumed in the same statement that
+  deletes it, its expiry is checked against the injected clock, and creating one replaces any
+  earlier state for the pair. It carries the user the flow belongs to and where it was started
+  (`client`: `web` or `cli`, #311) beside the verifier, because the callback authenticates by the
+  state alone — the browser the CLI opens may never have signed in — and completes the flow for
+  that user, answering a redirect for the app and a page for the CLI. `code_verifier` is stored
+  **in the clear** deliberately: it is a nonce for one round trip, not a durable credential, and
+  it is useless once the code it is bound to has been redeemed. The **tokens** that come out of
+  the flow are what get sealed.
+- **Owner-scoped and deep-frozen**, like the credential store: another user's server is `null`
+  on a read and `false` on a delete, and what a store returns is a value.
+
+Both implementations pass `runMcpServerStoreConformance`: `InMemoryMcpServerStore` (in
+`memory.ts`) and `PostgresMcpServerStore` (`@openharness/session/postgres`, on the `mcp_servers`
+and `mcp_oauth_states` tables, `0029`/`0030`).
+
 ## The Postgres store
 
 `@openharness/session/postgres` implements the same contract against Postgres, with Kysely and
@@ -578,7 +635,7 @@ and its decryption are the server's (`apps/server`, #61).
 the whole suite against a real database. [docs/postgres.md](./docs/postgres.md) is the long
 version; this is the shape of it.
 
-**Schema.** Sixteen tables, all created by `migrations/`. Eleven are this package's: `agents`,
+**Schema.** Eighteen tables, all created by `migrations/`. Thirteen are this package's: `agents`,
 `sessions` (each with the `owner_id` an agent or session belongs to, `sessions` also with the
 `partitionOf` partition, the `status` the log's last status event implies, the effective
 `model jsonb`/`system` the session runs, the `mode` a chat follows (#245, M6), and the nullable
@@ -602,7 +659,11 @@ carries it), `partition_leases` (`partition`, `owner`, `epoch`, `expires_at`),
 `last_seen` of its last heartbeat; see `0017`), `provider_credentials` (a sealed credential per
 `(user_id, name)`, with the key provider that wrapped its data key — NULL meaning `local` — and
 the public `details jsonb` its type publishes — NULL meaning none; see `0013`, `0018` and
-`0023`) and
+`0023`), `mcp_servers` (a user's remote MCP servers, each with the sealed `sealed_headers`,
+`sealed_tokens` and `sealed_oauth_client` JSON columns, the public `header_names`/`tools` and
+the connection status; unique `(owner_id, name)`; #303, X10), `mcp_oauth_states` (one pending
+OAuth authorization per row, keyed by `state`, carrying the user the flow belongs to and where
+it was started (`client`), and cascading from `mcp_servers`; see `0029`/`0030`) and
 `user_preferences` (one row per user: the stored `default_model`, or NULL, the `theme`,
 `system` by default, and the three compaction controls — `compaction_threshold` NULL meaning
 the server's own, `summary_model` `same-as-chat` by default, `summary_max_passes` NULL meaning
@@ -828,7 +889,11 @@ null default '{}'`, `updated_at`, `on delete cascade` from `"user"` — and one
   all. **A mode's `tools` takes NULL for every existing row**, which is not a guess: modes had
   no tool override before this, so a chat on one followed its owner's settings and still does.
   `user_id` is Better Auth's opaque text and takes no `collate "C"`; nothing orders by it.
-  Both statements are idempotent, so the runner can re-run the file.
+  Both statements are idempotent, so the runner can re-run the file. The mode override gained a
+  second half with #311 — `mcp_servers`, a server id → boolean map inside the same `tools` jsonb
+  — and took **no further migration**: the column already holds the protocol's one
+  `ModeToolOverride` object, so a mode stored before #311 (which has only `builtin`) still parses
+  and a mode stored after it holds both keys.
 
 Pausing for the user (epic #303, X6; issue #309) added the newest one:
 
@@ -981,8 +1046,9 @@ dependency table.
 
 `src/**/*.test.ts` with Vitest (node environment):
 
-- `testing/conformance.test.ts` and `testing/credentials-conformance.test.ts` run the two
-  suites against the in-memory stores — the acceptance tests of this package. The session
+- `testing/conformance.test.ts`, `testing/credentials-conformance.test.ts` and
+  `testing/mcp-servers-conformance.test.ts` run the three suites against the in-memory stores —
+  the acceptance tests of this package. The session
   suite now also asks for the per-user preferences (#111), the model projection a
   `user.message` carrying one applies, `deleteSession` — its rows gone from every read,
   the ids it held free again, and the final `session.deleted` a subscriber receives — and the
@@ -994,16 +1060,19 @@ dependency table.
   and the `RangeError` a window that is not one raises. The per-user tool-call read (#305) is in
   the suite beside it: a call its result answered, a failed call and one nothing answered both
   left out, the `name` filter, owner scoping, the half-open window, the `(session_id, seq)`
-  order and the rewind rule. The modes (#245, M6) are there as well:
+  order, the rewind rule, and — since #312 — a remote MCP call never counting: the read is
+  about this build's own tools, and an MCP server is the user's own, whatever its tool is named. The modes (#245, M6) are there as well:
   create, read, list, partial update and delete, owner scoping on every one of them, the
   unique-name rule (on create and on rename) and the `MAX_MODES_PER_USER` cap, a delete leaving
   the chats that followed the mode an ordinary chat, and the projections — a message's `mode`,
   a span's resolved `model`, and a `purpose: 'summary'` span projecting nothing (epic #277, C2).
   The per-user tool settings (epic #303, X4; #307) are there too: no choices for a user who has
   saved none, the round trip of a map of `{ enabled, policy }`, replace-in-place on a second
-  put, two users kept apart, and deep-frozen answers; and a mode's tool override — carried on
-  create, kept by an update that omits it, cleared by an explicit `null`, and replaced whole by
-  a new map.
+  put, two users kept apart, and deep-frozen answers; and a mode's tool override — both halves
+  of it (#311's `mcp_servers` map beside `builtin`) carried on create, kept by an update that
+  omits it, cleared by an explicit `null`, and replaced whole by a new map, with an override
+  that has only `builtin` round-tripping to exactly that (the shape every mode stored before
+  #311 has).
 - `postgres/postgres.test.ts` runs both suites against Postgres — the acceptance tests of the
   durable stores — and adds what only a shared store can be asked: concurrent appends from
   two stores, a supplied event id two of them try to take, fencing across stores, a burst that

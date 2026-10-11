@@ -2,6 +2,7 @@ import {
   APPROVAL_CHOICES,
   approvalConfirmation,
   approvalChoiceLabel,
+  pendingCallHeading,
   type ApprovalChoice,
   type TranscriptToolCall,
 } from '@openharness/client'
@@ -32,6 +33,12 @@ import { Input } from '../ui/input'
  *
  * The event it builds is one `user.tool_confirmation`; the **screen** sends it, because it
  * owns the request and the error it can fail with.
+ *
+ * **A remote MCP call is the same prompt** (#312), because a pause is a property of the log and
+ * not of a tool: the call is an `agent.mcp_tool_use`, the confirmation names its id, and the
+ * event is the same one the server writes an `agent.mcp_tool_result` from. What differs is the
+ * sentence — `pendingCallHeading` names the server, so a reader allowing `notes__search` knows
+ * whose search they are allowing.
  */
 export function ApprovalPrompt({
   call,
@@ -63,14 +70,16 @@ export function ApprovalPrompt({
     <div
       data-slot="approval-prompt"
       data-tool={call.name}
+      {...(call.server === undefined ? {} : { 'data-server': call.server })}
       role="group"
-      aria-label={`Allow ${call.name}?`}
+      aria-label={`Allow ${pendingCallHeading(call)}?`}
       className="mt-1 rounded-lg border border-coral/40 bg-coral/5 px-2.5 py-2"
     >
       <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
         <ShieldQuestion aria-hidden="true" className="size-3.5 shrink-0 text-coral-ink" />
         <span className="min-w-0">
-          <span className="font-medium text-foreground">{call.name}</span> wants to run. Allow it?
+          <span className="font-medium text-foreground">{pendingCallHeading(call)}</span> wants to
+          run. Allow it?
         </span>
       </p>
       {denying ? (

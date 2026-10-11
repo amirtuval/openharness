@@ -12,7 +12,15 @@ import type {
   ToolResultTruncation,
   Truncation,
 } from '@openharness/protocol'
-import { EVENT_TYPES } from '@openharness/protocol'
+import {
+  EVENT_TYPES,
+  isToolCallEvent,
+  isToolResultEvent,
+  toolCallInput,
+  toolCallOfferedName,
+  toolResultCallId,
+  toolResultIsError,
+} from '@openharness/protocol'
 import type { ModelMessage } from 'ai'
 
 import { lastModelRequest } from './log'
@@ -684,29 +692,22 @@ export function conversationItems(
     let text: string
     let tool = ''
     let pairSeq: number | undefined
-    switch (event.type) {
-      case EVENT_TYPES.userMessage:
-        role = 'user'
-        text = textOf(event.content)
-        break
-      case EVENT_TYPES.agentMessage:
-        role = 'assistant'
-        text = textOf(event.content)
-        break
-      case EVENT_TYPES.agentToolUse:
-        role = 'assistant'
-        text = toolCallText(event.name, event.input)
-        break
-      case EVENT_TYPES.agentToolResult: {
-        role = 'tool'
-        const call = calls.get(event.tool_use_id)
-        pairSeq = call?.seq
-        tool = call?.name ?? ''
-        text = toolResultText(tool, textOf(event.content), event.is_error === true)
-        break
-      }
-      default:
-        continue
+    if (event.type === EVENT_TYPES.userMessage || event.type === EVENT_TYPES.agentMessage) {
+      role = event.type === EVENT_TYPES.userMessage ? 'user' : 'assistant'
+      text = textOf(event.content)
+    } else if (isToolCallEvent(event)) {
+      role = 'assistant'
+      text = toolCallText(toolCallOfferedName(event), toolCallInput(event))
+    } else if (isToolResultEvent(event)) {
+      // A built-in tool and a remote one read the same way: the pair is what a cut must keep
+      // together, and the name is what the result's cap is keyed by (X9, #312).
+      role = 'tool'
+      const call = calls.get(toolResultCallId(event))
+      pairSeq = call?.seq
+      tool = call?.name ?? ''
+      text = toolResultText(tool, textOf(event.content), toolResultIsError(event))
+    } else {
+      continue
     }
     if (text.length === 0) {
       // A message the model said nothing in (an empty `content`, the way a reply that carried
@@ -726,14 +727,17 @@ export function conversationItems(
   return items
 }
 
-/** Every call in the log, by the event id that names it. */
+/**
+ * Every call in the log, by the event id that names it — built-in and remote alike, the name
+ * being the one the model called the tool by (a remote tool's offered name, #312).
+ */
 function toolCallsOf(
   events: readonly StoredEvent[],
 ): Map<EventId, { readonly seq: number; readonly name: string }> {
   const calls = new Map<EventId, { readonly seq: number; readonly name: string }>()
   for (const event of events) {
-    if (event.type === EVENT_TYPES.agentToolUse) {
-      calls.set(event.id, { seq: event.seq, name: event.name })
+    if (isToolCallEvent(event)) {
+      calls.set(event.id, { seq: event.seq, name: toolCallOfferedName(event) })
     }
   }
   return calls
@@ -1037,46 +1041,46 @@ function conversationAfter(
         }
         break
       }
-      case EVENT_TYPES.agentToolUse: {
-        flushAnswers()
-        assistant ??= { seq: event.seq, text: '', calls: [] }
-        assistant.calls.push({
-          type: 'tool-call',
-          toolCallId: event.id,
-          toolName: event.name,
-          input: event.input,
-        })
-        break
-      }
-      case EVENT_TYPES.agentToolResult: {
-        closeAssistant()
-        answers ??= { index: messages.length, seq: event.seq, parts: [] }
-        const raw = textOf(event.content)
-        const tool = toolNames.get(event.tool_use_id) ?? ''
-        // What the request carries instead of the result exactly as it was stored (X9): an old
-        // result's body is cleared, a fresh oversized one is capped. The pair is untouched
-        // either way — the call stays answered, with a shorter answer.
-        const planned = planToolResult(results, event.seq, tool, raw)
-        answers.parts.push({
-          type: 'tool-result',
-          toolCallId: event.tool_use_id,
-          toolName: tool,
-          output:
-            event.is_error === true
+      default: {
+        // A tool call or its answer, whichever pair it belongs to (#312): the request builder
+        // reads them through the one abstraction so a remote call is a call like any other.
+        if (isToolCallEvent(event)) {
+          flushAnswers()
+          assistant ??= { seq: event.seq, text: '', calls: [] }
+          assistant.calls.push({
+            type: 'tool-call',
+            toolCallId: event.id,
+            toolName: toolCallOfferedName(event),
+            input: toolCallInput(event),
+          })
+        } else if (isToolResultEvent(event)) {
+          const callId = toolResultCallId(event)
+          closeAssistant()
+          answers ??= { index: messages.length, seq: event.seq, parts: [] }
+          const raw = textOf(event.content)
+          const tool = toolNames.get(callId) ?? ''
+          // What the request carries instead of the result exactly as it was stored (X9): an old
+          // result's body is cleared, a fresh oversized one is capped. The pair is untouched
+          // either way — the call stays answered, with a shorter answer.
+          const planned = planToolResult(results, event.seq, tool, raw)
+          answers.parts.push({
+            type: 'tool-result',
+            toolCallId: callId,
+            toolName: tool,
+            output: toolResultIsError(event)
               ? { type: 'error-text', value: planned.text }
               : { type: 'text', value: planned.text },
-        })
-        if (planned.truncation !== undefined) {
-          truncatedResults.push(planned.truncation)
+          })
+          if (planned.truncation !== undefined) {
+            truncatedResults.push(planned.truncation)
+          }
+          if (planned.cleared !== undefined) {
+            cleared = { results: cleared.results + 1, tokens: cleared.tokens + planned.cleared }
+          }
+          flushAnswers()
         }
-        if (planned.cleared !== undefined) {
-          cleared = { results: cleared.results + 1, tokens: cleared.tokens + planned.cleared }
-        }
-        flushAnswers()
         break
       }
-      default:
-        break
     }
   }
   closeAssistant()
@@ -1097,8 +1101,8 @@ interface BuiltConversation {
 function toolNamesOf(events: readonly StoredEvent[]): Map<EventId, string> {
   const names = new Map<EventId, string>()
   for (const event of events) {
-    if (event.type === EVENT_TYPES.agentToolUse) {
-      names.set(event.id, event.name)
+    if (isToolCallEvent(event)) {
+      names.set(event.id, toolCallOfferedName(event))
     }
   }
   return names
@@ -1108,8 +1112,8 @@ function toolNamesOf(events: readonly StoredEvent[]): Map<EventId, string> {
 function answeredCalls(events: readonly StoredEvent[]): Set<string> {
   const answered = new Set<string>()
   for (const event of events) {
-    if (event.type === EVENT_TYPES.agentToolResult) {
-      answered.add(event.tool_use_id)
+    if (isToolResultEvent(event)) {
+      answered.add(toolResultCallId(event))
     }
   }
   return answered

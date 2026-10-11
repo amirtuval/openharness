@@ -31,8 +31,10 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '../ui/colla
  * - **#310 (the approval prompt)** passes `action` — a slot at the end of the row, outside the
  *   disclosure trigger so its buttons are not nested in one — for a `waiting` call. That is why
  *   the status is the client's derived `ToolCallStatus` and not a shape of this component's own.
- * - **#313 (MCP)** needs no change here: a call from a remote server carries `source: 'mcp'`,
- *   which the row draws as its own badge, and the server is named in the tool's name.
+ * - **A remote MCP call (#312)** needs no change here: it carries `source: 'mcp'` — which the row
+ *   draws as its own badge — and the server it came from, which the badge names in a `title` and
+ *   the row carries as `data-server`. The tool's name is already the model-facing
+ *   `<server>__<tool>` spelling, so the row says which server without a second word of chrome.
  *
  * The words come from `@openharness/client` (`toolStatusLabel`, `toolCallSummary`), so `oh`
  * draws the same line for the same call.
@@ -54,6 +56,7 @@ export function ToolCallLine({
       data-slot="tool-call"
       data-tool={call.name}
       data-status={call.status}
+      {...(call.server === undefined ? {} : { 'data-server': call.server })}
       className="group/tool"
     >
       <div
@@ -65,7 +68,7 @@ export function ToolCallLine({
         <ToolStatusIcon status={call.status} />
         <span className="shrink-0 font-mono font-medium">{call.name}</span>
         {call.source === 'mcp' ? (
-          <Badge variant="outline" className="text-2xs">
+          <Badge variant="outline" className="text-2xs" title={call.server}>
             MCP
           </Badge>
         ) : null}

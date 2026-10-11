@@ -10,6 +10,7 @@ import {
   draftComplete,
   draftProblems,
   emptyDrafts,
+  pendingCallHeading,
   withConfirmed,
   withLabel,
   withOther,
@@ -130,7 +131,9 @@ export function pendingRows(
           callId: entry.call.id,
           kind: 'approval',
           label: approvalChoiceLabel(choice.choice),
-          group: `${entry.call.name} is waiting on you`,
+          // The heading names a remote tool's server too (#312), so a reader deciding about
+          // `notes__search` knows whose search they are allowing.
+          group: `${pendingCallHeading(entry.call)} is waiting on you`,
           ...(choice.choice === 'deny'
             ? { detail: 'the model learns nothing but that you said no' }
             : {}),

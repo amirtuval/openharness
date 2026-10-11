@@ -76,7 +76,11 @@ src/
   tools.ts              the loop's tool half: what a request offers, what the settings say, how
                         one step's calls are stored, run and answered (epic #303, #304; the
                         per-user settings and the mode's override: #307; `ask` and the
-                        approvals a chat remembers: #309)
+                        approvals a chat remembers: #309; the remote MCP pair and the call
+                        event it is written as: #312)
+  mcp.ts                the remote MCP tools a request may offer (epic #303, X10; #312): the
+                        `McpToolProvider` seam, one registry for deployment and remote tools
+                        together, and the name-collision rule
   events.ts             the events the loop appends, built in one place
   validate.ts           the protocol check every appended event passes
   testing/
@@ -95,13 +99,14 @@ emits what that reaches.
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `runTurn(sessionId, options)`                                                                                                                                                                                                                     | run one turn; resolves to a `TurnOutcome`                                                                                                                                                                                                                                                                                                                                                      |
 | `RunTurnOptions`                                                                                                                                                                                                                                  | `{ store, model, resolveCredential, signal?, fence?, contextStrategy?, reasoningSupportFor?, resolveMode?, retry?, tools?, toolSettings?, toolSupportFor?, resolveToolSecrets?, maxToolSteps? }`                                                                                                                                                                                               |
+| `McpToolProvider`, `McpToolOffer`, `McpOfferedTool`, `McpListingFailure`, `McpFailureKind`, `resolveMcpTools()`, `ResolvedMcpTools`, `McpToolRef`, `combineTools()`, `NO_MCP_TOOLS`                                                               | the remote MCP half of the loop (#312): where a request's remote tools come from (asked per request with the owner and the mode's override), the one registry the deployment's and the remote tools share, the pair behind each offered name, and the servers that could not be listed                                                                                                         |
 | `runToolStep(options)`, `ToolStepOptions`                                                                                                                                                                                                         | one step's tool calls (epic #303, X2; #307): the permission read off the request's settings, the calls stored, run concurrently through the registry and answered in call order                                                                                                                                                                                                                |
 | `repairLostExecutions(events, append)`, `lostExecutions(events)`, `pendingToolUse(events)`                                                                                                                                                        | the crash rule (X3): the calls the log holds with no answer **and no user waiting on them**, and the `execution lost` results a brain that inherited them writes — never running them again                                                                                                                                                                                                    |
 | `awaitingUser(events)`, `answeredWaiting(events)`, `confirmationsByCall(events)`, `sessionApprovedTools(events)`, `waitsForUser(permission, registered, name)`, `malformedQuestion(call)`                                                         | the pause, read off the log (epic #303, X6; #309): the calls with no result that wait on the user, the ones the user has answered, the newest confirmation per call, the tools this chat has been told to allow, whether a call is one the user must answer, and what is wrong with an `ask_user` call's questions                                                                             |
 | `answerConfirmations(options)`, `confirmationOutcome(call, confirmation, recovered)`, `resolveWaiting(options)`, `denied(message)`, `executionLost(name)`, `RESOLVED_BY_MESSAGE`                                                                  | what answers a paused call: the turn's one append for the calls the user answered (running an approved tool, writing the denial, or writing the answers), the resolution of a single confirmation, the results a message or an interrupt leaves, and the two sentences those are written with                                                                                                  |
 | `asToolInput(value)`                                                                                                                                                                                                                              | a model's arguments as the JSON object the log stores: anything JSON cannot carry is dropped, and a value that is not an object becomes `{}`                                                                                                                                                                                                                                                   |
 | `DEFAULT_MAX_TOOL_STEPS`                                                                                                                                                                                                                          | `50` — the model requests one turn may make before it ends with the step-limit notice (X2)                                                                                                                                                                                                                                                                                                     |
-| `offeredTools(registry)`, `toolSet(registry)`, `toolsFor(registry, supportFor, settings, modelId, credentialType)`                                                                                                                                | what a request's span records, the definitions the model is offered (with **no** `execute`, so the AI SDK never loops), and the registry this request may call from — the settings' disabled tools left out, `undefined` when that leaves none                                                                                                                                                 |
+| `offeredTools(registry, mcp?)`, `toolSet(registry)`, `toolsFor(registry, supportFor, settings, modelId, credentialType)`                                                                                                                          | what a request's span records, the definitions the model is offered (with **no** `execute`, so the AI SDK never loops), and the registry this request may call from — the settings' disabled tools left out, `undefined` when that leaves none                                                                                                                                                 |
 | `ToolDecision`, `ToolSettings`, `ToolSettingsResolver`, `ToolSupportFor`, `ToolSecretResolver`                                                                                                                                                    | the injected seams around tools: the settings in force per request — an `enabled` and a `permission` per tool name, asked with the owner and the mode's override (#307) — whether a model can call tools at all (models.dev's `tool_call`), and where a turn's per-user values come from (#311)                                                                                                |
 | `TurnOutcome`, `TurnOutcomeKind`                                                                                                                                                                                                                  | `{ outcome: 'idle' \                                                                                                                                                                                                                                                                                                                                                                           | 'noop' \                     | 'interrupted' \                                                                                                                                 | 'error' }` |
 | `ResolvedMode`, `ModeResolver`                                                                                                                                                                                                                    | a mode as the host resolved it — id, name, model, effort, prompt addition, and the tool override it imposes (#245, M6; #307) — and where a request's mode comes from                                                                                                                                                                                                                           |
@@ -522,6 +527,57 @@ credentialType)` — the server builds it from models.dev's `tool_call`; `false`
   continues into the following request with the calls' answers, and a queued `user.message` is
   claimed by that request exactly as any steering message is.
 
+### Remote MCP tools (epic #303, X10; issue #312)
+
+A request's tools are not only this build's: the chat's **in-force remote MCP servers** offer
+theirs too, and `./mcp` is the whole of the loop's half. A call to one is stored in the pair the
+epic decided (`agent.mcp_tool_use` / `agent.mcp_tool_result`), and everything else about it —
+the policy, the pause, the cap, the crash rule — is the machinery that already existed, which is
+why the loop has no second tool path.
+
+- **The host lists, the loop offers.** `RunTurnOptions.mcpTools` is a `McpToolProvider` —
+  `(ownerId, modeOverride) => { tools, failures }` — asked **once per request**, with the same
+  mode override the settings resolver is asked with (so a mode's `mcp_servers` patch and a
+  server's `enabled` reach both halves from one answer). Which servers are in force belongs to
+  the session's owner, their credentials live in the host's vault, and listing a server's tools
+  is a network call nothing in this package makes; the host is expected to make that cheap with
+  a short cache, and the server's does. Asked per request, so a server switched off, removed or
+  connected applies from the next request on.
+- **One registry, two sources.** `combineTools` puts the deployment's tools and the remote ones
+  in one registry, because everything downstream — the settings' on/off, the permission a call
+  is evaluated under, `registry.execute`, the result's cap — is keyed by a tool's name and knows
+  nothing about where it came from. What tells them apart is the event the loop writes: the
+  `refs` map beside the registry says which server and tool an offered name stands for, and
+  `runToolStep` writes `agent.mcp_tool_use` for a name it carries and `agent.tool_use`
+  otherwise. `offeredTools` records the same split on the span (`source: 'mcp'`, plus the
+  server).
+- **The name is the model-facing one, and it is pure.** A remote tool is offered as
+  `<server>__<tool>` (`mcpToolOfferedName`), sanitized to what every provider accepts and
+  truncated to 64 characters — the only reading under which a reader that has just the log can
+  recompute the name the model called. Two pairs that sanitize to the same name are a
+  **collision**, and `resolveMcpTools` settles it by **first claim**: the later tool is not
+  offered, because renaming it would make the name depend on what else was offered. A remote
+  tool can never collide with a built-in (the separator is a double underscore and no built-in
+  carries one), and the check runs against the deployment's names anyway.
+- **A server that cannot be listed is a notice, not a failure.** The provider reports a failure
+  per server — `connection` or `authentication` — and `runTurn` writes one `session.error`
+  (`mcp_connection_failed_error` / `mcp_authentication_failed_error`, `retry_status: terminal`,
+  and a message saying the chat goes on without it) per server per **turn**, then builds the
+  request without that server's tools. A host that wired no provider, and a user with no
+  servers, are an empty offer and nothing written.
+- **The result is capped by the tool, and the tool declares it.** `toolResultCap` reads the
+  registry, so a remote tool's own `maxResultTokens` (its definition's, `@openharness/hands`')
+  is what bounds what a request carries of its answer; an old one is cleared like any other, and
+  the pair is kept together by the cut rule.
+- **The crash rule is the same rule.** A remote call with no result that a brain inherits is
+  answered `execution lost` in its own pair and never run again, and a remote call still waiting
+  on the user keeps waiting — `awaitingUser` and `pendingToolUse` read both pairs through
+  `@openharness/protocol`'s one abstraction.
+- **A call the user approves runs through the registry that holds it.** `answerConfirmations`
+  is handed the request's own combined registry, so an approved remote call is run through the
+  MCP tool — and one whose server has since been removed is answered by the registry's own
+  `No tool named … is registered.`
+
 ### Tools in the context strategy
 
 `conversationAfter` is where the log becomes messages, and tools are two shapes there: the
@@ -657,16 +713,16 @@ this: …`), and an `ask_user` call has its answers written as its result — va
 
 ### The seams the rest of the epic plugs into
 
-| what                                                 | how                                                                                                                                                                                                                          |
-| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| a tool that runs                                     | `ToolDefinition` + `ToolRegistry.execute` in `@openharness/hands` (#305's `web_fetch`, `web_search`, `todo_write` live there)                                                                                                |
-| whether a model can call tools                       | `toolSupportFor` on `runTurn`; the server answers from models.dev's `tool_call`                                                                                                                                              |
-| which tools a request offers, and what a call may do | `toolSettings` on `runTurn`: the per-request decisions #307 stores per user and a mode overrides; a disabled tool is left out of the offer, and an `ask` is the pause of #309                                                |
-| a call waiting on the user                           | `./pausing`: `awaitingUser` is the question ("which calls wait?"), `confirmationOutcome`/`answerConfirmations` are what a `user.tool_confirmation` does, and `resolveWaiting` is what a message or an interrupt does instead |
-| a tool that always asks (rather than a policy)       | `ASK_USER_TOOL_NAME` in `./pausing`'s `waitsForUser`: a call to `ask_user` waits whatever the policy says, because the user's answers are its result. An MCP tool (#312) asks through its `ask` policy on the same path      |
-| per-user values a tool needs                         | `resolveToolSecrets` on `runTurn` (asked per step with the owner); the operator's search key arrives here (#305), and #311's MCP tokens will                                                                                 |
-| MCP tools                                            | `agent.mcp_tool_use` / `agent.mcp_tool_result` and a second source in the offered-tools record (#312); nothing in this loop is built-in-specific today besides `offeredTools`' `source`                                      |
-| tool results in the context                          | the two rules above (X9, #306): a result's cap comes from `ToolDefinition.maxResultTokens` and the tool name in the log, and old results are cleared rather than summarized. #312's MCP results join them by being results   |
+| what                                                 | how                                                                                                                                                                                                                                       |
+| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| a tool that runs                                     | `ToolDefinition` + `ToolRegistry.execute` in `@openharness/hands` (#305's `web_fetch`, `web_search`, `todo_write` live there)                                                                                                             |
+| whether a model can call tools                       | `toolSupportFor` on `runTurn`; the server answers from models.dev's `tool_call`                                                                                                                                                           |
+| which tools a request offers, and what a call may do | `toolSettings` on `runTurn`: the per-request decisions #307 stores per user and a mode overrides; a disabled tool is left out of the offer, and an `ask` is the pause of #309                                                             |
+| a call waiting on the user                           | `./pausing`: `awaitingUser` is the question ("which calls wait?"), `confirmationOutcome`/`answerConfirmations` are what a `user.tool_confirmation` does, and `resolveWaiting` is what a message or an interrupt does instead              |
+| a tool that always asks (rather than a policy)       | `ASK_USER_TOOL_NAME` in `./pausing`'s `waitsForUser`: a call to `ask_user` waits whatever the policy says, because the user's answers are its result. A remote MCP tool asks through its own `ask` default (#312) on the same path        |
+| per-user values a tool needs                         | `resolveToolSecrets` on `runTurn` (asked per step with the owner); the operator's search key arrives here (#305), and #311's MCP tokens will                                                                                              |
+| MCP tools                                            | built (#312): `mcpTools` on `runTurn` lists the chat's in-force servers' tools per request, `runToolStep` writes the MCP pair, and every reader goes through `@openharness/protocol`'s one tool-call abstraction (`./mcp`)                |
+| tool results in the context                          | the two rules above (X9, #306): a result's cap comes from `ToolDefinition.maxResultTokens` and the tool name in the log, and old results are cleared rather than summarized. A remote MCP tool's result is a result like any other (#312) |
 
 ## Extension points
 

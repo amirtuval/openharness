@@ -1,7 +1,7 @@
 import type { TranscriptMessage, TranscriptToolCall } from '@openharness/client'
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { MessageList } from './message-list'
 
@@ -268,5 +268,30 @@ describe('MessageList and a waiting call (#310)', () => {
 
     expect(screen.queryByRole('button', { name: 'Allow once' })).toBeNull()
     expect(screen.getByText('waiting for you')).toBeInTheDocument()
+  })
+
+  it('prompts for a waiting remote MCP call, naming its server and its own id (#312)', async () => {
+    const user = userEvent.setup()
+    const responded = vi.fn()
+    const remote: TranscriptToolCall = {
+      ...waiting('sevt_mcp', 2, 'notes__search'),
+      source: 'mcp',
+      server: 'notes',
+    }
+
+    render(<MessageList messages={[]} toolCalls={[remote]} loading={false} onRespond={responded} />)
+
+    // The prompt is the same one a built-in gets — a pause is a property of the log — and its
+    // heading is what tells the reader whose tool they are allowing.
+    const prompt = screen.getByRole('group', { name: 'Allow notes__search (mcp: notes)?' })
+    expect(prompt).toHaveAttribute('data-server', 'notes')
+
+    await user.click(within(prompt).getByRole('button', { name: 'Allow once' }))
+
+    // The decision names the MCP call's own event id, which is the id its
+    // `agent.mcp_tool_result` will answer.
+    expect(responded).toHaveBeenCalledWith([
+      { type: 'user.tool_confirmation', tool_use_id: 'sevt_mcp', result: 'allow' },
+    ])
   })
 })

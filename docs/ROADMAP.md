@@ -261,8 +261,10 @@ registry in `@openharness/hands`, the brain's loop and step limit, the policy ho
 rule, a test tool behind the mock model, `web_fetch`, `web_search` and `todo_write`, the caps
 and clearing a request applies to tool results, `/v1/me/tools` with a mode's override, and
 pausing for the user
-([#309](https://github.com/amirtuval/openharness/issues/309)). MCP (#311/#312) is the rest of
-the epic's sub-issues.
+([#309](https://github.com/amirtuval/openharness/issues/309)) and the remote MCP servers
+([#311](https://github.com/amirtuval/openharness/issues/311),
+[#312](https://github.com/amirtuval/openharness/issues/312)) are **built**. The epic's
+sub-issues are done.
 
 1. **The tool loop.** The brain owns the loop, one model request per step: `agent.tool_use` →
    execute through `hands` (`execute(name, input, ctx)`) → `agent.tool_result` → the next
@@ -287,13 +289,18 @@ session` — read back off the log, so a rewind past it forgets it), always (whi
 3. **Remote MCP servers** (Streamable HTTP) as `agent.mcp_tool_use`, per user, with secret
    headers or **OAuth 2.1** (discovery, dynamic client registration, PKCE); secrets sealed with
    `@openharness/vault`. MCP tools ask by default, and a broken server never blocks the chat.
+   **Built**: the resource and the OAuth flow
+   ([#311](https://github.com/amirtuval/openharness/issues/311)), and the loop
+   ([#312](https://github.com/amirtuval/openharness/issues/312)) — a chat's in-force servers are
+   listed per request, their tools offered under `<server>__<tool>`, a call stored as the MCP
+   pair and answered with the server's answer as text, a per-tool policy the user may remember,
+   and a server that is down, refused or switched off reported rather than fatal.
 
 **Configuration** ([#307](https://github.com/amirtuval/openharness/issues/307)): per-user
 settings turn built-in tools and MCP servers on or off and give each tool a policy
 (`allow | ask | deny`); a mode may override which built-in tools and MCP servers are on. Built:
 `/v1/me/tools` and the mode override, with the brain reading the effective set per request, and
-`ask` pausing the turn (#309). The MCP halves arrive with #311/#312. Agents stay deferred
-(#96).
+`ask` pausing the turn (#309), and the MCP halves (#311/#312). Agents stay deferred (#96).
 
 **Context management for tools** ([#276](https://github.com/amirtuval/openharness/issues/276)):
 a tool call and its result are never split by a cut, results are capped, old results are

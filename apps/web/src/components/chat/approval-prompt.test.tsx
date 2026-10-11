@@ -104,4 +104,33 @@ describe('ApprovalPrompt (#310)', () => {
       expect(screen.getByRole('button', { name: label })).toBeDisabled()
     }
   })
+
+  it('prompts for a waiting remote MCP call, naming its server and its own id (#312)', async () => {
+    const onRespond = vi.fn()
+    const remote = call({
+      id: 'sevt_mcp_call',
+      name: 'notes__search',
+      input: { query: 'doom' },
+      source: 'mcp',
+      server: 'notes',
+    })
+    render(<ApprovalPrompt call={remote} busy={false} onRespond={onRespond} />)
+
+    // The prompt is the call itself, so the reader is told whose tool they are allowing — two
+    // servers' `search` are different tools, and the server is what tells them apart.
+    const prompt = screen.getByRole('group', { name: 'Allow notes__search (mcp: notes)?' })
+    expect(prompt).toHaveAttribute('data-server', 'notes')
+    expect(prompt).toHaveAttribute('data-tool', 'notes__search')
+    expect(screen.getByText('notes__search (mcp: notes)')).toBeInTheDocument()
+
+    // The decision is one confirmation naming the MCP call's event id — the id its
+    // `agent.mcp_tool_result` will name — sent like any other, since a pause is a fact about
+    // the log rather than about a tool.
+    await userEvent.click(screen.getByRole('button', { name: 'Allow once' }))
+    expect(onRespond).toHaveBeenCalledWith({
+      type: 'user.tool_confirmation',
+      tool_use_id: 'sevt_mcp_call',
+      result: 'allow',
+    })
+  })
 })

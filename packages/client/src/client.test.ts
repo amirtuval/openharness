@@ -10,6 +10,7 @@ import {
   makeAgentMessage,
   makeListModelsResponse,
   makeListToolSettingsResponse,
+  makeMcpToolSettingEntry,
   makeMode,
   makeProviderCredential,
   makeSession,
@@ -769,6 +770,31 @@ describe('tool settings (#303, #307, #308)', () => {
   it('rejects a response that is not the protocol’s list', async () => {
     const { client } = clientWith(() => jsonResponse({ data: [{ name: 'web_fetch' }] }))
     await expect(client.tools.list()).rejects.toBeInstanceOf(ResponseValidationError)
+  })
+
+  it('reads a remote MCP entry: its offered name, its server and a policy and nothing more', async () => {
+    const response = { data: [makeMcpToolSettingEntry()] }
+    const { client } = clientWith(() => jsonResponse(response))
+
+    const { data } = await client.tools.list()
+
+    expect(data[0]).toEqual(makeMcpToolSettingEntry())
+    expect(data[0]).toMatchObject({
+      name: 'notes__search',
+      source: 'mcp',
+      mcp_server: 'notes',
+      policy: 'ask',
+      default_policy: 'ask',
+    })
+  })
+
+  it('writes a remote policy through the mcp map, apart from the built-in one', async () => {
+    const response = { data: [makeMcpToolSettingEntry({ policy: 'allow' })] }
+    const { client, mock } = clientWith(() => jsonResponse(response))
+
+    const body = { mcp: { notes__search: 'allow' as const } }
+    expect(await client.tools.put(body)).toEqual(response)
+    expect(bodyOf(mock.requests[0]?.init)).toEqual(body)
   })
 })
 

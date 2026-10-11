@@ -9,7 +9,7 @@ import type { RequestOptions } from '../client'
 import type { Transport } from '../http'
 
 /**
- * The caller's own tool settings (epic #303, X4; #307; the screen is #308).
+ * The caller's own tool settings (epic #303, X4; #307; the screen is #308; the MCP half, #312).
  *
  * ```
  * GET /v1/me/tools            list the effective settings -> { data: entry[] }
@@ -23,10 +23,17 @@ import type { Transport } from '../http'
  * deployment does not register — a `web_search` with no operator key, say — listed rather than
  * hidden so a settings screen can say why it is not working.
  *
+ * An entry is a tool of either source since #312: this build's own (`source: 'builtin'`) or a
+ * remote MCP server's (`source: 'mcp'`, with the server named on `mcp_server` and its
+ * model-facing `<server>__<tool>` name), which `ToolSettingEntry` types for a consumer that
+ * groups them. A remote tool carries a permission and no on/off of its own — the server's
+ * `enabled` is reported, and per-server editing is #313 — so a caller must not write one.
+ *
  * The write **merges** per tool, exactly as `PUT /v1/me/preferences` merges its fields: a tool
- * the body names replaces that tool's whole setting, and every other tool keeps what is stored.
- * Both routes are owner-only and per-user (under `/v1/me`), and answer the list — the same shape
- * the read does — so a screen updates in place from either.
+ * the body names replaces that tool's whole setting, and every other tool keeps what is stored —
+ * `builtin` and `mcp` are separate maps, so a choice in one never touches the other. Both routes
+ * are owner-only and per-user (under `/v1/me`), and answer the list — the same shape the read
+ * does — so a screen updates in place from either.
  */
 export interface ToolsResource {
   /**

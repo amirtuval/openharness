@@ -30,7 +30,7 @@ import {
   type Vault,
 } from '@openharness/vault'
 
-import { alwaysReady, createApp, type Readiness } from '../app'
+import { alwaysReady, createApp, type McpServersAppOptions, type Readiness } from '../app'
 import {
   DEV_LOGIN_EMAIL,
   DEV_LOGIN_PASSWORD,
@@ -49,6 +49,9 @@ import { createContextCompactionResolver } from '../context-compaction'
 import { createModeResolver } from '../modes'
 import { emptyRegistry, type ModelRegistry } from '../catalog/registry'
 import { createSearchAllowance } from '../searches'
+import { createMcpFetch } from '../mcp/fetch'
+import { createMcpServerService } from '../mcp/service'
+import { InMemoryMcpServerStore } from '@openharness/session'
 import { createTurnTools } from '../tools'
 import { DEFAULT_DELTA_RETENTION_MS } from '../compaction'
 import {
@@ -218,6 +221,19 @@ export interface TestOptions {
   /** The validator a `PUT /v1/provider-credentials` uses; a fake, by default. */
   readonly validateProviderCredential?: ProviderCredentialValidator
   /**
+   * How the remote-MCP-server routes are wired (epic #303, X10): the store, the guarded fetch,
+   * the callback URL and whether a private address is reachable. Omitted, they run over an
+   * in-memory store with the real guarded fetch and no private access.
+   */
+  readonly mcpServers?: McpServersAppOptions
+  /**
+   * Whether the turn options are handed the MCP provider (epic #303, X10; #312), the same way
+   * `main.ts` does. Off by default so every test that does not ask for it builds exactly the
+   * turn it built before; a test of the loop's remote half turns it on and configures the
+   * servers through {@link HarnessOptions.mcpServers}.
+   */
+  readonly mcpTools?: boolean
+  /**
    * The model catalogue `GET /v1/models` serves. Defaults to an inert one — an empty registry
    * and a fetch that throws — so a test never reaches a provider by accident; a test of the
    * catalogue builds `new ModelCatalog({ …, registry, fetch })` over its own stubs.
@@ -352,6 +368,22 @@ export function createTestApp(options: TestOptions = {}): TestContext {
   // built-ins, so `kind` never has to build one here — but the search allowance is built from
   // the harness's config when a test turned search on, exactly as `main.ts` builds it.
   const turnConfig = testConfig(options)
+  // The remote-MCP-server resource (epic #303, X10; the loop's half: #312), built **once** here
+  // and handed to both readers exactly as `main.ts` hands it: the routes that manage the
+  // servers, and the turn options whose provider lists a chat's in-force servers.
+  const mcpFetch =
+    options.mcpServers?.fetch ??
+    createMcpFetch({ allowPrivate: options.mcpServers?.allowPrivateUrls === true })
+  const mcpServers = createMcpServerService({
+    store: options.mcpServers?.store ?? new InMemoryMcpServerStore(),
+    vault,
+    fetch: mcpFetch,
+    callbackUrl:
+      options.mcpServers?.callbackUrl ??
+      `${options.betterAuthUrl ?? TEST_PUBLIC_URL}/v1/me/mcp_servers/oauth/callback`,
+    ...(options.mcpServers?.now === undefined ? {} : { now: options.mcpServers.now }),
+    ...(options.mcpServers?.logger === undefined ? {} : { logger: options.mcpServers.logger }),
+  })
   const turnTools =
     options.tools === undefined
       ? undefined
@@ -366,6 +398,7 @@ export function createTestApp(options: TestOptions = {}): TestContext {
             turnConfig.search === null
               ? undefined
               : createSearchAllowance({ store, dailyLimit: turnConfig.search.dailyLimit }),
+          ...(options.mcpTools === true ? { mcp: { service: mcpServers, fetch: mcpFetch } } : {}),
         })
   const scheduler = new LocalScheduler({
     store,
@@ -427,6 +460,9 @@ export function createTestApp(options: TestOptions = {}): TestContext {
       validate: options.validateProviderCredential ?? acceptAnyCredential,
     },
     catalog,
+    // The one service instance both readers share, so a server a test's route changes is the one
+    // its chat lists (#312).
+    mcpServers: { service: mcpServers },
     ...(options.tools === undefined ? {} : { tools: options.tools }),
     // What `GET /v1/me/preferences` reports as the default trigger share (C3, #282).
     compactionThreshold,

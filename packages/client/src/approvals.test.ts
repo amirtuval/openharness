@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { ASK_USER_TOOL_NAME } from '@openharness/protocol'
 import {
+  makeAgentMcpToolUse,
   makeAgentToolResult,
   makeAgentToolUse,
   makeStatusIdle,
@@ -24,6 +25,7 @@ import {
   draftProblems,
   emptyDraft,
   emptyDrafts,
+  pendingCallHeading,
   pendingCallKind,
   pendingCalls,
   pendingCallsNotice,
@@ -138,6 +140,55 @@ describe('pendingCalls (#303, #310)', () => {
       ),
     ])[0]!
     expect(askUserQuestions(call)).toBeNull()
+  })
+})
+
+describe('a pause on a remote MCP call (#303, X6; #312)', () => {
+  it('reads a waiting `agent.mcp_tool_use` as an approval, and names its own id', () => {
+    const call = makeAgentMcpToolUse('notes', 'search', { query: 'doom' }, { seq: 2 })
+
+    const pending = pendingCalls(callsOf([makeStatusRunning({ seq: 1 }), call]))
+
+    expect(pending).toHaveLength(1)
+    expect(pending[0]?.kind).toBe('approval')
+    expect(pending[0]?.call.id).toBe(call.id)
+    // The confirmation names the call's **event** id — the MCP pair's `agent.mcp_tool_use` —
+    // which is what the server checks against the log before it stores one, and what the brain
+    // answers with an `agent.mcp_tool_result`.
+    expect(approvalConfirmation(pending[0]!.call.id, 'allow-once')).toMatchObject({
+      type: 'user.tool_confirmation',
+      tool_use_id: call.id,
+      result: 'allow',
+    })
+    expect(declineConfirmation(pending[0]!.call.id).tool_use_id).toBe(call.id)
+  })
+
+  it('asks no questions of a remote call, and heads the prompt with its server', () => {
+    const call = callsOf([
+      makeAgentMcpToolUse('notes', 'search', { query: 'doom' }, { seq: 2 }),
+    ])[0]!
+
+    expect(askUserQuestions(call)).toBeNull()
+    expect(pendingCallHeading(call)).toBe('notes__search (mcp: notes)')
+  })
+
+  it('reads a remote tool called `ask_user` as an approval, not a question', () => {
+    // The question is the built-in's **own** name; a server's tool of that name is offered as
+    // `<server>__ask_user`, so a question is not something a remote server can forge (#312).
+    const call = callsOf([
+      makeAgentMcpToolUse('notes', ASK_USER_TOOL_NAME, { questions: [] }, { seq: 2 }),
+    ])[0]!
+
+    expect(pendingCallKind(call)).toBe('approval')
+    expect(pendingCallHeading(call)).toBe('notes__ask_user (mcp: notes)')
+  })
+
+  it('heads a built-in call with its own name alone', () => {
+    const call = callsOf([
+      makeAgentToolUse('web_fetch', { url: 'x' }, { seq: 2, evaluated_permission: 'ask' }),
+    ])[0]!
+
+    expect(pendingCallHeading(call)).toBe('web_fetch')
   })
 })
 
