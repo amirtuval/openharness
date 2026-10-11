@@ -653,7 +653,10 @@ belongs to, the tool to attach, and whether the settings leave it on.
   reading: the count of searches the request ran rides `span.model_request_end.searches` (absent,
   not zero, for a request that ran none), and each search the step reported is written after the
   reply as the readable pair a client draws — the `web_search` call with `source: 'provider'`
-  beside its result's `sources`, the citations a reply carries. The crash rule leaves the pair
+  beside its result's `sources`, the citations a reply carries. That result's content is the
+  reading the last bullet builds, and a search the provider cited nothing for has none — so the
+  block says the search ran instead, because the protocol refuses a text block with no text in
+  it and an empty one here ended the turn (issue #339). The crash rule leaves the pair
   alone (nothing of ours ran, so there is nothing to re-run) and the request is rebuilt from the
   step's `agent.opaque_content`, never from this pair — which is also why an Anthropic server-side
   loop that hit its own limit (`result.paused`) sends the assistant turn back unchanged as the

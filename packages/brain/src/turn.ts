@@ -1507,7 +1507,12 @@ function searchSpan(result: ModelRequestResult): { readonly searches?: number } 
  *
  * The call's `input` is what the step said the search asked for (`./model`), and the result's
  * content is the reading of what it found — the same text a provider switch replays — beside the
- * normalized `sources` a client renders as the reply's citations.
+ * normalized `sources` a client renders as the reply's citations. A search the provider cited
+ * nothing for streams no `source` parts, so the reading is `''`; the readable block says the
+ * search ran instead, because the protocol refuses an empty text block and an empty one here
+ * ended the turn (issue #339). The reading a switch replays stays empty — there is nothing to
+ * tell another provider — and it is this block, not the log's only record, that gets the
+ * sentence.
  */
 async function storeProviderSearch(
   search: ModelSearchCall,
@@ -1518,10 +1523,18 @@ async function storeProviderSearch(
   if (call === undefined) {
     return
   }
-  await append([
-    agentToolResult(call.id, [{ type: 'text', text: search.text }], search.isError, sources),
-  ])
+  const text = search.text.length > 0 ? search.text : UNCITED_SEARCH_RESULT
+  await append([agentToolResult(call.id, [{ type: 'text', text }], search.isError, sources)])
 }
+
+/**
+ * What the readable result of a provider-executed search says when the provider cited no pages
+ * this build could read (issue #339).
+ *
+ * A sentence rather than `''`: an `agent.tool_result`'s content is text blocks, and the protocol
+ * refuses a block with no text in it — the append would fail validation and end the turn.
+ */
+const UNCITED_SEARCH_RESULT = 'The provider ran a web search and cited no pages.'
 
 /**
  * The system prompt a request is built with: the session's own, with the mode's addition

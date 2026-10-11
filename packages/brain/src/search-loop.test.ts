@@ -345,6 +345,34 @@ describe('a search the provider ran inside a request (#335)', () => {
     expect(parts[4]).toMatchObject({ toolName: 'echo' })
   })
 
+  it('answers a search the provider cited nothing for, rather than ending the turn (#339)', async () => {
+    // A search whose citations the provider did not stream as `source` parts — a model that did
+    // not cite, a search that found nothing. The reading a switch replays is empty (there is
+    // nothing to tell another provider), but the protocol refuses an empty text block, so the
+    // readable result would fail validation and end the turn.
+    const { store, sessionId } = await newSession([message('look it up')])
+    const { factory } = mockModel({
+      providerTools: [
+        { id: 'srvtoolu_1', name: WEB_SEARCH_TOOL_NAME, input: { query: 'nothing' }, output: [] },
+      ],
+      text: ['Nothing to cite.'],
+    })
+
+    const outcome = await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+      tools: createToolRegistry([echo()]),
+    })
+
+    expect(outcome).toEqual({ outcome: 'idle' })
+    const log = await logOf(store, sessionId)
+    expect(log.filter((event) => event.type === 'session.error')).toEqual([])
+    const result = log.find((event) => event.type === EVENT_TYPES.agentToolResult)
+    expect(result).toMatchObject({ is_error: false })
+    expect(JSON.stringify(result)).toContain('cited no pages')
+  })
+
   it('keeps the provider’s order across a paused turn’s continuation', async () => {
     const { store, sessionId } = await newSession([message('look it up')])
     const { factory, calls } = mockModel(
