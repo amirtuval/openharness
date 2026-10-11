@@ -29,7 +29,7 @@ import type { ModelMessage } from 'ai'
 
 import { lastModelRequest } from './log'
 import { opaqueReplayParts } from './opaque'
-import type { OpaqueMessagePart, OpaqueTarget } from './opaque'
+import type { OpaqueMessagePart, OpaqueReplayedPart, OpaqueTarget } from './opaque'
 import { stuckReminder } from './stuck'
 
 /**
@@ -1283,11 +1283,14 @@ function truncationRecord(
  * ## The step's opaque parts (epic #303, X13; #334)
  *
  * An `agent.opaque_content` event's parts are re-attached to the assistant message of the step
- * that produced them, **before** its text and its calls — the order every provider reads them in
- * (a `thinking` block comes before the text and the `tool_use` it reasoned about) — and only
- * when the request goes to the family and model that produced them (`./opaque`). An entry that
- * does not replay is left out entirely, so a model or provider switch builds the assistant turn
- * it built before #334: no parts, the model's own text and calls.
+ * that produced them, **in the order the provider wrote them** — a `thinking` block, then the
+ * text, then the `tool_use` it reasoned about, then the text that reads its answer, which is the
+ * order each part's own `text_before` offset records (epic #303, X14; #335) — and only when the
+ * request goes to the family and model that produced them (`./opaque`). An entry that does not
+ * replay is left out entirely, so a model or provider switch builds the assistant turn it built
+ * before #334: no parts, the model's own text and calls; an entry whose parts carry no offset —
+ * a log written before the order was recorded — lays them all ahead of the text, exactly as it
+ * did then.
  *
  * **Every** matching step's parts are replayed, not only the newest turn's: the
  * OpenAI-compatible family needs the key on each assistant turn of a thinking-mode conversation
@@ -1335,10 +1338,7 @@ function conversationAfter(
       }
       return
     }
-    const content: AssistantContent = [...parts]
-    if (text.length > 0) {
-      content.push({ type: 'text', text })
-    }
+    const content: AssistantContent = [...orderedAssistantParts(text, parts)]
     content.push(...settled)
     messages.push({ message: { role: 'assistant', content }, seq })
     if (settled.length > 0) {
@@ -1409,9 +1409,10 @@ function conversationAfter(
             input: toolCallInput(event),
           })
         } else if (event.type === EVENT_TYPES.agentOpaqueContent) {
-          // The step's own opaque parts (X13; #334): the ones this request may carry back, and
-          // it is the step's assistant message they belong to — opened here when the step
-          // streamed no text at all, which is exactly the tool-calling step this exists for.
+          // The step's own opaque parts (X13; #334): the ones this request may carry back, each
+          // with the place in the step's text the log recorded — it is the step's assistant
+          // message they belong to, opened here when the step streamed no text at all, which is
+          // exactly the tool-calling step this exists for.
           const parts = opaqueReplayParts(event, opaque)
           if (parts.length > 0) {
             assistant ??= { seq: event.seq, text: '', calls: [], parts: [] }
@@ -1521,8 +1522,49 @@ interface AssistantTurn {
   readonly seq: number
   text: string
   readonly calls: ToolCallPart[]
-  /** The replayed opaque parts, in the provider's own order, sent before the text and calls. */
-  readonly parts: OpaqueMessagePart[]
+  /**
+   * The replayed opaque parts, in the provider's own order, each with the place in the text the
+   * log recorded for it (X13; #334; the order: #335).
+   */
+  readonly parts: OpaqueReplayedPart[]
+}
+
+/**
+ * The step's own blocks in the order the provider produced them: the text pieces it wrote
+ * around its thinking and its provider-executed calls, and those parts between them (epic #303,
+ * X13/X14; #334, #335).
+ *
+ * A provider requires its assistant content back in the order it wrote it — text, then the
+ * `server_tool_use` it reasoned about, then the `web_search_tool_result` that answers it, then
+ * the text that reads it — so each replayed part carries the character offset in the step's
+ * text that came before it ({@link OpaqueReplayedPart}) and the text is split there. A part that
+ * led the step carries `0`, and a log written before the offsets existed carries none on any
+ * part, so every part is laid ahead of the whole text — the order #334 established, which is
+ * what an old entry must keep replaying as.
+ *
+ * Nothing is added where the text is empty: a step that streamed none contributes its parts
+ * alone, exactly as it did before there was an order to keep.
+ */
+function orderedAssistantParts(
+  text: string,
+  parts: readonly OpaqueReplayedPart[],
+): readonly OpaqueMessagePart[] {
+  const content: OpaqueMessagePart[] = []
+  let cursor = 0
+  for (const { part, textBefore } of parts) {
+    // Clamped to the text this step really carries: an offset past its end — a log nothing this
+    // build writes — puts the part after the text rather than inventing characters.
+    const at = Math.min(Math.max(textBefore, cursor), text.length)
+    if (at > cursor) {
+      content.push({ type: 'text', text: text.slice(cursor, at) })
+      cursor = at
+    }
+    content.push(part)
+  }
+  if (cursor < text.length) {
+    content.push({ type: 'text', text: text.slice(cursor) })
+  }
+  return content
 }
 
 /** One call inside an assistant message. */

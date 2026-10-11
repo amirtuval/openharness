@@ -872,6 +872,18 @@ export interface ModelOpaquePart {
    * (epic #303, X14; issue #335). Absent for a reasoning block.
    */
   readonly payload?: Record<string, unknown>
+  /**
+   * // extension: how many characters of the step's text were streamed before this part
+   * (epic #303, X14; issue #335).
+   *
+   * A step's assistant content has an order — a Claude reply that wrote a sentence, searched,
+   * and then answered from what it found is text → call → answer → text — so a part's place is
+   * recorded as its offset into the step's text and the strategy rebuilds the turn by splitting
+   * that text at those offsets (`./context`). `0` for a part that came before any of the text,
+   * which is every part of a step that streamed none, and the reading an old entry's absent
+   * offset takes ({@link ModelOpaquePart} is what `./opaque` stores as `text_before`).
+   */
+  readonly textBefore?: number
 }
 
 /**
@@ -1056,6 +1068,7 @@ export async function streamModelRequest(params: ModelRequestParams): Promise<Mo
               input: part.input,
             },
             providerMetadata: part.providerMetadata,
+            textBefore: text.length,
           })
           if (part.toolName === WEB_SEARCH_TOOL_NAME) {
             searches += 1
@@ -1089,6 +1102,7 @@ export async function streamModelRequest(params: ModelRequestParams): Promise<Mo
           ...(part.providerMetadata === undefined
             ? {}
             : { providerMetadata: part.providerMetadata }),
+          textBefore: text.length,
         })
       } else if (part.type === 'source') {
         // One citation, in the AI SDK's own normalized shape — the same part every provider that
@@ -1103,7 +1117,12 @@ export async function streamModelRequest(params: ModelRequestParams): Promise<Mo
         part.type === 'reasoning-end'
       ) {
         const key = `reasoning:${part.id}`
-        const open = opaque.get(key) ?? { type: 'reasoning' as const, text: '', metadata: {} }
+        const open = opaque.get(key) ?? {
+          type: 'reasoning' as const,
+          text: '',
+          metadata: {},
+          textBefore: text.length,
+        }
         if (part.type === 'reasoning-delta') {
           open.text += part.text
         }
@@ -1210,6 +1229,8 @@ interface CollectedPart {
   readonly providerMetadata?: Record<string, unknown>
   /** Whether a provider-executed call's answer reported a failure (#335). */
   readonly isError?: boolean
+  /** Characters of the step's text streamed before this part opened (#335). */
+  readonly textBefore: number
 }
 
 /**
@@ -1260,6 +1281,7 @@ function collectedParts(
           : part.text,
       ...(part.payload === undefined ? {} : { payload: part.payload }),
       ...(Object.keys(metadata).length === 0 ? {} : { providerMetadata: metadata }),
+      textBefore: part.textBefore,
     }
   })
   const searchCalls = collectedParts

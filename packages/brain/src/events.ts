@@ -406,8 +406,10 @@ export function agentMessage(id: EventId, text: string, supersedes?: Supersedes)
  * One event per step, written whether or not the step streamed text — the step this exists for
  * is a thinking model's call, which streams none. `provider` is the client family the parts may
  * be replayed to and `model` the `provider/model` that produced them, which are the two things
- * the context strategy checks before it puts them back in a request (`./opaque`); `dropped` is
- * written only when an oversized step kept none of its parts.
+ * the context strategy checks before it puts them back in a request (`./opaque`); each part
+ * keeps the place it had in the step (`text_before`), which is how the assistant turn goes back
+ * in the provider's own order (epic #303, X14; #335); `dropped` is written only when an
+ * oversized step kept none of its parts.
  *
  * @param provider the family the parts must be replayed to
  * @param model the model id that produced them
@@ -427,6 +429,7 @@ export function agentOpaqueContent(
     parts: parts.map((part) => ({
       type: part.type,
       text: part.text,
+      ...(part.text_before === undefined ? {} : { text_before: part.text_before }),
       ...(part.provider_options === undefined ? {} : { provider_options: part.provider_options }),
       ...(part.payload === undefined ? {} : { payload: part.payload }),
     })),

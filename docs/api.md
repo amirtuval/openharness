@@ -349,7 +349,10 @@ it into the transcript:
   "processed_at": "…",
   "provider": "anthropic",
   "model": "anthropic/claude-sonnet-5",
-  "parts": [{ "type": "reasoning", "text": "…", "provider_options": { "signature": "…" } }]
+  "parts": [
+    { "type": "reasoning", "text": "…", "provider_options": { "signature": "…" } },
+    { "type": "tool-call", "text": "", "text_before": 21, "payload": { "toolCallId": "…" } }
+  ]
 }
 ```
 
@@ -357,6 +360,13 @@ it into the transcript:
   `agent.message` beside it; a client that does not know this event skips it, and a frontend
   renders neither `parts` nor their text. It is stored whether or not the step streamed text —
   the step this exists for is a thinking model's tool call, which streams none.
+- **The parts go back in the step's own order.** A provider's assistant content has one — a
+  Claude reply that wrote "Let me look that up." then called `server_tool_use` then answered from
+  the results is text → call → result → text — and the brain rebuilds it by splitting the step's
+  `agent.message` text at each part's `text_before` (the characters of that text that came before
+  the part) and laying the parts between the pieces. A part that led the step, and every part of
+  an event stored before the field existed, carries no `text_before`, reads as `0`, and goes
+  ahead of the text — the order those logs have always replayed as.
 - **`provider` and `model` are what the parts may be replayed to, and both must match.** The
   brain re-attaches a step's parts to that step's assistant message on the **next request** only
   when it goes to the same client family **and** the same model; a model or provider switch

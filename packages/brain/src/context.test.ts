@@ -1310,10 +1310,90 @@ const THINKING: OpaquePart = {
   provider_options: { signature: 'sig-1' },
 }
 
+/**
+ * The provider-executed call and its answer, as the log stores them (#335), with the place in
+ * the step's text each came after.
+ */
+function searchParts(textBefore: number): OpaquePart[] {
+  const at = textBefore === 0 ? {} : { text_before: textBefore }
+  return [
+    {
+      type: 'tool-call',
+      text: '',
+      ...at,
+      payload: { toolCallId: 'srvtoolu_1', toolName: 'web_search', input: { query: 'x' } },
+    },
+    {
+      type: 'tool-result',
+      text: 'Web search results for "x":\n1. A — https://example.test/a',
+      ...at,
+      payload: { toolCallId: 'srvtoolu_1', toolName: 'web_search', output: { type: 'json' } },
+    },
+  ]
+}
+
 /** The request's own replay target: the family and model it goes to. */
 const ANTHROPIC_TARGET = { provider: 'anthropic', model: MODEL.id } as const
 
 describe('the opaque parts of a step (epic #303, X13; #334)', () => {
+  it('rebuilds a step’s text and parts in the provider’s own order (X14; #335)', () => {
+    const strategy = createContextStrategy()
+    const call = toolUse(5, 'echo')
+    const sentence = 'Let me look that up.'
+    const events = [
+      userMessage(1, 'do it'),
+      agentMessage(2, `${sentence} It is three ideas.`),
+      // The provider's own call and the answer to it, both streamed after the sentence and
+      // before the reply that reads the results — the order the step's own text splits at.
+      opaqueContent(3, searchParts(sentence.length)),
+      call,
+      toolResult(6, call, 'hi'),
+    ]
+
+    const { messages } = strategy(events, {
+      model: MODEL,
+      system: null,
+      opaqueTarget: ANTHROPIC_TARGET,
+    })
+
+    const content = (messages[1] as { readonly content: readonly { type: string }[] }).content
+    // Text → the provider's `server_tool_use` → the `web_search_tool_result` answering it → the
+    // text that reads it, with our own call last: the order the provider wrote, not the
+    // parts-ahead-of-text order a request that lost the offsets would send.
+    expect(content.map((part) => part.type)).toEqual([
+      'text',
+      'tool-call',
+      'tool-result',
+      'text',
+      'tool-call',
+    ])
+    expect(content[0]).toEqual({ type: 'text', text: sentence })
+    expect(content[3]).toEqual({ type: 'text', text: ' It is three ideas.' })
+    expect(content[1]).toMatchObject({ toolCallId: 'srvtoolu_1', providerExecuted: true })
+    expect(content[4]).toMatchObject({ toolCallId: call.id, toolName: 'echo' })
+  })
+
+  it('lays an entry with no offsets ahead of the text, exactly as before (pre-#335 logs)', () => {
+    const strategy = createContextStrategy()
+    // A log written before a part carried a place: the parts must go ahead of the whole text,
+    // which is the order #334 established and what such a log replays as.
+    const events = [
+      userMessage(1, 'do it'),
+      agentMessage(2, 'It is three ideas.'),
+      opaqueContent(3, searchParts(0)),
+    ]
+
+    const { messages } = strategy(events, {
+      model: MODEL,
+      system: null,
+      opaqueTarget: ANTHROPIC_TARGET,
+    })
+
+    const content = (messages[1] as { readonly content: readonly { type: string }[] }).content
+    expect(content.map((part) => part.type)).toEqual(['tool-call', 'tool-result', 'text'])
+    expect(content[2]).toEqual({ type: 'text', text: 'It is three ideas.' })
+  })
+
   it('re-attaches a step’s parts to its assistant turn, before the text and the calls', () => {
     const strategy = createContextStrategy()
     const call = toolUse(4, 'echo')

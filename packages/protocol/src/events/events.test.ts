@@ -153,6 +153,9 @@ const storedSamples = {
     model: 'anthropic/claude-sonnet-5',
     parts: [
       { type: 'reasoning', text: 'weighing the options', provider_options: { signature: 'sig' } },
+      // A part the step streamed after some of its text carries where it goes (#335), beside one
+      // that led the step and so carries no place at all.
+      { type: 'tool-call', text: '', text_before: 20, payload: { toolCallId: 'ws_1' } },
       { type: 'reasoning', text: '', provider_options: { redactedData: 'blob' } },
     ],
   },

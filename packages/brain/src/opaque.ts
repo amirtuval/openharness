@@ -270,9 +270,15 @@ export function captureOpaque(
 function opaquePartOf(provider: OpaqueFamily, part: ModelOpaquePart): OpaquePart {
   const payload = asJsonObject(part.providerMetadata?.[provider] ?? undefined)
   const data = asJsonObject(part.payload ?? undefined)
+  // Where the part belongs in the step's turn: the characters of text before it, in the
+  // provider's own order (`./context` rebuilds the turn from it). A part that led the step
+  // carries none — the shape every entry had before the offsets existed, and the shape a log
+  // stored then must keep replaying as.
+  const textBefore = part.textBefore ?? 0
   return {
     type: part.type,
     text: part.text,
+    ...(textBefore === 0 ? {} : { text_before: textBefore }),
     ...(payload === undefined ? {} : { provider_options: payload }),
     ...(data === undefined ? {} : { payload: data }),
   }
@@ -296,8 +302,25 @@ type AssistantParts = Extract<
  */
 export type OpaqueMessagePart = AssistantParts[number]
 
+/**
+ * One replayed part **and its place** in the step's assistant turn (epic #303, X14; issue
+ * #335).
+ *
+ * The place is the payload: a provider's assistant content has an order — text → its own call →
+ * the answer → the text that reads it — and the strategy rebuilds that order by splitting the
+ * step's text at each part's `textBefore` and laying the part between the pieces (`./context`).
+ * It is the part's own offset, out of {@link OpaqueReplayedPart.part} where an assistant part
+ * has nowhere to carry one.
+ */
+export interface OpaqueReplayedPart {
+  /** The assistant part to send. */
+  readonly part: OpaqueMessagePart
+  /** Characters of the step's text that came before it; `0` for a part that led the step. */
+  readonly textBefore: number
+}
+
 /** The types {@link OpaqueMessagePart} takes when it is a part and not a conversion. */
-type OpaqueReplayedPart = Extract<
+type OpaqueAssistantPart = Extract<
   OpaqueMessagePart,
   { type: 'reasoning' | 'tool-call' | 'tool-result' }
 >
@@ -326,8 +349,8 @@ export interface OpaqueEntry {
 }
 
 /**
- * The assistant parts one stored entry contributes to a request, or `[]` when it contributes
- * none (epic #303, X13; #334).
+ * The assistant parts one stored entry contributes to a request, each with the place in the
+ * step's turn the log recorded for it, or `[]` when it contributes none (epic #303, X13; #334).
  *
  * One entry is one step's whole opaque half, and it is replayed whole or not at all: a family
  * needs the same client and (every family today) the same model, and a part whose payload is
@@ -337,13 +360,19 @@ export interface OpaqueEntry {
  * both sides is the sequence: a provider that binds the parts to each other accepts a prefix,
  * never a hole.
  *
+ * A part's place is its stored `text_before`, the characters of the step's text that came
+ * before it — which the strategy splits that text at, so the assistant turn goes back in the
+ * provider's own order (epic #303, X14; #335). An entry written before the offset existed
+ * carries none, reads as `0`, and so replays with its parts ahead of the text, exactly as it
+ * did then.
+ *
  * @param entry the stored entry
  * @param target the request's own family and model, or `null` when its client reads nothing back
  */
 export function opaqueReplayParts(
   entry: OpaqueEntry,
   target: OpaqueTarget | null,
-): readonly OpaqueMessagePart[] {
+): readonly OpaqueReplayedPart[] {
   const rule = replayRule(entry.provider)
   if (
     target === null ||
@@ -358,8 +387,9 @@ export function opaqueReplayParts(
     return convertedParts(entry)
   }
   const key = rule.providerOptionsKey
-  const parts: OpaqueReplayedPart[] = []
+  const replayed: OpaqueReplayedPart[] = []
   for (const part of entry.parts) {
+    const textBefore = part.text_before ?? 0
     const options = providerOptionsFor(part, key)
     if (options === undefined) {
       // A keyed family's part without its payload — a signature the provider never sent — is a
@@ -368,7 +398,7 @@ export function opaqueReplayParts(
       return []
     }
     if (part.type === 'reasoning') {
-      parts.push({ type: 'reasoning', text: part.text, ...options })
+      replayed.push({ textBefore, part: { type: 'reasoning', text: part.text, ...options } })
       continue
     }
     const tool = toolPartOf(part)
@@ -381,23 +411,29 @@ export function opaqueReplayParts(
       // `providerExecuted` is what tells the provider's client this call is already answered,
       // and that its answer follows in this same assistant turn rather than in a `tool` message
       // of ours.
-      parts.push({
-        type: 'tool-call',
-        toolCallId: tool.toolCallId,
-        toolName: tool.toolName,
-        input: tool.input ?? {},
-        providerExecuted: true,
-        ...options,
+      replayed.push({
+        textBefore,
+        part: {
+          type: 'tool-call',
+          toolCallId: tool.toolCallId,
+          toolName: tool.toolName,
+          input: tool.input ?? {},
+          providerExecuted: true,
+          ...options,
+        },
       })
       continue
     }
     if (part.type === 'tool-result') {
-      parts.push({
-        type: 'tool-result',
-        toolCallId: tool.toolCallId,
-        toolName: tool.toolName,
-        output: tool.output as OpaqueToolOutput,
-        ...options,
+      replayed.push({
+        textBefore,
+        part: {
+          type: 'tool-result',
+          toolCallId: tool.toolCallId,
+          toolName: tool.toolName,
+          output: tool.output as OpaqueToolOutput,
+          ...options,
+        },
       })
       continue
     }
@@ -405,11 +441,11 @@ export function opaqueReplayParts(
     // send, the same rule an unknown family gets.
     return []
   }
-  return parts
+  return replayed
 }
 
 /** One tool result's output, as the AI SDK's message part carries it. */
-type OpaqueToolOutput = Extract<OpaqueReplayedPart, { type: 'tool-result' }>['output']
+type OpaqueToolOutput = Extract<OpaqueAssistantPart, { type: 'tool-result' }>['output']
 
 /**
  * One part's provider metadata, wrapped under the key its client reads it back with — or
@@ -463,14 +499,18 @@ function toolPartOf(
  * and the passage each was cited for. It is the rule #334 left room for — a part is replayed,
  * or it is its text — and it is why a provider switch keeps what the previous provider found
  * instead of losing it.
+ *
+ * Its place is `0`: the reading stands for the whole entry, and it goes where the entry went
+ * before the parts carried a place — ahead of the step's text — which is the shape a request
+ * built before those offsets existed had (epic #303, X14; #335).
  */
-function convertedParts(entry: OpaqueEntry): readonly OpaqueMessagePart[] {
+function convertedParts(entry: OpaqueEntry): readonly OpaqueReplayedPart[] {
   const text = entry.parts
     .filter((part) => part.type === 'tool-result')
     .map((part) => part.text)
     .filter((part) => part.length > 0)
     .join('\n')
-  return text.length === 0 ? [] : [{ type: 'text', text }]
+  return text.length === 0 ? [] : [{ textBefore: 0, part: { type: 'text', text } }]
 }
 
 /** The rule for a stored entry's family, or `undefined` when this build has none for it. */

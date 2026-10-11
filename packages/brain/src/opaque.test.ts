@@ -10,7 +10,18 @@ import {
   opaqueReplayParts,
   opaqueTargetOf,
 } from './opaque'
-import type { OpaqueTarget } from './opaque'
+import type { OpaqueMessagePart, OpaqueTarget } from './opaque'
+
+/**
+ * The parts a replay contributes, without the place in the step each goes — which is
+ * `OpaqueReplayedPart.textBefore`, and has its own tests below.
+ */
+function replayed(
+  entry: Parameters<typeof opaqueReplayParts>[0],
+  target: OpaqueTarget | null,
+): readonly OpaqueMessagePart[] {
+  return opaqueReplayParts(entry, target).map((placed) => placed.part)
+}
 
 /**
  * Provider-opaque content: which family a request belongs to, what a step's parts are stored as,
@@ -157,6 +168,17 @@ describe('captureOpaque', () => {
     const at = reasoning('x'.repeat(OPAQUE_MAX_CHARS), undefined)
     expect(captureOpaque(target!, [at]).dropped).toBe(0)
   })
+
+  it('stores where each part sat in the step, and omits a part that led it', () => {
+    const target = opaqueTargetOf('anthropic/claude-sonnet-5', 'api_key')
+    const parts = captureOpaque(target!, [
+      { ...signed('one'), textBefore: 0 },
+      { ...signed('two'), textBefore: 5 },
+    ]).parts
+    // A part at offset 0 carries no field: absent reads as `0`, which keeps a step that led with
+    // its parts — and every entry written before the offsets existed — stored as it always was.
+    expect(parts.map((part) => part.text_before)).toEqual([undefined, 5])
+  })
 })
 
 describe('opaqueReplayParts', () => {
@@ -169,9 +191,7 @@ describe('opaqueReplayParts', () => {
   }
 
   it('replays the entry to the family and model that produced it, ahead of the text', () => {
-    expect(
-      opaqueReplayParts(entry, { provider: 'anthropic', model: 'anthropic/claude-sonnet-5' }),
-    ).toEqual([
+    expect(replayed(entry, { provider: 'anthropic', model: 'anthropic/claude-sonnet-5' })).toEqual([
       {
         type: 'reasoning',
         text: 'weighing the options',
@@ -187,18 +207,16 @@ describe('opaqueReplayParts', () => {
       parts: [{ type: 'reasoning', text: 'thinking' }],
     }
     expect(
-      opaqueReplayParts(compat, { provider: 'openai-compatible', model: 'custom/deepseek-v4' }),
+      replayed(compat, { provider: 'openai-compatible', model: 'custom/deepseek-v4' }),
     ).toEqual([{ type: 'reasoning', text: 'thinking' }])
   })
 
   it('never replays another provider’s or another model’s entry', () => {
-    expect(opaqueReplayParts(entry, null)).toEqual([])
-    expect(
-      opaqueReplayParts(entry, { provider: 'bedrock', model: 'anthropic/claude-sonnet-5' }),
-    ).toEqual([])
-    expect(
-      opaqueReplayParts(entry, { provider: 'anthropic', model: 'anthropic/claude-opus-5-5' }),
-    ).toEqual([])
+    expect(replayed(entry, null)).toEqual([])
+    expect(replayed(entry, { provider: 'bedrock', model: 'anthropic/claude-sonnet-5' })).toEqual([])
+    expect(replayed(entry, { provider: 'anthropic', model: 'anthropic/claude-opus-5-5' })).toEqual(
+      [],
+    )
   })
 
   it('never replays a family this build has no rule for', () => {
@@ -206,12 +224,12 @@ describe('opaqueReplayParts', () => {
     // of this build, put there — so a family the table does not hold is one this build must not
     // guess at, even where the request's own family would name it.
     const foreign = { provider: 'google', model: 'google/gemini-3-pro' } as unknown as OpaqueTarget
-    expect(opaqueReplayParts({ ...entry, provider: 'google' }, foreign)).toEqual([])
+    expect(replayed({ ...entry, provider: 'google' }, foreign)).toEqual([])
   })
 
   it('refuses the whole entry when a keyed family’s part has no payload', () => {
     expect(
-      opaqueReplayParts(
+      replayed(
         { ...entry, parts: [{ type: 'reasoning', text: 'unsigned' }] },
         { provider: 'anthropic', model: 'anthropic/claude-sonnet-5' },
       ),
@@ -220,7 +238,7 @@ describe('opaqueReplayParts', () => {
 
   it('refuses the whole entry when it carries a part type this build does not replay', () => {
     expect(
-      opaqueReplayParts(
+      replayed(
         {
           ...entry,
           parts: [entry.parts[0]!, { type: 'tool-result', text: 'from the provider’s own search' }],
@@ -232,10 +250,78 @@ describe('opaqueReplayParts', () => {
 
   it('replays nothing for an entry that kept no parts', () => {
     expect(
-      opaqueReplayParts(
+      replayed(
         { ...entry, parts: [] },
         { provider: 'anthropic', model: 'anthropic/claude-sonnet-5' },
       ),
     ).toEqual([])
+  })
+
+  it('gives each part the place in the step the log recorded for it', () => {
+    // Text → the provider's call → its answer → the text that reads it: the offsets are the
+    // characters of the step's text that came before each part, and the strategy splits the text
+    // at them to rebuild the turn in this order (epic #303, X14; #335).
+    const searched: Parameters<typeof opaqueReplayParts>[0] = {
+      provider: 'anthropic',
+      model: 'anthropic/claude-sonnet-5',
+      parts: [
+        { type: 'reasoning', text: 'thinking', provider_options: { signature: 's' } },
+        { type: 'tool-call', text: '', payload: { toolCallId: 'ws_1', toolName: 'web_search' } },
+        {
+          type: 'tool-result',
+          text: 'found it',
+          payload: { toolCallId: 'ws_1', toolName: 'web_search', output: {} },
+          text_before: 7,
+        },
+      ],
+    }
+    const placed = opaqueReplayParts(searched, {
+      provider: 'anthropic',
+      model: 'anthropic/claude-sonnet-5',
+    })
+    expect(placed.map(({ textBefore }) => textBefore)).toEqual([0, 0, 7])
+    expect(placed.map(({ part }) => part.type)).toEqual(['reasoning', 'tool-call', 'tool-result'])
+  })
+
+  it('reads a part with no offset as leading the step', () => {
+    // Every entry written before the order was recorded carries none, and reads as `0`: the
+    // parts go ahead of the text, exactly as they were replayed then (#334).
+    expect(
+      opaqueReplayParts(entry, { provider: 'anthropic', model: 'anthropic/claude-sonnet-5' })[0]
+        ?.textBefore,
+    ).toBe(0)
+    expect(
+      opaqueReplayParts(
+        { ...entry, parts: [{ ...entry.parts[0]!, text_before: 12 }] },
+        { provider: 'anthropic', model: 'anthropic/claude-sonnet-5' },
+      )[0]?.textBefore,
+    ).toBe(12)
+  })
+
+  it('gives a converted reading the place the entry went before the offsets existed', () => {
+    // A switch replays a search's reading as one text block, which stands for the whole entry: it
+    // goes ahead of the step's text, as it did before a part carried a place (#335).
+    const switched: Parameters<typeof opaqueReplayParts>[0] = {
+      provider: 'anthropic',
+      model: 'anthropic/claude-sonnet-5',
+      parts: [
+        {
+          type: 'tool-result',
+          text: 'Web search results for "x":\n1. …',
+          payload: { toolCallId: 'ws_1', toolName: 'web_search', output: {} },
+          text_before: 9,
+        },
+      ],
+    }
+    const placed = opaqueReplayParts(switched, {
+      provider: 'openai-compatible',
+      model: 'deepseek/deepseek-chat',
+    })
+    expect(placed).toHaveLength(1)
+    expect(placed[0]?.textBefore).toBe(0)
+    expect(placed[0]?.part).toEqual({
+      type: 'text',
+      text: 'Web search results for "x":\n1. …',
+    })
   })
 })

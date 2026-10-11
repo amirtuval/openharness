@@ -301,6 +301,78 @@ describe('a search the provider ran inside a request (#335)', () => {
     expect(JSON.stringify(parts[1])).toContain('ENCRYPTED-RESULT')
   })
 
+  it('rebuilds a step that wrote around its search in the provider’s own order', async () => {
+    // The shape a Claude search step really streams: a sentence, the provider's call and its
+    // answer, then the reply that reads the results. The step's assistant turn has to go back
+    // exactly like that — the reordering #335's report is about — and not with the provider's
+    // parts hoisted ahead of the text.
+    const { store, sessionId } = await newSession([message('look it up')])
+    const { factory, calls } = mockModel(
+      {
+        ...scriptedSearch(),
+        textBeforeProviders: ['Let me look that up.'],
+        text: ['It is three ideas.'],
+        toolCalls: [{ name: 'echo', input: { text: 'again' } }],
+      },
+      { text: ['Done.'] },
+    )
+
+    await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+      tools: createToolRegistry([echo()]),
+    })
+
+    const parts = readAssistantParts(calls[1] as LanguageModelV4CallOptions)[0] ?? []
+    expect(parts.map((part) => part.type)).toEqual([
+      'text',
+      'tool-call',
+      'tool-result',
+      'text',
+      'tool-call',
+    ])
+    expect(parts[0]).toMatchObject({ text: 'Let me look that up.' })
+    expect(parts[3]).toMatchObject({ text: 'It is three ideas.' })
+    // The provider's own call and answer are the SDK's pair, `providerExecuted`, in between —
+    // and the readable `web_search` record our own log carries is not sent as a second call.
+    expect(parts[1]).toMatchObject({
+      toolCallId: 'srvtoolu_1',
+      toolName: WEB_SEARCH_TOOL_NAME,
+      providerExecuted: true,
+    })
+    expect(parts[2]).toMatchObject({ toolCallId: 'srvtoolu_1' })
+    expect(parts[4]).toMatchObject({ toolName: 'echo' })
+  })
+
+  it('keeps the provider’s order across a paused turn’s continuation', async () => {
+    const { store, sessionId } = await newSession([message('look it up')])
+    const { factory, calls } = mockModel(
+      {
+        ...scriptedSearch(),
+        textBeforeProviders: ['Looking that up.'],
+        rawFinishReason: 'pause_turn',
+      },
+      { text: ['Finished after all.'] },
+    )
+
+    const outcome = await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+      tools: createToolRegistry([echo()]),
+    })
+
+    expect(outcome).toEqual({ outcome: 'idle' })
+    expect(calls).toHaveLength(2)
+    // The paused step sends its own content back, in the order it wrote it: the sentence, then
+    // the provider's call and answer.
+    const parts = readAssistantParts(calls[1] as LanguageModelV4CallOptions)[0] ?? []
+    expect(parts.map((part) => part.type)).toEqual(['text', 'tool-call', 'tool-result'])
+    expect(parts[0]).toMatchObject({ text: 'Looking that up.' })
+    expect(parts[1]).toMatchObject({ providerExecuted: true })
+  })
+
   it('reads what was searched from the answer, for a provider whose call says nothing', async () => {
     // OpenAI's and xAI's wire formats put nothing on the call: the query — or the page an
     // `openPage` action opened — is on the answer, so the readable call is built from both ends.
@@ -418,13 +490,16 @@ describe('what a provider switch does to a search (#335)', () => {
     const parts = readAssistantParts(switchedCalls[0] as LanguageModelV4CallOptions)[0] ?? []
     // What the previous provider found is kept, as prose: neither its encrypted payload nor its
     // `server_tool_use` spelling goes to a model that cannot read either.
-    const text = parts
+    const texts = parts
       .filter((part) => part.type === 'text')
       .map((part) => (part as { readonly text: string }).text)
-      .join('\n')
-    expect(text).toContain('The architecture — https://example.test/architecture')
-    expect(text).toContain('three ideas carry the design')
+    expect(texts.join('\n')).toContain('The architecture — https://example.test/architecture')
+    expect(texts.join('\n')).toContain('three ideas carry the design')
     expect(JSON.stringify(parts)).not.toContain('ENCRYPTED-RESULT')
+    // The reading stands for the whole entry and goes where the entry went before a part carried
+    // a place — ahead of the step's own text — so a switch's request is ordered as it always was.
+    expect(texts[0]).toContain('The architecture — https://example.test/architecture')
+    expect(texts[1]).toBe('It is three ideas.')
   })
 })
 

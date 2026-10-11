@@ -223,6 +223,23 @@ export const OpaquePartSchema = z.object({
    */
   text: z.string(),
   /**
+   * // extension: how much of the step's own text was streamed **before** this part — in
+   * characters — which is where the part goes in the assistant turn it is replayed on
+   * (epic #303, X14; issue #335).
+   *
+   * A provider's assistant content has an order, and one this build must rebuild exactly: a
+   * Claude step that wrote "Let me look that up." then called `server_tool_use` then answered
+   * from the results is text → call → result → text, and a request that sent the parts first
+   * would be asking Anthropic to read a turn it never wrote. A part's place is therefore its
+   * own offset into that step's text, and the strategy splits the step's `agent.message` text
+   * at those offsets and lays the parts between the pieces.
+   *
+   * Absent reads as `0`: every part of a step streamed before any of its text, which is the
+   * order this event was written with before the offsets existed (#334 — parts ahead of the
+   * text), so a log stored then replays exactly as it did.
+   */
+  text_before: z.number().int().nonnegative().optional(),
+  /**
    * // extension: the provider's own metadata for the part, exactly as it sent it — the AI
    * SDK's `providerOptions` key for that provider (`signature` for Anthropic, `itemId` and
    * `reasoningEncryptedContent` for OpenAI and xAI, `thoughtSignature` for Gemini, the
@@ -268,6 +285,15 @@ export type OpaquePart = DeepReadonly<z.infer<typeof OpaquePartSchema>>
  * re-attaches a step's parts only when the next request goes to the same family **and** the
  * same model, and drops them on any switch (the AI SDK's provider clients then write the
  * assistant message without them, which is what a provider that cannot read them wants).
+ *
+ * A step's assistant turn has an **order**, and this event is where the parts' place in it is
+ * recorded: each part carries {@link OpaquePartSchema.shape.text_before}, the characters of the
+ * step's own `agent.message` text that came before it, and the strategy rebuilds the turn by
+ * splitting that text at those offsets and laying the parts between the pieces. Text → a
+ * provider's call → its answer → the text that answers from it is a step's real shape, and a
+ * request that sent the parts ahead of the text would be a turn the provider never wrote.
+ * Absent reads as `0`, so a log written before the offsets existed (#334's parts-ahead-of-text
+ * order) replays exactly as it did.
  *
  * Nothing here is summarized, and a rewind takes it back with the step it belongs to —
  * `session.rewind` covers every event in the tail it restarts, this one included. It is never

@@ -21,6 +21,15 @@ export interface MockModelScript {
   /** The text chunks to stream, in order. Default: no text at all. */
   readonly text?: readonly string[]
   /**
+   * Text the step streams **before** its provider-executed calls, in order (epic #303, X14;
+   * #335). Default: none, so the step is the provider's call and its answer alone.
+   *
+   * A reply that narrates a search before making it — "Let me look that up." → the provider's
+   * `server_tool_use` → `web_search_tool_result` → the answer that reads the results — is the
+   * shape the log must rebuild in its own order, and `text` is what follows the calls.
+   */
+  readonly textBeforeProviders?: readonly string[]
+  /**
    * The reasoning the step streams before its text, in order (epic #303, X13; #334) — the part
    * of a thinking model's step that only its own provider can read back.
    *
@@ -163,6 +172,9 @@ export function apiCallError(
 /** The text block the mock streams under; a real provider picks its own ids. */
 const TEXT_ID = 'mock-text-1'
 
+/** The block the mock streams {@link MockModelScript.textBeforeProviders} under. */
+const PREAMBLE_TEXT_ID = 'mock-text-0'
+
 /** The key a mock request is made with. The mock ignores it — a request still needs one. */
 export const TEST_API_KEY = 'oh-test-api-key-0000'
 
@@ -260,6 +272,10 @@ function streamOf(script: MockModelScript): ReadableStream<LanguageModelV4Stream
   const steps: (() => Promise<LanguageModelV4StreamPart>)[] = [
     () => Promise.resolve({ type: 'stream-start', warnings: [] }),
     ...reasoning,
+    // The text the step writes before its provider-executed calls (#335): a reply that narrates
+    // the search it is about to make. A block of its own, so the step's own text still follows
+    // the calls — the order the log has to rebuild.
+    ...textBlock(PREAMBLE_TEXT_ID, script.textBeforeProviders ?? []),
     // What the provider ran itself, before the text it grounds (#335): the call, the answer, and
     // the citations — the order Anthropic streams a search in.
     ...(script.providerTools ?? []).flatMap((tool) => {
@@ -383,6 +399,31 @@ function streamOf(script: MockModelScript): ReadableStream<LanguageModelV4Stream
       controller.enqueue(await next())
     },
   })
+}
+
+/**
+ * One text block's stream parts, under `id`, or `[]` for a block with no chunks.
+ *
+ * Two blocks in one step is what a provider streams around a search — the sentence before it
+ * and the answer after — and giving each its own id is what keeps the SDK from merging them into
+ * one, which is the shape the loop has to be able to rebuild in order.
+ */
+function textBlock(
+  id: string,
+  chunks: readonly string[],
+): (() => Promise<LanguageModelV4StreamPart>)[] {
+  if (chunks.length === 0) {
+    return []
+  }
+  return [
+    (): Promise<LanguageModelV4StreamPart> => Promise.resolve({ type: 'text-start' as const, id }),
+    ...chunks.map(
+      (chunk): (() => Promise<LanguageModelV4StreamPart>) =>
+        () =>
+          Promise.resolve({ type: 'text-delta' as const, id, delta: chunk }),
+    ),
+    (): Promise<LanguageModelV4StreamPart> => Promise.resolve({ type: 'text-end' as const, id }),
+  ]
 }
 
 /**
