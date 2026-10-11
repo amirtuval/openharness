@@ -13,6 +13,7 @@ import {
   newModeId,
 } from '@openharness/protocol'
 import type {
+  AgentToolUseEvent,
   GetPreferencesResponse,
   StoredEvent,
   StreamEvent,
@@ -2016,5 +2017,162 @@ describe('the fake’s usage reads (#247)', () => {
       AuthenticationError,
     )
     await expect(fake.usage.me()).rejects.toBeInstanceOf(AuthenticationError)
+  })
+})
+
+/**
+ * The pause, through the fake (epic #303, X6; #309).
+ *
+ * The fake's brain stores the `ask_user` call and ends the turn `requires_action`, exactly as
+ * the real one does, and accepts the one `user.tool_confirmation` that answers it — so a
+ * frontend's prompt can be driven end to end without a server.
+ */
+describe('the fake’s pause (#303, #309)', () => {
+  const QUESTIONS = {
+    questions: [
+      {
+        type: 'choice' as const,
+        question: 'Which environment?',
+        header: 'Env',
+        options: [{ label: 'staging' }, { label: 'production' }],
+      },
+      { type: 'confirm' as const, question: 'Go ahead?', header: 'Go' },
+    ],
+  }
+
+  /** Drive one turn that pauses on `ask_user`, and answer the call this way. */
+  async function paused() {
+    const fake = createFakeClient()
+    fake.askWith(QUESTIONS)
+    await fake.sendMessage(fake.session.id, 'deploy it')
+    await fake.waitForIdle()
+    const call = fake
+      .history()
+      .find((event) => event.type === 'agent.tool_use' && event.name === 'ask_user')
+    return { fake, call: call as AgentToolUseEvent }
+  }
+
+  it('stores the call and ends the turn `requires_action`', async () => {
+    const { fake, call } = await paused()
+
+    expect(call.evaluated_permission).toBe('ask')
+    // Nothing ran it: an unanswered call has no result.
+    expect(fake.history().some((event) => event.type === 'agent.tool_result')).toBe(false)
+    const idle = fake.history().findLast((event) => event.type === 'session.status_idle')
+    expect(idle).toMatchObject({
+      stop_reason: { type: 'requires_action', event_ids: [call.id] },
+    })
+    // The session is idle, not running: a pause is a turn end, not a wait in the process.
+    expect(fake.session.status).toBe('idle')
+  })
+
+  it('writes the answers as the call’s result when the reader confirms', async () => {
+    const { fake, call } = await paused()
+
+    await fake.sessions.events.send(fake.session.id, {
+      type: 'user.tool_confirmation',
+      tool_use_id: call.id,
+      result: 'allow',
+      answers: [
+        { question: 'Which environment?', labels: ['staging'] },
+        { question: 'Go ahead?', confirmed: true },
+      ],
+    })
+
+    const log = fake.history()
+    expect(log.some((event) => event.type === 'user.tool_confirmation')).toBe(true)
+    expect(log.findLast((event) => event.type === 'agent.tool_result')).toMatchObject({
+      tool_use_id: call.id,
+      is_error: false,
+      content: [{ type: 'text', text: 'Which environment?: staging\nGo ahead?: Yes' }],
+    })
+    expect(fake.session.status).toBe('idle')
+  })
+
+  it('writes a denial in the reader’s own words', async () => {
+    const { fake, call } = await paused()
+
+    await fake.sessions.events.send(fake.session.id, {
+      type: 'user.tool_confirmation',
+      tool_use_id: call.id,
+      result: 'deny',
+      deny_message: 'not today',
+    })
+
+    expect(fake.history().findLast((event) => event.type === 'agent.tool_result')).toMatchObject({
+      tool_use_id: call.id,
+      is_error: true,
+      content: [{ type: 'text', text: 'The user denied this: not today' }],
+    })
+  })
+
+  it('refuses a confirmation for a call that is not waiting, storing nothing', async () => {
+    // A call that already has its answer is not waiting any more — the second confirmation is
+    // the 400 the server answers, and nothing of it is stored.
+    const { fake, call } = await paused()
+    await fake.sessions.events.send(fake.session.id, {
+      type: 'user.tool_confirmation',
+      tool_use_id: call.id,
+      result: 'deny',
+    })
+    const before = fake.history().length
+
+    await expect(
+      fake.sessions.events.send(fake.session.id, {
+        type: 'user.tool_confirmation',
+        tool_use_id: call.id,
+        result: 'allow',
+        answers: [],
+      }),
+    ).rejects.toMatchObject({ status: 400, type: 'invalid_request_error' })
+    expect(fake.history()).toHaveLength(before)
+  })
+
+  it('refuses a question approved with no answers, a `remember`, and answers that do not fit', async () => {
+    const { fake, call } = await paused()
+    const before = fake.history().length
+
+    await expect(
+      fake.sessions.events.send(fake.session.id, {
+        type: 'user.tool_confirmation',
+        tool_use_id: call.id,
+        result: 'allow',
+      }),
+    ).rejects.toMatchObject({ status: 400 })
+
+    await expect(
+      fake.sessions.events.send(fake.session.id, {
+        type: 'user.tool_confirmation',
+        tool_use_id: call.id,
+        result: 'allow',
+        remember: 'always',
+        answers: [],
+      }),
+    ).rejects.toMatchObject({ status: 400 })
+
+    await expect(
+      fake.sessions.events.send(fake.session.id, {
+        type: 'user.tool_confirmation',
+        tool_use_id: call.id,
+        result: 'allow',
+        answers: [{ question: 'Which environment?', labels: ['nope'] }],
+      }),
+    ).rejects.toMatchObject({ status: 400 })
+
+    expect(fake.history()).toHaveLength(before)
+  })
+
+  it('resolves waiting calls when the reader sends a message instead', async () => {
+    const { fake, call } = await paused()
+    fake.respondWith('ok then')
+
+    await fake.sendMessage(fake.session.id, 'never mind')
+    await fake.waitForIdle()
+
+    expect(fake.history().findLast((event) => event.type === 'agent.tool_result')).toMatchObject({
+      tool_use_id: call.id,
+      is_error: true,
+      content: [{ type: 'text', text: 'The user sent a message instead.' }],
+    })
   })
 })
