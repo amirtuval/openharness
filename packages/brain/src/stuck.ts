@@ -119,10 +119,10 @@ export interface StuckStreak {
 }
 
 /**
- * The streak the log's newest calls form, or `null` when the turn has called no tool (or the
- * newest call is the first of a run — a run of one is still a streak, `length: 1`).
+ * The streak the log's newest calls form, or `null` when the turn has called no tool at all.
  *
- * The walk is backwards from the newest call, and it stops at the first call that names another
+ * A run of one is still a streak (`length: 1`). The walk is backwards from the newest call, and
+ * it stops at the first call that names another
  * tool or carries other arguments; a call with no result yet is not a failure, but the streak is
  * the calls, whether they are answered or not.
  *
@@ -199,7 +199,7 @@ export function stuckReminder(events: readonly StoredEvent[]): StuckReminder | n
   }
 }
 
-/** A reminder a request carries, with the id of what it is about (#331). */
+/** The stuck reminder a request carries, and the streak it was earned by (#331). */
 export interface StuckReminder {
   /** Always `'stuck'` — the tag a span record and the caller's reminder list share. */
   readonly kind: 'stuck'
