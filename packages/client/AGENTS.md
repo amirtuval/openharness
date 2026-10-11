@@ -726,7 +726,7 @@ running })` reads it off the call's `evaluated_permission`, whether a result has
   own type (`toolCallSource`), rather than being taken for a built-in.
 - **A provider-executed search keeps its pages, and says it was the provider's.** A `web_search`
   the provider ran inside the request is stored as a call like any other (#335), `source:
-  'provider'` folded from the span's own offer or read off the call for one the client joined
+'provider'` folded from the span's own offer or read off the call for one the client joined
   late, and its result carries the citations the provider returned as `TranscriptToolCall.sources`
   — the protocol's `Source` list (a URL, a title, the passage it was quoted for), which a line
   shows beneath the query and which no other tool's result has. The sources are part of a call's
