@@ -9,6 +9,7 @@ import {
   makeAgent,
   makeAgentMessage,
   makeListModelsResponse,
+  makeListToolSettingsResponse,
   makeMode,
   makeProviderCredential,
   makeSession,
@@ -738,6 +739,36 @@ describe('modes (#245, M6)', () => {
     expect(bodyOf(second.mock.requests[0]?.init)).toEqual({
       events: [{ type: 'user.message', content: [{ type: 'text', text: 'plain' }], mode: null }],
     })
+  })
+})
+
+describe('tool settings (#303, #307, #308)', () => {
+  it('reads GET /v1/me/tools, with the mode when one is given', async () => {
+    const response = makeListToolSettingsResponse({ name: 'web_fetch' })
+    const mode = makeMode()
+    const { client, mock } = clientWith(() => jsonResponse(response))
+
+    expect(await client.tools.list()).toEqual(response)
+    expect(mock.urlOf(0)).toBe(`${BASE_URL}/v1/me/tools`)
+
+    await client.tools.list({ mode_id: mode.id })
+    expect(mock.urlOf(1)).toBe(`${BASE_URL}/v1/me/tools?mode_id=${mode.id}`)
+  })
+
+  it('writes PUT /v1/me/tools with the per-tool patch and parses the answer', async () => {
+    const response = makeListToolSettingsResponse({ enabled: false, policy: 'ask' })
+    const { client, mock } = clientWith(() => jsonResponse(response))
+
+    const body = { builtin: { web_search: { enabled: false, policy: 'ask' as const } } }
+    expect(await client.tools.put(body)).toEqual(response)
+    expect(mock.requests[0]?.init?.method).toBe('PUT')
+    expect(mock.urlOf(0)).toBe(`${BASE_URL}/v1/me/tools`)
+    expect(bodyOf(mock.requests[0]?.init)).toEqual(body)
+  })
+
+  it('rejects a response that is not the protocol’s list', async () => {
+    const { client } = clientWith(() => jsonResponse({ data: [{ name: 'web_fetch' }] }))
+    await expect(client.tools.list()).rejects.toBeInstanceOf(ResponseValidationError)
   })
 })
 

@@ -122,6 +122,10 @@ describe('reduceTranscript', () => {
       context: null,
       truncation: null,
       manualCompaction: null,
+      toolCalls: [],
+      truncatedToolResults: [],
+      clearedToolResults: null,
+      toolSources: {},
     })
   })
 
@@ -1966,7 +1970,7 @@ describe('selectTranscriptEntries (#280)', () => {
 
     expect(
       selectTranscriptEntries(state).map((entry) =>
-        entry.kind === 'summary' ? 'summary' : `${entry.message.role}:${entry.message.text}`,
+        entry.kind === 'message' ? `${entry.message.role}:${entry.message.text}` : entry.kind,
       ),
     ).toEqual(['user:hello', 'summary', 'agent:hi there', 'user:again'])
   })

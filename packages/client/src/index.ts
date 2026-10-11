@@ -40,6 +40,7 @@ export type { ProviderCredentialsResource } from './resources/provider-credentia
 export type { ModesResource } from './resources/modes'
 export type { ModelsResource } from './resources/models'
 export type { PreferencesResource } from './resources/preferences'
+export type { ToolsResource } from './resources/tools'
 export type { UsageResource } from './resources/usage'
 
 export {
@@ -71,6 +72,7 @@ export {
   initialTranscriptState,
   reduceTranscript,
   reduceTranscriptAll,
+  selectClearedToolResults,
   selectContext,
   selectIsRunning,
   selectLastMessage,
@@ -80,7 +82,9 @@ export {
   selectStreamingMessage,
   selectSummaries,
   selectSummarizing,
+  selectToolCalls,
   selectTranscriptEntries,
+  selectTruncatedToolResults,
   selectTruncation,
   replyCost,
   sessionCost,
@@ -132,5 +136,26 @@ export type {
   ManualCompactionTone,
   SummaryModelFallback,
 } from './compaction'
+
+export {
+  TOOL_STEPS_EXHAUSTED_NOTICE,
+  TOOLS_UNSUPPORTED_NOTICE,
+  clearedResultsNotice,
+  formatToolInput,
+  modelSupportsTools,
+  stepLimitNotice,
+  toolCallStatus,
+  toolCallSummary,
+  toolStatusLabel,
+  truncatedResultsNotice,
+} from './tools'
+export type {
+  ClearedToolResults,
+  ToolCallResult,
+  ToolCallStatus,
+  ToolResultsNotice,
+  TranscriptToolCall,
+  TruncatedToolResult,
+} from './tools'
 
 export type { StreamOptions } from './events/stream'

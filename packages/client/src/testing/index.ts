@@ -6,12 +6,15 @@ import {
   EVENT_TYPES,
   CreateSessionRequestSchema,
   DEFAULT_USER_THEME,
+  DEFAULT_USER_TOOL_SETTINGS,
   ListModelsResponseSchema,
+  ListToolSettingsResponseSchema,
   MODE_DEFAULT_MODEL,
   MAX_MODES_PER_USER,
   ModeSchema,
   ProviderCredentialSchema,
   PutPreferencesRequestSchema,
+  PutToolSettingsRequestSchema,
   PutProviderCredentialRequestSchema,
   SUMMARY_MODEL_SAME_AS_CHAT,
   parseServiceAccountKey,
@@ -22,6 +25,7 @@ import {
   UpdateModeRequestSchema,
   UserMessageEventInputSchema,
   UserPreferencesSchema,
+  UserToolSettingsSchema,
   UserUsageSchema,
   credentialDetails,
   encodeKeyCursor,
@@ -43,12 +47,16 @@ import type {
   ListModesResponse,
   ListProviderCredentialsResponse,
   ListSessionsResponse,
+  ListToolSettingsResponse,
   Mode,
   ModeId,
   ModelEntry,
   ProviderCatalogStatus,
   PutProviderCredentialRequest,
   SessionUsage,
+  ToolPermission,
+  ToolSettingEntry,
+  UserToolSettings,
   UserUsage,
   ProviderCredential,
   SendEventsResponse,
@@ -246,6 +254,21 @@ export interface FakeClientOptions {
    * "my default model" resolves through.
    */
   modes?: readonly Mode[]
+  /**
+   * The tool settings {@link Client.tools} starts with, over the default of none.
+   *
+   * One entry per tool the reader chose for (`{ builtin: { web_search: { enabled: false,
+   * policy: 'ask' } } }`); a tool the map does not name follows its own declared default, the
+   * way the server reads it (#307). Seeded rather than put, like {@link credentials}, so a test
+   * of a settings screen renders from its first frame with a choice already made.
+   */
+  toolSettings?: UserToolSettings
+  /**
+   * Which tools this fake deployment registers and offers, over the default of the three
+   * built-ins. A tool named here with `false` is listed as `available: false` — the
+   * unregistered-tool state of #307 — which is how a screen that says "not configured" is seen.
+   */
+  toolsAvailable?: Readonly<Record<string, boolean>>
 }
 
 /** A device flow, as {@link FakeClient.scriptDeviceLogin} takes it. */
@@ -321,6 +344,26 @@ export interface ModelListCall {
   /** Whether the call asked to bypass the server's cache: `refresh: true`. */
   readonly refresh: boolean
 }
+
+/**
+ * The tools the fake deployment registers, in the order a request would offer them
+ * (epic #303, X4; #307).
+ *
+ * The names and declared permission match the real build's built-ins (`allow`), so a settings
+ * screen developed against the fake reads the same entries the server sends. The fake runs no
+ * tool loop, so this is only what `GET /v1/me/tools` answers — the same "the fake restates the
+ * shape, not the engine" line the fake's usage and compaction halves draw.
+ */
+const FAKE_TOOLS: readonly { readonly name: string; readonly policy: ToolPermission }[] = [
+  { name: 'web_fetch', policy: 'allow' },
+  { name: 'web_search', policy: 'allow' },
+  { name: 'todo_write', policy: 'allow' },
+]
+
+/** Every fake tool is registered unless {@link FakeClientOptions.toolsAvailable} says otherwise. */
+const FAKE_TOOLS_AVAILABLE: Readonly<Record<string, boolean>> = Object.fromEntries(
+  FAKE_TOOLS.map((tool) => [tool.name, true]),
+)
 
 /**
  * The fake client: a {@link Client} plus the scripting it needs to be a test double.
@@ -446,6 +489,16 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
   // the way the credentials are. The fake has one user, so ownership is only ever that user's
   // — a mode the map does not hold is the 404 an unknown id gets.
   const modes = new Map<string, Mode>((options.modes ?? []).map((mode) => [mode.id, mode]))
+  // The caller's tool settings (epic #303, X4; #307): one in-memory map behind `/v1/me/tools`,
+  // seeded by option the way the credentials and modes are. A tool the map does not name
+  // follows the fake registry's declaration, exactly as the server reads it.
+  let toolSettings: UserToolSettings = UserToolSettingsSchema.parse(
+    options.toolSettings ?? DEFAULT_USER_TOOL_SETTINGS,
+  )
+  const toolsAvailable: Readonly<Record<string, boolean>> = {
+    ...FAKE_TOOLS_AVAILABLE,
+    ...options.toolsAvailable,
+  }
   const user = options.user ?? makeUser()
   // The fake is a stand-in for `GET /v1/models`, so it stamps the budget a real server would on
   // every entry it serves (epic #277, K10; #280) — a caller that passes one keeps it.
@@ -1181,6 +1234,71 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
     },
   }
 
+  /** The effective tool list, as `GET /v1/me/tools` answers it (epic #303, X4; #307). */
+  const toolEntries = (modeId: ModeId | undefined): ListToolSettingsResponse => {
+    const override = modeId === undefined ? null : (modes.get(modeId)?.tools ?? null)
+    if (modeId !== undefined && !modes.has(modeId)) {
+      throw notFoundMode(modeId)
+    }
+    const entries: ToolSettingEntry[] = FAKE_TOOLS.map((tool) => {
+      const choice = toolSettings.builtin[tool.name]
+      return {
+        name: tool.name,
+        source: 'builtin' as const,
+        // A mode's override is on/off only (#307); the user's choice, else on.
+        enabled: override?.builtin[tool.name] ?? choice?.enabled ?? true,
+        policy: choice?.policy ?? tool.policy,
+        // A tool this deployment does not register has no declaration to report.
+        default_policy: toolsAvailable[tool.name] === false ? null : tool.policy,
+        available: toolsAvailable[tool.name] !== false,
+      }
+    })
+    // A stored setting for a tool this deployment does not register is listed, by name, after
+    // the registered ones — the same "listed rather than hidden" rule the server follows.
+    const known = new Set(FAKE_TOOLS.map((tool) => tool.name))
+    const strays = Object.keys(toolSettings.builtin)
+      .filter((name) => !known.has(name))
+      .sort()
+    for (const name of strays) {
+      const choice = toolSettings.builtin[name] as { enabled: boolean; policy: ToolPermission }
+      entries.push({
+        name,
+        source: 'builtin',
+        enabled: choice.enabled,
+        policy: choice.policy,
+        default_policy: null,
+        available: false,
+      })
+    }
+    return ListToolSettingsResponseSchema.parse({ data: entries })
+  }
+
+  const toolsResource: Client['tools'] = {
+    list(params, requestOptions): Promise<ListToolSettingsResponse> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      return Promise.resolve(toolEntries(params?.mode_id))
+    },
+
+    put(body, requestOptions): Promise<ListToolSettingsResponse> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      const request = PutToolSettingsRequestSchema.safeParse(body)
+      if (!request.success) {
+        return Promise.reject(badRequestFor(request.error.issues))
+      }
+      // The write merges per tool: a tool the body names replaces that tool's whole setting
+      // (so its `policy` is required by the schema), and every other tool keeps what is stored.
+      const builtin = { ...toolSettings.builtin, ...(request.data.builtin ?? {}) }
+      toolSettings = UserToolSettingsSchema.parse({ builtin })
+      return Promise.resolve(toolEntries(undefined))
+    },
+  }
+
   const preferencesResource: Client['preferences'] = {
     get(requestOptions): Promise<GetPreferencesResponse> {
       throwIfAborted(requestOptions)
@@ -1348,6 +1466,7 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
     providerCredentials: providerCredentialsResource,
     models: modelsResource,
     modes: modesResource,
+    tools: toolsResource,
     usage: usageResource,
     auth: authResource,
     preferences: preferencesResource,

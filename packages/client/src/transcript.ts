@@ -1,6 +1,8 @@
 import { EVENT_TYPES, totalCost, usageCost } from '@openharness/protocol'
 import type {
   AgentMessageEvent,
+  AgentToolResultEvent,
+  AgentToolUseEvent,
   ContextSummaryEvent,
   ContextSummaryReason,
   ModelCost,
@@ -10,6 +12,8 @@ import type {
   SessionUsageEvent,
   StreamEvent,
   StoredEvent,
+  ToolReference,
+  ToolSource,
   UserMessageEvent,
   RetryStatusType,
   SessionCompactionOutcome,
@@ -20,6 +24,13 @@ import type {
 } from '@openharness/protocol'
 
 import { contextAfterSummary } from './compaction'
+import { clearedResultsFrom, toolCallStatus, truncatedResultsFrom } from './tools'
+import type {
+  ClearedToolResults,
+  ToolCallResult,
+  TranscriptToolCall,
+  TruncatedToolResult,
+} from './tools'
 
 /**
  * The transcript: session events in, UI state out.
@@ -77,14 +88,20 @@ export interface TextPart {
  * agreed, are:
  *
  * - `thinking` — the model's reasoning;
- * - `tool_use` — a tool call the agent made;
- * - `tool_result` — what a tool answered;
- * - `question` — an `ask_user` question waiting for the user;
- * - `approval` — a tool call waiting for the user's approval.
+ * - `question` — an `ask_user` question waiting for the user (#310);
+ * - `approval` — a tool call waiting for the user's approval (#310).
  *
  * They are named here and deliberately not implemented: the protocol has no event for them
  * yet, and the union is what they extend when it does. A message's `text` stays the
  * concatenation of its text parts, so a caller that only wants the words keeps working.
+ *
+ * **A tool call is not a message part** (epic #303, X1; #308). The model's calls and their
+ * results are events of their own — one call is not text the model produced, and a step that
+ * made four calls and wrote no words is four calls and no message — so they live in
+ * {@link TranscriptState.toolCalls} and reach a renderer as their own {@link TranscriptEntry}
+ * (`kind: 'tool'`), interleaved with the messages by position. #310 draws its approval prompt
+ * from a call's `waiting` status, and #313's MCP calls are the same shape with
+ * `source: 'mcp'`.
  */
 export type MessagePart = TextPart
 
@@ -353,15 +370,17 @@ export interface TranscriptContext {
 }
 
 /**
- * One entry of the transcript as a frontend draws it: a message, or a summary divider
- * (epic #277, K10; #280).
+ * One entry of the transcript as a frontend draws it: a message, a tool call, or a summary
+ * divider (epic #277, K10; #280; epic #303, X5; #308).
  *
- * Both frontends render the conversation and the dividers from one ordered list
- * ({@link selectTranscriptEntries}), so a divider lands in the same place on the web and in the
- * terminal — which is the whole reason the order is decided here rather than in each renderer.
+ * Both frontends render the conversation, the tool calls and the dividers from one ordered list
+ * ({@link selectTranscriptEntries}), so a divider or a call line lands in the same place on the
+ * web and in the terminal — which is the whole reason the order is decided here rather than in
+ * each renderer.
  */
 export type TranscriptEntry =
   | { readonly kind: 'message'; readonly message: TranscriptMessage }
+  | { readonly kind: 'tool'; readonly call: TranscriptToolCall }
   | { readonly kind: 'summary'; readonly summary: TranscriptSummary }
 
 /**
@@ -495,6 +514,31 @@ export interface TranscriptState {
 
   /** The manual compaction the log last asked for, or `null` (epic #277, K8; #283). */
   readonly manualCompaction: TranscriptManualCompaction | null
+
+  /**
+   * The tool calls the conversation holds, in position order (epic #303, X1/X5; #308).
+   *
+   * One per `agent.tool_use` a `session.rewind` has not taken back, each paired with its
+   * `agent.tool_result` when one has landed. Both frontends interleave these with the messages
+   * through {@link selectTranscriptEntries}, so a call draws where it was made.
+   */
+  readonly toolCalls: readonly TranscriptToolCall[]
+
+  /** The tool results the newest real request had to shorten, or `[]` (epic #303, X9; #306; #308). */
+  readonly truncatedToolResults: readonly TruncatedToolResult[]
+
+  /** The old tool results the newest real request cleared, or `null` (epic #303, X9; #306; #308). */
+  readonly clearedToolResults: ClearedToolResults | null
+
+  /**
+   * Where the tools a request offered come from, keyed by name — bookkeeping (epic #303, X1).
+   *
+   * A UI renders messages and calls, not this. It is read once, when an `agent.tool_use` lands,
+   * to stamp the call's {@link TranscriptToolCall.source} from the request's own
+   * `span.model_request_start.tools` record; it is never cleared, because a tool's source does
+   * not change and a call may be replayed long after the request that offered it.
+   */
+  readonly toolSources: Readonly<Record<string, ToolSource>>
 }
 
 /**
@@ -538,6 +582,10 @@ export function initialTranscriptState(seed: TranscriptSeed = {}): TranscriptSta
     context: null,
     truncation: null,
     manualCompaction: null,
+    toolCalls: [],
+    truncatedToolResults: [],
+    clearedToolResults: null,
+    toolSources: {},
   }
 }
 
@@ -692,6 +740,16 @@ function reduceStoredEvent(state: TranscriptState, event: StoredEvent): Transcri
       // that reply arrives as an `agent.message` right behind it.
       return state
 
+    case EVENT_TYPES.agentToolUse:
+      // A call the model made (epic #303, X1/X5; #308): a line of its own in the conversation,
+      // interleaved with the messages by position. The event's id **is** the call's id, which
+      // the result that answers it names.
+      return fromToolUse(state, event)
+
+    case EVENT_TYPES.agentToolResult:
+      // What answered the call, and the status the line moves to (epic #303, X1; #308).
+      return fromToolResult(state, event)
+
     case EVENT_TYPES.eventStart:
       // The reply's chunks are log events (D9), so a client that resumes mid-reply meets
       // them here. The preview opens where the reply started — this event's `seq`.
@@ -708,8 +766,9 @@ function reduceStoredEvent(state: TranscriptState, event: StoredEvent): Transcri
 
     case EVENT_TYPES.sessionStatusRunning:
     case EVENT_TYPES.sessionStatusRescheduled:
-      // A rescheduled session is retrying, which is not idle: only `status_idle` is.
-      return { ...state, status: 'running' }
+      // A rescheduled session is retrying, which is not idle: only `status_idle` is. A call with
+      // no result on a working turn is out (`running`) rather than lost (epic #303, #308).
+      return { ...state, status: 'running', toolCalls: refreshToolStatuses(state, 'running') }
 
     case EVENT_TYPES.sessionStatusIdle:
       // A turn that has ended cannot have a reply still streaming: the stored `agent.message`
@@ -733,6 +792,11 @@ function reduceStoredEvent(state: TranscriptState, event: StoredEvent): Transcri
           // A compaction cannot outlive the turn it ran in (epic #277, K10): whatever happened to
           // it — the summary landed, a pass failed, the write was refused — the turn is over.
           summarizing: null,
+          // A call with no result on a turn that has ended is one nothing answered: the brain
+          // writes a result for every call it stores, so its absence is `execution lost`
+          // (epic #303, X3; #308). A call waiting on the reader keeps `waiting` — its permission
+          // is `ask` — because a pause is exactly a turn ending with the question open.
+          toolCalls: refreshToolStatuses(state, 'idle'),
         },
         event.consumes,
       )
@@ -840,6 +904,18 @@ function reduceStoredEvent(state: TranscriptState, event: StoredEvent): Transcri
                   tokensAfter: event.truncated.tokens_after,
                   recordedAt: event.seq,
                 },
+          // What the request offered, so a call it produces can say where its tool came from
+          // (epic #303, X1; #308). The record is the request's own, so reading it now is what
+          // keeps a replayed session's calls as well-described as a live one's.
+          toolSources: event.tools === undefined ? state.toolSources : sourcesFrom(event.tools),
+          // The tool results this request had to shorten, and the old ones it cleared
+          // (epic #303, X9; #306; #308). The newest real request replaces both records, so a
+          // request that capped and cleared nothing clears the notices rather than leaving them
+          // on screen for the life of the session.
+          truncatedToolResults:
+            event.truncated === undefined ? [] : truncatedResultsFrom(event.truncated),
+          clearedToolResults:
+            event.cleared === undefined ? null : clearedResultsFrom(event.cleared),
         },
         event.consumes,
         { absentMeansAll: true },
@@ -907,12 +983,20 @@ function dropRewound(state: TranscriptState, event: SessionRewindEvent): Transcr
   // as it is for a summary.
   const compaction = state.manualCompaction
   const manualCompaction = compaction !== null && inRange(compaction.seq) ? null : compaction
+  // A tool call the edit took back goes with the branch, like the messages around it
+  // (epic #303, #308): the call sits at its own `agent.tool_use` event's `seq`, so the range
+  // test is the same one. The newest request's result notices go too — they describe a request
+  // inside the branch a rewind just took back, and the next request writes fresh ones.
+  const toolCalls = state.toolCalls.filter((call) => !inRange(call.position))
   if (
     messages.length === state.messages.length &&
     summaries.length === state.summaries.length &&
     summarizing === state.summarizing &&
     truncation === state.truncation &&
     manualCompaction === state.manualCompaction &&
+    toolCalls.length === state.toolCalls.length &&
+    state.truncatedToolResults.length === 0 &&
+    state.clearedToolResults === null &&
     state.lastError === null &&
     state.pendingRequests.length === 0 &&
     state.usage === null &&
@@ -933,6 +1017,9 @@ function dropRewound(state: TranscriptState, event: SessionRewindEvent): Transcr
     summarizing,
     truncation,
     manualCompaction,
+    toolCalls,
+    truncatedToolResults: [],
+    clearedToolResults: null,
     lastError: null,
     pendingRequests: [],
     usage: null,
@@ -985,6 +1072,129 @@ function clearClaimedPending(
  */
 function withoutPreviews(messages: readonly TranscriptMessage[]): readonly TranscriptMessage[] {
   return messages.filter((message) => !message.streaming)
+}
+
+/** The name → source map a request's offered-tools record becomes (epic #303, X1; #308). */
+function sourcesFrom(tools: readonly ToolReference[]): Readonly<Record<string, ToolSource>> {
+  const sources: Record<string, ToolSource> = {}
+  for (const tool of tools) {
+    sources[tool.name] = tool.source
+  }
+  return sources
+}
+
+/**
+ * Fold an `agent.tool_use` in: one call line, at the event's own `seq` (epic #303, X1; #308).
+ *
+ * The status is derived rather than stored in the log: a call whose policy is `ask` is
+ * `waiting` (nothing runs it until the reader answers), and any other call is `running` while
+ * the turn is working — or `lost` once the turn is over and nothing has answered it, which only
+ * a call the brain never got to run can be.
+ */
+function fromToolUse(state: TranscriptState, event: AgentToolUseEvent): TranscriptState {
+  return upsertToolCall(state, {
+    id: event.id,
+    name: event.name,
+    input: event.input,
+    permission: event.evaluated_permission,
+    source: state.toolSources[event.name] ?? 'builtin',
+    status: toolCallStatus(event.evaluated_permission, undefined, {
+      waiting: false,
+      running: state.status === 'running',
+    }),
+    position: event.seq,
+  })
+}
+
+/**
+ * Fold an `agent.tool_result` in: what answered the call, and the status it moves to
+ * (epic #303, X1; #308).
+ *
+ * The result names its call in `tool_use_id`; a result for a call this client never saw — it
+ * joined mid-step, or a rewind took the call back — has nothing to attach to and is dropped.
+ */
+function fromToolResult(state: TranscriptState, event: AgentToolResultEvent): TranscriptState {
+  const index = state.toolCalls.findIndex((call) => call.id === event.tool_use_id)
+  if (index === -1) {
+    return state
+  }
+  const existing = state.toolCalls[index] as TranscriptToolCall
+  const result: ToolCallResult = {
+    content: event.content.map((block) => block.text).join(''),
+    isError: event.is_error,
+  }
+  const call: TranscriptToolCall = {
+    ...existing,
+    result,
+    status: toolCallStatus(existing.permission, result, {
+      waiting: false,
+      running: state.status === 'running',
+    }),
+  }
+  const toolCalls = state.toolCalls.slice()
+  toolCalls[index] = call
+  return { ...state, toolCalls }
+}
+
+/**
+ * Recompute every call's status for a turn that started or ended (epic #303, #308).
+ *
+ * Only the calls a result never answered change: one is `running` while the turn works and
+ * `lost` once it is over, while a call waiting on the reader keeps `waiting` (its permission is
+ * `ask`). Returns the list it was given when nothing changed, so the state keeps its identity.
+ */
+function refreshToolStatuses(
+  state: TranscriptState,
+  status: SessionStatus,
+): readonly TranscriptToolCall[] {
+  let changed = false
+  const toolCalls = state.toolCalls.map((call) => {
+    const next = toolCallStatus(call.permission, call.result, {
+      waiting: false,
+      running: status === 'running',
+    })
+    if (next === call.status) {
+      return call
+    }
+    changed = true
+    return { ...call, status: next }
+  })
+  return changed ? toolCalls : state.toolCalls
+}
+
+/**
+ * Put `call` in the transcript: replacing the call with the same id, or inserting it by
+ * position, exactly as {@link upsertMessage} does for messages.
+ */
+function upsertToolCall(state: TranscriptState, call: TranscriptToolCall): TranscriptState {
+  const existing = state.toolCalls.find((candidate) => candidate.id === call.id)
+  if (existing !== undefined && isSameToolCall(existing, call)) {
+    return state
+  }
+  const rest = state.toolCalls.filter((candidate) => candidate.id !== call.id)
+  const index = rest.findIndex((candidate) => candidate.position > call.position)
+  const toolCalls =
+    index === -1 ? [...rest, call] : [...rest.slice(0, index), call, ...rest.slice(index)]
+  return { ...state, toolCalls }
+}
+
+/** Whether an upsert would change nothing, so the state can keep its identity. */
+function isSameToolCall(current: TranscriptToolCall, next: TranscriptToolCall): boolean {
+  return (
+    current.name === next.name &&
+    current.permission === next.permission &&
+    current.source === next.source &&
+    current.status === next.status &&
+    current.position === next.position &&
+    sameJson(current.input, next.input) &&
+    current.result?.content === next.result?.content &&
+    current.result?.isError === next.result?.isError
+  )
+}
+
+/** Whether two JSON inputs are the same value, compared structurally. */
+function sameJson(current: unknown, next: unknown): boolean {
+  return JSON.stringify(current) === JSON.stringify(next)
 }
 
 /**
@@ -1527,36 +1737,80 @@ export function selectSummaries(state: TranscriptState): readonly TranscriptSumm
  * transcript cannot end up drawing its dividers in a different place from the other frontend's.
  */
 export function selectTranscriptEntries(state: TranscriptState): readonly TranscriptEntry[] {
-  return transcriptEntries(state.messages, state.summaries)
+  return transcriptEntries(state.messages, state.summaries, state.toolCalls)
 }
 
 /**
- * The same merge, for a caller that holds the two lists without a transcript around them.
+ * The same merge, for a caller that holds the lists without a transcript around them.
+ *
+ * A tie goes to the message, then to the tool call, then to the divider: a summary draws
+ * **after** the event it covers, and a call is drawn where its own event sits — never at a
+ * position a message already occupies, since every event has one `seq` of its own.
  *
  * @param messages the conversation, in position order
  * @param summaries the dividers, in position order
+ * @param toolCalls the calls, in position order
  */
 export function transcriptEntries(
   messages: readonly TranscriptMessage[],
   summaries: readonly TranscriptSummary[],
+  toolCalls: readonly TranscriptToolCall[] = [],
 ): readonly TranscriptEntry[] {
   const entries: TranscriptEntry[] = []
   let messageIndex = 0
   let summaryIndex = 0
-  while (messageIndex < messages.length || summaryIndex < summaries.length) {
+  let toolIndex = 0
+  while (
+    messageIndex < messages.length ||
+    summaryIndex < summaries.length ||
+    toolIndex < toolCalls.length
+  ) {
     const message = messages[messageIndex]
     const summary = summaries[summaryIndex]
-    if (summary !== undefined && (message === undefined || summary.position < message.position)) {
-      entries.push({ kind: 'summary', summary })
-      summaryIndex += 1
+    const call = toolCalls[toolIndex]
+    const nextMessage = message?.position ?? Number.POSITIVE_INFINITY
+    const nextTool = call?.position ?? Number.POSITIVE_INFINITY
+    const nextSummary = summary?.position ?? Number.POSITIVE_INFINITY
+    const min = Math.min(nextMessage, nextTool, nextSummary)
+    if (nextMessage === min) {
+      entries.push({ kind: 'message', message: message as TranscriptMessage })
+      messageIndex += 1
       continue
     }
-    if (message !== undefined) {
-      entries.push({ kind: 'message', message })
-      messageIndex += 1
+    if (nextTool === min) {
+      entries.push({ kind: 'tool', call: call as TranscriptToolCall })
+      toolIndex += 1
+      continue
     }
+    entries.push({ kind: 'summary', summary: summary as TranscriptSummary })
+    summaryIndex += 1
   }
   return entries
+}
+
+/**
+ * The tool calls the conversation holds, in position order (epic #303, X5; #308).
+ *
+ * A frontend that renders {@link selectTranscriptEntries} gets them interleaved with the
+ * messages; this is for one that wants the calls on their own (a count, a "waiting" badge).
+ */
+export function selectToolCalls(state: TranscriptState): readonly TranscriptToolCall[] {
+  return state.toolCalls
+}
+
+/**
+ * The tool results the newest real request had to shorten (epic #303, X9; #306; #308).
+ *
+ * Empty when the request capped nothing — which is every turn that did not fill a tool's head
+ * room, and every log stored before #306.
+ */
+export function selectTruncatedToolResults(state: TranscriptState): readonly TruncatedToolResult[] {
+  return state.truncatedToolResults
+}
+
+/** The old tool results the newest real request cleared, or `null` (epic #303, X9; #306; #308). */
+export function selectClearedToolResults(state: TranscriptState): ClearedToolResults | null {
+  return state.clearedToolResults
 }
 
 /** The summary being written right now, or `null` (epic #277, C2/K10; #280). */

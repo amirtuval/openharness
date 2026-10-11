@@ -1646,6 +1646,58 @@ describe('the fake’s modes (#245, M6)', () => {
   })
 })
 
+describe('the fake’s tool settings (#303, #307, #308)', () => {
+  it('lists the registered tools, following each tool’s declaration until a choice is stored', async () => {
+    const fake = createFakeClient()
+
+    const { data } = await fake.tools.list()
+
+    expect(data.map((entry) => entry.name)).toEqual(['web_fetch', 'web_search', 'todo_write'])
+    expect(data.every((entry) => entry.enabled && entry.policy === 'allow')).toBe(true)
+    expect(data.every((entry) => entry.available && entry.default_policy === 'allow')).toBe(true)
+  })
+
+  it('merges a write per tool, and reports an unregistered tool as unavailable', async () => {
+    const fake = createFakeClient({ toolsAvailable: { web_search: false } })
+
+    const before = await fake.tools.list()
+    expect(before.data.find((entry) => entry.name === 'web_search')).toMatchObject({
+      available: false,
+      default_policy: null,
+    })
+
+    await fake.tools.put({ builtin: { web_search: { enabled: false, policy: 'ask' } } })
+    const after = await fake.tools.list()
+    expect(after.data.find((entry) => entry.name === 'web_search')).toMatchObject({
+      enabled: false,
+      policy: 'ask',
+    })
+    // The other tools keep their declaration: the write is a patch, not a replacement.
+    expect(after.data.find((entry) => entry.name === 'web_fetch')).toMatchObject({
+      enabled: true,
+      policy: 'allow',
+    })
+  })
+
+  it('applies a mode’s on/off override to the read that names it', async () => {
+    const mode = makeMode({ tools: { builtin: { todo_write: false } } })
+    const fake = createFakeClient({ modes: [mode] })
+
+    const plain = await fake.tools.list()
+    expect(plain.data.find((entry) => entry.name === 'todo_write')?.enabled).toBe(true)
+
+    const onMode = await fake.tools.list({ mode_id: mode.id })
+    expect(onMode.data.find((entry) => entry.name === 'todo_write')?.enabled).toBe(false)
+    // A mode never changes a permission.
+    expect(onMode.data.find((entry) => entry.name === 'todo_write')?.policy).toBe('allow')
+  })
+
+  it('rejects a write while signed out, like every other /v1 route', async () => {
+    const fake = createFakeClient({ authenticated: false })
+    await expect(fake.tools.list()).rejects.toBeInstanceOf(AuthenticationError)
+  })
+})
+
 describe('the fake’s manual compaction (#283)', () => {
   it('records the request and answers it with a nothing-to-summarize outcome, as the route does', async () => {
     const fake = createFakeClient()
