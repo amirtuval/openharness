@@ -1,5 +1,5 @@
 import type { LanguageModelV4CallOptions } from '@ai-sdk/provider'
-import { createToolRegistry, textResult } from '@openharness/hands'
+import { createToolRegistry, errorResult, textResult } from '@openharness/hands'
 import type { ToolDefinition, ToolResult } from '@openharness/hands'
 import { EVENT_TYPES, newModeId } from '@openharness/protocol'
 import type { ModeToolOverride, StoredEvent, StoredEventType } from '@openharness/protocol'
@@ -831,5 +831,161 @@ describe('the tool helpers on their own', () => {
 
   it('caps the step budget where a real task cannot reach it by accident', () => {
     expect(DEFAULT_MAX_TOOL_STEPS).toBe(50)
+  })
+})
+
+/**
+ * Stuck detection at the loop's boundary (#331).
+ *
+ * The reminder is recorded on the span of the request that carried it — the only place the log
+ * says the model was told — and a run of identical failing calls ends the turn with the step
+ * limit's shape rather than looping to fifty.
+ */
+describe('stuck detection in the loop (#331)', () => {
+  it('reminds a model that repeats an identical call, once', async () => {
+    const { store, sessionId } = await newSession([message('keep looking')])
+    const { tool } = echo()
+    const repeat = { toolCalls: [{ name: 'echo', input: { text: 'same' } }] }
+    const { factory, calls } = mockModel(repeat, repeat, repeat, repeat, repeat, {
+      text: ['Done.'],
+    })
+
+    const outcome = await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+      tools: createToolRegistry([tool]),
+    })
+
+    expect(outcome).toEqual({ outcome: 'idle' })
+    expect(calls).toHaveLength(6)
+    const carried = (index: number): boolean =>
+      readPrompt(calls[index]!).some((entry) => entry.text.includes('same arguments 5 times'))
+    // The fifth request follows four calls — no streak yet. The sixth follows five: the reminder
+    // is there, and only there.
+    expect(carried(4)).toBe(false)
+    expect(carried(5)).toBe(true)
+
+    const log = await logOf(store, sessionId)
+    const starts = of(log, EVENT_TYPES.modelRequestStart)
+    expect(starts[4]?.reminders).toBeUndefined()
+    expect(starts[5]?.reminders?.[0]?.kind).toBe('stuck')
+    expect(starts[5]?.reminders?.[0]?.tokens).toBeGreaterThan(0)
+  })
+
+  it('ends the turn when the same call fails eight times', async () => {
+    const { store, sessionId } = await newSession([message('try again')])
+    const broken = echo({ run: () => errorResult('it keeps failing') })
+    const { factory, calls } = mockModel({
+      toolCalls: [{ name: 'echo', input: { text: 'same' } }],
+    })
+
+    const outcome = await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+      tools: createToolRegistry([broken.tool]),
+    })
+
+    expect(outcome).toEqual({ outcome: 'error' })
+    // Eight requests, eight failing calls, and no ninth: the notice is what ends the turn.
+    expect(calls).toHaveLength(8)
+    const log = await logOf(store, sessionId)
+    const notice = of(log, EVENT_TYPES.sessionError)[0]
+    expect(notice?.error.type).toBe('tool_loop_stuck_error')
+    expect(notice?.error.retry_status).toEqual({ type: 'terminal' })
+    expect(notice?.error.message).toContain('same arguments 8 times')
+    expect(eventTypes(log).at(-1)).toBe(EVENT_TYPES.sessionStatusIdle)
+    expect(of(log, EVENT_TYPES.sessionStatusRescheduled)).toEqual([])
+    // Every call the turn made was answered, and the reminder was sent on the way.
+    expect(pendingToolUse(log)).toEqual([])
+    expect(
+      of(log, EVENT_TYPES.modelRequestStart).some((start) => start.reminders !== undefined),
+    ).toBe(true)
+  })
+
+  it('does not end a turn whose repeated call was denied — that is not a failure', async () => {
+    const { store, sessionId } = await newSession([message('denied forever')])
+    const { tool, run } = echo()
+    const { factory, calls } = mockModel({
+      toolCalls: [{ name: 'echo', input: { text: 'same' } }],
+    })
+
+    const outcome = await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+      tools: createToolRegistry([tool]),
+      toolSettings: () => ({ echo: { enabled: true, permission: 'deny' } }),
+      // A budget the loop reaches on its own so the test ends: a denial never counts as a
+      // failure, so the stuck rule must not fire before the step limit does.
+      maxToolSteps: 9,
+    })
+
+    expect(outcome).toEqual({ outcome: 'error' })
+    expect(calls).toHaveLength(9)
+    expect(run).not.toHaveBeenCalled()
+    const log = await logOf(store, sessionId)
+    expect(of(log, EVENT_TYPES.sessionError)[0]?.error.type).toBe('tool_steps_exhausted_error')
+  })
+})
+
+/**
+ * The current todo list on the loop's requests (#331).
+ *
+ * The block is rebuilt from the log per request and rides after the history — never stored as a
+ * message — and the span of the request that carried it records that it was sent.
+ */
+describe('the todo list on the loop requests (#331)', () => {
+  /** A `todo_write` tool that records the list and answers ok. */
+  function todoWrite(): ToolDefinition<{ todos: { content: string; status: string }[] }> {
+    return {
+      name: 'todo_write',
+      description: 'Write the plan.',
+      inputSchema: z.object({
+        todos: z.array(z.object({ content: z.string(), status: z.string() })),
+      }),
+      permission: 'allow',
+      run: () => textResult('ok'),
+    }
+  }
+
+  it('carries the list on the request after the call that wrote it', async () => {
+    const { store, sessionId } = await newSession([message('plan the work')])
+    const { factory, calls } = mockModel(
+      {
+        toolCalls: [
+          {
+            name: 'todo_write',
+            input: { todos: [{ content: 'fetch the page', status: 'in_progress' }] },
+          },
+        ],
+      },
+      { text: ['Working on it.'] },
+    )
+
+    await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+      tools: createToolRegistry([todoWrite()]),
+    })
+
+    expect(calls).toHaveLength(2)
+    // The first request had no list yet; the second carries it, after the history.
+    expect(readPrompt(calls[0]!).some((entry) => entry.text.includes('todo list'))).toBe(false)
+    const second = readPrompt(calls[1]!)
+    expect(second.at(-1)?.role).toBe('user')
+    expect(second.at(-1)?.text).toContain('fetch the page')
+
+    const log = await logOf(store, sessionId)
+    const starts = of(log, EVENT_TYPES.modelRequestStart)
+    expect(starts[1]?.reminders?.[0]?.kind).toBe('todo')
+    // The block is the request's alone: no message event carries it.
+    for (const event of log) {
+      if (event.type === 'user.message' || event.type === 'agent.message') {
+        expect(textOfEvent(event)).not.toContain('Your current todo list')
+      }
+    }
   })
 })

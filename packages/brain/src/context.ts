@@ -186,11 +186,14 @@ export const DEFAULT_CLEAR_THRESHOLD = 0.5
  * The boundary is a prefix of the request, and a provider's prompt cache keys on that prefix, so
  * a boundary that crept forward on every turn would invalidate the cache with it. Instead the
  * cleared span is snapped **up** to a whole step of {@link CLEAR_STEP_RATIO} of the budget (see
- * {@link steppedClearBefore}): a step costs at most that much extra tool output, and a tenth is
- * small against the quarter the tail keeps verbatim (K4) — so the boundary moves about once per
- * tenth of the budget of new history and holds still for the requests in between.
+ * {@link clearingCut}): a step costs at most that much extra tool output, and it is a whole
+ * {@link RECENT_TAIL_RATIO} — one tail — because a turn that leaves the tail does so in about a
+ * tail's worth of tokens, so a step of the same size is the smallest that can hold the boundary
+ * across a turn rather than follow it. The boundary therefore moves about once per tail's worth
+ * of new history and holds still for the requests in between, which is what keeps the request
+ * prefix — and the provider's prompt cache on it — stable.
  */
-export const CLEAR_STEP_RATIO = 0.1
+export const CLEAR_STEP_RATIO = 0.25
 
 /**
  * What an old tool result's body is replaced by in a request (epic #303, X9; #331).
@@ -562,7 +565,7 @@ function measureRequest(
  *    it a request carries its old results whole, which is the whole point of the threshold: a chat
  *    at 30% of its budget used to lose them for nothing.
  * 2. **The boundary.** The cut K4's rule already gives — everything older than the verbatim tail —
- *    snapped to a step ({@link steppedClearBefore}) so consecutive requests keep the same prefix.
+ *    snapped to a step ({@link clearingCut}) so consecutive requests keep the same prefix.
  */
 function clearingBoundary(events: readonly StoredEvent[], options: ContextSizeOptions): number {
   const budget = options.budget ?? DEFAULT_CONTEXT_TOKEN_BUDGET
@@ -573,26 +576,31 @@ function clearingBoundary(events: readonly StoredEvent[], options: ContextSizeOp
   const summary = latestContextSummary(events)
   const afterSeq = summary === null ? 0 : summary.covers.to_seq
   const items = conversationItems(events, afterSeq, toolResultCap(options.tools, budget))
-  return steppedClearBefore(items, budget)
+  const cut = clearingCut(items, budget)
+  return cut <= 0 ? 0 : (items[cut]?.seq ?? 0)
 }
 
 /**
- * The clearing boundary, snapped to a step of the budget so it holds still between requests
- * (#331).
+ * Where clearing cuts the conversation: the first item the request keeps, snapped to a step of
+ * the budget so it holds still between requests (#331).
  *
- * The plain boundary is everything older than the verbatim tail (`cutAtUserBoundary`, K4). A
- * boundary that followed the tail exactly would creep forward on every turn, and since it sits at
- * the front of the request a provider's prompt cache keys on, every request would be a fresh
- * prefix. So the cleared span is rounded **up** to a whole {@link CLEAR_STEP_RATIO} step: the cut
- * is the last safe position that clears no more than the next step boundary, which means the
- * boundary sits on a fixed grid of the log and only moves when a step's worth of tool output has
- * fallen out of the tail. It is derived from the log and the budget and nothing else, so a second
- * brain on a partition computes the same one.
+ * The plain boundary is everything older than the verbatim tail (`cutAtUserBoundary`, K4). That
+ * boundary follows the tail, so a turn of new history nudges it forward — and since it sits at the
+ * front of the request, which is exactly what a provider's prompt cache keys on, each nudge
+ * invalidates the cache behind it. So the cleared span is rounded **up** to a whole
+ * {@link CLEAR_STEP_RATIO} step of the budget: the cut is the last safe position at most a step
+ * boundary's worth of tokens into the history. The grid is a property of the log's prefix, which
+ * only grows at the end, so a move of less than a step does not move the boundary — it holds for
+ * the requests in between and then jumps by a whole step. It is derived from the log and the
+ * budget alone, so a second brain on a partition computes the same one.
+ *
+ * Exported because it is the rule the two sides that must agree read: the strategy cuts here, and
+ * {@link estimateContextSize} measures the same request the same way.
  *
  * @param items the visible conversation, as {@link conversationItems} measured it
  * @param budget the chat model's history budget
  */
-function steppedClearBefore(items: readonly ContextCutItem[], budget: number): number {
+export function clearingCut(items: readonly ContextCutItem[], budget: number): number {
   const tailTokens = Math.floor(budget * RECENT_TAIL_RATIO)
   const plain = cutAtUserBoundary(items, tailTokens)
   if (plain <= 0) {
@@ -600,15 +608,14 @@ function steppedClearBefore(items: readonly ContextCutItem[], budget: number): n
   }
   const step = Math.max(1, Math.floor(budget * CLEAR_STEP_RATIO))
   const cleared = tokensBefore(items, plain)
+  // With the step a whole tail, the round-up can reach `total` but never past it: a step is no
+  // more than the tail, and the plain cut clears at most that much less than the whole history.
   const target = Math.ceil(cleared / step) * step
   const candidate = lastIndexAtMost(items, target)
   const cut = Math.max(widenToSafeCut(items, candidate), plain)
   // A cut that would clear the newest turn is not one the strategy may build; fall back to the
   // plain boundary, which never does.
-  if (cut <= 0 || cut >= items.length) {
-    return items[plain]?.seq ?? 0
-  }
-  return items[cut]?.seq ?? 0
+  return cut <= 0 || cut >= items.length ? plain : cut
 }
 
 /** What the items before `index` cost together (X9's capped sizes). */
