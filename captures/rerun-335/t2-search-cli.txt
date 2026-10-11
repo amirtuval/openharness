@@ -1,0 +1,45 @@
+Search the web for the newest Rust release and tell me its version in one line.
+
+Rust 1.99.0. (doc.rust-lang.org (https://doc.rust-lang.org/releases.html))
+
+11s · 11k tokens · $0.005
+
+● web_search Rust latest stable version · done
+  Rust Release Notes — https://doc.rust-lang.org/releases.html
+
+● web_search https://doc.rust-lang.org/releases.html · done
+  Rust Release Notes — https://doc.rust-lang.org/releases.html
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+GPT-5 Mini · sesn_…XCP3D9 · $0.005 · 2 searches · 5% of context used · idle
+❯
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

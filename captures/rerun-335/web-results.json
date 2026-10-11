@@ -1,0 +1,10 @@
+{
+  "results": [
+    {
+      "name": "T14 transcript: reload and replay match the live transcript (tool lines included)",
+      "ok": true,
+      "detail": "messages=6 tools=[\"web_search:done\",\"web_search:done\",\"web_search:done\"] banners=[]"
+    }
+  ],
+  "consoleErrors": []
+}

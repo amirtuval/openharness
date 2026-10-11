@@ -1,0 +1,9 @@
+# T13 — the threshold trigger (OPENHARNESS_COMPACTION_THRESHOLD=0.3) over a tool-heavy DeepSeek chat
+session sesn_01M4P9W0VC85J0E7YPHKAF94WN
+
+{"type":"session.error","error":{"type":"model_request_failed_error","message":"The `reasoning_content` in the thinking mode must be passed back to the API. (request_id: 2072ae7c-562d-4374-8a1e-453faf14f9d3)","retry_status":{"type":"terminal"}}}
+{"type":"session.context_summary_progress","passes":1}
+{"type":"session.context_summary","reason":"threshold","covers":{"to_seq":126},"passes":1}
+{"type":"session.error","error":{"type":"model_request_failed_error","message":"The `reasoning_content` in the thinking mode must be passed back to the API. (request_id: 42cc0dfb-3c97-4c83-b4fb-8dce79bd3b9f)","retry_status":{"type":"terminal"}}}
+
+cut lands at seq 126 = session.status_idle (a turn boundary; the step's opaque events sit whole inside the covered range)

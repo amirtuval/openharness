@@ -1,0 +1,14 @@
+# O2 — switching model mid-chat, both directions, after tool turns
+session sesn_01M4P8VSV64AK6X8B1QM15B0YG
+
+span.start openai/gpt-5-mini tools=["ask_user","web_fetch","todo_write","web_search"]
+agent.message "As of October 11, 2026, the latest stable Rust release is version 1.99.0 (released October 1, 2026).  \nSources: https://www.rust-lang.org/ a"
+span.end searches=3 error=-
+span.start deepseek-sbx/deepseek-chat tools=["ask_user","web_fetch","todo_write"]
+agent.message "2+2 equals 4."
+span.end searches=0 error=-
+span.start openai/gpt-5-mini tools=["ask_user","web_fetch","todo_write","web_search"]
+agent.message "Blue."
+span.end searches=0 error=-
+
+no session.error in the log; the deepseek request offered ask_user/web_fetch/todo_write and no web_search; the openai request offered web_search again.

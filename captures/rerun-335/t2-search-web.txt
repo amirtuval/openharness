@@ -1,0 +1,47 @@
+# T2' — provider-native web_search (gpt-5-mini), and what a model without it answers
+session sesn_01M4P8VSV64AK6X8B1QM15B0YG
+
+span.start openai/gpt-5-mini tools=["ask_user","web_fetch","todo_write","web_search"]
+agent.message "As of October 11, 2026, the latest stable Rust release is version 1.99.0 (released October 1, 2026).  \nSources: https://www.rust-lang.org/ a"
+opaque openai/openai/gpt-5-mini parts=["reasoning","tool-call","tool-result","reasoning","tool-call","tool-result","reasoning","tool-call","tool-result","reasoning"]
+span.end searches=3 error=-
+tool_use web_search (provider) {"query":"latest stable Rust version site:rust-lang.org"}
+tool_result err=false sources=https://www.rust-lang.org/ text="Web search results for \"latest stable Rust version site:rust-lang.org\":\n1. Rust Programming Language"
+tool_use web_search (provider) {"url":"https://doc.rust-lang.org/releases.html"}
+tool_result err=false sources=https://www.rust-lang.org/ text="Web search results for \"https://doc.rust-lang.org/releases.html\":\n1. Rust Programming Language — htt"
+tool_use web_search (provider) {"url":"https://www.rust-lang.org/"}
+tool_result err=false sources=https://www.rust-lang.org/ text="Web search results for \"https://www.rust-lang.org/\":\n1. Rust Programming Language — https://www.rust"
+span.start deepseek-sbx/deepseek-chat tools=["ask_user","web_fetch","todo_write"]
+agent.message "2+2 equals 4."
+span.end searches=0 error=-
+span.start openai/gpt-5-mini tools=["ask_user","web_fetch","todo_write","web_search"]
+agent.message "Blue."
+opaque openai/openai/gpt-5-mini parts=["reasoning"]
+span.end searches=0 error=-
+
+session usage: searches=3 cost=0.0066932
+
+--- GET /v1/me/tools?model_id=deepseek-sbx/deepseek-v4-pro (no native search) ---
+[
+  {
+    "name": "web_search",
+    "source": "builtin",
+    "enabled": true,
+    "policy": "allow",
+    "default_policy": "allow",
+    "available": false,
+    "reason": "This model has no web search."
+  }
+]
+
+--- GET /v1/me/tools?model_id=openai/gpt-5-mini ---
+[
+  {
+    "name": "web_search",
+    "source": "builtin",
+    "enabled": true,
+    "policy": "allow",
+    "default_policy": "allow",
+    "available": true
+  }
+]

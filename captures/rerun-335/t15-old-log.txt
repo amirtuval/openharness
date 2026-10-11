@@ -1,0 +1,14 @@
+# T15 — an operator-key era (Brave) web_search pair, inserted into the log, replays and continues
+session sesn_01M4P92P5Q4HD5TCJPNQNAPNPJ
+
+span.start anthropic/claude-sonnet-5 tools=["web_search"]
+tool_use web_search {"query":"capital of France"}
+tool_result err=false sources= text="Brave Search results: Paris is the capital of France."
+agent.message "The capital of France is Paris."
+span.end searches=0 error=-
+span.start openai/gpt-5-mini tools=["ask_user","web_fetch","todo_write","web_search"]
+agent.message "still alive"
+opaque openai/openai/gpt-5-mini parts=["reasoning"]
+span.end searches=0 error=-
+
+the page renders it as a done web_search call with its query and result, and the chat continues on it (t15-old-log-web.png, t15-old-log-continued.png)

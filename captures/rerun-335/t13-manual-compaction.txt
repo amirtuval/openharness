@@ -1,0 +1,10 @@
+# T13 — manual /compact over a tool-heavy DeepSeek chat (opaque content in the log)
+session sesn_01M4P9RFVTP31YJMSPBSGGQ5JB
+
+{"type":"session.error","error":{"type":"model_request_failed_error","message":"The `reasoning_content` in the thinking mode must be passed back to the API. (request_id: 691ed72d-4519-49cb-a864-c72627f55c87)","retry_status":{"type":"terminal"}}}
+{"type":"session.error","error":{"type":"model_request_failed_error","message":"The `reasoning_content` in the thinking mode must be passed back to the API. (request_id: c8f65414-f9c7-4675-b353-f01b03170ab9)","retry_status":{"type":"terminal"}}}
+{"type":"session.context_summary_progress"}
+{"type":"session.context_summary","reason":"manual","covers":{"to_seq":215}}
+{"type":"session.compaction","outcome":"summarized"}
+
+summaries=1 opaque events=8
