@@ -1299,7 +1299,7 @@ function fromToolResult(state: TranscriptState, event: ToolResultEvent): Transcr
   }
   // The web pages a provider-executed search found (#335), kept beside the answer so a line can
   // show them. Absent for every other result, and for one stored before the field existed.
-  const sources = event.sources ?? []
+  const sources = event.type === EVENT_TYPES.agentToolResult ? (event.sources ?? []) : []
   const call: TranscriptToolCall = {
     ...existing,
     ...(sources.length === 0 ? {} : { sources }),

@@ -255,11 +255,37 @@ what came back:
 The tools this build offers (epic #303, [#305](https://github.com/amirtuval/openharness/issues/305))
 are `builtin` ones — a call's `input` is the JSON object below, and the result is text:
 
-| tool         | input                                                    | what it does                                                                                                                                                                                                                          |
-| ------------ | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `web_fetch`  | `{ "url": "https://…" }`                                 | GETs one `http`/`https` URL through the SSRF guard (every redirect hop re-checked) and answers its main content as Markdown. Text and JSON pass through; anything else is an error.                                                   |
-| `web_search` | `{ "query": "…", "count": 5 }`                           | One search of the deployment's search API, as titles, URLs and snippets. **Offered only where an operator configured a provider**; each user has a daily allowance of searches, and a call over it is an `is_error` result saying so. |
-| `todo_write` | `{ "todos": [{ "content": "…", "status": "pending" }] }` | Replaces the model's whole task list. The list is the newest successful call's own input — nothing is stored beside it — and `readTodoList` in `@openharness/protocol` reads it back out of a log.                                    |
+| tool         | input                                                    | what it does                                                                                                                                                                                                                       |
+| ------------ | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `web_fetch`  | `{ "url": "https://…" }`                                 | GETs one `http`/`https` URL through the SSRF guard (every redirect hop re-checked) and answers its main content as Markdown. Text and JSON pass through; anything else is an error.                                                |
+| `web_search` | `{ "query": "…" }`                                       | The chat **model's own provider's** search, run inside the model request ([#335](https://github.com/amirtuval/openharness/issues/335)): the query is the model's, the results are the provider's, and the reply's cited pages come back as a `sources` list. Offered only on a model whose provider has one, and never executed by this build — see below. |
+| `todo_write` | `{ "todos": [{ "content": "…", "status": "pending" }] }` | Replaces the model's whole task list. The list is the newest successful call's own input — nothing is stored beside it — and `readTodoList` in `@openharness/protocol` reads it back out of a log.                                 |
+
+`web_search` is the one tool this build does **not** run. The request carries the model's own
+provider's search tool, the provider runs the search while the request is in flight, and what
+comes back is stored twice: the provider's own opaque content, which only that provider can read
+again and which the next request sends back unchanged (`agent.opaque_content`, #334), and a
+**readable** pair for clients — the `agent.tool_use` with `"source": "provider"`, and the
+`agent.tool_result` that answers it with the pages it found:
+
+```json
+{ "id": "sevt_…", "type": "agent.tool_use", "name": "web_search",
+  "input": { "query": "openharness architecture" }, "evaluated_permission": "allow",
+  "source": "provider" }
+
+{ "id": "sevt_…", "type": "agent.tool_result", "tool_use_id": "sevt_…",
+  "content": [{ "type": "text", "text": "Web search results:\n1. …" }], "is_error": false,
+  "sources": [{ "url": "https://example.test/architecture", "title": "The architecture",
+                "cited_text": "three ideas carry the design" }] }
+```
+
+The readable pair is a record and **never** part of a request: the provider's own content is what
+a request carries, so a call that ran a search is not replayed as a `tool_use` of ours. A chat
+that switches to another provider (or another model) cannot send that content on, so what the
+search found is replayed as **plain text** — the titles, the URLs and the cited passages — and
+the model that cannot read the provider's payload gets the facts instead. A provider that
+refuses the tool it was handed is answered by dropping it and asking once more; that request's
+span says so (`search_rejected`).
 
 A `web_fetch` result **leads with the address it finally came from** and says the content is
 untrusted data from the web, not instructions: it is the one tool whose text arrives from a
@@ -428,20 +454,21 @@ Which of those tools a chat may use is a **per-user choice**, stored beside the 
 at `/v1/me/tools`:
 
 ```json
-// GET /v1/me/tools            (optionally ?mode_id=<the mode the chat follows>)
+// GET /v1/me/tools            (optionally ?mode_id=<the mode the chat follows>
+//                                              &model_id=<the model the chat runs>)
 { "data": [
   { "name": "web_fetch",  "source": "builtin", "enabled": true, "policy": "allow",
     "default_policy": "allow", "available": true },
   { "name": "todo_write", "source": "builtin", "enabled": false, "policy": "ask",
     "default_policy": "allow", "available": true },
   { "name": "web_search", "source": "builtin", "enabled": true, "policy": "allow",
-    "default_policy": null, "available": false },
+    "default_policy": "allow", "available": false, "reason": "This model has no web search." },
   { "name": "notes__search", "source": "mcp", "enabled": true, "policy": "ask",
     "default_policy": "ask", "available": true, "mcp_server": "notes" }
 ] }
 
 // PUT /v1/me/tools            — merges per tool; a tool the body does not name keeps its setting
-{ "builtin": { "web_search": { "enabled": false, "policy": "ask" } },
+{ "builtin": { "web_search": { "enabled": false, "policy": "deny" } },
   "mcp":     { "notes__search": "allow" } }
 ```
 
@@ -458,12 +485,18 @@ at `/v1/me/tools`:
   the mode's override applied), because a remote tool has no on/off of its own. Its policy is
   the `mcp` map's value for that name, and `PUT` writes it there — a permission and nothing
   else. A policy for a tool no in-force server offers is listed with `available: false`.
-- **A tool this deployment does not register is listed as `available: false`** — a
-  `web_search` whose operator key is missing, say — rather than hidden, and `default_policy` is
-  `null` for it: nothing here declares it. It is never offered, whatever `enabled` says. So the
-  `data` list is the deployment's tools — `web_fetch` and `todo_write` always, `web_search` and
-  the test `echo` where the deployment registered them — plus any tool the caller has a setting
-  for.
+- **A tool this deployment does not register is listed as `available: false`** — a stored
+  setting for a tool that is gone, say — rather than hidden, and `default_policy` is `null` for
+  it: nothing here declares it. It is never offered, whatever `enabled` says. So the `data` list
+  is the deployment's tools — `web_fetch` and `todo_write` always, `web_search` (which no
+  registry carries, and which the chat model's provider supplies) and the test `echo` where the
+  deployment registered it — plus any tool the caller has a setting for.
+- **`web_search` is available or not depending on the model** (`?model_id=`), and says why when
+  it is not: `{"available": false, "reason": "This model has no web search."}`. A read that
+  names no model claims nothing about one. Its `policy` may be `allow` or `deny` only — an
+  `ask` cannot be honoured, because the provider runs the search inside the request — so a
+  `PUT` setting one is a 400 that says so, and a choice stored before that rule existed reads
+  as `allow`.
 - **A mode may override which built-in tools are on** (a `tools` field on the mode,
   `{ "builtin": { "web_search": true } }` — a patch, so a tool it does not name follows the
   user). The same field's `mcp_servers` map does the same for the user's **remote MCP servers**
@@ -1457,12 +1490,13 @@ GET /v1/me/usage?from=&to=&tz=         -> { from, to, tz, totals, cost, unpriced
   million tokens, from the vendored models.dev snapshot (see `apps/server/AGENTS.md`).
 - **Cache tokens are priced separately.** `cache_read` and `cache_write` are their own rates at
   every provider that publishes them, not a fraction of the input rate.
-- **Searches are counted, and never priced** (epic #303, #305). `searches` is how many
-  `web_search` calls the covered log holds — the call and its successful result, so a refused,
-  failed or never-answered call is not one — and it is a **count**: the operator pays the search
-  provider, no rate for that is in this repository, and inventing one would be the estimate the
-  rest of this surface refuses to make. It is a sibling of the totals rather than a member of
-  them, and every per-day entry of `by_day` carries its own.
+- **Searches are counted, and never priced** (epic #303, #305; #335). `searches` is a **count**,
+  summed from two places because a log may hold both: the `web_search` **calls** a session made
+  in the operator-key era — the call and its successful result, so a refused, failed or
+  never-answered call is not one — and the count each request's own `span.model_request_end`
+  carries, which is what a provider-executed search is. No rate for either is in this
+  repository, so no money is invented for them; it is a sibling of the totals rather than a
+  member of them, and every per-day entry of `by_day` carries its own.
 - **Usage is broken down by model, never by mode.** A session may switch models mid-conversation
   (U3), so `by_model` is what separates the cheap requests from the expensive ones. The per-user
   route adds `by_day`; there is no third axis.

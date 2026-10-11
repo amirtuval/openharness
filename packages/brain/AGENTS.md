@@ -87,6 +87,9 @@ src/
   mcp.ts                the remote MCP tools a request may offer (epic #303, X10; #312): the
                         `McpToolProvider` seam, one registry for deployment and remote tools
                         together, and the name-collision rule
+  native-search.ts      provider-native web search (epic #303, X14; #335): which model families
+                        have a search tool, the tool a request attaches, the policy over it, and
+                        how a provider's refusal to accept the tool is recognised
   events.ts             the events the loop appends, built in one place
   validate.ts           the protocol check every appended event passes
   testing/
@@ -116,8 +119,9 @@ emits what that reaches.
 | `opaqueFamilyOf(modelId, credentialType)`, `opaqueTargetOf(modelId, credentialType)`, `OpaqueTarget`                                                                                                                                                                        | the family a request's client belongs to (`null` for one that reads nothing back), and the `{ provider, model }` a step's parts may be replayed to — both read from the request's model id and credential type alone (X13; #334)                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `captureOpaque(target, parts)`, `OpaqueCapture`, `opaqueReplayParts(entry, target)`, `OpaqueEntry`, `OpaqueMessagePart`, `ModelOpaquePart`                                                                                                                                  | what a step's streamed parts become on `agent.opaque_content` (the payload kept, the cap applied all-or-nothing), and what a stored entry contributes to a request: the assistant `reasoning` parts, whole, or none — the same family and the same model (X13; #334)                                                                                                                                                                                                                                                                                                                                                                                      |
 | `DEFAULT_MAX_TOOL_STEPS`                                                                                                                                                                                                                                                    | `50` — the model requests one turn may make before it ends with the step-limit notice (X2)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `offeredTools(registry, mcp?)`, `toolSet(registry)`, `toolsFor(registry, supportFor, settings, modelId, credentialType)`                                                                                                                                                    | what a request's span records, the definitions the model is offered (with **no** `execute`, so the AI SDK never loops), and the registry this request may call from — the settings' disabled tools left out, `undefined` when that leaves none                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `offeredTools(registry, mcp?, native?)`, `toolSet(registry)`, `toolsFor(registry, supportFor, settings, modelId, credentialType)`                                                                                                                                            | what a request's span records, the definitions the model is offered (with **no** `execute`, so the AI SDK never loops), and the registry this request may call from — the settings' disabled tools left out, `undefined` when that leaves none                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `ToolDecision`, `ToolSettings`, `ToolSettingsResolver`, `ToolSupportFor`, `ToolSecretResolver`                                                                                                                                                                              | the injected seams around tools: the settings in force per request — an `enabled` and a `permission` per tool name, asked with the owner and the mode's override (#307) — whether a model can call tools at all (models.dev's `tool_call`), and where a turn's per-user values come from (#311)                                                                                                                                                                                                                                                                                                                                                           |
+| `nativeSearchFor(modelId, credentialType)`, `searchFamilyOf(modelId, credentialType)`, `modelSearches(modelId)`, `webSearchOffered(modelId, credentialType, settings?)`, `searchWasRejected(error)`, `SEARCH_FAMILIES`, `SearchFamily`, `SEARCH_MODEL_PATTERNS`, `MAX_SEARCHES_PER_REQUEST`, `NativeSearchTool`, `NATIVE_TOOL_DECLARATIONS`, `NativeToolDeclaration`                                          | provider-native web search (epic #303, X14; #335): the model families whose provider has a search tool this build attaches (Anthropic, OpenAI, xAI — and an Anthropic model on Vertex), the tool a request is offered keyed by `web_search`, the per-request bound, whether a model id can search when only the id is known, the settings policy over it (a `deny` or an off switch withholds it, a stored `ask` reads as `allow`), the declaration a host adds to its settings listing, and the narrow reading of a provider's 4xx refusal that costs the one retry without the tool                                                                                                                                            |
 | `TurnOutcome`, `TurnOutcomeKind`                                                                                                                                                                                                                                            | `{ outcome: 'idle' \                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | 'noop' \                     | 'interrupted' \                                                                                                                                 | 'error' }` |
 | `ResolvedMode`, `ModeResolver`                                                                                                                                                                                                                                              | a mode as the host resolved it — id, name, model, effort, prompt addition, and the tool override it imposes (#245, M6; #307) — and where a request's mode comes from                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `ContextStrategy`, `ContextStrategyOptions`, `ContextStrategyResult`                                                                                                                                                                                                        | `(events, { model, system, tools?, clearThreshold?, todoNudge?, opaqueTarget? }) => { messages, truncated?, cleared?, reminders? }` — the messages, what the strategy had to cap to fit (epic #277, K6), the tool results it capped and cleared (epic #303, X9; #306), and the reminders it carried beside the history (the todo list and the stuck one, #331). `tools` is the registry whose declarations carry the per-result cap; `clearThreshold` and `todoNudge` are the per-request settings of #331, and `opaqueTarget` is the family and model the request goes to — the gate a step's provider-opaque parts must pass to be replayed (X13; #334) |
@@ -599,6 +603,62 @@ why the loop has no second tool path.
   MCP tool — and one whose server has since been removed is answered by the registry's own
   `No tool named … is registered.`
 
+### Provider-native web search (epic #303, X14; issue #335)
+
+`web_search` is offered like any other tool and runs like none of them. #305 built it as a tool
+of ours over one operator-paid search API (Brave) with a daily cap per user; #335 removes that
+and takes the other road, so the **chat model's own provider's search tool is attached to the
+request** and the provider runs the search inside that request — there is no key to inject, no
+bill of the operator's, and no search any part of this build executes. `./native-search` is the
+whole of the loop's half, and `runTurn` reads three things off it: which family a request
+belongs to, the tool to attach, and whether the settings leave it on.
+
+- **Which model can search is written down here, not read from models.dev.** models.dev records
+  nothing about a native search tool, so `SEARCH_FAMILIES` names the three whose client this
+  build can attach one for — Anthropic, OpenAI (Responses) and xAI (Responses), plus an Anthropic
+  model on **Vertex** — and `SEARCH_MODEL_PATTERNS` gives each family the generations that have
+  the tool (Anthropic from Claude 3.5 on, OpenAI from `gpt-4o`, xAI from `grok-3`). The table is
+  deliberately generous within a family and explicit about what predates the tool: a model it
+  wrongly includes is caught by the provider's own refusal (below), and one it wrongly excludes
+  simply has no search. Google and Azure are out on purpose — grounding that one of the two
+  clients cannot present honestly, and a chat-completions client with no tool to attach — and
+  every other provider, and every custom endpoint, has none at all.
+- **The tool is one name, whatever the provider.** `nativeSearchFor` answers the `ToolSet` a
+  request is built with, keyed by `WEB_SEARCH_TOOL_NAME` (`web_search`), which is the name the
+  model calls it by and the name the log records — so a reader never has to know which provider
+  produced a search to read it, and the settings a user stored in the operator-key era (keyed
+  `builtin.web_search`) carry over unchanged. Anthropic is offered its newest factory (the Vertex
+  credential the basic one only), OpenAI `webSearch` with `searchContextSize: 'medium'`, xAI its
+  `webSearch` (`xSearch` deliberately not, a different tool with a different answer). A host that
+  registered a tool of its own under the name keeps it: attaching the provider's would shadow the
+  one the user meant. `MAX_SEARCHES_PER_REQUEST` (10) is the bound the providers that take one are
+  given, so one request cannot become a research session.
+- **A provider-executed tool has no moment to be refused, so `deny` means "do not attach".**
+  `webSearchOffered` asks the request's settings — turned off, or `deny`, withholds the tool
+  entirely, which is the only reading of the user's "no" that a search running inside the
+  request leaves — and an `ask` written before #335 is read as `allow` here (the settings route
+  refuses a new one, because a switch that says "ask me" and can never ask is worse than none).
+  `NATIVE_TOOL_DECLARATIONS` is what a host adds to its settings listing so the tool exists to be
+  chosen about at all, `allow` its default for the reason every built-in of #305 is: it runs on
+  the user's own model key. `offeredTools` records the split on the span as `source: 'provider'`,
+  beside the registry's `builtin` and `mcp`.
+- **A provider that does not know the tool costs one retry without it.** `searchWasRejected` is a
+  narrow reading on purpose — a **4xx** whose message names the search tool — because the answer
+  is a retry: the loop drops the tool, records `search_rejected` on the refused span, and asks
+  once more with a request that is otherwise the same, outside the ordinary retry budget (the
+  request is different now, and the model is owed a plain answer). Once per turn, so a provider
+  that refuses it again ends the turn rather than looping.
+- **The search is counted, and the pair is written, but neither rebuilds the request.** A search
+  the provider ran leaves no call of ours to store while it runs, so what the loop records is a
+  reading: the count of searches the request ran rides `span.model_request_end.searches` (absent,
+  not zero, for a request that ran none), and each search the step reported is written after the
+  reply as the readable pair a client draws — the `web_search` call with `source: 'provider'`
+  beside its result's `sources`, the citations a reply carries. The crash rule leaves the pair
+  alone (nothing of ours ran, so there is nothing to re-run) and the request is rebuilt from the
+  step's `agent.opaque_content`, never from this pair — which is also why an Anthropic server-side
+  loop that hit its own limit (`result.paused`) sends the assistant turn back unchanged as the
+  next request rather than re-running anything.
+
 ### Tools in the context strategy
 
 `conversationAfter` is where the log becomes messages, and tools are two shapes there: the
@@ -746,14 +806,24 @@ so every one of these was lost:
   step's `reasoning_content` back, or DeepSeek's thinking mode rejects the next request outright
   — issue #330, the failure this was widened from.
 
+A **fifth** case needs the same treatment for a different reason (#335). A **provider-executed
+tool call** — the web search a provider runs inside the request it was attached to — comes back
+as the AI SDK's own `tool-call` / `tool-result` pair, and the provider needs that pair handed
+back to continue the turn: Anthropic refuses a `server_tool_use` block replayed without the
+`web_search_tool_result` that answers it, and both carry payload this build cannot read (a search
+result's encrypted content). The pair is captured, stored and replayed through the same table
+under the same family key — the same four families' clients read it back, because the tool is
+attached through the client the request already runs on.
+
 The mechanism is one, and `./opaque` holds the only per-provider rules there are:
 
-- **Capture.** `streamModelRequest` collects every `reasoning` block of the step — its text, and
-  the metadata the provider attached to any of its fragments (Anthropic sends a `signature` on a
-  fragment of its own, with no text), merged per block, in the order the provider opened them.
-  `reasoning` is the only part type collected today, and the list is where #335's
-  provider-executed tool calls and results join it — the seam is the part type, not the
-  mechanism.
+- **Capture.** `streamModelRequest` collects every part of the step a family needs back: its
+  `reasoning` blocks — the text, and the metadata the provider attached to any of their fragments
+  (Anthropic sends a `signature` on a fragment of its own, with no text), merged per block, in
+  the order the provider opened them — and, since #335, the **provider-executed tool call and
+  the answer to it**, the AI SDK's own `tool-call` with `providerExecuted: true` and the
+  `tool-result` beside it (`PROVIDER_TOOL_PART_TYPES`). The list is what a reader sends back to
+  continue the turn, and the seam is the part type rather than the mechanism.
 - **Store.** The loop writes the parts that the request's **family** has a row for on an
   `agent.opaque_content` event of its own, beside the reply and before the span end — one event
   per step, written whether or not the step streamed text, because the step this exists for (a
@@ -854,12 +924,12 @@ this: …`), and an `ask_user` call has its answers written as its result — va
 
 | what                                                 | how                                                                                                                                                                                                                                       |
 | ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| a tool that runs                                     | `ToolDefinition` + `ToolRegistry.execute` in `@openharness/hands` (#305's `web_fetch`, `web_search`, `todo_write` live there)                                                                                                             |
+| a tool that runs                                     | `ToolDefinition` + `ToolRegistry.execute` in `@openharness/hands` (#305's `web_fetch` and `todo_write` live there; `web_search` is provider-native since #335, below)                                                                      |
 | whether a model can call tools                       | `toolSupportFor` on `runTurn`; the server answers from models.dev's `tool_call`                                                                                                                                                           |
 | which tools a request offers, and what a call may do | `toolSettings` on `runTurn`: the per-request decisions #307 stores per user and a mode overrides; a disabled tool is left out of the offer, and an `ask` is the pause of #309                                                             |
 | a call waiting on the user                           | `./pausing`: `awaitingUser` is the question ("which calls wait?"), `confirmationOutcome`/`answerConfirmations` are what a `user.tool_confirmation` does, and `resolveWaiting` is what a message or an interrupt does instead              |
 | a tool that always asks (rather than a policy)       | `ASK_USER_TOOL_NAME` in `./pausing`'s `waitsForUser`: a call to `ask_user` waits whatever the policy says, because the user's answers are its result. A remote MCP tool asks through its own `ask` default (#312) on the same path        |
-| per-user values a tool needs                         | `resolveToolSecrets` on `runTurn` (asked per step with the owner); the operator's search key arrives here (#305), and #311's MCP tokens will                                                                                              |
+| per-user values a tool needs                         | `resolveToolSecrets` on `runTurn` (asked per step with the owner); #311's MCP tokens arrive here (the operator's search key of #305 went with #335)                                                                                         |
 | MCP tools                                            | built (#312): `mcpTools` on `runTurn` lists the chat's in-force servers' tools per request, `runToolStep` writes the MCP pair, and every reader goes through `@openharness/protocol`'s one tool-call abstraction (`./mcp`)                |
 | tool results in the context                          | the two rules above (X9, #306): a result's cap comes from `ToolDefinition.maxResultTokens` and the tool name in the log, and old results are cleared rather than summarized. A remote MCP tool's result is a result like any other (#312) |
 
@@ -872,7 +942,7 @@ this: …`), and an `ask_user` call has its answers written as its result — va
 | which tools a turn may call          | `tools` on `runTurn`: a `ToolRegistry` from `@openharness/hands`, or none at all (epic #303, X4); it is also the registry an approved call runs through once the user answers (#309)                                                                                                             |
 | what the settings say about a tool   | `toolSettings` on `runTurn`: the resolver #307's per-user settings and a mode's override live behind, asked per request with the owner and the override; each tool's own declaration when absent (X4). `ask` pauses the turn, and a `remember: session` approval is read back off the log (#309) |
 | which models may call tools          | `toolSupportFor` on `runTurn`: models.dev's `tool_call`, `false` meaning no tools are offered to that model (X2)                                                                                                                                                                                 |
-| what a tool is handed besides input  | `resolveToolSecrets` on `runTurn`: the per-user values the host resolved for the step (X4; #305's search key, #311's MCP tokens)                                                                                                                                                                 |
+| what a tool is handed besides input  | `resolveToolSecrets` on `runTurn`: the per-user values the host resolved for the step (X4; #311's MCP tokens — the operator's search key of #305 went with #335)                                                                                                                                  |
 | how many requests a turn may make    | `maxToolSteps` on `runTurn`: the deployment's `OPENHARNESS_MAX_TOOL_STEPS`, ending the turn with a notice past it (X2)                                                                                                                                                                           |
 | how `provider/model` becomes a model | `model` on `runTurn` (required): a `ModelFactory`; the server passes `providerModelFactory`                                                                                                                                                                                                      |
 | where the key comes from             | `resolveCredential` on `runTurn`: the owner's credential per provider, resolved per request (A5)                                                                                                                                                                                                 |

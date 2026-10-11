@@ -258,7 +258,9 @@ in-process on the server. **Status:** in progress — the loop itself
 ([#306](https://github.com/amirtuval/openharness/issues/306)) and the per-user settings
 ([#307](https://github.com/amirtuval/openharness/issues/307)) are **built**: the events, the tool
 registry in `@openharness/hands`, the brain's loop and step limit, the policy hook, the crash
-rule, a test tool behind the mock model, `web_fetch`, `web_search` and `todo_write`, the caps
+rule, a test tool behind the mock model, `web_fetch`, `web_search` and `todo_write` — the middle
+one being the chat model's own provider's search tool since
+[#335](https://github.com/amirtuval/openharness/issues/335) — the caps
 and clearing a request applies to tool results, `/v1/me/tools` with a mode's override, and
 pausing for the user
 ([#309](https://github.com/amirtuval/openharness/issues/309)) and the remote MCP servers
@@ -271,9 +273,10 @@ sub-issues are done.
    request. A turn has a step limit, an interrupt stops running tools, and a tool is never
    re-run after a crash: the next brain records "execution lost". **The built-in tools are
    built** ([#305](https://github.com/amirtuval/openharness/issues/305)): `web_fetch` (through
-   `safeFetch`, HTML converted to Markdown, the output capped), `web_search` (one search API
-   with the operator's key, a daily cap per user, counted in usage) and `todo_write` (the whole
-   list each call, its state the latest call in the log).
+   `safeFetch`, HTML converted to Markdown, the output capped) and `todo_write` (the whole list
+   each call, its state the latest call in the log), beside `web_search`, which since
+   [#335](https://github.com/amirtuval/openharness/issues/335) is the chat model's own
+   provider's native search tool rather than an operator-keyed API.
 2. **Pausing for the user**
    ([#309](https://github.com/amirtuval/openharness/issues/309)) — **built**: `session.status_idle
 {stop_reason: {type: "requires_action", event_ids}}`, answered by one client event,

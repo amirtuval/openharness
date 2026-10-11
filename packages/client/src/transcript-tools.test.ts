@@ -348,6 +348,39 @@ describe('MCP tool calls in the transcript (#312)', () => {
     expect(selectToolCalls(state).map((call) => call.id)).toEqual([kept.id])
   })
 
+  it('keeps the pages a provider-executed search found, and the provider’s own source (#335)', () => {
+    const call = makeAgentToolUse('web_search', { query: 'a' }, { seq: 2, source: 'provider' })
+    const result = makeAgentToolResult(call, 'Web search results: 1. The architecture', {
+      seq: 3,
+      sources: [
+        {
+          url: 'https://example.test/architecture',
+          title: 'The architecture',
+          cited_text: 'three ideas carry the design',
+        },
+      ],
+    })
+
+    const [folded] = selectToolCalls(reduce([call, result]))
+
+    // The line says where the tool came from — `provider`, read off the call — and the answer
+    // carries the pages, which is what a frontend renders beside the query.
+    expect(folded?.source).toBe('provider')
+    expect(folded?.sources).toEqual([
+      {
+        url: 'https://example.test/architecture',
+        title: 'The architecture',
+        cited_text: 'three ideas carry the design',
+      },
+    ])
+    // A call of this build's own answers with no sources at all, which is every other tool.
+    const plain = makeAgentToolUse('web_fetch', { url: 'https://example.com' }, { seq: 4 })
+    const [other] = selectToolCalls(
+      reduce([plain, makeAgentToolResult(plain, 'The page says hello.', { seq: 5 })]),
+    )
+    expect(other?.sources).toBeUndefined()
+  })
+
   it('counts a search by the model-facing name, so a remote `web_search` is not one', () => {
     const builtin = makeAgentToolUse('web_search', { query: 'a' }, { seq: 2 })
     const remote = makeAgentMcpToolUse('notes', 'web_search', { query: 'b' }, { seq: 3 })

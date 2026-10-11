@@ -203,17 +203,21 @@ guidance for the summary (`/compact keep the API decisions`); the outcome — su
 to summarize, or a failure — is printed above the status line. `apps/tui/AGENTS.md` documents
 the keys and the exit codes.
 
-**A chat can use tools** (epic #303). The model may fetch a URL, search the web (where the
-deployment has a search key) or keep a task list, and every call is in the transcript: one
+**A chat can use tools** (epic #303). The model may fetch a URL, keep a task list, or search the
+web — the last of those on the model's **own provider's** index, inside the model request, so it
+runs on your key and finds the pages it cites ([#335](https://github.com/amirtuval/openharness/issues/335));
+a model whose provider has no search tool simply has none. Every call is in the transcript: one
 compact line per call — what it was asked, and whether it is running, waiting for you, done,
-failed, denied, interrupted or lost — which the web app expands to the full input and result
-and `oh` draws with the reason a failed one owes. A list the model writes with `todo_write` is
+failed, denied, interrupted or lost — which the web app expands to the full input, the result
+and, for a search, the pages it found, and `oh` draws with the reason a failed one owes. A list
+the model writes with `todo_write` is
 shown while the chat has one — a pinned panel in the web app, a compact block in `oh` — and
 updates as it is rewritten. Which tools a chat may use, and what a call to one may do
 (`allow`, `ask` or `deny`), is **your** per-user setting: the web app's **Settings → Tools** and
 `oh tools` list and set it, a mode can turn a tool on or off for the chats that follow it, and a
-tool this deployment does not register (a `web_search` with no key) is listed as unavailable
-rather than hidden. A model that cannot call tools says so. `oh settings` prints the context
+tool that cannot be offered — `web_search` on a model with no native one — is listed as
+unavailable, with the reason, rather than hidden. A model that cannot call tools says so.
+`oh settings` prints the context
 settings and `oh tools` the tool settings; both are the same stored values the web app shows.
 
 **A chat can also reach your own remote MCP servers** (epic #303, X10). You register the ones

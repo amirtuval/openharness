@@ -49,6 +49,35 @@ describe('toolCallLines (#308)', () => {
     expect(text).toContain('done')
   })
 
+  it('draws the pages a search found under its line (#335)', () => {
+    const lines = toolCallLines(
+      call({
+        name: 'web_search',
+        input: { query: 'openharness architecture' },
+        source: 'provider',
+        sources: [
+          {
+            url: 'https://example.test/architecture',
+            title: 'The architecture',
+            cited_text: 'three ideas carry the design',
+          },
+          { url: 'https://example.test/bare' },
+        ],
+      }),
+      80,
+      PLAIN,
+    )
+
+    // A terminal has no link to open, so the URL is the source: the title and the address on a
+    // line of its own, and the cited passage indented under it.
+    expect(lines).toHaveLength(4)
+    expect(textOf(lines)).toContain('The architecture — https://example.test/architecture')
+    expect(textOf(lines)).toContain('three ideas carry the design')
+    expect(textOf(lines)).toContain('https://example.test/bare')
+    // The status still ends the call's own line, whatever follows it.
+    expect(textOf(lines.slice(0, 1))).toContain('done')
+  })
+
   it('says "waiting for you" for a paused call, and names an MCP call and its server', () => {
     expect(
       textOf(
